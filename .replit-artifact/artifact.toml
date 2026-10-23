@@ -1,0 +1,13 @@
+kind = "web"
+previewPath = "/"
+title = "Go Proxy"
+version = "1.0.0"
+id = "goXProxyDashBoard001"
+
+[[services]]
+localPort = 8080
+name = "Go Proxy"
+paths = ["/"]
+
+[services.development]
+run = "go build -o go-proxy . && PORT=8080 ./go-proxy --config config.yaml"

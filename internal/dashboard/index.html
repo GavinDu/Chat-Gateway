@@ -1,0 +1,1215 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Go Proxy Dashboard</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#0d0d14;
+  --surface:#16161f;
+  --card:#1c1c28;
+  --border:#2a2a3d;
+  --text:#ddddf0;
+  --muted:#7070a0;
+  --accent:#7c6af7;
+  --accent-dim:#3d3680;
+  --green:#22c55e;
+  --green-dim:#14532d;
+  --yellow:#eab308;
+  --yellow-dim:#422006;
+  --red:#ef4444;
+  --red-dim:#450a0a;
+  --blue:#38bdf8;
+  --blue-dim:#0c3b52;
+  --radius:8px;
+  --shadow:0 2px 8px rgba(0,0,0,0.4);
+}
+body{background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,sans-serif;font-size:14px;line-height:1.5;min-height:100vh}
+
+/* Layout */
+.topbar{display:flex;align-items:center;gap:12px;padding:14px 24px;border-bottom:1px solid var(--border);background:var(--surface)}
+.topbar h1{font-size:16px;font-weight:600;letter-spacing:.02em}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--muted);flex-shrink:0}
+.dot.green{background:var(--green)}
+.dot.red{background:var(--red)}
+.topbar-spacer{flex:1}
+.topbar-hint{font-size:12px;color:var(--muted)}
+.secret-wrap{display:flex;align-items:center;gap:6px}
+.secret-wrap label{font-size:11px;color:var(--muted);white-space:nowrap}
+.secret-input{background:var(--surface);border:1px solid var(--border);border-radius:5px;color:var(--text);font-size:12px;padding:4px 8px;width:160px;transition:border-color .15s}
+.secret-input:focus{outline:none;border-color:var(--accent)}
+.secret-set-dot{width:7px;height:7px;border-radius:50%;background:var(--muted);flex-shrink:0;transition:background .2s}
+.secret-set-dot.active{background:var(--green)}
+main{padding:24px;max-width:1100px;margin:0 auto;display:flex;flex-direction:column;gap:28px}
+
+/* Section headers */
+.section-title{font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin-bottom:12px}
+
+/* Provider grid */
+.provider-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px}
+.provider-card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:16px;display:flex;flex-direction:column;gap:10px}
+.provider-card-header{display:flex;align-items:center;gap:10px}
+.provider-name{font-weight:600;font-size:15px;flex:1;text-transform:capitalize}
+.badge{display:inline-flex;align-items:center;gap:5px;padding:2px 8px;border-radius:100px;font-size:11px;font-weight:600;letter-spacing:.03em}
+.badge.ready{background:var(--green-dim);color:var(--green)}
+.badge.no_session{background:var(--yellow-dim);color:var(--yellow)}
+.badge.degraded{background:var(--red-dim);color:var(--red)}
+.badge::before{content:'';width:6px;height:6px;border-radius:50%;background:currentColor}
+.provider-meta{font-size:11px;color:var(--muted)}
+
+/* Models list */
+.models-list{display:flex;flex-wrap:wrap;align-content:flex-start;gap:5px;max-height:104px;overflow:auto;padding-right:3px}
+.model-pill{background:var(--border);border-radius:4px;padding:1px 7px;font-size:11px;color:var(--text);font-family:ui-monospace,monospace}
+.model-count{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;font-weight:700}
+.model-catalog-meta{display:flex;align-items:flex-start;gap:6px;font-size:11px;color:var(--muted);line-height:1.4}
+.model-catalog-meta.ok{color:var(--green)}
+.model-catalog-meta.stale{color:var(--yellow)}
+.model-catalog-meta.error{color:var(--red)}
+.model-catalog-label{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}
+
+/* Edit form */
+.edit-section{border-top:1px solid var(--border);padding-top:10px;display:flex;flex-direction:column;gap:8px}
+.field-row{display:flex;align-items:center;gap:8px}
+.field-label{font-size:11px;color:var(--muted);min-width:52px}
+input[type=number],textarea{background:var(--surface);border:1px solid var(--border);border-radius:5px;color:var(--text);font-family:inherit;font-size:12px;padding:5px 8px;width:100%;transition:border-color .15s}
+input[type=number]{width:70px}
+textarea{resize:vertical;min-height:70px;line-height:1.6;font-family:ui-monospace,monospace}
+input:focus,textarea:focus{outline:none;border-color:var(--accent)}
+.card-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+button{border:none;border-radius:5px;cursor:pointer;font-size:12px;font-weight:600;padding:5px 12px;transition:opacity .15s}
+button:hover:not(:disabled){opacity:.85}
+button:disabled{opacity:.5;cursor:not-allowed}
+.btn-primary{background:var(--accent);color:#fff}
+.btn-outline{background:transparent;border:1px solid var(--border);color:var(--text)}
+.btn-login{background:var(--accent-dim);color:var(--accent)}
+.btn-danger{background:var(--red-dim);color:var(--red)}
+.btn-success{background:var(--green-dim);color:var(--green)}
+.save-msg{font-size:11px;color:var(--green);display:none}
+.save-msg.err{color:var(--red)}
+
+/* Log table */
+.log-wrap{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden}
+.log-toolbar{display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid var(--border)}
+.log-toolbar-title{font-size:12px;font-weight:600;color:var(--muted)}
+.log-sseindicator{width:7px;height:7px;border-radius:50%;background:var(--muted)}
+.log-sseindicator.live{background:var(--green);box-shadow:0 0 5px var(--green)}
+.log-clear{margin-left:auto}
+#log-table{width:100%;border-collapse:collapse;font-size:12px}
+#log-table th{text-align:left;padding:6px 12px;color:var(--muted);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.05em;border-bottom:1px solid var(--border)}
+#log-table td{padding:6px 12px;border-bottom:1px solid #1e1e2e;font-family:ui-monospace,monospace}
+#log-table tr:last-child td{border-bottom:none}
+#log-table tr:hover td{background:rgba(124,106,247,.05)}
+.log-empty{padding:20px;text-align:center;color:var(--muted);font-size:12px}
+.log-success{color:var(--green)}
+.log-fail{color:var(--red)}
+.log-provider{color:var(--accent);font-weight:600}
+.log-model{color:var(--text)}
+.log-time{color:var(--muted)}
+.log-duration{color:var(--yellow)}
+.badge-fallback{display:inline-flex;align-items:center;gap:3px;padding:1px 6px;border-radius:100px;font-size:10px;font-weight:700;letter-spacing:.04em;background:var(--yellow-dim);color:var(--yellow);margin-left:6px;cursor:default;vertical-align:middle}
+.fallback-stat{font-size:11px;color:var(--muted);transition:color .3s}
+.fallback-stat.has-fallbacks{color:var(--yellow)}
+
+/* Expandable log rows */
+#log-table tr.log-row{cursor:pointer}
+#log-table tr.log-row:hover td{background:rgba(124,106,247,.07)}
+#log-table tr.log-row td:first-child::before{content:'▶';display:inline-block;font-size:8px;color:var(--muted);margin-right:6px;transition:transform .15s;vertical-align:middle}
+#log-table tr.log-row.expanded td:first-child::before{transform:rotate(90deg);color:var(--accent)}
+#log-table tr.log-detail-row td{padding:0;border-bottom:1px solid var(--border);background:rgba(13,13,20,.6)}
+.attempt-chain{padding:10px 16px 10px 32px;display:flex;flex-direction:column;gap:6px}
+.attempt-item{display:flex;align-items:center;gap:10px;font-size:11px;font-family:ui-monospace,monospace;padding:4px 8px;border-radius:5px;background:var(--surface);border:1px solid var(--border)}
+.attempt-item.skipped{opacity:.6;border-color:transparent;background:transparent}
+.attempt-icon{font-size:12px;flex-shrink:0;width:16px;text-align:center}
+.attempt-provider{font-weight:700;color:var(--accent);min-width:90px}
+.attempt-skipped{color:var(--muted);font-style:italic}
+.attempt-dur{color:var(--yellow);min-width:55px}
+.attempt-err{color:var(--red);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.attempt-ok{color:var(--green)}
+.attempt-connector{width:1px;height:10px;background:var(--border);margin-left:23px}
+
+/* Modal */
+.modal-backdrop{display:none;position:fixed;inset:0;background:rgba(0,0,0,.72);z-index:100;align-items:center;justify-content:center;padding:14px}
+.modal-backdrop.open{display:flex}
+.modal{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:20px;max-width:1120px;width:100%;max-height:calc(100vh - 28px);overflow:auto;box-shadow:var(--shadow)}
+.modal h2{font-size:16px;font-weight:700;margin-bottom:8px}
+.modal p{color:var(--muted);font-size:13px;margin-bottom:14px;line-height:1.6}
+ .modal-eyebrow{text-transform:uppercase;letter-spacing:.1em;font-size:10px;font-weight:700;color:var(--accent);margin-bottom:7px}
+
+/* Login status area */
+.login-status-box{background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:12px 14px;margin-bottom:14px;font-size:13px;line-height:1.6;min-height:56px;display:flex;align-items:center;gap:10px}
+.login-status-icon{font-size:18px;flex-shrink:0}
+.login-status-text{flex:1}
+ .login-steps{display:grid;gap:8px;margin:2px 0 14px}
+ .login-step{display:flex;align-items:flex-start;gap:10px;padding:9px 10px;border:1px solid var(--border);border-radius:6px;background:rgba(13,13,20,.35)}
+ .login-step-number{display:flex;align-items:center;justify-content:center;width:20px;height:20px;border-radius:50%;background:var(--accent-dim);color:var(--accent);font-size:11px;font-weight:700;flex-shrink:0}
+ .login-step strong{display:block;font-size:12px;color:var(--text);font-weight:600}
+ .login-step small{display:block;color:var(--muted);font-size:11px;line-height:1.45;margin-top:2px}
+ .login-note{font-size:11px!important;color:var(--muted);margin:0 0 14px!important}
+.login-fallback{margin-top:10px;padding-top:10px;border-top:1px solid var(--border);font-size:12px;color:var(--muted)}
+.login-fallback code{display:block;background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:7px 10px;font-family:ui-monospace,monospace;font-size:12px;color:var(--accent);margin-top:6px;word-break:break-all}
+.remote-browser{display:none;margin:0 0 14px;border:1px solid var(--border);border-radius:8px;overflow:hidden;background:#09090d}
+.remote-browser.visible{display:block}
+.remote-browser-toolbar{display:flex;align-items:center;gap:8px;min-height:34px;padding:7px 10px;background:var(--surface);border-bottom:1px solid var(--border)}
+.remote-live-dot{width:7px;height:7px;border-radius:50%;background:var(--green);box-shadow:0 0 5px var(--green);flex-shrink:0}
+.remote-origin{font-size:11px;color:var(--muted);font-family:ui-monospace,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.remote-toolbar-spacer{flex:1}
+.remote-screen{position:relative;width:100%;aspect-ratio:16/9;background:#fff;overflow:hidden;outline:none;cursor:default;touch-action:none}
+.remote-screen:focus-visible{box-shadow:inset 0 0 0 3px var(--accent)}
+.remote-screen canvas{display:block;width:100%;height:100%;user-select:none;-webkit-user-drag:none}
+.remote-screen-placeholder{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;gap:10px;color:#777;background:#f4f4f4;font-size:13px}
+.remote-browser-hint{padding:7px 10px;color:var(--muted);font-size:11px;background:var(--surface);border-top:1px solid var(--border)}
+.remote-mobile-input{display:none;padding:9px 10px;background:var(--surface);border-top:1px solid var(--border)}
+.remote-mobile-input label{display:block;color:var(--muted);font-size:11px;margin-bottom:6px}
+.remote-mobile-controls{display:flex;gap:6px}
+.remote-mobile-controls input{min-width:0;flex:1;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);padding:9px 10px;font-size:16px}
+.remote-mobile-controls button{padding:8px 10px}
+.modal-actions{display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap;margin-top:14px}
+.spinner{width:14px;height:14px;border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin .6s linear infinite;flex-shrink:0}
+@keyframes spin{to{transform:rotate(360deg)}}
+@media(max-width:700px){
+  .modal{padding:14px}
+  .login-steps{grid-template-columns:1fr}
+  .remote-browser-hint{display:none}
+  .remote-mobile-input{display:block}
+}
+
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="dot" id="health-dot"></div>
+  <h1>Go Proxy Dashboard</h1>
+  <div class="topbar-spacer"></div>
+  <div class="secret-wrap">
+    <div class="secret-set-dot" id="secret-dot"></div>
+    <label for="secret-input">API Secret</label>
+    <input id="secret-input" class="secret-input" type="password" placeholder="(none)" autocomplete="off"
+      oninput="onSecretChange(this.value)" />
+  </div>
+  <span class="topbar-hint" id="topbar-hint">Loading…</span>
+</div>
+
+<main>
+  <div>
+    <div class="section-title">Providers</div>
+    <div class="provider-grid" id="provider-grid">
+      <div style="color:var(--muted);font-size:13px">Loading providers…</div>
+    </div>
+  </div>
+
+  <div>
+    <div class="section-title">Live Request Log</div>
+    <div class="log-wrap">
+      <div class="log-toolbar">
+        <div class="log-sseindicator" id="sse-dot"></div>
+        <span class="log-toolbar-title">Streaming</span>
+        <button class="btn-outline log-clear" onclick="clearLogs()">Clear</button>
+      </div>
+      <table id="log-table">
+        <thead>
+          <tr>
+            <th>Time</th>
+            <th>Provider</th>
+            <th>Model</th>
+            <th>Duration</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody id="log-tbody">
+          <tr><td colspan="5" class="log-empty">No requests yet — send a chat completion to see logs.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</main>
+
+<!-- Login modal -->
+<div class="modal-backdrop" id="login-modal">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="login-modal-title">
+    <div class="modal-eyebrow">Manual session setup</div>
+    <h2 id="login-modal-title">Log in to <span id="modal-provider-name"></span></h2>
+    <p id="modal-intro">Start a temporary browser, complete the provider's sign-in here, then save the session.</p>
+
+    <div class="login-steps" aria-label="Login steps">
+      <div class="login-step">
+        <span class="login-step-number">1</span>
+        <div><strong>Open provider login</strong><small>The full provider page appears securely below.</small></div>
+      </div>
+      <div class="login-step">
+        <span class="login-step-number">2</span>
+        <div><strong>Save your session</strong><small>Return here after signing in and save cookies and local storage.</small></div>
+      </div>
+    </div>
+    <p class="login-note">Authentication input is relayed only to this temporary browser. It is never logged or persisted by the dashboard.</p>
+
+    <div class="login-status-box" id="login-status-box">
+      <div class="login-status-icon" id="login-status-icon">💡</div>
+      <div class="login-status-text" id="login-status-text">Ready to start browser login.</div>
+    </div>
+
+    <div class="remote-browser" id="remote-browser">
+      <div class="remote-browser-toolbar">
+        <span class="remote-live-dot" aria-hidden="true"></span>
+        <span class="remote-origin" id="remote-origin">Secure browser</span>
+        <span class="remote-toolbar-spacer"></span>
+        <button class="btn-outline" id="btn-reconnect-view" style="display:none" onclick="reconnectLoginView()">Reconnect view</button>
+      </div>
+      <div class="remote-screen" id="remote-screen" tabindex="0" role="application"
+        aria-label="Interactive provider login browser">
+        <canvas id="remote-frame" width="1280" height="720" aria-label="Current provider login page"></canvas>
+        <div class="remote-screen-placeholder" id="remote-placeholder">
+          <div class="spinner"></div><span>Waiting for browser frame…</span>
+        </div>
+      </div>
+      <div class="remote-browser-hint">Click the page to focus it. Keyboard input, paste, scrolling, and provider redirects are relayed to the temporary browser.</div>
+      <div class="remote-mobile-input">
+        <label for="remote-keyboard-input">After tapping a sign-in field above, type here to send text securely to it.</label>
+        <div class="remote-mobile-controls">
+          <input id="remote-keyboard-input" type="password" autocomplete="off" autocapitalize="none"
+            autocorrect="off" spellcheck="false" placeholder="Tap here to type" enterkeyhint="next" />
+          <button class="btn-outline" type="button" onclick="sendRemoteKey('Tab')">Next</button>
+          <button class="btn-outline" type="button" onclick="sendRemoteKey('Enter')">Enter</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- CLI fallback (shown when browser launch fails) -->
+    <div class="login-fallback" id="login-fallback" style="display:none">
+      <strong>Terminal fallback</strong> — run this command on the server instead:
+      <code id="login-fallback-cmd"></code>
+    </div>
+
+    <div class="modal-actions">
+      <button class="btn-outline" onclick="closeModal()">Close</button>
+      <button class="btn-danger" id="btn-cancel-login" style="display:none" onclick="cancelLogin()">Cancel</button>
+      <button class="btn-success" id="btn-save-session" style="display:none" onclick="saveSession()">Save Session</button>
+      <button class="btn-primary" id="btn-start-login" onclick="startLogin()">Start Login</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const MAX_LOG_ROWS = 200;
+let logRows = 0;
+let seenEmpty = true;
+
+let modalProvider = '';
+
+/* ── API secret (stored in localStorage, sent on mutation requests) ── */
+const SECRET_KEY = 'go_proxy_dashboard_secret';
+
+function authHeaders(extra) {
+  const secret = localStorage.getItem(SECRET_KEY) || '';
+  const h = Object.assign({'Content-Type': 'application/json'}, extra);
+  if (secret) h['Authorization'] = 'Bearer ' + secret;
+  return h;
+}
+
+function onSecretChange(value) {
+  if (value) {
+    localStorage.setItem(SECRET_KEY, value);
+  } else {
+    localStorage.removeItem(SECRET_KEY);
+  }
+  document.getElementById('secret-dot').className =
+    'secret-set-dot' + (value ? ' active' : '');
+}
+
+// Restore saved secret on page load
+(function() {
+  const saved = localStorage.getItem(SECRET_KEY) || '';
+  const input = document.getElementById('secret-input');
+  if (saved) {
+    input.value = saved;
+    document.getElementById('secret-dot').className = 'secret-set-dot active';
+  }
+})();
+
+/* ── Providers ─────────────────────────────────────────────────── */
+async function loadProviders() {
+  try {
+    const res = await fetch('/dashboard/api/providers');
+    const providers = await res.json();
+    renderProviders(providers);
+    const allReady = providers.every(p => p.status === 'ready');
+    const anyDegraded = providers.some(p => p.status === 'degraded');
+    const dot = document.getElementById('health-dot');
+    dot.className = 'dot ' + (anyDegraded ? 'red' : allReady ? 'green' : '');
+    const ready = providers.filter(p => p.status === 'ready').length;
+    document.getElementById('topbar-hint').textContent =
+      `${ready}/${providers.length} providers ready`;
+  } catch(e) {
+    document.getElementById('topbar-hint').textContent = 'Could not reach proxy';
+  }
+}
+
+function renderProviders(providers) {
+  const grid = document.getElementById('provider-grid');
+  if (!providers || !providers.length) {
+    grid.innerHTML = '<div style="color:var(--muted)">No providers configured.</div>';
+    return;
+  }
+  providers.sort((a, b) => a.priority - b.priority);
+  grid.innerHTML = providers.map(p => providerCard(p)).join('');
+}
+
+function statusLabel(status) {
+  if (status === 'ready') return 'Ready';
+  if (status === 'no_session') return 'No Session';
+  return 'Degraded';
+}
+
+function providerDisplayName(providerName) {
+  if (providerName === 'metaai') return 'Meta AI';
+  if (providerName === 'qwen') return 'Qwen';
+  return providerName;
+}
+
+function escapeHTML(value) {
+  return String(value == null ? '' : value)
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#039;');
+}
+
+function sessionAge(ts) {
+  if (!ts) return 'no session file';
+  const diff = Math.floor(Date.now() / 1000) - ts;
+  if (diff < 60) return 'session saved just now';
+  if (diff < 3600) return `session saved ${Math.floor(diff/60)}m ago`;
+  if (diff < 86400) return `session saved ${Math.floor(diff/3600)}h ago`;
+  return `session saved ${Math.floor(diff/86400)}d ago`;
+}
+
+function relativeAge(ts) {
+  if (!ts) return 'never';
+  const diff = Math.max(0, Math.floor(Date.now() / 1000) - ts);
+  if (diff < 60) return 'just now';
+  if (diff < 3600) return `${Math.floor(diff/60)}m ago`;
+  if (diff < 86400) return `${Math.floor(diff/3600)}h ago`;
+  return `${Math.floor(diff/86400)}d ago`;
+}
+
+function modelCatalogStatus(p) {
+  if (p.models_refreshing) {
+    return {className: '', text: 'Refreshing models from the provider page…'};
+  }
+  if (p.models_error) {
+    const retained = p.models_refreshed_at ? `Last successful refresh ${relativeAge(p.models_refreshed_at)}.` : 'Using configured aliases.';
+    return {className: 'error', text: `Refresh error: ${p.models_error}. ${retained}`};
+  }
+  if (!p.models_refreshed_at) {
+    return {className: 'stale', text: 'Waiting for the first provider-page refresh; configured aliases are active.'};
+  }
+  if (p.models_stale) {
+    return {className: 'stale', text: `Catalog is stale · last refreshed ${relativeAge(p.models_refreshed_at)}.`};
+  }
+  const source = p.model_source === 'cache' ? 'Loaded from cache' : 'Discovered from provider page';
+  return {className: 'ok', text: `${source} ${relativeAge(p.models_refreshed_at)}.`};
+}
+
+function providerCard(p) {
+  const configuredModels = (p.configured_models || p.models || []).join('\n');
+  const catalogStatus = modelCatalogStatus(p);
+  const id = `prov-${p.name}`;
+  const restartBadge = p.requires_restart
+    ? `<span class="badge" style="background:var(--blue-dim);color:var(--blue)">↻ Restart needed</span>`
+    : '';
+  return `
+<div class="provider-card" id="${id}">
+  <div class="provider-card-header">
+    <span class="provider-name">${providerDisplayName(p.name)}</span>
+    <span class="badge ${p.status}">${statusLabel(p.status)}</span>
+    ${restartBadge}
+  </div>
+  <div class="provider-meta">Priority ${p.priority} &nbsp;·&nbsp; ${sessionAge(p.session_saved_at)} &nbsp;·&nbsp; <span class="fallback-stat${p.fallback_count > 0 ? ' has-fallbacks' : ''}" id="${id}-fbc" data-count="${p.fallback_count}">↩ ${p.fallback_count} fallback${p.fallback_count !== 1 ? 's' : ''}</span></div>
+  <div class="model-count">${(p.models||[]).length} API model${(p.models||[]).length === 1 ? '' : 's'}</div>
+  <div class="models-list">
+    ${(p.models||[]).map(m => `<span class="model-pill">${escapeHTML(m)}</span>`).join('')}
+  </div>
+  <div class="model-catalog-meta ${catalogStatus.className}">
+    <span class="model-catalog-label">Catalog</span>
+    <span>${escapeHTML(catalogStatus.text)}</span>
+  </div>
+  <div class="edit-section">
+    <div class="field-row">
+      <span class="field-label">Priority</span>
+      <input type="number" id="${id}-priority" value="${p.priority}" min="1" max="99" />
+    </div>
+    <div class="field-row" style="align-items:flex-start">
+      <span class="field-label" style="padding-top:6px">Models</span>
+      <textarea id="${id}-models" rows="3">${escapeHTML(configuredModels)}</textarea>
+    </div>
+  </div>
+  <div class="card-actions">
+    <button class="btn-primary" onclick="saveProvider('${p.name}')">Save config</button>
+    <button class="btn-login" onclick="openLoginModal('${p.name}')">Log In</button>
+    <span class="save-msg" id="${id}-msg"></span>
+  </div>
+</div>`;
+}
+
+async function saveProvider(name) {
+  const id = `prov-${name}`;
+  const priority = parseInt(document.getElementById(`${id}-priority`).value, 10);
+  const modelsRaw = document.getElementById(`${id}-models`).value;
+  const models = modelsRaw.split('\n').map(s => s.trim()).filter(Boolean);
+  const msgEl = document.getElementById(`${id}-msg`);
+  msgEl.className = 'save-msg';
+  msgEl.style.display = 'none';
+
+  try {
+    const res = await fetch(`/dashboard/api/config/providers/${name}`, {
+      method: 'PUT',
+      headers: authHeaders(),
+      body: JSON.stringify({priority, models}),
+    });
+    const data = await res.json();
+    if (res.ok) {
+      msgEl.textContent = 'Saved!';
+      msgEl.className = 'save-msg';
+    } else {
+      msgEl.textContent = data.error || 'Error';
+      msgEl.className = 'save-msg err';
+    }
+  } catch(e) {
+    msgEl.textContent = 'Network error';
+    msgEl.className = 'save-msg err';
+  }
+  msgEl.style.display = 'inline';
+  setTimeout(() => { msgEl.style.display = 'none'; }, 3000);
+  loadProviders();
+}
+
+/* ── Login modal ───────────────────────────────────────────────── */
+let currentLoginJobID = '';
+let loginActive = false;
+let loginSaving = false;
+let loginStatusTimer = null;
+let loginFrameTimer = null;
+let loginFrameInFlight = false;
+let loginFrameReady = false;
+let loginFrameFailures = 0;
+let inputQueue = Promise.resolve();
+let loginModalGeneration = 0;
+let loginStartController = null;
+
+function openLoginModal(providerName) {
+  if (loginActive && currentLoginJobID) {
+    bestEffortCancel(modalProvider, currentLoginJobID);
+  }
+  loginModalGeneration++;
+  if (loginStartController) loginStartController.abort();
+  stopLoginTransport(true);
+  modalProvider = providerName;
+  currentLoginJobID = '';
+  loginActive = false;
+  loginSaving = false;
+  document.getElementById('modal-provider-name').textContent = providerDisplayName(providerName);
+  document.getElementById('modal-intro').textContent =
+    'Start a temporary browser, complete the provider\'s sign-in here, then save the session.';
+  setLoginStatus('idle', '💡', 'Ready to start browser login.');
+  setRemoteBrowserVisible(false);
+  document.getElementById('login-fallback').style.display = 'none';
+  document.getElementById('login-fallback-cmd').textContent = `./go-proxy --login ${providerName}`;
+  document.getElementById('btn-start-login').style.display = 'inline-flex';
+  document.getElementById('btn-start-login').disabled = false;
+  document.getElementById('btn-save-session').style.display = 'none';
+  document.getElementById('btn-cancel-login').style.display = 'none';
+  document.getElementById('login-modal').classList.add('open');
+}
+
+function closeModal() {
+  loginModalGeneration++;
+  if (loginStartController) {
+    loginStartController.abort();
+    loginStartController = null;
+  }
+  if (loginActive && !loginSaving && currentLoginJobID) {
+    cancelLogin(false);
+  }
+  stopLoginTransport(true);
+  document.getElementById('login-modal').classList.remove('open');
+}
+
+document.getElementById('login-modal').addEventListener('click', function(e) {
+  if (e.target === this) closeModal();
+});
+
+function setLoginStatus(type, icon, text) {
+  const box = document.getElementById('login-status-box');
+  const iconEl = document.getElementById('login-status-icon');
+  const textEl = document.getElementById('login-status-text');
+
+  // Remove spinner if present
+  const existing = box.querySelector('.spinner');
+  if (existing) existing.remove();
+
+  iconEl.textContent = icon;
+  if (icon === 'spinner') {
+    iconEl.textContent = '';
+    const s = document.createElement('div');
+    s.className = 'spinner';
+    iconEl.appendChild(s);
+  }
+  textEl.textContent = text;
+}
+
+function setRemoteBrowserVisible(visible) {
+  document.getElementById('remote-browser').classList.toggle('visible', visible);
+  if (visible) {
+    if (!loginFrameReady) {
+      document.getElementById('remote-placeholder').style.display = 'flex';
+    }
+    setTimeout(() => document.getElementById('remote-screen').focus(), 0);
+  }
+}
+
+function stopLoginTransport(clearFrame) {
+  if (loginStatusTimer) clearInterval(loginStatusTimer);
+  if (loginFrameTimer) clearInterval(loginFrameTimer);
+  loginStatusTimer = null;
+  loginFrameTimer = null;
+  loginFrameInFlight = false;
+  if (clearFrame) {
+    loginFrameReady = false;
+    const frame = document.getElementById('remote-frame');
+    frame.getContext('2d').clearRect(0, 0, frame.width, frame.height);
+    document.getElementById('remote-placeholder').style.display = 'flex';
+    document.getElementById('remote-keyboard-input').value = '';
+  }
+}
+
+function startLoginTransport() {
+  stopLoginTransport(false);
+  pollLoginStatus();
+  loginStatusTimer = setInterval(pollLoginStatus, 900);
+}
+
+async function pollLoginStatus() {
+  if (!loginActive || !currentLoginJobID) return;
+  try {
+    const res = await fetch(`/dashboard/api/providers/${modalProvider}/login/status?job_id=${encodeURIComponent(currentLoginJobID)}`, {
+      headers: authHeaders(),
+      cache: 'no-store',
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || 'Could not read login status');
+    }
+    applyLoginStatus(await res.json());
+  } catch(e) {
+    stopLoginTransport(false);
+    setLoginStatus('error', '❌', e.message);
+    document.getElementById('btn-reconnect-view').style.display = 'inline-flex';
+  }
+}
+
+function ensureFramePolling() {
+  if (loginFrameTimer) return;
+  refreshLoginFrame();
+  loginFrameTimer = setInterval(refreshLoginFrame, 650);
+}
+
+async function refreshLoginFrame() {
+  if (!loginActive || !currentLoginJobID || loginFrameInFlight) return;
+  loginFrameInFlight = true;
+  try {
+    const res = await fetch(`/dashboard/api/providers/${modalProvider}/login/frame?job_id=${encodeURIComponent(currentLoginJobID)}`, {
+      headers: authHeaders(),
+      cache: 'no-store',
+    });
+    if (res.status === 425 || res.status === 429) return;
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || 'Browser view unavailable');
+    }
+    const blob = await res.blob();
+    await drawRemoteFrame(blob);
+    loginFrameReady = true;
+    document.getElementById('remote-placeholder').style.display = 'none';
+    document.getElementById('remote-origin').textContent =
+      res.headers.get('X-Login-Origin') || 'Secure browser';
+    loginFrameFailures = 0;
+    document.getElementById('btn-reconnect-view').style.display = 'none';
+  } catch(e) {
+    loginFrameFailures++;
+    if (loginFrameFailures >= 3) {
+      if (loginFrameTimer) clearInterval(loginFrameTimer);
+      loginFrameTimer = null;
+      document.getElementById('btn-reconnect-view').style.display = 'inline-flex';
+      setLoginStatus('error', '⚠', 'Browser view paused. Reconnect the view or cancel this login.');
+    }
+  } finally {
+    loginFrameInFlight = false;
+  }
+}
+
+async function drawRemoteFrame(blob) {
+  const frame = document.getElementById('remote-frame');
+  const context = frame.getContext('2d', {alpha: false});
+  if ('createImageBitmap' in window) {
+    const bitmap = await createImageBitmap(blob);
+    context.drawImage(bitmap, 0, 0, frame.width, frame.height);
+    bitmap.close();
+    return;
+  }
+  const url = URL.createObjectURL(blob);
+  try {
+    await new Promise((resolve, reject) => {
+      const image = new Image();
+      image.onload = () => {
+        context.drawImage(image, 0, 0, frame.width, frame.height);
+        resolve();
+      };
+      image.onerror = reject;
+      image.src = url;
+    });
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+function reconnectLoginView() {
+  if (!loginActive || !currentLoginJobID) return;
+  loginFrameFailures = 0;
+  document.getElementById('btn-reconnect-view').style.display = 'none';
+  setLoginStatus('waiting', '🌐', 'Reconnecting secure browser view…');
+  startLoginTransport();
+  ensureFramePolling();
+}
+
+function applyLoginStatus(data) {
+  if (data.job_id && data.job_id !== currentLoginJobID) {
+    setLoginStatus('error', '❌', 'This login browser was replaced. Start again.');
+    loginActive = false;
+    stopLoginTransport(false);
+    return;
+  }
+  const status = data.status;
+  if (!status || status === 'idle') return;
+
+  if (status === 'starting') {
+    setLoginStatus('starting', 'spinner', data.message || 'Launching browser…');
+  } else if (status === 'waiting') {
+    setLoginStatus('waiting', '🌐', data.message || 'Browser is ready. Complete sign-in below, then save the session.');
+    setRemoteBrowserVisible(true);
+    ensureFramePolling();
+    document.getElementById('btn-save-session').style.display = 'inline-flex';
+    document.getElementById('btn-save-session').disabled = false;
+    document.getElementById('btn-cancel-login').style.display = 'inline-flex';
+    document.getElementById('btn-start-login').style.display = 'none';
+  } else if (status === 'saving') {
+    loginSaving = true;
+    setLoginStatus('saving', 'spinner', data.message || 'Capturing session…');
+    document.getElementById('btn-cancel-login').style.display = 'none';
+  } else if (status === 'saved') {
+    loginActive = false;
+    loginSaving = false;
+    stopLoginTransport(false);
+    setLoginStatus('saved', '✅', data.message || 'Session saved!');
+    document.getElementById('btn-save-session').style.display = 'none';
+    document.getElementById('btn-cancel-login').style.display = 'none';
+    document.getElementById('btn-start-login').style.display = 'inline-flex';
+    document.getElementById('btn-start-login').disabled = false;
+    setTimeout(loadProviders, 1500);
+  } else if (status === 'error') {
+    loginActive = false;
+    loginSaving = false;
+    stopLoginTransport(false);
+    setLoginStatus('error', '❌', data.message || 'Browser launch failed.');
+    document.getElementById('login-fallback').style.display = 'block';
+    document.getElementById('btn-save-session').style.display = 'none';
+    document.getElementById('btn-cancel-login').style.display = 'none';
+    document.getElementById('btn-start-login').style.display = 'inline-flex';
+    document.getElementById('btn-start-login').disabled = false;
+  }
+}
+
+async function startLogin() {
+  const generation = loginModalGeneration;
+  const provider = modalProvider;
+  const requestedJobID = crypto.randomUUID();
+  const controller = new AbortController();
+  loginStartController = controller;
+  currentLoginJobID = requestedJobID;
+  loginActive = true;
+  loginSaving = false;
+  document.getElementById('btn-start-login').disabled = true;
+  setLoginStatus('starting', 'spinner', 'Launching browser…');
+
+  try {
+    const res = await fetch(`/dashboard/api/providers/${provider}/login`, {
+      method: 'POST',
+      headers: authHeaders({'X-Login-Job-ID': requestedJobID}),
+      signal: controller.signal,
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to start login');
+    if (generation !== loginModalGeneration ||
+        !document.getElementById('login-modal').classList.contains('open') ||
+        currentLoginJobID !== requestedJobID) {
+      bestEffortCancel(provider, requestedJobID);
+      return;
+    }
+    applyLoginStatus(data);
+    startLoginTransport();
+    document.getElementById('btn-cancel-login').style.display = 'inline-flex';
+    document.getElementById('btn-start-login').style.display = 'none';
+  } catch(e) {
+    if (generation !== loginModalGeneration || e.name === 'AbortError') {
+      bestEffortCancel(provider, requestedJobID);
+      return;
+    }
+    loginActive = false;
+    stopLoginTransport(false);
+    setLoginStatus('error', '❌', e.message);
+    document.getElementById('login-fallback').style.display = 'block';
+    document.getElementById('btn-start-login').disabled = false;
+  } finally {
+    if (loginStartController === controller) loginStartController = null;
+  }
+}
+
+async function saveSession() {
+  loginSaving = true;
+  document.getElementById('btn-save-session').disabled = true;
+  document.getElementById('btn-cancel-login').style.display = 'none';
+  stopLoginTransport(false);
+  setLoginStatus('saving', 'spinner', 'Capturing session…');
+
+  try {
+    const res = await fetch(`/dashboard/api/providers/${modalProvider}/login/save?job_id=${encodeURIComponent(currentLoginJobID)}`, {method: 'POST', headers: authHeaders()});
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to save session');
+    loginActive = false;
+    loginSaving = false;
+    stopLoginTransport(false);
+    setLoginStatus('saved', '✅', data.message || 'Session saved!');
+    document.getElementById('btn-save-session').style.display = 'none';
+    document.getElementById('btn-cancel-login').style.display = 'none';
+    document.getElementById('btn-start-login').style.display = 'inline-flex';
+    document.getElementById('btn-start-login').disabled = false;
+    setTimeout(loadProviders, 1500);
+  } catch(e) {
+    loginSaving = false;
+    loginActive = true;
+    startLoginTransport();
+    ensureFramePolling();
+    setLoginStatus('waiting', '⚠', e.message + ' You can retry or cancel.');
+    document.getElementById('btn-save-session').disabled = false;
+    document.getElementById('btn-cancel-login').style.display = 'inline-flex';
+  }
+}
+
+async function cancelLogin(showStatus = true) {
+  const provider = modalProvider;
+  const jobID = currentLoginJobID;
+  loginActive = false;
+  loginSaving = false;
+  stopLoginTransport(false);
+  if (provider && jobID) {
+    await bestEffortCancel(provider, jobID);
+  }
+  currentLoginJobID = '';
+  if (showStatus) setLoginStatus('idle', '💡', 'Login cancelled.');
+  document.getElementById('btn-save-session').style.display = 'none';
+  document.getElementById('btn-cancel-login').style.display = 'none';
+  document.getElementById('btn-start-login').style.display = 'inline-flex';
+  document.getElementById('btn-start-login').disabled = false;
+}
+
+async function bestEffortCancel(provider, jobID) {
+  if (!provider || !jobID) return;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 3000);
+    try {
+      const res = await fetch(`/dashboard/api/providers/${provider}/login/cancel?job_id=${encodeURIComponent(jobID)}`, {
+        method: 'POST',
+        headers: authHeaders(),
+        keepalive: true,
+        signal: controller.signal,
+      });
+      clearTimeout(timeout);
+      if (res.ok || res.status === 409) return;
+      if (res.status !== 410) return;
+    } catch(_) {
+      clearTimeout(timeout);
+    }
+    if (attempt === 0) await new Promise(resolve => setTimeout(resolve, 300));
+  }
+}
+
+function normalizedRemotePoint(event) {
+  const rect = document.getElementById('remote-frame').getBoundingClientRect();
+  if (!rect.width || !rect.height) return null;
+  return {
+    x: Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width)),
+    y: Math.max(0, Math.min(1, (event.clientY - rect.top) / rect.height)),
+  };
+}
+
+function remoteModifiers(event) {
+  return (event.altKey ? 1 : 0) |
+    (event.ctrlKey ? 2 : 0) |
+    (event.metaKey ? 4 : 0) |
+    (event.shiftKey ? 8 : 0);
+}
+
+function sendRemoteInput(event) {
+  if (!loginActive || !currentLoginJobID) return;
+  const body = Object.assign({job_id: currentLoginJobID}, event);
+  inputQueue = inputQueue.then(async () => {
+    const res = await fetch(`/dashboard/api/providers/${modalProvider}/login/input`, {
+      method: 'POST',
+      headers: authHeaders(),
+      body: JSON.stringify(body),
+    });
+    if (!res.ok && res.status !== 429) {
+      throw new Error('Remote input failed');
+    }
+  }).catch(() => {
+    document.getElementById('btn-reconnect-view').style.display = 'inline-flex';
+  });
+}
+
+function sendRemoteKey(key) {
+  if (!loginActive) return;
+  sendRemoteInput({type: 'key', key, code: key, modifiers: 0});
+  document.getElementById('remote-keyboard-input').focus();
+}
+
+const remoteScreen = document.getElementById('remote-screen');
+let remotePointerActive = false;
+let remotePointerID = null;
+let lastPointerMoveAt = 0;
+
+remoteScreen.addEventListener('pointerdown', (event) => {
+  if (event.button !== 0 || !loginActive) return;
+  event.preventDefault();
+  const point = normalizedRemotePoint(event);
+  if (!point) return;
+  remoteScreen.focus();
+  remotePointerActive = true;
+  remotePointerID = event.pointerId;
+  remoteScreen.setPointerCapture(event.pointerId);
+  sendRemoteInput({type: 'pointer_down', x: point.x, y: point.y, button: 'left', click_count: 1});
+});
+remoteScreen.addEventListener('pointermove', (event) => {
+  if (!remotePointerActive || event.pointerId !== remotePointerID) return;
+  event.preventDefault();
+  const now = performance.now();
+  if (now - lastPointerMoveAt < 16) return;
+  lastPointerMoveAt = now;
+  const point = normalizedRemotePoint(event);
+  if (point) sendRemoteInput({type: 'pointer_move', x: point.x, y: point.y});
+});
+function releaseRemotePointer(event) {
+  if (!remotePointerActive || event.pointerId !== remotePointerID) return;
+  event.preventDefault();
+  const point = normalizedRemotePoint(event);
+  if (point) sendRemoteInput({type: 'pointer_up', x: point.x, y: point.y, button: 'left', click_count: 1});
+  if (remoteScreen.hasPointerCapture(event.pointerId)) remoteScreen.releasePointerCapture(event.pointerId);
+  remotePointerActive = false;
+  remotePointerID = null;
+}
+remoteScreen.addEventListener('pointerup', releaseRemotePointer);
+remoteScreen.addEventListener('pointercancel', releaseRemotePointer);
+remoteScreen.addEventListener('contextmenu', (event) => {
+  event.preventDefault();
+  const point = normalizedRemotePoint(event);
+  if (point) sendRemoteInput({type: 'click', x: point.x, y: point.y, button: 'right', click_count: 1});
+});
+remoteScreen.addEventListener('wheel', (event) => {
+  event.preventDefault();
+  const point = normalizedRemotePoint(event);
+  if (!point) return;
+  const scale = 1280 / Math.max(1, document.getElementById('remote-frame').getBoundingClientRect().width);
+  sendRemoteInput({
+    type: 'scroll',
+    x: point.x,
+    y: point.y,
+    delta_x: Math.max(-2000, Math.min(2000, event.deltaX * scale)),
+    delta_y: Math.max(-2000, Math.min(2000, event.deltaY * scale)),
+  });
+}, {passive: false});
+remoteScreen.addEventListener('keydown', (event) => {
+  if (!loginActive) return;
+  const modifiers = remoteModifiers(event);
+  const special = ['Enter','Tab','Escape','Backspace','Delete','ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Home','End','PageUp','PageDown'];
+  if (special.includes(event.key) || ((event.ctrlKey || event.metaKey || event.altKey) && event.key.length === 1)) {
+    event.preventDefault();
+    sendRemoteInput({type: 'key', key: event.key, code: event.code, modifiers});
+  } else if (event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey) {
+    event.preventDefault();
+    sendRemoteInput({type: 'text', text: event.key});
+  }
+});
+remoteScreen.addEventListener('paste', (event) => {
+  const text = event.clipboardData && event.clipboardData.getData('text');
+  if (!text) return;
+  event.preventDefault();
+  for (let offset = 0; offset < text.length; offset += 4000) {
+    sendRemoteInput({type: 'text', text: text.slice(offset, offset + 4000)});
+  }
+});
+
+const remoteKeyboardInput = document.getElementById('remote-keyboard-input');
+remoteKeyboardInput.addEventListener('input', (event) => {
+  const text = event.target.value;
+  event.target.value = '';
+  if (text) sendRemoteInput({type: 'text', text});
+});
+remoteKeyboardInput.addEventListener('keydown', (event) => {
+  if (event.key !== 'Backspace' && event.key !== 'Enter' && event.key !== 'Tab') return;
+  event.preventDefault();
+  sendRemoteKey(event.key);
+});
+remoteKeyboardInput.addEventListener('beforeinput', (event) => {
+  if (event.inputType !== 'deleteContentBackward' && event.inputType !== 'deleteContentForward') return;
+  event.preventDefault();
+  sendRemoteKey(event.inputType === 'deleteContentBackward' ? 'Backspace' : 'Delete');
+});
+remoteKeyboardInput.addEventListener('paste', (event) => {
+  const text = event.clipboardData && event.clipboardData.getData('text');
+  if (!text) return;
+  event.preventDefault();
+  for (let offset = 0; offset < text.length; offset += 4000) {
+    sendRemoteInput({type: 'text', text: text.slice(offset, offset + 4000)});
+  }
+});
+
+window.addEventListener('pagehide', () => {
+  if (!loginActive || loginSaving || !currentLoginJobID) return;
+  bestEffortCancel(modalProvider, currentLoginJobID);
+});
+
+/* ── Live log stream ───────────────────────────────────────────── */
+function initSSE() {
+  const evtSource = new EventSource('/dashboard/api/logs/stream');
+  const dot = document.getElementById('sse-dot');
+
+  evtSource.onopen = () => { dot.className = 'log-sseindicator live'; };
+  evtSource.onerror = () => {
+    dot.className = 'log-sseindicator';
+    setTimeout(initSSE, 3000);
+    evtSource.close();
+  };
+  evtSource.onmessage = (e) => {
+    try { appendLog(JSON.parse(e.data)); } catch(_) {}
+  };
+  evtSource.addEventListener('session_change', (e) => {
+    try { applySessionChange(JSON.parse(e.data)); } catch(_) {}
+  });
+}
+
+// applySessionChange updates a provider card badge instantly when a session
+// file appears or changes — no page reload required.
+function applySessionChange(ev) {
+  const id = `prov-${ev.provider}`;
+  const card = document.getElementById(id);
+  if (!card) return;
+
+  // Update the status badge.
+  const badge = card.querySelector('.badge');
+  if (badge && (badge.classList.contains('no_session') || badge.classList.contains('degraded'))) {
+    badge.className = 'badge ready';
+    badge.textContent = statusLabel('ready');
+  }
+
+  // Update the meta line (session age).
+  const meta = card.querySelector('.provider-meta');
+  if (meta && ev.session_saved_at) {
+    const priorityText = meta.textContent.split('·')[0].trim();
+    meta.textContent = priorityText + ' · ' + sessionAge(ev.session_saved_at);
+  }
+
+  // Also refresh the top-bar health dot / counter.
+  loadProviders();
+}
+
+// recentLogsReplaying is true while loadRecentLogs is populating the table.
+// appendLog skips live fallback-count updates during replay to avoid
+// double-counting counts that are already baked into the /api/providers response.
+let recentLogsReplaying = false;
+
+async function loadRecentLogs() {
+  try {
+    recentLogsReplaying = true;
+    const res = await fetch('/dashboard/api/logs/recent');
+    const logs = await res.json();
+    if (logs && logs.length) {
+      logs.forEach(appendLog);
+    }
+  } catch(_) {}
+  recentLogsReplaying = false;
+}
+
+function fmtDur(ms) {
+  if (ms == null || ms === 0) return '—';
+  return ms >= 1000 ? (ms / 1000).toFixed(1) + 's' : ms + 'ms';
+}
+
+function perfItem(label, value) {
+  return `<span style="white-space:nowrap"><span style="color:var(--muted)">${label}</span> ${fmtDur(value)}</span>`;
+}
+
+function buildAttemptChain(ev) {
+  const attempts = ev.attempts;
+  if (!attempts || !attempts.length) return '';
+  const items = attempts.map((a, i) => {
+    if (a.skipped) {
+      return `<div class="attempt-item skipped">
+        <span class="attempt-icon">⊘</span>
+        <span class="attempt-provider">${esc(a.provider)}</span>
+        <span class="attempt-skipped">skipped — degraded</span>
+      </div>`;
+    }
+    const dur = fmtDur(a.duration_ms);
+    const p = a.performance || {};
+    const flags = p.flags || {};
+    const mode = flags.reused_page ? 'reused conversation page' : (flags.warm_page ? 'warm page' : (flags.new_page ? 'new page' : 'page unknown'));
+    const browser = flags.reused_browser ? 'reused browser' : 'new browser';
+    const waterfall = `<div style="grid-column:2/-1;display:flex;flex-wrap:wrap;gap:5px 14px;margin-top:5px;font-size:11px">
+      ${perfItem('browser', p.browser_acquire_ms)}
+      ${perfItem('queue', p.provider_queue_ms)}
+      ${perfItem('page ready', p.page_ready_ms)}
+      ${perfItem('input', p.input_ms)}
+      ${perfItem('send', p.request_send_ms)}
+      ${perfItem('TTFT', p.ttft_ms)}
+      ${perfItem('generation', p.generation_ms)}
+      ${perfItem('provider first update', p.provider_first_update_ms)}
+      ${perfItem('active generation', p.active_generation_ms)}
+      ${perfItem('settle wait', p.response_settle_ms)}
+      ${perfItem('delivery', p.response_delivery_ms)}
+      <span style="white-space:nowrap"><span style="color:var(--muted)">updates</span> ${p.response_update_count || '—'}</span>
+      <span style="color:var(--muted)">${browser}, ${mode}</span>
+    </div>`;
+    if (a.succeeded) {
+      return `<div class="attempt-item">
+        <span class="attempt-icon">✓</span>
+        <span class="attempt-provider">${esc(a.provider)}</span>
+        <span class="attempt-dur">${dur}</span>
+        <span class="attempt-ok">succeeded</span>
+        ${waterfall}
+      </div>`;
+    }
+    return `<div class="attempt-item">
+      <span class="attempt-icon">✗</span>
+      <span class="attempt-provider">${esc(a.provider)}</span>
+      <span class="attempt-dur">${dur}</span>
+      <span class="attempt-err">${esc(a.error || 'failed')}</span>
+      ${waterfall}
+    </div>`;
+  });
+  const requestStages = `<div style="display:flex;flex-wrap:wrap;gap:5px 14px;margin-bottom:10px;font-size:11px">
+    <span style="color:var(--accent)">trace ${esc(ev.trace_id || '—')}</span>
+    ${perfItem('parse', ev.parse_ms)}
+    ${perfItem('memory', ev.memory_read_ms)}
+    ${perfItem('context', ev.context_build_ms)}
+    ${perfItem('routing', ev.routing_ms)}
+    ${perfItem('total', ev.response_time_ms)}
+  </div>`;
+  return `${requestStages}<div class="attempt-chain">${items.join('<div class="attempt-connector"></div>')}</div>`;
+}
+
+function esc(s) {
+  return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function appendLog(ev) {
+  const tbody = document.getElementById('log-tbody');
+  if (seenEmpty) {
+    tbody.innerHTML = '';
+    seenEmpty = false;
+  }
+
+  const t = new Date(ev.time);
+  const hms = t.toTimeString().slice(0, 8);
+  const statusClass = ev.success ? 'log-success' : 'log-fail';
+  const statusText = ev.success ? `✓ ${ev.status_code}` : `✗ ${ev.status_code}`;
+  const dur = fmtDur(ev.response_time_ms);
+
+  let providerCell = ev.provider || '—';
+  if (ev.fallback) {
+    const rawChain = (ev.attempted_providers && ev.attempted_providers.length > 1)
+      ? 'Tried: ' + ev.attempted_providers.join(' → ')
+      : 'Fallback used';
+    const chain = rawChain.replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    providerCell += `<span class="badge-fallback" title="${chain}">↩ fallback</span>`;
+
+    // Live-update the provider card's fallback count chip.
+    // Skip during historical replay — the initial count already comes from /api/providers.
+    if (!recentLogsReplaying && ev.provider) {
+      const fbEl = document.getElementById(`prov-${ev.provider}-fbc`);
+      if (fbEl) {
+        const next = (parseInt(fbEl.dataset.count || '0', 10) + 1);
+        fbEl.dataset.count = next;
+        fbEl.textContent = `↩ ${next} fallback${next !== 1 ? 's' : ''}`;
+        fbEl.className = 'fallback-stat has-fallbacks';
+      }
+    }
+  }
+
+  const hasDetail = ev.attempts && ev.attempts.length > 0;
+
+  const row = document.createElement('tr');
+  if (hasDetail) row.className = 'log-row';
+  row.innerHTML = `
+    <td class="log-time">${hms}</td>
+    <td class="log-provider">${providerCell}</td>
+    <td class="log-model">${ev.model_requested || '—'}</td>
+    <td class="log-duration">${ev.provider ? dur : '—'}</td>
+    <td class="${statusClass}">${statusText}</td>`;
+
+  // Detail row (hidden until expanded)
+  const detailRow = document.createElement('tr');
+  detailRow.className = 'log-detail-row';
+  detailRow.style.display = 'none';
+  const detailTd = document.createElement('td');
+  detailTd.colSpan = 5;
+  detailTd.innerHTML = buildAttemptChain(ev);
+  detailRow.appendChild(detailTd);
+
+  if (hasDetail) {
+    row.style.cursor = 'pointer';
+    row.addEventListener('click', () => {
+      const open = row.classList.toggle('expanded');
+      detailRow.style.display = open ? '' : 'none';
+    });
+  }
+
+  tbody.insertBefore(detailRow, tbody.firstChild);
+  tbody.insertBefore(row, tbody.firstChild);
+  logRows++;
+  if (logRows > MAX_LOG_ROWS) {
+    // Remove both the summary and its paired detail row
+    const last = tbody.lastChild;
+    if (last) tbody.removeChild(last);
+    const last2 = tbody.lastChild;
+    if (last2) tbody.removeChild(last2);
+    logRows--;
+  }
+}
+
+function clearLogs() {
+  document.getElementById('log-tbody').innerHTML =
+    '<tr><td colspan="5" class="log-empty">Log cleared.</td></tr>';
+  logRows = 0;
+  seenEmpty = true;
+}
+
+/* ── Init ──────────────────────────────────────────────────────── */
+loadProviders();
+loadRecentLogs();
+initSSE();
+setInterval(loadProviders, 30_000);
+</script>
+</body>
+</html>
