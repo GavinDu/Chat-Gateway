@@ -98,7 +98,7 @@ impl ChatProvider for GeminiAdapter {
 
                 tokio::time::sleep(Duration::from_millis(350)).await;
 
-                let els = page_clone.find_elements(response_sels.last().unwrap_or(&"div")).await;
+                let els = page_clone.find_elements(response_sels.last().copied().unwrap_or("div")).await;
                 if let Ok(nodes) = els {
                     if let Some(last) = nodes.last() {
                         match last.inner_text().await {
@@ -147,10 +147,10 @@ impl ChatProvider for GeminiAdapter {
 
     fn selectors(&self) -> AdapterSelectors {
         AdapterSelectors {
-            input_selector: "rich-textarea[aria-label]", "div[contenteditable=\"true\"][role=\"textbox\"]", "div[contenteditable=\"true\"]"[0].to_string(),
-            send_button: "button[aria-label=\"Send message\"]", "button.send-button", "button:has(mat-icon)"[0].to_string(),
-            response_container: "model-response", "div.response-container", "div.model-response-text"[0].to_string(),
-            model_picker: "button.model-picker", "mat-select", "button:has-text(\"Gemini\")"[0].to_string(),
+            input_selector: "rich-textarea[aria-label]".to_string(),
+            send_button: "button[aria-label=\"Send message\"]".to_string(),
+            response_container: "model-response".to_string(),
+            model_picker: "button.model-picker".to_string(),
         }
     }
 }

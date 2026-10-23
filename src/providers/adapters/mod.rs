@@ -6,6 +6,7 @@ pub mod gemini;
 pub mod grok;
 pub mod mistral;
 pub mod perplexity;
+pub mod common;
 pub mod diagnostics;
 
 use crate::providers::traits::ChatProvider;

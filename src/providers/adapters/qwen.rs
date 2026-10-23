@@ -98,7 +98,7 @@ impl ChatProvider for QwenAdapter {
 
                 tokio::time::sleep(Duration::from_millis(350)).await;
 
-                let els = page_clone.find_elements(response_sels.last().unwrap_or(&"div")).await;
+                let els = page_clone.find_elements(response_sels.last().copied().unwrap_or("div")).await;
                 if let Ok(nodes) = els {
                     if let Some(last) = nodes.last() {
                         match last.inner_text().await {
@@ -147,10 +147,10 @@ impl ChatProvider for QwenAdapter {
 
     fn selectors(&self) -> AdapterSelectors {
         AdapterSelectors {
-            input_selector: "textarea[placeholder*=\"Ask\"]", "textarea[data-testid=\"chat-input\"]", "div[contenteditable=\"true\"][role=\"textbox\"]"[0].to_string(),
-            send_button: "button[type=\"submit\"]", "button[aria-label*=\"Send\"]", "button[data-testid=\"send-button\"]"[0].to_string(),
-            response_container: "div.markdown-body", "div[data-role=\"assistant\"]", "div.message-content"[0].to_string(),
-            model_picker: "button:has-text(\"Qwen\")", "div.model-selector", "[data-testid=\"model-picker\"]"[0].to_string(),
+            input_selector: "textarea[placeholder*=\"Ask\"]".to_string(),
+            send_button: "button[type=\"submit\"]".to_string(),
+            response_container: "div.markdown-body".to_string(),
+            model_picker: "button:has-text(\"Qwen\")".to_string(),
         }
     }
 }

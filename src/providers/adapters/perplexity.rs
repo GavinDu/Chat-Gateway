@@ -98,7 +98,7 @@ impl ChatProvider for PerplexityAdapter {
 
                 tokio::time::sleep(Duration::from_millis(350)).await;
 
-                let els = page_clone.find_elements(response_sels.last().unwrap_or(&"div")).await;
+                let els = page_clone.find_elements(response_sels.last().copied().unwrap_or("div")).await;
                 if let Ok(nodes) = els {
                     if let Some(last) = nodes.last() {
                         match last.inner_text().await {
@@ -147,10 +147,10 @@ impl ChatProvider for PerplexityAdapter {
 
     fn selectors(&self) -> AdapterSelectors {
         AdapterSelectors {
-            input_selector: "textarea[placeholder*=\"Ask\"]", "div[contenteditable=\"true\"][role=\"textbox\"]", "textarea[name=\"q\"]"[0].to_string(),
-            send_button: "button[aria-label=\"Submit\"]", "button[type=\"submit\"]", "button:has(svg.lucide-arrow-up)"[0].to_string(),
-            response_container: "div[data-testid=\"answer\"]", "div.prose", "div.answer-container"[0].to_string(),
-            model_picker: "button:has-text(\"Sonar\")", "div.model-selector", "button[aria-label*=\"model\"]"[0].to_string(),
+            input_selector: "textarea[placeholder*=\"Ask\"]".to_string(),
+            send_button: "button[aria-label=\"Submit\"]".to_string(),
+            response_container: "div[data-testid=\"answer\"]".to_string(),
+            model_picker: "button:has-text(\"Sonar\")".to_string(),
         }
     }
 }

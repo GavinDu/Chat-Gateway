@@ -98,7 +98,7 @@ impl ChatProvider for ChatGPTAdapter {
 
                 tokio::time::sleep(Duration::from_millis(350)).await;
 
-                let els = page_clone.find_elements(response_sels.last().unwrap_or(&"div")).await;
+                let els = page_clone.find_elements(response_sels.last().copied().unwrap_or("div")).await;
                 if let Ok(nodes) = els {
                     if let Some(last) = nodes.last() {
                         match last.inner_text().await {
@@ -147,10 +147,10 @@ impl ChatProvider for ChatGPTAdapter {
 
     fn selectors(&self) -> AdapterSelectors {
         AdapterSelectors {
-            input_selector: "#prompt-textarea", "div#prompt-textarea[contenteditable=\"true\"]", "textarea[data-id=\"root\"]"[0].to_string(),
-            send_button: "button[data-testid=\"send-button\"]", "button[aria-label=\"Send prompt\"]", "button:has(svg)"[0].to_string(),
-            response_container: "div[data-message-author-role=\"assistant\"] div.markdown", "article div.markdown", "div[data-message-id] div.markdown"[0].to_string(),
-            model_picker: "button[data-testid=\"model-switcher\"]", "button:has-text(\"ChatGPT\")", "div#model-switcher"[0].to_string(),
+            input_selector: "#prompt-textarea".to_string(),
+            send_button: "button[data-testid=\"send-button\"]".to_string(),
+            response_container: "div[data-message-author-role=\"assistant\"] div.markdown".to_string(),
+            model_picker: "button[data-testid=\"model-switcher\"]".to_string(),
         }
     }
 }

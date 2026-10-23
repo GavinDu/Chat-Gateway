@@ -45,6 +45,10 @@ impl SessionStore {
         Ok(Self { base_dir: base, sessions: RwLock::new(map) })
     }
 
+    pub async fn loaded_count(&self) -> usize {
+        self.sessions.read().await.len()
+    }
+
     pub async fn get(&self, provider: &str) -> Option<SessionData> {
         self.sessions.read().await.get(provider).cloned()
     }
@@ -157,7 +161,6 @@ impl SessionStore {
             std::thread::spawn(move || {
                 let mut debouncer = match notify_debouncer_mini::new_debouncer(
                     Duration::from_millis(500),
-                    None,
                     move |res: Result<Vec<notify_debouncer_mini::DebouncedEvent>, _>| {
                         if let Ok(events) = res {
                             for ev in events {

@@ -98,7 +98,7 @@ impl ChatProvider for MistralAdapter {
 
                 tokio::time::sleep(Duration::from_millis(350)).await;
 
-                let els = page_clone.find_elements(response_sels.last().unwrap_or(&"div")).await;
+                let els = page_clone.find_elements(response_sels.last().copied().unwrap_or("div")).await;
                 if let Ok(nodes) = els {
                     if let Some(last) = nodes.last() {
                         match last.inner_text().await {
@@ -147,10 +147,10 @@ impl ChatProvider for MistralAdapter {
 
     fn selectors(&self) -> AdapterSelectors {
         AdapterSelectors {
-            input_selector: "textarea[placeholder*=\"Ask\"]", "div[contenteditable=\"true\"]", "textarea.chat-input"[0].to_string(),
-            send_button: "button[aria-label=\"Send\"]", "button[type=\"submit\"]", "button.submit"[0].to_string(),
-            response_container: "div.markdown", "div.assistant-message", "div.prose"[0].to_string(),
-            model_picker: "button.model-selector", "div:has-text(\"Mistral Large\")", "select"[0].to_string(),
+            input_selector: "textarea[placeholder*=\"Ask\"]".to_string(),
+            send_button: "button[aria-label=\"Send\"]".to_string(),
+            response_container: "div.markdown".to_string(),
+            model_picker: "button.model-selector".to_string(),
         }
     }
 }

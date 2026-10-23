@@ -98,7 +98,7 @@ impl ChatProvider for ClaudeAdapter {
 
                 tokio::time::sleep(Duration::from_millis(350)).await;
 
-                let els = page_clone.find_elements(response_sels.last().unwrap_or(&"div")).await;
+                let els = page_clone.find_elements(response_sels.last().copied().unwrap_or("div")).await;
                 if let Ok(nodes) = els {
                     if let Some(last) = nodes.last() {
                         match last.inner_text().await {
@@ -147,10 +147,10 @@ impl ChatProvider for ClaudeAdapter {
 
     fn selectors(&self) -> AdapterSelectors {
         AdapterSelectors {
-            input_selector: "div[contenteditable=\"true\"][data-placeholder]", "div.ProseMirror", "div[contenteditable=\"true\"]"[0].to_string(),
-            send_button: "button[aria-label=\"Send Message\"]", "button:has(svg)[type=\"button\"]", "button[type=\"button\"]"[0].to_string(),
-            response_container: "div[data-testid=\"assistant-message\"]", "div.font-claude-response", "div[data-is-streaming] .prose"[0].to_string(),
-            model_picker: "button:has-text(\"Claude\")", "div[data-testid=\"model-selector\"]", "button.model-selector"[0].to_string(),
+            input_selector: "div[contenteditable=\"true\"][data-placeholder]".to_string(),
+            send_button: "button[aria-label=\"Send Message\"]".to_string(),
+            response_container: "div[data-testid=\"assistant-message\"]".to_string(),
+            model_picker: "button:has-text(\"Claude\")".to_string(),
         }
     }
 }

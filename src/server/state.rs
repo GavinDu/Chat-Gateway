@@ -138,6 +138,3 @@ pub struct AppState {
     pub _supervisor: Arc<ObscuraSupervisor>,
 }
 
-impl Clone for crate::browser::ObscuraSupervisor {
-    fn clone(&self) -> Self { Self { _child: None } }
-}

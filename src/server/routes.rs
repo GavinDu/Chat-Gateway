@@ -19,7 +19,7 @@ pub async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let providers = state.config.providers.iter().map(|p| {
         serde_json::json!({ "name": p.name, "enabled": p.enabled, "priority": p.priority, "models": p.models })
     }).collect::<Vec<_>>();
-    Json(serde_json::json!({ "status": "ok", "providers": providers, "obscura": state.config.server.obscura_endpoint, "sessions_loaded": state.session_store }))
+    Json(serde_json::json!({ "status": "ok", "providers": providers, "obscura": state.config.server.obscura_endpoint, "sessions_loaded": state.session_store.loaded_count().await }))
 }
 
 pub async fn list_models(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -169,6 +169,7 @@ pub async fn chat_completions(
                 let total_start_clone = total_start;
 
                 if req.stream {
+                    let new_conv_id_stream = new_conv_id.clone();
                     let sse_stream = async_stream::stream! {
                         let mut full = String::new();
                         let mut update_count = 0usize;
@@ -190,7 +191,7 @@ pub async fn chat_completions(
                                         update_count += 1;
                                     }
                                     let data = serde_json::json!({
-                                        "id": format!("chatcmpl-{}", &new_conv_id[..8]),
+                                        "id": format!("chatcmpl-{}", &new_conv_id_stream[..8]),
                                         "object": "chat.completion.chunk",
                                         "created": chrono::Utc::now().timestamp(),
                                         "model": model_clone,
@@ -211,11 +212,11 @@ pub async fn chat_completions(
 
                         // Store turn in unified memory (no prompts/responses logged in trace)
                         state_clone.memory.store_turn(
-                            new_conv_id.clone(),
+                            new_conv_id_stream.clone(),
                             windowed_clone.clone(),
                             crate::memory::ChatMessage { role: "assistant".to_string(), content: full.clone() },
                             provider_clone.clone(),
-                            format!("tab-{}", &new_conv_id[..8])
+                            format!("tab-{}", &new_conv_id_stream[..8])
                         );
 
                         // Push performance trace

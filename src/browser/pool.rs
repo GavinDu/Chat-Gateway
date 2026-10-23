@@ -1,5 +1,6 @@
 use std::sync::Arc;
 use chromiumoxide::Browser;
+use futures::StreamExt;
 use tokio::sync::Semaphore;
 use crate::config::AppConfig;
 use dashmap::DashMap;
@@ -17,8 +18,8 @@ impl BrowserPool {
         let (browser, mut handler) = Browser::connect(endpoint).await?;
 
         tokio::spawn(async move {
-            loop {
-                if let Err(e) = handler.next().await {
+            while let Some(res) = handler.next().await {
+                if let Err(e) = res {
                     tracing::warn!("browser handler ended: {e}");
                     break;
                 }
