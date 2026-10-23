@@ -1,30 +1,17 @@
-BINARY  := go-proxy
-PKG     := go-proxy
-PORT    ?= 8080
-
-.PHONY: build run clean tidy login help
-
-## build: compile the binary
 build:
-	go build -o $(BINARY) .
+	cargo build --release
 
-## run: build and start the server
-run: build
-	PORT=$(PORT) ./$(BINARY) --config config.yaml
+run:
+	cargo run -- --config config.example.yaml
 
-## tidy: tidy and download Go modules
-tidy:
-	go mod tidy
+login-qwen:
+	cargo run -- --login qwen
 
-## login: open a headed browser for manual Qwen or Meta AI authentication
-##   Usage: make login PROVIDER=qwen
-login: build
-	./$(BINARY) --login $(PROVIDER) --config config.yaml
+test-adapter:
+	cargo run -- --test-adapter qwen
 
-## clean: remove compiled binary
-clean:
-	rm -f $(BINARY)
+obscura-serve:
+	obscura serve --port 9222 --stealth --render --allow-private-network
 
-## help: show this help
-help:
-	@grep -E '^##' Makefile | sed 's/## //'
+fmt:
+	cargo fmt && cargo clippy

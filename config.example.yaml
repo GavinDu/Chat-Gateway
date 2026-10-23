@@ -1,72 +1,62 @@
 server:
-  # Port the API listens on. Overridden by the PORT environment variable.
   port: 8080
-  # headless: true runs browsers without a visible window (for servers/CI).
-  # Individual providers can override this with their own headless setting.
   headless: true
-  # dashboard_secret — optional but recommended when the proxy is reachable by
-  # others on the network. Set to any non-empty string; the dashboard UI stores
-  # it in browser localStorage and sends "Authorization: Bearer <secret>" on all
-  # config-edit and login requests. Leave empty for private/local-only deployments.
-  # dashboard_secret: "change-me-to-a-strong-random-value"
-
-  # conversation_idle_minutes — how long an idle browser tab is kept open after
-  # the last request on that conversation. When the timeout expires the tab is
-  # closed and the X-Conversation-Id is no longer valid. Default: 30.
-  # conversation_idle_minutes: 30
-
+  obscura_endpoint: "ws://127.0.0.1:9222"
+  chrome_profile_dir: ""
+memory:
+  max_tokens: 8000
+  strategy: "sliding_window"
+obscura:
+  stealth: true
+  render: true
+  allow_private_network: true
+  binary: "obscura"
 providers:
-  # Providers are tried in priority order (lower number = higher priority).
-  # On failure or session expiry the next enabled provider is used automatically.
-
   - name: qwen
     enabled: true
     priority: 1
     timeout_seconds: 120
-    # Keep authenticated tabs ready in the shared Qwen browser.
     session_pool_size: 2
-    models:
-      - qwen
-      - qwen-turbo
-      - qwen-plus
-      - qwen-max
-      - qwen2.5
-
+    models: [qwen, qwen3, qwen-plus, qwen-max]
   - name: metaai
     enabled: true
     priority: 2
     timeout_seconds: 120
-    models:
-      - meta-ai
-      - llama
-      - llama-3
-      - llama-3.1
-
+    session_pool_size: 2
+    models: [meta-ai, llama, llama-4, llama-3.3]
   - name: claude
     enabled: true
     priority: 3
-    timeout_seconds: 120
-    models:
-      - claude
-      - claude-sonnet
-      - claude-opus
-      - claude-haiku
-
+    timeout_seconds: 150
+    session_pool_size: 2
+    models: [claude, claude-sonnet-4, claude-opus-4, claude-haiku-3.5, claude-sonnet, claude-opus]
   - name: chatgpt
     enabled: true
     priority: 4
-    timeout_seconds: 120
-    models:
-      - gpt
-      - chatgpt
-      - gpt-5
-      - gpt-4o
-
+    timeout_seconds: 150
+    session_pool_size: 2
+    models: [gpt, chatgpt, gpt-5, gpt-4o, gpt-4o-mini, o1, o3-mini]
   - name: gemini
     enabled: true
     priority: 5
     timeout_seconds: 120
-    models:
-      - gemini
-      - gemini-pro
-      - gemini-flash
+    session_pool_size: 2
+    models: [gemini, gemini-2.0-flash, gemini-1.5-pro, gemini-1.5-flash, gemini-pro]
+  - name: grok
+    enabled: true
+    priority: 6
+    timeout_seconds: 120
+    session_pool_size: 2
+    models: [grok, grok-3, grok-3-mini, grok-2, grok-beta]
+  - name: mistral
+    enabled: true
+    priority: 7
+    timeout_seconds: 120
+    session_pool_size: 2
+    models: [mistral, mistral-large, mistral-small, mixtral, codestral, pixtral]
+  - name: perplexity
+    enabled: true
+    priority: 8
+    timeout_seconds: 120
+    session_pool_size: 2
+    models: [perplexity, sonar, sonar-pro, sonar-reasoning, pplx-8b, pplx-70b]

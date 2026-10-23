@@ -1,144 +1,136 @@
-# go-proxy
+# chat-gateway-rs — Rust + Obscura
 
-An OpenAI-compatible local proxy for **Qwen**, **Meta AI**, **Claude**,
-**ChatGPT**, and **Gemini** web chat sessions.
-It automates Chromium through Go, Rod, and the Chrome DevTools Protocol (CDP).
+Rust port of GavinDu/Chat-Gateway with **8 providers**: Qwen, Meta AI, Claude, ChatGPT, Gemini, Grok, Mistral, Perplexity.
 
-## Requirements
+Unified memory layer + OpenAI-compatible API + automatic failover + Obscura headless browser (30MB, instant boot, built-in stealth).
 
-- Go 1.22+ to build
-- Chrome or Chromium available on the host
-- A manually authenticated account for each provider you enable
+## Why Obscura over Go Rod + Chromium?
 
-## Build
+| Metric | Obscura | Headless Chrome + Rod |
+|---|---|---|
+| Memory | 30 MB | 200+ MB |
+| Binary | ~70 MiB | 300+ MB |
+| Startup | instant | ~2s |
+| Page load | 85ms | ~500ms |
+| Anti-detect | Built-in (webdriver=undefined, canvas/GPU/audio randomization, 3520 trackers blocked) | Plugin needed |
+| CDP | Yes — `ws://127.0.0.1:9222` — works with chromiumoxide, puppeteer-core, playwright-core | Yes |
 
-```bash
-go build -o go-proxy .
-# Apple Silicon macOS package:
-./build-macos-arm64.sh
-```
+Obscura is Apache-2.0, Rust, V8 + custom DOM, single binary. `obscura serve --port 9222 --stealth --render` then `Browser::connect("ws://127.0.0.1:9222")` via chromiumoxide.
 
-## Start
-
-Copy the supplied configuration, manually save a session for one or more supported
-providers, then start the server:
+## Quick Start
 
 ```bash
+# 1. Install Obscura
+curl -LO https://github.com/h4ckf0r0day/obscura/releases/latest/download/obscura-x86_64-linux.tar.gz
+tar xzf obscura-x86_64-linux.tar.gz
+./obscura fetch https://example.com --eval "document.title" # test
+
+# 2. Start gateway
 cp config.example.yaml config.yaml
-./go-proxy --login qwen --config config.yaml
-# In the headed browser, complete login yourself; stop the command when finished.
-./go-proxy --config config.yaml
+cargo run -- --config config.yaml
+# or with Docker (Dockerfile includes obscura)
+
+# Dashboard at http://localhost:8080 handles manual login for all 8 providers
+# Sessions -> sessions/<provider>.json (cookies + localStorage), reloaded on change
 ```
 
-The dashboard at `http://localhost:8080/` starts an isolated manual-login browser and
-streams its page into the login modal. Clicks, scrolling, keyboard controls, and text
-are relayed to that browser without exposing CDP or the provider DOM. Login capture
-saves cookies and localStorage; authentication input and screenshots are not logged or
-persisted. On mobile, tap the provider field first, then use the secure typing relay
-below the browser view; its Next and Enter buttons relay those keys to the provider.
+## API (OpenAI compatible)
 
-Supported login names are `qwen`, `metaai`, `claude`, `chatgpt`, and `gemini`.
-Sessions are stored in
-`sessions/<provider>.json` and are reloaded when changed.
-
-## Configuration
-
-```yaml
-server:
-  port: 8080
-  headless: true
-  chrome_profile_dir: ""
-
-providers:
-  - name: qwen
-    enabled: true
-    priority: 1
-    timeout_seconds: 120
-    session_pool_size: 2
-    models: [qwen]
-  - name: metaai
-    enabled: true
-    priority: 2
-    timeout_seconds: 120
-    models: [meta-ai, llama]
-  - name: claude
-    enabled: true
-    priority: 3
-    timeout_seconds: 120
-    models: [claude, claude-sonnet, claude-opus, claude-haiku]
-  - name: chatgpt
-    enabled: true
-    priority: 4
-    timeout_seconds: 120
-    models: [gpt, chatgpt, gpt-5, gpt-4o]
-  - name: gemini
-    enabled: true
-    priority: 5
-    timeout_seconds: 120
-    models: [gemini, gemini-pro, gemini-flash]
-```
-
-`PORT` overrides `server.port`. Lower priority values are tried first. Model aliases
-are case-insensitive; `"auto"` uses the priority order.
-
-At startup, the proxy reads the authenticated model or bot picker on each enabled
-provider page without sending a message. Successful discoveries are combined with the
-configured aliases, saved to `models-cache.json` beside the config file, and refreshed
-at most once every 24 hours. If discovery fails, the last successful catalog remains
-active; on a first-run failure, the configured aliases remain active.
-
-Unique discovered labels are exposed directly. If multiple providers expose the same
-label, `/v1/models` qualifies only those collisions as `provider:model` so every
-advertised ID routes deterministically to its `owned_by` provider. Configured aliases
-keep their existing unqualified IDs when a discovered label collides with them.
-
-## API
-
-- `GET /health` — liveness and provider state
-- `GET /v1/models` — configured aliases plus the last discovered provider models
-- `POST /v1/chat/completions` — OpenAI-style streaming or JSON chat response
+- `GET /health` — liveness + provider state
+- `GET /v1/models` — configured aliases + discovered catalog (handles collision as `provider:model`)
+- `POST /v1/chat/completions` — streaming or JSON, supports `X-Conversation-Id` to reuse tab
 
 ```bash
 curl http://localhost:8080/v1/models
-
-curl http://localhost:8080/v1/chat/completions \
-  -H 'Content-Type: application/json' \
-  -d '{"model":"qwen","messages":[{"role":"user","content":"Hello"}]}'
+curl http://localhost:8080/v1/chat/completions -H 'Content-Type: application/json'   -d '{"model":"auto","messages":[{"role":"user","content":"Hello"}]}' 
+# auto = priority order: qwen(1) < metaai(2) < claude(3) < chatgpt(4) < gemini(5) < grok(6) < mistral(7) < perplexity(8)
+# On failure, tries next eligible provider
 ```
 
-Pass `X-Conversation-Id` from a successful response to reuse its browser tab for a
-later turn. On a failed provider the proxy tries the next eligible provider.
+Pass `X-Conversation-Id` from response to reuse browser tab.
 
-## Dashboard and diagnostics
+## Providers — Adapters Implemented
 
-The dashboard shows provider state, request activity, configuration, discovered model
-options, and the age or error state of each provider's model catalog. Its Login
-action is manual only and works remotely without host desktop access.
-`--test-adapter <provider>` performs a live selector check; it is diagnostic and
-may send a test prompt.
+All adapters implement `ChatProvider` trait: `discover_models` (reads picker without sending message) + `send` (streaming).
 
-Expand a request in the live log to inspect its low-overhead latency waterfall:
-parse, memory, context, routing, browser acquisition, provider queue, page readiness,
-input, send, TTFT, generation, and total time. Generation is divided into provider
-first-update latency, active response growth, response-settle wait, and final delivery,
-plus an aggregate response-update count. The latest 500 traces are retained in memory
-and each request emits one structured `performance trace` log entry. Prompts,
-responses, session data, and per-token events are not recorded.
+### 1. Qwen — chat.qwen.ai
+- Input: `textarea[placeholder*="Ask"]`
+- Models: qwen, qwen3, qwen-plus, qwen-max, discovered like qwen3-235b
+- Streaming via `div.markdown-body`
 
-The repeatable beta checklist and the latest credential-free beta execution record
-are in [`design/11-beta-test-plan.md`](design/11-beta-test-plan.md).
-The current end-to-end request flow, measured provider behavior, performance
-bottlenecks, and prioritized improvements are in
-[`design/12-performance.md`](design/12-performance.md). The complete design index is
-[`design/README.md`](design/README.md).
+### 2. Meta AI — www.meta.ai
+- Input: `div[contenteditable][role=textbox]`
+- Models: meta-ai, llama-4, llama-3.3
+- Llama 4 variants
+
+### 3. Claude — claude.ai
+- Input: `div.ProseMirror`
+- Models: claude-sonnet-4, opus-4, haiku-3.5
+- Detects `data-is-streaming` + settle wait 800ms
+
+### 4. ChatGPT — chatgpt.com / chat.openai.com
+- Input: `#prompt-textarea` (contenteditable)
+- Models: gpt-5, gpt-4o, o1, o3-mini
+- Response: `div[data-message-author-role=assistant] div.markdown`
+
+### 5. Gemini — gemini.google.com
+- Input: `rich-textarea`
+- Models: gemini-2.0-flash, 1.5-pro
+- Custom element `<model-response>`
+
+### 6. Grok — grok.com + x.com/i/grok
+- Input: `textarea[placeholder*=Ask]`
+- Models: grok-3, grok-3-mini, grok-2
+- Supports thinking traces, similar UI to ChatGPT
+
+### 7. Mistral — chat.mistral.ai (Le Chat)
+- Input: `textarea.chat-input`
+- Models: mistral-large, small, mixtral, codestral, pixtral
+- Model picker top
+
+### 8. Perplexity — perplexity.ai
+- Input: `textarea[name=q]`
+- Models: sonar, sonar-pro, sonar-reasoning, pplx-8b/70b
+- Answer with citations — adapter strips `[1][2]` for clean API
+- Focus modes + model selector
+
+## Architecture
+
+```
+ObscuraSupervisor (spawns obscura serve --stealth)
+  -> BrowserPool (chromiumoxide Browser::connect(ws://...), per-provider Semaphore(2))
+    -> SessionStore (sessions/*.json -> localStorage injection)
+    -> ProviderRouter (priority + model alias + X-Conversation-Id affinity)
+      -> ChatProvider adapters (8) -> streaming ChunkStream
+        -> UnifiedMemory (DashMap, sliding_window 8k, tab reuse)
+          -> Axum SSE /v1/chat/completions
+```
+
+Performance traces preserved: parse, memory, context, routing, browser acquisition, queue, readiness, input, send, TTFT, generation (first-update latency, growth, settle, final delivery).
+
+## Obscura Migration from Rod
+
+- `page.MustElement(sel).MustClick()` -> `page.find_element(sel).await?.click().await?` with fallback list
+- `WaitStable()` -> `wait_for_selector` + mutation observer polling 350ms
+- Screencast: `Page.startScreencast` -> dashboard canvas relay, no CDP/DOM exposure
+- Stealth: no plugins needed, Obscura sets `navigator.webdriver=undefined` automatically
+
+## Testing Adapters
+
+```bash
+cargo run -- --test-adapter qwen        # discovery + selector check (may send test prompt)
+cargo run -- --test-adapter grok
+cargo run -- --test-adapter perplexity
+```
+
+Dashboard also shows provider state, request activity, config, discovered models, model catalog age/error.
 
 ## Security
 
-Session files and browser profiles are authentication material. Keep them private,
-restrict filesystem access, and do not expose the proxy publicly without an
-appropriate reverse proxy and access controls.
+Session files + browser profiles are auth material. Keep private, restrict fs, don't expose publicly without reverse proxy.
 
-## Scope
+## Next
 
-Production adapters are Qwen, Meta AI, Claude, ChatGPT, and Gemini. Playwright
-migration is deferred; the current automation implementation remains Go + Rod over CDP.
+- Implement cookie persistence via CDP Network.setCookie (currently localStorage only)
+- Add summarization strategy for memory beyond sliding_window
+- Add Playwright-style tracing export

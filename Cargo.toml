@@ -1,0 +1,40 @@
+[package]
+name = "chat-gateway-rs"
+version = "0.1.0"
+edition = "2021"
+description = "Unified memory layer over Qwen/MetaAI/Claude/ChatGPT/Gemini/Grok/Mistral/Perplexity via Obscura - OpenAI compatible API"
+license = "Apache-2.0"
+
+[dependencies]
+axum = { version = "0.7", features = ["json", "macros"] }
+tokio = { version = "1.35", features = ["full"] }
+tokio-stream = "0.1"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+async-trait = "0.1"
+futures = "0.3"
+dashmap = "6"
+arc-swap = "1"
+thiserror = "2"
+anyhow = "1"
+axum-extra = { version = "0.9", features = ["typed-header"] }
+chromiumoxide = { version = "0.7", features = ["tokio-runtime"] }
+chromiumoxide_cdp = "0.7"
+async-stream = "0.3"
+clap = { version = "4", features = ["derive"] }
+reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+regex = "1"
+notify = { version = "6", features = ["macos_kqueue"] }
+notify-debouncer-mini = "0.4"
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
