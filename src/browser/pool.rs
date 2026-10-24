@@ -1,11 +1,13 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use dashmap::DashMap;
 use tokio::sync::{mpsc, oneshot, OwnedSemaphorePermit, Semaphore};
 use anyhow::Result;
 use crate::config::AppConfig;
+use crate::login::{self, LoginAction, LoginView};
 use crate::providers::{self, Provider, ProviderChunk};
 use crate::session;
 
@@ -32,7 +34,46 @@ enum Command {
     Send { provider: Provider, prompt: String, model: String, has_history: bool, timeout: Duration, chunks: mpsc::Sender<Result<ProviderChunk>> },
     SaveSession { provider: Provider, reply: oneshot::Sender<Result<()>> },
     TestAdapter { provider: Provider, reply: oneshot::Sender<Result<TestAdapterReport>> },
+    // Login delegate UI (see src/login.rs): dedicated pages on the
+    // browser thread, separate from the warm provider pages. Login
+    // pages are plain Rc<Page> (no &mut needed after creation — all
+    // relay actions use &Page methods; Navigate recreates the page).
+    LoginStart { provider: Provider, reply: oneshot::Sender<Result<String>> },
+    LoginCancel { provider: Provider, reply: oneshot::Sender<Result<()>> },
+    LoginComplete { provider: Provider, reply: oneshot::Sender<Result<LoginCompleted>> },
+    LoginStatusAll { reply: oneshot::Sender<Vec<LoginActiveInfo>> },
+    LoginView { provider: Provider, reply: oneshot::Sender<Result<LoginView>> },
+    LoginAct { provider: Provider, action: LoginAction, reply: oneshot::Sender<Result<String>> },
 }
+
+/// One provider's live login-page info for the /login status endpoint.
+#[derive(Debug, Clone)]
+pub struct LoginActiveInfo {
+    pub provider: String,
+    pub url: String,
+    pub title: String,
+    pub logged_in: Option<bool>,
+    pub input_found: bool,
+    pub state: String,
+}
+
+/// Outcome of POST /login/api/:provider/complete.
+#[derive(Debug, Clone)]
+pub struct LoginCompleted {
+    pub session_path: String,
+    pub warm_swapped: bool,
+    pub warning: Option<String>,
+}
+
+/// Bookkeeping for one active login page. last_seen drives the
+/// abandoned-login sweep (Go swept after 35s of no client contact for
+/// waiting jobs; here the UI polls every 5-8s, so a 30-minute idle
+/// threshold fits a user working through a slow SSO flow).
+struct LoginMeta {
+    last_seen: Instant,
+}
+
+const LOGIN_IDLE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
 /// Live-send test-adapter outcome, phase by phase (Go RunAdapterTest
 /// shape, adapted to the restored tree: probe uses the full Rust v1
@@ -142,6 +183,150 @@ impl ObscuraPool {
             .map_err(|_| anyhow::anyhow!("browser thread gone"))?;
         rx.await.map_err(|_| anyhow::anyhow!("browser thread dropped save"))?
     }
+
+    fn login_provider(&self, name: &str) -> Result<Provider> {
+        let provider = Provider::from_name(name)
+            .ok_or_else(|| anyhow::anyhow!("unknown provider {name}"))?;
+        match self.cfg.provider(name) {
+            Some(p) if p.enabled => Ok(provider),
+            _ => Err(anyhow::anyhow!("provider {name} not enabled")),
+        }
+    }
+
+    /// Login UI: open a dedicated login page for a provider (fresh page,
+    /// navigated to the provider URL; any previous login page for the
+    /// provider is dropped). Returns the page's URL.
+    pub async fn login_start(&self, name: &str) -> Result<String> {
+        let provider = self.login_provider(name)?;
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx.send(Command::LoginStart { provider, reply: tx }).await
+            .map_err(|_| anyhow::anyhow!("browser thread gone"))?;
+        rx.await.map_err(|_| anyhow::anyhow!("browser thread dropped login start"))?
+    }
+
+    /// Login UI: drop the provider's login page (idempotent).
+    pub async fn login_cancel(&self, name: &str) -> Result<()> {
+        let provider = self.login_provider(name)?;
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx.send(Command::LoginCancel { provider, reply: tx }).await
+            .map_err(|_| anyhow::anyhow!("browser thread gone"))?;
+        rx.await.map_err(|_| anyhow::anyhow!("browser thread dropped login cancel"))?
+    }
+
+    /// Login UI: capture the login page's session to
+    /// sessions/<provider>.json (existing format) and swap the login
+    /// page in as the provider's warm page so the next send boots with
+    /// the new session immediately.
+    pub async fn login_complete(&self, name: &str) -> Result<LoginCompleted> {
+        let provider = self.login_provider(name)?;
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx.send(Command::LoginComplete { provider, reply: tx }).await
+            .map_err(|_| anyhow::anyhow!("browser thread gone"))?;
+        rx.await.map_err(|_| anyhow::anyhow!("browser thread dropped login complete"))?
+    }
+
+    /// Login UI: live info for all providers with an active login page.
+    pub async fn login_status_all(&self) -> Result<Vec<LoginActiveInfo>> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx.send(Command::LoginStatusAll { reply: tx }).await
+            .map_err(|_| anyhow::anyhow!("browser thread gone"))?;
+        rx.await.map_err(|_| anyhow::anyhow!("browser thread dropped login status"))
+    }
+
+    /// Login UI: full live view of one provider's login page.
+    pub async fn login_view(&self, name: &str) -> Result<LoginView> {
+        let provider = self.login_provider(name)?;
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx.send(Command::LoginView { provider, reply: tx }).await
+            .map_err(|_| anyhow::anyhow!("browser thread gone"))?;
+        rx.await.map_err(|_| anyhow::anyhow!("browser thread dropped login view"))?
+    }
+
+    /// Login UI: perform one relay action on a provider's login page.
+    /// The action's text (if any) is never logged — see login.rs.
+    pub async fn login_act(&self, name: &str, action: LoginAction) -> Result<String> {
+        action.validate()?;
+        let provider = self.login_provider(name)?;
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx.send(Command::LoginAct { provider, action, reply: tx }).await
+            .map_err(|_| anyhow::anyhow!("browser thread gone"))?;
+        rx.await.map_err(|_| anyhow::anyhow!("browser thread dropped login act"))?
+    }
+}
+
+/// Drop login pages idle longer than LOGIN_IDLE_TIMEOUT (Go's
+/// abandoned-job sweep, with a threshold fitted to the UI's 5-8s
+/// polling instead of Go's 35s — a user mid-SSO must not lose the page
+/// between polls).
+fn sweep_login_pages(
+    login_pages: &Rc<RefCell<HashMap<Provider, Rc<obscura_core::Page>>>>,
+    login_meta: &Rc<RefCell<HashMap<Provider, LoginMeta>>>,
+) {
+    let now = Instant::now();
+    let stale: Vec<Provider> = login_meta
+        .borrow()
+        .iter()
+        .filter(|(_, m)| now.duration_since(m.last_seen) > LOGIN_IDLE_TIMEOUT)
+        .map(|(p, _)| *p)
+        .collect();
+    for p in stale {
+        login_pages.borrow_mut().remove(&p);
+        login_meta.borrow_mut().remove(&p);
+    }
+}
+
+fn touch_login_meta(login_meta: &Rc<RefCell<HashMap<Provider, LoginMeta>>>, provider: Provider) {
+    if let Some(m) = login_meta.borrow_mut().get_mut(&provider) {
+        m.last_seen = Instant::now();
+    }
+}
+
+fn build_login_view(
+    provider: Provider,
+    page: &obscura_core::Page,
+    registry: &Rc<HashMap<Provider, Arc<dyn providers::ChatProvider>>>,
+) -> LoginView {
+    let url = page.url();
+    let is_login = providers::common::is_login_page(page);
+    let input_found = registry
+        .get(&provider)
+        .map(|a| {
+            a.selector_set()
+                .input
+                .iter()
+                .any(|s| page.query_selector(s).is_some())
+        })
+        .unwrap_or(false);
+    let (state, logged_in) = login::login_state(is_login, input_found);
+    let (title, fields, buttons, snapshot) = login::parse_view(page.evaluate(login::VIEW_SCRIPT));
+    LoginView {
+        provider: provider.name().to_string(),
+        active: true,
+        url: Some(url),
+        title: Some(title),
+        state,
+        logged_in,
+        input_found,
+        fields,
+        buttons,
+        snapshot,
+    }
+}
+
+fn login_active_info(
+    provider: Provider,
+    page: &obscura_core::Page,
+    registry: &Rc<HashMap<Provider, Arc<dyn providers::ChatProvider>>>,
+) -> LoginActiveInfo {
+    let view = build_login_view(provider, page, registry);
+    LoginActiveInfo {
+        provider: provider.name().to_string(),
+        url: view.url.unwrap_or_default(),
+        title: view.title.unwrap_or_default(),
+        logged_in: view.logged_in,
+        input_found: view.input_found,
+        state: view.state,
+    }
 }
 
 fn build_browser(cfg: &AppConfig) -> Result<obscura_core::Browser> {
@@ -179,8 +364,20 @@ fn browser_thread(
                 };
                 let browser = Rc::new(browser);
                 let registry = Rc::new(providers::build_registry(&cfg));
-                let mut pages: HashMap<Provider, Rc<obscura_core::Page>> = HashMap::new();
-                let mut locks: HashMap<Provider, Rc<tokio::sync::Mutex<()>>> = HashMap::new();
+                // Warm pages + per-provider locks live in shared RefCells
+                // so login commands (which run in spawn_local tasks) can
+                // read them and Complete can swap a login page in as the
+                // warm page. Every borrow is short (no await while a
+                // borrow is held) — map entries are cloned out first.
+                let pages: Rc<RefCell<HashMap<Provider, Rc<obscura_core::Page>>>> =
+                    Rc::new(RefCell::new(HashMap::new()));
+                let locks: Rc<RefCell<HashMap<Provider, Rc<tokio::sync::Mutex<()>>>>> =
+                    Rc::new(RefCell::new(HashMap::new()));
+                // Login delegate UI state (see src/login.rs).
+                let login_pages: Rc<RefCell<HashMap<Provider, Rc<obscura_core::Page>>>> =
+                    Rc::new(RefCell::new(HashMap::new()));
+                let login_meta: Rc<RefCell<HashMap<Provider, LoginMeta>>> =
+                    Rc::new(RefCell::new(HashMap::new()));
 
                 // Pre-warm one persistent page per enabled provider
                 for pcfg in &cfg.providers {
@@ -205,14 +402,14 @@ fn browser_thread(
                                     tracing::warn!(provider = %pcfg.name, "warm re-goto failed: {e}");
                                 }
                             }
-                            pages.insert(provider, Rc::new(page));
-                            locks.insert(provider, Rc::new(tokio::sync::Mutex::new(())));
+                            pages.borrow_mut().insert(provider, Rc::new(page));
+                            locks.borrow_mut().insert(provider, Rc::new(tokio::sync::Mutex::new(())));
                             tracing::info!(provider = %pcfg.name, url = provider.login_url(), "page warmed");
                         }
                         Err(e) => tracing::warn!(provider = %pcfg.name, "warm failed: {e}"),
                     }
                 }
-                tracing::info!("ObscuraPool warmed: {} pages", pages.len());
+                tracing::info!("ObscuraPool warmed: {} pages", pages.borrow().len());
                 let _ = ready_tx.send(Ok(()));
 
                 while let Some(cmd) = cmd_rx.recv().await {
@@ -231,11 +428,11 @@ fn browser_thread(
                             });
                         }
                         Command::Send { provider, prompt, model, has_history, timeout, chunks } => {
-                            let Some(page) = pages.get(&provider).cloned() else {
+                            let Some(page) = pages.borrow().get(&provider).cloned() else {
                                 let _ = chunks.send(Err(anyhow::anyhow!("provider page not warmed"))).await;
                                 continue;
                             };
-                            let Some(lock) = locks.get(&provider).cloned() else { continue };
+                            let Some(lock) = locks.borrow().get(&provider).cloned() else { continue };
                             let Some(adapter) = registry.get(&provider).cloned() else {
                                 let _ = chunks.send(Err(anyhow::anyhow!("provider not enabled"))).await;
                                 continue;
@@ -377,11 +574,180 @@ fn browser_thread(
                             });
                         }
                         Command::SaveSession { provider, reply } => {
-                            let res = match pages.get(&provider) {
-                                Some(page) => session::save_session(&browser, page, provider.name()).await,
+                            let res = match pages.borrow().get(&provider).cloned() {
+                                Some(page) => session::save_session(&browser, &page, provider.name()).await,
                                 None => Err(anyhow::anyhow!("provider page not warmed")),
                             };
                             let _ = reply.send(res);
+                        }
+                        Command::LoginStart { provider, reply } => {
+                            let browser = browser.clone();
+                            let login_pages = login_pages.clone();
+                            let login_meta = login_meta.clone();
+                            tokio::task::spawn_local(async move {
+                                sweep_login_pages(&login_pages, &login_meta);
+                                // A fresh login page per start (Go used an
+                                // isolated temp profile for the same
+                                // reason); any previous login page for
+                                // this provider is dropped. Note the
+                                // browser-wide cookie jar is shared with
+                                // the warm pages, so a still-valid saved
+                                // session may already show as logged in.
+                                login_pages.borrow_mut().remove(&provider);
+                                login_meta.borrow_mut().remove(&provider);
+                                let res: Result<String> = async {
+                                    let mut page = browser.new_page().await?;
+                                    page.goto(provider.login_url()).await?;
+                                    let url = page.url();
+                                    login_pages.borrow_mut().insert(provider, Rc::new(page));
+                                    login_meta.borrow_mut().insert(provider, LoginMeta { last_seen: Instant::now() });
+                                    Ok(url)
+                                }.await;
+                                let _ = reply.send(res);
+                            });
+                        }
+                        Command::LoginCancel { provider, reply } => {
+                            login_pages.borrow_mut().remove(&provider);
+                            login_meta.borrow_mut().remove(&provider);
+                            let _ = reply.send(Ok(()));
+                        }
+                        Command::LoginComplete { provider, reply } => {
+                            let browser = browser.clone();
+                            let pages = pages.clone();
+                            let locks = locks.clone();
+                            let login_pages = login_pages.clone();
+                            let login_meta = login_meta.clone();
+                            tokio::task::spawn_local(async move {
+                                sweep_login_pages(&login_pages, &login_meta);
+                                let res: Result<LoginCompleted> = async {
+                                    let Some(login_page) = login_pages.borrow().get(&provider).cloned() else {
+                                        anyhow::bail!("no active login page for {} (press Start first)", provider.name());
+                                    };
+                                    // Serialize with in-flight sends so
+                                    // the warm-page swap below cannot race
+                                    // a send already running on the old
+                                    // page. A send spawned just before this
+                                    // swap still uses its cloned old page
+                                    // for that one attempt; later sends use
+                                    // the swapped page.
+                                    let lock = locks.borrow().get(&provider).cloned()
+                                        .unwrap_or_else(|| Rc::new(tokio::sync::Mutex::new(())));
+                                    let _guard = lock.lock().await;
+                                    // Same format/path as every other save:
+                                    // sessions/<provider>.json via
+                                    // session::save_session (cookies from
+                                    // the browser-wide CookieStore +
+                                    // localStorage from this page).
+                                    session::save_session(&browser, &login_page, provider.name()).await?;
+                                    pages.borrow_mut().insert(provider, login_page);
+                                    login_pages.borrow_mut().remove(&provider);
+                                    login_meta.borrow_mut().remove(&provider);
+                                    Ok(LoginCompleted {
+                                        session_path: session::session_path(provider.name()),
+                                        warm_swapped: true,
+                                        warning: None,
+                                    })
+                                }.await;
+                                let _ = reply.send(res);
+                            });
+                        }
+                        Command::LoginStatusAll { reply } => {
+                            let login_pages = login_pages.clone();
+                            let login_meta = login_meta.clone();
+                            let registry = registry.clone();
+                            tokio::task::spawn_local(async move {
+                                sweep_login_pages(&login_pages, &login_meta);
+                                let mut out = vec![];
+                                for (provider, page) in login_pages.borrow().iter() {
+                                    let provider = *provider;
+                                    let page = page.clone();
+                                    out.push(login_active_info(provider, &page, &registry));
+                                }
+                                let _ = reply.send(out);
+                            });
+                        }
+                        Command::LoginView { provider, reply } => {
+                            let login_pages = login_pages.clone();
+                            let login_meta = login_meta.clone();
+                            let registry = registry.clone();
+                            tokio::task::spawn_local(async move {
+                                sweep_login_pages(&login_pages, &login_meta);
+                                touch_login_meta(&login_meta, provider);
+                                let res = match login_pages.borrow().get(&provider).cloned() {
+                                    Some(page) => Ok(build_login_view(provider, &page, &registry)),
+                                    None => Ok(LoginView::inactive(provider.name())),
+                                };
+                                let _ = reply.send(res);
+                            });
+                        }
+                        Command::LoginAct { provider, action, reply } => {
+                            let browser = browser.clone();
+                            let login_pages = login_pages.clone();
+                            let login_meta = login_meta.clone();
+                            tokio::task::spawn_local(async move {
+                                sweep_login_pages(&login_pages, &login_meta);
+                                touch_login_meta(&login_meta, provider);
+                                let res: Result<String> = async {
+                                    match action {
+                                        LoginAction::Click { selector } => {
+                                            let Some(page) = login_pages.borrow().get(&provider).cloned() else {
+                                                anyhow::bail!("no active login page for {}", provider.name());
+                                            };
+                                            match page.query_selector(&selector) {
+                                                Some(el) => { el.click()?; Ok(format!("clicked {selector}")) }
+                                                None => anyhow::bail!("no element matches {selector}"),
+                                            }
+                                        }
+                                        LoginAction::ClickButton { index } => {
+                                            let Some(page) = login_pages.borrow().get(&provider).cloned() else {
+                                                anyhow::bail!("no active login page for {}", provider.name());
+                                            };
+                                            let js = format!(
+                                                "(function(){{ var b=document.querySelectorAll('button, [role=\"button\"]')[{}]; if(!b) return false; b.click(); return true; }})()",
+                                                index
+                                            );
+                                            if page.evaluate(&js).as_bool() == Some(true) {
+                                                Ok(format!("clicked button #{index}"))
+                                            } else {
+                                                anyhow::bail!("no button #{index} on the page")
+                                            }
+                                        }
+                                        // NOTE: `text` is used only to drive
+                                        // human_type and is never logged,
+                                        // stored, or echoed back.
+                                        LoginAction::Type { selector, text } => {
+                                            let Some(page) = login_pages.borrow().get(&provider).cloned() else {
+                                                anyhow::bail!("no active login page for {}", provider.name());
+                                            };
+                                            providers::common::human_type(&page, &[selector.as_str()], &text).await?;
+                                            Ok(format!("typed into {selector}"))
+                                        }
+                                        LoginAction::Enter { selector } => {
+                                            let Some(page) = login_pages.borrow().get(&provider).cloned() else {
+                                                anyhow::bail!("no active login page for {}", provider.name());
+                                            };
+                                            providers::common::press_enter(&page, &selector)?;
+                                            Ok(format!("Enter dispatched on {selector}"))
+                                        }
+                                        LoginAction::Navigate { url } => {
+                                            // Rc<Page> cannot goto (it needs
+                                            // &mut), so navigation recreates
+                                            // the page. Cookies survive
+                                            // (browser-wide jar); page JS
+                                            // state does not — acceptable
+                                            // for SSO hops, which re-drive
+                                            // from the URL.
+                                            login_pages.borrow_mut().remove(&provider);
+                                            let mut page = browser.new_page().await?;
+                                            page.goto(&url).await?;
+                                            let final_url = page.url();
+                                            login_pages.borrow_mut().insert(provider, Rc::new(page));
+                                            Ok(format!("navigated to {final_url}"))
+                                        }
+                                    }
+                                }.await;
+                                let _ = reply.send(res);
+                            });
                         }
                     }
                 }

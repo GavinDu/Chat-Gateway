@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chat Gateway — Login</title>
+<style>
+body{font-family:system-ui,-apple-system,sans-serif;margin:2rem auto;max-width:960px;padding:0 1rem;color:#1a1a1a}
+h1{font-size:1.5rem} h2{font-size:1.1rem;margin-top:2rem}
+.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:0.75rem}
+.card{border:1px solid #ccc;border-radius:8px;padding:0.75rem}
+.card h3{margin:0 0 0.4rem;text-transform:capitalize}
+.badge{display:inline-block;padding:0.1rem 0.45rem;border-radius:999px;font-size:0.75rem;background:#eee}
+.badge.ok{background:#d4edda}.badge.warn{background:#fff3cd}.badge.bad{background:#f8d7da}
+button{margin:0.15rem;padding:0.35rem 0.7rem;border-radius:6px;border:1px solid #888;background:#f6f6f6;cursor:pointer}
+button:disabled{opacity:0.5;cursor:default}
+input[type=text],input[type=password],input[type=url]{padding:0.35rem;border:1px solid #aaa;border-radius:6px;width:100%;box-sizing:border-box}
+table{border-collapse:collapse;width:100%} td,th{border-bottom:1px solid #ddd;padding:0.3rem;text-align:left;font-size:0.9rem}
+pre{white-space:pre-wrap;background:#f6f6f6;padding:0.75rem;border-radius:8px;max-height:240px;overflow:auto}
+.note{background:#fff8e1;border:1px solid #e6c87a;border-radius:8px;padding:0.75rem;font-size:0.9rem}
+.row{display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap}
+.row>*{flex:1} .row>button{flex:0 0 auto}
+#msg{margin:1rem 0;font-weight:600}
+small{color:#555}
+</style>
+</head>
+<body>
+<h1>Chat Gateway — Provider Login</h1>
+<p class="note"><b>How this works (relay login, no screenshots):</b> the gateway's embedded
+browser has no screenshot or keyboard API, so you cannot see the provider page directly here.
+Instead this page shows the live URL, title, detected form fields and buttons, and a text
+snapshot — and you drive the page with relay actions (click, type, Enter, navigate)
+that the gateway executes inside the provider page. Complete the sign-in (including any SSO
+redirects — use Navigate if a step lands on a new URL), then press <b>Complete</b> to capture
+the session into <code>sessions/&lt;provider&gt;.json</code> for the normal send path.
+<br><br><b>Credentials:</b> this page has no username/password form. Relayed text is held in
+memory only for the single typing action — it is never logged, stored, or sent anywhere except
+into the provider page itself. Prefer your provider's SSO / passkey options where offered.
+<br><br><b>Honest limits:</b> captchas, 2FA prompts, and SSO popups cannot be solved by the
+relay — you must complete those steps through the relay actions themselves (e.g. type the 2FA
+code into the code field when it appears), and some providers' bot checks may refuse synthetic
+input entirely. Sessions expire; when a provider reports <code>session_expired</code>, come
+back here and re-capture.</p>
+
+<div id="msg"></div>
+<h2>Providers</h2>
+<div class="cards" id="cards"></div>
+
+<h2>Active login session</h2>
+<div class="row">
+  <label>Provider
+    <select id="selProvider"></select>
+  </label>
+  <button onclick="refreshView()">Refresh view</button>
+</div>
+<div id="detail"><small>No login session selected. Press Start on a provider above.</small></div>
+
+<h3>Relay action</h3>
+<div class="row">
+  <label>Selector <input id="relaySel" type="text" placeholder="#email, input[name='username'], textarea…"></label>
+  <label>Text to type <input id="relayText" type="password" autocomplete="off" placeholder="typed into the provider page only"></label>
+  <label><input id="showText" type="checkbox" onchange="document.getElementById('relayText').type=this.checked?'text':'password'"> show</label>
+</div>
+<div class="row">
+  <button onclick="act('click')">Click selector</button>
+  <button onclick="act('type')">Type into selector</button>
+  <button onclick="act('enter')">Press Enter</button>
+</div>
+<div class="row">
+  <label>Navigate to URL <input id="navUrl" type="url" placeholder="https://…"></label>
+  <button onclick="act('navigate')">Go</button>
+</div>
+
+<script>
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const msg = t => document.getElementById('msg').textContent = t;
+let selected = null;
+
+async function api(path, method, body) {
+  const r = await fetch(path, {method, headers: {'Content-Type': 'application/json'},
+    body: body ? JSON.stringify(body) : undefined});
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || ('HTTP ' + r.status));
+  return j;
+}
+
+async function refreshStatus() {
+  try {
+    const st = await api('/login/api/status', 'GET');
+    const cards = document.getElementById('cards');
+    const sel = document.getElementById('selProvider');
+    cards.innerHTML = '';
+    sel.innerHTML = '';
+    for (const p of st.providers) {
+      const stateCls = p.login_active ? (p.logged_in === true ? 'ok' : p.logged_in === false ? 'bad' : 'warn') : '';
+      const stateTxt = p.login_active ? (p.logged_in === true ? 'likely logged in' : p.logged_in === false ? 'login required' : 'active, unknown') : 'idle';
+      const card = document.createElement('div');
+      card.className = 'card';
+      card.innerHTML = `<h3>${esc(p.name)}</h3>
+        <span class="badge">${p.enabled ? 'enabled' : 'disabled'}</span>
+        <span class="badge ${p.session_present ? 'ok' : ''}">${p.session_present ? 'session saved' + (p.session_ts ? ' ' + esc(p.session_ts.slice(0, 10)) : '') : 'no session'}</span>
+        <span class="badge ${stateCls}">${stateTxt}</span>
+        <div style="margin-top:0.5rem">
+          <button onclick="startLogin('${esc(p.name)}')" ${p.login_active ? 'disabled' : ''}>Start</button>
+          <button onclick="cancelLogin('${esc(p.name)}')" ${p.login_active ? '' : 'disabled'}>Cancel</button>
+          <button onclick="completeLogin('${esc(p.name)}')" ${p.login_active ? '' : 'disabled'}>Complete</button>
+        </div>
+        ${p.login_url ? `<div><small>${esc(p.login_url)}</small></div>` : ''}`;
+      cards.appendChild(card);
+      const opt = document.createElement('option');
+      opt.value = p.name; opt.textContent = p.name;
+      if (p.login_active) { opt.selected = true; selected = p.name; }
+      sel.appendChild(opt);
+    }
+    if (!selected && sel.options.length) { selected = sel.options[0].value; }
+    sel.value = selected || '';
+  } catch (e) { msg('status error: ' + e.message); }
+}
+
+async function startLogin(name) {
+  try { msg('Starting login for ' + name + '…'); await api('/login/api/' + name + '/start', 'POST'); selected = name; msg('Login page opened for ' + name + '. Use Refresh view to follow it.'); await refreshStatus(); await refreshView(); }
+  catch (e) { msg('start error: ' + e.message); }
+}
+async function cancelLogin(name) {
+  try { await api('/login/api/' + name + '/cancel', 'POST'); msg('Login cancelled for ' + name + '.'); await refreshStatus(); await refreshView(); }
+  catch (e) { msg('cancel error: ' + e.message); }
+}
+async function completeLogin(name) {
+  try { const r = await api('/login/api/' + name + '/complete', 'POST'); msg('Session saved for ' + name + ' (' + r.session_path + ')' + (r.warm_swapped ? ', warm page refreshed' : '') + (r.warning ? ' — ' + r.warning : '') + '.'); await refreshStatus(); await refreshView(); }
+  catch (e) { msg('complete error: ' + e.message); }
+}
+
+async function refreshView() {
+  const name = document.getElementById('selProvider').value;
+  if (!name) return;
+  selected = name;
+  const d = document.getElementById('detail');
+  try {
+    const v = await api('/login/api/' + name + '/view', 'GET');
+    if (!v.active) { d.innerHTML = '<small>No active login session for ' + esc(name) + '. Press Start above.</small>'; return; }
+    const fields = v.fields.map(f => `<tr><td>${esc(f.tag)}</td><td>${esc(f.type)}</td><td>${esc(f.placeholder || f.label || f.name)}</td><td><code>${esc(f.selector)}</code></td><td><button onclick="useSelector(${JSON.stringify(f.selector)})">Use</button></td></tr>`).join('') || '<tr><td colspan="5"><small>no fields detected</small></td></tr>';
+    const btns = v.buttons.map(b => `<button onclick="clickButton(${b.index})">${esc(b.text)}</button>`).join(' ') || '<small>no buttons detected</small>';
+    d.innerHTML = `<p><b>URL:</b> <code>${esc(v.url || '')}</code><br><b>Title:</b> ${esc(v.title || '')}<br>
+      <b>State:</b> <span class="badge ${v.logged_in === true ? 'ok' : v.logged_in === false ? 'bad' : 'warn'}">${esc(v.state)}</span>
+      <small>(best-effort: URL keywords + chat-input presence)</small><br>
+      <b>Chat input detected:</b> ${v.input_found ? 'yes' : 'no'}</p>
+      <h3>Form fields (values are never read)</h3>
+      <table><tr><th>Tag</th><th>Type</th><th>Placeholder / label / name</th><th>Selector</th><th></th></tr>${fields}</table>
+      <h3>Buttons</h3><p>${btns}</p>
+      <h3>Page text snapshot</h3><pre>${esc(v.snapshot)}</pre>`;
+  } catch (e) { d.innerHTML = '<small>view error: ' + esc(e.message) + '</small>'; }
+}
+
+function useSelector(sel) { document.getElementById('relaySel').value = sel; }
+async function clickButton(index) {
+  const name = document.getElementById('selProvider').value;
+  try { await api('/login/api/' + name + '/act', 'POST', {action: 'click_button', index}); msg('Clicked button #' + index + '.'); setTimeout(refreshView, 800); }
+  catch (e) { msg('click error: ' + e.message); }
+}
+async function act(kind) {
+  const name = document.getElementById('selProvider').value;
+  const selector = document.getElementById('relaySel').value.trim();
+  const text = document.getElementById('relayText').value;
+  const url = document.getElementById('navUrl').value.trim();
+  const body = {action: kind, selector, text, url};
+  try { const r = await api('/login/api/' + name + '/act', 'POST', body); msg(r.detail || ('action ' + kind + ' done.')); document.getElementById('relayText').value = ''; setTimeout(refreshView, 800); }
+  catch (e) { msg('action error: ' + e.message); }
+}
+
+document.getElementById('selProvider').addEventListener('change', e => { selected = e.target.value; refreshView(); });
+refreshStatus();
+setInterval(refreshStatus, 5000);
+setInterval(() => { if (selected) refreshView(); }, 8000);
+</script>
+</body>
+</html>

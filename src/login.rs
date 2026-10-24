@@ -1,0 +1,192 @@
+//! Browser login delegate UI — the Rust-form successor to Go's dashboard
+//! login flow (internal/dashboard/login.go + remote_browser.go).
+//!
+//! Go's version drove a headed Chromium over CDP: JPEG screenshot frames
+//! plus relayed mouse/keyboard/text input. The public obscura API cannot
+//! do that: it has no screenshot API (screenshot() lives only in the
+//! inner obscura-browser crate, unreachable because obscura::Page wraps
+//! its inner page in a pub(crate) field), no keyboard/mouse API, and no
+//! mutation-observer subscription. So this UI is RELAY-ONLY by design:
+//! the user sees the login page's URL, title, detected form fields and
+//! buttons, and a sanitized text snapshot, and drives the page by
+//! relayed actions (click-by-selector, type-into-selector, Enter,
+//! navigate, settle) executed on the browser thread via evaluate().
+//!
+//! SECURITY: the gateway never presents its own username/password form
+//! and never stores credentials. Relayed text is held in memory only for
+//! the single action that types it into the provider page; it is never
+//! logged (no tracing of relay text anywhere), never persisted, and
+//! never echoed back in any response. What IS persisted, on Complete,
+//! is exactly the existing session format (cookies + localStorage) in
+//! sessions/<provider>.json — see session::save_session. Field *values*
+//! are never collected: the view script returns field metadata
+//! (tag/type/placeholder/label/name/selector) only.
+
+use serde::{Deserialize, Serialize};
+
+/// The dashboard page itself (single self-contained HTML file, no build
+/// step). Served at GET /login.
+pub const LOGIN_HTML: &str = include_str!("login_page.html");
+
+/// One detected form field on the login page. Metadata only — values are
+/// never read, so a password field's content can never leak through here.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct LoginField {
+    pub tag: String,
+    #[serde(rename = "type")]
+    pub input_type: String,
+    pub placeholder: String,
+    pub label: String,
+    pub name: String,
+    /// Best-effort unique selector for this field (#id, [name=], or
+    /// [placeholder=]; falls back to the bare tag).
+    pub selector: String,
+}
+
+/// One clickable button on the login page (text only; clicked by index
+/// via querySelectorAll, since button text is not a selector).
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct LoginButton {
+    pub text: String,
+    pub index: usize,
+}
+
+/// Live view of one provider's login page.
+#[derive(Serialize, Clone, Debug)]
+pub struct LoginView {
+    pub provider: String,
+    pub active: bool,
+    pub url: Option<String>,
+    pub title: Option<String>,
+    /// "idle" | "login_required" | "likely_logged_in" | "active_unknown"
+    pub state: String,
+    pub logged_in: Option<bool>,
+    pub input_found: bool,
+    pub fields: Vec<LoginField>,
+    pub buttons: Vec<LoginButton>,
+    /// Truncated visible text of the page (first 1500 chars) to orient
+    /// the user. No input values are included (fields carry no values).
+    pub snapshot: String,
+}
+
+impl LoginView {
+    pub fn inactive(provider: &str) -> Self {
+        Self {
+            provider: provider.to_string(),
+            active: false,
+            url: None,
+            title: None,
+            state: "idle".to_string(),
+            logged_in: None,
+            input_found: false,
+            fields: vec![],
+            buttons: vec![],
+            snapshot: String::new(),
+        }
+    }
+}
+
+/// Best-effort logged-in signal: NOT a guarantee. URL keyword match
+/// (login/signin/sign-in/auth/...) means the provider bounced us to a
+/// login screen; presence of the provider's chat input selector means
+/// the app booted past login. Either signal alone can mislead (a
+/// logged-out chat page may still render an input; a logged-in user may
+/// sit on an /auth callback URL briefly), so the UI shows both facts
+/// separately and labels the verdict best-effort.
+pub fn login_state(is_login_url: bool, input_found: bool) -> (String, Option<bool>) {
+    if is_login_url {
+        ("login_required".to_string(), Some(false))
+    } else if input_found {
+        ("likely_logged_in".to_string(), Some(true))
+    } else {
+        ("active_unknown".to_string(), None)
+    }
+}
+
+/// JS run on the login page to collect view data. One IIFE, fully
+/// try/catch-guarded (evaluate() swallows JS exceptions as Null anyway,
+/// so a failure here degrades to an empty view, never an error). Field
+/// values are deliberately never read.
+pub const VIEW_SCRIPT: &str = r#"(function(){ try {
+  var fields=[]; var els=document.querySelectorAll('input, textarea, [contenteditable="true"]');
+  for (var i=0;i<els.length && fields.length<24;i++){ var el=els[i]; var tag=(el.tagName||'').toLowerCase();
+    var id=el.id||''; var nm=el.getAttribute('name')||''; var ph=el.getAttribute('placeholder')||''; var lb=el.getAttribute('aria-label')||'';
+    var sel=''; if(id) sel='#'+id; else if(nm) sel=tag+'[name="'+nm.replace(/"/g,'')+'"]'; else if(ph) sel=tag+'[placeholder="'+ph.replace(/"/g,'')+'"]'; else sel=tag;
+    fields.push({tag:tag, type: el.getAttribute('type')||'', placeholder: ph.slice(0,80), label: lb.slice(0,80), name: nm.slice(0,80), selector: sel}); }
+  var btns=[]; var bs=document.querySelectorAll('button, [role="button"]');
+  for (var j=0;j<bs.length && btns.length<24;j++){ var t=(bs[j].innerText||'').trim().replace(/\s+/g,' ').slice(0,60); if(t) btns.push({text:t, index:j}); }
+  var snap=''; try{ snap=(document.body?document.body.innerText:'').slice(0,1500); }catch(e){}
+  return {title: document.title||'', fields: fields, buttons: btns, snapshot: snap};
+} catch(e){ return {title:'', fields:[], buttons:[], snapshot:''}; } })()"#;
+
+/// Parse the VIEW_SCRIPT result into its parts. Any shape mismatch
+/// degrades to empty parts, never an error.
+pub fn parse_view(value: serde_json::Value) -> (String, Vec<LoginField>, Vec<LoginButton>, String) {
+    let title = value
+        .get("title")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let fields = value
+        .get("fields")
+        .and_then(|v| serde_json::from_value::<Vec<LoginField>>(v.clone()).ok())
+        .unwrap_or_default();
+    let buttons = value
+        .get("buttons")
+        .and_then(|v| serde_json::from_value::<Vec<LoginButton>>(v.clone()).ok())
+        .unwrap_or_default();
+    let snapshot = value
+        .get("snapshot")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    (title, fields, buttons, snapshot)
+}
+
+/// Relay actions the UI can ask the browser thread to perform on a login
+/// page. Text is never logged; see the module docs.
+#[derive(Debug, Clone)]
+pub enum LoginAction {
+    /// Click the element matching a selector.
+    Click { selector: String },
+    /// Click the nth button in document order (from the view's list).
+    ClickButton { index: usize },
+    /// Type text into the element matching a selector (human_type).
+    Type { selector: String, text: String },
+    /// Dispatch Enter on the element matching a selector.
+    Enter { selector: String },
+    /// Drop the page and open a fresh one at an https URL (SSO hops).
+    Navigate { url: String },
+}
+
+impl LoginAction {
+    /// Validate an action decoded from the UI request. Bounds mirror Go's
+    /// remote-input validation (4096-byte text cap, normalized points
+    /// have no equivalent here since there is no coordinate input).
+    pub fn validate(&self) -> anyhow::Result<()> {
+        match self {
+            LoginAction::Click { selector } | LoginAction::Enter { selector } => {
+                if selector.is_empty() || selector.len() > 500 {
+                    anyhow::bail!("selector must be 1..=500 chars");
+                }
+                Ok(())
+            }
+            LoginAction::ClickButton { .. } => Ok(()),
+            LoginAction::Type { selector, text } => {
+                if selector.is_empty() || selector.len() > 500 {
+                    anyhow::bail!("selector must be 1..=500 chars");
+                }
+                if text.is_empty() || text.len() > 4096 {
+                    anyhow::bail!("text must be 1..=4096 bytes");
+                }
+                Ok(())
+            }
+            LoginAction::Navigate { url } => {
+                if !url.starts_with("https://") {
+                    anyhow::bail!("navigate target must be an https URL");
+                }
+                Ok(())
+            }
+        }
+    }
+}

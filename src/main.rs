@@ -1,7 +1,7 @@
 use axum::{
-    extract::State,
+    extract::{Path, State},
     http::HeaderMap,
-    response::{sse::{Event, Sse}, IntoResponse},
+    response::{sse::{Event, Sse}, Html, IntoResponse},
     routing::{get, post},
     Json, Router,
 };
@@ -11,6 +11,7 @@ use tokio::sync::RwLock;
 
 mod browser;
 mod config;
+mod login;
 mod memory;
 mod providers;
 mod router;
@@ -123,6 +124,13 @@ async fn main() -> anyhow::Result<()> {
         .route("/health", get(health))
         .route("/v1/models", get(models))
         .route("/v1/chat/completions", post(chat_completions))
+        .route("/login", get(login_page))
+        .route("/login/api/status", get(login_status))
+        .route("/login/api/:provider/start", post(login_start))
+        .route("/login/api/:provider/cancel", post(login_cancel))
+        .route("/login/api/:provider/complete", post(login_complete))
+        .route("/login/api/:provider/view", get(login_view))
+        .route("/login/api/:provider/act", post(login_act))
         .with_state(state);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], cfg.server.port));
@@ -143,6 +151,153 @@ async fn refresh_models(state: &Arc<AppState>) {
             }
             Err(e) => tracing::warn!(provider = %p.name, "model discovery failed: {e}"),
         }
+    }
+}
+
+/// Login delegate UI (see src/login.rs): relay-based provider login.
+/// The gateway never presents its own credential form and never stores
+/// credentials — relayed text lives in memory only for the action that
+/// types it, and only cookies/localStorage are persisted on Complete.
+async fn login_page() -> impl IntoResponse {
+    Html(login::LOGIN_HTML)
+}
+
+fn login_err(msg: String) -> axum::response::Response {
+    (
+        axum::http::StatusCode::BAD_REQUEST,
+        Json(serde_json::json!({ "error": msg })),
+    )
+        .into_response()
+}
+
+async fn login_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let active = state.pool.login_status_all().await.unwrap_or_default();
+    let by_name: HashMap<String, browser::pool::LoginActiveInfo> = active
+        .into_iter()
+        .map(|a| (a.provider.clone(), a))
+        .collect();
+    let providers = providers::Provider::all()
+        .iter()
+        .map(|p| {
+            let name = p.name();
+            let enabled = state
+                .cfg
+                .provider(name)
+                .map(|c| c.enabled)
+                .unwrap_or(false);
+            let (session_present, session_ts) = match session::load_session_file(name) {
+                Ok(Some(f)) => (true, Some(f.ts)),
+                _ => (false, None),
+            };
+            let a = by_name.get(name);
+            serde_json::json!({
+                "name": name,
+                "enabled": enabled,
+                "login_url": p.login_url(),
+                "session_present": session_present,
+                "session_ts": session_ts,
+                "login_active": a.is_some(),
+                "current_url": a.map(|x| x.url.clone()),
+                "title": a.map(|x| x.title.clone()),
+                "logged_in": a.and_then(|x| x.logged_in),
+                "input_found": a.map(|x| x.input_found),
+                "state": a.map(|x| x.state.clone()),
+            })
+        })
+        .collect::<Vec<_>>();
+    Json(serde_json::json!({ "providers": providers }))
+}
+
+async fn login_start(
+    State(state): State<Arc<AppState>>,
+    Path(provider): Path<String>,
+) -> impl IntoResponse {
+    match state.pool.login_start(&provider).await {
+        Ok(url) => Json(serde_json::json!({ "ok": true, "provider": provider, "url": url })).into_response(),
+        Err(e) => login_err(e.to_string()),
+    }
+}
+
+async fn login_cancel(
+    State(state): State<Arc<AppState>>,
+    Path(provider): Path<String>,
+) -> impl IntoResponse {
+    match state.pool.login_cancel(&provider).await {
+        Ok(()) => Json(serde_json::json!({ "ok": true, "provider": provider })).into_response(),
+        Err(e) => login_err(e.to_string()),
+    }
+}
+
+async fn login_complete(
+    State(state): State<Arc<AppState>>,
+    Path(provider): Path<String>,
+) -> impl IntoResponse {
+    match state.pool.login_complete(&provider).await {
+        Ok(r) => Json(serde_json::json!({
+            "ok": true, "provider": provider,
+            "session_path": r.session_path,
+            "warm_swapped": r.warm_swapped,
+            "warning": r.warning,
+        }))
+        .into_response(),
+        Err(e) => login_err(e.to_string()),
+    }
+}
+
+async fn login_view(
+    State(state): State<Arc<AppState>>,
+    Path(provider): Path<String>,
+) -> impl IntoResponse {
+    match state.pool.login_view(&provider).await {
+        Ok(v) => Json(serde_json::to_value(v).unwrap_or(serde_json::json!({}))).into_response(),
+        Err(e) => login_err(e.to_string()),
+    }
+}
+
+#[derive(serde::Deserialize, Default)]
+struct LoginActReq {
+    action: String,
+    #[serde(default)]
+    selector: Option<String>,
+    // Relayed text: used only to drive human_type; never logged or
+    // echoed back in any response (see login.rs).
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    index: Option<usize>,
+}
+
+async fn login_act(
+    State(state): State<Arc<AppState>>,
+    Path(provider): Path<String>,
+    Json(req): Json<LoginActReq>,
+) -> impl IntoResponse {
+    let action = match req.action.as_str() {
+        "click" => login::LoginAction::Click {
+            selector: req.selector.unwrap_or_default(),
+        },
+        "click_button" => login::LoginAction::ClickButton {
+            index: req.index.unwrap_or(0),
+        },
+        "type" => login::LoginAction::Type {
+            selector: req.selector.unwrap_or_default(),
+            text: req.text.unwrap_or_default(),
+        },
+        "enter" => login::LoginAction::Enter {
+            selector: req.selector.unwrap_or_default(),
+        },
+        "navigate" => login::LoginAction::Navigate {
+            url: req.url.unwrap_or_default(),
+        },
+        other => return login_err(format!("unknown login action: {other}")),
+    };
+    match state.pool.login_act(&provider, action).await {
+        // Deliberately no echo of the request: the detail strings never
+        // contain relayed text.
+        Ok(detail) => Json(serde_json::json!({ "ok": true, "detail": detail })).into_response(),
+        Err(e) => login_err(e.to_string()),
     }
 }
 

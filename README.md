@@ -86,6 +86,77 @@ Test one adapter live:
 cargo run -- --config config.yaml --test-adapter qwen
 ```
 
+## Login UI (`/login`)
+
+Open `http://localhost:<port>/login` in a browser to log providers in
+through the gateway itself — the Rust-form successor to Go's dashboard
+login flow. The page lists all 8 providers with session status
+(`sessions/<provider>.json` present?) and login state, and lets you
+Start / Cancel / Complete a login session per provider.
+
+How a login works:
+
+1. Press **Start** for a provider. The gateway opens a dedicated page
+   for it on the browser thread (separate from the warm provider pages,
+   so in-flight sends are not disturbed) and navigates to the
+   provider's chat URL; a logged-out user is bounced to the provider's
+   own login screen by the provider.
+2. Follow the page from the **Active login session** panel: it shows the
+   live URL, title, detected form fields and buttons, and a text
+   snapshot, refreshed by polling. Drive the page with relay actions —
+   click-by-selector, type-into-selector, Enter, click-a-listed-button,
+   or navigate to another https URL for SSO hops.
+3. When the panel reports **likely logged in** (best-effort signal: the
+   URL is not a login URL *and* the provider's chat input is present),
+   press **Complete**. The gateway captures cookies (from the
+   browser-wide CookieStore) + localStorage into
+   `sessions/<provider>.json` — the exact format the normal send path
+   restores — and swaps the login page in as the provider's warm page,
+   so the next send boots with the new session immediately. Idle login
+   pages are dropped after 30 minutes without UI contact.
+
+API (all JSON except the page itself):
+
+- `GET /login` — the dashboard page (single self-contained HTML file).
+- `GET /login/api/status` — all providers: enabled, session present
+  (+ timestamp), login active, current URL, title, logged-in signal.
+- `POST /login/api/:provider/start` — open a login page (replaces any
+  previous one for that provider).
+- `POST /login/api/:provider/cancel` — drop the login page.
+- `POST /login/api/:provider/complete` — capture the session + swap the
+  warm page.
+- `GET /login/api/:provider/view` — live view data (URL, title, state,
+  fields, buttons, snapshot; field *values* are never read).
+- `POST /login/api/:provider/act` — one relay action
+  (`{action: click|click_button|type|enter|navigate, selector?, text?,
+  url?, index?}`).
+
+Honest limits of the login UI:
+
+- **Relay-only, no screenshots.** The public obscura API exposes no
+  screenshot method (it exists only in the inner obscura-browser crate,
+  unreachable because `obscura::Page` wraps its inner page in a
+  `pub(crate)` field) and no keyboard/mouse API. A screenshot path
+  would require driving pages through the inner crate directly — a
+  second, separate browser stack that shares neither the pool's pages
+  nor its cookie store — so it was deliberately not built. You steer by
+  the URL/title/fields/snapshot view, not by pixels.
+- **No credential handling by the gateway.** There is no
+  username/password form here. Relayed text lives in memory only for
+  the action that types it; it is never logged, stored, or echoed back.
+  Prefer SSO / passkey options where the provider offers them.
+- **Captchas, 2FA prompts, and SSO popups cannot be solved by the
+  relay.** Type a 2FA code into the code field when it appears; if a
+  provider's bot checks refuse synthetic input (dispatched
+  KeyboardEvents are not trusted keystrokes), that provider cannot be
+  logged in through this UI and needs a session captured elsewhere.
+- **Logged-in detection is best-effort** (URL keywords + chat-input
+  presence), not a guarantee. **Cookies are browser-wide** in this
+  engine, so a captured session file may contain other providers'
+  cookies too; restore is domain-scoped, so this is harmless but worth
+  knowing. Sessions expire — when a provider reports
+  `session_expired`, re-capture it here.
+
 ## Notes / honest limits
 
 - One persistent page per provider: concurrent sends to the same
@@ -94,6 +165,3 @@ cargo run -- --config config.yaml --test-adapter qwen
 - The figures in MIGRATION.md (memory, TTFT, switch latency) are the
   v2 design targets from the migration doc, not measurements taken in
   this repo; there is no benchmark harness in the tree yet.
-- No dashboard or login UI ships in v2; sessions are captured via the
-  pool's save-session path (`ObscuraPool::save_session`) after a manual
-  login flow - the endpoints above are the supported surface.
