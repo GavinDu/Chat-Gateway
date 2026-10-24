@@ -36,7 +36,11 @@ impl UnifiedMemory {
                 full.extend(conv.messages.clone());
             }
         }
-        full.extend(new_messages.iter().cloned());
+        // Clients often resend the full transcript on each OpenAI-style
+        // request. Reconcile it with the canonical transcript before
+        // constructing context so old messages are not duplicated.
+        let unseen = messages_after_overlap(&full, new_messages);
+        full.extend(unseen);
 
         // Sliding window by token estimate
         let mut tokens = 0;
@@ -59,7 +63,11 @@ impl UnifiedMemory {
             provider: None,
             tab_id: None,
         });
-        entry.messages.extend(user_msgs);
+        // The caller may provide a context window containing messages
+        // already stored for this conversation. Append only the unseen
+        // suffix (or the non-overlapping tail of a sliding window).
+        let unseen = messages_after_overlap(&entry.messages, &user_msgs);
+        entry.messages.extend(unseen);
         entry.messages.push(assistant_msg);
         entry.provider = Some(provider);
         entry.tab_id = Some(tab_id);
@@ -81,5 +89,79 @@ impl UnifiedMemory {
 
     pub fn get_provider(&self, cid: &str) -> Option<String> {
         self.conversations.get(cid).and_then(|c| c.provider.clone())
+    }
+}
+
+
+/// Remove a transcript prefix that is already represented in the stored
+/// conversation. Supports both full-history requests and requests that
+/// contain only a recent sliding window. Message equality is role+content.
+fn messages_after_overlap(stored: &[ChatMessage], incoming: &[ChatMessage]) -> Vec<ChatMessage> {
+    if incoming.is_empty() {
+        return Vec::new();
+    }
+    if stored.is_empty() {
+        return incoming.to_vec();
+    }
+
+    // Full transcript: find the longest incoming prefix that matches the
+    // stored transcript prefix, then append only the remaining tail.
+    let common_prefix = stored.iter().zip(incoming.iter())
+        .take_while(|(a, b)| a.role == b.role && a.content == b.content)
+        .count();
+    if common_prefix == stored.len() && incoming.len() >= stored.len() {
+        return incoming[common_prefix..].to_vec();
+    }
+
+    // Sliding-window transcript: find the largest stored suffix matching
+    // the incoming prefix and append only the part after that overlap.
+    let max_overlap = stored.len().min(incoming.len());
+    for overlap in (1..=max_overlap).rev() {
+        let matches = stored[stored.len() - overlap..].iter()
+            .zip(incoming[..overlap].iter())
+            .all(|(a, b)| a.role == b.role && a.content == b.content);
+        if matches {
+            return incoming[overlap..].to_vec();
+        }
+    }
+
+    // No overlap means the request is a new turn or a deliberately
+    // separate transcript. Do not discard it.
+    incoming.to_vec()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn m(role: &str, content: &str) -> ChatMessage {
+        ChatMessage { role: role.to_string(), content: content.to_string() }
+    }
+
+    #[test]
+    fn full_transcript_only_appends_new_suffix() {
+        let stored = vec![m("user", "hello"), m("assistant", "hi")];
+        let incoming = vec![m("user", "hello"), m("assistant", "hi"), m("user", "next")];
+        let result = messages_after_overlap(&stored, &incoming);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].content, "next");
+    }
+
+    #[test]
+    fn sliding_window_only_appends_new_suffix() {
+        let stored = vec![m("user", "one"), m("assistant", "two"), m("user", "three")];
+        let incoming = vec![m("assistant", "two"), m("user", "three"), m("user", "four")];
+        let result = messages_after_overlap(&stored, &incoming);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].content, "four");
+    }
+
+    #[test]
+    fn unrelated_new_turn_is_not_discarded() {
+        let stored = vec![m("user", "old")];
+        let incoming = vec![m("user", "new")];
+        let result = messages_after_overlap(&stored, &incoming);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].content, "new");
     }
 }
