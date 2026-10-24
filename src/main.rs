@@ -133,7 +133,9 @@ async fn main() -> anyhow::Result<()> {
         .route("/login/api/:provider/act", post(login_act))
         .with_state(state);
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], cfg.server.port));
+    // Security default: the gateway exposes browser/session control routes and must not listen on public interfaces by default.
+    // Remote access should be added only with explicit authentication and TLS.
+    let addr = SocketAddr::from(([127, 0, 0, 1], cfg.server.port));
     let listener = tokio::net::TcpListener::bind(addr).await?;
     println!("Chat Gateway v2 Obscura Native listening on {}", addr);
     axum::serve(listener, app).await?;
@@ -347,15 +349,12 @@ async fn chat_completions(
     let conversation_id = headers.get("X-Conversation-Id")
         .and_then(|v| v.to_str().ok()).map(|s| s.to_string());
 
-    // Prompt policy = Rust v1 effective behavior: the adapter sends
-    // ONLY the last message (Rust v1 adapters read messages.last()
-    // and ignore conversation_id/model/stream/tab_id). Memory still
-    // records turns, but the windowed transcript is NOT fed to the
-    // prompt — merged's transcript-into-warm-page policy was a v2
-    // invention and is removed here.
-    let (_context_prompt, windowed) = state.memory.build_context(conversation_id.as_deref(), &req.messages);
+    // Assemble the provider prompt from the unified memory window. The
+    // canonical transcript must be passed to the provider so follow-up
+    // turns and provider switches retain conversation context.
+    let (context_prompt, windowed) = state.memory.build_context(conversation_id.as_deref(), &req.messages);
     let has_history = conversation_id.as_deref().map(|cid| state.memory.has_history(cid)).unwrap_or(false);
-    let prompt = req.messages.last().map(|m| m.content.clone()).unwrap_or_default();
+    let prompt = context_prompt;
     if prompt.is_empty() {
         return (axum::http::StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({ "error": { "message": "empty prompt" } }))).into_response();
