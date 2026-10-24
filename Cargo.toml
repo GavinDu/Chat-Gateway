@@ -1,40 +1,38 @@
 [package]
 name = "chat-gateway-rs"
-version = "0.1.0"
+version = "2.0.0-obscura-native"
 edition = "2021"
-description = "Unified memory layer over Qwen/MetaAI/Claude/ChatGPT/Gemini/Grok/Mistral/Perplexity via Obscura - OpenAI compatible API"
+description = "Chat Gateway unified memory layer - Obscura native, no chromiumoxide"
 license = "Apache-2.0"
 
 [dependencies]
-axum = { version = "0.7", features = ["json", "macros"] }
-tokio = { version = "1.35", features = ["full"] }
-tokio-stream = "0.1"
-tower = "0.5"
-tower-http = { version = "0.6", features = ["cors", "trace"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+tokio = { version = "1.40", features = ["full"] }
+axum = { version = "0.7", features = ["json"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 serde_yaml = "0.9"
+dashmap = "6.0"
+anyhow = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
-uuid = { version = "1", features = ["v4", "serde"] }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-async-trait = "0.1"
-futures = "0.3"
-dashmap = "6"
-arc-swap = "1"
-thiserror = "2"
-anyhow = "1"
-axum-extra = { version = "0.9", features = ["typed-header"] }
-chromiumoxide = { version = "0.7", features = ["tokio-runtime"] }
-chromiumoxide_cdp = "0.7"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 async-stream = "0.3"
-clap = { version = "4", features = ["derive"] }
-reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+async-trait = "0.1"
 regex = "1"
-notify = { version = "6", features = ["macos_kqueue"] }
-notify-debouncer-mini = "0.4"
+uuid = { version = "1", features = ["v4"] }
+clap = { version = "4", features = ["derive"] }
+obscura-core = { git = "https://github.com/h4ckf0r0day/obscura", package = "obscura", features = ["render", "stealth"] }
 
-[profile.release]
-lto = true
-codegen-units = 1
-panic = "abort"
+[features]
+default = ["render", "stealth"]
+render = ["obscura-core/render"]
+stealth = ["obscura-core/stealth"]
+
+# Obscura's workspace patches taffy + cosmic-text to vendored copies with
+# APIs its render layer uses (CssLineBreak, AlignItems::NORMAL, ...).
+# [patch] does not propagate through a git dependency, so the same two
+# vendored crates are carried here, copied verbatim from the obscura repo
+# at the pinned rev (see Cargo.lock).
+[patch.crates-io]
+taffy = { path = "vendor/taffy" }
+cosmic-text = { path = "vendor/cosmic-text" }

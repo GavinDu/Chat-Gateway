@@ -1,6 +1,4 @@
 /target
+*.log
 config.yaml
 sessions/
-models-cache.json
-chat-gateway-rs
-.DS_Store

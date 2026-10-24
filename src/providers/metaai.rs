@@ -1,0 +1,41 @@
+use async_trait::async_trait;
+use obscura_core::Page;
+use anyhow::Result;
+use crate::config::ProviderConfig;
+use crate::providers::common::{self, SelectorSet};
+use crate::providers::{AdapterSelectors, ChatProvider};
+
+/// Meta AI - www.meta.ai. Model switcher shows Llama 4 variants.
+pub struct MetaAIAdapter {
+    pub cfg: ProviderConfig,
+}
+
+pub const SELECTORS: SelectorSet = SelectorSet {
+    url: "https://www.meta.ai",
+    picker: &["button:has-text(\"Llama\")", "div.model-switcher", "button[aria-label*=\"model\"]"],
+    input: &["div[contenteditable=\"true\"][role=\"textbox\"]", "textarea[placeholder*=\"Ask\"]", "div[contenteditable=\"true\"]"],
+    send: &["button[aria-label=\"Send\"]", "button[type=\"submit\"]", "button:has(svg[data-testid=\"send\"])"],
+    response: &["div[data-testid=\"bot-message\"]", "div.message.assistant", "div.prose"],
+    model_keywords: "metaai|sonar|grok|mistral|claude|gpt|gemini|qwen|llama",
+};
+
+#[async_trait(?Send)]
+impl ChatProvider for MetaAIAdapter {
+    fn name(&self) -> &str { "metaai" }
+    fn aliases(&self) -> &[String] { &self.cfg.models }
+    fn strip_citations(&self) -> bool { false }
+
+    async fn discover_models(&self, page: &mut Page) -> Result<Vec<String>> {
+        common::discover_models(page, &SELECTORS, &self.cfg.models).await
+    }
+
+    async fn send_prompt(&self, page: &Page, prompt: &str) -> Result<()> {
+        common::send_prompt(page, &SELECTORS, prompt).await
+    }
+
+    fn response_text(&self, page: &Page) -> Option<String> {
+        common::response_text(page, &SELECTORS)
+    }
+
+    fn selectors(&self) -> AdapterSelectors { SELECTORS.adapter_selectors() }
+}

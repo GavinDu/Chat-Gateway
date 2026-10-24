@@ -1,74 +1,304 @@
-use std::{path::PathBuf, sync::Arc};
+use axum::{
+    extract::State,
+    http::HeaderMap,
+    response::{sse::{Event, Sse}, IntoResponse},
+    routing::{get, post},
+    Json, Router,
+};
 use clap::Parser;
-use tracing_subscriber::EnvFilter;
+use std::{collections::HashMap, net::SocketAddr, sync::Arc};
+use tokio::sync::RwLock;
 
-mod config;
 mod browser;
-mod session;
+mod config;
 mod memory;
 mod providers;
-mod server;
-mod models;
+mod router;
+mod session;
+
+use browser::pool::ObscuraPool;
+use config::AppConfig;
+use memory::{ChatMessage, UnifiedMemory};
+use router::ProviderRouter;
 
 #[derive(Parser, Debug)]
-#[command(name = "chat-gateway-rs", about = "Rust + Obscura Chat Gateway - unified memory over 8 providers")]
+#[command(name = "chat-gateway-rs", about = "Chat Gateway v2 - Obscura native, unified memory over 8 providers")]
 struct Cli {
     #[arg(long, default_value = "config.yaml")]
-    config: PathBuf,
+    config: std::path::PathBuf,
 
-    #[arg(long, help = "Interactive login for provider (qwen|metaai|claude|chatgpt|gemini|grok|mistral|perplexity)")]
-    login: Option<String>,
-
-    #[arg(long, help = "Test adapter selectors live")]
+    #[arg(long, help = "Test one adapter live: discover models + show selectors, then exit")]
     test_adapter: Option<String>,
+}
+
+struct AppState {
+    cfg: Arc<AppConfig>,
+    pool: Arc<ObscuraPool>,
+    memory: Arc<UnifiedMemory>,
+    router: ProviderRouter,
+    models_cache: Arc<RwLock<HashMap<String, Vec<String>>>>,
+}
+
+#[derive(serde::Deserialize)]
+struct ChatReq {
+    model: String,
+    messages: Vec<ChatMessage>,
+    #[serde(default)]
+    stream: bool,
+    #[serde(default)]
+    temperature: Option<f32>,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env().add_directive("info".parse().unwrap()))
+        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();
 
     let cli = Cli::parse();
-    let cfg = config::AppConfig::load(&cli.config)?;
+    let cfg = Arc::new(AppConfig::load(&cli.config)?);
 
-    if let Some(provider) = cli.login {
-        return browser::login::interactive_login(&cfg, &provider).await;
-    }
+    let pool = ObscuraPool::new(cfg.clone()).await?;
+    pool.warm_all().await?;
+
     if let Some(provider) = cli.test_adapter {
-        return providers::adapters::diagnostics::test_adapter(&cfg, &provider).await;
+        let permit = pool.acquire(&provider).await?;
+        println!("Testing adapter '{}' with embedded Obscura (queue {}ms)...", provider, permit.queue_ms);
+        drop(permit);
+        match pool.discover(&provider).await {
+            Ok(models) => println!("Discovered models: {:?}", models),
+            Err(e) => println!("Discovery failed: {}", e),
+        }
+        if let Some(p) = providers::Provider::from_name(&provider) {
+            let registry = providers::build_registry(&cfg);
+            if let Some(adapter) = registry.get(&p) {
+                println!("Selectors: {:?}", adapter.selectors());
+            }
+        }
+        return Ok(());
     }
 
-    let supervisor = Arc::new(browser::ObscuraSupervisor::start(&cfg.obscura).await?);
-    let pool = browser::pool::BrowserPool::connect(&cfg.server.obscura_endpoint, &cfg).await?;
-    let session_store = Arc::new(session::SessionStore::load_all(&cfg).await?);
-
-    // Spawn file watcher for sessions/*.json hot-reload
-    session_store.clone().spawn_watcher();
-
-    let memory = Arc::new(memory::UnifiedMemory::new(cfg.memory.clone()));
-    let model_cache = Arc::new(models::cache::ModelCache::load(&cfg).await);
-
-    let cache_clone = model_cache.clone();
-    let cfg_clone = cfg.clone();
-    let pool_clone = pool.clone();
-    let sessions_clone = session_store.clone();
-    tokio::spawn(async move {
-        if let Err(e) = cache_clone.refresh_all(&cfg_clone, &pool_clone, &sessions_clone).await {
-            tracing::warn!("initial model discovery failed: {e}");
-        }
+    let state = Arc::new(AppState {
+        cfg: cfg.clone(),
+        pool: pool.clone(),
+        memory: Arc::new(UnifiedMemory::new(cfg.memory.max_tokens)),
+        router: ProviderRouter::new(cfg.clone()),
+        models_cache: Arc::new(RwLock::new(HashMap::new())),
     });
 
-    let state = server::state::AppState {
-        config: Arc::new(cfg.clone()),
-        browser_pool: pool,
-        session_store,
-        memory,
-        model_cache,
-        traces: Arc::new(server::state::TraceBuffer::new(500)),
-        _supervisor: supervisor,
+    // Background model discovery (reads pickers without sending messages)
+    {
+        let state = state.clone();
+        tokio::spawn(async move {
+            refresh_models(&state).await;
+        });
+    }
+
+    let app = Router::new()
+        .route("/health", get(health))
+        .route("/v1/models", get(models))
+        .route("/v1/chat/completions", post(chat_completions))
+        .with_state(state);
+
+    let addr = SocketAddr::from(([0, 0, 0, 0], cfg.server.port));
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    println!("Chat Gateway v2 Obscura Native listening on {}", addr);
+    axum::serve(listener, app).await?;
+    Ok(())
+}
+
+async fn refresh_models(state: &Arc<AppState>) {
+    for p in &state.cfg.providers {
+        if !p.enabled {
+            continue;
+        }
+        match state.pool.discover(&p.name).await {
+            Ok(models) => {
+                state.models_cache.write().await.insert(p.name.clone(), models);
+            }
+            Err(e) => tracing::warn!(provider = %p.name, "model discovery failed: {e}"),
+        }
+    }
+}
+
+async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let providers = state.cfg.providers.iter().map(|p| {
+        serde_json::json!({ "name": p.name, "enabled": p.enabled, "priority": p.priority, "models": p.models })
+    }).collect::<Vec<_>>();
+    Json(serde_json::json!({
+        "status": "ok",
+        "engine": "obscura-native (embedded)",
+        "sessions_loaded": "sessions/<provider>.json (restored at warm-up)",
+        "providers": providers,
+    }))
+}
+
+async fn models(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let cache = state.models_cache.read().await;
+    let mut data = vec![];
+    for p in &state.cfg.providers {
+        for m in &p.models {
+            data.push(serde_json::json!({ "id": m, "object": "model", "owned_by": p.name }));
+        }
+    }
+    for (provider, models) in cache.iter() {
+        for m in models {
+            if !data.iter().any(|d| d["id"] == *m) {
+                data.push(serde_json::json!({ "id": m, "object": "model", "owned_by": provider, "discovered": true }));
+            }
+        }
+    }
+    Json(serde_json::json!({ "object": "list", "data": data }))
+}
+
+async fn chat_completions(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> impl IntoResponse {
+    let req: ChatReq = match serde_json::from_slice::<ChatReq>(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            return (axum::http::StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": { "message": e.to_string() } }))).into_response();
+        }
     };
 
-    server::run(state).await?;
-    Ok(())
+    let conversation_id = headers.get("X-Conversation-Id")
+        .and_then(|v| v.to_str().ok()).map(|s| s.to_string());
+
+    // Memory: sliding-window context over the unified conversation store.
+    // With prior history, send the windowed transcript (the provider page
+    // does not retain our conversations); otherwise send the raw message.
+    let (context_prompt, windowed) = state.memory.build_context(conversation_id.as_deref(), &req.messages);
+    let has_history = conversation_id.is_some() && windowed.len() > req.messages.len();
+    let prompt = if has_history {
+        context_prompt
+    } else {
+        req.messages.last().map(|m| m.content.clone()).unwrap_or_default()
+    };
+    if prompt.is_empty() {
+        return (axum::http::StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": { "message": "empty prompt" } }))).into_response();
+    }
+
+    let candidates = state.router.resolve(&req.model, conversation_id.as_deref(), &state.memory);
+    tracing::info!(model = %req.model, ?candidates, conv = ?conversation_id, "routing request");
+
+    let mut last_err: Option<String> = None;
+    for provider_name in candidates {
+        let permit = match state.pool.acquire(&provider_name).await {
+            Ok(p) => p,
+            Err(e) => {
+                last_err = Some(e.to_string());
+                continue;
+            }
+        };
+        tracing::debug!(provider = %provider_name, queue_ms = permit.queue_ms, "acquired provider slot");
+
+        let mut rx = match state.pool.send_stream(&provider_name, prompt.clone()).await {
+            Ok(rx) => rx,
+            Err(e) => {
+                last_err = Some(e.to_string());
+                continue;
+            }
+        };
+
+        let new_conv_id = conversation_id.clone()
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
+        if req.stream {
+            let state_c = state.clone();
+            let windowed_c = windowed.clone();
+            let provider_c = provider_name.clone();
+            let model_c = req.model.clone();
+            let conv_stream = new_conv_id.clone();
+            let sse_stream = async_stream::stream! {
+                // Hold the provider slot for the stream's duration
+                let _permit = permit;
+                let mut full = String::new();
+                while let Some(item) = rx.recv().await {
+                    match item {
+                        Ok(c) => {
+                            if c.done { break; }
+                            full.push_str(&c.content);
+                            let data = serde_json::json!({
+                                "id": format!("chatcmpl-{}", &conv_stream[..8]),
+                                "object": "chat.completion.chunk",
+                                "created": chrono::Utc::now().timestamp(),
+                                "model": model_c,
+                                "choices": [{ "delta": { "content": c.content }, "index": 0, "finish_reason": null }],
+                            });
+                            yield Ok::<_, anyhow::Error>(Event::default().data(data.to_string()));
+                        }
+                        Err(e) => {
+                            tracing::error!("stream err: {e}");
+                            break;
+                        }
+                    }
+                }
+                state_c.memory.store_turn(
+                    conv_stream.clone(),
+                    windowed_c.clone(),
+                    ChatMessage { role: "assistant".to_string(), content: full.clone() },
+                    provider_c.clone(),
+                    format!("tab-{}", &conv_stream[..8]),
+                );
+                yield Ok(Event::default().data("[DONE]"));
+            };
+            let mut resp_headers = axum::http::HeaderMap::new();
+            resp_headers.insert("X-Conversation-Id", new_conv_id.parse().unwrap());
+            resp_headers.insert("Content-Type", "text/event-stream".parse().unwrap());
+            return (resp_headers, Sse::new(sse_stream)).into_response();
+        }
+
+        // Non-streaming: drain the channel; a failure before any content
+        // falls through to the next candidate provider.
+        let mut full = String::new();
+        let mut failed: Option<String> = None;
+        while let Some(item) = rx.recv().await {
+            match item {
+                Ok(c) => {
+                    if c.done { break; }
+                    full.push_str(&c.content);
+                }
+                Err(e) => {
+                    failed = Some(e.to_string());
+                    break;
+                }
+            }
+        }
+        if let Some(e) = failed {
+            if full.is_empty() {
+                tracing::warn!(provider = %provider_name, "provider failed: {e}");
+                last_err = Some(e);
+                continue;
+            }
+        }
+
+        state.memory.store_turn(
+            new_conv_id.clone(),
+            windowed.clone(),
+            ChatMessage { role: "assistant".to_string(), content: full.clone() },
+            provider_name.clone(),
+            format!("tab-{}", &new_conv_id[..8]),
+        );
+
+        let body = serde_json::json!({
+            "id": format!("chatcmpl-{}", &new_conv_id[..8]),
+            "object": "chat.completion",
+            "created": chrono::Utc::now().timestamp(),
+            "model": req.model,
+            "choices": [{ "message": { "role": "assistant", "content": full }, "finish_reason": "stop", "index": 0 }],
+            "conversation_id": new_conv_id,
+        });
+        let mut resp_headers = axum::http::HeaderMap::new();
+        resp_headers.insert("X-Conversation-Id", new_conv_id.parse().unwrap());
+        return (resp_headers, Json(body)).into_response();
+    }
+
+    let err_body = serde_json::json!({
+        "error": { "message": format!("all providers failed: {:?}", last_err), "type": "provider_error" }
+    });
+    (axum::http::StatusCode::BAD_GATEWAY, Json(err_body)).into_response()
 }
