@@ -17,12 +17,18 @@ pub const SELECTORS: SelectorSet = SelectorSet {
     send: &["button[data-testid=\"send-button\"]", "button[aria-label=\"Send prompt\"]", "button:has(svg)"],
     response: &["div[data-message-author-role=\"assistant\"] div.markdown", "article div.markdown", "div[data-message-id] div.markdown"],
     model_keywords: "chatgpt|sonar|grok|mistral|claude|gpt|gemini|qwen|llama",
+    model_pairs: &[("button[data-testid='model-switcher-dropdown-button'], button[aria-label*='model' i], [data-testid='model-switcher-dropdown-button']", "[role='menuitem'], [role='option'], [data-testid*='model' i]")],
 };
 
 #[async_trait(?Send)]
 impl ChatProvider for ChatGPTAdapter {
     fn name(&self) -> &str { "chatgpt" }
     fn aliases(&self) -> &[String] { &self.cfg.models }
+    fn model_pairs(&self) -> &[(&str, &str)] { SELECTORS.model_pairs }
+
+    async fn select_model(&self, page: &Page, model: &str) -> Result<()> {
+        common::select_model(page, SELECTORS.model_pairs, model, &self.cfg.models).await
+    }
     fn strip_citations(&self) -> bool { false }
 
     async fn discover_models(&self, page: &mut Page) -> Result<Vec<String>> {
@@ -38,4 +44,5 @@ impl ChatProvider for ChatGPTAdapter {
     }
 
     fn selectors(&self) -> AdapterSelectors { SELECTORS.adapter_selectors() }
+    fn selector_set(&self) -> &common::SelectorSet { &SELECTORS }
 }

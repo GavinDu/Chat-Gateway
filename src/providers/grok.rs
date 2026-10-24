@@ -17,6 +17,7 @@ pub const SELECTORS: SelectorSet = SelectorSet {
     send: &["button[aria-label=\"Send\"]", "button[type=\"submit\"]:has(svg)", "button.send-button"],
     response: &["div[data-testid=\"grok-response\"]", "div.markdown", "div.response-content"],
     model_keywords: "grok|sonar|grok|mistral|codestral|claude|gpt|gemini|qwen|llama|pixtral",
+    model_pairs: &[],
 };
 
 #[async_trait(?Send)]
@@ -38,4 +39,5 @@ impl ChatProvider for GrokAdapter {
     }
 
     fn selectors(&self) -> AdapterSelectors { SELECTORS.adapter_selectors() }
+    fn selector_set(&self) -> &common::SelectorSet { &SELECTORS }
 }

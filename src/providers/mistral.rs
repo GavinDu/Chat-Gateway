@@ -17,6 +17,7 @@ pub const SELECTORS: SelectorSet = SelectorSet {
     send: &["button[aria-label=\"Send\"]", "button[type=\"submit\"]", "button.submit"],
     response: &["div.markdown", "div.assistant-message", "div.prose"],
     model_keywords: "mistral|sonar|grok|mistral|codestral|claude|gpt|gemini|qwen|llama|pixtral",
+    model_pairs: &[],
 };
 
 #[async_trait(?Send)]
@@ -38,4 +39,5 @@ impl ChatProvider for MistralAdapter {
     }
 
     fn selectors(&self) -> AdapterSelectors { SELECTORS.adapter_selectors() }
+    fn selector_set(&self) -> &common::SelectorSet { &SELECTORS }
 }

@@ -17,12 +17,18 @@ pub const SELECTORS: SelectorSet = SelectorSet {
     send: &["button[aria-label=\"Send\"]", "button[type=\"submit\"]", "button:has(svg[data-testid=\"send\"])"],
     response: &["div[data-testid=\"bot-message\"]", "div.message.assistant", "div.prose"],
     model_keywords: "metaai|sonar|grok|mistral|claude|gpt|gemini|qwen|llama",
+    model_pairs: &[("button[aria-label*='model' i], button[aria-label*='llama' i], [data-testid*='model' i], [data-model-selector]", "[role='menuitem'], [role='option'], [data-model-option]"), ("[role='button'][aria-haspopup='menu']", "[role='menuitem'], [role='option']")],
 };
 
 #[async_trait(?Send)]
 impl ChatProvider for MetaAIAdapter {
     fn name(&self) -> &str { "metaai" }
     fn aliases(&self) -> &[String] { &self.cfg.models }
+    fn model_pairs(&self) -> &[(&str, &str)] { SELECTORS.model_pairs }
+
+    async fn select_model(&self, page: &Page, model: &str) -> Result<()> {
+        common::select_model(page, SELECTORS.model_pairs, model, &self.cfg.models).await
+    }
     fn strip_citations(&self) -> bool { false }
 
     async fn discover_models(&self, page: &mut Page) -> Result<Vec<String>> {
@@ -38,4 +44,5 @@ impl ChatProvider for MetaAIAdapter {
     }
 
     fn selectors(&self) -> AdapterSelectors { SELECTORS.adapter_selectors() }
+    fn selector_set(&self) -> &common::SelectorSet { &SELECTORS }
 }

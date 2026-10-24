@@ -65,6 +65,31 @@ async fn main() -> anyhow::Result<()> {
         let permit = pool.acquire(&provider).await?;
         println!("Testing adapter '{}' with embedded Obscura (queue {}ms)...", provider, permit.queue_ms);
         drop(permit);
+        // Live-send phases (Go RunAdapterTest, restored-tree form) for
+        // ALL providers — Rust v1 diagnostics only did discover+print.
+        match pool.test_adapter(&provider).await {
+            Ok(rep) => {
+                println!("test-adapter '{}': session_ok={}", provider, rep.session_ok);
+                for (role, hit) in &rep.probe {
+                    match hit {
+                        Some(sel) => println!("  probe {role}: OK ({sel})"),
+                        None => println!("  probe {role}: ALL selectors failed"),
+                    }
+                }
+                println!(
+                    "  phases: input_found={} send_clicked={} (false = Enter used) response_token={}",
+                    rep.input_found, rep.send_clicked, rep.response_token
+                );
+                for e in &rep.errors {
+                    println!("  error: {e}");
+                }
+                if rep.errors.is_empty() && rep.session_ok && rep.input_found && rep.response_token {
+                    println!("test-adapter: all phases passed — adapter is healthy");
+                }
+            }
+            Err(e) => println!("test-adapter failed: {}", e),
+        }
+        // Plus the Rust v1 diagnostics output (discover + selectors).
         match pool.discover(&provider).await {
             Ok(models) => println!("Discovered models: {:?}", models),
             Err(e) => println!("Discovery failed: {}", e),
@@ -167,16 +192,15 @@ async fn chat_completions(
     let conversation_id = headers.get("X-Conversation-Id")
         .and_then(|v| v.to_str().ok()).map(|s| s.to_string());
 
-    // Memory: sliding-window context over the unified conversation store.
-    // With prior history, send the windowed transcript (the provider page
-    // does not retain our conversations); otherwise send the raw message.
-    let (context_prompt, windowed) = state.memory.build_context(conversation_id.as_deref(), &req.messages);
-    let has_history = conversation_id.is_some() && windowed.len() > req.messages.len();
-    let prompt = if has_history {
-        context_prompt
-    } else {
-        req.messages.last().map(|m| m.content.clone()).unwrap_or_default()
-    };
+    // Prompt policy = Rust v1 effective behavior: the adapter sends
+    // ONLY the last message (Rust v1 adapters read messages.last()
+    // and ignore conversation_id/model/stream/tab_id). Memory still
+    // records turns, but the windowed transcript is NOT fed to the
+    // prompt — merged's transcript-into-warm-page policy was a v2
+    // invention and is removed here.
+    let (_context_prompt, windowed) = state.memory.build_context(conversation_id.as_deref(), &req.messages);
+    let has_history = conversation_id.as_deref().map(|cid| state.memory.has_history(cid)).unwrap_or(false);
+    let prompt = req.messages.last().map(|m| m.content.clone()).unwrap_or_default();
     if prompt.is_empty() {
         return (axum::http::StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({ "error": { "message": "empty prompt" } }))).into_response();
@@ -196,7 +220,7 @@ async fn chat_completions(
         };
         tracing::debug!(provider = %provider_name, queue_ms = permit.queue_ms, "acquired provider slot");
 
-        let mut rx = match state.pool.send_stream(&provider_name, prompt.clone()).await {
+        let mut rx = match state.pool.send_stream(&provider_name, prompt.clone(), req.model.clone(), has_history).await {
             Ok(rx) => rx,
             Err(e) => {
                 last_err = Some(e.to_string());

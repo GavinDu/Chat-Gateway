@@ -17,12 +17,18 @@ pub const SELECTORS: SelectorSet = SelectorSet {
     send: &["button[aria-label=\"Send message\"]", "button.send-button", "button:has(mat-icon)"],
     response: &["model-response", "div.response-container", "div.model-response-text"],
     model_keywords: "gemini|sonar|grok|mistral|claude|gpt|gemini|qwen|llama",
+    model_pairs: &[("button[aria-label*='model' i], [data-test-id*='model' i], .bard-mode-switcher", "[role='menuitem'], [role='option'], mat-option, [data-test-id*='model-option' i]")],
 };
 
 #[async_trait(?Send)]
 impl ChatProvider for GeminiAdapter {
     fn name(&self) -> &str { "gemini" }
     fn aliases(&self) -> &[String] { &self.cfg.models }
+    fn model_pairs(&self) -> &[(&str, &str)] { SELECTORS.model_pairs }
+
+    async fn select_model(&self, page: &Page, model: &str) -> Result<()> {
+        common::select_model(page, SELECTORS.model_pairs, model, &self.cfg.models).await
+    }
     fn strip_citations(&self) -> bool { false }
 
     async fn discover_models(&self, page: &mut Page) -> Result<Vec<String>> {
@@ -38,4 +44,5 @@ impl ChatProvider for GeminiAdapter {
     }
 
     fn selectors(&self) -> AdapterSelectors { SELECTORS.adapter_selectors() }
+    fn selector_set(&self) -> &common::SelectorSet { &SELECTORS }
 }

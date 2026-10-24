@@ -17,6 +17,7 @@ pub const SELECTORS: SelectorSet = SelectorSet {
     send: &["button[aria-label=\"Submit\"]", "button[type=\"submit\"]", "button:has(svg.lucide-arrow-up)"],
     response: &["div[data-testid=\"answer\"]", "div.prose", "div.answer-container"],
     model_keywords: "perplexity|sonar|grok|mistral|codestral|claude|gpt|gemini|qwen|llama|pixtral",
+    model_pairs: &[],
 };
 
 #[async_trait(?Send)]
@@ -38,4 +39,5 @@ impl ChatProvider for PerplexityAdapter {
     }
 
     fn selectors(&self) -> AdapterSelectors { SELECTORS.adapter_selectors() }
+    fn selector_set(&self) -> &common::SelectorSet { &SELECTORS }
 }

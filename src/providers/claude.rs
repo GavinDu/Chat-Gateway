@@ -17,12 +17,18 @@ pub const SELECTORS: SelectorSet = SelectorSet {
     send: &["button[aria-label=\"Send Message\"]", "button:has(svg)[type=\"button\"]", "button[type=\"button\"]"],
     response: &["div[data-testid=\"assistant-message\"]", "div.font-claude-response", "div[data-is-streaming] .prose"],
     model_keywords: "claude|sonar|grok|mistral|claude|gpt|gemini|qwen|llama",
+    model_pairs: &[("button[aria-haspopup='menu'][data-testid*='model' i], button[aria-label*='model' i], [data-testid='model-selector-dropdown']", "[role='menuitem'], [role='option'], [data-testid*='model-option' i]")],
 };
 
 #[async_trait(?Send)]
 impl ChatProvider for ClaudeAdapter {
     fn name(&self) -> &str { "claude" }
     fn aliases(&self) -> &[String] { &self.cfg.models }
+    fn model_pairs(&self) -> &[(&str, &str)] { SELECTORS.model_pairs }
+
+    async fn select_model(&self, page: &Page, model: &str) -> Result<()> {
+        common::select_model(page, SELECTORS.model_pairs, model, &self.cfg.models).await
+    }
     fn strip_citations(&self) -> bool { false }
 
     async fn discover_models(&self, page: &mut Page) -> Result<Vec<String>> {
@@ -38,4 +44,5 @@ impl ChatProvider for ClaudeAdapter {
     }
 
     fn selectors(&self) -> AdapterSelectors { SELECTORS.adapter_selectors() }
+    fn selector_set(&self) -> &common::SelectorSet { &SELECTORS }
 }

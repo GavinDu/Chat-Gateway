@@ -65,6 +65,16 @@ impl UnifiedMemory {
         entry.tab_id = Some(tab_id);
     }
 
+    /// True when the conversation already has stored turns. Used only
+    /// to scope model selection (Go's new-conversation-only rule):
+    /// selection runs only when there is NO prior history. This is a
+    /// memory lookup, not a tab map — there is deliberately no
+    /// per-conversation tab reuse in this restoration (Rust v1: fresh
+    /// page per attempt, tab_id unread).
+    pub fn has_history(&self, cid: &str) -> bool {
+        self.conversations.get(cid).map(|c| !c.messages.is_empty()).unwrap_or(false)
+    }
+
     pub fn get_tab(&self, cid: &str) -> Option<String> {
         self.conversations.get(cid).and_then(|c| c.tab_id.clone())
     }

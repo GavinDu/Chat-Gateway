@@ -96,6 +96,16 @@ pub trait ChatProvider: Send + Sync {
     /// Discover models without sending a message - reads the picker.
     async fn discover_models(&self, page: &mut Page) -> Result<Vec<String>>;
 
+    /// Model-picker trigger→option pairs (Go's modelSelectors data).
+    /// Default: none — selection no-ops, which is Rust v1 behavior.
+    fn model_pairs(&self) -> &[(&str, &str)] { &[] }
+
+    /// Select a model in the provider UI before typing. Default: no-op
+    /// (Rust v1 behavior — no selection). Providers with pair data
+    /// delegate to common::select_model; failure fails the attempt so
+    /// the router can try the next provider.
+    async fn select_model(&self, _page: &Page, _model: &str) -> Result<()> { Ok(()) }
+
     /// Wait for the input, type the prompt, click send.
     async fn send_prompt(&self, page: &Page, prompt: &str) -> Result<()>;
 
@@ -108,6 +118,10 @@ pub trait ChatProvider: Send + Sync {
     }
 
     fn selectors(&self) -> AdapterSelectors;
+
+    /// Full selector data (for --test-adapter probing over the whole
+    /// fallback arrays, not just the primaries).
+    fn selector_set(&self) -> &common::SelectorSet;
 }
 
 fn adapter_for(provider: Provider, cfg: ProviderConfig) -> Arc<dyn ChatProvider> {
@@ -147,6 +161,14 @@ pub async fn run_send(
     timeout: Duration,
     chunks: mpsc::Sender<Result<ProviderChunk>>,
 ) {
+    // Baseline snapshot (Go concept, Rust form): capture the response
+    // text BEFORE sending, so pre-existing text on a reused warm page
+    // is never emitted as new. Rust v1 had no baseline (last_len
+    // started at 0); this fixes that stale-text bug while keeping
+    // Rust v1's 350ms / stability / indicator completion.
+    let baseline = adapter.response_text(&page).filter(|t| !t.is_empty());
+    let mut baseline = baseline;
+
     if let Err(e) = adapter.send_prompt(&page, &prompt).await {
         let _ = chunks.send(Err(e)).await;
         return;
@@ -169,6 +191,33 @@ pub async fn run_send(
 
         if let Some(txt) = adapter.response_text(&page) {
             if txt.is_empty() {
+                continue;
+            }
+            // Still at baseline: the provider has not produced new
+            // text yet. Do not emit, do not count stability.
+            if let Some(b) = &baseline {
+                if txt == *b {
+                    continue;
+                }
+                // First differing text: emit only the growth past the
+                // baseline (suffix if it extends the baseline, else
+                // the full text), then drop the baseline.
+                let mut delta = if let Some(rest) = txt.strip_prefix(b.as_str()) {
+                    rest.to_string()
+                } else {
+                    txt.clone()
+                };
+                if let Some(re) = &citation_re {
+                    delta = re.replace_all(&delta, "").to_string();
+                }
+                last_len = txt.len();
+                stable_ticks = 0;
+                baseline = None;
+                if !delta.is_empty()
+                    && chunks.send(Ok(ProviderChunk { content: delta, done: false })).await.is_err()
+                {
+                    return; // receiver gone
+                }
                 continue;
             }
             if txt.len() > last_len {

@@ -13,16 +13,22 @@ pub struct QwenAdapter {
 pub const SELECTORS: SelectorSet = SelectorSet {
     url: "https://chat.qwen.ai",
     picker: &["button:has-text(\"Qwen\")", "div.model-selector", "[data-testid=\"model-picker\"]"],
-    input: &["textarea[placeholder*=\"Ask\"]", "textarea[placeholder*=\"提问\"]", "textarea[data-testid=\"chat-input\"]", "div[contenteditable=\"true\"][role=\"textbox\"]", "textarea"],
+    input: &["textarea[placeholder*=\"Ask\"]", "textarea[data-testid=\"chat-input\"]", "div[contenteditable=\"true\"][role=\"textbox\"]"],
     send: &["button[type=\"submit\"]", "button[aria-label*=\"Send\"]", "button[data-testid=\"send-button\"]"],
-    response: &["div.chat-message:last-child div.markdown-body", "div[data-role=\"assistant\"]", "div.message-content", "div.markdown-body"],
+    response: &["div.markdown-body", "div[data-role=\"assistant\"]", "div.message-content"],
     model_keywords: "qwen|sonar|grok|mistral|claude|gpt|gemini|qwen|llama",
+    model_pairs: &[("[role='button'][aria-label*='select model' i], button[aria-label*='model' i], .model-selector button, [data-model-selector]", "[role='listbox'] [role='option'], [role='menuitem'], [role='option'], [data-model-option], .ant-select-item"), (".ant-select-selector", ".ant-select-item, [role='option']")],
 };
 
 #[async_trait(?Send)]
 impl ChatProvider for QwenAdapter {
     fn name(&self) -> &str { "qwen" }
     fn aliases(&self) -> &[String] { &self.cfg.models }
+    fn model_pairs(&self) -> &[(&str, &str)] { SELECTORS.model_pairs }
+
+    async fn select_model(&self, page: &Page, model: &str) -> Result<()> {
+        common::select_model(page, SELECTORS.model_pairs, model, &self.cfg.models).await
+    }
     fn strip_citations(&self) -> bool { false }
 
     async fn discover_models(&self, page: &mut Page) -> Result<Vec<String>> {
@@ -38,16 +44,6 @@ impl ChatProvider for QwenAdapter {
     }
 
     fn selectors(&self) -> AdapterSelectors { SELECTORS.adapter_selectors() }
+    fn selector_set(&self) -> &common::SelectorSet { &SELECTORS }
 }
 
-impl QwenAdapter {
-    /// v2 helper kept: the first visible input element's selector from
-    /// the i18n-robust fallback list, if one is on the page.
-    pub fn find_input(page: &Page) -> Option<&'static str> {
-        SELECTORS.input.iter().copied().find(|sel| {
-            page.query_selector(sel)
-                .map(|el| el.attribute("hidden").is_none())
-                .unwrap_or(false)
-        })
-    }
-}
