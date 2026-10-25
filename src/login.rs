@@ -230,8 +230,8 @@ mod navigation_validation_tests {
 
     #[test]
     fn accepts_public_https_sso_host() {
-        assert!(validate_navigation_url("https://accounts.example.com/oauth/callback").is_ok());
-        assert!(validate_navigation_url("https://login.example.com:443/").is_ok());
+        assert!(validate_navigation_url("https://accounts.example.org/oauth/callback").is_ok());
+        assert!(validate_navigation_url("https://login.example.org:443/").is_ok());
     }
 
     #[test]
