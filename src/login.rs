@@ -268,15 +268,15 @@ impl LoginAction {
     pub fn validate(&self) -> anyhow::Result<()> {
         match self {
             LoginAction::Click { selector } | LoginAction::Enter { selector } => {
-                if selector.is_empty() || selector.len() > 500 {
-                    anyhow::bail!("selector must be 1..=500 chars");
+                if selector.trim().is_empty() || selector.len() > 500 {
+                    anyhow::bail!("selector must be 1..=500 non-blank chars");
                 }
                 Ok(())
             }
             LoginAction::ClickButton { .. } => Ok(()),
             LoginAction::Type { selector, text } => {
-                if selector.is_empty() || selector.len() > 500 {
-                    anyhow::bail!("selector must be 1..=500 chars");
+                if selector.trim().is_empty() || selector.len() > 500 {
+                    anyhow::bail!("selector must be 1..=500 non-blank chars");
                 }
                 if text.is_empty() || text.len() > 4096 {
                     anyhow::bail!("text must be 1..=4096 bytes");
@@ -285,6 +285,32 @@ impl LoginAction {
             }
             LoginAction::Navigate { url } => validate_navigation_url(url),
         }
+    }
+}
+
+#[cfg(test)]
+mod login_action_validation_tests {
+    use super::*;
+
+    #[test]
+    fn rejects_empty_and_whitespace_only_selectors_for_click_enter_and_type() {
+        for selector in ["", " ", "\t", "\n", " \t "] {
+            assert!(LoginAction::Click { selector: selector.to_string() }.validate().is_err());
+            assert!(LoginAction::Enter { selector: selector.to_string() }.validate().is_err());
+            assert!(
+                LoginAction::Type {
+                    selector: selector.to_string(),
+                    text: "value".to_string(),
+                }
+                .validate()
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_non_blank_selectors_with_surrounding_whitespace() {
+        assert!(LoginAction::Click { selector: " #submit ".to_string() }.validate().is_ok());
     }
 }
 
