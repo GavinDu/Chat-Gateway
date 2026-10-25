@@ -14,13 +14,14 @@ use axum::{
 };
 use clap::Parser;
 use sha2::{Digest, Sha256};
-use std::{collections::HashMap, net::SocketAddr, sync::Arc};
+use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Instant};
 use tokio::sync::RwLock;
 
 mod browser;
 mod config;
 mod login;
 mod memory;
+mod metrics;
 mod providers;
 mod router;
 mod session;
@@ -349,6 +350,7 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/health", get(health))
         .route("/ready", get(readiness))
+        .route("/metrics", get(metrics_endpoint))
         .route("/v1/models", get(models))
         .route("/v1/chat/completions", post(chat_completions))
         .route(
@@ -953,6 +955,13 @@ fn readiness_response(enabled: usize) -> Response {
         .into_response()
 }
 
+async fn metrics_endpoint() -> impl IntoResponse {
+    (
+        [(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
+        metrics::render(),
+    )
+}
+
 async fn readiness(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     readiness_response(state.cfg.providers.iter().filter(|p| p.enabled).count())
 }
@@ -962,8 +971,21 @@ async fn readiness(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 /// without trusting arbitrary client-supplied IDs.
 async fn attach_request_id(req: Request<Body>, next: Next) -> Response {
     let request_id = uuid::Uuid::new_v4().to_string();
+    let method = req.method().to_string();
+    let route = metrics::normalize_route(req.uri().path());
     let is_chat_completion = req.uri().path() == "/v1/chat/completions";
+    let started = Instant::now();
     let mut response = next.run(req).await;
+    let duration_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+    metrics::record_http_request(&route, response.status().as_u16(), duration_ms);
+    tracing::info!(
+        request_id = %request_id,
+        method = %method,
+        route = %route,
+        status = response.status().as_u16(),
+        duration_ms,
+        "http request completed"
+    );
 
     // Axum's DefaultBodyLimit rejection happens before the Bytes handler is
     // invoked. Normalize that framework rejection to the same stable error
@@ -1028,7 +1050,8 @@ fn authorize_api_request(
         )
     }).ok_or(AuthFailure::MissingOrInvalid)?;
 
-    let admin_route = path.starts_with("/login")
+    let admin_route = path == "/metrics"
+        || path.starts_with("/login")
         || path.starts_with("/relay/")
         || (*method == axum::http::Method::DELETE
             && path.starts_with("/v1/conversations/"));
