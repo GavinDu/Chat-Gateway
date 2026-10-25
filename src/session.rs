@@ -336,7 +336,9 @@ mod cookie_scope_tests {
         assert!(!restored_cookie_fields_safe(&cookie(
             "session", "value", "/safe\r\nInjected: yes"
         )));
-    }    #[test]
+    }
+
+    #[test]
     fn provider_cookie_allowlist_rejects_cross_provider_and_suffix_spoofing() {
         assert!(!cookie_domain_allowed("chatgpt", "claude.ai"));
         assert!(!cookie_domain_allowed("chatgpt", "notopenai.com"));
