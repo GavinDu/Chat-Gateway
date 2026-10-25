@@ -622,7 +622,21 @@ async fn readiness(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 /// without trusting arbitrary client-supplied IDs.
 async fn attach_request_id(req: Request<Body>, next: Next) -> Response {
     let request_id = uuid::Uuid::new_v4().to_string();
+    let is_chat_completion = req.uri().path() == "/v1/chat/completions";
     let mut response = next.run(req).await;
+
+    // Axum's DefaultBodyLimit rejection happens before the Bytes handler is
+    // invoked. Normalize that framework rejection to the same stable error
+    // envelope used by the chat endpoint, while preserving HTTP 413.
+    if is_chat_completion && response.status() == StatusCode::PAYLOAD_TOO_LARGE {
+        response = api_error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "invalid_request_error",
+            "request_too_large",
+            "request body exceeds the 1 MiB limit",
+        );
+    }
+
     if let Ok(value) = axum::http::HeaderValue::from_str(&request_id) {
         response.headers_mut().insert("x-request-id", value);
     }
