@@ -31,7 +31,9 @@ pub struct UnifiedMemory {
 }
 
 impl UnifiedMemory {
+    // Test-only helper is shared across test targets; some targets do not call it.
     #[cfg(test)]
+    #[allow(dead_code)]
     pub(crate) fn open_path_for_test(
         path: &std::path::Path,
         legacy: Option<&std::path::Path>,
@@ -41,15 +43,6 @@ impl UnifiedMemory {
             max_tokens,
             connection: Mutex::new(sqlite::open(Some(path), legacy)?),
         })
-    }
-
-    pub fn new(max_tokens: usize) -> Self {
-        Self {
-            max_tokens,
-            connection: Mutex::new(
-                sqlite::open(None, None).expect("initializing in-memory conversation database"),
-            ),
-        }
     }
 
     /// Existing JSON path overrides keep working: `custom.json` imports into
@@ -72,7 +65,9 @@ impl UnifiedMemory {
         })
     }
 
+    // Test-only helper is used by corruption-path tests in separate targets.
     #[cfg(test)]
+    #[allow(dead_code)]
     pub(crate) fn drop_conversations_table_for_test(&self) -> anyhow::Result<()> {
         self.lock()?.execute_batch("DROP TABLE conversations")?;
         Ok(())
@@ -171,18 +166,6 @@ impl UnifiedMemory {
         let deleted = tx.execute("DELETE FROM conversations WHERE id = ?1", [conversation_id])?;
         tx.commit()?;
         Ok(deleted != 0)
-    }
-
-    pub fn has_history(&self, cid: &str) -> anyhow::Result<bool> {
-        Ok(self
-            .conversation(cid)?
-            .is_some_and(|conversation| !conversation.messages.is_empty()))
-    }
-
-    pub fn get_tab(&self, cid: &str) -> anyhow::Result<Option<String>> {
-        Ok(self
-            .conversation(cid)?
-            .and_then(|conversation| conversation.tab_id))
     }
 
     pub fn get_provider(&self, cid: &str) -> anyhow::Result<Option<String>> {
