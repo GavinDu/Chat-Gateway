@@ -111,6 +111,7 @@ impl AppConfig {
             "qwen", "metaai", "claude", "chatgpt", "gemini", "grok", "mistral", "perplexity",
         ];
         let mut seen = std::collections::HashSet::new();
+        let mut enabled_count = 0usize;
         for provider in &self.providers {
             if !PROVIDERS.contains(&provider.name.as_str()) {
                 anyhow::bail!("unknown provider '{}'", provider.name);
@@ -118,12 +119,18 @@ impl AppConfig {
             if !seen.insert(provider.name.as_str()) {
                 anyhow::bail!("duplicate provider '{}'", provider.name);
             }
+            if provider.enabled {
+                enabled_count += 1;
+            }
             if provider.timeout_seconds == 0 {
                 anyhow::bail!("provider '{}' timeout_seconds must be greater than zero", provider.name);
             }
             if provider.session_pool_size == 0 {
                 anyhow::bail!("provider '{}' session_pool_size must be greater than zero", provider.name);
             }
+        }
+        if enabled_count == 0 {
+            anyhow::bail!("at least one provider must be enabled");
         }
         Ok(())
     }
@@ -162,6 +169,15 @@ mod tests {
 
         let duplicate = config("providers:\n  - name: chatgpt\n  - name: chatgpt\n");
         assert!(duplicate.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_configuration_with_no_enabled_provider() {
+        let none = config("providers:\n  - name: chatgpt\n    enabled: false\n");
+        assert!(none.validate().is_err());
+
+        let empty = config("providers: []\n");
+        assert!(empty.validate().is_err());
     }
 
     #[test]
