@@ -1066,11 +1066,16 @@ async fn chat_completions(
         );
     }
 
+    let candidate_count = candidates.len();
+    let mut busy_count = 0usize;
     let mut last_err: Option<String> = None;
     for provider_name in candidates {
         let permit = match state.pool.acquire(&provider_name).await {
             Ok(p) => p,
             Err(e) => {
+                if e.downcast_ref::<browser::pool::ProviderBusyError>().is_some() {
+                    busy_count += 1;
+                }
                 last_err = Some(e.to_string());
                 continue;
             }
@@ -1231,6 +1236,20 @@ async fn chat_completions(
         let mut resp_headers = axum::http::HeaderMap::new();
         resp_headers.insert("X-Conversation-Id", new_conv_id.parse().unwrap());
         return (resp_headers, Json(body)).into_response();
+    }
+
+    if candidate_count > 0 && busy_count == candidate_count {
+        let mut response = api_error(
+            axum::http::StatusCode::TOO_MANY_REQUESTS,
+            "server_error",
+            "provider_busy",
+            "all eligible providers are busy; retry shortly",
+        );
+        response.headers_mut().insert(
+            axum::http::header::RETRY_AFTER,
+            axum::http::HeaderValue::from_static("1"),
+        );
+        return response;
     }
 
     api_error(
