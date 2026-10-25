@@ -247,7 +247,7 @@ fn is_loopback_authority(authority: &str) -> bool {
             return false;
         }
     }
-    matches!(host.to_ascii_lowercase().as_str(), "localhost" | "127.0.0.1" | "[::1]")
+    matches!(host.to_ascii_lowercase().as_str(), "localhost" | "127.0.0.1" | "[::1" | "[::1]")
 }
 
 async fn login_page() -> impl IntoResponse {
