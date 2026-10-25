@@ -1146,3 +1146,134 @@ mod conversation_id_tests {
         assert!(!valid_conversation_id(&"a".repeat(129)));
     }
 }
+
+
+#[cfg(test)]
+mod http_api_regression_tests {
+    use super::*;
+    use axum::{body::{to_bytes, Body}, routing::post};
+    use std::{path::PathBuf, sync::Arc};
+    use tower::ServiceExt;
+
+    async fn validation_endpoint(body: axum::body::Bytes) -> Response {
+        match parse_and_validate_chat_req(&body) {
+            Ok(request) => Json(serde_json::json!({
+                "accepted": true,
+                "model": request.model,
+            })).into_response(),
+            Err(response) => response,
+        }
+    }
+
+    async fn delete_endpoint(
+        State(memory): State<Arc<UnifiedMemory>>,
+        Path(conversation_id): Path<String>,
+    ) -> Response {
+        delete_conversation_response(&memory, &conversation_id)
+    }
+
+    fn test_db(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "chat-gateway-http-{label}-{}.sqlite3",
+            uuid::Uuid::new_v4()
+        ))
+    }
+
+    fn app(memory: Arc<UnifiedMemory>) -> Router {
+        Router::new()
+            .route("/ready", get(|| async { readiness_response(1) }))
+            .route("/v1/chat/completions", post(validation_endpoint))
+            .route("/v1/conversations/:conversation_id", delete(delete_endpoint))
+            .with_state(memory)
+            .layer(middleware::from_fn(attach_request_id))
+    }
+
+    async fn json_body(response: Response) -> serde_json::Value {
+        let bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn http_readiness_and_request_id_contract() {
+        let memory = Arc::new(UnifiedMemory::new(8000));
+        let response = app(memory)
+            .oneshot(Request::builder().uri("/ready").body(Body::empty()).unwrap())
+            .await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let request_id = response.headers().get("x-request-id").unwrap().to_str().unwrap();
+        assert!(uuid::Uuid::parse_str(request_id).is_ok());
+        assert_eq!(json_body(response).await["status"], "ready");
+
+        let response = app(Arc::new(UnifiedMemory::new(8000)))
+            .oneshot(Request::builder().uri("/ready").header("host", "127.0.0.1:8080").body(Body::empty()).unwrap())
+            .await.unwrap();
+        assert!(response.headers().contains_key("x-request-id"));
+    }
+
+    #[tokio::test]
+    async fn http_chat_validation_returns_structured_openai_errors_without_provider_access() {
+        let memory = Arc::new(UnifiedMemory::new(8000));
+        let response = app(memory.clone()).oneshot(
+            Request::builder().method("POST").uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"model":"auto","messages":[{"role":"user","content":"hi"}],"tools":[]}"#)).unwrap()
+        ).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(response.headers().contains_key("x-request-id"));
+        let body = json_body(response).await;
+        assert_eq!(body["error"]["type"], "invalid_request_error");
+        assert_eq!(body["error"]["code"], "unsupported_parameter");
+
+        let response = app(memory).oneshot(
+            Request::builder().method("POST").uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from("{ malformed")).unwrap()
+        ).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(json_body(response).await["error"]["code"], "invalid_json");
+    }
+
+    #[tokio::test]
+    async fn http_delete_is_durable_across_database_restart() {
+        let path = test_db("delete");
+        let memory = Arc::new(UnifiedMemory::open_path_for_test(&path, None, 8000).unwrap());
+        memory.store_turn(
+            "conversation_http_1".into(),
+            vec![ChatMessage { role: "user".into(), content: "private prompt".into() }],
+            ChatMessage { role: "assistant".into(), content: "private answer".into() },
+            "chatgpt".into(),
+            "tab-http".into(),
+        ).unwrap();
+        let response = app(memory.clone()).oneshot(
+            Request::builder().method("DELETE").uri("/v1/conversations/conversation_http_1")
+                .body(Body::empty()).unwrap()
+        ).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert!(response.headers().contains_key("x-request-id"));
+        drop(memory);
+
+        let restored = UnifiedMemory::open_path_for_test(&path, None, 8000).unwrap();
+        assert!(!restored.has_history("conversation_http_1"));
+        drop(restored);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-journal"));
+    }
+
+    #[tokio::test]
+    async fn http_delete_rejects_invalid_and_missing_conversation_ids() {
+        let memory = Arc::new(UnifiedMemory::new(8000));
+        let response = app(memory.clone()).oneshot(
+            Request::builder().method("DELETE").uri("/v1/conversations/short")
+                .body(Body::empty()).unwrap()
+        ).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(json_body(response).await["error"]["code"], "invalid_conversation_id");
+
+        let response = app(memory).oneshot(
+            Request::builder().method("DELETE").uri("/v1/conversations/conversation_missing")
+                .body(Body::empty()).unwrap()
+        ).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(json_body(response).await["error"]["code"], "conversation_not_found");
+    }
+}
