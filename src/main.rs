@@ -1147,7 +1147,6 @@ mod conversation_id_tests {
     }
 }
 
-
 #[cfg(test)]
 mod http_api_regression_tests {
     use super::*;
