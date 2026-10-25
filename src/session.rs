@@ -261,7 +261,9 @@ pub fn restore_cookies(browser: &Browser, file: &SessionFile, provider: &str) ->
 fn local_storage_restore_script(key: &str, value: &str) -> Option<String> {
     let key = serde_json::to_string(key).ok()?;
     let value = serde_json::to_string(value).ok()?;
-    Some(format!("try{{localStorage.setItem({key}, {value})}}catch(e){{}}"))
+    Some(format!(
+        "try{{localStorage.setItem({key}, {value})}}catch(e){{}}"
+    ))
 }
 
 pub fn restore_local_storage(page: &Page, file: &SessionFile) {
