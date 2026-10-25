@@ -22,7 +22,7 @@ async-trait = "0.1"
 regex = "1"
 uuid = { version = "1", features = ["v4"] }
 clap = { version = "4", features = ["derive"] }
-obscura-core = { git = "https://github.com/h4ckf0r0day/obscura", package = "obscura", features = ["render", "stealth"] }
+obscura-core = { git = "https://github.com/h4ckf0r0day/obscura", rev = "09790944a405ba81a7df27bc2577c6b0db283900", package = "obscura", features = ["render", "stealth"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
