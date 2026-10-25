@@ -198,41 +198,51 @@ pub async fn save_session(browser: &Browser, page: &Page, provider: &str) -> Res
     };
     ensure_private_session_dir(Path::new("sessions")).await?;
     let destination = session_path(provider)?;
-    let temp_path = format!(
-        "{}.tmp-{}-{}",
-        destination,
-        std::process::id(),
-        uuid::Uuid::new_v4()
-    );
     let serialized = serde_json::to_vec_pretty(&file)?;
 
     // Session files contain reusable authentication cookies. Create them
     // privately on Unix and replace the destination atomically.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut output = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&temp_path)?;
-        output.write_all(&serialized)?;
-        output.sync_all()?;
-    }
-    #[cfg(not(unix))]
-    {
-        tokio::fs::write(&temp_path, &serialized).await?;
-    }
-
-    if let Err(error) = tokio::fs::rename(&temp_path, &destination).await {
-        let _ = tokio::fs::remove_file(&temp_path).await;
-        return Err(error.into());
-    }
+    write_session_file_atomically(Path::new(&destination), &serialized)?;
     tracing::info!(
         provider = provider,
         cookies = file.cookies.len(),
         "session saved"
     );
+    Ok(())
+}
+
+fn write_session_file_atomically(destination: &Path, serialized: &[u8]) -> Result<()> {
+    let temp_path = format!(
+        "{}.tmp-{}-{}",
+        destination.display(),
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    );
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    // Do not remove the path if create_new fails: in that case the temp path
+    // may belong to another process and was not created by this invocation.
+    let mut output = options.open(&temp_path)?;
+    let write_result = (|| -> Result<()> {
+        output.write_all(serialized)?;
+        output.sync_all()?;
+        Ok(())
+    })();
+    drop(output);
+
+    if let Err(error) = write_result {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(error);
+    }
+    if let Err(error) = std::fs::rename(&temp_path, destination) {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(error.into());
+    }
     Ok(())
 }
 
@@ -538,5 +548,54 @@ mod session_directory_permissions_tests {
         );
 
         std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod atomic_session_write_tests {
+    use super::*;
+
+    fn temp_dir() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "chat-gateway-atomic-session-write-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn writes_session_atomically_and_uses_private_unix_file_mode() {
+        let dir = temp_dir();
+        let destination = dir.join("chatgpt.json");
+        write_session_file_atomically(&destination, br#"{"session":"new"}"#).unwrap();
+        assert_eq!(
+            std::fs::read(&destination).unwrap(),
+            br#"{"session":"new"}"#
+        );
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&destination)
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn removes_temporary_session_file_when_atomic_replace_fails() {
+        let dir = temp_dir();
+        let destination = dir.join("destination-is-a-directory");
+        std::fs::create_dir(&destination).unwrap();
+        assert!(write_session_file_atomically(&destination, b"secret").is_err());
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }
