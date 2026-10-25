@@ -139,8 +139,8 @@ pub async fn click_send_or_enter(
         }
         tokio::time::sleep(Duration::from_millis(150)).await;
     }
-    // Go proceeds after pressEnter regardless of its outcome.
-    let _ = press_enter(page, input_selector);
+    // Do not report a successful fallback when Enter could not be dispatched.
+    press_enter(page, input_selector)?;
     Ok(false)
 }
 
