@@ -283,7 +283,8 @@ pub fn restore_cookies(browser: &Browser, file: &SessionFile, provider: &str) ->
             continue;
         }
         if !restored_cookie_fields_safe(c) {
-            tracing::warn!(provider, "skipping cookie with invalid persisted fields");
+            failed_writes += 1;
+            tracing::warn!(provider, "provider session cookie has invalid persisted fields");
             continue;
         }
         let mut s = format!("{}={}", c.name, c.value);
