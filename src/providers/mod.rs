@@ -138,6 +138,13 @@ pub trait ChatProvider: Send + Sync {
         common::is_streaming(page)
     }
 
+    /// Best-effort cancellation when the HTTP consumer disconnects.
+    /// Providers with a Stop control use the shared selector; adapters may
+    /// override this method when their UI needs a different action.
+    fn cancel_generation(&self, page: &Page) {
+        let _ = common::click_first(page, &[r#"button[aria-label*="Stop"]"#]);
+    }
+
     fn selectors(&self) -> AdapterSelectors;
 
     /// Full selector data (for --test-adapter probing over the whole
