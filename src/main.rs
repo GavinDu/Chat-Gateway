@@ -56,14 +56,11 @@ struct Cli {
     json: bool,
 }
 
-#[derive(serde::Serialize)]
 fn adapter_report_is_healthy(report: &browser::pool::TestAdapterReport) -> bool {
-    report.errors.is_empty()
-        && report.session_ok
-        && report.input_found
-        && report.response_token
+    report.errors.is_empty() && report.session_ok && report.input_found && report.response_token
 }
 
+#[derive(serde::Serialize)]
 struct AdapterDiagnostic {
     provider: String,
     queue_ms: Option<u128>,
