@@ -12,11 +12,7 @@ pub struct MistralAdapter {
 
 pub const SELECTORS: SelectorSet = SelectorSet {
     url: "https://chat.mistral.ai",
-    picker: &[
-        "button.model-selector",
-        "text:div=Mistral Large",
-        "select",
-    ],
+    picker: &["button.model-selector", "text:div=Mistral Large", "select"],
     input: &[
         "textarea[placeholder*=\"Ask\"]",
         "div[contenteditable=\"true\"]",
