@@ -337,17 +337,17 @@ pub fn restore_cookies(browser: &Browser, file: &SessionFile, provider: &str) ->
 fn local_storage_restore_script(key: &str, value: &str) -> Option<String> {
     let key = serde_json::to_string(key).ok()?;
     let value = serde_json::to_string(value).ok()?;
-    Some(format!(
-        "try{{localStorage.setItem({key}, {value})}}catch(e){{}}"
-    ))
+    Some(format!("localStorage.setItem({key}, {value})"))
 }
 
-pub fn restore_local_storage(page: &Page, file: &SessionFile) {
+pub fn restore_local_storage(page: &Page, file: &SessionFile) -> Result<()> {
     for (k, v) in &file.local_storage {
-        if let Some(script) = local_storage_restore_script(k, v) {
-            let _ = page.evaluate(&script);
-        }
+        let script = local_storage_restore_script(k, v)
+            .ok_or_else(|| anyhow::anyhow!("failed to serialize provider localStorage restore script"))?;
+        page.evaluate(&script)
+            .map_err(|_| anyhow::anyhow!("failed to restore provider localStorage entry"))?;
     }
+    Ok(())
 }
 
 /// Back-compat combined restore for a page already on the provider
@@ -356,7 +356,7 @@ pub fn restore_session(browser: &Browser, page: &Page, provider: &str) -> Result
     match load_session_file(provider)? {
         Some(file) => {
             restore_cookies(browser, &file, provider)?;
-            restore_local_storage(page, &file);
+            restore_local_storage(page, &file)?;
             Ok(true)
         }
         None => Ok(false),
@@ -425,8 +425,9 @@ mod local_storage_script_tests {
 
         assert!(script.contains(&serde_json::to_string(key).unwrap()));
         assert!(script.contains(&serde_json::to_string(value).unwrap()));
-        assert!(script.starts_with("try{localStorage.setItem("));
-        assert!(script.ends_with(")}catch(e){}"));
+        assert!(script.starts_with("localStorage.setItem("));
+        assert!(script.ends_with(")"));
+        assert!(!script.contains("catch"));
     }
 
     #[test]
