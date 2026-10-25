@@ -59,13 +59,34 @@ struct ChatReq {
 /// Validate request semantics separately from JSON decoding so the contract
 /// can be exercised without initializing browser-backed providers.
 fn validate_chat_req(req: &ChatReq) -> Result<(), (&'static str, String)> {
+    const MAX_MESSAGES: usize = 256;
+    const MAX_MESSAGE_BYTES: usize = 128 * 1024;
+    const MAX_TOTAL_CONTENT_BYTES: usize = 512 * 1024;
+
     if req.model.trim().is_empty() {
         return Err(("model_required", "model must not be empty".to_string()));
     }
     if req.messages.is_empty() {
         return Err(("messages_required", "messages must contain at least one message".to_string()));
     }
+    if req.messages.len() > MAX_MESSAGES {
+        return Err(("too_many_messages", format!("messages may contain at most {MAX_MESSAGES} entries")));
+    }
+    let mut total_content_bytes = 0usize;
     for (index, message) in req.messages.iter().enumerate() {
+        if message.content.len() > MAX_MESSAGE_BYTES {
+            return Err((
+                "message_too_large",
+                format!("messages[{index}].content exceeds the {MAX_MESSAGE_BYTES}-byte limit"),
+            ));
+        }
+        total_content_bytes = total_content_bytes.saturating_add(message.content.len());
+        if total_content_bytes > MAX_TOTAL_CONTENT_BYTES {
+            return Err((
+                "request_content_too_large",
+                format!("combined message content exceeds the {MAX_TOTAL_CONTENT_BYTES}-byte limit"),
+            ));
+        }
         if !matches!(message.role.as_str(), "system" | "developer" | "user" | "assistant" | "tool") {
             return Err((
                 "invalid_message_role",
@@ -779,6 +800,37 @@ mod api_contract_tests {
             "temperature": 0.2
         })).unwrap();
         assert_eq!(validate_chat_req(&temperature).unwrap_err().0, "unsupported_parameter");
+    }
+
+    #[test]
+    fn rejects_excessive_message_count_and_content_size() {
+        let too_many: ChatReq = serde_json::from_value(serde_json::json!({
+            "model": "auto",
+            "messages": (0..257).map(|_| serde_json::json!({"role":"user","content":"x"})).collect::<Vec<_>>()
+        })).unwrap();
+        assert_eq!(validate_chat_req(&too_many).unwrap_err().0, "too_many_messages");
+
+        let too_large: ChatReq = serde_json::from_value(serde_json::json!({
+            "model": "auto",
+            "messages": [{"role":"user","content":"x".repeat(128 * 1024 + 1)}]
+        })).unwrap();
+        assert_eq!(validate_chat_req(&too_large).unwrap_err().0, "message_too_large");
+    }
+
+    #[test]
+    fn rejects_total_content_over_limit_even_when_each_message_is_valid() {
+        let req: ChatReq = serde_json::from_value(serde_json::json!({
+            "model": "auto",
+            "messages": [
+                {"role":"user","content":"x".repeat(100 * 1024)},
+                {"role":"assistant","content":"y".repeat(100 * 1024)},
+                {"role":"user","content":"z".repeat(100 * 1024)},
+                {"role":"assistant","content":"w".repeat(100 * 1024)},
+                {"role":"user","content":"q".repeat(100 * 1024)},
+                {"role":"assistant","content":"r".repeat(100 * 1024)}
+            ]
+        })).unwrap();
+        assert_eq!(validate_chat_req(&req).unwrap_err().0, "request_content_too_large");
     }
 
     #[test]
