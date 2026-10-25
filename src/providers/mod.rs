@@ -149,6 +149,55 @@ pub fn build_registry(cfg: &AppConfig) -> HashMap<Provider, Arc<dyn ChatProvider
     map
 }
 
+
+#[derive(Debug, PartialEq, Eq)]
+enum DeltaObservation {
+    NoText,
+    WaitingForNewResponse,
+    InvalidBoundary,
+    Delta(String),
+    Stable,
+}
+
+/// Tracks byte offsets without ever slicing a UTF-8 string at an invalid
+/// boundary. Baseline text is from the previous answer on a reused page.
+struct ResponseDeltaTracker {
+    baseline: Option<String>,
+    last_len: usize,
+}
+
+impl ResponseDeltaTracker {
+    fn new(baseline: Option<String>) -> Self {
+        Self { baseline, last_len: 0 }
+    }
+
+    fn observe(&mut self, text: &str) -> DeltaObservation {
+        if text.is_empty() {
+            return DeltaObservation::NoText;
+        }
+        if let Some(baseline) = &self.baseline {
+            if text == baseline {
+                return DeltaObservation::WaitingForNewResponse;
+            }
+            let delta = text.strip_prefix(baseline.as_str())
+                .map(str::to_string)
+                .unwrap_or_else(|| text.to_string());
+            self.last_len = text.len();
+            self.baseline = None;
+            return DeltaObservation::Delta(delta);
+        }
+        if text.len() > self.last_len {
+            if !text.is_char_boundary(self.last_len) {
+                return DeltaObservation::InvalidBoundary;
+            }
+            let delta = text[self.last_len..].to_string();
+            self.last_len = text.len();
+            return DeltaObservation::Delta(delta);
+        }
+        DeltaObservation::Stable
+    }
+}
+
 /// Generic send + stream-poll loop (v1 semantics, shared by all
 /// adapters): type the prompt via the adapter, then poll the response
 /// container every 350ms, yield text deltas, finish after ~2s without
@@ -177,7 +226,7 @@ pub async fn run_send(
     let citation_re = adapter
         .strip_citations()
         .then(|| regex::Regex::new(r"\[\d+\]").expect("static regex"));
-    let mut last_len = 0usize;
+    let mut tracker = ResponseDeltaTracker::new(baseline.take());
     let mut stable_ticks = 0u32;
     let start = Instant::now();
 
@@ -196,55 +245,23 @@ pub async fn run_send(
         tokio::time::sleep(Duration::from_millis(350)).await;
 
         if let Some(txt) = adapter.response_text(&page) {
-            if txt.is_empty() {
-                continue;
-            }
-            // Still at baseline: the provider has not produced new
-            // text yet. Do not emit, do not count stability.
-            if let Some(b) = &baseline {
-                if txt == *b {
+            match tracker.observe(&txt) {
+                DeltaObservation::NoText
+                | DeltaObservation::WaitingForNewResponse
+                | DeltaObservation::InvalidBoundary => continue,
+                DeltaObservation::Delta(mut delta) => {
+                    if let Some(re) = &citation_re {
+                        delta = re.replace_all(&delta, "").to_string();
+                    }
+                    stable_ticks = 0;
+                    if !delta.is_empty()
+                        && chunks.send(Ok(ProviderChunk { content: delta, done: false })).await.is_err()
+                    {
+                        return; // receiver gone
+                    }
                     continue;
                 }
-                // First differing text: emit only the growth past the
-                // baseline (suffix if it extends the baseline, else
-                // the full text), then drop the baseline.
-                let mut delta = if let Some(rest) = txt.strip_prefix(b.as_str()) {
-                    rest.to_string()
-                } else {
-                    txt.clone()
-                };
-                if let Some(re) = &citation_re {
-                    delta = re.replace_all(&delta, "").to_string();
-                }
-                last_len = txt.len();
-                stable_ticks = 0;
-                baseline = None;
-                if !delta.is_empty()
-                    && chunks.send(Ok(ProviderChunk { content: delta, done: false })).await.is_err()
-                {
-                    return; // receiver gone
-                }
-                continue;
-            }
-            if txt.len() > last_len {
-                // v1 sliced bytes directly; guard the char boundary so a
-                // multi-byte char mid-growth cannot panic the poll loop.
-                if !txt.is_char_boundary(last_len) {
-                    continue;
-                }
-                let mut delta = txt[last_len..].to_string();
-                if let Some(re) = &citation_re {
-                    delta = re.replace_all(&delta, "").to_string();
-                }
-                last_len = txt.len();
-                stable_ticks = 0;
-                if !delta.is_empty()
-                    && chunks.send(Ok(ProviderChunk { content: delta, done: false })).await.is_err()
-                {
-                    return; // receiver gone
-                }
-            } else {
-                stable_ticks += 1;
+                DeltaObservation::Stable => stable_ticks += 1,
             }
 
             // Completion: no growth for ~2s + no streaming indicator
@@ -257,3 +274,38 @@ pub async fn run_send(
 
     tracing::info!(provider = adapter.name(), total_ms = %start.elapsed().as_millis(), "generation complete");
 }
+
+#[cfg(test)]
+mod response_delta_tracker_tests {
+    use super::*;
+
+    #[test]
+    fn waits_when_reused_page_still_shows_old_answer() {
+        let mut tracker = ResponseDeltaTracker::new(Some("same answer".to_string()));
+        assert_eq!(tracker.observe("same answer"), DeltaObservation::WaitingForNewResponse);
+        assert_eq!(tracker.observe("same answer"), DeltaObservation::WaitingForNewResponse);
+        assert_eq!(tracker.observe("same answer plus new text"), DeltaObservation::Delta(" plus new text".to_string()));
+    }
+
+    #[test]
+    fn emits_unicode_growth_without_splitting_utf8() {
+        let mut tracker = ResponseDeltaTracker::new(None);
+        assert_eq!(tracker.observe("你好"), DeltaObservation::Delta("你好".to_string()));
+        assert_eq!(tracker.observe("你好世界"), DeltaObservation::Delta("世界".to_string()));
+        assert_eq!(tracker.observe("你好世界"), DeltaObservation::Stable);
+    }
+
+    #[test]
+    fn emits_full_text_when_provider_replaces_instead_of_appending() {
+        let mut tracker = ResponseDeltaTracker::new(Some("old answer".to_string()));
+        assert_eq!(tracker.observe("new answer"), DeltaObservation::Delta("new answer".to_string()));
+    }
+
+    #[test]
+    fn ignores_empty_text_until_response_appears() {
+        let mut tracker = ResponseDeltaTracker::new(None);
+        assert_eq!(tracker.observe(""), DeltaObservation::NoText);
+        assert_eq!(tracker.observe("answer"), DeltaObservation::Delta("answer".to_string()));
+    }
+}
+
