@@ -1,5 +1,6 @@
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
+use std::{collections::HashMap, path::{Path, PathBuf}, sync::Mutex};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
@@ -7,7 +8,7 @@ pub struct ChatMessage {
     pub content: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Conversation {
     pub id: String,
     pub messages: Vec<ChatMessage>,
@@ -20,11 +21,43 @@ pub struct Conversation {
 pub struct UnifiedMemory {
     max_tokens: usize,
     conversations: DashMap<String, Conversation>,
+    persistence_path: Option<PathBuf>,
+    persistence_lock: Mutex<()>,
 }
 
 impl UnifiedMemory {
     pub fn new(max_tokens: usize) -> Self {
-        Self { max_tokens, conversations: DashMap::new() }
+        Self::with_optional_persistence(max_tokens, None)
+    }
+
+    /// Restore durable conversation memory from CHAT_GATEWAY_MEMORY_PATH,
+    /// defaulting to data/conversations.json. Snapshot writes use an atomic
+    /// rename so a process interruption cannot leave a partially written file.
+    pub fn from_env(max_tokens: usize) -> Self {
+        let path = std::env::var_os("CHAT_GATEWAY_MEMORY_PATH")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("data/conversations.json"));
+        Self::with_optional_persistence(max_tokens, Some(path))
+    }
+
+    fn with_optional_persistence(max_tokens: usize, persistence_path: Option<PathBuf>) -> Self {
+        let conversations = DashMap::new();
+        if let Some(path) = persistence_path.as_deref() {
+            match load_conversations(path) {
+                Ok(loaded) => {
+                    for (id, conversation) in loaded {
+                        conversations.insert(id, conversation);
+                    }
+                }
+                Err(error) => tracing::warn!(path = %path.display(), "could not restore conversation memory: {error}"),
+            }
+        }
+        Self {
+            max_tokens,
+            conversations,
+            persistence_path,
+            persistence_lock: Mutex::new(()),
+        }
     }
 
     /// Build prompt with sliding window, unified across providers.
@@ -57,6 +90,13 @@ impl UnifiedMemory {
     }
 
     pub fn store_turn(&self, conversation_id: String, user_msgs: Vec<ChatMessage>, assistant_msg: ChatMessage, provider: String, tab_id: String) {
+        let _guard = match self.persistence_lock.lock() {
+            Ok(guard) => guard,
+            Err(error) => {
+                tracing::error!("conversation persistence lock poisoned: {error}");
+                return;
+            }
+        };
         let mut entry = self.conversations.entry(conversation_id.clone()).or_insert_with(|| Conversation {
             id: conversation_id.clone(),
             messages: vec![],
@@ -71,6 +111,30 @@ impl UnifiedMemory {
         entry.messages.push(assistant_msg);
         entry.provider = Some(provider);
         entry.tab_id = Some(tab_id);
+        drop(entry);
+        if let Err(error) = self.persist_snapshot() {
+            tracing::error!("could not persist conversation memory: {error}");
+        }
+    }
+
+    fn persist_snapshot(&self) -> anyhow::Result<()> {
+        let Some(path) = self.persistence_path.as_deref() else {
+            return Ok(());
+        };
+        let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+        std::fs::create_dir_all(parent)?;
+        let snapshot: HashMap<String, Conversation> = self.conversations
+            .iter()
+            .map(|entry| (entry.key().clone(), entry.value().clone()))
+            .collect();
+        let bytes = serde_json::to_vec(&snapshot)?;
+        let temp_path = path.with_extension(format!("tmp-{}", std::process::id()));
+        std::fs::write(&temp_path, bytes)?;
+        if let Err(error) = std::fs::rename(&temp_path, path) {
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(error.into());
+        }
+        Ok(())
     }
 
     /// True when the conversation already has stored turns. Used only
@@ -92,6 +156,14 @@ impl UnifiedMemory {
     }
 }
 
+
+fn load_conversations(path: &Path) -> anyhow::Result<HashMap<String, Conversation>> {
+    if !path.exists() {
+        return Ok(HashMap::new());
+    }
+    let bytes = std::fs::read(path)?;
+    Ok(serde_json::from_slice(&bytes)?)
+}
 
 /// Remove a transcript prefix that is already represented in the stored
 /// conversation. Supports both full-history requests and requests that
@@ -136,6 +208,31 @@ mod tests {
 
     fn m(role: &str, content: &str) -> ChatMessage {
         ChatMessage { role: role.to_string(), content: content.to_string() }
+    }
+
+    #[test]
+    fn persistent_memory_restores_conversation_after_restart() {
+        let path = std::env::temp_dir().join(format!("chat-gateway-memory-{}.json", uuid::Uuid::new_v4()));
+        {
+            let memory = UnifiedMemory::with_optional_persistence(8000, Some(path.clone()));
+            memory.store_turn(
+                "conversation-1".to_string(),
+                vec![m("user", "hello")],
+                m("assistant", "hi"),
+                "chatgpt".to_string(),
+                "tab-1".to_string(),
+            );
+            assert!(path.exists());
+        }
+        {
+            let memory = UnifiedMemory::with_optional_persistence(8000, Some(path.clone()));
+            assert!(memory.has_history("conversation-1"));
+            assert_eq!(memory.get_provider("conversation-1").as_deref(), Some("chatgpt"));
+            let (prompt, _) = memory.build_context(Some("conversation-1"), &[m("user", "next")]);
+            assert!(prompt.contains("assistant: hi"));
+            assert!(prompt.contains("user: next"));
+        }
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
