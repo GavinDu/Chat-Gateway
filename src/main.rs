@@ -401,6 +401,7 @@ async fn chat_completions(
     }
 
     let candidates = state.router.resolve(&req.model, conversation_id.as_deref(), &state.memory);
+    let provider_model = req.model.split_once('/').map(|(_, model)| model).unwrap_or(req.model.as_str()).to_string();
     tracing::info!(model = %req.model, ?candidates, conv = ?conversation_id, "routing request");
     if candidates.is_empty() {
         return api_error(
@@ -422,7 +423,7 @@ async fn chat_completions(
         };
         tracing::debug!(provider = %provider_name, queue_ms = permit.queue_ms, "acquired provider slot");
 
-        let mut rx = match state.pool.send_stream(&provider_name, prompt.clone(), req.model.clone(), has_history).await {
+        let mut rx = match state.pool.send_stream(&provider_name, prompt.clone(), provider_model.clone(), has_history).await {
             Ok(rx) => rx,
             Err(e) => {
                 last_err = Some(e.to_string());
