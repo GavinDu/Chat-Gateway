@@ -97,9 +97,7 @@ pub async fn wait_for_selector(
 ) -> anyhow::Result<()> {
     let start = std::time::Instant::now();
     while start.elapsed().as_millis() < timeout_ms as u128 {
-        if selectors
-            .iter()
-            .any(|sel| page.query_selector(sel).is_some())
+        if selectors.iter().any(|sel| element_exists(page, sel))
         {
             return Ok(());
         }
@@ -448,4 +446,27 @@ pub async fn send_prompt(page: &Page, set: &SelectorSet, prompt: &str) -> anyhow
         .unwrap_or(set.input[0]);
     click_send_or_enter(page, set.send, input_sel, 5000).await?;
     Ok(())
+}
+
+
+#[cfg(test)]
+mod text_selector_tests {
+    use super::text_selector_parts;
+
+    #[test]
+    fn parses_internal_text_selector() {
+        assert_eq!(text_selector_parts("text:button=Stop"), Some(("button", "Stop")));
+        assert_eq!(
+            text_selector_parts("text:div=Mistral Large"),
+            Some(("div", "Mistral Large"))
+        );
+    }
+
+    #[test]
+    fn rejects_empty_or_css_like_text_selector() {
+        assert_eq!(text_selector_parts("text:button="), None);
+        assert_eq!(text_selector_parts("text:=Stop"), None);
+        assert_eq!(text_selector_parts("button:has-text(\\"Stop\\")"), None);
+        assert_eq!(text_selector_parts("button[aria-label*=Stop]"), None);
+    }
 }
