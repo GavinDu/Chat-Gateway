@@ -22,7 +22,10 @@ fn data() -> &'static Mutex<MetricData> {
 pub fn record_http_request(route: &str, status: u16, duration_ms: u64) {
     if let Ok(mut data) = data().lock() {
         *data.requests.entry((route.to_owned(), status)).or_default() += 1;
-        data.handler_ms.entry(route.to_owned()).or_default().push(duration_ms);
+        data.handler_ms
+            .entry(route.to_owned())
+            .or_default()
+            .push(duration_ms);
     }
 }
 
@@ -35,24 +38,48 @@ pub fn record_provider_timings(
     total_ms: u64,
 ) {
     if let Ok(mut data) = data().lock() {
-        data.queue_ms.entry(provider.to_owned()).or_default().push(queue_ms);
+        data.queue_ms
+            .entry(provider.to_owned())
+            .or_default()
+            .push(queue_ms);
         if let Some(ttft) = ttft_ms {
-            data.ttft_ms.entry(provider.to_owned()).or_default().push(ttft);
+            data.ttft_ms
+                .entry(provider.to_owned())
+                .or_default()
+                .push(ttft);
         }
-        data.provider_work_ms.entry(provider.to_owned()).or_default().push(provider_work_ms);
-        data.chat_total_ms.entry(provider.to_owned()).or_default().push(total_ms);
-        data.gateway_overhead_ms.entry(provider.to_owned()).or_default()
+        data.provider_work_ms
+            .entry(provider.to_owned())
+            .or_default()
+            .push(provider_work_ms);
+        data.chat_total_ms
+            .entry(provider.to_owned())
+            .or_default()
+            .push(total_ms);
+        data.gateway_overhead_ms
+            .entry(provider.to_owned())
+            .or_default()
             .push(total_ms.saturating_sub(queue_ms.saturating_add(provider_work_ms)));
-        *data.provider_outcomes.entry((provider.to_owned(), outcome.to_owned())).or_default() += 1;
+        *data
+            .provider_outcomes
+            .entry((provider.to_owned(), outcome.to_owned()))
+            .or_default() += 1;
     }
 }
 
-
 fn escape_label(value: &str) -> String {
-    value.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n")
+    value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
 }
 
-fn emit_histogram(out: &mut String, metric: &str, label: &str, observations: &BTreeMap<String, Vec<u64>>) {
+fn emit_histogram(
+    out: &mut String,
+    metric: &str,
+    label: &str,
+    observations: &BTreeMap<String, Vec<u64>>,
+) {
     const BOUNDS: &[u64] = &[5, 10, 25, 50, 100, 250, 500, 1_000, 2_500, 5_000, 10_000];
     use std::fmt::Write as _;
     let _ = writeln!(out, "# TYPE {metric} histogram");
@@ -60,32 +87,85 @@ fn emit_histogram(out: &mut String, metric: &str, label: &str, observations: &BT
         let escaped = escape_label(key);
         for bound in BOUNDS {
             let count = values.iter().filter(|value| **value <= *bound).count();
-            let _ = writeln!(out, "{metric}_bucket{{{label}=\"{escaped}\",le=\"{bound}\"}} {count}");
+            let _ = writeln!(
+                out,
+                "{metric}_bucket{{{label}=\\"{escaped}\\",le=\\"{bound}\\"}} {count}"
+            );
         }
-        let _ = writeln!(out, "{metric}_bucket{{{label}=\"{escaped}\",le=\"+Inf\"}} {}", values.len());
+        let _ = writeln!(
+            out,
+            "{metric}_bucket{{{label}=\\"{escaped}\\",le=\\"+Inf\\"}} {}",
+            values.len()
+        );
         let sum: u128 = values.iter().map(|value| *value as u128).sum();
-        let _ = writeln!(out, "{metric}_sum{{{label}=\"{escaped}\"}} {sum}");
-        let _ = writeln!(out, "{metric}_count{{{label}=\"{escaped}\"}} {}", values.len());
+        let _ = writeln!(out, "{metric}_sum{{{label}=\\"{escaped}\\"}} {sum}");
+        let _ = writeln!(
+            out,
+            "{metric}_count{{{label}=\\"{escaped}\\"}} {}",
+            values.len()
+        );
     }
 }
 
 pub fn render() -> String {
     use std::fmt::Write as _;
-    let Ok(data) = data().lock() else { return String::new() };
+    let Ok(data) = data().lock() else {
+        return String::new();
+    };
     let mut out = String::new();
     let _ = writeln!(out, "# TYPE gateway_http_requests_total counter");
     for ((route, status), count) in &data.requests {
-        let _ = writeln!(out, "gateway_http_requests_total{{route=\"{}\",status=\"{}\"}} {count}", escape_label(route), status);
+        let _ = writeln!(
+            out,
+            "gateway_http_requests_total{{route=\\"{}\\",status=\\"{}\\"}} {count}",
+            escape_label(route),
+            status
+        );
     }
-    emit_histogram(&mut out, "gateway_http_handler_duration_ms", "route", &data.handler_ms);
-    emit_histogram(&mut out, "gateway_provider_queue_duration_ms", "provider", &data.queue_ms);
-    emit_histogram(&mut out, "gateway_provider_ttft_ms", "provider", &data.ttft_ms);
-    emit_histogram(&mut out, "gateway_provider_work_duration_ms", "provider", &data.provider_work_ms);
-    emit_histogram(&mut out, "gateway_chat_total_duration_ms", "provider", &data.chat_total_ms);
-    emit_histogram(&mut out, "gateway_overhead_ms", "provider", &data.gateway_overhead_ms);
+    emit_histogram(
+        &mut out,
+        "gateway_http_handler_duration_ms",
+        "route",
+        &data.handler_ms,
+    );
+    emit_histogram(
+        &mut out,
+        "gateway_provider_queue_duration_ms",
+        "provider",
+        &data.queue_ms,
+    );
+    emit_histogram(
+        &mut out,
+        "gateway_provider_ttft_ms",
+        "provider",
+        &data.ttft_ms,
+    );
+    emit_histogram(
+        &mut out,
+        "gateway_provider_work_duration_ms",
+        "provider",
+        &data.provider_work_ms,
+    );
+    emit_histogram(
+        &mut out,
+        "gateway_chat_total_duration_ms",
+        "provider",
+        &data.chat_total_ms,
+    );
+    emit_histogram(
+        &mut out,
+        "gateway_overhead_ms",
+        "provider",
+        &data.gateway_overhead_ms,
+    );
     let _ = writeln!(out, "# TYPE gateway_provider_requests_total counter");
     for ((provider, outcome), count) in &data.provider_outcomes {
-        let _ = writeln!(out, "gateway_provider_requests_total{{provider=\"{}\",outcome=\"{}\"}} {count}", escape_label(provider), escape_label(outcome));
+        let _ = writeln!(
+            out,
+            "gateway_provider_requests_total{{provider=\\"{}\\",outcome=\\"{}\\"}} {count}",
+            escape_label(provider),
+            escape_label(outcome)
+        );
     }
     out
 }
@@ -108,7 +188,10 @@ mod tests {
 
     #[test]
     fn dynamic_paths_are_normalized_before_becoming_metric_labels() {
-        assert_eq!(normalize_route("/v1/conversations/private-id"), "/v1/conversations/:id");
+        assert_eq!(
+            normalize_route("/v1/conversations/private-id"),
+            "/v1/conversations/:id"
+        );
         assert_eq!(normalize_route("/login/api/chatgpt/act"), "/login/api/*");
         assert_eq!(normalize_route("/health"), "/health");
     }
