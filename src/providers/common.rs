@@ -35,8 +35,7 @@ impl SelectorSet {
 
 /// Streaming indicator shared by all providers. Keep this valid CSS only;
 /// text matching is handled by the explicit text-selector helper below.
-pub const STREAMING_SELECTOR: &str =
-    r#"[data-is-streaming="true"], button[aria-label*="Stop"]"#;
+pub const STREAMING_SELECTOR: &str = r#"[data-is-streaming="true"], button[aria-label*="Stop"]"#;
 
 /// Parse the internal `text:TAG=NEEDLE` selector syntax. This is deliberately
 /// not CSS: Obscura's selector engine must never receive Playwright-only pseudos.
@@ -97,8 +96,7 @@ pub async fn wait_for_selector(
 ) -> anyhow::Result<()> {
     let start = std::time::Instant::now();
     while start.elapsed().as_millis() < timeout_ms as u128 {
-        if selectors.iter().any(|sel| element_exists(page, sel))
-        {
+        if selectors.iter().any(|sel| element_exists(page, sel)) {
             return Ok(());
         }
         tokio::time::sleep(Duration::from_millis(150)).await;
@@ -448,14 +446,16 @@ pub async fn send_prompt(page: &Page, set: &SelectorSet, prompt: &str) -> anyhow
     Ok(())
 }
 
-
 #[cfg(test)]
 mod text_selector_tests {
     use super::text_selector_parts;
 
     #[test]
     fn parses_internal_text_selector() {
-        assert_eq!(text_selector_parts("text:button=Stop"), Some(("button", "Stop")));
+        assert_eq!(
+            text_selector_parts("text:button=Stop"),
+            Some(("button", "Stop"))
+        );
         assert_eq!(
             text_selector_parts("text:div=Mistral Large"),
             Some(("div", "Mistral Large"))
