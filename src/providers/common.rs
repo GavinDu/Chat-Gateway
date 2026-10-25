@@ -171,13 +171,14 @@ pub async fn click_send_or_enter(
     timeout_ms: u64,
 ) -> anyhow::Result<bool> {
     let start = std::time::Instant::now();
+    let input_js = serde_json::to_string(input_selector)?;
     while start.elapsed().as_millis() < timeout_ms as u128 {
-        if let Some(sel) = send_selectors
-            .iter()
-            .find(|s| page.query_selector(s).is_some())
-        {
-            if let Some(el) = page.query_selector(sel) {
-                el.click()?;
+        for selector in send_selectors {
+            let selector_js = serde_json::to_string(selector)?;
+            let js = format!(
+                "(() => {{ const input = document.querySelector({input_js}); if (!input) return false; let root = input; for (let depth = 0; root && depth < 6; depth++, root = root.parentElement) {{ const button = root.querySelector({selector_js}); if (button && !button.disabled && button.getAttribute('aria-disabled') !== 'true') {{ button.click(); return true; }} if (root.tagName === 'FORM') break; }} return false; }})()"
+            );
+            if page.evaluate(&js).as_bool() == Some(true) {
                 return Ok(true);
             }
         }
