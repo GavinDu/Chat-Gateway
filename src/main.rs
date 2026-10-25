@@ -511,6 +511,40 @@ fn validate_login_action_for_provider(
 }
 
 #[cfg(test)]
+mod memory_context_http_contract_tests {
+    use super::*;
+
+    #[test]
+    fn context_storage_failure_returns_structured_error_before_provider_dispatch() {
+        let dir = std::env::temp_dir().join(format!("gateway-http-memory-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let db = dir.join("memory.sqlite3");
+        let memory = UnifiedMemory::open_path_for_test(&db, None, 8000).unwrap();
+        memory.store_turn(
+            "conversation-123".into(),
+            vec![ChatMessage { role: "user".into(), content: "first".into() }],
+            ChatMessage { role: "assistant".into(), content: "answer".into() },
+            "chatgpt".into(),
+            "tab-123".into(),
+        ).unwrap();
+
+        rusqlite::Connection::open(&db).unwrap()
+            .execute_batch("DROP TABLE messages;").unwrap();
+
+        let result = prepare_chat_context(
+            &memory,
+            Some("conversation-123"),
+            &[ChatMessage { role: "user".into(), content: "follow-up".into() }],
+        );
+        let response = result.expect_err("memory read errors must stop provider dispatch");
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let bytes = axum::body::to_bytes(response.into_body(), 4096).now_or_never();
+        assert!(bytes.is_some());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[cfg(test)]
 mod request_body_error_tests {
     use super::*;
 
@@ -770,6 +804,39 @@ fn oversized_chat_body_error() -> Response {
     )
 }
 
+/// Prepare all conversation history before any provider request is dispatched.
+/// A storage failure is a hard error, never an empty-history fallback.
+fn prepare_chat_context(
+    memory: &UnifiedMemory,
+    conversation_id: Option<&str>,
+    messages: &[ChatMessage],
+) -> Result<(String, Vec<ChatMessage>, bool), Response> {
+    let (prompt, windowed) = memory
+        .build_context(conversation_id, messages)
+        .map_err(|error| {
+            tracing::error!(conversation_id = ?conversation_id, "conversation context read failed: {error}");
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                "memory_read_failed",
+                "conversation history could not be read safely",
+            )
+        })?;
+    let has_history = match conversation_id {
+        Some(cid) => memory.has_history(cid).map_err(|error| {
+            tracing::error!(conversation_id = %cid, "conversation history check failed: {error}");
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                "memory_read_failed",
+                "conversation history could not be read safely",
+            )
+        })?,
+        None => false,
+    };
+    Ok((prompt, windowed, has_history))
+}
+
 async fn chat_completions(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -818,36 +885,11 @@ async fn chat_completions(
     // Assemble the provider prompt from the unified memory window. The
     // canonical transcript must be passed to the provider so follow-up
     // turns and provider switches retain conversation context.
-    let (context_prompt, windowed) = match state
-        .memory
-        .build_context(conversation_id.as_deref(), &req.messages)
-    {
-        Ok(context) => context,
-        Err(error) => {
-            tracing::error!(conversation_id = ?conversation_id, "conversation context read failed: {error}");
-            return api_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "server_error",
-                "memory_read_failed",
-                "conversation history could not be read safely",
-            );
-        }
-    };
-    let has_history = match conversation_id.as_deref() {
-        Some(cid) => match state.memory.has_history(cid) {
-            Ok(value) => value,
-            Err(error) => {
-                tracing::error!(conversation_id = %cid, "conversation history check failed: {error}");
-                return api_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "server_error",
-                    "memory_read_failed",
-                    "conversation history could not be read safely",
-                );
-            }
-        },
-        None => false,
-    };
+    let (context_prompt, windowed, has_history) =
+        match prepare_chat_context(&state.memory, conversation_id.as_deref(), &req.messages) {
+            Ok(context) => context,
+            Err(response) => return response,
+        };
     let prompt = context_prompt;
     if prompt.is_empty() {
         return api_error(
