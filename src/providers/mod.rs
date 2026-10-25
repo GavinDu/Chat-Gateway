@@ -183,7 +183,13 @@ pub async fn run_send(
 
     loop {
         if start.elapsed() > timeout {
-            let _ = chunks.send(Ok(ProviderChunk { content: String::new(), done: true })).await;
+            // A timeout is not a successful completion. Propagate a typed
+            // provider error so the API won't commit a partial/empty turn.
+            let _ = chunks.send(Err(anyhow::anyhow!(
+                "provider '{}' did not complete within {:?}",
+                adapter.name(),
+                timeout
+            ))).await;
             break;
         }
 
