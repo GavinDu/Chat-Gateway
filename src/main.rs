@@ -41,6 +41,7 @@ struct AppState {
 }
 
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ChatReq {
     model: String,
     messages: Vec<ChatMessage>,
@@ -48,6 +49,16 @@ struct ChatReq {
     stream: bool,
     #[serde(default)]
     temperature: Option<f32>,
+}
+
+fn api_error(status: axum::http::StatusCode, error_type: &str, code: &str, message: impl Into<String>) -> axum::response::Response {
+    (status, Json(serde_json::json!({
+        "error": {
+            "message": message.into(),
+            "type": error_type,
+            "code": code,
+        }
+    }))).into_response()
 }
 
 #[tokio::main]
@@ -341,10 +352,39 @@ async fn chat_completions(
     let req: ChatReq = match serde_json::from_slice::<ChatReq>(&body) {
         Ok(r) => r,
         Err(e) => {
-            return (axum::http::StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({ "error": { "message": e.to_string() } }))).into_response();
+            return api_error(
+                axum::http::StatusCode::BAD_REQUEST,
+                "invalid_request_error",
+                "invalid_json",
+                format!("invalid or unsupported request field: {e}"),
+            );
         }
     };
+
+    if req.model.trim().is_empty() {
+        return api_error(axum::http::StatusCode::BAD_REQUEST, "invalid_request_error", "model_required", "model must not be empty");
+    }
+    if req.messages.is_empty() {
+        return api_error(axum::http::StatusCode::BAD_REQUEST, "invalid_request_error", "messages_required", "messages must contain at least one message");
+    }
+    for (index, message) in req.messages.iter().enumerate() {
+        if !matches!(message.role.as_str(), "system" | "developer" | "user" | "assistant" | "tool") {
+            return api_error(
+                axum::http::StatusCode::BAD_REQUEST,
+                "invalid_request_error",
+                "invalid_message_role",
+                format!("messages[{index}].role '{}' is not supported", message.role),
+            );
+        }
+    }
+    if req.temperature.is_some() {
+        return api_error(
+            axum::http::StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            "unsupported_parameter",
+            "temperature is not supported by the current browser-backed adapters",
+        );
+    }
 
     let conversation_id = headers.get("X-Conversation-Id")
         .and_then(|v| v.to_str().ok()).map(|s| s.to_string());
@@ -361,7 +401,16 @@ async fn chat_completions(
     }
 
     let candidates = state.router.resolve(&req.model, conversation_id.as_deref(), &state.memory);
+    let provider_model = req.model.split_once('/').map(|(_, model)| model).unwrap_or(req.model.as_str()).to_string();
     tracing::info!(model = %req.model, ?candidates, conv = ?conversation_id, "routing request");
+    if candidates.is_empty() {
+        return api_error(
+            axum::http::StatusCode::NOT_FOUND,
+            "invalid_request_error",
+            "model_not_found",
+            format!("model '{}' is not configured for an enabled provider; use /v1/models or model='auto'", req.model),
+        );
+    }
 
     let mut last_err: Option<String> = None;
     for provider_name in candidates {
@@ -374,7 +423,7 @@ async fn chat_completions(
         };
         tracing::debug!(provider = %provider_name, queue_ms = permit.queue_ms, "acquired provider slot");
 
-        let mut rx = match state.pool.send_stream(&provider_name, prompt.clone(), req.model.clone(), has_history).await {
+        let mut rx = match state.pool.send_stream(&provider_name, prompt.clone(), provider_model.clone(), has_history).await {
             Ok(rx) => rx,
             Err(e) => {
                 last_err = Some(e.to_string());
@@ -392,9 +441,9 @@ async fn chat_completions(
             let model_c = req.model.clone();
             let conv_stream = new_conv_id.clone();
             let sse_stream = async_stream::stream! {
-                // Hold the provider slot for the stream's duration
                 let _permit = permit;
                 let mut full = String::new();
+                let mut stream_error: Option<String> = None;
                 while let Some(item) = rx.recv().await {
                     match item {
                         Ok(c) => {
@@ -410,18 +459,35 @@ async fn chat_completions(
                             yield Ok::<_, anyhow::Error>(Event::default().data(data.to_string()));
                         }
                         Err(e) => {
-                            tracing::error!("stream err: {e}");
+                            tracing::warn!(provider = %provider_c, "provider stream failed: {e}");
+                            stream_error = Some("provider stream failed; partial response was not committed".to_string());
                             break;
                         }
                     }
                 }
-                state_c.memory.store_turn(
-                    conv_stream.clone(),
-                    windowed_c.clone(),
-                    ChatMessage { role: "assistant".to_string(), content: full.clone() },
-                    provider_c.clone(),
-                    format!("tab-{}", &conv_stream[..8]),
-                );
+
+                if let Some(message) = stream_error {
+                    let error = serde_json::json!({
+                        "error": { "message": message, "type": "provider_error", "code": "stream_failed" }
+                    });
+                    yield Ok(Event::default().data(error.to_string()));
+                } else {
+                    state_c.memory.store_turn(
+                        conv_stream.clone(),
+                        windowed_c.clone(),
+                        ChatMessage { role: "assistant".to_string(), content: full.clone() },
+                        provider_c.clone(),
+                        format!("tab-{}", &conv_stream[..8]),
+                    );
+                    let finish = serde_json::json!({
+                        "id": format!("chatcmpl-{}", &conv_stream[..8]),
+                        "object": "chat.completion.chunk",
+                        "created": chrono::Utc::now().timestamp(),
+                        "model": model_c,
+                        "choices": [{ "delta": {}, "index": 0, "finish_reason": "stop" }],
+                    });
+                    yield Ok(Event::default().data(finish.to_string()));
+                }
                 yield Ok(Event::default().data("[DONE]"));
             };
             let mut resp_headers = axum::http::HeaderMap::new();
@@ -430,8 +496,8 @@ async fn chat_completions(
             return (resp_headers, Sse::new(sse_stream)).into_response();
         }
 
-        // Non-streaming: drain the channel; a failure before any content
-        // falls through to the next candidate provider.
+        // Non-streaming: retry another provider only if no response bytes were
+        // emitted. A partial response is an error, never a successful turn.
         let mut full = String::new();
         let mut failed: Option<String> = None;
         while let Some(item) = rx.recv().await {
@@ -448,10 +514,17 @@ async fn chat_completions(
         }
         if let Some(e) = failed {
             if full.is_empty() {
-                tracing::warn!(provider = %provider_name, "provider failed: {e}");
+                tracing::warn!(provider = %provider_name, "provider failed before output: {e}");
                 last_err = Some(e);
                 continue;
             }
+            tracing::warn!(provider = %provider_name, "provider failed after partial output");
+            return api_error(
+                axum::http::StatusCode::BAD_GATEWAY,
+                "provider_error",
+                "partial_response",
+                "provider failed after emitting a partial response; the turn was not committed",
+            );
         }
 
         state.memory.store_turn(
