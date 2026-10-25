@@ -385,11 +385,16 @@ fn browser_thread(
                     let Some(provider) = Provider::from_name(&pcfg.name) else { continue };
                     match browser.new_page().await {
                         Ok(mut page) => {
-                            let session_file = session::load_session_file(&pcfg.name)
-                                .ok().flatten();
+                            let session_file = match session::load_session_file(&pcfg.name) {
+                                Ok(file) => file,
+                                Err(e) => {
+                                    tracing::warn!(provider = %pcfg.name, "session file could not be loaded; continuing without restored session: {e}");
+                                    None
+                                }
+                            };
                             if let Some(file) = &session_file {
                                 if let Err(e) = session::restore_cookies(&browser, file) {
-                                    tracing::warn!(provider = %pcfg.name, "cookie restore failed: {e}");
+                                    tracing::warn!(provider = %pcfg.name, "cookie restore failed; provider may require login: {e}");
                                 }
                             }
                             if let Err(e) = page.goto(provider.login_url()).await {
@@ -486,8 +491,17 @@ fn browser_thread(
                                         return;
                                     }
                                 };
-                                if let Ok(Some(file)) = session::load_session_file(provider.name()) {
-                                    let _ = session::restore_cookies(&browser, &file);
+                                let session_file = match session::load_session_file(provider.name()) {
+                                    Ok(file) => file,
+                                    Err(error) => {
+                                        report.errors.push(format!("session file load failed: {error}"));
+                                        None
+                                    }
+                                };
+                                if let Some(file) = session_file {
+                                    if let Err(error) = session::restore_cookies(&browser, &file) {
+                                        report.errors.push(format!("session cookie restore failed: {error}"));
+                                    }
                                     if page.goto(provider.login_url()).await.is_err() {
                                         report.errors.push("page navigation failed".to_string());
                                         finish(report);
