@@ -255,7 +255,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Security default: the gateway exposes browser/session control routes and must not listen on public interfaces by default.
     // Remote access should be added only with explicit authentication and TLS.
-    let addr = SocketAddr::from(([127, 0, 0, 1], cfg.server.port));
+    let addr = server_bind_addr(cfg.server.port);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     println!("Chat Gateway v2 Obscura Native listening on {}", addr);
     axum::serve(listener, app).await?;
@@ -284,6 +284,12 @@ async fn refresh_models(state: &Arc<AppState>) {
 /// The gateway never presents its own credential form and never stores
 /// credentials — relayed text lives in memory only for the action that
 /// types it, and only cookies/localStorage are persisted on Complete.
+
+/// The login relay can read and persist provider session material. Keep the HTTP
+/// listener loopback-only until an authenticated remote-access mode is designed.
+fn server_bind_addr(port: u16) -> SocketAddr {
+    SocketAddr::from(([127, 0, 0, 1], port))
+}
 
 /// Protect browser-control endpoints against cross-origin requests (CSRF).
 /// Non-browser clients without an Origin header remain usable, while browser
@@ -1695,6 +1701,56 @@ mod login_security_middleware_http_tests {
         assert_eq!(originless.status(), StatusCode::OK);
     }
 
+    #[tokio::test]
+    async fn rejects_missing_host_and_dns_rebinding_even_when_origin_matches() {
+        let missing_host = request("/login/api/status", &[]).await;
+        assert_eq!(missing_host.status(), StatusCode::FORBIDDEN);
+
+        let rebinding = request(
+            "/login/api/status",
+            &[
+                ("host", "attacker.example:8080"),
+                ("origin", "http://attacker.example:8080"),
+            ],
+        )
+        .await;
+        assert_eq!(rebinding.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn protects_every_session_control_action_from_cross_origin_requests() {
+        for (method, path) in [
+            ("POST", "/login/api/openai/start"),
+            ("POST", "/login/api/openai/cancel"),
+            ("POST", "/login/api/openai/complete"),
+            ("GET", "/login/api/openai/view"),
+            ("POST", "/login/api/openai/act"),
+        ] {
+            let response = app()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(path)
+                        .header("host", "127.0.0.1:8080")
+                        .header("origin", "https://attacker.example")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{method} {path}");
+            assert!(
+                response.headers().contains_key("x-request-id"),
+                "{method} {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn server_listener_is_loopback_only_by_default() {
+        assert!(server_bind_addr(8080).ip().is_loopback());
+        assert_eq!(server_bind_addr(8080).port(), 8080);
+    }
     #[tokio::test]
     async fn host_protection_also_applies_to_non_login_routes() {
         let response = request("/health", &[("host", "attacker.example")]).await;
