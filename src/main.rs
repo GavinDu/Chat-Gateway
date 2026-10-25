@@ -490,6 +490,54 @@ struct LoginActReq {
     index: Option<usize>,
 }
 
+
+/// Validate relayed actions at the HTTP boundary, before browser-thread dispatch.
+/// Navigation needs the provider-specific allowlist in addition to the generic
+/// URL safety checks performed by LoginAction::validate().
+fn validate_login_action_for_provider(
+    provider: &str,
+    action: &login::LoginAction,
+) -> anyhow::Result<()> {
+    action.validate()?;
+    if let login::LoginAction::Navigate { url } = action {
+        login::validate_navigation_url_for_provider(provider, url)?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod login_action_validation_tests {
+    use super::*;
+
+    #[test]
+    fn login_action_rejects_unrelated_navigation_before_dispatch() {
+        let action = login::LoginAction::Navigate {
+            url: "https://attacker.example.org/collect".to_owned(),
+        };
+        assert!(validate_login_action_for_provider("chatgpt", &action).is_err());
+    }
+
+    #[test]
+    fn login_action_allows_provider_and_common_sso_destinations() {
+        let provider = login::LoginAction::Navigate {
+            url: "https://chatgpt.com/".to_owned(),
+        };
+        let sso = login::LoginAction::Navigate {
+            url: "https://accounts.google.com/o/oauth2/".to_owned(),
+        };
+        assert!(validate_login_action_for_provider("chatgpt", &provider).is_ok());
+        assert!(validate_login_action_for_provider("chatgpt", &sso).is_ok());
+    }
+
+    #[test]
+    fn login_action_rejects_another_provider_domain() {
+        let action = login::LoginAction::Navigate {
+            url: "https://claude.ai/".to_owned(),
+        };
+        assert!(validate_login_action_for_provider("chatgpt", &action).is_err());
+    }
+}
+
 async fn login_act(
     State(state): State<Arc<AppState>>,
     Path(provider): Path<String>,
@@ -514,7 +562,7 @@ async fn login_act(
         },
         other => return login_err(format!("unknown login action: {other}")),
     };
-    if let Err(error) = action.validate() {
+    if let Err(error) = validate_login_action_for_provider(&provider, &action) {
         return login_err(error.to_string());
     }
     match state.pool.login_act(&provider, action).await {
