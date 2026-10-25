@@ -207,7 +207,10 @@ pub async fn save_session(browser: &Browser, page: &Page, provider: &str) -> Res
 }
 
 fn ensure_cookie_restore_complete(failed_writes: usize) -> Result<()> {
-    ensure_cookie_restore_complete(failed_writes)
+    if failed_writes > 0 {
+        anyhow::bail!("failed to restore {failed_writes} provider session cookie(s)");
+    }
+    Ok(())
 }
 
 #[cfg(test)]
