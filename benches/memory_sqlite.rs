@@ -69,7 +69,7 @@ fn main() -> anyhow::Result<()> {
         for i in 0..ITERATIONS {
             let incoming = [message("user", format!("context prompt {i}"))];
             let start = Instant::now();
-            let (prompt, messages) = memory.build_context(Some("store-bench"), &incoming);
+            let (prompt, messages) = memory.build_context(Some("store-bench"), &incoming).expect("benchmark context read");
             std::hint::black_box((prompt, messages));
             context_samples.push(start.elapsed());
         }
