@@ -4,7 +4,6 @@ mod memory;
 use memory::{ChatMessage, UnifiedMemory};
 use std::{
     env, fs,
-    path::PathBuf,
     time::{Duration, Instant},
 };
 
