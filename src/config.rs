@@ -132,16 +132,12 @@ impl AppConfig {
             "perplexity",
         ];
         let mut seen = std::collections::HashSet::new();
-        let mut enabled_count = 0usize;
         for provider in &self.providers {
             if !PROVIDERS.contains(&provider.name.as_str()) {
                 anyhow::bail!("unknown provider '{}'", provider.name);
             }
             if !seen.insert(provider.name.as_str()) {
                 anyhow::bail!("duplicate provider '{}'", provider.name);
-            }
-            if provider.enabled {
-                enabled_count += 1;
             }
             if provider.timeout_seconds == 0 {
                 anyhow::bail!(
@@ -155,9 +151,6 @@ impl AppConfig {
                     provider.name
                 );
             }
-        }
-        if enabled_count == 0 {
-            anyhow::bail!("at least one provider must be enabled");
         }
         Ok(())
     }
@@ -234,12 +227,12 @@ mod tests {
     }
 
     #[test]
-    fn rejects_configuration_with_no_enabled_provider() {
+    fn permits_a_safe_configuration_with_no_enabled_providers() {
         let none = config("providers:\n  - name: chatgpt\n    enabled: false\n");
-        assert!(none.validate().is_err());
+        assert!(none.validate().is_ok());
 
         let empty = config("providers: []\n");
-        assert!(empty.validate().is_err());
+        assert!(empty.validate().is_ok());
     }
 
     #[test]
