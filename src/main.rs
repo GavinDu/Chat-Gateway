@@ -56,7 +56,11 @@ struct Cli {
     #[arg(long, help = "Emit machine-readable JSON for adapter diagnostics")]
     json: bool,
 
-    #[arg(long, value_name = "NAME", help = "Create a random chat API key, print it once and exit")]
+    #[arg(
+        long,
+        value_name = "NAME",
+        help = "Create a random chat API key, print it once and exit"
+    )]
     create_api_key: Option<String>,
 }
 
@@ -75,8 +79,7 @@ struct AdapterDiagnostic {
     healthy: bool,
 }
 
-#[derive(Clone)]
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct AuthKeyContext {
     provider_allowlist: Option<Vec<String>>,
 }
@@ -198,10 +201,18 @@ async fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
     if let Some(name) = cli.create_api_key.as_deref() {
-        if name.trim().is_empty() || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-') {
+        if name.trim().is_empty()
+            || !name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        {
             anyhow::bail!("key name must contain only ASCII letters, digits, '_' or '-'");
         }
-        let secret = format!("cg_{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple());
+        let secret = format!(
+            "cg_{}{}",
+            uuid::Uuid::new_v4().simple(),
+            uuid::Uuid::new_v4().simple()
+        );
         let hash = hash_api_key(&secret);
         println!("API key secret (shown once; store it securely): {secret}");
         println!("Add this entry under auth.keys in config.yaml:");
@@ -1016,22 +1027,27 @@ fn authorize_api_request(
         return Ok(None);
     }
     let header = authorization.ok_or(AuthFailure::MissingOrInvalid)?;
-    let (scheme, secret) = header.split_once(' ').ok_or(AuthFailure::MissingOrInvalid)?;
+    let (scheme, secret) = header
+        .split_once(' ')
+        .ok_or(AuthFailure::MissingOrInvalid)?;
     if !scheme.eq_ignore_ascii_case("bearer") || secret.is_empty() || secret.contains(' ') {
         return Err(AuthFailure::MissingOrInvalid);
     }
     let digest = hash_api_key(secret);
-    let key = auth.keys.iter().find(|key| {
-        constant_time_eq(
-            key.secret_hash.to_ascii_lowercase().as_bytes(),
-            digest.as_bytes(),
-        )
-    }).ok_or(AuthFailure::MissingOrInvalid)?;
+    let key = auth
+        .keys
+        .iter()
+        .find(|key| {
+            constant_time_eq(
+                key.secret_hash.to_ascii_lowercase().as_bytes(),
+                digest.as_bytes(),
+            )
+        })
+        .ok_or(AuthFailure::MissingOrInvalid)?;
 
     let admin_route = path.starts_with("/login")
         || path.starts_with("/relay/")
-        || (*method == axum::http::Method::DELETE
-            && path.starts_with("/v1/conversations/"));
+        || (*method == axum::http::Method::DELETE && path.starts_with("/v1/conversations/"));
     let required_scope = if admin_route { "admin" } else { "chat" };
     if !key.scopes.iter().any(|scope| scope == required_scope) {
         return Err(AuthFailure::InsufficientScope);
@@ -1046,7 +1062,8 @@ async fn authenticate_api_key(
     mut req: Request<Body>,
     next: Next,
 ) -> Response {
-    let authorization = req.headers()
+    let authorization = req
+        .headers()
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok());
     match authorize_api_request(
@@ -1171,9 +1188,14 @@ async fn models(
     let mut model_list = build_model_list(&state.cfg, &cache);
     if let Some(Extension(context)) = auth_context {
         if let Some(allowed) = context.provider_allowlist {
-            if let Some(models) = model_list.get_mut("data").and_then(serde_json::Value::as_array_mut) {
+            if let Some(models) = model_list
+                .get_mut("data")
+                .and_then(serde_json::Value::as_array_mut)
+            {
                 models.retain(|model| {
-                    model.get("owned_by").and_then(serde_json::Value::as_str)
+                    model
+                        .get("owned_by")
+                        .and_then(serde_json::Value::as_str)
                         .is_some_and(|provider| allowed.iter().any(|item| item == provider))
                 });
             }
@@ -2374,7 +2396,6 @@ mod adapter_diagnostic_tests {
     }
 }
 
-
 #[cfg(test)]
 mod api_key_auth_tests {
     use super::*;
@@ -2393,10 +2414,27 @@ mod api_key_auth_tests {
 
     #[test]
     fn authentication_is_optional_only_when_no_keys_are_configured() {
-        assert!(authorize_api_request(&AuthConfig::default(), None, "/v1/models", &axum::http::Method::GET).is_ok());
-        assert!(authorize_api_request(&AuthConfig::default(), None, "/health", &axum::http::Method::GET).is_ok());
+        assert!(authorize_api_request(
+            &AuthConfig::default(),
+            None,
+            "/v1/models",
+            &axum::http::Method::GET
+        )
+        .is_ok());
+        assert!(authorize_api_request(
+            &AuthConfig::default(),
+            None,
+            "/health",
+            &axum::http::Method::GET
+        )
+        .is_ok());
         assert_eq!(
-            authorize_api_request(&auth(&["chat"]), None, "/v1/models", &axum::http::Method::GET),
+            authorize_api_request(
+                &auth(&["chat"]),
+                None,
+                "/v1/models",
+                &axum::http::Method::GET
+            ),
             Err(AuthFailure::MissingOrInvalid)
         );
     }
@@ -2429,7 +2467,13 @@ mod api_key_auth_tests {
     #[test]
     fn bearer_scheme_is_case_insensitive_but_token_format_is_strict() {
         let config = auth(&["chat"]);
-        assert!(authorize_api_request(&config, Some("bearer test-secret"), "/v1/models", &axum::http::Method::GET).is_ok());
+        assert!(authorize_api_request(
+            &config,
+            Some("bearer test-secret"),
+            "/v1/models",
+            &axum::http::Method::GET
+        )
+        .is_ok());
         assert_eq!(
             authorize_api_request(&config, Some("Bearer test-secret extra"), "/v1/models", &axum::http::Method::GET),
             Err(AuthFailure::MissingOrInvalid)
