@@ -10,6 +10,7 @@ use std::{
 };
 
 const ITERATIONS: usize = 500;
+const SMOKE_ITERATIONS: usize = 10;
 
 fn message(role: &str, content: impl Into<String>) -> ChatMessage {
     ChatMessage {
@@ -42,6 +43,12 @@ fn report(name: &str, mut samples: Vec<Duration>) {
 }
 
 fn main() -> anyhow::Result<()> {
+    let iterations = if env::args().any(|arg| arg == "--smoke") {
+        SMOKE_ITERATIONS
+    } else {
+        ITERATIONS
+    };
+
     // A unique temporary *.json override makes from_env choose a sibling SQLite
     // database and an absent legacy import file. Never touch repository data.
     let root = env::temp_dir().join(format!("chat-gateway-bench-{}", uuid::Uuid::new_v4()));
@@ -52,8 +59,8 @@ fn main() -> anyhow::Result<()> {
 
     let result = (|| -> anyhow::Result<()> {
         let memory = UnifiedMemory::from_env(8192)?;
-        let mut store_samples = Vec::with_capacity(ITERATIONS);
-        for i in 0..ITERATIONS {
+        let mut store_samples = Vec::with_capacity(iterations);
+        for i in 0..iterations {
             let start = Instant::now();
             memory.store_turn(
                 "store-bench".to_owned(),
@@ -66,8 +73,8 @@ fn main() -> anyhow::Result<()> {
         }
         report("sqlite store_turn", store_samples);
 
-        let mut context_samples = Vec::with_capacity(ITERATIONS);
-        for i in 0..ITERATIONS {
+        let mut context_samples = Vec::with_capacity(iterations);
+        for i in 0..iterations {
             let incoming = [message("user", format!("context prompt {i}"))];
             let start = Instant::now();
             let (prompt, messages) = memory
@@ -78,8 +85,8 @@ fn main() -> anyhow::Result<()> {
         }
         report("build_context (500 turns)", context_samples);
 
-        let mut affinity_samples = Vec::with_capacity(ITERATIONS);
-        for _ in 0..ITERATIONS {
+        let mut affinity_samples = Vec::with_capacity(iterations);
+        for _ in 0..iterations {
             let start = Instant::now();
             std::hint::black_box(
                 memory
@@ -91,8 +98,8 @@ fn main() -> anyhow::Result<()> {
         }
         report("provider/tab lookup", affinity_samples);
 
-        let mut delete_samples = Vec::with_capacity(ITERATIONS);
-        for i in 0..ITERATIONS {
+        let mut delete_samples = Vec::with_capacity(iterations);
+        for i in 0..iterations {
             let id = format!("delete-bench-{i}");
             memory.store_turn(
                 id.clone(),
