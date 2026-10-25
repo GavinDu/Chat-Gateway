@@ -285,3 +285,8 @@ latency decisions.
 ## Local security boundary
 
 The HTTP server binds to `127.0.0.1` only. The login relay can control provider pages and capture provider session data, so do not expose this listener through a public interface, reverse proxy, or port-forwarding tunnel. The login API rejects non-loopback `Host` authorities and cross-origin browser requests; these checks are defense in depth, not authentication for remote access. Remote access is not supported unless a future change adds explicit authentication and TLS. Local command-line clients may omit `Origin`; browser-origin requests must match the loopback request authority.
+
+
+### Login relay credential safety
+
+The login relay UI does not expose a text/password field and does not submit typed text to the gateway by default. Use the browser extension/session-linking flow for authentication. The backend also rejects legacy `type` actions unless `CHAT_GATEWAY_LEGACY_LOGIN_RELAY=1` is explicitly set. Enable that compatibility switch only for trusted local development: when enabled, text sent to the relay API is received by the gateway process. Keep the listener loopback-only and never expose it through a reverse proxy or tunnel.
