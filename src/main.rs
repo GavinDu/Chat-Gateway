@@ -737,13 +737,14 @@ fn build_model_list(cfg: &AppConfig, cache: &HashMap<String, Vec<String>>) -> se
 
     for provider in cfg.providers.iter().filter(|provider| provider.enabled) {
         for model in &provider.models {
-            if seen.insert(model.clone()) {
-                data.push(serde_json::json!({
-                    "id": model,
-                    "object": "model",
-                    "owned_by": provider.name
-                }));
-            }
+            // Preserve configured entries as declared; only use their IDs to
+            // suppress duplicates from the discovered-model cache.
+            seen.insert(model.clone());
+            data.push(serde_json::json!({
+                "id": model,
+                "object": "model",
+                "owned_by": provider.name
+            }));
         }
     }
 
