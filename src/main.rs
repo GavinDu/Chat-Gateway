@@ -1994,3 +1994,47 @@ mod login_security_middleware_http_tests {
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 }
+
+
+#[cfg(test)]
+mod loopback_authority_edge_tests {
+    use super::is_loopback_authority;
+
+    #[test]
+    fn accepts_only_valid_loopback_authorities_and_ports() {
+        for authority in [
+            "localhost",
+            "localhost:8080",
+            "127.0.0.1",
+            "127.0.0.1:8080",
+            "[::1]",
+            "[::1]:8080",
+        ] {
+            assert!(
+                is_loopback_authority(authority),
+                "expected loopback authority to be accepted: {authority}"
+            );
+        }
+
+        for authority in [
+            "localhost:",
+            "localhost:0",
+            "localhost:65536",
+            "localhost:not-a-port",
+            "localhost:8080/path",
+            "user@localhost:8080",
+            "localhost\\\\@attacker.example:8080",
+            "[::1",
+            "[::1]junk:8080",
+            "[::1]:0",
+            "[::1]:65536",
+            "127.0.0.2:8080",
+            "localhost.attacker.example:8080",
+        ] {
+            assert!(
+                !is_loopback_authority(authority),
+                "expected unsafe authority to be rejected: {authority}"
+            );
+        }
+    }
+}
