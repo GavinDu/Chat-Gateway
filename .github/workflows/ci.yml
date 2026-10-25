@@ -55,6 +55,12 @@ jobs:
       - name: Run Clippy
         run: cargo clippy --all-targets --locked -- -D warnings
 
+      - name: Audit dependencies, licenses, and sources
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+          arguments: --all-features
+
       # Formatting is a required check now that main has been normalized.
       - name: Check formatting
         run: cargo fmt --all -- --check
