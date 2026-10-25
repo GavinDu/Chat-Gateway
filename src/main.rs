@@ -566,7 +566,7 @@ mod corrupt_message_history_regression_tests {
                 content: "follow-up".into(),
             }],
         ) {
-            Err(_) => conversation_context_read_error(conversation_id),
+            Err(_) => conversation_context_read_error(Some("conversation-123")),
             Ok(_) => panic!("corrupt message history must fail closed"),
         };
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
@@ -1651,12 +1651,7 @@ mod http_api_regression_tests {
                 }))
                 .into_response()
             }
-            Err(_) => api_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "server_error",
-                "memory_read_failed",
-                "conversation history could not be read safely",
-            ),
+            Err(_) => conversation_context_read_error(conversation_id),
         }
     }
 
