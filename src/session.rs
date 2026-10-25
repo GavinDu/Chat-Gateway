@@ -545,7 +545,11 @@ mod atomic_session_write_tests {
         {
             use std::os::unix::fs::PermissionsExt;
             assert_eq!(
-                std::fs::metadata(&destination).unwrap().permissions().mode() & 0o777,
+                std::fs::metadata(&destination)
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
                 0o600
             );
         }
