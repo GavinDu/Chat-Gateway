@@ -1,0 +1,52 @@
+# cargo-deny policy for Chat-Gateway.
+# Keep this list explicit; review any new license/source before widening it.
+
+[graph]
+all-features = true
+targets = []
+
+[advisories]
+version = 2
+# Limit unmaintained checks to dependency reachability and explicitly document
+# known upstream maintenance notices that currently have no compatible upgrade.
+unmaintained = "transitive"
+yanked = "deny"
+ignore = [
+  { id = "RUSTSEC-2025-0057", reason = "fxhash is a transitive dependency of the pinned Obscura stack; track replacement during upstream migration." },
+  { id = "RUSTSEC-2024-0436", reason = "paste is a transitive dependency of the pinned Obscura stack; track replacement during upstream migration." },
+  { id = "RUSTSEC-2026-0206", reason = "rustybuzz is currently pulled by the pinned renderer; review when updating Obscura." },
+  { id = "RUSTSEC-2026-0192", reason = "ttf-parser is currently pulled by the pinned renderer; review when updating Obscura." },
+  { id = "RUSTSEC-2024-0449", reason = "unsafe-libyaml is used by serde_yaml; migration to a maintained YAML implementation is tracked separately." },
+]
+
+[licenses]
+version = 2
+confidence-threshold = 0.93
+allow = [
+  "Apache-2.0",
+  "MIT",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Unicode-3.0",
+  "Unicode-DFS-2016",
+  "Zlib",
+  "CC0-1.0",
+  "MPL-2.0",
+  "OpenSSL",
+  "BSL-1.0",
+  "NCSA",
+  "OFL-1.1",
+  "CDLA-Permissive-2.0",
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = ["https://github.com/h4ckf0r0day/obscura"]
