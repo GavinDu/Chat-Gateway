@@ -1,4 +1,4 @@
-FROM rust:1.89 AS builder
+FROM rust:1.99.1 AS builder
 WORKDIR /app
 
 # Cargo.toml patches these local vendored crates and declares a benchmark target.
