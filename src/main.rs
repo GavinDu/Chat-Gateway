@@ -1234,7 +1234,20 @@ mod http_api_regression_tests {
     use std::{path::PathBuf, sync::Arc};
     use tower::ServiceExt;
 
-    async fn validation_endpoint(body: axum::body::Bytes) -> Response {
+    async fn validation_endpoint(
+        body: Result<axum::body::Bytes, axum::extract::rejection::BytesRejection>,
+    ) -> Response {
+        let body = match body {
+            Ok(body) => body,
+            Err(_) => {
+                return api_error(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "invalid_request_error",
+                    "request_too_large",
+                    "request body exceeds the 1 MiB limit",
+                );
+            }
+        };
         match parse_and_validate_chat_req(&body) {
             Ok(request) => Json(serde_json::json!({
                 "accepted": true,
@@ -1268,6 +1281,7 @@ mod http_api_regression_tests {
                 delete(delete_endpoint),
             )
             .with_state(memory)
+            .layer(DefaultBodyLimit::max(1024 * 1024))
             .layer(middleware::from_fn(attach_request_id))
     }
 
@@ -1346,6 +1360,30 @@ mod http_api_regression_tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         assert_eq!(json_body(response).await["error"]["code"], "invalid_json");
+    }
+
+    #[tokio::test]
+    async fn oversized_chat_body_keeps_structured_error_and_request_id() {
+        let memory = Arc::new(UnifiedMemory::new(8000));
+        let oversized = "x".repeat(1024 * 1024 + 1);
+        let response = app(memory)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(oversized))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert!(response.headers().contains_key("x-request-id"));
+        let body = json_body(response).await;
+        assert_eq!(body["error"]["type"], "invalid_request_error");
+        assert_eq!(body["error"]["code"], "request_too_large");
+        assert_eq!(body["error"]["message"], "request body exceeds the 1 MiB limit");
     }
 
     #[tokio::test]
