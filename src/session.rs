@@ -342,8 +342,9 @@ fn local_storage_restore_script(key: &str, value: &str) -> Option<String> {
 
 pub fn restore_local_storage(page: &Page, file: &SessionFile) -> Result<()> {
     for (k, v) in &file.local_storage {
-        let script = local_storage_restore_script(k, v)
-            .ok_or_else(|| anyhow::anyhow!("failed to serialize provider localStorage restore script"))?;
+        let script = local_storage_restore_script(k, v).ok_or_else(|| {
+            anyhow::anyhow!("failed to serialize provider localStorage restore script")
+        })?;
         page.evaluate(&script)
             .map_err(|_| anyhow::anyhow!("failed to restore provider localStorage entry"))?;
     }
