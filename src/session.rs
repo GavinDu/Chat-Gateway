@@ -206,6 +206,26 @@ pub async fn save_session(browser: &Browser, page: &Page, provider: &str) -> Res
     Ok(())
 }
 
+fn ensure_cookie_restore_complete(failed_writes: usize) -> Result<()> {
+    ensure_cookie_restore_complete(failed_writes)
+}
+
+#[cfg(test)]
+mod cookie_restore_result_tests {
+    use super::*;
+
+    #[test]
+    fn cookie_restore_succeeds_when_all_eligible_cookies_are_written() {
+        assert!(ensure_cookie_restore_complete(0).is_ok());
+    }
+
+    #[test]
+    fn cookie_restore_fails_when_any_store_write_fails() {
+        let error = ensure_cookie_restore_complete(2).unwrap_err();
+        assert!(error.to_string().contains("2 provider session cookie(s)"));
+    }
+}
+
 /// Restore step 1 (BEFORE goto): put the saved cookies into the browser's
 /// cookie store so the first navigation is already authenticated.
 pub fn restore_cookies(browser: &Browser, file: &SessionFile, provider: &str) -> Result<()> {
