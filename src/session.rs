@@ -139,9 +139,16 @@ pub async fn save_session(browser: &Browser, page: &Page, provider: &str) -> Res
 
 /// Restore step 1 (BEFORE goto): put the saved cookies into the browser's
 /// cookie store so the first navigation is already authenticated.
-pub fn restore_cookies(browser: &Browser, file: &SessionFile) -> Result<()> {
+pub fn restore_cookies(browser: &Browser, file: &SessionFile, provider: &str) -> Result<()> {
     let store = browser.cookies();
     for c in &file.cookies {
+        // Session files are local files and may have been edited or created by
+        // an older version. Apply the same provider-domain allowlist at restore
+        // time, not just when saving, to avoid cross-provider cookie injection.
+        if !cookie_domain_allowed(provider, &c.domain) {
+            tracing::warn!(provider, domain = %c.domain, "skipping cookie outside provider domain allowlist");
+            continue;
+        }
         let mut s = format!("{}={}", c.name, c.value);
         if !c.domain.is_empty() {
             s += &format!("; Domain={}", c.domain);
@@ -175,7 +182,7 @@ pub fn restore_local_storage(page: &Page, file: &SessionFile) {
 pub fn restore_session(browser: &Browser, page: &Page, provider: &str) -> Result<bool> {
     match load_session_file(provider)? {
         Some(file) => {
-            restore_cookies(browser, &file)?;
+            restore_cookies(browser, &file, provider)?;
             restore_local_storage(page, &file);
             Ok(true)
         }
@@ -186,6 +193,15 @@ pub fn restore_session(browser: &Browser, page: &Page, provider: &str) -> Result
 #[cfg(test)]
 mod cookie_scope_tests {
     use super::*;
+
+    #[test]
+    fn provider_cookie_allowlist_rejects_cross_provider_and_suffix_spoofing() {
+        assert!(!cookie_domain_allowed("chatgpt", "claude.ai"));
+        assert!(!cookie_domain_allowed("chatgpt", "notopenai.com"));
+        assert!(!cookie_domain_allowed("chatgpt", "openai.com.attacker.example"));
+        assert!(!cookie_domain_allowed("claude", "chatgpt.com"));
+        assert!(!cookie_domain_allowed("unknown", "openai.com"));
+    }
 
     #[test]
     fn persists_only_cookies_from_configured_provider_domain_families() {
