@@ -1018,7 +1018,7 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
     }
     left.iter()
         .zip(right)
-        .fold(0u8, |difference, (a, b)| difference | (a ^ b))
+        .fold(0u8, |difference, (a, b)| difference | (*a ^ *b))
         == 0
 }
 
