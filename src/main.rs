@@ -753,6 +753,19 @@ async fn models(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 /// Conversation IDs are echoed into response IDs and tab affinity. Restrict
 /// them to bounded ASCII so formatting and byte slicing cannot panic on a
 /// malicious multibyte header value.
+fn read_conversation_context(
+    memory: &UnifiedMemory,
+    conversation_id: Option<&str>,
+    messages: &[ChatMessage],
+) -> anyhow::Result<(String, Vec<ChatMessage>, bool)> {
+    let (prompt, windowed) = memory.build_context(conversation_id, messages)?;
+    let has_history = match conversation_id {
+        Some(id) => memory.has_history(id)?,
+        None => false,
+    };
+    Ok((prompt, windowed, has_history))
+}
+
 fn valid_conversation_id(value: &str) -> bool {
     (8..=128).contains(&value.len())
         && value.is_ascii()
@@ -815,13 +828,13 @@ async fn chat_completions(
         }
     };
 
-    // Assemble the provider prompt from the unified memory window. The
-    // canonical transcript must be passed to the provider so follow-up
-    // turns and provider switches retain conversation context.
-    let (context_prompt, windowed) = match state
-        .memory
-        .build_context(conversation_id.as_deref(), &req.messages)
-    {
+    // Read all context-dependent memory before any provider request. A read
+    // failure must not degrade into an empty prompt or an unauthenticated turn.
+    let (context_prompt, windowed, has_history) = match read_conversation_context(
+        &state.memory,
+        conversation_id.as_deref(),
+        &req.messages,
+    ) {
         Ok(context) => context,
         Err(error) => {
             tracing::error!(conversation_id = ?conversation_id, "conversation context read failed: {error}");
@@ -832,21 +845,6 @@ async fn chat_completions(
                 "conversation history could not be read safely",
             );
         }
-    };
-    let has_history = match conversation_id.as_deref() {
-        Some(cid) => match state.memory.has_history(cid) {
-            Ok(value) => value,
-            Err(error) => {
-                tracing::error!(conversation_id = %cid, "conversation history check failed: {error}");
-                return api_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "server_error",
-                    "memory_read_failed",
-                    "conversation history could not be read safely",
-                );
-            }
-        },
-        None => false,
     };
     let prompt = context_prompt;
     if prompt.is_empty() {
