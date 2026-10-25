@@ -89,8 +89,43 @@ impl AppConfig {
                 cfg.server.port = v;
             }
         }
+        cfg.validate()?;
         cfg.providers.sort_by_key(|x| x.priority);
         Ok(cfg)
+    }
+
+    /// Reject configuration that would otherwise be silently ignored or
+    /// create zero-capacity pools / immediately-expiring provider requests.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if self.server.port == 0 {
+            anyhow::bail!("server.port must be between 1 and 65535");
+        }
+        if self.memory.max_tokens == 0 {
+            anyhow::bail!("memory.max_tokens must be greater than zero");
+        }
+        if self.memory.strategy != "sliding_window" {
+            anyhow::bail!("unsupported memory.strategy '{}'; supported value: sliding_window", self.memory.strategy);
+        }
+
+        const PROVIDERS: &[&str] = &[
+            "qwen", "metaai", "claude", "chatgpt", "gemini", "grok", "mistral", "perplexity",
+        ];
+        let mut seen = std::collections::HashSet::new();
+        for provider in &self.providers {
+            if !PROVIDERS.contains(&provider.name.as_str()) {
+                anyhow::bail!("unknown provider '{}'", provider.name);
+            }
+            if !seen.insert(provider.name.as_str()) {
+                anyhow::bail!("duplicate provider '{}'", provider.name);
+            }
+            if provider.timeout_seconds == 0 {
+                anyhow::bail!("provider '{}' timeout_seconds must be greater than zero", provider.name);
+            }
+            if provider.session_pool_size == 0 {
+                anyhow::bail!("provider '{}' session_pool_size must be greater than zero", provider.name);
+            }
+        }
+        Ok(())
     }
 
     pub fn provider(&self, name: &str) -> Option<&ProviderConfig> {
@@ -105,3 +140,45 @@ fn default_timeout() -> u64 { 120 }
 fn default_pool() -> usize { 2 }
 fn default_max_tokens() -> usize { 8000 }
 fn default_strategy() -> String { "sliding_window".to_string() }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config(yaml: &str) -> AppConfig {
+        serde_yaml::from_str(yaml).expect("test config parses")
+    }
+
+    #[test]
+    fn accepts_supported_provider_configuration() {
+        let cfg = config("memory:\n  max_tokens: 4000\nproviders:\n  - name: chatgpt\n    timeout_seconds: 30\n    session_pool_size: 1\n");
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn rejects_unknown_or_duplicate_providers() {
+        let unknown = config("providers:\n  - name: custom-provider\n");
+        assert!(unknown.validate().is_err());
+
+        let duplicate = config("providers:\n  - name: chatgpt\n  - name: chatgpt\n");
+        assert!(duplicate.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_zero_capacity_or_timeout() {
+        let timeout = config("providers:\n  - name: chatgpt\n    timeout_seconds: 0\n");
+        assert!(timeout.validate().is_err());
+
+        let pool = config("providers:\n  - name: chatgpt\n    session_pool_size: 0\n");
+        assert!(pool.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_zero_memory_budget_and_unknown_strategy() {
+        let budget = config("memory:\n  max_tokens: 0\n");
+        assert!(budget.validate().is_err());
+
+        let strategy = config("memory:\n  strategy: full_history\n");
+        assert!(strategy.validate().is_err());
+    }
+}
