@@ -1618,3 +1618,86 @@ mod http_api_regression_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod login_security_middleware_http_tests {
+    use super::*;
+    use axum::{body::Body, routing::get};
+    use tower::ServiceExt;
+
+    fn app() -> Router {
+        Router::new()
+            .route("/login/api/status", get(|| async { "ok" }))
+            .route("/health", get(|| async { "ok" }))
+            .layer(middleware::from_fn(protect_login_api))
+            .layer(middleware::from_fn(attach_request_id))
+    }
+
+    async fn request(uri: &str, headers: &[(&str, &str)]) -> Response {
+        let mut builder = Request::builder().uri(uri);
+        for (name, value) in headers {
+            builder = builder.header(*name, *value);
+        }
+        app()
+            .oneshot(builder.body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn rejects_non_loopback_host_at_http_boundary() {
+        let response = request("/login/api/status", &[("host", "attacker.example")]).await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert!(response.headers().contains_key("x-request-id"));
+    }
+
+    #[tokio::test]
+    async fn rejects_mismatched_origin_at_http_boundary() {
+        let response = request(
+            "/login/api/status",
+            &[
+                ("host", "127.0.0.1:8080"),
+                ("origin", "https://attacker.example"),
+            ],
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"]["code"], "unsafe_local_request");
+    }
+
+    #[tokio::test]
+    async fn rejects_cross_site_login_mutation_metadata() {
+        let response = request(
+            "/login/api/status",
+            &[("host", "127.0.0.1:8080"), ("sec-fetch-site", "cross-site")],
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn allows_matching_loopback_origin_and_originless_local_clients() {
+        let matching = request(
+            "/login/api/status",
+            &[
+                ("host", "127.0.0.1:8080"),
+                ("origin", "http://127.0.0.1:8080"),
+            ],
+        )
+        .await;
+        assert_eq!(matching.status(), StatusCode::OK);
+
+        let originless = request("/login/api/status", &[("host", "localhost:8080")]).await;
+        assert_eq!(originless.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn host_protection_also_applies_to_non_login_routes() {
+        let response = request("/health", &[("host", "attacker.example")]).await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+}
