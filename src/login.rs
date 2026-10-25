@@ -424,7 +424,6 @@ mod parse_view_tests {
     }
 }
 
-
 #[cfg(test)]
 mod login_action_size_limit_tests {
     use super::*;
@@ -438,9 +437,11 @@ mod login_action_size_limit_tests {
         }
         .validate()
         .is_ok());
-        assert!(LoginAction::Enter { selector: selector.clone() }
-            .validate()
-            .is_ok());
+        assert!(LoginAction::Enter {
+            selector: selector.clone()
+        }
+        .validate()
+        .is_ok());
         assert!(LoginAction::Type { selector, text }.validate().is_ok());
     }
 
