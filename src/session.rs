@@ -2,6 +2,7 @@ use anyhow::Result;
 use obscura_core::{Browser, Page};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+use std::io::Write;
 
 #[derive(Serialize, Deserialize)]
 pub struct SessionFile {
@@ -50,7 +51,32 @@ pub async fn save_session(browser: &Browser, page: &Page, provider: &str) -> Res
     let cookies: Vec<Cookie> = browser.cookies().get_all().into_iter().map(Cookie::from).collect();
     let file = SessionFile { local_storage, cookies, ts: chrono::Utc::now().to_rfc3339() };
     tokio::fs::create_dir_all("sessions").await?;
-    tokio::fs::write(session_path(provider), serde_json::to_string_pretty(&file)?).await?;
+    let destination = session_path(provider);
+    let temp_path = format!("{}.tmp-{}-{}", destination, std::process::id(), uuid::Uuid::new_v4());
+    let serialized = serde_json::to_vec_pretty(&file)?;
+
+    // Session files contain reusable authentication cookies. Create them
+    // privately on Unix and replace the destination atomically.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut output = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&temp_path)?;
+        output.write_all(&serialized)?;
+        output.sync_all()?;
+    }
+    #[cfg(not(unix))]
+    {
+        tokio::fs::write(&temp_path, &serialized).await?;
+    }
+
+    if let Err(error) = tokio::fs::rename(&temp_path, &destination).await {
+        let _ = tokio::fs::remove_file(&temp_path).await;
+        return Err(error.into());
+    }
     tracing::info!(provider = provider, cookies = file.cookies.len(), "session saved");
     Ok(())
 }

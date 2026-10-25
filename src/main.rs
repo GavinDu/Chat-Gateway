@@ -3,6 +3,10 @@ use axum::{
     http::HeaderMap,
     response::{sse::{Event, Sse}, Html, IntoResponse},
     routing::{get, post},
+    middleware::{self, Next},
+    http::{Request, StatusCode},
+    response::Response,
+    body::Body,
     Json, Router,
 };
 use clap::Parser;
@@ -142,7 +146,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/login/api/:provider/complete", post(login_complete))
         .route("/login/api/:provider/view", get(login_view))
         .route("/login/api/:provider/act", post(login_act))
-        .with_state(state);
+        .with_state(state)
+        .layer(middleware::from_fn(protect_login_api));
 
     // Security default: the gateway exposes browser/session control routes and must not listen on public interfaces by default.
     // Remote access should be added only with explicit authentication and TLS.
@@ -171,6 +176,46 @@ async fn refresh_models(state: &Arc<AppState>) {
 /// The gateway never presents its own credential form and never stores
 /// credentials — relayed text lives in memory only for the action that
 /// types it, and only cookies/localStorage are persisted on Complete.
+
+/// Protect browser-control endpoints against cross-origin requests (CSRF).
+/// Non-browser clients without an Origin header remain usable, while browser
+/// requests must have an Origin authority identical to the request Host.
+async fn protect_login_api(req: Request<Body>, next: Next) -> Response {
+    if !req.uri().path().starts_with("/login/api/") {
+        return next.run(req).await;
+    }
+    let headers = req.headers();
+    let fetch_site = headers.get("sec-fetch-site").and_then(|v| v.to_str().ok());
+    if fetch_site == Some("cross-site") || !login_origin_is_same_authority(headers) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "error": {
+                    "message": "cross-origin browser-control request rejected",
+                    "type": "security_error",
+                    "code": "cross_origin_request"
+                }
+            })),
+        ).into_response();
+    }
+    next.run(req).await
+}
+
+fn login_origin_is_same_authority(headers: &HeaderMap) -> bool {
+    let Some(origin) = headers.get(axum::http::header::ORIGIN) else {
+        // CLI and local automation clients commonly omit Origin. The
+        // Sec-Fetch-Site check above still rejects explicitly cross-site calls.
+        return true;
+    };
+    let Ok(origin) = origin.to_str() else { return false; };
+    let Some((scheme, authority)) = origin.split_once("://") else { return false; };
+    if scheme != "http" && scheme != "https" { return false; }
+    let Some(host) = headers.get(axum::http::header::HOST).and_then(|v| v.to_str().ok()) else {
+        return false;
+    };
+    authority.eq_ignore_ascii_case(host)
+}
+
 async fn login_page() -> impl IntoResponse {
     Html(login::LOGIN_HTML)
 }
@@ -552,4 +597,31 @@ async fn chat_completions(
         "error": { "message": format!("all providers failed: {:?}", last_err), "type": "provider_error" }
     });
     (axum::http::StatusCode::BAD_GATEWAY, Json(err_body)).into_response()
+}
+
+#[cfg(test)]
+mod login_origin_tests {
+    use super::*;
+
+    #[test]
+    fn allows_matching_local_origin_and_host() {
+        let mut headers = HeaderMap::new();
+        headers.insert("origin", "http://127.0.0.1:8080".parse().unwrap());
+        headers.insert("host", "127.0.0.1:8080".parse().unwrap());
+        assert!(login_origin_is_same_authority(&headers));
+    }
+
+    #[test]
+    fn rejects_origin_with_different_authority() {
+        let mut headers = HeaderMap::new();
+        headers.insert("origin", "https://evil.example".parse().unwrap());
+        headers.insert("host", "127.0.0.1:8080".parse().unwrap());
+        assert!(!login_origin_is_same_authority(&headers));
+    }
+
+    #[test]
+    fn allows_originless_local_automation_clients() {
+        let headers = HeaderMap::new();
+        assert!(login_origin_is_same_authority(&headers));
+    }
 }
