@@ -2,10 +2,12 @@
 # Migration from chromiumoxide to Obscura Native
 
 ## Performance
-- Memory 200MB -> 30MB per provider
-- Startup 2s -> instant
-- Provider switch 120ms -> 0.02ms DashMap get
-- TTFT Qwen 800ms -> 84ms
+
+The figures previously listed here were design targets, not measurements from
+this repository, and are intentionally not presented as verified results. The
+SQLite memory microbenchmark can be run with `cargo bench --locked --bench
+memory_sqlite`; it measures memory-layer operations only, not browser startup,
+per-provider resident memory, provider switching, or provider TTFT.
 
 ## Changes
 1. Removed chromiumoxide
