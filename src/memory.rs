@@ -28,6 +28,7 @@ pub struct UnifiedMemory {
 impl UnifiedMemory {
     pub fn new(max_tokens: usize) -> Self {
         Self::with_optional_persistence(max_tokens, None)
+            .expect("in-memory conversation store initialization cannot fail")
     }
 
     /// Restore durable conversation memory from CHAT_GATEWAY_MEMORY_PATH,
