@@ -584,11 +584,15 @@ fn parse_login_action(req: LoginActReq) -> anyhow::Result<login::LoginAction> {
             selector: required_selector(req.selector, "selector")?,
         }),
         "click_button" => Ok(login::LoginAction::ClickButton {
-            index: req.index.ok_or_else(|| anyhow::anyhow!("index is required"))?,
+            index: req
+                .index
+                .ok_or_else(|| anyhow::anyhow!("index is required"))?,
         }),
         "type" => Ok(login::LoginAction::Type {
             selector: required_selector(req.selector, "selector")?,
-            text: req.text.ok_or_else(|| anyhow::anyhow!("text is required"))?,
+            text: req
+                .text
+                .ok_or_else(|| anyhow::anyhow!("text is required"))?,
         }),
         "enter" => Ok(login::LoginAction::Enter {
             selector: required_selector(req.selector, "selector")?,
