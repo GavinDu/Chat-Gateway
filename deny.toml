@@ -7,6 +7,9 @@ targets = []
 
 [advisories]
 version = 2
+# Keep vulnerabilities and yanked releases blocking; surface unmaintained transitive crates
+# as warnings until the pinned Obscura renderer and YAML parser can be migrated.
+unmaintained = "warn"
 yanked = "deny"
 ignore = []
 
