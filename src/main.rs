@@ -1651,12 +1651,7 @@ mod http_api_regression_tests {
                 }))
                 .into_response()
             }
-            Err(_) => api_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "server_error",
-                "memory_read_failed",
-                "conversation history could not be read safely",
-            ),
+            Err(_) => conversation_context_read_error(conversation_id),
         }
     }
 
