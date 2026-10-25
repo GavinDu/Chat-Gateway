@@ -1,23 +1,188 @@
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, path::{Path, PathBuf}, sync::Mutex};
+use std::{
+    collections::HashMap,
+    ffi::{CStr, CString},
+    os::raw::{c_char, c_int, c_void},
+    path::{Path, PathBuf},
+    ptr,
+    sync::Mutex,
+};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ChatMessage {
-    pub role: String,
-    pub content: String,
-}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ChatMessage { pub role: String, pub content: String }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Conversation {
     pub id: String,
     pub messages: Vec<ChatMessage>,
     pub provider: Option<String>,
-    pub tab_id: Option<String>, // page/tab affinity reused via X-Conversation-Id
+    pub tab_id: Option<String>,
 }
 
-/// Unified memory layer (v1 semantics): one conversation store shared
-/// across all providers, sliding-window context by token estimate.
+#[repr(C)] struct Sqlite3 { _private: [u8; 0] }
+#[repr(C)] struct Sqlite3Stmt { _private: [u8; 0] }
+
+#[link(name = "sqlite3")]
+unsafe extern "C" {
+    fn sqlite3_open_v2(filename: *const c_char, db: *mut *mut Sqlite3, flags: c_int, vfs: *const c_char) -> c_int;
+    fn sqlite3_close_v2(db: *mut Sqlite3) -> c_int;
+    fn sqlite3_errmsg(db: *mut Sqlite3) -> *const c_char;
+    fn sqlite3_exec(db: *mut Sqlite3, sql: *const c_char, callback: Option<unsafe extern "C" fn(*mut c_void, c_int, *mut *mut c_char, *mut *mut c_char) -> c_int>, arg: *mut c_void, errmsg: *mut *mut c_char) -> c_int;
+    fn sqlite3_free(ptr: *mut c_void);
+    fn sqlite3_prepare_v2(db: *mut Sqlite3, sql: *const c_char, bytes: c_int, stmt: *mut *mut Sqlite3Stmt, tail: *mut *const c_char) -> c_int;
+    fn sqlite3_step(stmt: *mut Sqlite3Stmt) -> c_int;
+    fn sqlite3_finalize(stmt: *mut Sqlite3Stmt) -> c_int;
+    fn sqlite3_column_text(stmt: *mut Sqlite3Stmt, column: c_int) -> *const u8;
+    fn sqlite3_column_int(stmt: *mut Sqlite3Stmt, column: c_int) -> c_int;
+    fn sqlite3_busy_timeout(db: *mut Sqlite3, milliseconds: c_int) -> c_int;
+}
+
+const SQLITE_OK: c_int = 0;
+const SQLITE_ROW: c_int = 100;
+const SQLITE_DONE: c_int = 101;
+const SQLITE_OPEN_READWRITE: c_int = 2;
+const SQLITE_OPEN_CREATE: c_int = 4;
+const SQLITE_OPEN_FULLMUTEX: c_int = 0x00010000;
+
+struct Db(*mut Sqlite3);
+impl Db {
+    fn open(path: &Path) -> anyhow::Result<Self> {
+        let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+        std::fs::create_dir_all(parent)?;
+        if !path.exists() {
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)] { use std::os::unix::fs::OpenOptionsExt; options.mode(0o600); }
+            drop(options.open(path)?);
+        }
+        #[cfg(unix)] {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        }
+        let filename = CString::new(path.to_string_lossy().as_bytes()).map_err(|_| anyhow::anyhow!("database path contains NUL"))?;
+        let mut raw = ptr::null_mut();
+        let rc = unsafe { sqlite3_open_v2(filename.as_ptr(), &mut raw, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX, ptr::null()) };
+        if rc != SQLITE_OK {
+            let message = if raw.is_null() { format!("SQLite open error {rc}") } else { unsafe { CStr::from_ptr(sqlite3_errmsg(raw)).to_string_lossy().into_owned() } };
+            if !raw.is_null() { unsafe { sqlite3_close_v2(raw); } }
+            anyhow::bail!("opening {}: {message}", path.display());
+        }
+        let db = Self(raw);
+        let rc = unsafe { sqlite3_busy_timeout(db.0, 5000) };
+        if rc != SQLITE_OK { anyhow::bail!("setting SQLite busy timeout: {}", db.error()); }
+        db.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")?;
+        Ok(db)
+    }
+    fn error(&self) -> String { unsafe { CStr::from_ptr(sqlite3_errmsg(self.0)).to_string_lossy().into_owned() } }
+    fn exec(&self, sql: &str) -> anyhow::Result<()> {
+        let sql = CString::new(sql).map_err(|_| anyhow::anyhow!("SQL contains NUL"))?;
+        let mut error = ptr::null_mut();
+        let rc = unsafe { sqlite3_exec(self.0, sql.as_ptr(), None, ptr::null_mut(), &mut error) };
+        if rc == SQLITE_OK { return Ok(()); }
+        let message = if error.is_null() { self.error() } else {
+            let message = unsafe { CStr::from_ptr(error).to_string_lossy().into_owned() };
+            unsafe { sqlite3_free(error.cast()); }
+            message
+        };
+        anyhow::bail!("SQLite statement failed: {message}");
+    }
+    fn prepare(&self, sql: &str) -> anyhow::Result<*mut Sqlite3Stmt> {
+        let sql = CString::new(sql).map_err(|_| anyhow::anyhow!("SQL contains NUL"))?;
+        let mut stmt = ptr::null_mut();
+        let rc = unsafe { sqlite3_prepare_v2(self.0, sql.as_ptr(), -1, &mut stmt, ptr::null_mut()) };
+        if rc != SQLITE_OK { anyhow::bail!("preparing SQLite query: {}", self.error()); }
+        Ok(stmt)
+    }
+    fn scalar(&self, sql: &str) -> anyhow::Result<i32> {
+        let stmt = self.prepare(sql)?;
+        let rc = unsafe { sqlite3_step(stmt) };
+        if rc != SQLITE_ROW {
+            let error = self.error(); unsafe { sqlite3_finalize(stmt); }
+            anyhow::bail!("reading SQLite scalar: {error}");
+        }
+        let value = unsafe { sqlite3_column_int(stmt, 0) };
+        unsafe { sqlite3_finalize(stmt); }
+        Ok(value)
+    }
+}
+impl Drop for Db { fn drop(&mut self) { unsafe { sqlite3_close_v2(self.0); } } }
+fn quote(value: &str) -> String { format!("'{}'", value.replace('\'', "''")) }
+fn column(stmt: *mut Sqlite3Stmt, index: c_int) -> Option<String> {
+    let value = unsafe { sqlite3_column_text(stmt, index) };
+    if value.is_null() { None } else { Some(unsafe { CStr::from_ptr(value.cast()).to_string_lossy().into_owned() }) }
+}
+
+fn read_all(db: &Db) -> anyhow::Result<HashMap<String, Conversation>> {
+    let stmt = db.prepare("SELECT id, payload FROM conversations ORDER BY id")?;
+    let mut result = HashMap::new();
+    loop {
+        let rc = unsafe { sqlite3_step(stmt) };
+        if rc == SQLITE_DONE { break; }
+        if rc != SQLITE_ROW {
+            let error = db.error(); unsafe { sqlite3_finalize(stmt); }
+            anyhow::bail!("reading SQLite conversations: {error}");
+        }
+        let id = column(stmt, 0).ok_or_else(|| anyhow::anyhow!("SQLite conversation id is NULL"))?;
+        let payload = column(stmt, 1).ok_or_else(|| anyhow::anyhow!("SQLite conversation payload is NULL"))?;
+        let conversation: Conversation = serde_json::from_str(&payload)
+            .map_err(|e| anyhow::anyhow!("invalid conversation payload for '{id}': {e}"))?;
+        if conversation.id != id { unsafe { sqlite3_finalize(stmt); } anyhow::bail!("SQLite key/id mismatch for '{id}'"); }
+        result.insert(id, conversation);
+    }
+    unsafe { sqlite3_finalize(stmt); }
+    Ok(result)
+}
+
+fn initialize_database(path: &Path, legacy: Option<&Path>) -> anyhow::Result<HashMap<String, Conversation>> {
+    let db = Db::open(path).map_err(|e| anyhow::anyhow!("open database {}: {e}", path.display()))?;
+    let version = db.scalar("PRAGMA user_version")?;
+    if version > 1 { anyhow::bail!("unsupported SQLite schema version {version} in {}", path.display()); }
+    if version == 0 {
+        db.exec("BEGIN IMMEDIATE;
+          CREATE TABLE IF NOT EXISTS conversations(id TEXT PRIMARY KEY NOT NULL, payload TEXT NOT NULL);
+          PRAGMA user_version=1;
+          COMMIT;")?;
+    }
+    let mut loaded = read_all(&db)?;
+    if loaded.is_empty() {
+        if let Some(source) = legacy.filter(|p| p.exists()) {
+            let bytes = std::fs::read(source).map_err(|e| anyhow::anyhow!("reading legacy snapshot {}: {e}", source.display()))?;
+            let imported: HashMap<String, Conversation> = serde_json::from_slice(&bytes)
+                .map_err(|e| anyhow::anyhow!("parsing legacy snapshot {}: {e}", source.display()))?;
+            for (key, value) in &imported {
+                if key != &value.id { anyhow::bail!("legacy key/id mismatch for '{key}' in {}", source.display()); }
+            }
+            db.exec("BEGIN IMMEDIATE")?;
+            let result = (|| -> anyhow::Result<()> {
+                for value in imported.values() { write_one(&db, value)?; }
+                db.exec("COMMIT")
+            })();
+            if let Err(e) = result {
+                let _ = db.exec("ROLLBACK");
+                return Err(e.context("legacy import rolled back; source JSON was preserved"));
+            }
+            loaded = read_all(&db)?;
+        }
+    }
+    Ok(loaded)
+}
+
+fn write_one(db: &Db, conversation: &Conversation) -> anyhow::Result<()> {
+    let payload = serde_json::to_string(conversation)?;
+    db.exec(&format!("INSERT INTO conversations(id,payload) VALUES({}, {}) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload",
+        quote(&conversation.id), quote(&payload)))
+}
+fn persist(path: &Path, conversation: &Conversation) -> anyhow::Result<()> {
+    let db = Db::open(path)?;
+    db.exec("BEGIN IMMEDIATE")?;
+    let result = write_one(&db, conversation).and_then(|()| db.exec("COMMIT"));
+    if let Err(error) = result { let _ = db.exec("ROLLBACK"); return Err(error.context("SQLite transaction rolled back")); }
+    Ok(())
+}
+
+/// Unified memory layer: SQLite is the durable source of truth; the DashMap
+/// is a process-local read cache. All mutations are serialized to preserve order.
 pub struct UnifiedMemory {
     max_tokens: usize,
     conversations: DashMap<String, Conversation>,
@@ -27,363 +192,149 @@ pub struct UnifiedMemory {
 
 impl UnifiedMemory {
     pub fn new(max_tokens: usize) -> Self {
-        Self::with_optional_persistence(max_tokens, None)
-            .expect("in-memory conversation store initialization cannot fail")
+        Self::with_optional_persistence(max_tokens, None).expect("in-memory store initialization cannot fail")
     }
-
-    /// Restore durable conversation memory from CHAT_GATEWAY_MEMORY_PATH,
-    /// defaulting to data/conversations.json. Snapshot writes use an atomic
-    /// rename so a process interruption cannot leave a partially written file.
     pub fn from_env(max_tokens: usize) -> anyhow::Result<Self> {
-        let path = std::env::var_os("CHAT_GATEWAY_MEMORY_PATH")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("data/conversations.json"));
-        Self::with_optional_persistence(max_tokens, Some(path))
-    }
-
-    fn with_optional_persistence(max_tokens: usize, persistence_path: Option<PathBuf>) -> anyhow::Result<Self> {
-        let conversations = DashMap::new();
-        if let Some(path) = persistence_path.as_deref() {
-            // Fail closed: never start with an empty store after a restore
-            // error, since a subsequent write could overwrite recoverable data.
-            let loaded = load_conversations(path)
-                .map_err(|error| anyhow::anyhow!("failed to restore conversation memory from {}: {error}", path.display()))?;
-            for (id, conversation) in loaded {
-                if id != conversation.id {
-                    anyhow::bail!("conversation memory key/id mismatch for key '{id}' in {}", path.display());
-                }
-                conversations.insert(id, conversation);
+        let configured = std::env::var_os("CHAT_GATEWAY_MEMORY_PATH").map(PathBuf::from);
+        let (database, legacy) = match configured {
+            Some(path) if path.extension().and_then(|e| e.to_str()) == Some("json") => (path.with_extension("sqlite3"), Some(path)),
+            Some(path) => {
+                let legacy = path.parent().unwrap_or(Path::new(".")).join("conversations.json");
+                (path, Some(legacy))
             }
-        }
-        Ok(Self {
-            max_tokens,
-            conversations,
-            persistence_path,
-            persistence_lock: Mutex::new(()),
-        })
+            None => (PathBuf::from("data/conversations.sqlite3"), Some(PathBuf::from("data/conversations.json"))),
+        };
+        Self::with_paths(max_tokens, Some(database), legacy)
     }
-
-    /// Build prompt with sliding window, unified across providers.
-    /// Returns (prompt, windowed messages).
+    fn with_optional_persistence(max_tokens: usize, path: Option<PathBuf>) -> anyhow::Result<Self> {
+        let legacy = path.as_ref().map(|p| p.with_extension("json"));
+        Self::with_paths(max_tokens, path, legacy)
+    }
+    fn with_paths(max_tokens: usize, path: Option<PathBuf>, legacy: Option<PathBuf>) -> anyhow::Result<Self> {
+        let loaded = if let Some(path) = path.as_deref() {
+            initialize_database(path, legacy.as_deref()).map_err(|e| anyhow::anyhow!("failed to restore conversation memory from {}: {e}", path.display()))?
+        } else { HashMap::new() };
+        let conversations = DashMap::new();
+        for (id, conversation) in loaded {
+            if id != conversation.id { anyhow::bail!("conversation key/id mismatch for '{id}'"); }
+            conversations.insert(id, conversation);
+        }
+        Ok(Self { max_tokens, conversations, persistence_path: path, persistence_lock: Mutex::new(()) })
+    }
     pub fn build_context(&self, conversation_id: Option<&str>, new_messages: &[ChatMessage]) -> (String, Vec<ChatMessage>) {
         let mut full = vec![];
-        if let Some(cid) = conversation_id {
-            if let Some(conv) = self.conversations.get(cid) {
-                full.extend(conv.messages.clone());
-            }
-        }
-        // Clients often resend the full transcript on each OpenAI-style
-        // request. Reconcile it with the canonical transcript before
-        // constructing context so old messages are not duplicated.
-        let unseen = messages_after_overlap(&full, new_messages);
-        full.extend(unseen);
-
-        // Sliding window by token estimate
+        if let Some(cid) = conversation_id { if let Some(conv) = self.conversations.get(cid) { full.extend(conv.messages.clone()); } }
+        full.extend(messages_after_overlap(&full, new_messages));
         let mut tokens = 0;
         let mut windowed = Vec::new();
         for msg in full.iter().rev() {
-            let t = (msg.content.len() as f32 / 4.0) as usize + 8;
-            if tokens + t > self.max_tokens && !windowed.is_empty() { break; }
-            tokens += t;
-            windowed.push(msg.clone());
+            let count = (msg.content.len() as f32 / 4.0) as usize + 8;
+            if tokens + count > self.max_tokens && !windowed.is_empty() { break; }
+            tokens += count; windowed.push(msg.clone());
         }
         windowed.reverse();
         let prompt = windowed.iter().map(|m| format!("{}: {}", m.role, m.content)).collect::<Vec<_>>().join("\n");
         (prompt, windowed)
     }
-
     pub fn store_turn(&self, conversation_id: String, user_msgs: Vec<ChatMessage>, assistant_msg: ChatMessage, provider: String, tab_id: String) -> anyhow::Result<()> {
-        let _guard = self.persistence_lock.lock()
-            .map_err(|error| anyhow::anyhow!("conversation persistence lock poisoned: {error}"))?;
-
-        // Keep a rollback copy so a failed durable write cannot leave an
-        // apparently committed turn in memory while disk has the old state.
-        let previous = self.conversations.get(&conversation_id).map(|entry| entry.value().clone());
-        {
-            let mut entry = self.conversations.entry(conversation_id.clone()).or_insert_with(|| Conversation {
-                id: conversation_id.clone(),
-                messages: vec![],
-                provider: None,
-                tab_id: None,
-            });
-            let unseen = messages_after_overlap(&entry.messages, &user_msgs);
-            entry.messages.extend(unseen);
-            entry.messages.push(assistant_msg);
-            entry.provider = Some(provider);
-            entry.tab_id = Some(tab_id);
-        }
-
-        if let Err(error) = self.persist_snapshot() {
-            match previous {
-                Some(conversation) => { self.conversations.insert(conversation_id, conversation); }
-                None => { self.conversations.remove(&conversation_id); }
-            }
-            return Err(error.context("persisting conversation turn"));
-        }
+        let _guard = self.persistence_lock.lock().map_err(|e| anyhow::anyhow!("conversation lock poisoned: {e}"))?;
+        let previous = self.conversations.get(&conversation_id).map(|v| v.value().clone());
+        let mut next = previous.unwrap_or_else(|| Conversation { id: conversation_id.clone(), messages: vec![], provider: None, tab_id: None });
+        next.messages.extend(messages_after_overlap(&next.messages, &user_msgs));
+        next.messages.push(assistant_msg);
+        next.provider = Some(provider); next.tab_id = Some(tab_id);
+        if let Some(path) = self.persistence_path.as_deref() { persist(path, &next).context("persisting conversation turn")?; }
+        self.conversations.insert(conversation_id, next);
         Ok(())
     }
-
-    fn persist_snapshot(&self) -> anyhow::Result<()> {
-        let Some(path) = self.persistence_path.as_deref() else {
-            return Ok(());
-        };
-        let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
-        std::fs::create_dir_all(parent)?;
-        let snapshot: HashMap<String, Conversation> = self.conversations
-            .iter()
-            .map(|entry| (entry.key().clone(), entry.value().clone()))
-            .collect();
-        let bytes = serde_json::to_vec(&snapshot)?;
-        // Conversation snapshots contain private prompts and responses. Use a
-        // unique temp file and owner-only permissions on Unix, then flush file
-        // contents before atomically replacing the durable snapshot.
-        let temp_path = path.with_extension(format!("tmp-{}-{}", std::process::id(), uuid::Uuid::new_v4()));
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut output = options.open(&temp_path)?;
-        if let Err(error) = std::io::Write::write_all(&mut output, &bytes)
-            .and_then(|()| output.sync_all())
-        {
-            let _ = std::fs::remove_file(&temp_path);
-            return Err(error.into());
-        }
-        drop(output);
-        if let Err(error) = std::fs::rename(&temp_path, path) {
-            let _ = std::fs::remove_file(&temp_path);
-            return Err(error.into());
-        }
-        // Best-effort directory sync makes the rename durable across a crash
-        // on filesystems that support syncing directory entries.
-        #[cfg(unix)]
-        if let Ok(directory) = std::fs::File::open(parent) {
-            let _ = directory.sync_all();
-        }
-        Ok(())
-    }
-
-    /// Delete one conversation and persist the deletion before reporting success.
-    /// If the snapshot write fails, restore the removed entry in memory.
     pub fn delete_conversation(&self, conversation_id: &str) -> anyhow::Result<bool> {
-        let _guard = self.persistence_lock.lock()
-            .map_err(|error| anyhow::anyhow!("conversation persistence lock poisoned: {error}"))?;
-        let Some((_, previous)) = self.conversations.remove(conversation_id) else {
-            return Ok(false);
-        };
-        if let Err(error) = self.persist_snapshot() {
-            self.conversations.insert(conversation_id.to_string(), previous);
-            return Err(error.context("persisting conversation deletion"));
+        let _guard = self.persistence_lock.lock().map_err(|e| anyhow::anyhow!("conversation lock poisoned: {e}"))?;
+        if !self.conversations.contains_key(conversation_id) { return Ok(false); }
+        if let Some(path) = self.persistence_path.as_deref() {
+            let db = Db::open(path)?;
+            db.exec("BEGIN IMMEDIATE")?;
+            let result = db.exec(&format!("DELETE FROM conversations WHERE id={}", quote(conversation_id))).and_then(|()| db.exec("COMMIT"));
+            if let Err(e) = result { let _ = db.exec("ROLLBACK"); return Err(e.context("persisting conversation deletion")); }
         }
+        self.conversations.remove(conversation_id);
         Ok(true)
     }
-
-    /// True when the conversation already has stored turns. Used only
-    /// to scope model selection (Go's new-conversation-only rule):
-    /// selection runs only when there is NO prior history. This is a
-    /// memory lookup, not a tab map — there is deliberately no
-    /// per-conversation tab reuse in this restoration (Rust v1: fresh
-    /// page per attempt, tab_id unread).
-    pub fn has_history(&self, cid: &str) -> bool {
-        self.conversations.get(cid).map(|c| !c.messages.is_empty()).unwrap_or(false)
-    }
-
-    pub fn get_tab(&self, cid: &str) -> Option<String> {
-        self.conversations.get(cid).and_then(|c| c.tab_id.clone())
-    }
-
-    pub fn get_provider(&self, cid: &str) -> Option<String> {
-        self.conversations.get(cid).and_then(|c| c.provider.clone())
-    }
+    pub fn has_history(&self, cid: &str) -> bool { self.conversations.get(cid).map(|c| !c.messages.is_empty()).unwrap_or(false) }
+    pub fn get_tab(&self, cid: &str) -> Option<String> { self.conversations.get(cid).and_then(|c| c.tab_id.clone()) }
+    pub fn get_provider(&self, cid: &str) -> Option<String> { self.conversations.get(cid).and_then(|c| c.provider.clone()) }
 }
 
-
-fn load_conversations(path: &Path) -> anyhow::Result<HashMap<String, Conversation>> {
-    if !path.exists() {
-        return Ok(HashMap::new());
-    }
-    let bytes = std::fs::read(path)?;
-    Ok(serde_json::from_slice(&bytes)?)
-}
-
-/// Remove a transcript prefix that is already represented in the stored
-/// conversation. Supports both full-history requests and requests that
-/// contain only a recent sliding window. Message equality is role+content.
 fn messages_after_overlap(stored: &[ChatMessage], incoming: &[ChatMessage]) -> Vec<ChatMessage> {
-    if incoming.is_empty() {
-        return Vec::new();
-    }
-    if stored.is_empty() {
-        return incoming.to_vec();
-    }
-
-    // Full transcript: find the longest incoming prefix that matches the
-    // stored transcript prefix, then append only the remaining tail.
-    let common_prefix = stored.iter().zip(incoming.iter())
-        .take_while(|(a, b)| a.role == b.role && a.content == b.content)
-        .count();
-    if common_prefix == stored.len() && incoming.len() >= stored.len() {
-        return incoming[common_prefix..].to_vec();
-    }
-
-    // Sliding-window transcript: find the largest stored suffix matching
-    // the incoming prefix and append only the part after that overlap.
-    let max_overlap = stored.len().min(incoming.len());
-    for overlap in (1..=max_overlap).rev() {
-        let matches = stored[stored.len() - overlap..].iter()
-            .zip(incoming[..overlap].iter())
-            .all(|(a, b)| a.role == b.role && a.content == b.content);
-        if matches {
+    if incoming.is_empty() { return Vec::new(); }
+    if stored.is_empty() { return incoming.to_vec(); }
+    let prefix = stored.iter().zip(incoming.iter()).take_while(|(a,b)| a.role == b.role && a.content == b.content).count();
+    if prefix == stored.len() && incoming.len() >= stored.len() { return incoming[prefix..].to_vec(); }
+    for overlap in (1..=stored.len().min(incoming.len())).rev() {
+        if stored[stored.len()-overlap..].iter().zip(incoming[..overlap].iter()).all(|(a,b)| a.role == b.role && a.content == b.content) {
             return incoming[overlap..].to_vec();
         }
     }
-
-    // No overlap means the request is a new turn or a deliberately
-    // separate transcript. Do not discard it.
     incoming.to_vec()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{sync::Arc, thread};
+    fn m(role: &str, content: &str) -> ChatMessage { ChatMessage { role: role.into(), content: content.into() } }
+    fn dbpath(label: &str) -> PathBuf { std::env::temp_dir().join(format!("gateway-{label}-{}.sqlite3", uuid::Uuid::new_v4())) }
+    fn clean(p: &Path) { let _=std::fs::remove_file(p); let _=std::fs::remove_file(p.with_extension("sqlite3-wal")); let _=std::fs::remove_file(p.with_extension("sqlite3-shm")); }
 
-    fn m(role: &str, content: &str) -> ChatMessage {
-        ChatMessage { role: role.to_string(), content: content.to_string() }
+    #[test] fn restart_restores_messages_and_affinity() {
+        let p=dbpath("restart");
+        { let x=UnifiedMemory::with_optional_persistence(8000,Some(p.clone())).unwrap(); x.store_turn("c".into(),vec![m("user","hi")],m("assistant","hello"),"chatgpt".into(),"tab".into()).unwrap(); }
+        let x=UnifiedMemory::with_optional_persistence(8000,Some(p.clone())).unwrap();
+        assert!(x.has_history("c")); assert_eq!(x.get_provider("c").as_deref(),Some("chatgpt")); assert_eq!(x.get_tab("c").as_deref(),Some("tab"));
+        clean(&p);
     }
-
-
-    #[test]
-    fn failed_persistence_rolls_back_memory_mutation() {
-        // A directory at the target path forces atomic rename to fail.
-        let path = std::env::temp_dir().join(format!("chat-gateway-memory-target-{}", uuid::Uuid::new_v4()));
-        let memory = UnifiedMemory::with_optional_persistence(8000, Some(path.clone())).unwrap();
-        // Turn the intended snapshot file into a directory after startup so
-        // restore succeeds but the subsequent atomic rename must fail.
-        std::fs::create_dir_all(&path).unwrap();
-        let result = memory.store_turn(
-            "conversation-failed".to_string(),
-            vec![m("user", "hello")],
-            m("assistant", "hi"),
-            "chatgpt".to_string(),
-            "tab-1".to_string(),
-        );
-        assert!(result.is_err());
-        assert!(!memory.has_history("conversation-failed"));
-        let _ = std::fs::remove_dir_all(path);
+    #[test] fn imports_json_and_preserves_source() {
+        let p=dbpath("import"); let source=p.with_extension("json");
+        let mut values=HashMap::new(); values.insert("old".into(),Conversation{id:"old".into(),messages:vec![m("user","saved")],provider:Some("p".into()),tab_id:Some("t".into())});
+        let bytes=serde_json::to_vec(&values).unwrap(); std::fs::write(&source,&bytes).unwrap();
+        let x=UnifiedMemory::with_optional_persistence(8000,Some(p.clone())).unwrap(); assert!(x.has_history("old")); assert_eq!(std::fs::read(&source).unwrap(),bytes);
+        drop(x); clean(&p); let _=std::fs::remove_file(source);
     }
-
-    #[cfg(unix)]
-    #[test]
-    fn snapshot_file_is_created_with_owner_only_permissions() {
-        use std::os::unix::fs::PermissionsExt;
-        let path = std::env::temp_dir().join(format!("chat-gateway-memory-private-{}.json", uuid::Uuid::new_v4()));
-        let memory = UnifiedMemory::with_optional_persistence(8000, Some(path.clone())).unwrap();
-        memory.store_turn(
-            "conversation-private".to_string(),
-            vec![m("user", "private prompt")],
-            m("assistant", "private answer"),
-            "chatgpt".to_string(),
-            "tab-private".to_string(),
-        ).unwrap();
-        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600);
-        let _ = std::fs::remove_file(path);
+    #[test] fn deletion_survives_restart() {
+        let p=dbpath("delete");
+        { let x=UnifiedMemory::with_optional_persistence(8000,Some(p.clone())).unwrap(); x.store_turn("gone".into(),vec![m("user","secret")],m("assistant","answer"),"p".into(),"t".into()).unwrap(); assert!(x.delete_conversation("gone").unwrap()); }
+        let x=UnifiedMemory::with_optional_persistence(8000,Some(p.clone())).unwrap(); assert!(!x.has_history("gone")); clean(&p);
     }
-
-    #[test]
-    fn persistent_memory_restores_conversation_after_restart() {
-        let path = std::env::temp_dir().join(format!("chat-gateway-memory-{}.json", uuid::Uuid::new_v4()));
-        {
-            let memory = UnifiedMemory::with_optional_persistence(8000, Some(path.clone())).unwrap();
-            memory.store_turn(
-                "conversation-1".to_string(),
-                vec![m("user", "hello")],
-                m("assistant", "hi"),
-                "chatgpt".to_string(),
-                "tab-1".to_string(),
-            );
-            assert!(path.exists());
-        }
-        {
-            let memory = UnifiedMemory::with_optional_persistence(8000, Some(path.clone())).unwrap();
-            assert!(memory.has_history("conversation-1"));
-            assert_eq!(memory.get_provider("conversation-1").as_deref(), Some("chatgpt"));
-            let (prompt, _) = memory.build_context(Some("conversation-1"), &[m("user", "next")]);
-            assert!(prompt.contains("assistant: hi"));
-            assert!(prompt.contains("user: next"));
-        }
-        let _ = std::fs::remove_file(path);
+    #[test] fn failed_database_open_does_not_mutate_memory() {
+        let p=dbpath("rollback"); let x=UnifiedMemory::with_optional_persistence(8000,Some(p.clone())).unwrap();
+        std::fs::remove_file(&p).unwrap(); std::fs::create_dir_all(&p).unwrap();
+        assert!(x.store_turn("no".into(),vec![m("user","hi")],m("assistant","ok"),"p".into(),"t".into()).is_err()); assert!(!x.has_history("no")); let _=std::fs::remove_dir_all(p);
     }
-
-    #[test]
-    fn deleting_conversation_persists_across_restart() {
-        let path = std::env::temp_dir().join(format!("chat-gateway-memory-delete-{}.json", uuid::Uuid::new_v4()));
-        {
-            let memory = UnifiedMemory::with_optional_persistence(8000, Some(path.clone())).unwrap();
-            memory.store_turn(
-                "conversation-delete".to_string(),
-                vec![m("user", "private prompt")],
-                m("assistant", "private answer"),
-                "chatgpt".to_string(),
-                "tab-delete".to_string(),
-            ).unwrap();
-            assert!(memory.delete_conversation("conversation-delete").unwrap());
-            assert!(!memory.has_history("conversation-delete"));
-            assert!(!memory.delete_conversation("conversation-delete").unwrap());
-        }
-        let restored = UnifiedMemory::with_optional_persistence(8000, Some(path.clone())).unwrap();
-        assert!(!restored.has_history("conversation-delete"));
-        let _ = std::fs::remove_file(path);
+    #[cfg(unix)] #[test] fn database_permissions_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt; let p=dbpath("mode");
+        let x=UnifiedMemory::with_optional_persistence(8000,Some(p.clone())).unwrap(); x.store_turn("private".into(),vec![m("user","x")],m("assistant","y"),"p".into(),"t".into()).unwrap();
+        assert_eq!(std::fs::metadata(&p).unwrap().permissions().mode()&0o777,0o600); drop(x); clean(&p);
     }
-
-    #[test]
-    fn corrupt_snapshot_fails_restore_instead_of_starting_empty() {
-        let path = std::env::temp_dir().join(format!("chat-gateway-memory-corrupt-{}.json", uuid::Uuid::new_v4()));
-        std::fs::write(&path, b"{ definitely not json").unwrap();
-        let result = UnifiedMemory::with_optional_persistence(8000, Some(path.clone()));
-        assert!(result.is_err());
-        assert_eq!(std::fs::read(&path).unwrap(), b"{ definitely not json");
-        let _ = std::fs::remove_file(path);
+    #[test] fn corrupt_database_fails_closed() {
+        let p=dbpath("corrupt"); std::fs::write(&p,b"not sqlite").unwrap(); assert!(UnifiedMemory::with_optional_persistence(8000,Some(p.clone())).is_err()); clean(&p);
     }
-
-    #[test]
-    fn rejects_snapshot_with_mismatched_conversation_identity() {
-        let path = std::env::temp_dir().join(format!("chat-gateway-memory-mismatch-{}.json", uuid::Uuid::new_v4()));
-        let data = serde_json::json!({
-            "key-1": { "id": "different-id", "messages": [], "provider": null, "tab_id": null }
-        });
-        std::fs::write(&path, serde_json::to_vec(&data).unwrap()).unwrap();
-        assert!(UnifiedMemory::with_optional_persistence(8000, Some(path.clone())).is_err());
-        let _ = std::fs::remove_file(path);
+    #[test] fn unsupported_schema_fails_closed() {
+        let p=dbpath("version"); let db=Db::open(&p).unwrap(); db.exec("PRAGMA user_version=99").unwrap(); drop(db);
+        assert!(UnifiedMemory::with_optional_persistence(8000,Some(p.clone())).is_err()); clean(&p);
     }
-
-    #[test]
-    fn full_transcript_only_appends_new_suffix() {
-        let stored = vec![m("user", "hello"), m("assistant", "hi")];
-        let incoming = vec![m("user", "hello"), m("assistant", "hi"), m("user", "next")];
-        let result = messages_after_overlap(&stored, &incoming);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].content, "next");
+    #[test] fn concurrent_writes_preserve_different_conversations() {
+        let p=dbpath("parallel"); let x=Arc::new(UnifiedMemory::with_optional_persistence(8000,Some(p.clone())).unwrap());
+        let jobs=(0..8).map(|i| {let x=x.clone();thread::spawn(move||x.store_turn(format!("c{i}"),vec![m("user",&format!("u{i}"))],m("assistant",&format!("a{i}")),"p".into(),"t".into()).unwrap())}).collect::<Vec<_>>();
+        for j in jobs {j.join().unwrap();} drop(x); let x=UnifiedMemory::with_optional_persistence(8000,Some(p.clone())).unwrap(); for i in 0..8 {assert!(x.has_history(&format!("c{i}")));} clean(&p);
     }
-
-    #[test]
-    fn sliding_window_only_appends_new_suffix() {
-        let stored = vec![m("user", "one"), m("assistant", "two"), m("user", "three")];
-        let incoming = vec![m("assistant", "two"), m("user", "three"), m("user", "four")];
-        let result = messages_after_overlap(&stored, &incoming);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].content, "four");
+    #[test] fn concurrent_writes_to_same_conversation_preserve_ordered_messages() {
+        let p=dbpath("same"); let x=Arc::new(UnifiedMemory::with_optional_persistence(8000,Some(p.clone())).unwrap());
+        let jobs=(0..6).map(|i| {let x=x.clone();thread::spawn(move||x.store_turn("same".into(),vec![m("user",&format!("u{i}"))],m("assistant",&format!("a{i}")),"p".into(),"t".into()).unwrap())}).collect::<Vec<_>>();
+        for j in jobs {j.join().unwrap();} assert_eq!(x.conversations.get("same").unwrap().messages.len(),12); drop(x);
+        let x=UnifiedMemory::with_optional_persistence(8000,Some(p.clone())).unwrap(); assert_eq!(x.conversations.get("same").unwrap().messages.len(),12); clean(&p);
     }
-
-    #[test]
-    fn unrelated_new_turn_is_not_discarded() {
-        let stored = vec![m("user", "old")];
-        let incoming = vec![m("user", "new")];
-        let result = messages_after_overlap(&stored, &incoming);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].content, "new");
+    #[test] fn overlap_deduplicates_full_and_sliding_transcripts() {
+        let stored=vec![m("user","hello"),m("assistant","hi")];
+        assert_eq!(messages_after_overlap(&stored,&[m("user","hello"),m("assistant","hi"),m("user","next")]),vec![m("user","next")]);
+        assert_eq!(messages_after_overlap(&stored,&[m("assistant","hi"),m("user","next")]),vec![m("user","next")]);
     }
 }
