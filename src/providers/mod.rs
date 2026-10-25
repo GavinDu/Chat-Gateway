@@ -290,7 +290,10 @@ pub async fn run_send(
     loop {
         if chunks.is_closed() {
             adapter.cancel_generation(page.as_ref());
-            tracing::debug!(provider = adapter.name(), "client disconnected; requested generation stop");
+            tracing::debug!(
+                provider = adapter.name(),
+                "client disconnected; requested generation stop"
+            );
             return;
         }
 
@@ -341,14 +344,16 @@ pub async fn run_send(
                                 return;
                             }
                         }
-                        let _ = chunks.send(Ok(ProviderChunk {
-                            content: String::new(),
-                            done: true,
-                        })).await;
+                        let _ = chunks
+                            .send(Ok(ProviderChunk {
+                                content: String::new(),
+                                done: true,
+                            }))
+                            .await;
                         break;
                     }
                     continue;
-                },
+                }
                 DeltaObservation::Delta(mut delta) => {
                     if let Some(re) = &citation_re {
                         delta = re.replace_all(&delta, "").to_string();
@@ -374,7 +379,7 @@ pub async fn run_send(
                     } else {
                         stable_ticks += 1;
                     }
-                },
+                }
             }
 
             // Completion requires a conservative 15s idle grace plus no
