@@ -210,6 +210,7 @@ pub async fn save_session(browser: &Browser, page: &Page, provider: &str) -> Res
 /// cookie store so the first navigation is already authenticated.
 pub fn restore_cookies(browser: &Browser, file: &SessionFile, provider: &str) -> Result<()> {
     let store = browser.cookies();
+    let mut failed_writes = 0usize;
     for c in &file.cookies {
         // Session files are local files and may have been edited or created by
         // an older version. Apply the same provider-domain allowlist at restore
@@ -249,9 +250,17 @@ pub fn restore_cookies(browser: &Browser, file: &SessionFile, provider: &str) ->
                 }
             )
         };
-        if let Err(e) = store.set(&s, &url) {
-            tracing::debug!(cookie = c.name, "cookie restore failed: {e}");
+        if store.set(&s, &url).is_err() {
+            failed_writes += 1;
+            tracing::warn!(
+                provider,
+                cookie = %c.name,
+                "provider session cookie restore failed"
+            );
         }
+    }
+    if failed_writes > 0 {
+        anyhow::bail!("failed to restore {failed_writes} provider session cookie(s)");
     }
     Ok(())
 }
