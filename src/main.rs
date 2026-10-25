@@ -48,11 +48,8 @@ struct Cli {
     #[arg(long, conflicts_with = "test_adapter", help = "Run live diagnostics for every enabled provider")]
     all: bool,
 
-    #[arg(long, requires = "diagnostic_requested", help = "Emit machine-readable JSON for adapter diagnostics")]
+    #[arg(long, help = "Emit machine-readable JSON for adapter diagnostics")]
     json: bool,
-
-    #[arg(long = "diagnostic-requested", hide = true, conflicts_with = "config")]
-    diagnostic_requested: bool,
 }
 
 #[derive(serde::Serialize)]
@@ -182,6 +179,9 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let cli = Cli::parse();
+    if cli.json && !cli.all && cli.test_adapter.is_none() {
+        anyhow::bail!("--json requires --all or --test-adapter <provider>");
+    }
     let cfg = Arc::new(AppConfig::load(&cli.config)?);
 
     let pool = ObscuraPool::new(cfg.clone()).await?;
