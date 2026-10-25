@@ -1995,7 +1995,6 @@ mod login_security_middleware_http_tests {
     }
 }
 
-
 #[cfg(test)]
 mod loopback_authority_edge_tests {
     use super::is_loopback_authority;
