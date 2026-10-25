@@ -99,10 +99,15 @@ mod session_path_tests {
 /// Load a saved session file, if one exists.
 pub fn load_session_file(provider: &str) -> Result<Option<SessionFile>> {
     let path = session_path(provider)?;
-    if !Path::new(&path).exists() {
-        return Ok(None);
-    }
-    let data = std::fs::read_to_string(&path)?;
+    load_session_file_from_path(Path::new(&path))
+}
+
+fn load_session_file_from_path(path: &Path) -> Result<Option<SessionFile>> {
+    let data = match std::fs::read_to_string(path) {
+        Ok(data) => data,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
     Ok(Some(serde_json::from_str(&data)?))
 }
 
@@ -307,6 +312,37 @@ pub fn restore_session(browser: &Browser, page: &Page, provider: &str) -> Result
             Ok(true)
         }
         None => Ok(false),
+    }
+}
+
+#[cfg(test)]
+mod session_file_read_tests {
+    use super::*;
+
+    #[test]
+    fn missing_session_file_returns_none() {
+        let dir = std::env::temp_dir().join(format!(
+            "chat-gateway-session-read-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let result = load_session_file_from_path(&dir.join("missing.json"));
+        std::fs::remove_dir_all(dir).unwrap();
+        assert!(matches!(result, Ok(None)));
+    }
+
+    #[test]
+    fn malformed_session_file_returns_error() {
+        let dir = std::env::temp_dir().join(format!(
+            "chat-gateway-session-invalid-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("invalid.json");
+        std::fs::write(&path, b"not-json").unwrap();
+        let result = load_session_file_from_path(&path);
+        std::fs::remove_dir_all(dir).unwrap();
+        assert!(result.is_err());
     }
 }
 
