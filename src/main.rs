@@ -57,6 +57,13 @@ struct Cli {
 }
 
 #[derive(serde::Serialize)]
+fn adapter_report_is_healthy(report: &browser::pool::TestAdapterReport) -> bool {
+    report.errors.is_empty()
+        && report.session_ok
+        && report.input_found
+        && report.response_token
+}
+
 struct AdapterDiagnostic {
     provider: String,
     queue_ms: Option<u128>,
@@ -242,12 +249,7 @@ async fn main() -> anyhow::Result<()> {
                 .and_then(|provider_id| registry.get(&provider_id))
                 .map(|adapter| format!("{:?}", adapter.selectors()));
             let healthy = errors.is_empty()
-                && report.as_ref().is_some_and(|report| {
-                    report.errors.is_empty()
-                        && report.session_ok
-                        && report.input_found
-                        && report.response_token
-                });
+                && report.as_ref().is_some_and(adapter_report_is_healthy);
 
             results.push(AdapterDiagnostic {
                 provider,
@@ -2128,5 +2130,46 @@ mod loopback_authority_edge_tests {
                 "expected unsafe authority to be rejected: {authority}"
             );
         }
+    }
+}
+
+
+#[cfg(test)]
+mod adapter_diagnostic_tests {
+    use super::*;
+
+    fn passing_report() -> browser::pool::TestAdapterReport {
+        browser::pool::TestAdapterReport {
+            session_ok: true,
+            probe: vec![("input".to_string(), Some("#prompt".to_string()))],
+            input_found: true,
+            send_clicked: true,
+            response_token: true,
+            errors: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn healthy_report_requires_all_critical_phases() {
+        assert!(adapter_report_is_healthy(&passing_report()));
+
+        let mut report = passing_report();
+        report.session_ok = false;
+        assert!(!adapter_report_is_healthy(&report));
+
+        let mut report = passing_report();
+        report.input_found = false;
+        assert!(!adapter_report_is_healthy(&report));
+
+        let mut report = passing_report();
+        report.response_token = false;
+        assert!(!adapter_report_is_healthy(&report));
+    }
+
+    #[test]
+    fn any_report_error_marks_adapter_unhealthy() {
+        let mut report = passing_report();
+        report.errors.push("send failed".to_string());
+        assert!(!adapter_report_is_healthy(&report));
     }
 }
