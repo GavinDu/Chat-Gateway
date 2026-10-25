@@ -266,7 +266,7 @@ async fn main() -> anyhow::Result<()> {
         if cli.json {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&serde_json::json!({
+                serde_json::to_string(&serde_json::json!({
                     "ok": all_healthy,
                     "results": results,
                 }))?
