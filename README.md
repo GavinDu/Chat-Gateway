@@ -72,7 +72,7 @@ Axum HTTP side (multi-thread)
       -> embedded Obscura Browser, one pre-warmed Page per provider
       -> per-provider mutex serializes sends on its page
       -> provider adapters (selector fallbacks) -> chunk channel back
-  -> UnifiedMemory (DashMap, sliding window)
+  -> UnifiedMemory (SQLite-backed conversation store; sliding-window context)
 ```
 
 Obscura pages wrap a V8 runtime behind interior mutability and are
