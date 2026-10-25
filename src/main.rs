@@ -285,15 +285,15 @@ async fn refresh_models(state: &Arc<AppState>) {
 /// credentials — relayed text lives in memory only for the action that
 /// types it, and only cookies/localStorage are persisted on Complete.
 
-/// Protect browser-control endpoints against cross-origin requests (CSRF).
-/// Non-browser clients without an Origin header remain usable, while browser
-/// requests must have an Origin authority identical to the request Host.
 /// The login relay can read and persist provider session material. Keep the HTTP
 /// listener loopback-only until an authenticated remote-access mode is designed.
 fn server_bind_addr(port: u16) -> SocketAddr {
     SocketAddr::from(([127, 0, 0, 1], port))
 }
 
+/// Protect browser-control endpoints against cross-origin requests (CSRF).
+/// Non-browser clients without an Origin header remain usable, while browser
+/// requests must have an Origin authority identical to the request Host.
 async fn protect_login_api(req: Request<Body>, next: Next) -> Response {
     let headers = req.headers();
     // The service binds to loopback, but DNS rebinding can still send a
