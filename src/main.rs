@@ -45,7 +45,6 @@ struct AppState {
 }
 
 #[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
 struct ChatReq {
     model: String,
     messages: Vec<ChatMessage>,
@@ -53,6 +52,10 @@ struct ChatReq {
     stream: bool,
     #[serde(default)]
     temperature: Option<f32>,
+    // Capture unknown OpenAI-style fields so validation can return a clear
+    // unsupported_parameter error instead of misreporting them as malformed JSON.
+    #[serde(flatten)]
+    unsupported_fields: HashMap<String, serde_json::Value>,
 }
 
 
@@ -98,6 +101,14 @@ fn validate_chat_req(req: &ChatReq) -> Result<(), (&'static str, String)> {
         return Err((
             "unsupported_parameter",
             "temperature is not supported by the current browser-backed adapters".to_string(),
+        ));
+    }
+    if !req.unsupported_fields.is_empty() {
+        let mut fields = req.unsupported_fields.keys().cloned().collect::<Vec<_>>();
+        fields.sort();
+        return Err((
+            "unsupported_parameter",
+            format!("unsupported request parameter(s): {}", fields.join(", ")),
         ));
     }
     Ok(())
@@ -921,13 +932,17 @@ mod api_contract_tests {
     }
 
     #[test]
-    fn rejects_unknown_request_fields_instead_of_ignoring_them() {
-        let result = serde_json::from_value::<ChatReq>(serde_json::json!({
+    fn reports_unknown_request_fields_as_unsupported_parameters() {
+        let req = serde_json::from_value::<ChatReq>(serde_json::json!({
             "model": "auto",
             "messages": [{"role": "user", "content": "hello"}],
-            "tools": []
-        }));
-        assert!(result.is_err());
+            "tools": [],
+            "top_p": 0.5
+        })).expect("unknown parameters should be captured for validation");
+        let error = validate_chat_req(&req).unwrap_err();
+        assert_eq!(error.0, "unsupported_parameter");
+        assert!(error.1.contains("tools"));
+        assert!(error.1.contains("top_p"));
     }
 
     #[test]
