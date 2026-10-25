@@ -33,31 +33,33 @@ impl UnifiedMemory {
     /// Restore durable conversation memory from CHAT_GATEWAY_MEMORY_PATH,
     /// defaulting to data/conversations.json. Snapshot writes use an atomic
     /// rename so a process interruption cannot leave a partially written file.
-    pub fn from_env(max_tokens: usize) -> Self {
+    pub fn from_env(max_tokens: usize) -> anyhow::Result<Self> {
         let path = std::env::var_os("CHAT_GATEWAY_MEMORY_PATH")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("data/conversations.json"));
         Self::with_optional_persistence(max_tokens, Some(path))
     }
 
-    fn with_optional_persistence(max_tokens: usize, persistence_path: Option<PathBuf>) -> Self {
+    fn with_optional_persistence(max_tokens: usize, persistence_path: Option<PathBuf>) -> anyhow::Result<Self> {
         let conversations = DashMap::new();
         if let Some(path) = persistence_path.as_deref() {
-            match load_conversations(path) {
-                Ok(loaded) => {
-                    for (id, conversation) in loaded {
-                        conversations.insert(id, conversation);
-                    }
+            // Fail closed: never start with an empty store after a restore
+            // error, since a subsequent write could overwrite recoverable data.
+            let loaded = load_conversations(path)
+                .map_err(|error| anyhow::anyhow!("failed to restore conversation memory from {}: {error}", path.display()))?;
+            for (id, conversation) in loaded {
+                if id != conversation.id {
+                    anyhow::bail!("conversation memory key/id mismatch for key '{id}' in {}", path.display());
                 }
-                Err(error) => tracing::warn!(path = %path.display(), "could not restore conversation memory: {error}"),
+                conversations.insert(id, conversation);
             }
         }
-        Self {
+        Ok(Self {
             max_tokens,
             conversations,
             persistence_path,
             persistence_lock: Mutex::new(()),
-        }
+        })
     }
 
     /// Build prompt with sliding window, unified across providers.
@@ -219,7 +221,7 @@ mod tests {
         // A directory at the target path forces atomic rename to fail.
         let path = std::env::temp_dir().join(format!("chat-gateway-memory-target-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&path).unwrap();
-        let memory = UnifiedMemory::with_optional_persistence(8000, Some(path.clone()));
+        let memory = UnifiedMemory::with_optional_persistence(8000, Some(path.clone())).unwrap();
         let result = memory.store_turn(
             "conversation-failed".to_string(),
             vec![m("user", "hello")],
@@ -236,7 +238,7 @@ mod tests {
     fn persistent_memory_restores_conversation_after_restart() {
         let path = std::env::temp_dir().join(format!("chat-gateway-memory-{}.json", uuid::Uuid::new_v4()));
         {
-            let memory = UnifiedMemory::with_optional_persistence(8000, Some(path.clone()));
+            let memory = UnifiedMemory::with_optional_persistence(8000, Some(path.clone())).unwrap();
             memory.store_turn(
                 "conversation-1".to_string(),
                 vec![m("user", "hello")],
@@ -247,13 +249,34 @@ mod tests {
             assert!(path.exists());
         }
         {
-            let memory = UnifiedMemory::with_optional_persistence(8000, Some(path.clone()));
+            let memory = UnifiedMemory::with_optional_persistence(8000, Some(path.clone())).unwrap();
             assert!(memory.has_history("conversation-1"));
             assert_eq!(memory.get_provider("conversation-1").as_deref(), Some("chatgpt"));
             let (prompt, _) = memory.build_context(Some("conversation-1"), &[m("user", "next")]);
             assert!(prompt.contains("assistant: hi"));
             assert!(prompt.contains("user: next"));
         }
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn corrupt_snapshot_fails_restore_instead_of_starting_empty() {
+        let path = std::env::temp_dir().join(format!("chat-gateway-memory-corrupt-{}.json", uuid::Uuid::new_v4()));
+        std::fs::write(&path, b"{ definitely not json").unwrap();
+        let result = UnifiedMemory::with_optional_persistence(8000, Some(path.clone()));
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"{ definitely not json");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn rejects_snapshot_with_mismatched_conversation_identity() {
+        let path = std::env::temp_dir().join(format!("chat-gateway-memory-mismatch-{}.json", uuid::Uuid::new_v4()));
+        let data = serde_json::json!({
+            "key-1": { "id": "different-id", "messages": [], "provider": null, "tab_id": null }
+        });
+        std::fs::write(&path, serde_json::to_vec(&data).unwrap()).unwrap();
+        assert!(UnifiedMemory::with_optional_persistence(8000, Some(path.clone())).is_err());
         let _ = std::fs::remove_file(path);
     }
 
