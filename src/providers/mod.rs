@@ -460,7 +460,6 @@ mod response_delta_tracker_tests {
     }
 }
 
-
 #[cfg(test)]
 mod response_completion_tests {
     use super::{completion_ready, COMPLETION_IDLE_TICKS};
