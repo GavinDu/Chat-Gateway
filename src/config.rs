@@ -21,8 +21,6 @@ pub struct AppConfig {
 pub struct ServerConfig {
     #[serde(default = "default_port")]
     pub port: u16,
-    #[serde(default = "default_true")]
-    pub headless: bool,
     #[serde(default)]
     pub chrome_profile_dir: String,
 }
@@ -31,7 +29,6 @@ impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             port: default_port(),
-            headless: true,
             chrome_profile_dir: String::new(),
         }
     }
