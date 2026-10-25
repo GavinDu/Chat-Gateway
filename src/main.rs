@@ -1290,6 +1290,7 @@ mod model_list_tests {
             enabled,
             priority: 1,
             timeout_seconds: 30,
+            queue_timeout_seconds: 30,
             session_pool_size: 1,
             models: models.iter().map(|model| (*model).to_owned()).collect(),
         }
