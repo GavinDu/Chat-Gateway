@@ -363,19 +363,6 @@ pub fn restore_local_storage(page: &Page, file: &SessionFile) -> Result<()> {
     Ok(())
 }
 
-/// Back-compat combined restore for a page already on the provider
-/// origin: cookies into the store, then localStorage into the page.
-pub fn restore_session(browser: &Browser, page: &Page, provider: &str) -> Result<bool> {
-    match load_session_file(provider)? {
-        Some(file) => {
-            restore_cookies(browser, &file, provider)?;
-            restore_local_storage(page, &file)?;
-            Ok(true)
-        }
-        None => Ok(false),
-    }
-}
-
 #[cfg(test)]
 mod local_storage_snapshot_tests {
     use super::*;
