@@ -133,6 +133,24 @@ pub trait ChatProvider: Send + Sync {
     /// Current full text of the (last) response, if present.
     fn response_text(&self, page: &Page) -> Option<String>;
 
+    /// Count distinct response nodes before/after a send. This lets the
+    /// stream loop distinguish a new identical answer from stale text.
+    fn response_count(&self, page: &Page) -> usize {
+        let selectors = serde_json::to_string(self.selector_set().response)
+            .unwrap_or_else(|_| "[]".to_owned());
+        page.evaluate(&format!(
+            "(() => {{ const nodes = new Set(); for (const selector of {selectors}) {{ try {{ document.querySelectorAll(selector).forEach(node => nodes.add(node)); }} catch (_) {{}} }} return nodes.size; }})()"
+        ))
+        .as_u64()
+        .unwrap_or(0) as usize
+    }
+
+    /// Minimum quiet period before declaring a response complete. The default
+    /// tolerates long pauses during reasoning, search, and tool use.
+    fn response_idle_grace(&self) -> Duration {
+        Duration::from_secs(10)
+    }
+
     /// Provider still generating (stop button / streaming attribute).
     fn is_streaming(&self, page: &Page) -> bool {
         common::is_streaming(page)
@@ -224,6 +242,10 @@ impl ResponseDeltaTracker {
     }
 }
 
+fn is_new_response_node(baseline_count: usize, current_count: usize) -> bool {
+    current_count > baseline_count
+}
+
 /// Generic send + stream-poll loop (v1 semantics, shared by all
 /// adapters): type the prompt via the adapter, then poll the response
 /// container every 350ms, yield text deltas, finish after ~2s without
@@ -241,6 +263,7 @@ pub async fn run_send(
     // is never emitted as new. Rust v1 had no baseline (last_len
     // started at 0); this fixes that stale-text bug while keeping
     // Rust v1's 350ms / stability / indicator completion.
+    let baseline_response_count = adapter.response_count(&page);
     let baseline = adapter.response_text(&page).filter(|t| !t.is_empty());
     let mut baseline = baseline;
 
@@ -270,7 +293,9 @@ pub async fn run_send(
         .strip_citations()
         .then(|| regex::Regex::new(r"\[\d+\]").expect("static regex"));
     let mut tracker = ResponseDeltaTracker::new(baseline.take());
-    let mut stable_ticks = 0u32;
+    let mut new_response_node_seen = false;
+    let mut stable_since: Option<Instant> = None;
+    let idle_grace = adapter.response_idle_grace();
 
     loop {
         if start.elapsed() > timeout {
@@ -288,6 +313,15 @@ pub async fn run_send(
 
         tokio::time::sleep(Duration::from_millis(350)).await;
 
+        if !new_response_node_seen
+            && is_new_response_node(baseline_response_count, adapter.response_count(&page))
+        {
+            // A new DOM node is the strongest signal that the provider started
+            // a fresh answer, even when its text exactly matches the last turn.
+            tracker = ResponseDeltaTracker::new(None);
+            new_response_node_seen = true;
+        }
+
         if let Some(txt) = adapter.response_text(&page) {
             match tracker.observe(&txt) {
                 DeltaObservation::NoText
@@ -297,7 +331,7 @@ pub async fn run_send(
                     if let Some(re) = &citation_re {
                         delta = re.replace_all(&delta, "").to_string();
                     }
-                    stable_ticks = 0;
+                    stable_since = None;
                     if !delta.is_empty()
                         && chunks
                             .send(Ok(ProviderChunk {
@@ -311,11 +345,16 @@ pub async fn run_send(
                     }
                     continue;
                 }
-                DeltaObservation::Stable => stable_ticks += 1,
+                DeltaObservation::Stable => {
+                    stable_since.get_or_insert_with(Instant::now);
+                }
             }
 
-            // Completion: no growth for ~2s + no streaming indicator
-            if stable_ticks > 6 && !adapter.is_streaming(&page) {
+            // Require a longer quiet window so reasoning/search/tool pauses
+            // do not prematurely terminate a response.
+            if stable_since.is_some_and(|since| since.elapsed() >= idle_grace)
+                && !adapter.is_streaming(&page)
+            {
                 let _ = chunks
                     .send(Ok(ProviderChunk {
                         content: String::new(),
@@ -382,5 +421,35 @@ mod response_delta_tracker_tests {
             tracker.observe("answer"),
             DeltaObservation::Delta("answer".to_string())
         );
+    }
+}
+
+
+#[cfg(test)]
+mod response_completion_regression_tests {
+    use super::*;
+
+    #[test]
+    fn new_response_node_resets_tracker_for_identical_consecutive_answers() {
+        let baseline_count = 2;
+        let current_count = 3;
+        assert!(is_new_response_node(baseline_count, current_count));
+
+        let mut tracker = ResponseDeltaTracker::new(Some("OK".to_owned()));
+        assert_eq!(
+            tracker.observe("OK"),
+            DeltaObservation::WaitingForNewResponse
+        );
+
+        // run_send resets the tracker when the node count grows. The identical
+        // answer is therefore emitted instead of being mistaken for stale text.
+        tracker = ResponseDeltaTracker::new(None);
+        assert_eq!(tracker.observe("OK"), DeltaObservation::Delta("OK".to_owned()));
+    }
+
+    #[test]
+    fn unchanged_response_node_is_not_mistaken_for_a_new_answer() {
+        assert!(!is_new_response_node(2, 2));
+        assert!(!is_new_response_node(2, 1));
     }
 }
