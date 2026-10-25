@@ -1,6 +1,6 @@
 use axum::{
     body::Body,
-    extract::{DefaultBodyLimit, Path, State},
+    extract::{DefaultBodyLimit, Extension, Path, State},
     http::HeaderMap,
     http::{Request, StatusCode},
     middleware::{self, Next},
@@ -13,6 +13,7 @@ use axum::{
     Json, Router,
 };
 use clap::Parser;
+use sha2::{Digest, Sha256};
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 use tokio::sync::RwLock;
 
@@ -54,6 +55,9 @@ struct Cli {
 
     #[arg(long, help = "Emit machine-readable JSON for adapter diagnostics")]
     json: bool,
+
+    #[arg(long, value_name = "NAME", help = "Create a random chat API key, print it once and exit")]
+    create_api_key: Option<String>,
 }
 
 fn adapter_report_is_healthy(report: &browser::pool::TestAdapterReport) -> bool {
@@ -69,6 +73,13 @@ struct AdapterDiagnostic {
     selectors: Option<String>,
     errors: Vec<String>,
     healthy: bool,
+}
+
+#[derive(Clone)]
+struct AuthKeyContext {
+    name: String,
+    scopes: Vec<String>,
+    provider_allowlist: Option<Vec<String>>,
 }
 
 struct AppState {
@@ -187,10 +198,26 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let cli = Cli::parse();
+    if let Some(name) = cli.create_api_key.as_deref() {
+        if name.trim().is_empty() || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-') {
+            anyhow::bail!("key name must contain only ASCII letters, digits, '_' or '-'");
+        }
+        let secret = format!("cg_{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple());
+        let hash = hash_api_key(&secret);
+        println!("API key secret (shown once; store it securely): {secret}");
+        println!("Add this entry under auth.keys in config.yaml:");
+        println!("  - name: {name}");
+        println!("    secret_hash: \"{hash}\"");
+        println!("    scopes: [chat]");
+        return Ok(());
+    }
     if cli.json && !cli.all && cli.test_adapter.is_none() {
         anyhow::bail!("--json requires --all or --test-adapter <provider>");
     }
     let cfg = Arc::new(AppConfig::load(&cli.config)?);
+    if cfg.auth.keys.is_empty() {
+        tracing::warn!("API-key authentication is disabled; the listener remains loopback-only");
+    }
 
     let pool = ObscuraPool::new(cfg.clone()).await?;
     pool.warm_all().await?;
@@ -336,7 +363,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/login/api/:provider/complete", post(login_complete))
         .route("/login/api/:provider/view", get(login_view))
         .route("/login/api/:provider/act", post(login_act))
-        .with_state(state)
+        .with_state(state.clone())
+        .layer(middleware::from_fn_with_state(state, authenticate_api_key))
         // Semantic message limits run after JSON parsing; cap the raw body too
         // so an oversized payload cannot consume unbounded memory before
         // request validation has a chance to reject it.
@@ -956,6 +984,100 @@ async fn attach_request_id(req: Request<Body>, next: Next) -> Response {
     response
 }
 
+fn hash_api_key(secret: &str) -> String {
+    Sha256::digest(secret.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    left.iter()
+        .zip(right)
+        .fold(0u8, |difference, (a, b)| difference | (a ^ b))
+        == 0
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum AuthFailure {
+    MissingOrInvalid,
+    InsufficientScope,
+}
+
+fn authorize_api_request(
+    auth: &config::AuthConfig,
+    authorization: Option<&str>,
+    path: &str,
+    method: &axum::http::Method,
+) -> Result<Option<AuthKeyContext>, AuthFailure> {
+    if auth.keys.is_empty() || path == "/health" {
+        return Ok(None);
+    }
+    let header = authorization.ok_or(AuthFailure::MissingOrInvalid)?;
+    let (scheme, secret) = header.split_once(' ').ok_or(AuthFailure::MissingOrInvalid)?;
+    if !scheme.eq_ignore_ascii_case("bearer") || secret.is_empty() || secret.contains(' ') {
+        return Err(AuthFailure::MissingOrInvalid);
+    }
+    let digest = hash_api_key(secret);
+    let key = auth.keys.iter().find(|key| {
+        constant_time_eq(
+            key.secret_hash.to_ascii_lowercase().as_bytes(),
+            digest.as_bytes(),
+        )
+    }).ok_or(AuthFailure::MissingOrInvalid)?;
+
+    let admin_route = path.starts_with("/login")
+        || path.starts_with("/relay/")
+        || (*method == axum::http::Method::DELETE
+            && path.starts_with("/v1/conversations/"));
+    let required_scope = if admin_route { "admin" } else { "chat" };
+    if !key.scopes.iter().any(|scope| scope == required_scope) {
+        return Err(AuthFailure::InsufficientScope);
+    }
+    Ok(Some(AuthKeyContext {
+        name: key.name.clone(),
+        scopes: key.scopes.clone(),
+        provider_allowlist: key.provider_allowlist.clone(),
+    }))
+}
+
+async fn authenticate_api_key(
+    State(state): State<Arc<AppState>>,
+    mut req: Request<Body>,
+    next: Next,
+) -> Response {
+    let authorization = req.headers()
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok());
+    match authorize_api_request(
+        &state.cfg.auth,
+        authorization,
+        req.uri().path(),
+        req.method(),
+    ) {
+        Ok(Some(context)) => {
+            req.extensions_mut().insert(context);
+            next.run(req).await
+        }
+        Ok(None) => next.run(req).await,
+        Err(AuthFailure::MissingOrInvalid) => api_error(
+            StatusCode::UNAUTHORIZED,
+            "authentication_error",
+            "invalid_api_key",
+            "a valid Bearer API key is required",
+        ),
+        Err(AuthFailure::InsufficientScope) => api_error(
+            StatusCode::FORBIDDEN,
+            "authentication_error",
+            "insufficient_scope",
+            "the API key does not have the required scope",
+        ),
+    }
+}
+
 fn delete_conversation_response(memory: &UnifiedMemory, conversation_id: &str) -> Response {
     if !valid_conversation_id(conversation_id) {
         return api_error(
@@ -1044,9 +1166,23 @@ fn build_model_list(cfg: &AppConfig, cache: &HashMap<String, Vec<String>>) -> se
     serde_json::json!({ "object": "list", "data": data })
 }
 
-async fn models(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+async fn models(
+    State(state): State<Arc<AppState>>,
+    auth_context: Option<Extension<AuthKeyContext>>,
+) -> impl IntoResponse {
     let cache = state.models_cache.read().await;
-    Json(build_model_list(&state.cfg, &cache))
+    let mut model_list = build_model_list(&state.cfg, &cache);
+    if let Some(Extension(context)) = auth_context {
+        if let Some(allowed) = context.provider_allowlist {
+            if let Some(models) = model_list.get_mut("data").and_then(serde_json::Value::as_array_mut) {
+                models.retain(|model| {
+                    model.get("owned_by").and_then(serde_json::Value::as_str)
+                        .is_some_and(|provider| allowed.iter().any(|item| item == provider))
+                });
+            }
+        }
+    }
+    Json(model_list)
 }
 
 /// Conversation IDs are echoed into response IDs and tab affinity. Restrict
@@ -1095,6 +1231,7 @@ fn oversized_chat_body_error() -> Response {
 async fn chat_completions(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    auth_context: Option<Extension<AuthKeyContext>>,
     body: Result<axum::body::Bytes, axum::extract::rejection::BytesRejection>,
 ) -> Response {
     let body = match body {
@@ -1156,7 +1293,7 @@ async fn chat_completions(
         );
     }
 
-    let candidates = match state.router.resolve(
+    let mut candidates = match state.router.resolve(
         &req.model,
         conversation_id.as_deref(),
         &state.memory,
@@ -1172,6 +1309,20 @@ async fn chat_completions(
             );
         }
     };
+    let original_candidate_count = candidates.len();
+    if let Some(Extension(context)) = &auth_context {
+        if let Some(allowed) = &context.provider_allowlist {
+            candidates.retain(|provider| allowed.iter().any(|item| item == provider));
+            if candidates.is_empty() && original_candidate_count > 0 {
+                return api_error(
+                    StatusCode::FORBIDDEN,
+                    "authentication_error",
+                    "provider_not_allowed",
+                    "the API key is not allowed to use the requested provider",
+                );
+            }
+        }
+    }
     let provider_model = req
         .model
         .split_once('/')
@@ -1428,6 +1579,7 @@ mod model_list_tests {
             server: config::ServerConfig::default(),
             memory: config::MemoryConfig::default(),
             obscura: config::ObscuraConfig::default(),
+            auth: config::AuthConfig::default(),
             providers: vec![
                 provider("chatgpt", true, &["gpt-live"]),
                 provider("claude", false, &["claude-disabled"]),
