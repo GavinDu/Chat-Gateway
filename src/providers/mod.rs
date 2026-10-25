@@ -332,9 +332,14 @@ pub async fn run_send(
                     }
                     if stable_ticks >= COMPLETION_IDLE_TICKS {
                         if let Some(answer) = &identical_answer_fallback {
+                            let answer = if let Some(re) = &citation_re {
+                                re.replace_all(answer, "").to_string()
+                            } else {
+                                answer.clone()
+                            };
                             if chunks
                                 .send(Ok(ProviderChunk {
-                                    content: answer.clone(),
+                                    content: answer,
                                     done: false,
                                 }))
                                 .await
