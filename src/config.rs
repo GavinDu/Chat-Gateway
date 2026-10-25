@@ -153,19 +153,37 @@ impl AppConfig {
             if key.name.trim().is_empty() {
                 anyhow::bail!("auth key name must not be empty");
             }
-            if key.secret_hash.len() != 64 || !key.secret_hash.bytes().all(|b| b.is_ascii_hexdigit()) {
-                anyhow::bail!("auth key '{}' secret_hash must be a 64-character SHA-256 hex digest", key.name);
+            if key.secret_hash.len() != 64
+                || !key.secret_hash.bytes().all(|b| b.is_ascii_hexdigit())
+            {
+                anyhow::bail!(
+                    "auth key '{}' secret_hash must be a 64-character SHA-256 hex digest",
+                    key.name
+                );
             }
-            if key.scopes.is_empty() || key.scopes.iter().any(|scope| !matches!(scope.as_str(), "chat" | "admin")) {
-                anyhow::bail!("auth key '{}' scopes must contain chat and/or admin", key.name);
+            if key.scopes.is_empty()
+                || key
+                    .scopes
+                    .iter()
+                    .any(|scope| !matches!(scope.as_str(), "chat" | "admin"))
+            {
+                anyhow::bail!(
+                    "auth key '{}' scopes must contain chat and/or admin",
+                    key.name
+                );
             }
             if let Some(providers) = &key.provider_allowlist {
-                if providers.iter().any(|provider| !PROVIDERS.contains(&provider.as_str())) {
-                    anyhow::bail!("auth key '{}' has an unknown provider in provider_allowlist", key.name);
+                if providers
+                    .iter()
+                    .any(|provider| !PROVIDERS.contains(&provider.as_str()))
+                {
+                    anyhow::bail!(
+                        "auth key '{}' has an unknown provider in provider_allowlist",
+                        key.name
+                    );
                 }
             }
         }
-
 
         let mut seen = std::collections::HashSet::new();
         for provider in &self.providers {
