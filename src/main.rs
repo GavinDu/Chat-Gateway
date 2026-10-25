@@ -2458,6 +2458,18 @@ mod api_key_auth_tests {
             &axum::http::Method::GET
         )
         .is_ok());
+        let context = authorize_api_request(
+            &config,
+            Some("Bearer test-secret"),
+            "/v1/models",
+            &axum::http::Method::GET
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            context.provider_allowlist,
+            Some(vec!["chatgpt".to_owned()])
+        );
         assert_eq!(
             authorize_api_request(
                 &config,
