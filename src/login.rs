@@ -119,6 +119,44 @@ pub const VIEW_SCRIPT: &str = r#"(function(){ try {
   return {title: document.title||'', fields: fields, buttons: btns, snapshot: snap};
 } catch(e){ return {title:'', fields:[], buttons:[], snapshot:''}; } })()"#;
 
+
+/// Reject navigation targets that can reach local services or use URL
+/// authority tricks. SSO may use a different public HTTPS hostname, so this
+/// is a network-safety baseline rather than a provider-domain allowlist.
+fn validate_navigation_url(url: &str) -> anyhow::Result<()> {
+    let rest = url.strip_prefix("https://")
+        .ok_or_else(|| anyhow::anyhow!("navigate target must be an https URL"))?;
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if authority.is_empty() || authority.contains('@') || authority.contains('[') || authority.contains(']') {
+        anyhow::bail!("navigate target must use a public DNS hostname without userinfo or IP literals");
+    }
+    let host = if let Some((host, port)) = authority.rsplit_once(':') {
+        if port != "443" || host.contains(':') {
+            anyhow::bail!("navigate target may only use the default HTTPS port");
+        }
+        host
+    } else {
+        authority
+    }.to_ascii_lowercase();
+
+    if host.len() > 253 || !host.contains('.') || host.ends_with('.') ||
+       host.split('.').any(|label| label.is_empty() || label.len() > 63 ||
+           label.starts_with('-') || label.ends_with('-') ||
+           !label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')) {
+        anyhow::bail!("navigate target must use a valid public DNS hostname");
+    }
+    if host == "localhost" || host.ends_with(".localhost") ||
+       host.ends_with(".local") || host.ends_with(".internal") ||
+       host.ends_with(".test") || host.ends_with(".invalid") ||
+       host.ends_with(".example") {
+        anyhow::bail!("navigate target may not use a local or reserved hostname");
+    }
+    if host.parse::<std::net::IpAddr>().is_ok() {
+        anyhow::bail!("navigate target may not use an IP literal");
+    }
+    Ok(())
+}
+
 /// Parse the VIEW_SCRIPT result into its parts. Any shape mismatch
 /// degrades to empty parts, never an error.
 pub fn parse_view(value: serde_json::Value) -> (String, Vec<LoginField>, Vec<LoginButton>, String) {
@@ -181,12 +219,29 @@ impl LoginAction {
                 }
                 Ok(())
             }
-            LoginAction::Navigate { url } => {
-                if !url.starts_with("https://") {
-                    anyhow::bail!("navigate target must be an https URL");
-                }
-                Ok(())
-            }
+            LoginAction::Navigate { url } => validate_navigation_url(url),
         }
+    }
+}
+
+#[cfg(test)]
+mod navigation_validation_tests {
+    use super::*;
+
+    #[test]
+    fn accepts_public_https_sso_host() {
+        assert!(validate_navigation_url("https://accounts.example.com/oauth/callback").is_ok());
+        assert!(validate_navigation_url("https://login.example.com:443/").is_ok());
+    }
+
+    #[test]
+    fn rejects_non_https_and_local_targets() {
+        assert!(validate_navigation_url("http://example.com").is_err());
+        assert!(validate_navigation_url("https://localhost/").is_err());
+        assert!(validate_navigation_url("https://service.local/").is_err());
+        assert!(validate_navigation_url("https://127.0.0.1/").is_err());
+        assert!(validate_navigation_url("https://192.168.1.20/").is_err());
+        assert!(validate_navigation_url("https://example.com:8443/").is_err());
+        assert!(validate_navigation_url("https://user@example.com/").is_err());
     }
 }
