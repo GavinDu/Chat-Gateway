@@ -15,7 +15,7 @@ pub const SELECTORS: SelectorSet = SelectorSet {
     picker: &[
         "button.model-picker",
         "mat-select",
-        "button:has-text(\"Gemini\")",
+        "text:button=Gemini",
     ],
     input: &[
         "rich-textarea[aria-label]",
