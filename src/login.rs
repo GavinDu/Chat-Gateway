@@ -157,6 +157,40 @@ fn validate_navigation_url(url: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Apply a provider-scoped destination allowlist to login-relay navigation.
+/// Generic HTTPS validation alone would let a caller navigate to an attacker
+/// site and type provider credentials there. Common identity-provider domains
+/// are included for expected OAuth/SSO hops.
+pub fn validate_navigation_url_for_provider(provider: &str, url: &str) -> anyhow::Result<()> {
+    validate_navigation_url(url)?;
+    let rest = url.strip_prefix("https://").expect("generic validator accepted HTTPS");
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let host = authority.strip_suffix(":443").unwrap_or(authority).to_ascii_lowercase();
+    const COMMON_IDP: &[&str] = &[
+        "accounts.google.com", "google.com", "googleusercontent.com",
+        "apple.com", "icloud.com", "microsoftonline.com", "live.com",
+        "facebook.com", "github.com",
+    ];
+    let provider_domains: &[&str] = match provider {
+        "qwen" => &["qwen.ai", "aliyun.com", "alibabacloud.com"],
+        "metaai" => &["meta.ai", "meta.com", "facebook.com"],
+        "claude" => &["claude.ai", "anthropic.com"],
+        "chatgpt" => &["chatgpt.com", "openai.com", "auth0.com"],
+        "gemini" => &["gemini.google.com", "google.com"],
+        "grok" => &["grok.com", "x.com", "twitter.com", "x.ai"],
+        "mistral" => &["mistral.ai"],
+        "perplexity" => &["perplexity.ai"],
+        _ => anyhow::bail!("unknown provider for login navigation"),
+    };
+    let allowed = provider_domains.iter().chain(COMMON_IDP.iter()).any(|base| {
+        host == *base || host.ends_with(&format!(".{base}"))
+    });
+    if !allowed {
+        anyhow::bail!("navigation target is outside the provider and SSO allowlists");
+    }
+    Ok(())
+}
+
 /// Parse the VIEW_SCRIPT result into its parts. Any shape mismatch
 /// degrades to empty parts, never an error.
 pub fn parse_view(value: serde_json::Value) -> (String, Vec<LoginField>, Vec<LoginButton>, String) {
@@ -227,6 +261,20 @@ impl LoginAction {
 #[cfg(test)]
 mod navigation_validation_tests {
     use super::*;
+
+    #[test]
+    fn provider_navigation_allows_own_domain_and_common_sso() {
+        assert!(validate_navigation_url_for_provider("chatgpt", "https://chatgpt.com/").is_ok());
+        assert!(validate_navigation_url_for_provider("chatgpt", "https://accounts.google.com/o/oauth2/").is_ok());
+        assert!(validate_navigation_url_for_provider("claude", "https://login.microsoftonline.com/").is_ok());
+    }
+
+    #[test]
+    fn provider_navigation_rejects_other_provider_and_arbitrary_domains() {
+        assert!(validate_navigation_url_for_provider("chatgpt", "https://claude.ai/").is_err());
+        assert!(validate_navigation_url_for_provider("chatgpt", "https://attacker.example.org/").is_err());
+        assert!(validate_navigation_url_for_provider("unknown", "https://chatgpt.com/").is_err());
+    }
 
     #[test]
     fn accepts_public_https_sso_host() {
