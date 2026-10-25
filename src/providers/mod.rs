@@ -224,11 +224,12 @@ impl ResponseDeltaTracker {
     }
 }
 
-/// Generic send + stream-poll loop (v1 semantics, shared by all
-/// adapters): type the prompt via the adapter, then poll the response
-/// container every 350ms, yield text deltas, finish after ~2s without
-/// growth and no streaming indicator, or at the provider timeout.
+/// Generic send + stream-poll loop shared by all adapters. Poll response
+/// text every 350ms and finish only after a conservative idle grace period
+/// with no streaming indicator, or at the provider timeout. The grace period
+/// tolerates long reasoning/search pauses that can occur between text deltas.
 /// Runs on the browser thread; chunks leave via the channel.
+const COMPLETION_IDLE_TICKS: u32 = 43; // ~15 seconds at 350ms per poll.
 pub async fn run_send(
     adapter: Arc<dyn ChatProvider>,
     page: Rc<Page>,
@@ -242,6 +243,7 @@ pub async fn run_send(
     // started at 0); this fixes that stale-text bug while keeping
     // Rust v1's 350ms / stability / indicator completion.
     let baseline = adapter.response_text(&page).filter(|t| !t.is_empty());
+    let identical_answer_fallback = baseline.clone();
     let mut baseline = baseline;
 
     // Apply the same timeout budget to prompt submission and response
@@ -271,6 +273,7 @@ pub async fn run_send(
         .then(|| regex::Regex::new(r"\[\d+\]").expect("static regex"));
     let mut tracker = ResponseDeltaTracker::new(baseline.take());
     let mut stable_ticks = 0u32;
+    let mut saw_streaming = false;
 
     loop {
         if start.elapsed() > timeout {
@@ -288,11 +291,41 @@ pub async fn run_send(
 
         tokio::time::sleep(Duration::from_millis(350)).await;
 
+        let streaming = adapter.is_streaming(&page);
+        saw_streaming |= streaming;
+
         if let Some(txt) = adapter.response_text(&page) {
             match tracker.observe(&txt) {
-                DeltaObservation::NoText
-                | DeltaObservation::WaitingForNewResponse
-                | DeltaObservation::InvalidBoundary => continue,
+                DeltaObservation::NoText | DeltaObservation::InvalidBoundary => continue,
+                DeltaObservation::WaitingForNewResponse => {
+                    // Some providers reuse a response node and can return the
+                    // exact same text on consecutive turns. Once a generation
+                    // indicator has been observed, allow a full idle grace for
+                    // that indicator to disappear before treating the unchanged
+                    // baseline as the new answer.
+                    if saw_streaming && !streaming {
+                        stable_ticks += 1;
+                    } else {
+                        stable_ticks = 0;
+                        continue;
+                    }
+                    if stable_ticks >= COMPLETION_IDLE_TICKS {
+                        if let Some(answer) = &identical_answer_fallback {
+                            if chunks.send(Ok(ProviderChunk {
+                                content: answer.clone(),
+                                done: false,
+                            })).await.is_err() {
+                                return;
+                            }
+                        }
+                        let _ = chunks.send(Ok(ProviderChunk {
+                            content: String::new(),
+                            done: true,
+                        })).await;
+                        break;
+                    }
+                    continue;
+                },
                 DeltaObservation::Delta(mut delta) => {
                     if let Some(re) = &citation_re {
                         delta = re.replace_all(&delta, "").to_string();
@@ -314,8 +347,10 @@ pub async fn run_send(
                 DeltaObservation::Stable => stable_ticks += 1,
             }
 
-            // Completion: no growth for ~2s + no streaming indicator
-            if stable_ticks > 6 && !adapter.is_streaming(&page) {
+            // Completion requires a conservative 15s idle grace plus no
+            // active streaming indicator, avoiding truncation during long
+            // reasoning or search pauses.
+            if stable_ticks >= COMPLETION_IDLE_TICKS && !streaming {
                 let _ = chunks
                     .send(Ok(ProviderChunk {
                         content: String::new(),
