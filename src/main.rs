@@ -1148,7 +1148,6 @@ mod conversation_id_tests {
 }
 
 
-
 #[cfg(test)]
 mod http_api_regression_tests {
     use super::*;
@@ -1197,9 +1196,7 @@ mod http_api_regression_tests {
     }
 
     async fn json_body(response: Response) -> serde_json::Value {
-        let bytes = to_bytes(response.into_body(), 1024 * 1024)
-            .await
-            .unwrap();
+        let bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
         serde_json::from_slice(&bytes).unwrap()
     }
 
