@@ -242,6 +242,12 @@ pub async fn select_model(
     {
         return Ok(());
     }
+    // Providers without model-picker metadata cannot select a non-default
+    // model through the UI. Preserve the documented graceful no-op rather
+    // than failing every request for those providers.
+    if pairs.is_empty() {
+        return Ok(());
+    }
     let target_js = serde_json::to_string(&model.to_lowercase())?;
     for (trigger, options) in pairs {
         let found = {
