@@ -27,13 +27,41 @@ impl From<obscura_core::Cookie> for Cookie {
     }
 }
 
-pub fn session_path(provider: &str) -> String {
-    format!("sessions/{}.json", provider)
+pub fn session_path(provider: &str) -> Result<String> {
+    // Provider IDs become filesystem path components. Keep the accepted set
+    // aligned with the provider registry; never interpolate arbitrary config
+    // or request strings into a path.
+    const PROVIDERS: &[&str] = &[
+        "qwen", "metaai", "claude", "chatgpt", "gemini", "grok", "mistral", "perplexity",
+    ];
+    if !PROVIDERS.contains(&provider) {
+        anyhow::bail!("unsupported provider identifier for session storage");
+    }
+    Ok(format!("sessions/{}.json", provider))
+}
+
+#[cfg(test)]
+mod session_path_tests {
+    use super::*;
+
+    #[test]
+    fn only_registered_provider_names_become_paths() {
+        assert_eq!(session_path("chatgpt").unwrap(), "sessions/chatgpt.json");
+        assert_eq!(session_path("perplexity").unwrap(), "sessions/perplexity.json");
+    }
+
+    #[test]
+    fn rejects_path_traversal_and_unregistered_names() {
+        assert!(session_path("../outside").is_err());
+        assert!(session_path("chatgpt/../../outside").is_err());
+        assert!(session_path("CHATGPT").is_err());
+        assert!(session_path("").is_err());
+    }
 }
 
 /// Load a saved session file, if one exists.
 pub fn load_session_file(provider: &str) -> Result<Option<SessionFile>> {
-    let path = session_path(provider);
+    let path = session_path(provider)?;
     if !Path::new(&path).exists() {
         return Ok(None);
     }
@@ -79,7 +107,7 @@ pub async fn save_session(browser: &Browser, page: &Page, provider: &str) -> Res
         .collect();
     let file = SessionFile { local_storage, cookies, ts: chrono::Utc::now().to_rfc3339() };
     tokio::fs::create_dir_all("sessions").await?;
-    let destination = session_path(provider);
+    let destination = session_path(provider)?;
     let temp_path = format!("{}.tmp-{}-{}", destination, std::process::id(), uuid::Uuid::new_v4());
     let serialized = serde_json::to_vec_pretty(&file)?;
 

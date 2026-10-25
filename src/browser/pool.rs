@@ -657,7 +657,7 @@ fn browser_thread(
                                     login_pages.borrow_mut().remove(&provider);
                                     login_meta.borrow_mut().remove(&provider);
                                     Ok(LoginCompleted {
-                                        session_path: session::session_path(provider.name()),
+                                        session_path: session::session_path(provider.name())?,
                                         warm_swapped: true,
                                         warning: None,
                                     })
