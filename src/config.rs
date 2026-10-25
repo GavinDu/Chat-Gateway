@@ -309,4 +309,19 @@ mod tests {
         let strategy = config("memory:\n  strategy: full_history\n");
         assert!(strategy.validate().is_err());
     }
+
+    #[test]
+    fn validates_hashed_api_key_scopes_and_provider_allowlists() {
+        let valid = config("auth:\n  keys:\n    - name: local-client\n      secret_hash: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n      scopes: [chat]\n      provider_allowlist: [chatgpt]\n");
+        assert!(valid.validate().is_ok());
+
+        let bad_hash = config("auth:\n  keys:\n    - name: local-client\n      secret_hash: plaintext\n      scopes: [chat]\n");
+        assert!(bad_hash.validate().is_err());
+
+        let bad_scope = config("auth:\n  keys:\n    - name: local-client\n      secret_hash: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n      scopes: [root]\n");
+        assert!(bad_scope.validate().is_err());
+
+        let bad_provider = config("auth:\n  keys:\n    - name: local-client\n      secret_hash: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n      scopes: [chat]\n      provider_allowlist: [unknown]\n");
+        assert!(bad_provider.validate().is_err());
+    }
 }
