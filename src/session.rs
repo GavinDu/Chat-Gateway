@@ -136,14 +136,19 @@ fn cookie_domain_allowed(provider: &str, domain: &str) -> bool {
 /// Session files can be stale or manually modified, so domain validation alone is insufficient.
 fn restored_cookie_fields_safe(cookie: &Cookie) -> bool {
     let valid_name = !cookie.name.is_empty()
-        && cookie.name.bytes().all(|b| {
-            b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b)
-        });
-    let valid_value = cookie.value.bytes().all(|b| {
-        (0x21..=0x7e).contains(&b) && !matches!(b, b'"' | b',' | b';' | b'\\')
-    });
+        && cookie
+            .name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b));
+    let valid_value = cookie
+        .value
+        .bytes()
+        .all(|b| (0x21..=0x7e).contains(&b) && !matches!(b, b'"' | b',' | b';' | b'\\'));
     let valid_path = cookie.path.starts_with('/')
-        && !cookie.path.bytes().any(|b| b.is_ascii_control() || b == b';');
+        && !cookie
+            .path
+            .bytes()
+            .any(|b| b.is_ascii_control() || b == b';');
     valid_name && valid_value && valid_path
 }
 /// Ensure the directory holding reusable provider credentials is private.
@@ -313,14 +318,25 @@ mod cookie_scope_tests {
 
     #[test]
     fn restored_cookie_fields_reject_injection_and_malformed_paths() {
-        assert!(restored_cookie_fields_safe(&cookie("__Secure-session", "abc_123-xyz", "/")));
-        assert!(!restored_cookie_fields_safe(&cookie("bad;name", "value", "/")));
-        assert!(!restored_cookie_fields_safe(&cookie("session", "value; Secure", "/")));
-        assert!(!restored_cookie_fields_safe(&cookie("session", "value\r\nX-Evil: yes", "/")));
-        assert!(!restored_cookie_fields_safe(&cookie("session", "value", "relative/path")));
-        assert!(!restored_cookie_fields_safe(&cookie("session", "value", "/safe\r\nInjected: yes")));
-    }
-    #[test]
+        assert!(restored_cookie_fields_safe(&cookie(
+            "__Secure-session", "abc_123-xyz", "/"
+        )));
+        assert!(!restored_cookie_fields_safe(&cookie(
+            "bad;name", "value", "/"
+        )));
+        assert!(!restored_cookie_fields_safe(&cookie(
+            "session", "value; Secure", "/"
+        )));
+        assert!(!restored_cookie_fields_safe(&cookie(
+            "session", "value\r\nX-Evil: yes", "/"
+        )));
+        assert!(!restored_cookie_fields_safe(&cookie(
+            "session", "value", "relative/path"
+        )));
+        assert!(!restored_cookie_fields_safe(&cookie(
+            "session", "value", "/safe\r\nInjected: yes"
+        )));
+    }    #[test]
     fn provider_cookie_allowlist_rejects_cross_provider_and_suffix_spoofing() {
         assert!(!cookie_domain_allowed("chatgpt", "claude.ai"));
         assert!(!cookie_domain_allowed("chatgpt", "notopenai.com"));
