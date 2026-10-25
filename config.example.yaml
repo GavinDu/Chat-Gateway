@@ -17,47 +17,55 @@ providers:
     enabled: true
     priority: 1
     timeout_seconds: 120
-    session_pool_size: 2
+    queue_timeout_seconds: 30
+    session_pool_size: 1
     models: [qwen, qwen3, qwen-plus, qwen-max]
   - name: metaai
     enabled: true
     priority: 2
     timeout_seconds: 120
-    session_pool_size: 2
+    queue_timeout_seconds: 30
+    session_pool_size: 1
     models: [meta-ai, llama, llama-4, llama-3.3]
   - name: claude
     enabled: true
     priority: 3
     timeout_seconds: 150
-    session_pool_size: 2
+    queue_timeout_seconds: 30
+    session_pool_size: 1
     models: [claude, claude-sonnet-4, claude-opus-4, claude-haiku-3.5, claude-sonnet, claude-opus]
   - name: chatgpt
     enabled: true
     priority: 4
     timeout_seconds: 150
-    session_pool_size: 2
+    queue_timeout_seconds: 30
+    session_pool_size: 1
     models: [gpt, chatgpt, gpt-5, gpt-4o, gpt-4o-mini, o1, o3-mini]
   - name: gemini
     enabled: true
     priority: 5
     timeout_seconds: 120
-    session_pool_size: 2
+    queue_timeout_seconds: 30
+    session_pool_size: 1
     models: [gemini, gemini-2.0-flash, gemini-1.5-pro, gemini-1.5-flash, gemini-pro]
   - name: grok
     enabled: true
     priority: 6
     timeout_seconds: 120
-    session_pool_size: 2
+    queue_timeout_seconds: 30
+    session_pool_size: 1
     models: [grok, grok-3, grok-3-mini, grok-2, grok-beta]
   - name: mistral
     enabled: true
     priority: 7
     timeout_seconds: 120
-    session_pool_size: 2
+    queue_timeout_seconds: 30
+    session_pool_size: 1
     models: [mistral, mistral-large, mistral-small, mixtral, codestral, pixtral]
   - name: perplexity
     enabled: true
     priority: 8
     timeout_seconds: 120
-    session_pool_size: 2
+    queue_timeout_seconds: 30
+    session_pool_size: 1
     models: [perplexity, sonar, sonar-pro, sonar-reasoning, pplx-8b, pplx-70b]
