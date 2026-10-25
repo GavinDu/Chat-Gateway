@@ -14,7 +14,7 @@ pub const SELECTORS: SelectorSet = SelectorSet {
     url: "https://chat.mistral.ai",
     picker: &[
         "button.model-selector",
-        "div:has-text(\"Mistral Large\")",
+        "text:div=Mistral Large",
         "select",
     ],
     input: &[
