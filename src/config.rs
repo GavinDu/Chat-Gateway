@@ -15,6 +15,25 @@ pub struct AppConfig {
     pub obscura: ObscuraConfig,
     #[serde(default)]
     pub providers: Vec<ProviderConfig>,
+    #[serde(default)]
+    pub auth: AuthConfig,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct AuthConfig {
+    #[serde(default)]
+    pub keys: Vec<ApiKeyConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ApiKeyConfig {
+    pub name: String,
+    /// Lowercase SHA-256 hex digest of the one-time-displayed secret.
+    pub secret_hash: String,
+    #[serde(default)]
+    pub scopes: Vec<String>,
+    #[serde(default)]
+    pub provider_allowlist: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -130,6 +149,42 @@ impl AppConfig {
             "mistral",
             "perplexity",
         ];
+        for key in &self.auth.keys {
+            if key.name.trim().is_empty() {
+                anyhow::bail!("auth key name must not be empty");
+            }
+            if key.secret_hash.len() != 64
+                || !key.secret_hash.bytes().all(|b| b.is_ascii_hexdigit())
+            {
+                anyhow::bail!(
+                    "auth key '{}' secret_hash must be a 64-character SHA-256 hex digest",
+                    key.name
+                );
+            }
+            if key.scopes.is_empty()
+                || key
+                    .scopes
+                    .iter()
+                    .any(|scope| !matches!(scope.as_str(), "chat" | "admin"))
+            {
+                anyhow::bail!(
+                    "auth key '{}' scopes must contain chat and/or admin",
+                    key.name
+                );
+            }
+            if let Some(providers) = &key.provider_allowlist {
+                if providers
+                    .iter()
+                    .any(|provider| !PROVIDERS.contains(&provider.as_str()))
+                {
+                    anyhow::bail!(
+                        "auth key '{}' has an unknown provider in provider_allowlist",
+                        key.name
+                    );
+                }
+            }
+        }
+
         let mut seen = std::collections::HashSet::new();
         for provider in &self.providers {
             if !PROVIDERS.contains(&provider.name.as_str()) {
@@ -271,5 +326,20 @@ mod tests {
 
         let strategy = config("memory:\n  strategy: full_history\n");
         assert!(strategy.validate().is_err());
+    }
+
+    #[test]
+    fn validates_hashed_api_key_scopes_and_provider_allowlists() {
+        let valid = config("auth:\n  keys:\n    - name: local-client\n      secret_hash: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n      scopes: [chat]\n      provider_allowlist: [chatgpt]\n");
+        assert!(valid.validate().is_ok());
+
+        let bad_hash = config("auth:\n  keys:\n    - name: local-client\n      secret_hash: plaintext\n      scopes: [chat]\n");
+        assert!(bad_hash.validate().is_err());
+
+        let bad_scope = config("auth:\n  keys:\n    - name: local-client\n      secret_hash: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n      scopes: [root]\n");
+        assert!(bad_scope.validate().is_err());
+
+        let bad_provider = config("auth:\n  keys:\n    - name: local-client\n      secret_hash: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n      scopes: [chat]\n      provider_allowlist: [unknown]\n");
+        assert!(bad_provider.validate().is_err());
     }
 }
