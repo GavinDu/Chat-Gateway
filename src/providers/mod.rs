@@ -230,6 +230,11 @@ impl ResponseDeltaTracker {
 /// tolerates long reasoning/search pauses that can occur between text deltas.
 /// Runs on the browser thread; chunks leave via the channel.
 const COMPLETION_IDLE_TICKS: u32 = 43; // ~15 seconds at 350ms per poll.
+
+fn completion_ready(stable_ticks: u32, streaming: bool) -> bool {
+    stable_ticks >= COMPLETION_IDLE_TICKS && !streaming
+}
+
 pub async fn run_send(
     adapter: Arc<dyn ChatProvider>,
     page: Rc<Page>,
@@ -350,7 +355,7 @@ pub async fn run_send(
             // Completion requires a conservative 15s idle grace plus no
             // active streaming indicator, avoiding truncation during long
             // reasoning or search pauses.
-            if stable_ticks >= COMPLETION_IDLE_TICKS && !streaming {
+            if completion_ready(stable_ticks, streaming) {
                 let _ = chunks
                     .send(Ok(ProviderChunk {
                         content: String::new(),
@@ -417,5 +422,23 @@ mod response_delta_tracker_tests {
             tracker.observe("answer"),
             DeltaObservation::Delta("answer".to_string())
         );
+    }
+}
+
+
+#[cfg(test)]
+mod response_completion_tests {
+    use super::{completion_ready, COMPLETION_IDLE_TICKS};
+
+    #[test]
+    fn requires_more_than_ten_seconds_of_idle_before_completion() {
+        assert!(!completion_ready(28, false));
+        assert!(!completion_ready(COMPLETION_IDLE_TICKS - 1, false));
+        assert!(completion_ready(COMPLETION_IDLE_TICKS, false));
+    }
+
+    #[test]
+    fn active_streaming_prevents_completion_even_after_idle_ticks() {
+        assert!(!completion_ready(COMPLETION_IDLE_TICKS + 10, true));
     }
 }
