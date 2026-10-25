@@ -169,9 +169,24 @@ pub async fn run_send(
     let baseline = adapter.response_text(&page).filter(|t| !t.is_empty());
     let mut baseline = baseline;
 
-    if let Err(e) = adapter.send_prompt(&page, &prompt).await {
-        let _ = chunks.send(Err(e)).await;
-        return;
+    // Apply the same timeout budget to prompt submission and response
+    // polling; otherwise a stuck selector/input action can hang indefinitely
+    // before the existing polling timeout even starts.
+    let start = Instant::now();
+    match tokio::time::timeout(timeout, adapter.send_prompt(&page, &prompt)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            let _ = chunks.send(Err(error)).await;
+            return;
+        }
+        Err(_) => {
+            let _ = chunks.send(Err(anyhow::anyhow!(
+                "provider '{}' timed out while submitting the prompt after {:?}",
+                adapter.name(),
+                timeout
+            ))).await;
+            return;
+        }
     }
 
     let citation_re = adapter
@@ -179,7 +194,6 @@ pub async fn run_send(
         .then(|| regex::Regex::new(r"\[\d+\]").expect("static regex"));
     let mut last_len = 0usize;
     let mut stable_ticks = 0u32;
-    let start = Instant::now();
 
     loop {
         if start.elapsed() > timeout {
