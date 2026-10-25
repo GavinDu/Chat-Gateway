@@ -404,7 +404,7 @@ async fn login_status(State(state): State<Arc<AppState>>) -> axum::response::Res
     let active = match state.pool.login_status_all().await {
         Ok(active) => active,
         Err(error) => {
-            tracing::error!("login status lookup failed: {error}");
+            tracing::error!("login status lookup failed");
             return login_status_read_error();
         }
     };
@@ -422,7 +422,7 @@ async fn login_status(State(state): State<Arc<AppState>>) -> axum::response::Res
             Err(error) => {
                 tracing::error!(
                     provider = name,
-                    "persisted login session read failed: {error}"
+                    "persisted login session read failed"
                 );
                 return login_status_read_error();
             }
