@@ -70,9 +70,15 @@ pub(super) fn open(path: Option<&Path>, legacy: Option<&Path>) -> Result<Connect
 fn initialize(connection: &mut Connection, legacy: Option<&Path>) -> Result<()> {
     connection.busy_timeout(Duration::from_secs(30))?;
     connection.execute_batch("PRAGMA foreign_keys=ON; PRAGMA synchronous=FULL;")?;
-    let integrity: String = connection.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
-    if integrity != "ok" {
-        bail!("SQLite integrity check failed: {integrity}");
+    // integrity_check can return multiple rows when it finds multiple
+    // problems; inspecting only the first row could accidentally accept a
+    // damaged database if the first result happened to be "ok".
+    let integrity = connection
+        .prepare("PRAGMA integrity_check")?
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if integrity.as_slice() != ["ok"] {
+        bail!("SQLite integrity check failed: {}", integrity.join("; "));
     }
     let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let version: i64 = tx.query_row("PRAGMA user_version", [], |row| row.get(0))?;
