@@ -207,4 +207,5 @@ fn messages_after_overlap(stored: &[ChatMessage], incoming: &[ChatMessage]) -> V
 }
 
 #[cfg(test)]
+#[path = "memory/tests.rs"]
 mod tests;
