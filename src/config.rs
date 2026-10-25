@@ -85,9 +85,7 @@ impl AppConfig {
         })?;
         let mut cfg: Self = serde_yaml::from_str(&raw)?;
         if let Ok(port) = std::env::var("PORT") {
-            if let Ok(v) = port.parse() {
-                cfg.server.port = v;
-            }
+            cfg.server.port = parse_port_override(&port)?;
         }
         cfg.validate()?;
         cfg.providers.sort_by_key(|x| x.priority);
@@ -140,6 +138,11 @@ impl AppConfig {
     }
 }
 
+fn parse_port_override(value: &str) -> anyhow::Result<u16> {
+    value.parse::<u16>()
+        .map_err(|error| anyhow::anyhow!("invalid PORT value '{value}': expected an integer from 1 to 65535 ({error})"))
+}
+
 fn default_true() -> bool { true }
 fn default_port() -> u16 { 8080 }
 fn default_priority() -> u32 { 99 }
@@ -154,6 +157,19 @@ mod tests {
 
     fn config(yaml: &str) -> AppConfig {
         serde_yaml::from_str(yaml).expect("test config parses")
+    }
+
+    #[test]
+    fn rejects_malformed_port_environment_override() {
+        assert!(parse_port_override("not-a-port").is_err());
+        assert!(parse_port_override("65536").is_err());
+        assert_eq!(parse_port_override("8081").unwrap(), 8081);
+    }
+
+    #[test]
+    fn rejects_port_zero() {
+        let cfg = config("server:\n  port: 0\n");
+        assert!(cfg.validate().is_err());
     }
 
     #[test]
