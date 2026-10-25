@@ -89,19 +89,19 @@ fn emit_histogram(
             let count = values.iter().filter(|value| **value <= *bound).count();
             let _ = writeln!(
                 out,
-                "{metric}_bucket{{{label}=\\"{escaped}\\",le=\\"{bound}\\"}} {count}"
+                "{metric}_bucket{{{label}=\"{escaped}\",le=\"{bound}\"}} {count}"
             );
         }
         let _ = writeln!(
             out,
-            "{metric}_bucket{{{label}=\\"{escaped}\\",le=\\"+Inf\\"}} {}",
+            "{metric}_bucket{{{label}=\"{escaped}\",le=\"+Inf\"}} {}",
             values.len()
         );
         let sum: u128 = values.iter().map(|value| *value as u128).sum();
-        let _ = writeln!(out, "{metric}_sum{{{label}=\\"{escaped}\\"}} {sum}");
+        let _ = writeln!(out, "{metric}_sum{{{label}=\"{escaped}\"}} {sum}");
         let _ = writeln!(
             out,
-            "{metric}_count{{{label}=\\"{escaped}\\"}} {}",
+            "{metric}_count{{{label}=\"{escaped}\"}} {}",
             values.len()
         );
     }
@@ -117,7 +117,7 @@ pub fn render() -> String {
     for ((route, status), count) in &data.requests {
         let _ = writeln!(
             out,
-            "gateway_http_requests_total{{route=\\"{}\\",status=\\"{}\\"}} {count}",
+            "gateway_http_requests_total{{route=\"{}\",status=\"{}\"}} {count}",
             escape_label(route),
             status
         );
@@ -162,7 +162,7 @@ pub fn render() -> String {
     for ((provider, outcome), count) in &data.provider_outcomes {
         let _ = writeln!(
             out,
-            "gateway_provider_requests_total{{provider=\\"{}\\",outcome=\\"{}\\"}} {count}",
+            "gateway_provider_requests_total{{provider=\"{}\",outcome=\"{}\"}} {count}",
             escape_label(provider),
             escape_label(outcome)
         );
