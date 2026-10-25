@@ -897,8 +897,7 @@ async fn login_act(
             Json(serde_json::json!({
                 "error": "legacy text relay is disabled; use the browser extension or explicitly set CHAT_GATEWAY_LEGACY_LOGIN_RELAY=1 for trusted local development"
             })),
-        )
-            .into_response();
+        ).into_response();
     }
     if let Err(error) = validate_login_action_for_provider(&provider, &action) {
         return login_err(error.to_string());
