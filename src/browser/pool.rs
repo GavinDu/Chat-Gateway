@@ -11,6 +11,22 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot, OwnedSemaphorePermit, Semaphore};
 
+fn effective_session_pool_size(configured: usize) -> usize {
+    configured.min(1)
+}
+
+#[cfg(test)]
+mod queue_capacity_tests {
+    use super::effective_session_pool_size;
+
+    #[test]
+    fn configured_capacity_never_exceeds_single_persistent_page() {
+        assert_eq!(effective_session_pool_size(1), 1);
+        assert_eq!(effective_session_pool_size(2), 1);
+        assert_eq!(effective_session_pool_size(8), 1);
+    }
+}
+
 #[derive(Debug)]
 pub struct ProviderBusyError;
 
@@ -147,7 +163,7 @@ impl ObscuraPool {
         let semaphores = DashMap::new();
         for p in &cfg.providers {
             if p.enabled {
-                let effective_pool_size = p.session_pool_size.min(1);
+                let effective_pool_size = effective_session_pool_size(p.session_pool_size);
                 if p.session_pool_size > effective_pool_size {
                     tracing::warn!(
                         provider = %p.name,
