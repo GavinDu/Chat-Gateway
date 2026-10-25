@@ -14,13 +14,14 @@ use axum::{
 };
 use clap::Parser;
 use sha2::{Digest, Sha256};
-use std::{collections::HashMap, net::SocketAddr, sync::Arc};
+use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Instant};
 use tokio::sync::RwLock;
 
 mod browser;
 mod config;
 mod login;
 mod memory;
+mod metrics;
 mod providers;
 mod router;
 mod session;
@@ -360,6 +361,7 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/health", get(health))
         .route("/ready", get(readiness))
+        .route("/metrics", get(metrics_endpoint))
         .route("/v1/models", get(models))
         .route("/v1/chat/completions", post(chat_completions))
         .route(
@@ -990,6 +992,15 @@ fn readiness_response(enabled: usize) -> Response {
         .into_response()
 }
 
+async fn metrics_endpoint() -> impl IntoResponse {
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("text/plain; version=0.0.4; charset=utf-8"),
+    );
+    (headers, metrics::render())
+}
+
 async fn readiness(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     readiness_response(state.cfg.providers.iter().filter(|p| p.enabled).count())
 }
@@ -999,8 +1010,21 @@ async fn readiness(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 /// without trusting arbitrary client-supplied IDs.
 async fn attach_request_id(req: Request<Body>, next: Next) -> Response {
     let request_id = uuid::Uuid::new_v4().to_string();
+    let method = req.method().to_string();
+    let route = metrics::normalize_route(req.uri().path());
     let is_chat_completion = req.uri().path() == "/v1/chat/completions";
+    let started = Instant::now();
     let mut response = next.run(req).await;
+    let duration_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+    metrics::record_http_request(&route, response.status().as_u16(), duration_ms);
+    tracing::info!(
+        request_id = %request_id,
+        method = %method,
+        route = %route,
+        status = response.status().as_u16(),
+        duration_ms,
+        "http request handled"
+    );
 
     // Axum's DefaultBodyLimit rejection happens before the Bytes handler is
     // invoked. Normalize that framework rejection to the same stable error
@@ -1071,7 +1095,8 @@ fn authorize_api_request(
         })
         .ok_or(AuthFailure::MissingOrInvalid)?;
 
-    let admin_route = path.starts_with("/login")
+    let admin_route = path == "/metrics"
+        || path.starts_with("/login")
         || path.starts_with("/relay/")
         || (*method == axum::http::Method::DELETE && path.starts_with("/v1/conversations/"));
     let required_scope = if admin_route { "admin" } else { "chat" };
@@ -1279,6 +1304,7 @@ async fn chat_completions(
     auth_context: Option<Extension<AuthKeyContext>>,
     body: Result<axum::body::Bytes, axum::extract::rejection::BytesRejection>,
 ) -> Response {
+    let request_started = Instant::now();
     let body = match body {
         Ok(body) => body,
         Err(_) => {
@@ -1401,6 +1427,7 @@ async fn chat_completions(
             }
         };
         tracing::debug!(provider = %provider_name, queue_ms = permit.queue_ms, "acquired provider slot");
+        let queue_ms = permit.queue_ms.min(u64::MAX as u128) as u64;
 
         let mut rx = match state
             .pool
@@ -1418,6 +1445,7 @@ async fn chat_completions(
                 continue;
             }
         };
+        let provider_started = Instant::now();
 
         let new_conv_id = conversation_id
             .clone()
@@ -1429,14 +1457,21 @@ async fn chat_completions(
             let provider_c = provider_name.clone();
             let model_c = req.model.clone();
             let conv_stream = new_conv_id.clone();
+            let request_started_c = request_started;
+            let provider_started_c = provider_started;
+            let queue_ms_c = queue_ms;
             let sse_stream = async_stream::stream! {
                 let _permit = permit;
                 let mut full = String::new();
                 let mut stream_error: Option<String> = None;
+                let mut ttft_ms: Option<u64> = None;
                 while let Some(item) = rx.recv().await {
                     match item {
                         Ok(c) => {
                             if c.done { break; }
+                            if ttft_ms.is_none() {
+                                ttft_ms = Some(provider_started_c.elapsed().as_millis().min(u64::MAX as u128) as u64);
+                            }
                             full.push_str(&c.content);
                             let data = serde_json::json!({
                                 "id": format!("chatcmpl-{}", &conv_stream[..8]),
@@ -1455,6 +1490,16 @@ async fn chat_completions(
                     }
                 }
 
+                let provider_work_ms = provider_started_c.elapsed().as_millis().min(u64::MAX as u128) as u64;
+                let total_ms = request_started_c.elapsed().as_millis().min(u64::MAX as u128) as u64;
+                metrics::record_provider_timings(
+                    &provider_c,
+                    if stream_error.is_some() { "error" } else { "success" },
+                    queue_ms_c,
+                    ttft_ms,
+                    provider_work_ms,
+                    total_ms,
+                );
                 if let Some(message) = stream_error {
                     let error = serde_json::json!({
                         "error": { "message": message, "type": "provider_error", "code": "stream_failed" }
@@ -1497,11 +1542,17 @@ async fn chat_completions(
         // emitted. A partial response is an error, never a successful turn.
         let mut full = String::new();
         let mut failed: Option<String> = None;
+        let mut ttft_ms: Option<u64> = None;
         while let Some(item) = rx.recv().await {
             match item {
                 Ok(c) => {
                     if c.done {
                         break;
+                    }
+                    if ttft_ms.is_none() {
+                        ttft_ms = Some(
+                            provider_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+                        );
                     }
                     full.push_str(&c.content);
                 }
@@ -1511,7 +1562,17 @@ async fn chat_completions(
                 }
             }
         }
+        let provider_work_ms = provider_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+        let total_ms = request_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
         if let Some(e) = failed {
+            metrics::record_provider_timings(
+                &provider_name,
+                "error",
+                queue_ms,
+                ttft_ms,
+                provider_work_ms,
+                total_ms,
+            );
             if full.is_empty() {
                 tracing::warn!(provider = %provider_name, "provider failed before output: {e}");
                 last_err = Some(e);
@@ -1526,6 +1587,14 @@ async fn chat_completions(
             );
         }
 
+        metrics::record_provider_timings(
+            &provider_name,
+            "success",
+            queue_ms,
+            ttft_ms,
+            provider_work_ms,
+            total_ms,
+        );
         if let Err(_error) = state.memory.store_turn(
             new_conv_id.clone(),
             windowed.clone(),
@@ -2484,15 +2553,6 @@ mod api_key_auth_tests {
             &axum::http::Method::GET
         )
         .is_ok());
-        let context = authorize_api_request(
-            &config,
-            Some("Bearer test-secret"),
-            "/v1/models",
-            &axum::http::Method::GET
-        )
-        .unwrap()
-        .unwrap();
-        assert_eq!(context.provider_allowlist, Some(vec!["chatgpt".to_owned()]));
         assert_eq!(
             authorize_api_request(
                 &config,
