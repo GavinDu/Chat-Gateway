@@ -1,12 +1,22 @@
-FROM rust:1.89 as builder
+FROM rust:1.99.1 AS builder
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
-RUN apt-get update && apt-get install -y build-essential cmake clang libclang-dev llvm-dev
-RUN cargo build --release --features render,stealth
+COPY benches ./benches
+COPY vendor ./vendor
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential cmake clang libclang-dev llvm-dev \
+    && rm -rf /var/lib/apt/lists/*
+RUN cargo build --locked --release --features render,stealth
+RUN mkdir -p /app/data /app/sessions && chown -R 65532:65532 /app/data /app/sessions
+
 FROM gcr.io/distroless/cc:nonroot
-COPY --from=builder /app/target/release/chat-gateway-rs /usr/local/bin/chat-gateway-rs
-COPY config.example.yaml /config.example.yaml
+WORKDIR /app
+COPY --from=builder --chown=nonroot:nonroot /app/target/release/chat-gateway-rs /usr/local/bin/chat-gateway-rs
+COPY --from=builder --chown=nonroot:nonroot /app/data /app/data
+COPY --from=builder --chown=nonroot:nonroot /app/sessions /app/sessions
+COPY --chown=nonroot:nonroot config.example.yaml /config.example.yaml
+VOLUME ["/app/data", "/app/sessions"]
 EXPOSE 8080
-# Mount your config at /config.yaml and pass --config /config.yaml
-ENTRYPOINT ["chat-gateway-rs"]
+# Mount a real config at /config.yaml and pass --config /config.yaml.
+# On Linux, use --network host to preserve the gateway's loopback-only bind.
+ENTRYPOINT ["/usr/local/bin/chat-gateway-rs"]

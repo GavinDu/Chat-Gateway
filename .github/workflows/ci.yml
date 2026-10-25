@@ -13,6 +13,17 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  docker-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Build container image
+        run: docker build --pull --tag chat-gateway-rs:ci .
+      - name: Verify container entrypoint
+        run: docker run --rm --entrypoint /usr/local/bin/chat-gateway-rs chat-gateway-rs:ci --help
+
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 45
