@@ -72,6 +72,12 @@ impl UnifiedMemory {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn drop_conversations_table_for_test(&self) -> anyhow::Result<()> {
+        self.lock()?.execute_batch("DROP TABLE conversations")?;
+        Ok(())
+    }
+
     fn lock(&self) -> anyhow::Result<MutexGuard<'_, Connection>> {
         self.connection
             .lock()

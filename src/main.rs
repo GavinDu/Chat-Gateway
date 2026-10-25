@@ -753,6 +753,19 @@ async fn models(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 /// Conversation IDs are echoed into response IDs and tab affinity. Restrict
 /// them to bounded ASCII so formatting and byte slicing cannot panic on a
 /// malicious multibyte header value.
+fn read_conversation_context(
+    memory: &UnifiedMemory,
+    conversation_id: Option<&str>,
+    messages: &[ChatMessage],
+) -> anyhow::Result<(String, Vec<ChatMessage>, bool)> {
+    let (prompt, windowed) = memory.build_context(conversation_id, messages)?;
+    let has_history = match conversation_id {
+        Some(id) => memory.has_history(id)?,
+        None => false,
+    };
+    Ok((prompt, windowed, has_history))
+}
+
 fn valid_conversation_id(value: &str) -> bool {
     (8..=128).contains(&value.len())
         && value.is_ascii()
@@ -815,13 +828,13 @@ async fn chat_completions(
         }
     };
 
-    // Assemble the provider prompt from the unified memory window. The
-    // canonical transcript must be passed to the provider so follow-up
-    // turns and provider switches retain conversation context.
-    let (context_prompt, windowed) = match state
-        .memory
-        .build_context(conversation_id.as_deref(), &req.messages)
-    {
+    // Read all context-dependent memory before any provider request. A read
+    // failure must not degrade into an empty prompt or an unauthenticated turn.
+    let (context_prompt, windowed, has_history) = match read_conversation_context(
+        &state.memory,
+        conversation_id.as_deref(),
+        &req.messages,
+    ) {
         Ok(context) => context,
         Err(error) => {
             tracing::error!(conversation_id = ?conversation_id, "conversation context read failed: {error}");
@@ -832,21 +845,6 @@ async fn chat_completions(
                 "conversation history could not be read safely",
             );
         }
-    };
-    let has_history = match conversation_id.as_deref() {
-        Some(cid) => match state.memory.has_history(cid) {
-            Ok(value) => value,
-            Err(error) => {
-                tracing::error!(conversation_id = %cid, "conversation history check failed: {error}");
-                return api_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "server_error",
-                    "memory_read_failed",
-                    "conversation history could not be read safely",
-                );
-            }
-        },
-        None => false,
     };
     let prompt = context_prompt;
     if prompt.is_empty() {
@@ -1390,7 +1388,13 @@ mod http_api_regression_tests {
         body::{to_bytes, Body},
         routing::post,
     };
-    use std::{path::PathBuf, sync::Arc};
+    use std::{
+        path::PathBuf,
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        },
+    };
     use tower::ServiceExt;
 
     async fn validation_endpoint(
@@ -1447,6 +1451,66 @@ mod http_api_regression_tests {
     async fn json_body(response: Response) -> serde_json::Value {
         let bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
         serde_json::from_slice(&bytes).unwrap()
+    }
+
+    async fn context_test_endpoint(
+        State((memory, provider_calls)): State<(Arc<UnifiedMemory>, Arc<AtomicUsize>)>,
+        Json(payload): Json<serde_json::Value>,
+    ) -> Response {
+        let conversation_id = payload.get("conversation_id").and_then(|v| v.as_str());
+        let messages = payload
+            .get("messages")
+            .cloned()
+            .and_then(|value| serde_json::from_value::<Vec<ChatMessage>>(value).ok())
+            .unwrap_or_default();
+        match read_conversation_context(&memory, conversation_id, &messages) {
+            Ok((prompt, _, has_history)) => {
+                provider_calls.fetch_add(1, Ordering::SeqCst);
+                Json(serde_json::json!({
+                    "accepted": true,
+                    "prompt": prompt,
+                    "has_history": has_history
+                }))
+                .into_response()
+            }
+            Err(_) => api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                "memory_read_failed",
+                "conversation history could not be read safely",
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn http_memory_read_failure_returns_structured_error_without_provider_call() {
+        let memory = Arc::new(UnifiedMemory::new(8000));
+        memory.drop_conversations_table_for_test().unwrap();
+        let provider_calls = Arc::new(AtomicUsize::new(0));
+        let app = Router::new()
+            .route("/v1/context-test", post(context_test_endpoint))
+            .with_state((memory, provider_calls.clone()))
+            .layer(middleware::from_fn(attach_request_id));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/context-test")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"conversation_id":"conversation_123","messages":[{"role":"user","content":"hello"}]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(response.headers().contains_key("x-request-id"));
+        let body = json_body(response).await;
+        assert_eq!(body["error"]["code"], "memory_read_failed");
+        assert_eq!(provider_calls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
