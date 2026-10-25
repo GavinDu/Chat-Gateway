@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Path, State},
+    extract::{DefaultBodyLimit, Path, State},
     http::HeaderMap,
     response::{sse::{Event, Sse}, Html, IntoResponse},
     routing::{get, post},
@@ -195,6 +195,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/login/api/:provider/view", get(login_view))
         .route("/login/api/:provider/act", post(login_act))
         .with_state(state)
+        // Semantic message limits run after JSON parsing; cap the raw body too
+        // so an oversized payload cannot consume unbounded memory before
+        // request validation has a chance to reject it.
+        .layer(DefaultBodyLimit::max(1024 * 1024))
         .layer(middleware::from_fn(protect_login_api));
 
     // Security default: the gateway exposes browser/session control routes and must not listen on public interfaces by default.
