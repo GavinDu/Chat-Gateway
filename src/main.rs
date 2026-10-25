@@ -538,11 +538,16 @@ mod memory_context_http_contract_tests {
         );
         let response = result.expect_err("memory read errors must stop provider dispatch");
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-        let bytes = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
         let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(body["error"]["code"], "memory_read_failed");
         assert_eq!(body["error"]["type"], "server_error");
-        assert_eq!(body["error"]["message"], "conversation history could not be read safely");
+        assert_eq!(
+            body["error"]["message"],
+            "conversation history could not be read safely"
+        );
         assert!(!body.to_string().contains("DROP TABLE"));
         let _ = std::fs::remove_dir_all(dir);
     }
