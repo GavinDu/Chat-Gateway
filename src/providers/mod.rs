@@ -281,6 +281,12 @@ pub async fn run_send(
     let mut saw_streaming = false;
 
     loop {
+        if chunks.is_closed() {
+            adapter.cancel_generation(page.as_ref());
+            tracing::debug!(provider = adapter.name(), "client disconnected; requested generation stop");
+            return;
+        }
+
         if start.elapsed() > timeout {
             // A timeout is not a successful completion. Propagate a typed
             // provider error so the API won't commit a partial/empty turn.
@@ -324,6 +330,7 @@ pub async fn run_send(
                                 .await
                                 .is_err()
                             {
+                                adapter.cancel_generation(page.as_ref());
                                 return;
                             }
                         }
@@ -349,6 +356,7 @@ pub async fn run_send(
                             .await
                             .is_err()
                     {
+                        adapter.cancel_generation(page.as_ref());
                         return; // receiver gone
                     }
                     continue;
