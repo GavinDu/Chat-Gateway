@@ -490,7 +490,6 @@ struct LoginActReq {
     index: Option<usize>,
 }
 
-
 /// Validate relayed actions at the HTTP boundary, before browser-thread dispatch.
 /// Navigation needs the provider-specific allowlist in addition to the generic
 /// URL safety checks performed by LoginAction::validate().
