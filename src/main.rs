@@ -527,6 +527,70 @@ fn validate_login_action_for_provider(
 }
 
 #[cfg(test)]
+mod corrupt_message_history_regression_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn dropping_messages_table_after_startup_fails_closed_without_sql_details() {
+        let dir =
+            std::env::temp_dir().join(format!("gateway-corrupt-history-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let db = dir.join("memory.sqlite3");
+        let memory = UnifiedMemory::open_path_for_test(&db, None, 8000).unwrap();
+        memory
+            .store_turn(
+                "conversation-123".into(),
+                vec![ChatMessage {
+                    role: "user".into(),
+                    content: "first".into(),
+                }],
+                ChatMessage {
+                    role: "assistant".into(),
+                    content: "answer".into(),
+                },
+                "chatgpt".into(),
+                "tab-123".into(),
+            )
+            .unwrap();
+
+        rusqlite::Connection::open(&db)
+            .unwrap()
+            .execute_batch("DROP TABLE messages;")
+            .unwrap();
+
+        let response = match read_conversation_context(
+            &memory,
+            Some("conversation-123"),
+            &[ChatMessage {
+                role: "user".into(),
+                content: "follow-up".into(),
+            }],
+        ) {
+            Err(_) => api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                "memory_read_failed",
+                "conversation history could not be read safely",
+            ),
+            Ok(_) => panic!("corrupt message history must fail closed"),
+        };
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"]["code"], "memory_read_failed");
+        assert_eq!(body["error"]["type"], "server_error");
+        assert_eq!(
+            body["error"]["message"],
+            "conversation history could not be read safely"
+        );
+        assert!(!body.to_string().contains("DROP TABLE"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[cfg(test)]
 mod request_body_error_tests {
     use super::*;
 
