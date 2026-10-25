@@ -248,8 +248,8 @@ async fn main() -> anyhow::Result<()> {
             let selectors = providers::Provider::from_name(&provider)
                 .and_then(|provider_id| registry.get(&provider_id))
                 .map(|adapter| format!("{:?}", adapter.selectors()));
-            let healthy = errors.is_empty()
-                && report.as_ref().is_some_and(adapter_report_is_healthy);
+            let healthy =
+                errors.is_empty() && report.as_ref().is_some_and(adapter_report_is_healthy);
 
             results.push(AdapterDiagnostic {
                 provider,
@@ -2132,7 +2132,6 @@ mod loopback_authority_edge_tests {
         }
     }
 }
-
 
 #[cfg(test)]
 mod adapter_diagnostic_tests {
