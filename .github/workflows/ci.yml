@@ -23,7 +23,7 @@ jobs:
       - name: Install native build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential cmake clang libclang-dev llvm-dev
+          sudo apt-get install -y build-essential cmake clang libclang-dev llvm-dev libsqlite3-dev
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
