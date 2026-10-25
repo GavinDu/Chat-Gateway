@@ -642,7 +642,7 @@ mod login_action_payload_tests {
             serde_json::json!({"action":"click"}),
             serde_json::json!({"action":"click","selector":""}),
             serde_json::json!({"action":"click","selector":"   "}),
-            serde_json::json!({"action":"type","selector":"#email","text":"secret"}),
+            serde_json::json!({"action":"type","text":"secret"}),
             serde_json::json!({"action":"enter","selector":""}),
         ] {
             assert!(parse(payload).is_err());
