@@ -1673,10 +1673,7 @@ mod login_security_middleware_http_tests {
     async fn rejects_cross_site_login_mutation_metadata() {
         let response = request(
             "/login/api/status",
-            &[
-                ("host", "127.0.0.1:8080"),
-                ("sec-fetch-site", "cross-site"),
-            ],
+            &[("host", "127.0.0.1:8080"), ("sec-fetch-site", "cross-site")],
         )
         .await;
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
