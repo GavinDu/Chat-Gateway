@@ -392,6 +392,16 @@ async fn models(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     Json(serde_json::json!({ "object": "list", "data": data }))
 }
 
+
+/// Conversation IDs are echoed into response IDs and tab affinity. Restrict
+/// them to bounded ASCII so formatting and byte slicing cannot panic on a
+/// malicious multibyte header value.
+fn valid_conversation_id(value: &str) -> bool {
+    (8..=128).contains(&value.len())
+        && value.is_ascii()
+        && value.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
 async fn chat_completions(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -434,8 +444,29 @@ async fn chat_completions(
         );
     }
 
-    let conversation_id = headers.get("X-Conversation-Id")
-        .and_then(|v| v.to_str().ok()).map(|s| s.to_string());
+    let conversation_id = match headers.get("X-Conversation-Id") {
+        None => None,
+        Some(value) => {
+            let value = match value.to_str() {
+                Ok(value) => value,
+                Err(_) => return api_error(
+                    axum::http::StatusCode::BAD_REQUEST,
+                    "invalid_request_error",
+                    "invalid_conversation_id",
+                    "X-Conversation-Id must be a valid ASCII identifier",
+                ),
+            };
+            if !valid_conversation_id(value) {
+                return api_error(
+                    axum::http::StatusCode::BAD_REQUEST,
+                    "invalid_request_error",
+                    "invalid_conversation_id",
+                    "X-Conversation-Id must be 8-128 ASCII letters, digits, '_' or '-'",
+                );
+            }
+            Some(value.to_string())
+        }
+    };
 
     // Assemble the provider prompt from the unified memory window. The
     // canonical transcript must be passed to the provider so follow-up
@@ -693,5 +724,24 @@ mod api_contract_tests {
             "messages": [{"role": "user", "content": "hello"}]
         }));
         assert!(missing_model.is_err());
+    }
+}
+
+#[cfg(test)]
+mod conversation_id_tests {
+    use super::*;
+
+    #[test]
+    fn accepts_generated_uuid_and_safe_ids() {
+        assert!(valid_conversation_id("8c1d8e2a-1e2a-4f7c-93f8-84c5c39a8b12"));
+        assert!(valid_conversation_id("conversation_123"));
+    }
+
+    #[test]
+    fn rejects_short_unicode_and_unsafe_ids() {
+        assert!(!valid_conversation_id("short"));
+        assert!(!valid_conversation_id("conversation-é"));
+        assert!(!valid_conversation_id("conversation/123"));
+        assert!(!valid_conversation_id(&"a".repeat(129)));
     }
 }
