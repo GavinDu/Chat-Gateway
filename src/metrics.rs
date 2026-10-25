@@ -11,7 +11,6 @@ struct MetricData {
     chat_total_ms: BTreeMap<String, Vec<u64>>,
     gateway_overhead_ms: BTreeMap<String, Vec<u64>>,
     provider_outcomes: BTreeMap<(String, String), u64>,
-    probe_failures: BTreeMap<String, u64>,
 }
 
 static DATA: OnceLock<Mutex<MetricData>> = OnceLock::new();
@@ -48,11 +47,6 @@ pub fn record_provider_timings(
     }
 }
 
-pub fn record_probe_failure(provider: &str) {
-    if let Ok(mut data) = data().lock() {
-        *data.probe_failures.entry(provider.to_owned()).or_default() += 1;
-    }
-}
 
 fn escape_label(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n")
@@ -92,10 +86,6 @@ pub fn render() -> String {
     let _ = writeln!(out, "# TYPE gateway_provider_requests_total counter");
     for ((provider, outcome), count) in &data.provider_outcomes {
         let _ = writeln!(out, "gateway_provider_requests_total{{provider=\"{}\",outcome=\"{}\"}} {count}", escape_label(provider), escape_label(outcome));
-    }
-    let _ = writeln!(out, "# TYPE gateway_provider_probe_failures_total counter");
-    for (provider, count) in &data.probe_failures {
-        let _ = writeln!(out, "gateway_provider_probe_failures_total{{provider=\"{}\"}} {count}", escape_label(provider));
     }
     out
 }
