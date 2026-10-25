@@ -89,32 +89,35 @@ impl UnifiedMemory {
         (prompt, windowed)
     }
 
-    pub fn store_turn(&self, conversation_id: String, user_msgs: Vec<ChatMessage>, assistant_msg: ChatMessage, provider: String, tab_id: String) {
-        let _guard = match self.persistence_lock.lock() {
-            Ok(guard) => guard,
-            Err(error) => {
-                tracing::error!("conversation persistence lock poisoned: {error}");
-                return;
-            }
-        };
-        let mut entry = self.conversations.entry(conversation_id.clone()).or_insert_with(|| Conversation {
-            id: conversation_id.clone(),
-            messages: vec![],
-            provider: None,
-            tab_id: None,
-        });
-        // The caller may provide a context window containing messages
-        // already stored for this conversation. Append only the unseen
-        // suffix (or the non-overlapping tail of a sliding window).
-        let unseen = messages_after_overlap(&entry.messages, &user_msgs);
-        entry.messages.extend(unseen);
-        entry.messages.push(assistant_msg);
-        entry.provider = Some(provider);
-        entry.tab_id = Some(tab_id);
-        drop(entry);
-        if let Err(error) = self.persist_snapshot() {
-            tracing::error!("could not persist conversation memory: {error}");
+    pub fn store_turn(&self, conversation_id: String, user_msgs: Vec<ChatMessage>, assistant_msg: ChatMessage, provider: String, tab_id: String) -> anyhow::Result<()> {
+        let _guard = self.persistence_lock.lock()
+            .map_err(|error| anyhow::anyhow!("conversation persistence lock poisoned: {error}"))?;
+
+        // Keep a rollback copy so a failed durable write cannot leave an
+        // apparently committed turn in memory while disk has the old state.
+        let previous = self.conversations.get(&conversation_id).map(|entry| entry.value().clone());
+        {
+            let mut entry = self.conversations.entry(conversation_id.clone()).or_insert_with(|| Conversation {
+                id: conversation_id.clone(),
+                messages: vec![],
+                provider: None,
+                tab_id: None,
+            });
+            let unseen = messages_after_overlap(&entry.messages, &user_msgs);
+            entry.messages.extend(unseen);
+            entry.messages.push(assistant_msg);
+            entry.provider = Some(provider);
+            entry.tab_id = Some(tab_id);
         }
+
+        if let Err(error) = self.persist_snapshot() {
+            match previous {
+                Some(conversation) => { self.conversations.insert(conversation_id, conversation); }
+                None => { self.conversations.remove(&conversation_id); }
+            }
+            return Err(error.context("persisting conversation turn"));
+        }
+        Ok(())
     }
 
     fn persist_snapshot(&self) -> anyhow::Result<()> {
@@ -208,6 +211,25 @@ mod tests {
 
     fn m(role: &str, content: &str) -> ChatMessage {
         ChatMessage { role: role.to_string(), content: content.to_string() }
+    }
+
+
+    #[test]
+    fn failed_persistence_rolls_back_memory_mutation() {
+        // A directory at the target path forces atomic rename to fail.
+        let path = std::env::temp_dir().join(format!("chat-gateway-memory-target-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&path).unwrap();
+        let memory = UnifiedMemory::with_optional_persistence(8000, Some(path.clone()));
+        let result = memory.store_turn(
+            "conversation-failed".to_string(),
+            vec![m("user", "hello")],
+            m("assistant", "hi"),
+            "chatgpt".to_string(),
+            "tab-1".to_string(),
+        );
+        assert!(result.is_err());
+        assert!(!memory.has_history("conversation-failed"));
+        let _ = std::fs::remove_dir_all(path);
     }
 
     #[test]

@@ -520,13 +520,21 @@ async fn chat_completions(
                     });
                     yield Ok(Event::default().data(error.to_string()));
                 } else {
-                    state_c.memory.store_turn(
+                    if let Err(error) = state_c.memory.store_turn(
                         conv_stream.clone(),
                         windowed_c.clone(),
                         ChatMessage { role: "assistant".to_string(), content: full.clone() },
                         provider_c.clone(),
                         format!("tab-{}", &conv_stream[..8]),
-                    );
+                    ) {
+                        tracing::error!("conversation persistence failed after stream: {error}");
+                        let error = serde_json::json!({
+                            "error": { "message": "conversation could not be persisted", "type": "server_error", "code": "memory_persistence_failed" }
+                        });
+                        yield Ok(Event::default().data(error.to_string()));
+                        yield Ok(Event::default().data("[DONE]"));
+                        return;
+                    }
                     let finish = serde_json::json!({
                         "id": format!("chatcmpl-{}", &conv_stream[..8]),
                         "object": "chat.completion.chunk",
@@ -575,13 +583,21 @@ async fn chat_completions(
             );
         }
 
-        state.memory.store_turn(
+        if let Err(error) = state.memory.store_turn(
             new_conv_id.clone(),
             windowed.clone(),
             ChatMessage { role: "assistant".to_string(), content: full.clone() },
             provider_name.clone(),
             format!("tab-{}", &new_conv_id[..8]),
-        );
+        ) {
+            tracing::error!("conversation persistence failed: {error}");
+            return api_error(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                "memory_persistence_failed",
+                "conversation could not be persisted",
+            );
+        }
 
         let body = serde_json::json!({
             "id": format!("chatcmpl-{}", &new_conv_id[..8]),
