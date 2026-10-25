@@ -33,16 +33,60 @@ impl SelectorSet {
     }
 }
 
-/// Streaming indicator shared by all providers (v1 template).
+/// Streaming indicator shared by all providers. Keep this valid CSS only;
+/// text matching is handled by the explicit text-selector helper below.
 pub const STREAMING_SELECTOR: &str =
-    r#"[data-is-streaming="true"], button[aria-label*="Stop"], button:has-text("Stop")"#;
+    r#"[data-is-streaming="true"], button[aria-label*="Stop"]"#;
+
+/// Parse the internal `text:TAG=NEEDLE` selector syntax. This is deliberately
+/// not CSS: Obscura's selector engine must never receive Playwright-only pseudos.
+fn text_selector_parts(selector: &str) -> Option<(&str, &str)> {
+    let rest = selector.strip_prefix("text:")?;
+    let (tag, needle) = rest.split_once('=')?;
+    if tag.is_empty() || needle.is_empty() {
+        return None;
+    }
+    Some((tag, needle))
+}
+
+fn text_selector_matches(page: &Page, selector: &str) -> bool {
+    let Some((tag, needle)) = text_selector_parts(selector) else {
+        return false;
+    };
+    let Ok(tag) = serde_json::to_string(tag) else {
+        return false;
+    };
+    let Ok(needle) = serde_json::to_string(needle) else {
+        return false;
+    };
+    page.evaluate(&format!(
+        "Array.from(document.querySelectorAll({tag})).some(el => ((el.innerText || el.textContent || '').trim()).includes({needle}))"
+    ))
+    .as_bool() == Some(true)
+}
+
+fn click_text_selector(page: &Page, selector: &str) -> anyhow::Result<bool> {
+    let Some((tag, needle)) = text_selector_parts(selector) else {
+        return Ok(false);
+    };
+    let tag = serde_json::to_string(tag)?;
+    let needle = serde_json::to_string(needle)?;
+    let clicked = page.evaluate(&format!(
+        "(() => {{ const el = Array.from(document.querySelectorAll({tag})).find(el => ((el.innerText || el.textContent || '').trim()).includes({needle}) && el.getClientRects().length); if (!el) return false; el.click(); return true; }})()"
+    ));
+    Ok(clicked.as_bool() == Some(true))
+}
 
 pub fn element_exists(page: &Page, selector: &str) -> bool {
-    page.query_selector(selector).is_some()
+    if text_selector_parts(selector).is_some() {
+        text_selector_matches(page, selector)
+    } else {
+        page.query_selector(selector).is_some()
+    }
 }
 
 pub fn is_streaming(page: &Page) -> bool {
-    element_exists(page, STREAMING_SELECTOR)
+    element_exists(page, STREAMING_SELECTOR) || element_exists(page, "text:button=Stop")
 }
 
 /// Wait until any of the selectors matches (polls query_selector).
@@ -68,7 +112,11 @@ pub async fn wait_for_selector(
 /// synchronous, scrolls into view first, and focuses the element).
 pub fn click_first(page: &Page, selectors: &[&str]) -> anyhow::Result<()> {
     for sel in selectors {
-        if let Some(el) = page.query_selector(sel) {
+        if text_selector_parts(sel).is_some() {
+            if click_text_selector(page, sel)? {
+                return Ok(());
+            }
+        } else if let Some(el) = page.query_selector(sel) {
             el.click()?;
             return Ok(());
         }
@@ -342,8 +390,7 @@ pub async fn discover_models(
 
     // Try to open model picker without sending message
     for sel in set.picker {
-        if let Some(el) = page.query_selector(sel) {
-            let _ = el.click();
+        if click_first(page, &[sel]).is_ok() {
             tokio::time::sleep(Duration::from_millis(600)).await;
             break;
         }
