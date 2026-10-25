@@ -1619,7 +1619,6 @@ mod http_api_regression_tests {
     }
 }
 
-
 #[cfg(test)]
 mod login_security_middleware_http_tests {
     use super::*;
@@ -1639,7 +1638,8 @@ mod login_security_middleware_http_tests {
         for (name, value) in headers {
             builder = builder.header(*name, *value);
         }
-        app().oneshot(builder.body(Body::empty()).unwrap())
+        app()
+            .oneshot(builder.body(Body::empty()).unwrap())
             .await
             .unwrap()
     }
@@ -1655,10 +1655,16 @@ mod login_security_middleware_http_tests {
     async fn rejects_mismatched_origin_at_http_boundary() {
         let response = request(
             "/login/api/status",
-            &[("host", "127.0.0.1:8080"), ("origin", "https://attacker.example")],
-        ).await;
+            &[
+                ("host", "127.0.0.1:8080"),
+                ("origin", "https://attacker.example"),
+            ],
+        )
+        .await;
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
-        let bytes = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
         let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(body["error"]["code"], "unsafe_local_request");
     }
@@ -1667,8 +1673,12 @@ mod login_security_middleware_http_tests {
     async fn rejects_cross_site_login_mutation_metadata() {
         let response = request(
             "/login/api/status",
-            &[("host", "127.0.0.1:8080"), ("sec-fetch-site", "cross-site")],
-        ).await;
+            &[
+                ("host", "127.0.0.1:8080"),
+                ("sec-fetch-site", "cross-site"),
+            ],
+        )
+        .await;
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 
@@ -1676,8 +1686,12 @@ mod login_security_middleware_http_tests {
     async fn allows_matching_loopback_origin_and_originless_local_clients() {
         let matching = request(
             "/login/api/status",
-            &[("host", "127.0.0.1:8080"), ("origin", "http://127.0.0.1:8080")],
-        ).await;
+            &[
+                ("host", "127.0.0.1:8080"),
+                ("origin", "http://127.0.0.1:8080"),
+            ],
+        )
+        .await;
         assert_eq!(matching.status(), StatusCode::OK);
 
         let originless = request("/login/api/status", &[("host", "localhost:8080")]).await;
