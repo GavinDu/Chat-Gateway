@@ -514,8 +514,8 @@ fn validate_login_action_for_provider(
 mod memory_context_http_contract_tests {
     use super::*;
 
-    #[test]
-    fn context_storage_failure_returns_structured_error_before_provider_dispatch() {
+    #[tokio::test]
+    async fn context_storage_failure_returns_structured_error_before_provider_dispatch() {
         let dir = std::env::temp_dir().join(format!("gateway-http-memory-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&dir).unwrap();
         let db = dir.join("memory.sqlite3");
@@ -538,8 +538,12 @@ mod memory_context_http_contract_tests {
         );
         let response = result.expect_err("memory read errors must stop provider dispatch");
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-        let bytes = axum::body::to_bytes(response.into_body(), 4096).now_or_never();
-        assert!(bytes.is_some());
+        let bytes = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"]["code"], "memory_read_failed");
+        assert_eq!(body["error"]["type"], "server_error");
+        assert_eq!(body["error"]["message"], "conversation history could not be read safely");
+        assert!(!body.to_string().contains("DROP TABLE"));
         let _ = std::fs::remove_dir_all(dir);
     }
 }
