@@ -529,8 +529,7 @@ async fn login_act(
 /// Startup already validates configuration and warms the browser pool before
 /// binding the listener; this endpoint reports whether at least one provider
 /// is configured as enabled.
-async fn readiness(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let enabled = state.cfg.providers.iter().filter(|p| p.enabled).count();
+fn readiness_response(enabled: usize) -> Response {
     if enabled == 0 {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -551,6 +550,10 @@ async fn readiness(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         .into_response()
 }
 
+async fn readiness(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    readiness_response(state.cfg.providers.iter().filter(|p| p.enabled).count())
+}
+
 /// Add a gateway-generated request ID to every response, including security
 /// middleware rejections, so callers can correlate failures with server logs
 /// without trusting arbitrary client-supplied IDs.
@@ -563,11 +566,8 @@ async fn attach_request_id(req: Request<Body>, next: Next) -> Response {
     response
 }
 
-async fn delete_conversation(
-    State(state): State<Arc<AppState>>,
-    Path(conversation_id): Path<String>,
-) -> Response {
-    if !valid_conversation_id(&conversation_id) {
+fn delete_conversation_response(memory: &UnifiedMemory, conversation_id: &str) -> Response {
+    if !valid_conversation_id(conversation_id) {
         return api_error(
             StatusCode::BAD_REQUEST,
             "invalid_request_error",
@@ -575,7 +575,7 @@ async fn delete_conversation(
             "conversation ID must be 8-128 ASCII letters, digits, '_' or '-'",
         );
     }
-    match state.memory.delete_conversation(&conversation_id) {
+    match memory.delete_conversation(conversation_id) {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
         Ok(false) => api_error(
             StatusCode::NOT_FOUND,
@@ -593,6 +593,13 @@ async fn delete_conversation(
             )
         }
     }
+}
+
+async fn delete_conversation(
+    State(state): State<Arc<AppState>>,
+    Path(conversation_id): Path<String>,
+) -> Response {
+    delete_conversation_response(&state.memory, &conversation_id)
 }
 
 async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -641,26 +648,10 @@ async fn chat_completions(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> impl IntoResponse {
-    let req: ChatReq = match serde_json::from_slice::<ChatReq>(&body) {
-        Ok(r) => r,
-        Err(e) => {
-            return api_error(
-                axum::http::StatusCode::BAD_REQUEST,
-                "invalid_request_error",
-                "invalid_json",
-                format!("invalid or unsupported request field: {e}"),
-            );
-        }
+    let req = match parse_and_validate_chat_req(&body) {
+        Ok(req) => req,
+        Err(response) => return response,
     };
-
-    if let Err((code, message)) = validate_chat_req(&req) {
-        return api_error(
-            axum::http::StatusCode::BAD_REQUEST,
-            "invalid_request_error",
-            code,
-            message,
-        );
-    }
 
     let conversation_id = match headers.get("X-Conversation-Id") {
         None => None,
@@ -900,6 +891,26 @@ async fn chat_completions(
         "provider_unavailable",
         format!("all providers failed: {:?}", last_err),
     )
+}
+
+fn parse_and_validate_chat_req(body: &[u8]) -> Result<ChatReq, Response> {
+    let req = serde_json::from_slice::<ChatReq>(body).map_err(|error| {
+        api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            "invalid_json",
+            format!("invalid or unsupported request field: {error}"),
+        )
+    })?;
+    validate_chat_req(&req).map_err(|(code, message)| {
+        api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            code,
+            message,
+        )
+    })?;
+    Ok(req)
 }
 
 #[cfg(test)]
