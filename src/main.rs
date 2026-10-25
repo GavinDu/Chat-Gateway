@@ -1708,7 +1708,10 @@ mod login_security_middleware_http_tests {
 
         let rebinding = request(
             "/login/api/status",
-            &[("host", "attacker.example:8080"), ("origin", "http://attacker.example:8080")],
+            &[
+                ("host", "attacker.example:8080"),
+                ("origin", "http://attacker.example:8080"),
+            ],
         )
         .await;
         assert_eq!(rebinding.status(), StatusCode::FORBIDDEN);
@@ -1736,7 +1739,10 @@ mod login_security_middleware_http_tests {
                 .await
                 .unwrap();
             assert_eq!(response.status(), StatusCode::FORBIDDEN, "{method} {path}");
-            assert!(response.headers().contains_key("x-request-id"), "{method} {path}");
+            assert!(
+                response.headers().contains_key("x-request-id"),
+                "{method} {path}"
+            );
         }
     }
 
