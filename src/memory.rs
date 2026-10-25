@@ -134,11 +134,34 @@ impl UnifiedMemory {
             .map(|entry| (entry.key().clone(), entry.value().clone()))
             .collect();
         let bytes = serde_json::to_vec(&snapshot)?;
-        let temp_path = path.with_extension(format!("tmp-{}", std::process::id()));
-        std::fs::write(&temp_path, bytes)?;
+        // Conversation snapshots contain private prompts and responses. Use a
+        // unique temp file and owner-only permissions on Unix, then flush file
+        // contents before atomically replacing the durable snapshot.
+        let temp_path = path.with_extension(format!("tmp-{}-{}", std::process::id(), uuid::Uuid::new_v4()));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut output = options.open(&temp_path)?;
+        if let Err(error) = std::io::Write::write_all(&mut output, &bytes)
+            .and_then(|()| output.sync_all())
+        {
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(error.into());
+        }
+        drop(output);
         if let Err(error) = std::fs::rename(&temp_path, path) {
             let _ = std::fs::remove_file(&temp_path);
             return Err(error.into());
+        }
+        // Best-effort directory sync makes the rename durable across a crash
+        // on filesystems that support syncing directory entries.
+        #[cfg(unix)]
+        if let Ok(directory) = std::fs::File::open(parent) {
+            let _ = directory.sync_all();
         }
         Ok(())
     }
@@ -235,6 +258,24 @@ mod tests {
         assert!(result.is_err());
         assert!(!memory.has_history("conversation-failed"));
         let _ = std::fs::remove_dir_all(path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn snapshot_file_is_created_with_owner_only_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = std::env::temp_dir().join(format!("chat-gateway-memory-private-{}.json", uuid::Uuid::new_v4()));
+        let memory = UnifiedMemory::with_optional_persistence(8000, Some(path.clone())).unwrap();
+        memory.store_turn(
+            "conversation-private".to_string(),
+            vec![m("user", "private prompt")],
+            m("assistant", "private answer"),
+            "chatgpt".to_string(),
+            "tab-private".to_string(),
+        ).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
