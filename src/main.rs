@@ -440,9 +440,9 @@ async fn chat_completions(
             let model_c = req.model.clone();
             let conv_stream = new_conv_id.clone();
             let sse_stream = async_stream::stream! {
-                // Hold the provider slot for the stream's duration
                 let _permit = permit;
                 let mut full = String::new();
+                let mut stream_error: Option<String> = None;
                 while let Some(item) = rx.recv().await {
                     match item {
                         Ok(c) => {
@@ -458,18 +458,35 @@ async fn chat_completions(
                             yield Ok::<_, anyhow::Error>(Event::default().data(data.to_string()));
                         }
                         Err(e) => {
-                            tracing::error!("stream err: {e}");
+                            tracing::warn!(provider = %provider_c, "provider stream failed: {e}");
+                            stream_error = Some("provider stream failed; partial response was not committed".to_string());
                             break;
                         }
                     }
                 }
-                state_c.memory.store_turn(
-                    conv_stream.clone(),
-                    windowed_c.clone(),
-                    ChatMessage { role: "assistant".to_string(), content: full.clone() },
-                    provider_c.clone(),
-                    format!("tab-{}", &conv_stream[..8]),
-                );
+
+                if let Some(message) = stream_error {
+                    let error = serde_json::json!({
+                        "error": { "message": message, "type": "provider_error", "code": "stream_failed" }
+                    });
+                    yield Ok(Event::default().data(error.to_string()));
+                } else {
+                    state_c.memory.store_turn(
+                        conv_stream.clone(),
+                        windowed_c.clone(),
+                        ChatMessage { role: "assistant".to_string(), content: full.clone() },
+                        provider_c.clone(),
+                        format!("tab-{}", &conv_stream[..8]),
+                    );
+                    let finish = serde_json::json!({
+                        "id": format!("chatcmpl-{}", &conv_stream[..8]),
+                        "object": "chat.completion.chunk",
+                        "created": chrono::Utc::now().timestamp(),
+                        "model": model_c,
+                        "choices": [{ "delta": {}, "index": 0, "finish_reason": "stop" }],
+                    });
+                    yield Ok(Event::default().data(finish.to_string()));
+                }
                 yield Ok(Event::default().data("[DONE]"));
             };
             let mut resp_headers = axum::http::HeaderMap::new();
@@ -478,8 +495,8 @@ async fn chat_completions(
             return (resp_headers, Sse::new(sse_stream)).into_response();
         }
 
-        // Non-streaming: drain the channel; a failure before any content
-        // falls through to the next candidate provider.
+        // Non-streaming: retry another provider only if no response bytes were
+        // emitted. A partial response is an error, never a successful turn.
         let mut full = String::new();
         let mut failed: Option<String> = None;
         while let Some(item) = rx.recv().await {
@@ -496,10 +513,17 @@ async fn chat_completions(
         }
         if let Some(e) = failed {
             if full.is_empty() {
-                tracing::warn!(provider = %provider_name, "provider failed: {e}");
+                tracing::warn!(provider = %provider_name, "provider failed before output: {e}");
                 last_err = Some(e);
                 continue;
             }
+            tracing::warn!(provider = %provider_name, "provider failed after partial output");
+            return api_error(
+                axum::http::StatusCode::BAD_GATEWAY,
+                "provider_error",
+                "partial_response",
+                "provider failed after emitting a partial response; the turn was not committed",
+            );
         }
 
         state.memory.store_turn(
