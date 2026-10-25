@@ -85,13 +85,14 @@ impl ProviderRouter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{AppConfig, MemoryConfig, ObscuraConfig, ProviderConfig, ServerConfig};
+    use crate::config::{AppConfig, AuthConfig, MemoryConfig, ObscuraConfig, ProviderConfig, ServerConfig};
 
     fn router() -> ProviderRouter {
         let cfg = AppConfig {
             server: ServerConfig::default(),
             memory: MemoryConfig::default(),
             obscura: ObscuraConfig::default(),
+            auth: AuthConfig::default(),
             providers: vec![
                 ProviderConfig {
                     name: "claude".into(),
