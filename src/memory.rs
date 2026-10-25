@@ -174,11 +174,15 @@ impl UnifiedMemory {
     }
 
     pub fn get_tab(&self, cid: &str) -> anyhow::Result<Option<String>> {
-        Ok(self.conversation(cid)?.and_then(|conversation| conversation.tab_id))
+        Ok(self
+            .conversation(cid)?
+            .and_then(|conversation| conversation.tab_id))
     }
 
     pub fn get_provider(&self, cid: &str) -> anyhow::Result<Option<String>> {
-        Ok(self.conversation(cid)?.and_then(|conversation| conversation.provider))
+        Ok(self
+            .conversation(cid)?
+            .and_then(|conversation| conversation.provider))
     }
 }
 
