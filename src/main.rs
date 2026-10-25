@@ -76,6 +76,7 @@ struct AdapterDiagnostic {
 }
 
 #[derive(Clone)]
+#[derive(Debug, PartialEq, Eq)]
 struct AuthKeyContext {
     provider_allowlist: Option<Vec<String>>,
 }
