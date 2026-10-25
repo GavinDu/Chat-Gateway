@@ -29,7 +29,11 @@ pub struct ServerConfig {
 
 impl Default for ServerConfig {
     fn default() -> Self {
-        Self { port: default_port(), headless: true, chrome_profile_dir: String::new() }
+        Self {
+            port: default_port(),
+            headless: true,
+            chrome_profile_dir: String::new(),
+        }
     }
 }
 
@@ -43,7 +47,10 @@ pub struct MemoryConfig {
 
 impl Default for MemoryConfig {
     fn default() -> Self {
-        Self { max_tokens: default_max_tokens(), strategy: default_strategy() }
+        Self {
+            max_tokens: default_max_tokens(),
+            strategy: default_strategy(),
+        }
     }
 }
 
@@ -59,7 +66,10 @@ pub struct ObscuraConfig {
 
 impl Default for ObscuraConfig {
     fn default() -> Self {
-        Self { stealth: true, storage_dir: None }
+        Self {
+            stealth: true,
+            storage_dir: None,
+        }
     }
 }
 
@@ -81,7 +91,10 @@ pub struct ProviderConfig {
 impl AppConfig {
     pub fn load(p: &Path) -> anyhow::Result<Self> {
         let raw = std::fs::read_to_string(p).map_err(|e| {
-            anyhow::anyhow!("cannot read config {}: {e} (copy config.example.yaml to config.yaml)", p.display())
+            anyhow::anyhow!(
+                "cannot read config {}: {e} (copy config.example.yaml to config.yaml)",
+                p.display()
+            )
         })?;
         let mut cfg: Self = serde_yaml::from_str(&raw)?;
         if let Ok(port) = std::env::var("PORT") {
@@ -102,11 +115,21 @@ impl AppConfig {
             anyhow::bail!("memory.max_tokens must be greater than zero");
         }
         if self.memory.strategy != "sliding_window" {
-            anyhow::bail!("unsupported memory.strategy '{}'; supported value: sliding_window", self.memory.strategy);
+            anyhow::bail!(
+                "unsupported memory.strategy '{}'; supported value: sliding_window",
+                self.memory.strategy
+            );
         }
 
         const PROVIDERS: &[&str] = &[
-            "qwen", "metaai", "claude", "chatgpt", "gemini", "grok", "mistral", "perplexity",
+            "qwen",
+            "metaai",
+            "claude",
+            "chatgpt",
+            "gemini",
+            "grok",
+            "mistral",
+            "perplexity",
         ];
         let mut seen = std::collections::HashSet::new();
         let mut enabled_count = 0usize;
@@ -121,10 +144,16 @@ impl AppConfig {
                 enabled_count += 1;
             }
             if provider.timeout_seconds == 0 {
-                anyhow::bail!("provider '{}' timeout_seconds must be greater than zero", provider.name);
+                anyhow::bail!(
+                    "provider '{}' timeout_seconds must be greater than zero",
+                    provider.name
+                );
             }
             if provider.session_pool_size == 0 {
-                anyhow::bail!("provider '{}' session_pool_size must be greater than zero", provider.name);
+                anyhow::bail!(
+                    "provider '{}' session_pool_size must be greater than zero",
+                    provider.name
+                );
             }
         }
         if enabled_count == 0 {
@@ -139,17 +168,34 @@ impl AppConfig {
 }
 
 fn parse_port_override(value: &str) -> anyhow::Result<u16> {
-    value.parse::<u16>()
-        .map_err(|error| anyhow::anyhow!("invalid PORT value '{value}': expected an integer from 1 to 65535 ({error})"))
+    value.parse::<u16>().map_err(|error| {
+        anyhow::anyhow!(
+            "invalid PORT value '{value}': expected an integer from 1 to 65535 ({error})"
+        )
+    })
 }
 
-fn default_true() -> bool { true }
-fn default_port() -> u16 { 8080 }
-fn default_priority() -> u32 { 99 }
-fn default_timeout() -> u64 { 120 }
-fn default_pool() -> usize { 2 }
-fn default_max_tokens() -> usize { 8000 }
-fn default_strategy() -> String { "sliding_window".to_string() }
+fn default_true() -> bool {
+    true
+}
+fn default_port() -> u16 {
+    8080
+}
+fn default_priority() -> u32 {
+    99
+}
+fn default_timeout() -> u64 {
+    120
+}
+fn default_pool() -> usize {
+    2
+}
+fn default_max_tokens() -> usize {
+    8000
+}
+fn default_strategy() -> String {
+    "sliding_window".to_string()
+}
 
 #[cfg(test)]
 mod tests {

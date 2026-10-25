@@ -34,7 +34,8 @@ impl SelectorSet {
 }
 
 /// Streaming indicator shared by all providers (v1 template).
-pub const STREAMING_SELECTOR: &str = r#"[data-is-streaming="true"], button[aria-label*="Stop"], button:has-text("Stop")"#;
+pub const STREAMING_SELECTOR: &str =
+    r#"[data-is-streaming="true"], button[aria-label*="Stop"], button:has-text("Stop")"#;
 
 pub fn element_exists(page: &Page, selector: &str) -> bool {
     page.query_selector(selector).is_some()
@@ -45,10 +46,17 @@ pub fn is_streaming(page: &Page) -> bool {
 }
 
 /// Wait until any of the selectors matches (polls query_selector).
-pub async fn wait_for_selector(page: &Page, selectors: &[&str], timeout_ms: u64) -> anyhow::Result<()> {
+pub async fn wait_for_selector(
+    page: &Page,
+    selectors: &[&str],
+    timeout_ms: u64,
+) -> anyhow::Result<()> {
     let start = std::time::Instant::now();
     while start.elapsed().as_millis() < timeout_ms as u128 {
-        if selectors.iter().any(|sel| page.query_selector(sel).is_some()) {
+        if selectors
+            .iter()
+            .any(|sel| page.query_selector(sel).is_some())
+        {
             return Ok(());
         }
         tokio::time::sleep(Duration::from_millis(150)).await;
@@ -112,10 +120,18 @@ pub fn press_enter(page: &Page, selector: &str) -> anyhow::Result<()> {
 /// Click the send button if one matches within `timeout_ms`, else
 /// dispatch Enter on the input (Go's send fallback). Returns true when
 /// a button was clicked, false when Enter was used.
-pub async fn click_send_or_enter(page: &Page, send_selectors: &[&str], input_selector: &str, timeout_ms: u64) -> anyhow::Result<bool> {
+pub async fn click_send_or_enter(
+    page: &Page,
+    send_selectors: &[&str],
+    input_selector: &str,
+    timeout_ms: u64,
+) -> anyhow::Result<bool> {
     let start = std::time::Instant::now();
     while start.elapsed().as_millis() < timeout_ms as u128 {
-        if let Some(sel) = send_selectors.iter().find(|s| page.query_selector(s).is_some()) {
+        if let Some(sel) = send_selectors
+            .iter()
+            .find(|s| page.query_selector(s).is_some())
+        {
             if let Some(el) = page.query_selector(sel) {
                 el.click()?;
                 return Ok(true);
@@ -132,7 +148,14 @@ pub async fn click_send_or_enter(page: &Page, send_selectors: &[&str], input_sel
 /// none): Go's login keyword list (base.go) matched against the page
 /// URL. Callers fail the attempt with a distinct session_expired error
 /// so the API can report it and the router can skip the provider.
-pub const LOGIN_KEYWORDS: &[&str] = &["login", "signin", "sign-in", "auth", "accounts.google.com", "auth0"];
+pub const LOGIN_KEYWORDS: &[&str] = &[
+    "login",
+    "signin",
+    "sign-in",
+    "auth",
+    "accounts.google.com",
+    "auth0",
+];
 
 pub fn is_login_page(page: &Page) -> bool {
     let url = page.url().to_lowercase();
@@ -152,9 +175,20 @@ pub fn check_session(provider: &str, page: &Page) -> anyhow::Result<()> {
 /// chars, dropping the 14 non-model labels. Rust v1's config-alias
 /// merge is kept (Go's discovered-only return is NOT adopted).
 pub const NON_MODEL_LABELS: &[&str] = &[
-    "selected", "current", "select", "close", "cancel", "settings",
-    "new chat", "new conversation", "search", "more", "home", "explore",
-    "recent", "history",
+    "selected",
+    "current",
+    "select",
+    "close",
+    "cancel",
+    "settings",
+    "new chat",
+    "new conversation",
+    "search",
+    "more",
+    "home",
+    "explore",
+    "recent",
+    "history",
 ];
 
 pub fn normalize_model_option(raw: &str) -> Option<String> {
@@ -163,7 +197,10 @@ pub fn normalize_model_option(raw: &str) -> Option<String> {
     if collapsed.is_empty() || collapsed.len() > 120 {
         return None;
     }
-    if NON_MODEL_LABELS.iter().any(|l| l.eq_ignore_ascii_case(&collapsed)) {
+    if NON_MODEL_LABELS
+        .iter()
+        .any(|l| l.eq_ignore_ascii_case(&collapsed))
+    {
         return None;
     }
     Some(collapsed)
@@ -189,12 +226,20 @@ pub fn normalize_model_labels(labels: Vec<String>) -> Vec<String> {
 /// click → 300ms → Escape + next pair on miss. Returns Err when a
 /// selection was attempted and every pair missed, so the caller can
 /// fail the attempt and let the router try the next provider.
-pub async fn select_model(page: &Page, pairs: &[(&str, &str)], model: &str, default_aliases: &[String]) -> anyhow::Result<()> {
+pub async fn select_model(
+    page: &Page,
+    pairs: &[(&str, &str)],
+    model: &str,
+    default_aliases: &[String],
+) -> anyhow::Result<()> {
     let model = model.trim();
     if model.is_empty() {
         return Ok(());
     }
-    if default_aliases.iter().any(|a| a.trim().eq_ignore_ascii_case(model)) {
+    if default_aliases
+        .iter()
+        .any(|a| a.trim().eq_ignore_ascii_case(model))
+    {
         return Ok(());
     }
     let target_js = serde_json::to_string(&model.to_lowercase())?;
@@ -238,11 +283,20 @@ pub async fn select_model(page: &Page, pairs: &[(&str, &str)], model: &str, defa
 /// query_selector is an instant snapshot of the loaded page, unlike
 /// Go's ProbeSelectors which waited up to 5s per selector — probe
 /// results therefore describe the page's current state only.
-pub fn probe_selector_groups(page: &Page, groups: &[(&str, &[&str])]) -> Vec<(String, Option<String>)> {
-    groups.iter().map(|(role, selectors)| {
-        let hit = selectors.iter().find(|s| page.query_selector(s).is_some()).map(|s| s.to_string());
-        (role.to_string(), hit)
-    }).collect()
+pub fn probe_selector_groups(
+    page: &Page,
+    groups: &[(&str, &[&str])],
+) -> Vec<(String, Option<String>)> {
+    groups
+        .iter()
+        .map(|(role, selectors)| {
+            let hit = selectors
+                .iter()
+                .find(|s| page.query_selector(s).is_some())
+                .map(|s| s.to_string());
+            (role.to_string(), hit)
+        })
+        .collect()
 }
 
 /// Text of the last element matching `selector` (innerText, falling back
@@ -255,7 +309,11 @@ pub fn last_element_text(page: &Page, selector: &str) -> Option<String> {
         sel_js
     );
     let v = page.evaluate(&js);
-    if v.is_null() { None } else { Some(v.as_str().unwrap_or("").to_string()) }
+    if v.is_null() {
+        None
+    } else {
+        Some(v.as_str().unwrap_or("").to_string())
+    }
 }
 
 /// Response text for an adapter: first response selector (in fallback
@@ -274,7 +332,11 @@ pub fn response_text(page: &Page, set: &SelectorSet) -> Option<String> {
 /// Discover models without sending a message (v1 body): navigate, open
 /// the model picker, scrape visible labels filtered by keyword regex,
 /// merge with the configured aliases.
-pub async fn discover_models(page: &mut Page, set: &SelectorSet, cfg_models: &[String]) -> anyhow::Result<Vec<String>> {
+pub async fn discover_models(
+    page: &mut Page,
+    set: &SelectorSet,
+    cfg_models: &[String],
+) -> anyhow::Result<Vec<String>> {
     page.goto(set.url).await?;
     tokio::time::sleep(Duration::from_millis(1200)).await;
 
@@ -331,7 +393,10 @@ pub async fn send_prompt(page: &Page, set: &SelectorSet, prompt: &str) -> anyhow
     // button appears within the 5s send budget. The input selector is
     // the first input selector that currently matches, else the first
     // listed input selector.
-    let input_sel = set.input.iter().copied()
+    let input_sel = set
+        .input
+        .iter()
+        .copied()
         .find(|s| page.query_selector(s).is_some())
         .unwrap_or(set.input[0]);
     click_send_or_enter(page, set.send, input_sel, 5000).await?;

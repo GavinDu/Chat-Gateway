@@ -1,22 +1,22 @@
-pub mod common;
-pub mod qwen;
-pub mod metaai;
-pub mod claude;
 pub mod chatgpt;
+pub mod claude;
+pub mod common;
 pub mod gemini;
 pub mod grok;
+pub mod metaai;
 pub mod mistral;
 pub mod perplexity;
+pub mod qwen;
 
+use crate::config::{AppConfig, ProviderConfig};
+use anyhow::Result;
 use async_trait::async_trait;
 use obscura_core::Page;
-use anyhow::Result;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
-use crate::config::{AppConfig, ProviderConfig};
 
 /// One streamed piece of a provider response.
 #[derive(Debug, Clone)]
@@ -80,7 +80,16 @@ impl Provider {
     }
 
     pub fn all() -> Vec<Provider> {
-        vec![Self::Qwen, Self::MetaAI, Self::Claude, Self::ChatGPT, Self::Gemini, Self::Grok, Self::Mistral, Self::Perplexity]
+        vec![
+            Self::Qwen,
+            Self::MetaAI,
+            Self::Claude,
+            Self::ChatGPT,
+            Self::Gemini,
+            Self::Grok,
+            Self::Mistral,
+            Self::Perplexity,
+        ]
     }
 }
 
@@ -91,20 +100,26 @@ pub trait ChatProvider: Send + Sync {
     fn name(&self) -> &str;
     fn aliases(&self) -> &[String];
     /// Perplexity answers carry [1][2] citation markers; strip them.
-    fn strip_citations(&self) -> bool { false }
+    fn strip_citations(&self) -> bool {
+        false
+    }
 
     /// Discover models without sending a message - reads the picker.
     async fn discover_models(&self, page: &mut Page) -> Result<Vec<String>>;
 
     /// Model-picker trigger→option pairs (Go's modelSelectors data).
     /// Default: none — selection no-ops, which is Rust v1 behavior.
-    fn model_pairs(&self) -> &[(&str, &str)] { &[] }
+    fn model_pairs(&self) -> &[(&str, &str)] {
+        &[]
+    }
 
     /// Select a model in the provider UI before typing. Default: no-op
     /// (Rust v1 behavior — no selection). Providers with pair data
     /// delegate to common::select_model; failure fails the attempt so
     /// the router can try the next provider.
-    async fn select_model(&self, _page: &Page, _model: &str) -> Result<()> { Ok(()) }
+    async fn select_model(&self, _page: &Page, _model: &str) -> Result<()> {
+        Ok(())
+    }
 
     /// Wait for the input, type the prompt, click send.
     async fn send_prompt(&self, page: &Page, prompt: &str) -> Result<()>;
@@ -141,14 +156,15 @@ fn adapter_for(provider: Provider, cfg: ProviderConfig) -> Arc<dyn ChatProvider>
 pub fn build_registry(cfg: &AppConfig) -> HashMap<Provider, Arc<dyn ChatProvider>> {
     let mut map = HashMap::new();
     for p in &cfg.providers {
-        if !p.enabled { continue; }
+        if !p.enabled {
+            continue;
+        }
         if let Some(provider) = Provider::from_name(&p.name) {
             map.insert(provider, adapter_for(provider, p.clone()));
         }
     }
     map
 }
-
 
 #[derive(Debug, PartialEq, Eq)]
 enum DeltaObservation {
@@ -168,7 +184,10 @@ struct ResponseDeltaTracker {
 
 impl ResponseDeltaTracker {
     fn new(baseline: Option<String>) -> Self {
-        Self { baseline, last_len: 0 }
+        Self {
+            baseline,
+            last_len: 0,
+        }
     }
 
     fn observe(&mut self, text: &str) -> DeltaObservation {
@@ -179,7 +198,8 @@ impl ResponseDeltaTracker {
             if text == baseline {
                 return DeltaObservation::WaitingForNewResponse;
             }
-            let delta = text.strip_prefix(baseline.as_str())
+            let delta = text
+                .strip_prefix(baseline.as_str())
                 .map(str::to_string)
                 .unwrap_or_else(|| text.to_string());
             self.last_len = text.len();
@@ -229,11 +249,13 @@ pub async fn run_send(
             return;
         }
         Err(_) => {
-            let _ = chunks.send(Err(anyhow::anyhow!(
-                "provider '{}' timed out while submitting the prompt after {:?}",
-                adapter.name(),
-                timeout
-            ))).await;
+            let _ = chunks
+                .send(Err(anyhow::anyhow!(
+                    "provider '{}' timed out while submitting the prompt after {:?}",
+                    adapter.name(),
+                    timeout
+                )))
+                .await;
             return;
         }
     }
@@ -248,11 +270,13 @@ pub async fn run_send(
         if start.elapsed() > timeout {
             // A timeout is not a successful completion. Propagate a typed
             // provider error so the API won't commit a partial/empty turn.
-            let _ = chunks.send(Err(anyhow::anyhow!(
-                "provider '{}' did not complete within {:?}",
-                adapter.name(),
-                timeout
-            ))).await;
+            let _ = chunks
+                .send(Err(anyhow::anyhow!(
+                    "provider '{}' did not complete within {:?}",
+                    adapter.name(),
+                    timeout
+                )))
+                .await;
             break;
         }
 
@@ -269,7 +293,13 @@ pub async fn run_send(
                     }
                     stable_ticks = 0;
                     if !delta.is_empty()
-                        && chunks.send(Ok(ProviderChunk { content: delta, done: false })).await.is_err()
+                        && chunks
+                            .send(Ok(ProviderChunk {
+                                content: delta,
+                                done: false,
+                            }))
+                            .await
+                            .is_err()
                     {
                         return; // receiver gone
                     }
@@ -280,7 +310,12 @@ pub async fn run_send(
 
             // Completion: no growth for ~2s + no streaming indicator
             if stable_ticks > 6 && !adapter.is_streaming(&page) {
-                let _ = chunks.send(Ok(ProviderChunk { content: String::new(), done: true })).await;
+                let _ = chunks
+                    .send(Ok(ProviderChunk {
+                        content: String::new(),
+                        done: true,
+                    }))
+                    .await;
                 break;
             }
         }
@@ -296,30 +331,50 @@ mod response_delta_tracker_tests {
     #[test]
     fn waits_when_reused_page_still_shows_old_answer() {
         let mut tracker = ResponseDeltaTracker::new(Some("same answer".to_string()));
-        assert_eq!(tracker.observe("same answer"), DeltaObservation::WaitingForNewResponse);
-        assert_eq!(tracker.observe("same answer"), DeltaObservation::WaitingForNewResponse);
-        assert_eq!(tracker.observe("same answer plus new text"), DeltaObservation::Delta(" plus new text".to_string()));
+        assert_eq!(
+            tracker.observe("same answer"),
+            DeltaObservation::WaitingForNewResponse
+        );
+        assert_eq!(
+            tracker.observe("same answer"),
+            DeltaObservation::WaitingForNewResponse
+        );
+        assert_eq!(
+            tracker.observe("same answer plus new text"),
+            DeltaObservation::Delta(" plus new text".to_string())
+        );
     }
 
     #[test]
     fn emits_unicode_growth_without_splitting_utf8() {
         let mut tracker = ResponseDeltaTracker::new(None);
-        assert_eq!(tracker.observe("你好"), DeltaObservation::Delta("你好".to_string()));
-        assert_eq!(tracker.observe("你好世界"), DeltaObservation::Delta("世界".to_string()));
+        assert_eq!(
+            tracker.observe("你好"),
+            DeltaObservation::Delta("你好".to_string())
+        );
+        assert_eq!(
+            tracker.observe("你好世界"),
+            DeltaObservation::Delta("世界".to_string())
+        );
         assert_eq!(tracker.observe("你好世界"), DeltaObservation::Stable);
     }
 
     #[test]
     fn emits_full_text_when_provider_replaces_instead_of_appending() {
         let mut tracker = ResponseDeltaTracker::new(Some("old answer".to_string()));
-        assert_eq!(tracker.observe("new answer"), DeltaObservation::Delta("new answer".to_string()));
+        assert_eq!(
+            tracker.observe("new answer"),
+            DeltaObservation::Delta("new answer".to_string())
+        );
     }
 
     #[test]
     fn ignores_empty_text_until_response_appears() {
         let mut tracker = ResponseDeltaTracker::new(None);
         assert_eq!(tracker.observe(""), DeltaObservation::NoText);
-        assert_eq!(tracker.observe("answer"), DeltaObservation::Delta("answer".to_string()));
+        assert_eq!(
+            tracker.observe("answer"),
+            DeltaObservation::Delta("answer".to_string())
+        );
     }
 }
-

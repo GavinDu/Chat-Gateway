@@ -58,7 +58,69 @@ thread; the HTTP side only ever sees channels. Provider switch is a
 map lookup + channel send on pre-warmed pages - no process or tab
 spawn per request.
 
-## Sessions
+## Durable conversation storage (SQLite)
+
+Conversation history now lives in `data/conversations.sqlite3`, not a rewritten
+JSON snapshot. SQLite is the source of truth: reads use a consistent database
+snapshot, and each turn (ordered messages plus provider/tab affinity) or deletion
+commits as one transaction. Failed writes roll back completely. Independent
+gateway connections serialize writes using `BEGIN IMMEDIATE` with a 30-second
+busy timeout, reconciling transcripts against the latest committed history.
+Identical completed-turn replays are idempotent; full and sliding-window
+transcripts append only their unseen suffix.
+
+`CHAT_GATEWAY_MEMORY_PATH` can select a database path. For compatibility, an
+existing override ending in `.json` remains the **import source**, and its sibling
+`.sqlite3` file becomes the database. Without an override, or with a direct
+database override, the import source is `data/conversations.json`.
+
+### JSON import and schema migrations
+
+On first startup, the gateway creates schema version 1 (`PRAGMA user_version`)
+and imports the legacy JSON snapshot in the **same transaction**. A completion
+marker prevents reimport on later starts, including after conversation deletion.
+The source JSON is never modified, renamed, or deleted automatically. Keep it
+until you have verified history and affinity after restart, then archive it
+securely or remove it yourself. Old JSON backups still contain deleted history.
+After migration, restoring that JSON into a new empty database resurrects the
+history in that backup; use a current SQLite backup for recovery.
+
+Malformed JSON, mismatched conversation IDs, database corruption, foreign-key or
+message-order violations, missing/modified schema definitions, and unsupported
+schema/application versions stop startup with diagnostics instead of starting
+with empty memory. A failed initial import leaves no committed schema or partial
+history, and can be retried after correcting the source. Future schema upgrades
+must be explicit, transactional migrations; unknown versions are never reset.
+
+On Unix, database files are created/tightened to owner-only `0600`, and SQLite's
+rollback journal inherits those permissions. Database symlink paths are rejected.
+Use a private, trusted data directory on local storage; do not share it with
+untrusted users or put it on a filesystem without SQLite locking guarantees.
+
+### Backup and restore
+
+Stop the gateway before copying the database, or use SQLite's online backup API:
+
+```bash
+sqlite3 data/conversations.sqlite3 ".backup 'conversations-backup.sqlite3'"
+chmod 600 conversations-backup.sqlite3
+```
+
+Keep backups private. Do not copy only the main file while a transaction is
+active, discard journal/WAL sidecars, or edit a live database. To restore, stop
+all gateway processes, preserve the current database and all sidecars together,
+restore the backup at the configured path with owner-only permissions, and
+restart. Never run the older JSON-only gateway against this SQLite path.
+
+Regression checks:
+
+```bash
+cargo test --locked memory::tests
+cargo test --locked
+cargo fmt --all -- --check
+```
+
+## Provider sessions
 
 Sessions live in `sessions/<provider>.json`:
 `{ local_storage, cookies: [{name, value, domain, path, secure,

@@ -119,16 +119,22 @@ pub const VIEW_SCRIPT: &str = r#"(function(){ try {
   return {title: document.title||'', fields: fields, buttons: btns, snapshot: snap};
 } catch(e){ return {title:'', fields:[], buttons:[], snapshot:''}; } })()"#;
 
-
 /// Reject navigation targets that can reach local services or use URL
 /// authority tricks. SSO may use a different public HTTPS hostname, so this
 /// is a network-safety baseline rather than a provider-domain allowlist.
 fn validate_navigation_url(url: &str) -> anyhow::Result<()> {
-    let rest = url.strip_prefix("https://")
+    let rest = url
+        .strip_prefix("https://")
         .ok_or_else(|| anyhow::anyhow!("navigate target must be an https URL"))?;
     let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
-    if authority.is_empty() || authority.contains('@') || authority.contains('[') || authority.contains(']') {
-        anyhow::bail!("navigate target must use a public DNS hostname without userinfo or IP literals");
+    if authority.is_empty()
+        || authority.contains('@')
+        || authority.contains('[')
+        || authority.contains(']')
+    {
+        anyhow::bail!(
+            "navigate target must use a public DNS hostname without userinfo or IP literals"
+        );
     }
     let host = if let Some((host, port)) = authority.rsplit_once(':') {
         if port != "443" || host.contains(':') {
@@ -137,18 +143,30 @@ fn validate_navigation_url(url: &str) -> anyhow::Result<()> {
         host
     } else {
         authority
-    }.to_ascii_lowercase();
+    }
+    .to_ascii_lowercase();
 
-    if host.len() > 253 || !host.contains('.') || host.ends_with('.') ||
-       host.split('.').any(|label| label.is_empty() || label.len() > 63 ||
-           label.starts_with('-') || label.ends_with('-') ||
-           !label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')) {
+    if host.len() > 253
+        || !host.contains('.')
+        || host.ends_with('.')
+        || host.split('.').any(|label| {
+            label.is_empty()
+                || label.len() > 63
+                || label.starts_with('-')
+                || label.ends_with('-')
+                || !label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+        })
+    {
         anyhow::bail!("navigate target must use a valid public DNS hostname");
     }
-    if host == "localhost" || host.ends_with(".localhost") ||
-       host.ends_with(".local") || host.ends_with(".internal") ||
-       host.ends_with(".test") || host.ends_with(".invalid") ||
-       host.ends_with(".example") {
+    if host == "localhost"
+        || host.ends_with(".localhost")
+        || host.ends_with(".local")
+        || host.ends_with(".internal")
+        || host.ends_with(".test")
+        || host.ends_with(".invalid")
+        || host.ends_with(".example")
+    {
         anyhow::bail!("navigate target may not use a local or reserved hostname");
     }
     if host.parse::<std::net::IpAddr>().is_ok() {
@@ -163,13 +181,24 @@ fn validate_navigation_url(url: &str) -> anyhow::Result<()> {
 /// are included for expected OAuth/SSO hops.
 pub fn validate_navigation_url_for_provider(provider: &str, url: &str) -> anyhow::Result<()> {
     validate_navigation_url(url)?;
-    let rest = url.strip_prefix("https://").expect("generic validator accepted HTTPS");
+    let rest = url
+        .strip_prefix("https://")
+        .expect("generic validator accepted HTTPS");
     let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
-    let host = authority.strip_suffix(":443").unwrap_or(authority).to_ascii_lowercase();
+    let host = authority
+        .strip_suffix(":443")
+        .unwrap_or(authority)
+        .to_ascii_lowercase();
     const COMMON_IDP: &[&str] = &[
-        "accounts.google.com", "google.com", "googleusercontent.com",
-        "apple.com", "icloud.com", "microsoftonline.com", "live.com",
-        "facebook.com", "github.com",
+        "accounts.google.com",
+        "google.com",
+        "googleusercontent.com",
+        "apple.com",
+        "icloud.com",
+        "microsoftonline.com",
+        "live.com",
+        "facebook.com",
+        "github.com",
     ];
     let provider_domains: &[&str] = match provider {
         "qwen" => &["qwen.ai", "aliyun.com", "alibabacloud.com"],
@@ -182,9 +211,10 @@ pub fn validate_navigation_url_for_provider(provider: &str, url: &str) -> anyhow
         "perplexity" => &["perplexity.ai"],
         _ => anyhow::bail!("unknown provider for login navigation"),
     };
-    let allowed = provider_domains.iter().chain(COMMON_IDP.iter()).any(|base| {
-        host == *base || host.ends_with(&format!(".{base}"))
-    });
+    let allowed = provider_domains
+        .iter()
+        .chain(COMMON_IDP.iter())
+        .any(|base| host == *base || host.ends_with(&format!(".{base}")));
     if !allowed {
         anyhow::bail!("navigation target is outside the provider and SSO allowlists");
     }
@@ -265,14 +295,25 @@ mod navigation_validation_tests {
     #[test]
     fn provider_navigation_allows_own_domain_and_common_sso() {
         assert!(validate_navigation_url_for_provider("chatgpt", "https://chatgpt.com/").is_ok());
-        assert!(validate_navigation_url_for_provider("chatgpt", "https://accounts.google.com/o/oauth2/").is_ok());
-        assert!(validate_navigation_url_for_provider("claude", "https://login.microsoftonline.com/").is_ok());
+        assert!(validate_navigation_url_for_provider(
+            "chatgpt",
+            "https://accounts.google.com/o/oauth2/"
+        )
+        .is_ok());
+        assert!(validate_navigation_url_for_provider(
+            "claude",
+            "https://login.microsoftonline.com/"
+        )
+        .is_ok());
     }
 
     #[test]
     fn provider_navigation_rejects_other_provider_and_arbitrary_domains() {
         assert!(validate_navigation_url_for_provider("chatgpt", "https://claude.ai/").is_err());
-        assert!(validate_navigation_url_for_provider("chatgpt", "https://attacker.example.org/").is_err());
+        assert!(
+            validate_navigation_url_for_provider("chatgpt", "https://attacker.example.org/")
+                .is_err()
+        );
         assert!(validate_navigation_url_for_provider("unknown", "https://chatgpt.com/").is_err());
     }
 
