@@ -112,4 +112,19 @@ mod tests {
         assert_eq!(normalize_route("/login/api/chatgpt/act"), "/login/api/*");
         assert_eq!(normalize_route("/health"), "/health");
     }
+
+    #[test]
+    fn renders_request_and_provider_histograms_without_high_cardinality_ids() {
+        super::record_http_request("/v1/chat/completions", 200, 42);
+        super::record_provider_timings("chatgpt", "success", 5, Some(12), 25, 42);
+        let output = super::render();
+        assert!(output.contains("gateway_http_requests_total"));
+        assert!(output.contains("gateway_provider_queue_duration_ms"));
+        assert!(output.contains("gateway_provider_ttft_ms"));
+        assert!(output.contains("gateway_provider_work_duration_ms"));
+        assert!(output.contains("gateway_chat_total_duration_ms"));
+        assert!(output.contains("gateway_gateway_overhead_ms"));
+        assert!(output.contains("provider=\\"chatgpt\\""));
+        assert!(!output.contains("private-conversation-id"));
+    }
 }
