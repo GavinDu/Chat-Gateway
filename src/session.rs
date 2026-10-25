@@ -319,15 +319,9 @@ mod cookie_scope_tests {
     #[test]
     fn restored_cookie_fields_reject_injection_and_malformed_paths() {
         assert!(restored_cookie_fields_safe(&cookie(
-            "__Secure-session",
-            "abc_123-xyz",
-            "/"
+            "__Secure-session", "abc_123-xyz", "/"
         )));
-        assert!(!restored_cookie_fields_safe(&cookie(
-            "bad;name",
-            "value",
-            "/"
-        )));
+        assert!(!restored_cookie_fields_safe(&cookie("bad;name", "value", "/")));
         assert!(!restored_cookie_fields_safe(&cookie(
             "session",
             "value; Secure",
