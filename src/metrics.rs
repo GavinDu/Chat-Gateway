@@ -82,7 +82,7 @@ pub fn render() -> String {
     emit_histogram(&mut out, "gateway_provider_ttft_ms", "provider", &data.ttft_ms);
     emit_histogram(&mut out, "gateway_provider_work_duration_ms", "provider", &data.provider_work_ms);
     emit_histogram(&mut out, "gateway_chat_total_duration_ms", "provider", &data.chat_total_ms);
-    emit_histogram(&mut out, "gateway_gateway_overhead_ms", "provider", &data.gateway_overhead_ms);
+    emit_histogram(&mut out, "gateway_overhead_ms", "provider", &data.gateway_overhead_ms);
     let _ = writeln!(out, "# TYPE gateway_provider_requests_total counter");
     for ((provider, outcome), count) in &data.provider_outcomes {
         let _ = writeln!(out, "gateway_provider_requests_total{{provider=\"{}\",outcome=\"{}\"}} {count}", escape_label(provider), escape_label(outcome));
@@ -123,7 +123,7 @@ mod tests {
         assert!(output.contains("gateway_provider_ttft_ms"));
         assert!(output.contains("gateway_provider_work_duration_ms"));
         assert!(output.contains("gateway_chat_total_duration_ms"));
-        assert!(output.contains("gateway_gateway_overhead_ms"));
+        assert!(output.contains("gateway_overhead_ms"));
         assert!(output.contains(r#"provider="chatgpt""#));
         assert!(!output.contains("private-conversation-id"));
     }
