@@ -2443,16 +2443,39 @@ mod api_key_auth_tests {
     fn bearer_secret_is_verified_by_hash_and_scope() {
         let config = auth(&["chat"]);
         assert_eq!(
-            authorize_api_request(&config, Some("Bearer wrong"), "/v1/models", &axum::http::Method::GET),
+            authorize_api_request(
+                &config,
+                Some("Bearer wrong"),
+                "/v1/models",
+                &axum::http::Method::GET
+            ),
             Err(AuthFailure::MissingOrInvalid)
         );
-        assert!(authorize_api_request(&config, Some("Bearer test-secret"), "/v1/models", &axum::http::Method::GET).is_ok());
+        assert!(
+            authorize_api_request(
+                &config,
+                Some("Bearer test-secret"),
+                "/v1/models",
+                &axum::http::Method::GET
+            )
+            .is_ok()
+        );
         assert_eq!(
-            authorize_api_request(&config, Some("Bearer test-secret"), "/login/api/status", &axum::http::Method::GET),
+            authorize_api_request(
+                &config,
+                Some("Bearer test-secret"),
+                "/login/api/status",
+                &axum::http::Method::GET
+            ),
             Err(AuthFailure::InsufficientScope)
         );
         assert_eq!(
-            authorize_api_request(&config, Some("Bearer test-secret"), "/v1/conversations/conversation_1", &axum::http::Method::DELETE),
+            authorize_api_request(
+                &config,
+                Some("Bearer test-secret"),
+                "/v1/conversations/conversation_1",
+                &axum::http::Method::DELETE
+            ),
             Err(AuthFailure::InsufficientScope)
         );
     }
@@ -2460,22 +2483,45 @@ mod api_key_auth_tests {
     #[test]
     fn admin_key_can_access_admin_routes_and_health_needs_no_key() {
         let config = auth(&["admin"]);
-        assert!(authorize_api_request(&config, Some("Bearer test-secret"), "/login/api/status", &axum::http::Method::GET).is_ok());
-        assert!(authorize_api_request(&config, None, "/health", &axum::http::Method::GET).is_ok());
+        assert!(
+            authorize_api_request(
+                &config,
+                Some("Bearer test-secret"),
+                "/login/api/status",
+                &axum::http::Method::GET
+            )
+            .is_ok()
+        );
+        assert!(
+            authorize_api_request(
+                &config,
+                None,
+                "/health",
+                &axum::http::Method::GET
+            )
+            .is_ok()
+        );
     }
 
     #[test]
     fn bearer_scheme_is_case_insensitive_but_token_format_is_strict() {
         let config = auth(&["chat"]);
-        assert!(authorize_api_request(
-            &config,
-            Some("bearer test-secret"),
-            "/v1/models",
-            &axum::http::Method::GET
-        )
-        .is_ok());
+        assert!(
+            authorize_api_request(
+                &config,
+                Some("bearer test-secret"),
+                "/v1/models",
+                &axum::http::Method::GET
+            )
+            .is_ok()
+        );
         assert_eq!(
-            authorize_api_request(&config, Some("Bearer test-secret extra"), "/v1/models", &axum::http::Method::GET),
+            authorize_api_request(
+                &config,
+                Some("Bearer test-secret extra"),
+                "/v1/models",
+                &axum::http::Method::GET
+            ),
             Err(AuthFailure::MissingOrInvalid)
         );
     }
