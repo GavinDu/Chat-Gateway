@@ -505,6 +505,30 @@ fn validate_login_action_for_provider(
 }
 
 #[cfg(test)]
+mod request_body_error_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn oversized_body_error_uses_stable_openai_envelope() {
+        let response = oversized_chat_body_error();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::CONTENT_TYPE)
+                .unwrap(),
+            "application/json"
+        );
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"]["type"], "invalid_request_error");
+        assert_eq!(body["error"]["code"], "request_too_large");
+    }
+}
+
+#[cfg(test)]
 mod login_action_validation_tests {
     use super::*;
 
@@ -606,7 +630,21 @@ async fn readiness(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 /// without trusting arbitrary client-supplied IDs.
 async fn attach_request_id(req: Request<Body>, next: Next) -> Response {
     let request_id = uuid::Uuid::new_v4().to_string();
+    let is_chat_completion = req.uri().path() == "/v1/chat/completions";
     let mut response = next.run(req).await;
+
+    // Axum's DefaultBodyLimit rejection happens before the Bytes handler is
+    // invoked. Normalize that framework rejection to the same stable error
+    // envelope used by the chat endpoint, while preserving HTTP 413.
+    if is_chat_completion && response.status() == StatusCode::PAYLOAD_TOO_LARGE {
+        response = api_error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "invalid_request_error",
+            "request_too_large",
+            "request body exceeds the 1 MiB limit",
+        );
+    }
+
     if let Ok(value) = axum::http::HeaderValue::from_str(&request_id) {
         response.headers_mut().insert("x-request-id", value);
     }
@@ -717,11 +755,29 @@ fn valid_conversation_id(value: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
+fn oversized_chat_body_error() -> Response {
+    api_error(
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "invalid_request_error",
+        "request_too_large",
+        "request body exceeds the 1 MiB limit",
+    )
+}
+
 async fn chat_completions(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    body: axum::body::Bytes,
-) -> impl IntoResponse {
+    body: Result<axum::body::Bytes, axum::extract::rejection::BytesRejection>,
+) -> Response {
+    let body = match body {
+        Ok(body) => body,
+        Err(_) => {
+            // Bytes extraction happens before the handler body runs. Catch the
+            // rejection explicitly so oversized payloads keep the public API
+            // error envelope instead of Axum's default rejection body.
+            return oversized_chat_body_error();
+        }
+    };
     let req = match parse_and_validate_chat_req(&body) {
         Ok(req) => req,
         Err(response) => return response,
@@ -1331,7 +1387,20 @@ mod http_api_regression_tests {
     use std::{path::PathBuf, sync::Arc};
     use tower::ServiceExt;
 
-    async fn validation_endpoint(body: axum::body::Bytes) -> Response {
+    async fn validation_endpoint(
+        body: Result<axum::body::Bytes, axum::extract::rejection::BytesRejection>,
+    ) -> Response {
+        let body = match body {
+            Ok(body) => body,
+            Err(_) => {
+                return api_error(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "invalid_request_error",
+                    "request_too_large",
+                    "request body exceeds the 1 MiB limit",
+                );
+            }
+        };
         match parse_and_validate_chat_req(&body) {
             Ok(request) => Json(serde_json::json!({
                 "accepted": true,
@@ -1365,6 +1434,7 @@ mod http_api_regression_tests {
                 delete(delete_endpoint),
             )
             .with_state(memory)
+            .layer(DefaultBodyLimit::max(1024 * 1024))
             .layer(middleware::from_fn(attach_request_id))
     }
 
@@ -1443,6 +1513,33 @@ mod http_api_regression_tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         assert_eq!(json_body(response).await["error"]["code"], "invalid_json");
+    }
+
+    #[tokio::test]
+    async fn oversized_chat_body_keeps_structured_error_and_request_id() {
+        let memory = Arc::new(UnifiedMemory::new(8000));
+        let oversized = "x".repeat(1024 * 1024 + 1);
+        let response = app(memory)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(oversized))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert!(response.headers().contains_key("x-request-id"));
+        let body = json_body(response).await;
+        assert_eq!(body["error"]["type"], "invalid_request_error");
+        assert_eq!(body["error"]["code"], "request_too_large");
+        assert_eq!(
+            body["error"]["message"],
+            "request body exceeds the 1 MiB limit"
+        );
     }
 
     #[tokio::test]
