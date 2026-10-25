@@ -12,11 +12,7 @@ pub struct GeminiAdapter {
 
 pub const SELECTORS: SelectorSet = SelectorSet {
     url: "https://gemini.google.com",
-    picker: &[
-        "button.model-picker",
-        "mat-select",
-        "text:button=Gemini",
-    ],
+    picker: &["button.model-picker", "mat-select", "text:button=Gemini"],
     input: &[
         "rich-textarea[aria-label]",
         "div[contenteditable=\"true\"][role=\"textbox\"]",
