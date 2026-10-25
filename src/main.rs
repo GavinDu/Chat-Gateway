@@ -496,6 +496,13 @@ struct LoginActReq {
     index: Option<usize>,
 }
 
+fn required_login_string(value: Option<String>, field: &str) -> anyhow::Result<String> {
+    match value {
+        Some(value) if !value.trim().is_empty() => Ok(value),
+        _ => anyhow::bail!("{field} is required"),
+    }
+}
+
 /// Validate relayed actions at the HTTP boundary, before browser-thread dispatch.
 /// Navigation needs the provider-specific allowlist in addition to the generic
 /// URL safety checks performed by LoginAction::validate().
@@ -531,6 +538,28 @@ mod request_body_error_tests {
         let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(body["error"]["type"], "invalid_request_error");
         assert_eq!(body["error"]["code"], "request_too_large");
+    }
+}
+
+#[cfg(test)]
+mod login_action_payload_tests {
+    use super::*;
+
+    #[test]
+    fn required_string_fields_reject_missing_and_blank_values() {
+        assert!(required_login_string(None, "selector").is_err());
+        assert!(required_login_string(Some("  ".to_owned()), "selector").is_err());
+        assert_eq!(
+            required_login_string(Some("#email".to_owned()), "selector").unwrap(),
+            "#email"
+        );
+    }
+
+    #[test]
+    fn click_button_requires_an_explicit_index() {
+        let missing_index: Option<usize> = None;
+        assert!(missing_index.is_none());
+        assert_eq!(Some(0usize), Some(0usize));
     }
 }
 
@@ -574,20 +603,20 @@ async fn login_act(
 ) -> impl IntoResponse {
     let action = match req.action.as_str() {
         "click" => login::LoginAction::Click {
-            selector: req.selector.unwrap_or_default(),
+            selector: match required_login_string(req.selector, "selector") { Ok(value) => value, Err(error) => return login_err(error.to_string()) },
         },
         "click_button" => login::LoginAction::ClickButton {
-            index: req.index.unwrap_or(0),
+            index: match req.index { Some(value) => value, None => return login_err("index is required for click_button".to_owned()) },
         },
         "type" => login::LoginAction::Type {
             selector: req.selector.unwrap_or_default(),
-            text: req.text.unwrap_or_default(),
+            text: match required_login_string(req.text, "text") { Ok(value) => value, Err(error) => return login_err(error.to_string()) },
         },
         "enter" => login::LoginAction::Enter {
             selector: req.selector.unwrap_or_default(),
         },
         "navigate" => login::LoginAction::Navigate {
-            url: req.url.unwrap_or_default(),
+            url: match required_login_string(req.url, "url") { Ok(value) => value, Err(error) => return login_err(error.to_string()) },
         },
         other => return login_err(format!("unknown login action: {other}")),
     };
