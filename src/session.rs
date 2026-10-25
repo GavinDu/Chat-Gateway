@@ -230,10 +230,34 @@ pub async fn save_session(browser: &Browser, page: &Page, provider: &str) -> Res
     Ok(())
 }
 
+fn ensure_cookie_restore_complete(failed_writes: usize) -> Result<()> {
+    if failed_writes > 0 {
+        anyhow::bail!("failed to restore {failed_writes} provider session cookie(s)");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod cookie_restore_result_tests {
+    use super::*;
+
+    #[test]
+    fn cookie_restore_succeeds_when_all_eligible_cookies_are_written() {
+        assert!(ensure_cookie_restore_complete(0).is_ok());
+    }
+
+    #[test]
+    fn cookie_restore_fails_when_any_store_write_fails() {
+        let error = ensure_cookie_restore_complete(2).unwrap_err();
+        assert!(error.to_string().contains("2 provider session cookie(s)"));
+    }
+}
+
 /// Restore step 1 (BEFORE goto): put the saved cookies into the browser's
 /// cookie store so the first navigation is already authenticated.
 pub fn restore_cookies(browser: &Browser, file: &SessionFile, provider: &str) -> Result<()> {
     let store = browser.cookies();
+    let mut failed_writes = 0usize;
     for c in &file.cookies {
         // Session files are local files and may have been edited or created by
         // an older version. Apply the same provider-domain allowlist at restore
@@ -277,9 +301,17 @@ pub fn restore_cookies(browser: &Browser, file: &SessionFile, provider: &str) ->
                 }
             )
         };
-        if let Err(e) = store.set(&s, &url) {
-            tracing::debug!(cookie = c.name, "cookie restore failed: {e}");
+        if store.set(&s, &url).is_err() {
+            failed_writes += 1;
+            tracing::warn!(
+                provider,
+                cookie = %c.name,
+                "provider session cookie restore failed"
+            );
         }
+    }
+    if failed_writes > 0 {
+        anyhow::bail!("failed to restore {failed_writes} provider session cookie(s)");
     }
     Ok(())
 }
