@@ -1,3 +1,14 @@
+# Obscura dependency and vendored-crate update procedure
+#
+# The Obscura git revision is pinned in the `obscura-core` dependency below.
+# When updating it:
+# 1. Choose and review an exact 40-character upstream commit.
+# 2. Update the `rev` in Cargo.toml.
+# 3. Copy vendor/taffy and vendor/cosmic-text from that exact Obscura revision.
+# 4. Run cargo update -p obscura --precise <revision> (or refresh Cargo.lock).
+# 5. Run cargo test --locked and cargo bench --locked --bench memory_sqlite.
+# CI compares both vendored trees to the pinned upstream commit.
+
 [package]
 name = "chat-gateway-rs"
 version = "2.0.0-obscura-native"
