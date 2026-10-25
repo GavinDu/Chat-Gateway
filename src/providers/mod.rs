@@ -316,10 +316,14 @@ pub async fn run_send(
                     }
                     if stable_ticks >= COMPLETION_IDLE_TICKS {
                         if let Some(answer) = &identical_answer_fallback {
-                            if chunks.send(Ok(ProviderChunk {
-                                content: answer.clone(),
-                                done: false,
-                            })).await.is_err() {
+                            if chunks
+                                .send(Ok(ProviderChunk {
+                                    content: answer.clone(),
+                                    done: false,
+                                }))
+                                .await
+                                .is_err()
+                            {
                                 return;
                             }
                         }
