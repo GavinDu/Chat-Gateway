@@ -19,7 +19,7 @@ form remains available by omitting `--json`.
 ## Cron example
 
 Use a local installation with persistent config/session storage. The following
-runs every night at 03:20 and appends JSON output to a restricted local log:
+runs every night at 03:20 and appends JSON output to a restricted local JSONL log:
 
 ```cron
 20 3 * * * cd /opt/chat-gateway && umask 077 && /usr/bin/cargo run --locked -- --config /opt/chat-gateway/config.yaml --all --json >> /var/log/chat-gateway-adapter-canary.jsonl 2>&1
