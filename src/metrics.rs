@@ -124,7 +124,7 @@ mod tests {
         assert!(output.contains("gateway_provider_work_duration_ms"));
         assert!(output.contains("gateway_chat_total_duration_ms"));
         assert!(output.contains("gateway_gateway_overhead_ms"));
-        assert!(output.contains("provider=\\"chatgpt\\""));
+        assert!(output.contains(r#"provider="chatgpt""#));
         assert!(!output.contains("private-conversation-id"));
     }
 }
