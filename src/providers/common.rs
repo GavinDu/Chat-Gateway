@@ -469,4 +469,33 @@ mod text_selector_tests {
         assert_eq!(text_selector_parts(r#"button:has-text("Stop")"#), None);
         assert_eq!(text_selector_parts("button[aria-label*=Stop]"), None);
     }
+
+    #[test]
+    fn provider_selectors_do_not_use_playwright_only_text_pseudos() {
+        let sets = [
+            &crate::providers::qwen::SELECTORS,
+            &crate::providers::metaai::SELECTORS,
+            &crate::providers::claude::SELECTORS,
+            &crate::providers::chatgpt::SELECTORS,
+            &crate::providers::gemini::SELECTORS,
+            &crate::providers::grok::SELECTORS,
+            &crate::providers::mistral::SELECTORS,
+            &crate::providers::perplexity::SELECTORS,
+        ];
+        for selectors in sets {
+            for selector in selectors
+                .picker
+                .iter()
+                .chain(selectors.input.iter())
+                .chain(selectors.send.iter())
+                .chain(selectors.response.iter())
+            {
+                assert!(
+                    !selector.contains(":has-text("),
+                    "{} still uses a Playwright-only selector",
+                    selectors.url
+                );
+            }
+        }
+    }
 }
