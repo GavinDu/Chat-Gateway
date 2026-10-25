@@ -1,3 +1,4 @@
+#[path = "memory/sqlite.rs"]
 mod sqlite;
 
 use rusqlite::{Connection, TransactionBehavior};
