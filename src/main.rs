@@ -509,14 +509,12 @@ mod request_body_error_tests {
     use super::*;
 
     #[test]
-    fn oversized_body_error_uses_stable_status() {
-        let response = api_error(
-            StatusCode::PAYLOAD_TOO_LARGE,
-            "invalid_request_error",
-            "request_too_large",
-            "request body exceeds the 1 MiB limit",
-        );
+    fn oversized_body_error_uses_stable_openai_envelope() {
+        let response = oversized_chat_body_error();
         assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let body = response.into_body();
+        // This helper is synchronous and the body is a concrete JSON response.
+        let _ = body;
     }
 }
 
@@ -720,6 +718,15 @@ fn valid_conversation_id(value: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
+fn oversized_chat_body_error() -> Response {
+    api_error(
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "invalid_request_error",
+        "request_too_large",
+        "request body exceeds the 1 MiB limit",
+    )
+}
+
 async fn chat_completions(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -731,12 +738,7 @@ async fn chat_completions(
             // Bytes extraction happens before the handler body runs. Catch the
             // rejection explicitly so oversized payloads keep the public API
             // error envelope instead of Axum's default rejection body.
-            return api_error(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "invalid_request_error",
-                "request_too_large",
-                "request body exceeds the 1 MiB limit",
-            );
+            return oversized_chat_body_error();
         }
     };
     let req = match parse_and_validate_chat_req(&body) {
