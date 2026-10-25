@@ -77,8 +77,6 @@ struct AdapterDiagnostic {
 
 #[derive(Clone)]
 struct AuthKeyContext {
-    name: String,
-    scopes: Vec<String>,
     provider_allowlist: Option<Vec<String>>,
 }
 
@@ -1038,8 +1036,6 @@ fn authorize_api_request(
         return Err(AuthFailure::InsufficientScope);
     }
     Ok(Some(AuthKeyContext {
-        name: key.name.clone(),
-        scopes: key.scopes.clone(),
         provider_allowlist: key.provider_allowlist.clone(),
     }))
 }
@@ -2373,5 +2369,68 @@ mod adapter_diagnostic_tests {
         let mut report = passing_report();
         report.errors.push("send failed".to_string());
         assert!(!adapter_report_is_healthy(&report));
+    }
+}
+
+
+#[cfg(test)]
+mod api_key_auth_tests {
+    use super::*;
+    use crate::config::{ApiKeyConfig, AuthConfig};
+
+    fn auth(scopes: &[&str]) -> AuthConfig {
+        AuthConfig {
+            keys: vec![ApiKeyConfig {
+                name: "test-client".into(),
+                secret_hash: hash_api_key("test-secret"),
+                scopes: scopes.iter().map(|scope| (*scope).to_owned()).collect(),
+                provider_allowlist: Some(vec!["chatgpt".into()]),
+            }],
+        }
+    }
+
+    #[test]
+    fn authentication_is_optional_only_when_no_keys_are_configured() {
+        assert!(authorize_api_request(&AuthConfig::default(), None, "/v1/models", &axum::http::Method::GET).is_ok());
+        assert!(authorize_api_request(&AuthConfig::default(), None, "/health", &axum::http::Method::GET).is_ok());
+        assert_eq!(
+            authorize_api_request(&auth(&["chat"]), None, "/v1/models", &axum::http::Method::GET),
+            Err(AuthFailure::MissingOrInvalid)
+        );
+    }
+
+    #[test]
+    fn bearer_secret_is_verified_by_hash_and_scope() {
+        let config = auth(&["chat"]);
+        assert_eq!(
+            authorize_api_request(&config, Some("Bearer wrong"), "/v1/models", &axum::http::Method::GET),
+            Err(AuthFailure::MissingOrInvalid)
+        );
+        assert!(authorize_api_request(&config, Some("Bearer test-secret"), "/v1/models", &axum::http::Method::GET).is_ok());
+        assert_eq!(
+            authorize_api_request(&config, Some("Bearer test-secret"), "/login/api/status", &axum::http::Method::GET),
+            Err(AuthFailure::InsufficientScope)
+        );
+        assert_eq!(
+            authorize_api_request(&config, Some("Bearer test-secret"), "/v1/conversations/conversation_1", &axum::http::Method::DELETE),
+            Err(AuthFailure::InsufficientScope)
+        );
+    }
+
+    #[test]
+    fn admin_key_can_access_admin_routes_and_health_needs_no_key() {
+        let config = auth(&["admin"]);
+        assert!(authorize_api_request(&config, Some("Bearer test-secret"), "/login/api/status", &axum::http::Method::GET).is_ok());
+        assert!(authorize_api_request(&config, None, "/health", &axum::http::Method::GET).is_ok());
+    }
+
+    #[test]
+    fn bearer_scheme_is_case_insensitive_but_token_format_is_strict() {
+        let config = auth(&["chat"]);
+        assert!(authorize_api_request(&config, Some("bearer test-secret"), "/v1/models", &axum::http::Method::GET).is_ok());
+        assert_eq!(
+            authorize_api_request(&config, Some("Bearer test-secret extra"), "/v1/models", &axum::http::Method::GET),
+            Err(AuthFailure::MissingOrInvalid)
+        );
     }
 }
