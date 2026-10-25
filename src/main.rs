@@ -351,6 +351,9 @@ async fn login_act(
         },
         other => return login_err(format!("unknown login action: {other}")),
     };
+    if let Err(error) = action.validate() {
+        return login_err(error.to_string());
+    }
     match state.pool.login_act(&provider, action).await {
         // Deliberately no echo of the request: the detail strings never
         // contain relayed text.
