@@ -99,10 +99,11 @@ mod session_path_tests {
 /// Load a saved session file, if one exists.
 pub fn load_session_file(provider: &str) -> Result<Option<SessionFile>> {
     let path = session_path(provider)?;
-    if !Path::new(&path).exists() {
-        return Ok(None);
-    }
-    let data = std::fs::read_to_string(&path)?;
+    let data = match std::fs::read_to_string(&path) {
+        Ok(data) => data,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
     Ok(Some(serde_json::from_str(&data)?))
 }
 
@@ -287,6 +288,45 @@ pub fn restore_session(browser: &Browser, page: &Page, provider: &str) -> Result
     }
 }
 
+#[cfg(test)]
+mod session_file_read_tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn missing_session_file_returns_none() {
+        let original = std::env::current_dir().unwrap();
+        let temp = std::env::temp_dir().join(format!(
+            "chat-gateway-session-read-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&temp).unwrap();
+        std::env::set_current_dir(&temp).unwrap();
+        let result = load_session_file("chatgpt");
+        std::env::set_current_dir(original).unwrap();
+        std::fs::remove_dir_all(temp).unwrap();
+        assert!(matches!(result, Ok(None)));
+    }
+
+    #[test]
+    fn malformed_session_file_returns_error() {
+        let original = std::env::current_dir().unwrap();
+        let temp = std::env::temp_dir().join(format!(
+            "chat-gateway-session-invalid-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(temp.join("sessions")).unwrap();
+        std::fs::File::create(temp.join("sessions/chatgpt.json"))
+            .unwrap()
+            .write_all(b"not-json")
+            .unwrap();
+        std::env::set_current_dir(&temp).unwrap();
+        let result = load_session_file("chatgpt");
+        std::env::set_current_dir(original).unwrap();
+        std::fs::remove_dir_all(temp).unwrap();
+        assert!(result.is_err());
+    }
+}
 #[cfg(test)]
 mod local_storage_script_tests {
     use super::*;
