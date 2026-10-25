@@ -45,7 +45,11 @@ struct Cli {
     )]
     test_adapter: Option<String>,
 
-    #[arg(long, conflicts_with = "test_adapter", help = "Run live diagnostics for every enabled provider")]
+    #[arg(
+        long,
+        conflicts_with = "test_adapter",
+        help = "Run live diagnostics for every enabled provider"
+    )]
     all: bool,
 
     #[arg(long, help = "Emit machine-readable JSON for adapter diagnostics")]
