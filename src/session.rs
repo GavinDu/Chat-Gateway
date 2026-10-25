@@ -218,26 +218,32 @@ fn write_session_file_atomically(destination: &Path, serialized: &[u8]) -> Resul
         std::process::id(),
         uuid::Uuid::new_v4()
     );
-    let result = (|| -> Result<()> {
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut output = options.open(&temp_path)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    // Do not remove the path if create_new fails: in that case the temp path
+    // may belong to another process and was not created by this invocation.
+    let mut output = options.open(&temp_path)?;
+    let write_result = (|| -> Result<()> {
         output.write_all(serialized)?;
         output.sync_all()?;
-        drop(output);
-        std::fs::rename(&temp_path, destination)?;
         Ok(())
     })();
+    drop(output);
 
-    if result.is_err() {
+    if let Err(error) = write_result {
         let _ = std::fs::remove_file(&temp_path);
+        return Err(error);
     }
-    result
+    if let Err(error) = std::fs::rename(&temp_path, destination) {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(error.into());
+    }
+    Ok(())
 }
 
 fn ensure_cookie_restore_complete(failed_writes: usize) -> Result<()> {
