@@ -505,6 +505,22 @@ fn validate_login_action_for_provider(
 }
 
 #[cfg(test)]
+mod request_body_error_tests {
+    use super::*;
+
+    #[test]
+    fn oversized_body_error_uses_stable_status() {
+        let response = api_error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "invalid_request_error",
+            "request_too_large",
+            "request body exceeds the 1 MiB limit",
+        );
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+}
+
+#[cfg(test)]
 mod login_action_validation_tests {
     use super::*;
 
@@ -693,8 +709,22 @@ fn valid_conversation_id(value: &str) -> bool {
 async fn chat_completions(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    body: axum::body::Bytes,
-) -> impl IntoResponse {
+    body: Result<axum::body::Bytes, axum::extract::rejection::BytesRejection>,
+) -> Response {
+    let body = match body {
+        Ok(body) => body,
+        Err(_) => {
+            // Bytes extraction happens before the handler body runs. Catch the
+            // rejection explicitly so oversized payloads keep the public API
+            // error envelope instead of Axum's default rejection body.
+            return api_error(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "invalid_request_error",
+                "request_too_large",
+                "request body exceeds the 1 MiB limit",
+            );
+        }
+    };
     let req = match parse_and_validate_chat_req(&body) {
         Ok(req) => req,
         Err(response) => return response,
