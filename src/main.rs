@@ -625,3 +625,54 @@ mod login_origin_tests {
         assert!(login_origin_is_same_authority(&headers));
     }
 }
+
+#[cfg(test)]
+mod api_contract_tests {
+    use super::*;
+
+    #[test]
+    fn accepts_minimal_openai_chat_request() {
+        let parsed: ChatReq = serde_json::from_value(serde_json::json!({
+            "model": "auto",
+            "messages": [{"role": "user", "content": "hello"}]
+        })).expect("minimal request should deserialize");
+        assert_eq!(parsed.model, "auto");
+        assert_eq!(parsed.messages.len(), 1);
+        assert!(!parsed.stream);
+        assert!(parsed.temperature.is_none());
+    }
+
+    #[test]
+    fn rejects_unknown_request_fields_instead_of_ignoring_them() {
+        let result = serde_json::from_value::<ChatReq>(serde_json::json!({
+            "model": "auto",
+            "messages": [{"role": "user", "content": "hello"}],
+            "tools": []
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn structured_api_errors_have_openai_error_envelope() {
+        let response = api_error(
+            StatusCode::NOT_FOUND,
+            "invalid_request_error",
+            "model_not_found",
+            "model does not exist",
+        );
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn rejects_malformed_messages_before_provider_execution() {
+        let missing_messages = serde_json::from_value::<ChatReq>(serde_json::json!({
+            "model": "auto"
+        }));
+        assert!(missing_messages.is_err());
+
+        let missing_model = serde_json::from_value::<ChatReq>(serde_json::json!({
+            "messages": [{"role": "user", "content": "hello"}]
+        }));
+        assert!(missing_model.is_err());
+    }
+}
