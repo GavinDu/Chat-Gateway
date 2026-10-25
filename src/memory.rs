@@ -221,8 +221,10 @@ mod tests {
     fn failed_persistence_rolls_back_memory_mutation() {
         // A directory at the target path forces atomic rename to fail.
         let path = std::env::temp_dir().join(format!("chat-gateway-memory-target-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&path).unwrap();
         let memory = UnifiedMemory::with_optional_persistence(8000, Some(path.clone())).unwrap();
+        // Turn the intended snapshot file into a directory after startup so
+        // restore succeeds but the subsequent atomic rename must fail.
+        std::fs::create_dir_all(&path).unwrap();
         let result = memory.store_turn(
             "conversation-failed".to_string(),
             vec![m("user", "hello")],
