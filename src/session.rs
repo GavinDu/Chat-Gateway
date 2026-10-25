@@ -132,6 +132,13 @@ fn cookie_domain_allowed(provider: &str, domain: &str) -> bool {
         .any(|base| domain == *base || domain.ends_with(&format!(".{base}")))
 }
 
+fn parse_local_storage_snapshot(
+    value: serde_json::Value,
+) -> Result<std::collections::HashMap<String, String>> {
+    serde_json::from_value(value)
+        .map_err(|error| anyhow::anyhow!("decoding provider localStorage snapshot: {error}"))
+}
+
 /// Ensure the directory holding reusable provider credentials is private.
 /// Existing directories are hardened too; relying only on the process umask is
 /// insufficient because it varies by deployment environment.
@@ -149,8 +156,7 @@ async fn ensure_private_session_dir(path: &Path) -> Result<()> {
 /// sessions/<provider>.json.
 pub async fn save_session(browser: &Browser, page: &Page, provider: &str) -> Result<()> {
     let ls_value = page.evaluate("(function(){ const o = {}; for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); o[k] = localStorage.getItem(k); } return o; })()");
-    let local_storage: std::collections::HashMap<String, String> =
-        serde_json::from_value(ls_value).unwrap_or_default();
+    let local_storage = parse_local_storage_snapshot(ls_value)?;
     // Obscura's cookie store is browser-wide. Persist only cookies in the
     // provider's known domain family; otherwise saving one provider can copy
     // unrelated logged-in sessions into every other provider's session file.
