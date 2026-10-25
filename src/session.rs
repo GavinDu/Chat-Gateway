@@ -347,7 +347,9 @@ pub fn restore_local_storage(page: &Page, file: &SessionFile) -> Result<()> {
         })?;
         let restored = page.evaluate(&script);
         if restored != serde_json::Value::Bool(true) {
-            return Err(anyhow::anyhow!("failed to restore provider localStorage entry"));
+            return Err(anyhow::anyhow!(
+                "failed to restore provider localStorage entry"
+            ));
         }
     }
     Ok(())
