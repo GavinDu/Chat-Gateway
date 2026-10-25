@@ -219,11 +219,27 @@ Honest limits of the login UI:
   knowing. Sessions expire — when a provider reports
   `session_expired`, re-capture it here.
 
+## Performance benchmarks
+
+Run the reproducible, provider-independent SQLite memory microbenchmark:
+
+```bash
+cargo bench --locked --bench memory_sqlite
+```
+
+It reports average, p50, p95, and throughput for durable `store_turn`,
+context construction with a 500-turn transcript, provider/tab affinity reads,
+and deletion. Each run uses a unique temporary directory and never opens the
+repository's real data or provider-session files. Results depend on the host,
+filesystem, Rust toolchain, and workload; record those details when comparing
+runs. This is a memory-layer microbenchmark, not an end-to-end provider TTFT or
+browser startup benchmark.
+
 ## Notes / honest limits
 
 - One persistent page per provider: concurrent sends to the same
   provider are serialized on that page (bounded by
   `session_pool_size` permits on the HTTP side).
-- The figures in MIGRATION.md (memory, TTFT, switch latency) are the
-  v2 design targets from the migration doc, not measurements taken in
-  this repo; there is no benchmark harness in the tree yet.
+- Provider startup, resident memory, provider switching, and TTFT are not
+  benchmarked by this harness; do not treat historical design targets as
+  measured results.
