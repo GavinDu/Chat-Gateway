@@ -845,7 +845,7 @@ async fn login_act(
         Ok(action) => action,
         Err(error) => return login_err(error.to_string()),
     };
-    if matches!(action, login::LoginAction::Type { .. }) && !legacy_login_relay_enabled() {
+    if matches!(&action, login::LoginAction::Type { .. }) && !legacy_login_relay_enabled() {
         return (
             StatusCode::FORBIDDEN,
             Json(serde_json::json!({
