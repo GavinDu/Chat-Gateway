@@ -323,7 +323,9 @@ mod cookie_scope_tests {
             "abc_123-xyz",
             "/"
         )));
-        assert!(!restored_cookie_fields_safe(&cookie("bad;name", "value", "/")));
+        assert!(!restored_cookie_fields_safe(&cookie(
+            "bad;name", "value", "/"
+        )));
         assert!(!restored_cookie_fields_safe(&cookie(
             "session",
             "value; Secure",
