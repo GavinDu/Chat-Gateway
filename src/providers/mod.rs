@@ -26,6 +26,8 @@ pub struct ProviderChunk {
 }
 
 /// Primary selectors for an adapter (diagnostics + readiness reporting).
+// Selector metadata is retained for upcoming adapter contract/readiness diagnostics.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct AdapterSelectors {
     pub input_selector: String,
@@ -98,6 +100,8 @@ impl Provider {
 #[async_trait(?Send)]
 pub trait ChatProvider: Send + Sync {
     fn name(&self) -> &str;
+    // Kept in the adapter contract for provider catalog diagnostics.
+    #[allow(dead_code)]
     fn aliases(&self) -> &[String];
     /// Perplexity answers carry [1][2] citation markers; strip them.
     fn strip_citations(&self) -> bool {
@@ -109,6 +113,8 @@ pub trait ChatProvider: Send + Sync {
 
     /// Model-picker trigger→option pairs (Go's modelSelectors data).
     /// Default: none — selection no-ops, which is Rust v1 behavior.
+    // Picker metadata is consumed by providers that implement UI model selection.
+    #[allow(dead_code)]
     fn model_pairs(&self) -> &[(&str, &str)] {
         &[]
     }
