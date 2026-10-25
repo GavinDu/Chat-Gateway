@@ -13,7 +13,7 @@ pub struct GrokAdapter {
 pub const SELECTORS: SelectorSet = SelectorSet {
     url: "https://grok.com",
     picker: &[
-        "button:has-text(\"Grok\")",
+        "text:button=Grok",
         "select.model-selector",
         "div.model-picker",
     ],

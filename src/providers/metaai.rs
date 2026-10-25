@@ -12,7 +12,7 @@ pub struct MetaAIAdapter {
 
 pub const SELECTORS: SelectorSet = SelectorSet {
     url: "https://www.meta.ai",
-    picker: &["button:has-text(\"Llama\")", "div.model-switcher", "button[aria-label*=\"model\"]"],
+    picker: &["text:button=Llama", "div.model-switcher", "button[aria-label*=\"model\"]"],
     input: &["div[contenteditable=\"true\"][role=\"textbox\"]", "textarea[placeholder*=\"Ask\"]", "div[contenteditable=\"true\"]"],
     send: &["button[aria-label=\"Send\"]", "button[type=\"submit\"]", "button:has(svg[data-testid=\"send\"])"],
     response: &["div[data-testid=\"bot-message\"]", "div.message.assistant", "div.prose"],

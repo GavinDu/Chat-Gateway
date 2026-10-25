@@ -12,7 +12,7 @@ pub struct QwenAdapter {
 
 pub const SELECTORS: SelectorSet = SelectorSet {
     url: "https://chat.qwen.ai",
-    picker: &["button:has-text(\"Qwen\")", "div.model-selector", "[data-testid=\"model-picker\"]"],
+    picker: &["text:button=Qwen", "div.model-selector", "[data-testid=\"model-picker\"]"],
     input: &["textarea[placeholder*=\"Ask\"]", "textarea[data-testid=\"chat-input\"]", "div[contenteditable=\"true\"][role=\"textbox\"]"],
     send: &["button[type=\"submit\"]", "button[aria-label*=\"Send\"]", "button[data-testid=\"send-button\"]"],
     response: &["div.markdown-body", "div[data-role=\"assistant\"]", "div.message-content"],
