@@ -516,25 +516,39 @@ mod memory_context_http_contract_tests {
 
     #[tokio::test]
     async fn context_storage_failure_returns_structured_error_before_provider_dispatch() {
-        let dir = std::env::temp_dir().join(format!("gateway-http-memory-{}", uuid::Uuid::new_v4()));
+        let dir =
+            std::env::temp_dir().join(format!("gateway-http-memory-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&dir).unwrap();
         let db = dir.join("memory.sqlite3");
         let memory = UnifiedMemory::open_path_for_test(&db, None, 8000).unwrap();
-        memory.store_turn(
-            "conversation-123".into(),
-            vec![ChatMessage { role: "user".into(), content: "first".into() }],
-            ChatMessage { role: "assistant".into(), content: "answer".into() },
-            "chatgpt".into(),
-            "tab-123".into(),
-        ).unwrap();
+        memory
+            .store_turn(
+                "conversation-123".into(),
+                vec![ChatMessage {
+                    role: "user".into(),
+                    content: "first".into(),
+                }],
+                ChatMessage {
+                    role: "assistant".into(),
+                    content: "answer".into(),
+                },
+                "chatgpt".into(),
+                "tab-123".into(),
+            )
+            .unwrap();
 
-        rusqlite::Connection::open(&db).unwrap()
-            .execute_batch("DROP TABLE messages;").unwrap();
+        rusqlite::Connection::open(&db)
+            .unwrap()
+            .execute_batch("DROP TABLE messages;")
+            .unwrap();
 
         let result = prepare_chat_context(
             &memory,
             Some("conversation-123"),
-            &[ChatMessage { role: "user".into(), content: "follow-up".into() }],
+            &[ChatMessage {
+                role: "user".into(),
+                content: "follow-up".into(),
+            }],
         );
         let response = result.expect_err("memory read errors must stop provider dispatch");
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
