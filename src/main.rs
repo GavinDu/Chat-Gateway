@@ -420,7 +420,10 @@ async fn login_status(State(state): State<Arc<AppState>>) -> axum::response::Res
             Ok(Some(file)) => (true, Some(file.ts)),
             Ok(None) => (false, None),
             Err(error) => {
-                tracing::error!(provider = name, "persisted login session read failed: {error}");
+                tracing::error!(
+                    provider = name,
+                    "persisted login session read failed: {error}"
+                );
                 return login_status_read_error();
             }
         };
@@ -559,11 +562,16 @@ mod login_status_error_tests {
     async fn login_status_read_failure_returns_sanitized_structured_error() {
         let response = login_status_read_error();
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-        let bytes = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
         let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(body["error"]["type"], "server_error");
         assert_eq!(body["error"]["code"], "login_status_read_failed");
-        assert_eq!(body["error"]["message"], "login status could not be read safely");
+        assert_eq!(
+            body["error"]["message"],
+            "login status could not be read safely"
+        );
     }
 }
 
