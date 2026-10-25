@@ -40,9 +40,35 @@ struct Cli {
 
     #[arg(
         long,
+        conflicts_with = "all",
         help = "Test one adapter live: discover models + show selectors, then exit"
     )]
     test_adapter: Option<String>,
+
+    #[arg(
+        long,
+        conflicts_with = "test_adapter",
+        help = "Run live diagnostics for every enabled provider"
+    )]
+    all: bool,
+
+    #[arg(long, help = "Emit machine-readable JSON for adapter diagnostics")]
+    json: bool,
+}
+
+fn adapter_report_is_healthy(report: &browser::pool::TestAdapterReport) -> bool {
+    report.errors.is_empty() && report.session_ok && report.input_found && report.response_token
+}
+
+#[derive(serde::Serialize)]
+struct AdapterDiagnostic {
+    provider: String,
+    queue_ms: Option<u128>,
+    report: Option<browser::pool::TestAdapterReport>,
+    models: Option<Vec<String>>,
+    selectors: Option<String>,
+    errors: Vec<String>,
+    healthy: bool,
 }
 
 struct AppState {
@@ -161,53 +187,119 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let cli = Cli::parse();
+    if cli.json && !cli.all && cli.test_adapter.is_none() {
+        anyhow::bail!("--json requires --all or --test-adapter <provider>");
+    }
     let cfg = Arc::new(AppConfig::load(&cli.config)?);
 
     let pool = ObscuraPool::new(cfg.clone()).await?;
     pool.warm_all().await?;
 
-    if let Some(provider) = cli.test_adapter {
-        let permit = pool.acquire(&provider).await?;
-        println!(
-            "Testing adapter '{}' with embedded Obscura (queue {}ms)...",
-            provider, permit.queue_ms
-        );
-        drop(permit);
-        // Live-send phases (Go RunAdapterTest, restored-tree form) for
-        // ALL providers — Rust v1 diagnostics only did discover+print.
-        match pool.test_adapter(&provider).await {
-            Ok(rep) => {
-                println!("test-adapter '{}': session_ok={}", provider, rep.session_ok);
-                for (role, hit) in &rep.probe {
-                    match hit {
-                        Some(sel) => println!("  probe {role}: OK ({sel})"),
-                        None => println!("  probe {role}: ALL selectors failed"),
+    if cli.all || cli.test_adapter.is_some() {
+        let names = if cli.all {
+            cfg.providers
+                .iter()
+                .filter(|provider| provider.enabled)
+                .map(|provider| provider.name.clone())
+                .collect::<Vec<_>>()
+        } else {
+            vec![cli.test_adapter.clone().expect("checked above")]
+        };
+        let registry = providers::build_registry(&cfg);
+        let mut results = Vec::with_capacity(names.len());
+
+        for provider in names {
+            let mut errors = Vec::new();
+            let queue_ms = match pool.acquire(&provider).await {
+                Ok(permit) => {
+                    let queue_ms = permit.queue_ms;
+                    drop(permit);
+                    Some(queue_ms)
+                }
+                Err(error) => {
+                    errors.push(format!("provider acquisition failed: {error}"));
+                    None
+                }
+            };
+
+            let report = if queue_ms.is_some() {
+                match pool.test_adapter(&provider).await {
+                    Ok(report) => Some(report),
+                    Err(error) => {
+                        errors.push(format!("live adapter test failed: {error}"));
+                        None
                     }
                 }
+            } else {
+                None
+            };
+
+            let (models, discovery_error) = match pool.discover(&provider).await {
+                Ok(models) => (Some(models), None),
+                Err(error) => (None, Some(error.to_string())),
+            };
+            if let Some(error) = &discovery_error {
+                errors.push(format!("model discovery failed: {error}"));
+            }
+
+            let selectors = providers::Provider::from_name(&provider)
+                .and_then(|provider_id| registry.get(&provider_id))
+                .map(|adapter| format!("{:?}", adapter.selectors()));
+            let healthy =
+                errors.is_empty() && report.as_ref().is_some_and(adapter_report_is_healthy);
+
+            results.push(AdapterDiagnostic {
+                provider,
+                queue_ms,
+                report,
+                models,
+                selectors,
+                errors,
+                healthy,
+            });
+        }
+
+        let all_healthy = results.iter().all(|result| result.healthy);
+        if cli.json {
+            println!(
+                "{}",
+                serde_json::to_string(&serde_json::json!({
+                    "ok": all_healthy,
+                    "results": results,
+                }))?
+            );
+        } else {
+            for result in &results {
                 println!(
-                    "  phases: input_found={} send_clicked={} (false = Enter used) response_token={}",
-                    rep.input_found, rep.send_clicked, rep.response_token
+                    "test-adapter '{}': healthy={} queue_ms={:?}",
+                    result.provider, result.healthy, result.queue_ms
                 );
-                for e in &rep.errors {
-                    println!("  error: {e}");
+                if let Some(report) = &result.report {
+                    println!(
+                        "  phases: session_ok={} input_found={} send_clicked={} response_token={}",
+                        report.session_ok,
+                        report.input_found,
+                        report.send_clicked,
+                        report.response_token
+                    );
+                    for error in &report.errors {
+                        println!("  error: {error}");
+                    }
                 }
-                if rep.errors.is_empty() && rep.session_ok && rep.input_found && rep.response_token
-                {
-                    println!("test-adapter: all phases passed — adapter is healthy");
+                for error in &result.errors {
+                    println!("  error: {error}");
+                }
+                if let Some(models) = &result.models {
+                    println!("  discovered models: {models:?}");
+                }
+                if let Some(selectors) = &result.selectors {
+                    println!("  selectors: {selectors}");
                 }
             }
-            Err(e) => println!("test-adapter failed: {}", e),
         }
-        // Plus the Rust v1 diagnostics output (discover + selectors).
-        match pool.discover(&provider).await {
-            Ok(models) => println!("Discovered models: {:?}", models),
-            Err(e) => println!("Discovery failed: {}", e),
-        }
-        if let Some(p) = providers::Provider::from_name(&provider) {
-            let registry = providers::build_registry(&cfg);
-            if let Some(adapter) = registry.get(&p) {
-                println!("Selectors: {:?}", adapter.selectors());
-            }
+
+        if !all_healthy {
+            anyhow::bail!("one or more adapter diagnostics failed");
         }
         return Ok(());
     }
@@ -2058,5 +2150,45 @@ mod loopback_authority_edge_tests {
                 "expected unsafe authority to be rejected: {authority}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod adapter_diagnostic_tests {
+    use super::*;
+
+    fn passing_report() -> browser::pool::TestAdapterReport {
+        browser::pool::TestAdapterReport {
+            session_ok: true,
+            probe: vec![("input".to_string(), Some("#prompt".to_string()))],
+            input_found: true,
+            send_clicked: true,
+            response_token: true,
+            errors: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn healthy_report_requires_all_critical_phases() {
+        assert!(adapter_report_is_healthy(&passing_report()));
+
+        let mut report = passing_report();
+        report.session_ok = false;
+        assert!(!adapter_report_is_healthy(&report));
+
+        let mut report = passing_report();
+        report.input_found = false;
+        assert!(!adapter_report_is_healthy(&report));
+
+        let mut report = passing_report();
+        report.response_token = false;
+        assert!(!adapter_report_is_healthy(&report));
+    }
+
+    #[test]
+    fn any_report_error_marks_adapter_unhealthy() {
+        let mut report = passing_report();
+        report.errors.push("send failed".to_string());
+        assert!(!adapter_report_is_healthy(&report));
     }
 }
