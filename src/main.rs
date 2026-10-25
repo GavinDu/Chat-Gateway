@@ -508,13 +508,20 @@ fn validate_login_action_for_provider(
 mod request_body_error_tests {
     use super::*;
 
-    #[test]
-    fn oversized_body_error_uses_stable_openai_envelope() {
+    #[tokio::test]
+    async fn oversized_body_error_uses_stable_openai_envelope() {
         let response = oversized_chat_body_error();
         assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
-        let body = response.into_body();
-        // This helper is synchronous and the body is a concrete JSON response.
-        let _ = body;
+        assert_eq!(
+            response.headers().get(axum::http::header::CONTENT_TYPE).unwrap(),
+            "application/json"
+        );
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"]["type"], "invalid_request_error");
+        assert_eq!(body["error"]["code"], "request_too_large");
     }
 }
 
