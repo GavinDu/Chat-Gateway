@@ -67,6 +67,26 @@ mod session_path_tests {
         );
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn session_directory_is_hardened_to_owner_only_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = std::env::temp_dir().join(format!(
+            "chat-gateway-session-permissions-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir(&path).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        ensure_private_session_dir(&path).await.unwrap();
+
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        std::fs::remove_dir_all(path).unwrap();
+    }
     #[test]
     fn rejects_path_traversal_and_unregistered_names() {
         assert!(session_path("../outside").is_err());
@@ -112,6 +132,18 @@ fn cookie_domain_allowed(provider: &str, domain: &str) -> bool {
         .any(|base| domain == *base || domain.ends_with(&format!(".{base}")))
 }
 
+/// Ensure the directory holding reusable provider credentials is private.
+/// Existing directories are hardened too; relying only on the process umask is
+/// insufficient because it varies by deployment environment.
+async fn ensure_private_session_dir(path: &Path) -> Result<()> {
+    tokio::fs::create_dir_all(path).await?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).await?;
+    }
+    Ok(())
+}
 /// Capture cookies (from the browser's CookieStore - this is the v2 fix:
 /// v1 only persisted localStorage) + localStorage into
 /// sessions/<provider>.json.
@@ -134,7 +166,7 @@ pub async fn save_session(browser: &Browser, page: &Page, provider: &str) -> Res
         cookies,
         ts: chrono::Utc::now().to_rfc3339(),
     };
-    tokio::fs::create_dir_all("sessions").await?;
+    ensure_private_session_dir(Path::new("sessions")).await?;
     let destination = session_path(provider)?;
     let temp_path = format!(
         "{}.tmp-{}-{}",
