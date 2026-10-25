@@ -1073,7 +1073,9 @@ async fn chat_completions(
         let permit = match state.pool.acquire(&provider_name).await {
             Ok(p) => p,
             Err(e) => {
-                if e.downcast_ref::<browser::pool::ProviderBusyError>().is_some() {
+                if e.downcast_ref::<browser::pool::ProviderBusyError>()
+                    .is_some()
+                {
                     busy_count += 1;
                 }
                 last_err = Some(e.to_string());
