@@ -18,6 +18,29 @@ cargo run -- --config config.yaml
 
 The server listens on `server.port` (default 8080, `PORT` env overrides).
 
+
+## Security boundary: local login relay
+
+The gateway binds to `127.0.0.1` only. This is intentional: the login UI and
+`/login/api/*` endpoints can control provider browser sessions and persist
+session cookies/localStorage, so they are **local-machine control surfaces**, not
+a remotely accessible login service. The server does not currently support a
+public or LAN bind address, and changing the bind address is not a supported
+configuration option.
+
+The HTTP middleware also rejects requests whose `Host` is not an explicit
+loopback authority, rejects unsafe `Origin` values, and rejects cross-site
+Fetch Metadata for login API routes. These checks defend against DNS-rebinding
+and cross-site browser requests; they are defense in depth, not authentication.
+Local automation clients that omit `Origin` are supported, but should only be
+used by trusted local processes.
+
+**Do not expose this service through a reverse proxy, tunnel, port-forward, or
+container port publication to an untrusted network.** Remote access is not
+supported until a separate design adds explicit authentication, TLS, and
+origin/CSRF protections for the remote trust boundary. Do not log or share
+provider session files: they may contain reusable authentication material.
+
 ## API (OpenAI compatible)
 
 - `GET /health` - status + configured providers
