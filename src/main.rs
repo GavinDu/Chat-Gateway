@@ -1017,16 +1017,13 @@ async fn chat_completions(
 
     // Read all context-dependent memory before any provider request. A read
     // failure must not degrade into an empty prompt or an unauthenticated turn.
-    let (context_prompt, windowed, has_history) = match read_conversation_context(
-        &state.memory,
-        conversation_id.as_deref(),
-        &req.messages,
-    ) {
-        Ok(context) => context,
-        Err(_error) => {
-            return conversation_context_read_error(conversation_id.as_deref());
-        }
-    };
+    let (context_prompt, windowed, has_history) =
+        match read_conversation_context(&state.memory, conversation_id.as_deref(), &req.messages) {
+            Ok(context) => context,
+            Err(_error) => {
+                return conversation_context_read_error(conversation_id.as_deref());
+            }
+        };
     let prompt = context_prompt;
     if prompt.is_empty() {
         return api_error(
