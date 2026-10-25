@@ -118,7 +118,7 @@ async fn main() -> anyhow::Result<()> {
     let state = Arc::new(AppState {
         cfg: cfg.clone(),
         pool: pool.clone(),
-        memory: Arc::new(UnifiedMemory::new(cfg.memory.max_tokens)),
+        memory: Arc::new(UnifiedMemory::from_env(cfg.memory.max_tokens)),
         router: ProviderRouter::new(cfg.clone()),
         models_cache: Arc::new(RwLock::new(HashMap::new())),
     });
