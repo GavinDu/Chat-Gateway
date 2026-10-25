@@ -17,4 +17,13 @@ per-provider resident memory, provider switching, or provider TTFT.
 5. Qwen selectors i18n robust
 
 ## Testing
-cargo run -- --test-adapter qwen --bench
+
+Run the live adapter diagnostic for Qwen with the default `config.yaml`:
+
+```bash
+cargo run -- --test-adapter qwen
+```
+
+This diagnostic uses the configured provider and may require a reachable provider
+site and a valid session. It is not an offline test; use `cargo test --locked` for
+the offline Rust test suite.
