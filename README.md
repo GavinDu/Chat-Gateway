@@ -11,8 +11,9 @@ in-process - no chromiumoxide, no external `obscura serve` CDP process).
 
 ```bash
 cp config.example.yaml config.yaml
-# log in to providers in a browser and save sessions/<provider>.json
-# (cookies + localStorage - see Sessions), or let the pool warm without them
+# Read docs/PROVIDERS_POLICY.md, then explicitly enable only providers
+# whose terms permit your intended use; all providers start disabled.
+# After enabling at least one provider, configure its session if required.
 cargo run -- --config config.yaml
 ```
 
