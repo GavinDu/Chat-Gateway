@@ -864,6 +864,24 @@ fn parse_login_action(req: LoginActReq) -> anyhow::Result<login::LoginAction> {
     }
 }
 
+
+fn legacy_login_relay_enabled_from(value: Option<&str>) -> bool {
+    value.is_some_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes"
+        )
+    })
+}
+
+fn legacy_login_relay_enabled() -> bool {
+    legacy_login_relay_enabled_from(
+        std::env::var("CHAT_GATEWAY_LEGACY_LOGIN_RELAY")
+            .ok()
+            .as_deref(),
+    )
+}
+
 async fn login_act(
     State(state): State<Arc<AppState>>,
     Path(provider): Path<String>,
@@ -873,6 +891,15 @@ async fn login_act(
         Ok(action) => action,
         Err(error) => return login_err(error.to_string()),
     };
+    if matches!(&action, login::LoginAction::Type { .. }) && !legacy_login_relay_enabled() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "error": "legacy text relay is disabled; use the browser extension or explicitly set CHAT_GATEWAY_LEGACY_LOGIN_RELAY=1 for trusted local development"
+            })),
+        )
+            .into_response();
+    }
     if let Err(error) = validate_login_action_for_provider(&provider, &action) {
         return login_err(error.to_string());
     }
@@ -2519,5 +2546,25 @@ mod api_key_auth_tests {
             ),
             Err(AuthFailure::MissingOrInvalid)
         );
+    }
+}
+
+#[cfg(test)]
+mod legacy_login_relay_flag_tests {
+    use super::legacy_login_relay_enabled_from;
+
+    #[test]
+    fn legacy_login_relay_is_disabled_by_default() {
+        assert!(!legacy_login_relay_enabled_from(None));
+        assert!(!legacy_login_relay_enabled_from(Some("")));
+        assert!(!legacy_login_relay_enabled_from(Some("false")));
+        assert!(!legacy_login_relay_enabled_from(Some("0")));
+    }
+
+    #[test]
+    fn legacy_login_relay_requires_explicit_truthy_opt_in() {
+        assert!(legacy_login_relay_enabled_from(Some("1")));
+        assert!(legacy_login_relay_enabled_from(Some("true")));
+        assert!(legacy_login_relay_enabled_from(Some(" YES ")));
     }
 }
