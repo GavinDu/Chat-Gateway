@@ -400,38 +400,55 @@ fn login_err(msg: String) -> axum::response::Response {
         .into_response()
 }
 
-async fn login_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let active = state.pool.login_status_all().await.unwrap_or_default();
+async fn login_status(State(state): State<Arc<AppState>>) -> axum::response::Response {
+    let active = match state.pool.login_status_all().await {
+        Ok(active) => active,
+        Err(error) => {
+            tracing::error!("login status lookup failed: {error}");
+            return login_status_read_error();
+        }
+    };
     let by_name: HashMap<String, browser::pool::LoginActiveInfo> = active
         .into_iter()
         .map(|a| (a.provider.clone(), a))
         .collect();
-    let providers = providers::Provider::all()
-        .iter()
-        .map(|p| {
-            let name = p.name();
-            let enabled = state.cfg.provider(name).map(|c| c.enabled).unwrap_or(false);
-            let (session_present, session_ts) = match session::load_session_file(name) {
-                Ok(Some(f)) => (true, Some(f.ts)),
-                _ => (false, None),
-            };
-            let a = by_name.get(name);
-            serde_json::json!({
-                "name": name,
-                "enabled": enabled,
-                "login_url": p.login_url(),
-                "session_present": session_present,
-                "session_ts": session_ts,
-                "login_active": a.is_some(),
-                "current_url": a.map(|x| x.url.clone()),
-                "title": a.map(|x| x.title.clone()),
-                "logged_in": a.and_then(|x| x.logged_in),
-                "input_found": a.map(|x| x.input_found),
-                "state": a.map(|x| x.state.clone()),
-            })
-        })
-        .collect::<Vec<_>>();
-    Json(serde_json::json!({ "providers": providers }))
+    let mut providers = Vec::new();
+    for p in providers::Provider::all() {
+        let name = p.name();
+        let enabled = state.cfg.provider(name).map(|c| c.enabled).unwrap_or(false);
+        let (session_present, session_ts) = match session::load_session_file(name) {
+            Ok(Some(file)) => (true, Some(file.ts)),
+            Ok(None) => (false, None),
+            Err(error) => {
+                tracing::error!(provider = name, "persisted login session read failed: {error}");
+                return login_status_read_error();
+            }
+        };
+        let active_login = by_name.get(name);
+        providers.push(serde_json::json!({
+            "name": name,
+            "enabled": enabled,
+            "login_url": p.login_url(),
+            "session_present": session_present,
+            "session_ts": session_ts,
+            "login_active": active_login.is_some(),
+            "current_url": active_login.map(|x| x.url.clone()),
+            "title": active_login.map(|x| x.title.clone()),
+            "logged_in": active_login.and_then(|x| x.logged_in),
+            "input_found": active_login.map(|x| x.input_found),
+            "state": active_login.map(|x| x.state.clone()),
+        }));
+    }
+    Json(serde_json::json!({ "providers": providers })).into_response()
+}
+
+fn login_status_read_error() -> axum::response::Response {
+    api_error(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "server_error",
+        "login_status_read_failed",
+        "login status could not be read safely",
+    )
 }
 
 async fn login_start(
@@ -531,6 +548,22 @@ mod request_body_error_tests {
         let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(body["error"]["type"], "invalid_request_error");
         assert_eq!(body["error"]["code"], "request_too_large");
+    }
+}
+
+#[cfg(test)]
+mod login_status_error_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn login_status_read_failure_returns_sanitized_structured_error() {
+        let response = login_status_read_error();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let bytes = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"]["type"], "server_error");
+        assert_eq!(body["error"]["code"], "login_status_read_failed");
+        assert_eq!(body["error"]["message"], "login status could not be read safely");
     }
 }
 
