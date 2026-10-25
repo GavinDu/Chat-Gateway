@@ -13,7 +13,7 @@ pub struct PerplexityAdapter {
 pub const SELECTORS: SelectorSet = SelectorSet {
     url: "https://www.perplexity.ai",
     picker: &[
-        "button:has-text(\"Sonar\")",
+        "text:button=Sonar",
         "div.model-selector",
         "button[aria-label*=\"model\"]",
     ],
