@@ -30,10 +30,8 @@ jobs:
         with:
           components: rustfmt, clippy
 
-      # Formatting is not a clean baseline in the existing repository yet.
-      # Keep it visible as a warning while test/build validation remains blocking.
-      - name: Report formatting baseline
-        continue-on-error: true
+      # Formatting is a required check now that main has been normalized.
+      - name: Check formatting
         run: cargo fmt --all -- --check
 
       - name: Run tests
