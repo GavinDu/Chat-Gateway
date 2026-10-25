@@ -31,7 +31,9 @@ pub struct UnifiedMemory {
 }
 
 impl UnifiedMemory {
+    // Test-only helper is shared across test targets; some targets do not call it.
     #[cfg(test)]
+    #[allow(dead_code)]
     pub(crate) fn open_path_for_test(
         path: &std::path::Path,
         legacy: Option<&std::path::Path>,
@@ -43,6 +45,8 @@ impl UnifiedMemory {
         })
     }
 
+    // Convenience constructor used by isolated unit tests.
+    #[allow(dead_code)]
     pub fn new(max_tokens: usize) -> Self {
         Self {
             max_tokens,
@@ -72,7 +76,9 @@ impl UnifiedMemory {
         })
     }
 
+    // Test-only helper is used by corruption-path tests in separate targets.
     #[cfg(test)]
+    #[allow(dead_code)]
     pub(crate) fn drop_conversations_table_for_test(&self) -> anyhow::Result<()> {
         self.lock()?.execute_batch("DROP TABLE conversations")?;
         Ok(())
@@ -173,12 +179,15 @@ impl UnifiedMemory {
         Ok(deleted != 0)
     }
 
+    // Legacy read helpers remain used by the benchmark and routing tests.
+    #[allow(dead_code)]
     pub fn has_history(&self, cid: &str) -> anyhow::Result<bool> {
         Ok(self
             .conversation(cid)?
             .is_some_and(|conversation| !conversation.messages.is_empty()))
     }
 
+    #[allow(dead_code)]
     pub fn get_tab(&self, cid: &str) -> anyhow::Result<Option<String>> {
         Ok(self
             .conversation(cid)?

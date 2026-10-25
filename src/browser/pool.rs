@@ -17,7 +17,7 @@ use tokio::sync::{mpsc, oneshot, OwnedSemaphorePermit, Semaphore};
 /// The embedded obscura engine is thread-affine (each Page wraps a V8
 /// runtime behind a RefCell and is neither Clone nor Send), so all pages
 /// live on a dedicated browser thread running a current-thread runtime
-/// + LocalSet. The HTTP side talks to it over channels; per-provider
+/// and LocalSet. The HTTP side talks to it over channels; per-provider
 /// semaphores (this side) bound concurrent sends, and a per-provider
 /// async mutex (browser side) serializes access to its single page.
 /// Provider switch is therefore a channel send + map lookup, not a
@@ -41,10 +41,6 @@ enum Command {
         has_history: bool,
         timeout: Duration,
         chunks: mpsc::Sender<Result<ProviderChunk>>,
-    },
-    SaveSession {
-        provider: Provider,
-        reply: oneshot::Sender<Result<()>>,
     },
     TestAdapter {
         provider: Provider,
@@ -246,22 +242,6 @@ impl ObscuraPool {
             .map_err(|_| anyhow::anyhow!("browser thread gone"))?;
         rx.await
             .map_err(|_| anyhow::anyhow!("browser thread dropped test-adapter"))?
-    }
-
-    /// Persist the provider's current cookies + localStorage.
-    pub async fn save_session(&self, name: &str) -> Result<()> {
-        let provider =
-            Provider::from_name(name).ok_or_else(|| anyhow::anyhow!("unknown provider {name}"))?;
-        let (tx, rx) = oneshot::channel();
-        self.cmd_tx
-            .send(Command::SaveSession {
-                provider,
-                reply: tx,
-            })
-            .await
-            .map_err(|_| anyhow::anyhow!("browser thread gone"))?;
-        rx.await
-            .map_err(|_| anyhow::anyhow!("browser thread dropped save"))?
     }
 
     fn login_provider(&self, name: &str) -> Result<Provider> {
@@ -531,7 +511,9 @@ fn browser_thread(
                                 tracing::warn!(provider = %pcfg.name, "warm goto failed: {e}");
                             }
                             if let Some(file) = &session_file {
-                                session::restore_local_storage(&page, file);
+                                if let Err(error) = session::restore_local_storage(&page, file) {
+                                    tracing::warn!(provider = %pcfg.name, "localStorage restore failed: {error}");
+                                }
                                 // Reload-equivalent so the app boots with the session applied
                                 if let Err(e) = page.goto(provider.login_url()).await {
                                     tracing::warn!(provider = %pcfg.name, "warm re-goto failed: {e}");
@@ -637,7 +619,9 @@ fn browser_thread(
                                         finish(report);
                                         return;
                                     }
-                                    session::restore_local_storage(&page, &file);
+                                    if let Err(error) = session::restore_local_storage(&page, &file) {
+                                        report.errors.push(format!("session localStorage restore failed: {error}"));
+                                    }
                                     if page.goto(provider.login_url()).await.is_err() {
                                         report.errors.push("page navigation failed".to_string());
                                         finish(report);
@@ -716,13 +700,6 @@ fn browser_thread(
                                 }
                                 finish(report);
                             });
-                        }
-                        Command::SaveSession { provider, reply } => {
-                            let res = match pages.borrow().get(&provider).cloned() {
-                                Some(page) => session::save_session(&browser, &page, provider.name()).await,
-                                None => Err(anyhow::anyhow!("provider page not warmed")),
-                            };
-                            let _ = reply.send(res);
                         }
                         Command::LoginStart { provider, reply } => {
                             let browser = browser.clone();

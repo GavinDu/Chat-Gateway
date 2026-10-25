@@ -284,7 +284,6 @@ async fn refresh_models(state: &Arc<AppState>) {
 /// The gateway never presents its own credential form and never stores
 /// credentials — relayed text lives in memory only for the action that
 /// types it, and only cookies/localStorage are persisted on Complete.
-
 /// The login relay can read and persist provider session material. Keep the HTTP
 /// listener loopback-only until an authenticated remote-access mode is designed.
 fn server_bind_addr(port: u16) -> SocketAddr {
@@ -403,7 +402,7 @@ fn login_err(msg: String) -> axum::response::Response {
 async fn login_status(State(state): State<Arc<AppState>>) -> axum::response::Response {
     let active = match state.pool.login_status_all().await {
         Ok(active) => active,
-        Err(error) => {
+        Err(_error) => {
             tracing::error!("login status lookup failed");
             return login_status_read_error();
         }
@@ -419,7 +418,7 @@ async fn login_status(State(state): State<Arc<AppState>>) -> axum::response::Res
         let (session_present, session_ts) = match session::load_session_file(name) {
             Ok(Some(file)) => (true, Some(file.ts)),
             Ok(None) => (false, None),
-            Err(error) => {
+            Err(_error) => {
                 tracing::error!(provider = name, "persisted login session read failed");
                 return login_status_read_error();
             }
@@ -1136,7 +1135,7 @@ async fn chat_completions(
                     });
                     yield Ok(Event::default().data(error.to_string()));
                 } else {
-                    if let Err(error) = state_c.memory.store_turn(
+                    if let Err(_error) = state_c.memory.store_turn(
                         conv_stream.clone(),
                         windowed_c.clone(),
                         ChatMessage { role: "assistant".to_string(), content: full.clone() },
@@ -1201,7 +1200,7 @@ async fn chat_completions(
             );
         }
 
-        if let Err(error) = state.memory.store_turn(
+        if let Err(_error) = state.memory.store_turn(
             new_conv_id.clone(),
             windowed.clone(),
             ChatMessage {
@@ -1241,6 +1240,8 @@ async fn chat_completions(
     )
 }
 
+// Returning a ready-to-send Axum response keeps validation errors consistent at the handler boundary.
+#[allow(clippy::result_large_err)]
 fn parse_and_validate_chat_req(body: &[u8]) -> Result<ChatReq, Response> {
     let req = serde_json::from_slice::<ChatReq>(body).map_err(|error| {
         api_error(

@@ -1,10 +1,11 @@
+// The benchmark compiles the memory module without its unit-test call sites.
+#[allow(dead_code)]
 #[path = "../src/memory.rs"]
 mod memory;
 
 use memory::{ChatMessage, UnifiedMemory};
 use std::{
     env, fs,
-    path::PathBuf,
     time::{Duration, Instant},
 };
 

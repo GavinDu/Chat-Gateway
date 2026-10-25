@@ -1,3 +1,6 @@
+// Helpers are shared by several test targets; not every target exercises each fixture helper.
+#![allow(dead_code)]
+
 use super::*;
 use std::{
     collections::HashMap,
@@ -291,7 +294,9 @@ fn concurrent_writes(same_conversation: bool) {
         let messages = memory.conversation("shared").unwrap().unwrap().messages;
         assert_eq!(messages.len(), 16);
         let mut users = std::collections::HashSet::new();
-        for pair in messages.chunks_exact(2) {
+        let (pairs, remainder) = messages.as_chunks::<2>();
+        assert!(remainder.is_empty());
+        for pair in pairs {
             assert_eq!(pair[0].role, "user");
             assert_eq!(
                 pair[1],

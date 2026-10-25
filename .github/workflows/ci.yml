@@ -52,6 +52,9 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      - name: Run Clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+
       # Formatting is a required check now that main has been normalized.
       - name: Check formatting
         run: cargo fmt --all -- --check
