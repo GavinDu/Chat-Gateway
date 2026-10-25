@@ -118,21 +118,33 @@ mod tests {
     fn unknown_model_does_not_fall_back_to_unrelated_provider() {
         let r = router();
         let memory = UnifiedMemory::new(1000);
-        assert!(r.resolve("made-up-model", None, &memory).unwrap().is_empty());
+        assert!(r
+            .resolve("made-up-model", None, &memory)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
     fn provider_can_be_pinned() {
         let r = router();
         let memory = UnifiedMemory::new(1000);
-        assert_eq!(r.resolve("chatgpt/gpt-4o", None, &memory).unwrap(), vec!["chatgpt"]);
-        assert!(r.resolve("claude/gpt-4o", None, &memory).unwrap().is_empty());
+        assert_eq!(
+            r.resolve("chatgpt/gpt-4o", None, &memory).unwrap(),
+            vec!["chatgpt"]
+        );
+        assert!(r
+            .resolve("claude/gpt-4o", None, &memory)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
     fn auto_uses_enabled_priority_order() {
         let r = router();
         let memory = UnifiedMemory::new(1000);
-        assert_eq!(r.resolve("auto", None, &memory).unwrap(), vec!["claude", "chatgpt"]);
+        assert_eq!(
+            r.resolve("auto", None, &memory).unwrap(),
+            vec!["claude", "chatgpt"]
+        );
     }
 }
