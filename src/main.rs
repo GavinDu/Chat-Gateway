@@ -1524,7 +1524,9 @@ async fn chat_completions(
                         break;
                     }
                     if ttft_ms.is_none() {
-                        ttft_ms = Some(provider_started.elapsed().as_millis().min(u64::MAX as u128) as u64);
+                        ttft_ms = Some(
+                            provider_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+                        );
                     }
                     full.push_str(&c.content);
                 }
@@ -1537,7 +1539,14 @@ async fn chat_completions(
         let provider_work_ms = provider_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
         let total_ms = request_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
         if let Some(e) = failed {
-            metrics::record_provider_timings(&provider_name, "error", queue_ms, ttft_ms, provider_work_ms, total_ms);
+            metrics::record_provider_timings(
+                &provider_name,
+                "error",
+                queue_ms,
+                ttft_ms,
+                provider_work_ms,
+                total_ms,
+            );
             if full.is_empty() {
                 tracing::warn!(provider = %provider_name, "provider failed before output: {e}");
                 last_err = Some(e);
@@ -1552,7 +1561,14 @@ async fn chat_completions(
             );
         }
 
-        metrics::record_provider_timings(&provider_name, "success", queue_ms, ttft_ms, provider_work_ms, total_ms);
+        metrics::record_provider_timings(
+            &provider_name,
+            "success",
+            queue_ms,
+            ttft_ms,
+            provider_work_ms,
+            total_ms,
+        );
         if let Err(_error) = state.memory.store_turn(
             new_conv_id.clone(),
             windowed.clone(),
@@ -2496,16 +2512,37 @@ mod api_key_auth_tests {
     fn bearer_secret_is_verified_by_hash_and_scope() {
         let config = auth(&["chat"]);
         assert_eq!(
-            authorize_api_request(&config, Some("Bearer wrong"), "/v1/models", &axum::http::Method::GET),
+            authorize_api_request(
+                &config,
+                Some("Bearer wrong"),
+                "/v1/models",
+                &axum::http::Method::GET
+            ),
             Err(AuthFailure::MissingOrInvalid)
         );
-        assert!(authorize_api_request(&config, Some("Bearer test-secret"), "/v1/models", &axum::http::Method::GET).is_ok());
+        assert!(authorize_api_request(
+            &config,
+            Some("Bearer test-secret"),
+            "/v1/models",
+            &axum::http::Method::GET
+        )
+        .is_ok());
         assert_eq!(
-            authorize_api_request(&config, Some("Bearer test-secret"), "/login/api/status", &axum::http::Method::GET),
+            authorize_api_request(
+                &config,
+                Some("Bearer test-secret"),
+                "/login/api/status",
+                &axum::http::Method::GET
+            ),
             Err(AuthFailure::InsufficientScope)
         );
         assert_eq!(
-            authorize_api_request(&config, Some("Bearer test-secret"), "/v1/conversations/conversation_1", &axum::http::Method::DELETE),
+            authorize_api_request(
+                &config,
+                Some("Bearer test-secret"),
+                "/v1/conversations/conversation_1",
+                &axum::http::Method::DELETE
+            ),
             Err(AuthFailure::InsufficientScope)
         );
     }
@@ -2513,7 +2550,13 @@ mod api_key_auth_tests {
     #[test]
     fn admin_key_can_access_admin_routes_and_health_needs_no_key() {
         let config = auth(&["admin"]);
-        assert!(authorize_api_request(&config, Some("Bearer test-secret"), "/login/api/status", &axum::http::Method::GET).is_ok());
+        assert!(authorize_api_request(
+            &config,
+            Some("Bearer test-secret"),
+            "/login/api/status",
+            &axum::http::Method::GET
+        )
+        .is_ok());
         assert!(authorize_api_request(&config, None, "/health", &axum::http::Method::GET).is_ok());
     }
 
@@ -2528,7 +2571,12 @@ mod api_key_auth_tests {
         )
         .is_ok());
         assert_eq!(
-            authorize_api_request(&config, Some("Bearer test-secret extra"), "/v1/models", &axum::http::Method::GET),
+            authorize_api_request(
+                &config,
+                Some("Bearer test-secret extra"),
+                "/v1/models",
+                &axum::http::Method::GET
+            ),
             Err(AuthFailure::MissingOrInvalid)
         );
     }
