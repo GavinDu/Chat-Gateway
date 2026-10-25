@@ -350,8 +350,39 @@ async fn main() -> anyhow::Result<()> {
     let addr = server_bind_addr(cfg.server.port);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     println!("Chat Gateway v2 Obscura Native listening on {}", addr);
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
     Ok(())
+}
+
+/// Stop accepting new connections on SIGINT/SIGTERM and let Axum drain
+/// in-flight requests before the process exits.
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+
+        let mut terminate = signal(SignalKind::terminate())
+            .expect("failed to install SIGTERM handler");
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => {
+                if let Err(error) = result {
+                    tracing::warn!(%error, "failed to listen for Ctrl-C");
+                }
+            }
+            _ = terminate.recv() => {}
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        if let Err(error) = tokio::signal::ctrl_c().await {
+            tracing::warn!(%error, "failed to listen for Ctrl-C");
+        }
+    }
+
+    tracing::info!("shutdown signal received; draining in-flight HTTP requests");
 }
 
 async fn refresh_models(state: &Arc<AppState>) {
