@@ -16,7 +16,7 @@ pub const SELECTORS: SelectorSet = SelectorSet {
     input: &["div[contenteditable=\"true\"][role=\"textbox\"]", "textarea[placeholder*=\"Ask\"]", "div[contenteditable=\"true\"]"],
     send: &["button[aria-label=\"Send\"]", "button[type=\"submit\"]", "button:has(svg[data-testid=\"send\"])"],
     response: &["div[data-testid=\"bot-message\"]", "div.message.assistant", "div.prose"],
-    model_keywords: "metaai|sonar|grok|mistral|claude|gpt|gemini|qwen|llama",
+    model_keywords: "metaai|meta|llama",
     model_pairs: &[("button[aria-label*='model' i], button[aria-label*='llama' i], [data-testid*='model' i], [data-model-selector]", "[role='menuitem'], [role='option'], [data-model-option]"), ("[role='button'][aria-haspopup='menu']", "[role='menuitem'], [role='option']")],
 };
 
