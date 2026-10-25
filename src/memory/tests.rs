@@ -87,7 +87,7 @@ fn json_import_restores_order_and_affinity_and_preserves_source() {
         );
     }
     assert_eq!(fs::read(fixture.json()).unwrap(), bytes);
-    assert!(fixture.open().has_history("legacy")).unwrap();
+    assert!(fixture.open().has_history("legacy").unwrap());
 }
 
 #[test]
@@ -115,7 +115,7 @@ fn failed_import_rolls_back_schema_and_can_be_retried_without_source_loss() {
     assert_eq!((version, tables), (0, 0));
     drop(connection);
     snapshot(&fixture);
-    assert!(fixture.open().has_history("legacy")).unwrap();
+    assert!(fixture.open().has_history("legacy").unwrap());
 }
 
 #[test]
@@ -137,7 +137,7 @@ fn completed_import_never_replays_json_or_resurrects_deleted_conversations() {
     }
     // Even a subsequently corrupt legacy file must not block a migrated store.
     fs::write(fixture.json(), b"corrupted old backup").unwrap();
-    assert!(!fixture.open().has_history("legacy")).unwrap();
+    assert!(!fixture.open().has_history("legacy").unwrap());
 }
 
 #[test]
@@ -174,8 +174,8 @@ fn deletion_cascades_and_survives_restart() {
         assert_eq!(memory.get_tab("delete").unwrap(), None);
     }
     let memory = fixture.open();
-    assert!(!memory.has_history("delete")).unwrap();
-    assert!(memory.has_history("keep")).unwrap();
+    assert!(!memory.has_history("delete").unwrap());
+    assert!(memory.has_history("keep").unwrap());
     let count: i64 = memory
         .lock()
         .unwrap()
@@ -214,11 +214,11 @@ fn injected_insert_failure_rolls_back_partial_messages_and_affinity() {
             .is_err());
     }
     assert_eq!(memory.conversation("existing").unwrap().unwrap(), previous);
-    assert!(!memory.has_history("new")).unwrap();
+    assert!(!memory.has_history("new").unwrap());
     drop(memory);
     let restored = fixture.open();
     assert_eq!(restored.conversation("existing").unwrap().unwrap(), previous);
-    assert!(!restored.has_history("new")).unwrap();
+    assert!(!restored.has_history("new").unwrap());
 }
 
 #[test]
@@ -235,9 +235,9 @@ fn injected_delete_failure_preserves_conversation() {
         )
         .unwrap();
     assert!(memory.delete_conversation("keep").is_err());
-    assert!(memory.has_history("keep")).unwrap();
+    assert!(memory.has_history("keep").unwrap());
     drop(memory);
-    assert!(fixture.open().has_history("keep")).unwrap();
+    assert!(fixture.open().has_history("keep").unwrap());
 }
 
 #[test]
@@ -246,9 +246,9 @@ fn separate_connections_observe_commits_instead_of_stale_caches() {
     let first = fixture.open();
     let second = fixture.open();
     store(&first, "one", "hello");
-    assert!(second.has_history("one")).unwrap();
+    assert!(second.has_history("one").unwrap());
     assert!(second.delete_conversation("one").unwrap());
-    assert!(!first.has_history("one")).unwrap();
+    assert!(!first.has_history("one").unwrap());
 }
 
 fn concurrent_writes(same_conversation: bool) {
@@ -290,6 +290,7 @@ fn concurrent_writes(same_conversation: bool) {
                 memory
                     .conversation(&format!("conv-{i}"))
                     .unwrap()
+                    .unwrap()
                     .messages
                     .len(),
                 2
@@ -326,6 +327,7 @@ fn concurrent_identical_transcript_replays_are_idempotent() {
         fixture
             .open()
             .conversation("shared")
+            .unwrap()
             .unwrap()
             .messages
             .len(),
