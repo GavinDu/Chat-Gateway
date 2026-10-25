@@ -221,22 +221,28 @@ pub fn validate_navigation_url_for_provider(provider: &str, url: &str) -> anyhow
     Ok(())
 }
 
-/// Parse the VIEW_SCRIPT result into its parts. Any shape mismatch
-/// degrades to empty parts, never an error.
+fn parse_view_items<T: serde::de::DeserializeOwned>(value: Option<&serde_json::Value>) -> Vec<T> {
+    value
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| serde_json::from_value::<T>(item.clone()).ok())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Parse the VIEW_SCRIPT result into its parts. Malformed individual field or
+/// button entries are skipped without discarding otherwise valid metadata.
 pub fn parse_view(value: serde_json::Value) -> (String, Vec<LoginField>, Vec<LoginButton>, String) {
     let title = value
         .get("title")
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    let fields = value
-        .get("fields")
-        .and_then(|v| serde_json::from_value::<Vec<LoginField>>(v.clone()).ok())
-        .unwrap_or_default();
-    let buttons = value
-        .get("buttons")
-        .and_then(|v| serde_json::from_value::<Vec<LoginButton>>(v.clone()).ok())
-        .unwrap_or_default();
+    let fields = parse_view_items(value.get("fields"));
+    let buttons = parse_view_items(value.get("buttons"));
     let snapshot = value
         .get("snapshot")
         .and_then(|v| v.as_str())
@@ -368,5 +374,52 @@ mod navigation_validation_tests {
         assert!(validate_navigation_url("https://192.168.1.20/").is_err());
         assert!(validate_navigation_url("https://example.com:8443/").is_err());
         assert!(validate_navigation_url("https://user@example.com/").is_err());
+    }
+}
+
+#[cfg(test)]
+mod parse_view_tests {
+    use super::*;
+
+    #[test]
+    fn keeps_valid_entries_when_other_entries_are_malformed() {
+        let value = serde_json::json!({
+            "title": "Sign in",
+            "fields": [
+                {
+                    "tag": "input",
+                    "type": "email",
+                    "placeholder": "Email",
+                    "label": "Email",
+                    "name": "email",
+                    "selector": "#email"
+                },
+                { "tag": "input", "selector": "#broken" }
+            ],
+            "buttons": [
+                { "text": "Continue", "index": 0 },
+                { "text": 42, "index": "invalid" }
+            ],
+            "snapshot": "Sign in to continue"
+        });
+
+        let (title, fields, buttons, snapshot) = parse_view(value);
+        assert_eq!(title, "Sign in");
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].selector, "#email");
+        assert_eq!(buttons.len(), 1);
+        assert_eq!(buttons[0].text, "Continue");
+        assert_eq!(snapshot, "Sign in to continue");
+    }
+
+    #[test]
+    fn unexpected_collection_shapes_degrade_to_empty_collections() {
+        let value = serde_json::json!({
+            "fields": { "unexpected": true },
+            "buttons": "unexpected"
+        });
+        let (_, fields, buttons, _) = parse_view(value);
+        assert!(fields.is_empty());
+        assert!(buttons.is_empty());
     }
 }
