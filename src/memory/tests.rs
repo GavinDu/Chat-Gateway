@@ -1,3 +1,6 @@
+// Helpers are shared by several test targets; not every target exercises each fixture helper.
+#![allow(dead_code)]
+
 use super::*;
 use std::{
     collections::HashMap,
