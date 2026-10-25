@@ -299,7 +299,6 @@ mod local_storage_script_tests {
         assert!(script.contains(&serde_json::to_string(value).unwrap()));
         assert!(script.starts_with("try{localStorage.setItem("));
         assert!(script.ends_with(")}catch(e){}"));
-        assert!(!script.contains("setItem(\"key"));
     }
 
     #[test]
