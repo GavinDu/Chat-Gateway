@@ -36,3 +36,6 @@ jobs:
 
       - name: Run tests
         run: cargo test --locked
+
+      - name: Run SQLite memory benchmark smoke test
+        run: cargo bench --locked --bench memory_sqlite
