@@ -337,7 +337,7 @@ pub fn restore_cookies(browser: &Browser, file: &SessionFile, provider: &str) ->
 fn local_storage_restore_script(key: &str, value: &str) -> Option<String> {
     let key = serde_json::to_string(key).ok()?;
     let value = serde_json::to_string(value).ok()?;
-    Some(format!("localStorage.setItem({key}, {value})"))
+    Some(format!("(() => {{ try {{ localStorage.setItem({key}, {value}); return true; }} catch (_error) {{ return false; }} }})()"))
 }
 
 pub fn restore_local_storage(page: &Page, file: &SessionFile) -> Result<()> {
@@ -345,8 +345,10 @@ pub fn restore_local_storage(page: &Page, file: &SessionFile) -> Result<()> {
         let script = local_storage_restore_script(k, v).ok_or_else(|| {
             anyhow::anyhow!("failed to serialize provider localStorage restore script")
         })?;
-        page.evaluate(&script)
-            .map_err(|_| anyhow::anyhow!("failed to restore provider localStorage entry"))?;
+        let restored = page.evaluate(&script);
+        if restored != serde_json::Value::Bool(true) {
+            return Err(anyhow::anyhow!("failed to restore provider localStorage entry"));
+        }
     }
     Ok(())
 }
@@ -426,9 +428,11 @@ mod local_storage_script_tests {
 
         assert!(script.contains(&serde_json::to_string(key).unwrap()));
         assert!(script.contains(&serde_json::to_string(value).unwrap()));
-        assert!(script.starts_with("localStorage.setItem("));
+        assert!(script.contains("localStorage.setItem("));
+        assert!(script.contains("return true"));
+        assert!(script.contains("return false"));
+        assert!(script.contains("catch"));
         assert!(script.ends_with(")"));
-        assert!(!script.contains("catch"));
     }
 
     #[test]
