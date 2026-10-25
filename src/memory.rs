@@ -45,6 +45,17 @@ impl UnifiedMemory {
         })
     }
 
+    // Convenience constructor used by isolated unit tests.
+    #[allow(dead_code)]
+    pub fn new(max_tokens: usize) -> Self {
+        Self {
+            max_tokens,
+            connection: Mutex::new(
+                sqlite::open(None, None).expect("initializing in-memory conversation database"),
+            ),
+        }
+    }
+
     /// Existing JSON path overrides keep working: `custom.json` imports into
     /// `custom.sqlite3`. Other extensions designate a database directly.
     pub fn from_env(max_tokens: usize) -> anyhow::Result<Self> {
@@ -166,6 +177,21 @@ impl UnifiedMemory {
         let deleted = tx.execute("DELETE FROM conversations WHERE id = ?1", [conversation_id])?;
         tx.commit()?;
         Ok(deleted != 0)
+    }
+
+    // Legacy read helpers remain used by the benchmark and routing tests.
+    #[allow(dead_code)]
+    pub fn has_history(&self, cid: &str) -> anyhow::Result<bool> {
+        Ok(self
+            .conversation(cid)?
+            .is_some_and(|conversation| !conversation.messages.is_empty()))
+    }
+
+    #[allow(dead_code)]
+    pub fn get_tab(&self, cid: &str) -> anyhow::Result<Option<String>> {
+        Ok(self
+            .conversation(cid)?
+            .and_then(|conversation| conversation.tab_id))
     }
 
     pub fn get_provider(&self, cid: &str) -> anyhow::Result<Option<String>> {
