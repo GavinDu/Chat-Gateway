@@ -28,7 +28,7 @@ pub const SELECTORS: SelectorSet = SelectorSet {
         "div.response-container",
         "div.model-response-text",
     ],
-    model_keywords: "gemini|sonar|grok|mistral|claude|gpt|gemini|qwen|llama",
+    model_keywords: "gemini",
     model_pairs: &[(
         "button[aria-label*='model' i], [data-test-id*='model' i], .bard-mode-switcher",
         "[role='menuitem'], [role='option'], mat-option, [data-test-id*='model-option' i]",

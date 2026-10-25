@@ -14,9 +14,9 @@ pub const SELECTORS: SelectorSet = SelectorSet {
     url: "https://claude.ai",
     picker: &["text:button=Claude", "div[data-testid=\"model-selector\"]", "button.model-selector"],
     input: &["div[contenteditable=\"true\"][data-placeholder]", "div.ProseMirror", "div[contenteditable=\"true\"]"],
-    send: &["button[aria-label=\"Send Message\"]", "button:has(svg)[type=\"button\"]", "button[type=\"button\"]"],
+    send: &["button[aria-label=\"Send Message\"]", "button:has(svg)[type=\"button\"]"],
     response: &["div[data-testid=\"assistant-message\"]", "div.font-claude-response", "div[data-is-streaming] .prose"],
-    model_keywords: "claude|sonar|grok|mistral|claude|gpt|gemini|qwen|llama",
+    model_keywords: "claude|sonnet|opus|haiku",
     model_pairs: &[("button[aria-haspopup='menu'][data-testid*='model' i], button[aria-label*='model' i], [data-testid='model-selector-dropdown']", "[role='menuitem'], [role='option'], [data-testid*='model-option' i]")],
 };
 
