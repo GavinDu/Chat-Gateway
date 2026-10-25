@@ -566,12 +566,7 @@ mod corrupt_message_history_regression_tests {
                 content: "follow-up".into(),
             }],
         ) {
-            Err(_) => api_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "server_error",
-                "memory_read_failed",
-                "conversation history could not be read safely",
-            ),
+            Err(_) => conversation_context_read_error(Some("conversation-123")),
             Ok(_) => panic!("corrupt message history must fail closed"),
         };
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
@@ -935,6 +930,16 @@ async fn models(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 /// Conversation IDs are echoed into response IDs and tab affinity. Restrict
 /// them to bounded ASCII so formatting and byte slicing cannot panic on a
 /// malicious multibyte header value.
+fn conversation_context_read_error(conversation_id: Option<&str>) -> Response {
+    tracing::error!(conversation_id = ?conversation_id, "conversation context read failed");
+    api_error(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "server_error",
+        "memory_read_failed",
+        "conversation history could not be read safely",
+    )
+}
+
 fn read_conversation_context(
     memory: &UnifiedMemory,
     conversation_id: Option<&str>,
@@ -1018,14 +1023,8 @@ async fn chat_completions(
         &req.messages,
     ) {
         Ok(context) => context,
-        Err(error) => {
-            tracing::error!(conversation_id = ?conversation_id, "conversation context read failed: {error}");
-            return api_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "server_error",
-                "memory_read_failed",
-                "conversation history could not be read safely",
-            );
+        Err(_error) => {
+            return conversation_context_read_error(conversation_id.as_deref());
         }
     };
     let prompt = context_prompt;
@@ -1655,12 +1654,7 @@ mod http_api_regression_tests {
                 }))
                 .into_response()
             }
-            Err(_) => api_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "server_error",
-                "memory_read_failed",
-                "conversation history could not be read safely",
-            ),
+            Err(_) => conversation_context_read_error(conversation_id),
         }
     }
 
