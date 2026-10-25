@@ -466,7 +466,7 @@ mod text_selector_tests {
     fn rejects_empty_or_css_like_text_selector() {
         assert_eq!(text_selector_parts("text:button="), None);
         assert_eq!(text_selector_parts("text:=Stop"), None);
-        assert_eq!(text_selector_parts("button:has-text(\\"Stop\\")"), None);
+        assert_eq!(text_selector_parts(r#"button:has-text("Stop")"#), None);
         assert_eq!(text_selector_parts("button[aria-label*=Stop]"), None);
     }
 }
