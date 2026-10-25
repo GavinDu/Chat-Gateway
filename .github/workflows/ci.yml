@@ -20,6 +20,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Verify Obscura vendor matches pinned revision
+        run: |
+          set -euo pipefail
+          rev="$(sed -n 's/.*obscura-core = .*rev = "\([0-9a-f]\{40\}\)".*/\1/p' Cargo.toml)"
+          test -n "$rev"
+          repo="$RUNNER_TEMP/obscura-vendor-check"
+          git clone --quiet --filter=blob:none --no-checkout https://github.com/h4ckf0r0day/obscura.git "$repo"
+          git -C "$repo" checkout --quiet "$rev"
+          diff -ru vendor/taffy "$repo/vendor/taffy"
+          diff -ru vendor/cosmic-text "$repo/vendor/cosmic-text"
+
       - name: Install native build dependencies
         run: |
           sudo apt-get update

@@ -1,3 +1,14 @@
+# Obscura dependency and vendored-crate update procedure
+#
+# The Obscura git revision is pinned in the `obscura-core` dependency below.
+# When updating it:
+# 1. Choose and review an exact 40-character upstream commit.
+# 2. Update the `rev` in Cargo.toml.
+# 3. Copy vendor/taffy and vendor/cosmic-text from that exact Obscura revision.
+# 4. Run cargo update -p obscura --precise <revision> (or refresh Cargo.lock).
+# 5. Run cargo test --locked and cargo bench --locked --bench memory_sqlite.
+# CI compares both vendored trees to the pinned upstream commit.
+
 [package]
 name = "chat-gateway-rs"
 version = "2.0.0-obscura-native"
@@ -22,7 +33,7 @@ async-trait = "0.1"
 regex = "1"
 uuid = { version = "1", features = ["v4"] }
 clap = { version = "4", features = ["derive"] }
-obscura-core = { git = "https://github.com/h4ckf0r0day/obscura", package = "obscura", features = ["render", "stealth"] }
+obscura-core = { git = "https://github.com/h4ckf0r0day/obscura", rev = "09790944a405ba81a7df27bc2577c6b0db283900", package = "obscura", features = ["render", "stealth"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
@@ -35,8 +46,8 @@ stealth = ["obscura-core/stealth"]
 # Obscura's workspace patches taffy + cosmic-text to vendored copies with
 # APIs its render layer uses (CssLineBreak, AlignItems::NORMAL, ...).
 # [patch] does not propagate through a git dependency, so the same two
-# vendored crates are carried here, copied verbatim from the obscura repo
-# at the pinned rev (see Cargo.lock).
+# vendored crates are carried here, copied verbatim from the Obscura repo
+# at the pinned rev; Cargo.lock records the same rev-qualified source.
 [patch.crates-io]
 taffy = { path = "vendor/taffy" }
 cosmic-text = { path = "vendor/cosmic-text" }
