@@ -233,19 +233,30 @@ async fn refresh_models(state: &Arc<AppState>) {
 /// Non-browser clients without an Origin header remain usable, while browser
 /// requests must have an Origin authority identical to the request Host.
 async fn protect_login_api(req: Request<Body>, next: Next) -> Response {
-    if !req.uri().path().starts_with("/login/api/") {
-        return next.run(req).await;
-    }
     let headers = req.headers();
+    // The service binds to loopback, but DNS rebinding can still send a
+    // browser request with an attacker-controlled Host that resolves to
+    // 127.0.0.1. Enforce the loopback authority on every route, not only
+    // the browser-control endpoints.
+    let host_is_loopback = headers.get(axum::http::header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .map(is_loopback_authority)
+        .unwrap_or(false);
+    let origin_present = headers.contains_key(axum::http::header::ORIGIN);
     let fetch_site = headers.get("sec-fetch-site").and_then(|v| v.to_str().ok());
-    if fetch_site == Some("cross-site") || !login_origin_is_same_authority(headers) {
+    let is_login_api = req.uri().path().starts_with("/login/api/");
+    let origin_is_safe = !origin_present || login_origin_is_same_authority(headers);
+    if !host_is_loopback
+        || (is_login_api && fetch_site == Some("cross-site"))
+        || !origin_is_safe
+    {
         return (
             StatusCode::FORBIDDEN,
             Json(serde_json::json!({
                 "error": {
-                    "message": "cross-origin browser-control request rejected",
+                    "message": "request authority or origin rejected",
                     "type": "security_error",
-                    "code": "cross_origin_request"
+                    "code": "unsafe_local_request"
                 }
             })),
         ).into_response();
@@ -743,6 +754,12 @@ mod login_origin_tests {
         headers.insert("origin", "https://evil.example".parse().unwrap());
         headers.insert("host", "127.0.0.1:8080".parse().unwrap());
         assert!(!login_origin_is_same_authority(&headers));
+    }
+
+    #[test]
+    fn rejects_non_loopback_host_authority() {
+        assert!(!is_loopback_authority("attacker.example:8080"));
+        assert!(!is_loopback_authority("localhost.attacker.example:8080"));
     }
 
     #[test]
