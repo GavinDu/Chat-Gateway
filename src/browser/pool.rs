@@ -247,6 +247,9 @@ impl ObscuraPool {
     pub async fn login_act(&self, name: &str, action: LoginAction) -> Result<String> {
         action.validate()?;
         let provider = self.login_provider(name)?;
+        if let LoginAction::Navigate { url } = &action {
+            login::validate_navigation_url_for_provider(name, url)?;
+        }
         let (tx, rx) = oneshot::channel();
         self.cmd_tx.send(Command::LoginAct { provider, action, reply: tx }).await
             .map_err(|_| anyhow::anyhow!("browser thread gone"))?;
