@@ -166,6 +166,21 @@ impl UnifiedMemory {
         Ok(())
     }
 
+    /// Delete one conversation and persist the deletion before reporting success.
+    /// If the snapshot write fails, restore the removed entry in memory.
+    pub fn delete_conversation(&self, conversation_id: &str) -> anyhow::Result<bool> {
+        let _guard = self.persistence_lock.lock()
+            .map_err(|error| anyhow::anyhow!("conversation persistence lock poisoned: {error}"))?;
+        let Some((_, previous)) = self.conversations.remove(conversation_id) else {
+            return Ok(false);
+        };
+        if let Err(error) = self.persist_snapshot() {
+            self.conversations.insert(conversation_id.to_string(), previous);
+            return Err(error.context("persisting conversation deletion"));
+        }
+        Ok(true)
+    }
+
     /// True when the conversation already has stored turns. Used only
     /// to scope model selection (Go's new-conversation-only rule):
     /// selection runs only when there is NO prior history. This is a
@@ -300,6 +315,27 @@ mod tests {
             assert!(prompt.contains("assistant: hi"));
             assert!(prompt.contains("user: next"));
         }
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn deleting_conversation_persists_across_restart() {
+        let path = std::env::temp_dir().join(format!("chat-gateway-memory-delete-{}.json", uuid::Uuid::new_v4()));
+        {
+            let memory = UnifiedMemory::with_optional_persistence(8000, Some(path.clone())).unwrap();
+            memory.store_turn(
+                "conversation-delete".to_string(),
+                vec![m("user", "private prompt")],
+                m("assistant", "private answer"),
+                "chatgpt".to_string(),
+                "tab-delete".to_string(),
+            ).unwrap();
+            assert!(memory.delete_conversation("conversation-delete").unwrap());
+            assert!(!memory.has_history("conversation-delete"));
+            assert!(!memory.delete_conversation("conversation-delete").unwrap());
+        }
+        let restored = UnifiedMemory::with_optional_persistence(8000, Some(path.clone())).unwrap();
+        assert!(!restored.has_history("conversation-delete"));
         let _ = std::fs::remove_file(path);
     }
 

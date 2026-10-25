@@ -2,7 +2,7 @@ use axum::{
     extract::{DefaultBodyLimit, Path, State},
     http::HeaderMap,
     response::{sse::{Event, Sse}, Html, IntoResponse},
-    routing::{get, post},
+    routing::{delete, get, post},
     middleware::{self, Next},
     http::{Request, StatusCode},
     response::Response,
@@ -188,6 +188,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/ready", get(readiness))
         .route("/v1/models", get(models))
         .route("/v1/chat/completions", post(chat_completions))
+        .route("/v1/conversations/:conversation_id", delete(delete_conversation))
         .route("/login", get(login_page))
         .route("/login/api/status", get(login_status))
         .route("/login/api/:provider/start", post(login_start))
@@ -496,6 +497,38 @@ async fn attach_request_id(req: Request<Body>, next: Next) -> Response {
         response.headers_mut().insert("x-request-id", value);
     }
     response
+}
+
+async fn delete_conversation(
+    State(state): State<Arc<AppState>>,
+    Path(conversation_id): Path<String>,
+) -> Response {
+    if !valid_conversation_id(&conversation_id) {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            "invalid_conversation_id",
+            "conversation ID must be 8-128 ASCII letters, digits, '_' or '-'",
+        );
+    }
+    match state.memory.delete_conversation(&conversation_id) {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => api_error(
+            StatusCode::NOT_FOUND,
+            "invalid_request_error",
+            "conversation_not_found",
+            "conversation does not exist",
+        ),
+        Err(error) => {
+            tracing::error!(conversation_id = %conversation_id, "conversation deletion failed: {error}");
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                "memory_persistence_failed",
+                "conversation could not be deleted durably",
+            )
+        }
+    }
 }
 
 async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
