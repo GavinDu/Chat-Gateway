@@ -156,6 +156,13 @@ fn restored_cookie_fields_safe(cookie: &Cookie) -> bool {
             .any(|b| b.is_ascii_control() || b == b';');
     valid_name && valid_value && valid_path
 }
+fn parse_local_storage_snapshot(
+    value: serde_json::Value,
+) -> Result<std::collections::HashMap<String, String>> {
+    serde_json::from_value(value)
+        .map_err(|error| anyhow::anyhow!("decoding provider localStorage snapshot: {error}"))
+}
+
 /// Ensure the directory holding reusable provider credentials is private.
 /// Existing directories are hardened too; relying only on the process umask is
 /// insufficient because it varies by deployment environment.
@@ -173,8 +180,7 @@ async fn ensure_private_session_dir(path: &Path) -> Result<()> {
 /// sessions/<provider>.json.
 pub async fn save_session(browser: &Browser, page: &Page, provider: &str) -> Result<()> {
     let ls_value = page.evaluate("(function(){ const o = {}; for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); o[k] = localStorage.getItem(k); } return o; })()");
-    let local_storage: std::collections::HashMap<String, String> =
-        serde_json::from_value(ls_value).unwrap_or_default();
+    let local_storage = parse_local_storage_snapshot(ls_value)?;
     // Obscura's cookie store is browser-wide. Persist only cookies in the
     // provider's known domain family; otherwise saving one provider can copy
     // unrelated logged-in sessions into every other provider's session file.
@@ -312,6 +318,25 @@ pub fn restore_session(browser: &Browser, page: &Page, provider: &str) -> Result
             Ok(true)
         }
         None => Ok(false),
+    }
+}
+
+#[cfg(test)]
+mod local_storage_snapshot_tests {
+    use super::*;
+
+    #[test]
+    fn parses_valid_local_storage_string_map() {
+        let value = serde_json::json!({"theme": "dark", "locale": "en-US"});
+        let parsed = parse_local_storage_snapshot(value).unwrap();
+        assert_eq!(parsed.get("theme").map(String::as_str), Some("dark"));
+        assert_eq!(parsed.get("locale").map(String::as_str), Some("en-US"));
+    }
+
+    #[test]
+    fn rejects_invalid_local_storage_snapshot_instead_of_silently_emptying_it() {
+        assert!(parse_local_storage_snapshot(serde_json::json!(["unexpected"])).is_err());
+        assert!(parse_local_storage_snapshot(serde_json::json!({"theme": 42})).is_err());
     }
 }
 
