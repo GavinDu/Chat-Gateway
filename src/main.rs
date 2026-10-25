@@ -486,8 +486,12 @@ async fn chat_completions(
     let has_history = conversation_id.as_deref().map(|cid| state.memory.has_history(cid)).unwrap_or(false);
     let prompt = context_prompt;
     if prompt.is_empty() {
-        return (axum::http::StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": { "message": "empty prompt" } }))).into_response();
+        return api_error(
+            axum::http::StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            "empty_prompt",
+            "prompt must not be empty",
+        );
     }
 
     let candidates = state.router.resolve(&req.model, conversation_id.as_deref(), &state.memory);
@@ -654,10 +658,12 @@ async fn chat_completions(
         return (resp_headers, Json(body)).into_response();
     }
 
-    let err_body = serde_json::json!({
-        "error": { "message": format!("all providers failed: {:?}", last_err), "type": "provider_error" }
-    });
-    (axum::http::StatusCode::BAD_GATEWAY, Json(err_body)).into_response()
+    api_error(
+        axum::http::StatusCode::BAD_GATEWAY,
+        "provider_error",
+        "provider_unavailable",
+        format!("all providers failed: {:?}", last_err),
+    )
 }
 
 #[cfg(test)]
