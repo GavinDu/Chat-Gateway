@@ -956,10 +956,12 @@ fn readiness_response(enabled: usize) -> Response {
 }
 
 async fn metrics_endpoint() -> impl IntoResponse {
-    (
-        [(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
-        metrics::render(),
-    )
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("text/plain; version=0.0.4; charset=utf-8"),
+    );
+    (headers, metrics::render())
 }
 
 async fn readiness(State(state): State<Arc<AppState>>) -> impl IntoResponse {
