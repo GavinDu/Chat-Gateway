@@ -41,6 +41,28 @@ pub fn load_session_file(provider: &str) -> Result<Option<SessionFile>> {
     Ok(Some(serde_json::from_str(&data)?))
 }
 
+
+/// Conservative provider-domain allowlist for persisted authentication cookies.
+/// Keep these families narrow: session files contain reusable credentials.
+fn cookie_domain_allowed(provider: &str, domain: &str) -> bool {
+    let domain = domain.trim_start_matches('.').trim_end_matches('.').to_ascii_lowercase();
+    if domain.is_empty() || domain.contains('/') || domain.contains(':') {
+        return false;
+    }
+    let allowed: &[&str] = match provider {
+        "qwen" => &["qwen.ai", "aliyun.com"],
+        "metaai" => &["meta.ai", "facebook.com", "fbcdn.net"],
+        "claude" => &["claude.ai", "anthropic.com"],
+        "chatgpt" => &["chatgpt.com", "openai.com"],
+        "gemini" => &["gemini.google.com", "google.com", "googleusercontent.com"],
+        "grok" => &["grok.com", "x.com", "twitter.com", "x.ai"],
+        "mistral" => &["mistral.ai"],
+        "perplexity" => &["perplexity.ai"],
+        _ => return false,
+    };
+    allowed.iter().any(|base| domain == *base || domain.ends_with(&format!(".{base}")))
+}
+
 /// Capture cookies (from the browser's CookieStore - this is the v2 fix:
 /// v1 only persisted localStorage) + localStorage into
 /// sessions/<provider>.json.
@@ -48,7 +70,13 @@ pub async fn save_session(browser: &Browser, page: &Page, provider: &str) -> Res
     let ls_value = page.evaluate("(function(){ const o = {}; for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); o[k] = localStorage.getItem(k); } return o; })()");
     let local_storage: std::collections::HashMap<String, String> =
         serde_json::from_value(ls_value).unwrap_or_default();
-    let cookies: Vec<Cookie> = browser.cookies().get_all().into_iter().map(Cookie::from).collect();
+    // Obscura's cookie store is browser-wide. Persist only cookies in the
+    // provider's known domain family; otherwise saving one provider can copy
+    // unrelated logged-in sessions into every other provider's session file.
+    let cookies: Vec<Cookie> = browser.cookies().get_all().into_iter()
+        .filter(|cookie| cookie_domain_allowed(provider, &cookie.domain))
+        .map(Cookie::from)
+        .collect();
     let file = SessionFile { local_storage, cookies, ts: chrono::Utc::now().to_rfc3339() };
     tokio::fs::create_dir_all("sessions").await?;
     let destination = session_path(provider);
@@ -126,3 +154,27 @@ pub fn restore_session(browser: &Browser, page: &Page, provider: &str) -> Result
         None => Ok(false),
     }
 }
+
+#[cfg(test)]
+mod cookie_scope_tests {
+    use super::*;
+
+    #[test]
+    fn persists_only_cookies_from_configured_provider_domain_families() {
+        assert!(cookie_domain_allowed("chatgpt", ".chatgpt.com"));
+        assert!(cookie_domain_allowed("chatgpt", "auth.openai.com"));
+        assert!(!cookie_domain_allowed("chatgpt", "claude.ai"));
+        assert!(!cookie_domain_allowed("claude", "chatgpt.com"));
+        assert!(cookie_domain_allowed("gemini", ".google.com"));
+        assert!(!cookie_domain_allowed("gemini", "attacker-google.com"));
+    }
+
+    #[test]
+    fn rejects_unknown_provider_and_malformed_cookie_domains() {
+        assert!(!cookie_domain_allowed("unknown", "example.com"));
+        assert!(!cookie_domain_allowed("chatgpt", ""));
+        assert!(!cookie_domain_allowed("chatgpt", "openai.com/path"));
+        assert!(!cookie_domain_allowed("chatgpt", "openai.com:443"));
+    }
+}
+
