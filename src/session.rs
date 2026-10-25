@@ -81,7 +81,10 @@ mod session_path_tests {
 
         ensure_private_session_dir(&path).await.unwrap();
 
-        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o700);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
         std::fs::remove_dir_all(path).unwrap();
     }
     #[test]
