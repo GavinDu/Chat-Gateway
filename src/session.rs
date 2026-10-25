@@ -263,9 +263,16 @@ mod cookie_restore_result_tests {
     }
 
     #[test]
-    fn cookie_restore_fails_when_any_store_write_fails() {
+    fn cookie_restore_fails_when_any_cookie_cannot_be_restored() {
+        let error = ensure_cookie_restore_complete(1).unwrap_err();
+        assert!(error.to_string().contains("1 provider session cookie(s)"));
+    }
+
+    #[test]
+    fn cookie_restore_reports_multiple_failures_without_cookie_contents() {
         let error = ensure_cookie_restore_complete(2).unwrap_err();
         assert!(error.to_string().contains("2 provider session cookie(s)"));
+        assert!(!error.to_string().contains("secret"));
     }
 }
 
@@ -330,10 +337,7 @@ pub fn restore_cookies(browser: &Browser, file: &SessionFile, provider: &str) ->
             );
         }
     }
-    if failed_writes > 0 {
-        anyhow::bail!("failed to restore {failed_writes} provider session cookie(s)");
-    }
-    Ok(())
+    ensure_cookie_restore_complete(failed_writes)
 }
 
 /// Restore step 2 (AFTER goto): localStorage is origin-scoped, so it can
