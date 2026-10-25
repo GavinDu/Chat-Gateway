@@ -614,10 +614,7 @@ async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     }))
 }
 
-fn build_model_list(
-    cfg: &AppConfig,
-    cache: &HashMap<String, Vec<String>>,
-) -> serde_json::Value {
+fn build_model_list(cfg: &AppConfig, cache: &HashMap<String, Vec<String>>) -> serde_json::Value {
     let enabled = cfg
         .providers
         .iter()
