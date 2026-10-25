@@ -1656,8 +1656,8 @@ mod model_list_tests {
             server: config::ServerConfig::default(),
             memory: config::MemoryConfig::default(),
             obscura: config::ObscuraConfig::default(),
-            providers: vec![provider("chatgpt", true, &["gpt-live"])],
             auth: config::AuthConfig::default(),
+            providers: vec![provider("chatgpt", true, &["gpt-live"])],
         };
         let cache = HashMap::from([(
             "chatgpt".to_owned(),
