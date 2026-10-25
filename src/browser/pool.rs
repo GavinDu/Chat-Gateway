@@ -499,7 +499,7 @@ fn browser_thread(
                                     }
                                 };
                                 if let Some(file) = session_file {
-                                    if let Err(error) = session::restore_cookies(&browser, &file, &provider.name) {
+                                    if let Err(error) = session::restore_cookies(&browser, &file, provider.name()) {
                                         report.errors.push(format!("session cookie restore failed: {error}"));
                                     }
                                     if page.goto(provider.login_url()).await.is_err() {
