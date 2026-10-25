@@ -2,46 +2,150 @@
 //! contract examples; they contain no captured account/session data.
 
 const FIXTURES: &[(&str, &str, &str)] = &[
-    ("qwen", "logged-out", include_str!("fixtures/qwen/logged-out.html")),
+    (
+        "qwen",
+        "logged-out",
+        include_str!("fixtures/qwen/logged-out.html"),
+    ),
     ("qwen", "idle", include_str!("fixtures/qwen/idle.html")),
-    ("qwen", "streaming", include_str!("fixtures/qwen/streaming.html")),
+    (
+        "qwen",
+        "streaming",
+        include_str!("fixtures/qwen/streaming.html"),
+    ),
     ("qwen", "done", include_str!("fixtures/qwen/done.html")),
-    ("metaai", "logged-out", include_str!("fixtures/metaai/logged-out.html")),
-    ("metaai", "idle", include_str!("fixtures/metaai/idle.html")),
-    ("metaai", "streaming", include_str!("fixtures/metaai/streaming.html")),
-    ("metaai", "done", include_str!("fixtures/metaai/done.html")),
-    ("claude", "logged-out", include_str!("fixtures/claude/logged-out.html")),
-    ("claude", "idle", include_str!("fixtures/claude/idle.html")),
-    ("claude", "streaming", include_str!("fixtures/claude/streaming.html")),
-    ("claude", "done", include_str!("fixtures/claude/done.html")),
-    ("chatgpt", "logged-out", include_str!("fixtures/chatgpt/logged-out.html")),
-    ("chatgpt", "idle", include_str!("fixtures/chatgpt/idle.html")),
-    ("chatgpt", "streaming", include_str!("fixtures/chatgpt/streaming.html")),
-    ("chatgpt", "done", include_str!("fixtures/chatgpt/done.html")),
-    ("gemini", "logged-out", include_str!("fixtures/gemini/logged-out.html")),
-    ("gemini", "idle", include_str!("fixtures/gemini/idle.html")),
-    ("gemini", "streaming", include_str!("fixtures/gemini/streaming.html")),
-    ("gemini", "done", include_str!("fixtures/gemini/done.html")),
-    ("grok", "logged-out", include_str!("fixtures/grok/logged-out.html")),
+    (
+        "metaai",
+        "logged-out",
+        include_str!("fixtures/metaai/logged-out.html"),
+    ),
+    (
+        "metaai",
+        "idle",
+        include_str!("fixtures/metaai/idle.html"),
+    ),
+    (
+        "metaai",
+        "streaming",
+        include_str!("fixtures/metaai/streaming.html"),
+    ),
+    (
+        "metaai",
+        "done",
+        include_str!("fixtures/metaai/done.html"),
+    ),
+    (
+        "claude",
+        "logged-out",
+        include_str!("fixtures/claude/logged-out.html"),
+    ),
+    (
+        "claude",
+        "idle",
+        include_str!("fixtures/claude/idle.html"),
+    ),
+    (
+        "claude",
+        "streaming",
+        include_str!("fixtures/claude/streaming.html"),
+    ),
+    (
+        "claude",
+        "done",
+        include_str!("fixtures/claude/done.html"),
+    ),
+    (
+        "chatgpt",
+        "logged-out",
+        include_str!("fixtures/chatgpt/logged-out.html"),
+    ),
+    (
+        "chatgpt",
+        "idle",
+        include_str!("fixtures/chatgpt/idle.html"),
+    ),
+    (
+        "chatgpt",
+        "streaming",
+        include_str!("fixtures/chatgpt/streaming.html"),
+    ),
+    (
+        "chatgpt",
+        "done",
+        include_str!("fixtures/chatgpt/done.html"),
+    ),
+    (
+        "gemini",
+        "logged-out",
+        include_str!("fixtures/gemini/logged-out.html"),
+    ),
+    (
+        "gemini",
+        "idle",
+        include_str!("fixtures/gemini/idle.html"),
+    ),
+    (
+        "gemini",
+        "streaming",
+        include_str!("fixtures/gemini/streaming.html"),
+    ),
+    (
+        "gemini",
+        "done",
+        include_str!("fixtures/gemini/done.html"),
+    ),
+    (
+        "grok",
+        "logged-out",
+        include_str!("fixtures/grok/logged-out.html"),
+    ),
     ("grok", "idle", include_str!("fixtures/grok/idle.html")),
-    ("grok", "streaming", include_str!("fixtures/grok/streaming.html")),
+    (
+        "grok",
+        "streaming",
+        include_str!("fixtures/grok/streaming.html"),
+    ),
     ("grok", "done", include_str!("fixtures/grok/done.html")),
-    ("mistral", "logged-out", include_str!("fixtures/mistral/logged-out.html")),
-    ("mistral", "idle", include_str!("fixtures/mistral/idle.html")),
-    ("mistral", "streaming", include_str!("fixtures/mistral/streaming.html")),
-    ("mistral", "done", include_str!("fixtures/mistral/done.html")),
+    (
+        "mistral",
+        "logged-out",
+        include_str!("fixtures/mistral/logged-out.html"),
+    ),
+    (
+        "mistral",
+        "idle",
+        include_str!("fixtures/mistral/idle.html"),
+    ),
+    (
+        "mistral",
+        "streaming",
+        include_str!("fixtures/mistral/streaming.html"),
+    ),
+    (
+        "mistral",
+        "done",
+        include_str!("fixtures/mistral/done.html"),
+    ),
     (
         "perplexity",
         "logged-out",
         include_str!("fixtures/perplexity/logged-out.html"),
     ),
-    ("perplexity", "idle", include_str!("fixtures/perplexity/idle.html")),
+    (
+        "perplexity",
+        "idle",
+        include_str!("fixtures/perplexity/idle.html"),
+    ),
     (
         "perplexity",
         "streaming",
         include_str!("fixtures/perplexity/streaming.html"),
     ),
-    ("perplexity", "done", include_str!("fixtures/perplexity/done.html")),
+    (
+        "perplexity",
+        "done",
+        include_str!("fixtures/perplexity/done.html"),
+    ),
 ];
 
 #[test]
