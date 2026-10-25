@@ -41,6 +41,7 @@ struct AppState {
 }
 
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ChatReq {
     model: String,
     messages: Vec<ChatMessage>,
@@ -48,6 +49,16 @@ struct ChatReq {
     stream: bool,
     #[serde(default)]
     temperature: Option<f32>,
+}
+
+fn api_error(status: axum::http::StatusCode, error_type: &str, code: &str, message: impl Into<String>) -> axum::response::Response {
+    (status, Json(serde_json::json!({
+        "error": {
+            "message": message.into(),
+            "type": error_type,
+            "code": code,
+        }
+    }))).into_response()
 }
 
 #[tokio::main]
@@ -341,10 +352,39 @@ async fn chat_completions(
     let req: ChatReq = match serde_json::from_slice::<ChatReq>(&body) {
         Ok(r) => r,
         Err(e) => {
-            return (axum::http::StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({ "error": { "message": e.to_string() } }))).into_response();
+            return api_error(
+                axum::http::StatusCode::BAD_REQUEST,
+                "invalid_request_error",
+                "invalid_json",
+                format!("invalid or unsupported request field: {e}"),
+            );
         }
     };
+
+    if req.model.trim().is_empty() {
+        return api_error(axum::http::StatusCode::BAD_REQUEST, "invalid_request_error", "model_required", "model must not be empty");
+    }
+    if req.messages.is_empty() {
+        return api_error(axum::http::StatusCode::BAD_REQUEST, "invalid_request_error", "messages_required", "messages must contain at least one message");
+    }
+    for (index, message) in req.messages.iter().enumerate() {
+        if !matches!(message.role.as_str(), "system" | "developer" | "user" | "assistant" | "tool") {
+            return api_error(
+                axum::http::StatusCode::BAD_REQUEST,
+                "invalid_request_error",
+                "invalid_message_role",
+                format!("messages[{index}].role '{}' is not supported", message.role),
+            );
+        }
+    }
+    if req.temperature.is_some() {
+        return api_error(
+            axum::http::StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            "unsupported_parameter",
+            "temperature is not supported by the current browser-backed adapters",
+        );
+    }
 
     let conversation_id = headers.get("X-Conversation-Id")
         .and_then(|v| v.to_str().ok()).map(|s| s.to_string());
@@ -362,6 +402,14 @@ async fn chat_completions(
 
     let candidates = state.router.resolve(&req.model, conversation_id.as_deref(), &state.memory);
     tracing::info!(model = %req.model, ?candidates, conv = ?conversation_id, "routing request");
+    if candidates.is_empty() {
+        return api_error(
+            axum::http::StatusCode::NOT_FOUND,
+            "invalid_request_error",
+            "model_not_found",
+            format!("model '{}' is not configured for an enabled provider; use /v1/models or model='auto'", req.model),
+        );
+    }
 
     let mut last_err: Option<String> = None;
     for provider_name in candidates {
