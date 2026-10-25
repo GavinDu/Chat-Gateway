@@ -7,11 +7,17 @@ targets = []
 
 [advisories]
 version = 2
-# Keep vulnerabilities and yanked releases blocking; surface unmaintained transitive crates
-# as warnings until the pinned Obscura renderer and YAML parser can be migrated.
-unmaintained = "warn"
+# Limit unmaintained checks to dependency reachability and explicitly document
+# known upstream maintenance notices that currently have no compatible upgrade.
+unmaintained = "transitive"
 yanked = "deny"
-ignore = []
+ignore = [
+  { id = "RUSTSEC-2025-0057", reason = "fxhash is a transitive dependency of the pinned Obscura stack; track replacement during upstream migration." },
+  { id = "RUSTSEC-2024-0436", reason = "paste is a transitive dependency of the pinned Obscura stack; track replacement during upstream migration." },
+  { id = "RUSTSEC-2026-0206", reason = "rustybuzz is currently pulled by the pinned renderer; review when updating Obscura." },
+  { id = "RUSTSEC-2026-0192", reason = "ttf-parser is currently pulled by the pinned renderer; review when updating Obscura." },
+  { id = "RUSTSEC-2024-0449", reason = "unsafe-libyaml is used by serde_yaml; migration to a maintained YAML implementation is tracked separately." },
+]
 
 [licenses]
 version = 2
