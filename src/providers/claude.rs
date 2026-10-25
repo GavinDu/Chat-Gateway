@@ -1,9 +1,9 @@
-use async_trait::async_trait;
-use obscura_core::Page;
-use anyhow::Result;
 use crate::config::ProviderConfig;
 use crate::providers::common::{self, SelectorSet};
 use crate::providers::{AdapterSelectors, ChatProvider};
+use anyhow::Result;
+use async_trait::async_trait;
+use obscura_core::Page;
 
 /// Claude - claude.ai. ProseMirror input; streaming via data-is-streaming.
 pub struct ClaudeAdapter {
@@ -22,14 +22,22 @@ pub const SELECTORS: SelectorSet = SelectorSet {
 
 #[async_trait(?Send)]
 impl ChatProvider for ClaudeAdapter {
-    fn name(&self) -> &str { "claude" }
-    fn aliases(&self) -> &[String] { &self.cfg.models }
-    fn model_pairs(&self) -> &[(&str, &str)] { SELECTORS.model_pairs }
+    fn name(&self) -> &str {
+        "claude"
+    }
+    fn aliases(&self) -> &[String] {
+        &self.cfg.models
+    }
+    fn model_pairs(&self) -> &[(&str, &str)] {
+        SELECTORS.model_pairs
+    }
 
     async fn select_model(&self, page: &Page, model: &str) -> Result<()> {
         common::select_model(page, SELECTORS.model_pairs, model, &self.cfg.models).await
     }
-    fn strip_citations(&self) -> bool { false }
+    fn strip_citations(&self) -> bool {
+        false
+    }
 
     async fn discover_models(&self, page: &mut Page) -> Result<Vec<String>> {
         common::discover_models(page, &SELECTORS, &self.cfg.models).await
@@ -43,6 +51,10 @@ impl ChatProvider for ClaudeAdapter {
         common::response_text(page, &SELECTORS)
     }
 
-    fn selectors(&self) -> AdapterSelectors { SELECTORS.adapter_selectors() }
-    fn selector_set(&self) -> &common::SelectorSet { &SELECTORS }
+    fn selectors(&self) -> AdapterSelectors {
+        SELECTORS.adapter_selectors()
+    }
+    fn selector_set(&self) -> &common::SelectorSet {
+        &SELECTORS
+    }
 }

@@ -1,15 +1,15 @@
+use crate::config::AppConfig;
+use crate::login::{self, LoginAction, LoginView};
+use crate::providers::{self, Provider, ProviderChunk};
+use crate::session;
+use anyhow::Result;
+use dashmap::DashMap;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use dashmap::DashMap;
 use tokio::sync::{mpsc, oneshot, OwnedSemaphorePermit, Semaphore};
-use anyhow::Result;
-use crate::config::AppConfig;
-use crate::login::{self, LoginAction, LoginView};
-use crate::providers::{self, Provider, ProviderChunk};
-use crate::session;
 
 /// ObscuraPool - one persistent, pre-warmed page per provider
 /// (DashMap-indexed by provider name on the API side).
@@ -30,20 +30,54 @@ pub struct ObscuraPool {
 }
 
 enum Command {
-    Discover { provider: Provider, reply: oneshot::Sender<Result<Vec<String>>> },
-    Send { provider: Provider, prompt: String, model: String, has_history: bool, timeout: Duration, chunks: mpsc::Sender<Result<ProviderChunk>> },
-    SaveSession { provider: Provider, reply: oneshot::Sender<Result<()>> },
-    TestAdapter { provider: Provider, reply: oneshot::Sender<Result<TestAdapterReport>> },
+    Discover {
+        provider: Provider,
+        reply: oneshot::Sender<Result<Vec<String>>>,
+    },
+    Send {
+        provider: Provider,
+        prompt: String,
+        model: String,
+        has_history: bool,
+        timeout: Duration,
+        chunks: mpsc::Sender<Result<ProviderChunk>>,
+    },
+    SaveSession {
+        provider: Provider,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    TestAdapter {
+        provider: Provider,
+        reply: oneshot::Sender<Result<TestAdapterReport>>,
+    },
     // Login delegate UI (see src/login.rs): dedicated pages on the
     // browser thread, separate from the warm provider pages. Login
     // pages are plain Rc<Page> (no &mut needed after creation — all
     // relay actions use &Page methods; Navigate recreates the page).
-    LoginStart { provider: Provider, reply: oneshot::Sender<Result<String>> },
-    LoginCancel { provider: Provider, reply: oneshot::Sender<Result<()>> },
-    LoginComplete { provider: Provider, reply: oneshot::Sender<Result<LoginCompleted>> },
-    LoginStatusAll { reply: oneshot::Sender<Vec<LoginActiveInfo>> },
-    LoginView { provider: Provider, reply: oneshot::Sender<Result<LoginView>> },
-    LoginAct { provider: Provider, action: LoginAction, reply: oneshot::Sender<Result<String>> },
+    LoginStart {
+        provider: Provider,
+        reply: oneshot::Sender<Result<String>>,
+    },
+    LoginCancel {
+        provider: Provider,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    LoginComplete {
+        provider: Provider,
+        reply: oneshot::Sender<Result<LoginCompleted>>,
+    },
+    LoginStatusAll {
+        reply: oneshot::Sender<Vec<LoginActiveInfo>>,
+    },
+    LoginView {
+        provider: Provider,
+        reply: oneshot::Sender<Result<LoginView>>,
+    },
+    LoginAct {
+        provider: Provider,
+        action: LoginAction,
+        reply: oneshot::Sender<Result<String>>,
+    },
 }
 
 /// One provider's live login-page info for the /login status endpoint.
@@ -102,7 +136,10 @@ impl ObscuraPool {
         let semaphores = DashMap::new();
         for p in &cfg.providers {
             if p.enabled {
-                semaphores.insert(p.name.clone(), Arc::new(Semaphore::new(p.session_pool_size.max(1))));
+                semaphores.insert(
+                    p.name.clone(),
+                    Arc::new(Semaphore::new(p.session_pool_size.max(1))),
+                );
             }
         }
         let pool = Arc::new(Self {
@@ -121,7 +158,8 @@ impl ObscuraPool {
     pub async fn warm_all(&self) -> Result<()> {
         let mut slot = self.ready.lock().await;
         if let Some(rx) = slot.take() {
-            rx.await.map_err(|_| anyhow::anyhow!("browser thread died during warm-up"))??;
+            rx.await
+                .map_err(|_| anyhow::anyhow!("browser thread died during warm-up"))??;
         }
         Ok(())
     }
@@ -129,20 +167,32 @@ impl ObscuraPool {
     /// Bound concurrent sends per provider (v1 pool semantics).
     pub async fn acquire(&self, provider: &str) -> Result<ObscuraPermit> {
         let start = std::time::Instant::now();
-        let sem = self.semaphores.get(provider).map(|v| v.clone())
+        let sem = self
+            .semaphores
+            .get(provider)
+            .map(|v| v.clone())
             .unwrap_or_else(|| Arc::new(Semaphore::new(2)));
         let permit = sem.acquire_owned().await?;
-        Ok(ObscuraPermit { _permit: permit, queue_ms: start.elapsed().as_millis() })
+        Ok(ObscuraPermit {
+            _permit: permit,
+            queue_ms: start.elapsed().as_millis(),
+        })
     }
 
     /// Discover a provider's models on a fresh page (no message sent).
     pub async fn discover(&self, name: &str) -> Result<Vec<String>> {
-        let provider = Provider::from_name(name)
-            .ok_or_else(|| anyhow::anyhow!("unknown provider {name}"))?;
+        let provider =
+            Provider::from_name(name).ok_or_else(|| anyhow::anyhow!("unknown provider {name}"))?;
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx.send(Command::Discover { provider, reply: tx }).await
+        self.cmd_tx
+            .send(Command::Discover {
+                provider,
+                reply: tx,
+            })
+            .await
             .map_err(|_| anyhow::anyhow!("browser thread gone"))?;
-        rx.await.map_err(|_| anyhow::anyhow!("browser thread dropped discover"))?
+        rx.await
+            .map_err(|_| anyhow::anyhow!("browser thread dropped discover"))?
     }
 
     /// Send a prompt on the provider's warmed page; response chunks
@@ -150,14 +200,32 @@ impl ObscuraPool {
     /// requested model (for UI selection on new conversations only)
     /// and `has_history` marks a returning conversation (selection
     /// skipped — the model is already fixed by the prior turns).
-    pub async fn send_stream(&self, name: &str, prompt: String, model: String, has_history: bool) -> Result<mpsc::Receiver<Result<ProviderChunk>>> {
-        let provider = Provider::from_name(name)
-            .ok_or_else(|| anyhow::anyhow!("unknown provider {name}"))?;
+    pub async fn send_stream(
+        &self,
+        name: &str,
+        prompt: String,
+        model: String,
+        has_history: bool,
+    ) -> Result<mpsc::Receiver<Result<ProviderChunk>>> {
+        let provider =
+            Provider::from_name(name).ok_or_else(|| anyhow::anyhow!("unknown provider {name}"))?;
         let timeout = Duration::from_secs(
-            self.cfg.provider(name).map(|p| p.timeout_seconds).unwrap_or(120),
+            self.cfg
+                .provider(name)
+                .map(|p| p.timeout_seconds)
+                .unwrap_or(120),
         );
         let (tx, rx) = mpsc::channel(32);
-        self.cmd_tx.send(Command::Send { provider, prompt, model, has_history, timeout, chunks: tx }).await
+        self.cmd_tx
+            .send(Command::Send {
+                provider,
+                prompt,
+                model,
+                has_history,
+                timeout,
+                chunks: tx,
+            })
+            .await
             .map_err(|_| anyhow::anyhow!("browser thread gone"))?;
         Ok(rx)
     }
@@ -166,27 +234,39 @@ impl ObscuraPool {
     /// phases, restored-tree form): session check → selector probe →
     /// dummy prompt send → up to 45s response-token wait.
     pub async fn test_adapter(&self, name: &str) -> Result<TestAdapterReport> {
-        let provider = Provider::from_name(name)
-            .ok_or_else(|| anyhow::anyhow!("unknown provider {name}"))?;
+        let provider =
+            Provider::from_name(name).ok_or_else(|| anyhow::anyhow!("unknown provider {name}"))?;
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx.send(Command::TestAdapter { provider, reply: tx }).await
+        self.cmd_tx
+            .send(Command::TestAdapter {
+                provider,
+                reply: tx,
+            })
+            .await
             .map_err(|_| anyhow::anyhow!("browser thread gone"))?;
-        rx.await.map_err(|_| anyhow::anyhow!("browser thread dropped test-adapter"))?
+        rx.await
+            .map_err(|_| anyhow::anyhow!("browser thread dropped test-adapter"))?
     }
 
     /// Persist the provider's current cookies + localStorage.
     pub async fn save_session(&self, name: &str) -> Result<()> {
-        let provider = Provider::from_name(name)
-            .ok_or_else(|| anyhow::anyhow!("unknown provider {name}"))?;
+        let provider =
+            Provider::from_name(name).ok_or_else(|| anyhow::anyhow!("unknown provider {name}"))?;
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx.send(Command::SaveSession { provider, reply: tx }).await
+        self.cmd_tx
+            .send(Command::SaveSession {
+                provider,
+                reply: tx,
+            })
+            .await
             .map_err(|_| anyhow::anyhow!("browser thread gone"))?;
-        rx.await.map_err(|_| anyhow::anyhow!("browser thread dropped save"))?
+        rx.await
+            .map_err(|_| anyhow::anyhow!("browser thread dropped save"))?
     }
 
     fn login_provider(&self, name: &str) -> Result<Provider> {
-        let provider = Provider::from_name(name)
-            .ok_or_else(|| anyhow::anyhow!("unknown provider {name}"))?;
+        let provider =
+            Provider::from_name(name).ok_or_else(|| anyhow::anyhow!("unknown provider {name}"))?;
         match self.cfg.provider(name) {
             Some(p) if p.enabled => Ok(provider),
             _ => Err(anyhow::anyhow!("provider {name} not enabled")),
@@ -199,18 +279,30 @@ impl ObscuraPool {
     pub async fn login_start(&self, name: &str) -> Result<String> {
         let provider = self.login_provider(name)?;
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx.send(Command::LoginStart { provider, reply: tx }).await
+        self.cmd_tx
+            .send(Command::LoginStart {
+                provider,
+                reply: tx,
+            })
+            .await
             .map_err(|_| anyhow::anyhow!("browser thread gone"))?;
-        rx.await.map_err(|_| anyhow::anyhow!("browser thread dropped login start"))?
+        rx.await
+            .map_err(|_| anyhow::anyhow!("browser thread dropped login start"))?
     }
 
     /// Login UI: drop the provider's login page (idempotent).
     pub async fn login_cancel(&self, name: &str) -> Result<()> {
         let provider = self.login_provider(name)?;
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx.send(Command::LoginCancel { provider, reply: tx }).await
+        self.cmd_tx
+            .send(Command::LoginCancel {
+                provider,
+                reply: tx,
+            })
+            .await
             .map_err(|_| anyhow::anyhow!("browser thread gone"))?;
-        rx.await.map_err(|_| anyhow::anyhow!("browser thread dropped login cancel"))?
+        rx.await
+            .map_err(|_| anyhow::anyhow!("browser thread dropped login cancel"))?
     }
 
     /// Login UI: capture the login page's session to
@@ -220,26 +312,41 @@ impl ObscuraPool {
     pub async fn login_complete(&self, name: &str) -> Result<LoginCompleted> {
         let provider = self.login_provider(name)?;
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx.send(Command::LoginComplete { provider, reply: tx }).await
+        self.cmd_tx
+            .send(Command::LoginComplete {
+                provider,
+                reply: tx,
+            })
+            .await
             .map_err(|_| anyhow::anyhow!("browser thread gone"))?;
-        rx.await.map_err(|_| anyhow::anyhow!("browser thread dropped login complete"))?
+        rx.await
+            .map_err(|_| anyhow::anyhow!("browser thread dropped login complete"))?
     }
 
     /// Login UI: live info for all providers with an active login page.
     pub async fn login_status_all(&self) -> Result<Vec<LoginActiveInfo>> {
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx.send(Command::LoginStatusAll { reply: tx }).await
+        self.cmd_tx
+            .send(Command::LoginStatusAll { reply: tx })
+            .await
             .map_err(|_| anyhow::anyhow!("browser thread gone"))?;
-        rx.await.map_err(|_| anyhow::anyhow!("browser thread dropped login status"))
+        rx.await
+            .map_err(|_| anyhow::anyhow!("browser thread dropped login status"))
     }
 
     /// Login UI: full live view of one provider's login page.
     pub async fn login_view(&self, name: &str) -> Result<LoginView> {
         let provider = self.login_provider(name)?;
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx.send(Command::LoginView { provider, reply: tx }).await
+        self.cmd_tx
+            .send(Command::LoginView {
+                provider,
+                reply: tx,
+            })
+            .await
             .map_err(|_| anyhow::anyhow!("browser thread gone"))?;
-        rx.await.map_err(|_| anyhow::anyhow!("browser thread dropped login view"))?
+        rx.await
+            .map_err(|_| anyhow::anyhow!("browser thread dropped login view"))?
     }
 
     /// Login UI: perform one relay action on a provider's login page.
@@ -251,9 +358,16 @@ impl ObscuraPool {
             login::validate_navigation_url_for_provider(name, url)?;
         }
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx.send(Command::LoginAct { provider, action, reply: tx }).await
+        self.cmd_tx
+            .send(Command::LoginAct {
+                provider,
+                action,
+                reply: tx,
+            })
+            .await
             .map_err(|_| anyhow::anyhow!("browser thread gone"))?;
-        rx.await.map_err(|_| anyhow::anyhow!("browser thread dropped login act"))?
+        rx.await
+            .map_err(|_| anyhow::anyhow!("browser thread dropped login act"))?
     }
 }
 
@@ -334,8 +448,18 @@ fn login_active_info(
 
 fn build_browser(cfg: &AppConfig) -> Result<obscura_core::Browser> {
     let mut builder = obscura_core::Browser::builder().stealth(cfg.obscura.stealth);
-    let storage = cfg.obscura.storage_dir.clone().filter(|s| !s.is_empty())
-        .or_else(|| if cfg.server.chrome_profile_dir.is_empty() { None } else { Some(cfg.server.chrome_profile_dir.clone()) });
+    let storage = cfg
+        .obscura
+        .storage_dir
+        .clone()
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            if cfg.server.chrome_profile_dir.is_empty() {
+                None
+            } else {
+                Some(cfg.server.chrome_profile_dir.clone())
+            }
+        });
     if let Some(dir) = storage {
         builder = builder.storage_dir(dir);
     }
@@ -348,7 +472,10 @@ fn browser_thread(
     ready_tx: oneshot::Sender<Result<()>>,
 ) {
     std::thread::spawn(move || {
-        let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+        let rt = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
             Ok(rt) => rt,
             Err(e) => {
                 let _ = ready_tx.send(Err(e.into()));

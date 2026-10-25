@@ -1,12 +1,15 @@
 use axum::{
+    body::Body,
     extract::{DefaultBodyLimit, Path, State},
     http::HeaderMap,
-    response::{sse::{Event, Sse}, Html, IntoResponse},
-    routing::{delete, get, post},
-    middleware::{self, Next},
     http::{Request, StatusCode},
+    middleware::{self, Next},
     response::Response,
-    body::Body,
+    response::{
+        sse::{Event, Sse},
+        Html, IntoResponse,
+    },
+    routing::{delete, get, post},
     Json, Router,
 };
 use clap::Parser;
@@ -27,12 +30,18 @@ use memory::{ChatMessage, UnifiedMemory};
 use router::ProviderRouter;
 
 #[derive(Parser, Debug)]
-#[command(name = "chat-gateway-rs", about = "Chat Gateway v2 - Obscura native, unified memory over 8 providers")]
+#[command(
+    name = "chat-gateway-rs",
+    about = "Chat Gateway v2 - Obscura native, unified memory over 8 providers"
+)]
 struct Cli {
     #[arg(long, default_value = "config.yaml")]
     config: std::path::PathBuf,
 
-    #[arg(long, help = "Test one adapter live: discover models + show selectors, then exit")]
+    #[arg(
+        long,
+        help = "Test one adapter live: discover models + show selectors, then exit"
+    )]
     test_adapter: Option<String>,
 }
 
@@ -58,7 +67,6 @@ struct ChatReq {
     unsupported_fields: HashMap<String, serde_json::Value>,
 }
 
-
 /// Validate request semantics separately from JSON decoding so the contract
 /// can be exercised without initializing browser-backed providers.
 fn validate_chat_req(req: &ChatReq) -> Result<(), (&'static str, String)> {
@@ -70,10 +78,16 @@ fn validate_chat_req(req: &ChatReq) -> Result<(), (&'static str, String)> {
         return Err(("model_required", "model must not be empty".to_string()));
     }
     if req.messages.is_empty() {
-        return Err(("messages_required", "messages must contain at least one message".to_string()));
+        return Err((
+            "messages_required",
+            "messages must contain at least one message".to_string(),
+        ));
     }
     if req.messages.len() > MAX_MESSAGES {
-        return Err(("too_many_messages", format!("messages may contain at most {MAX_MESSAGES} entries")));
+        return Err((
+            "too_many_messages",
+            format!("messages may contain at most {MAX_MESSAGES} entries"),
+        ));
     }
     let mut total_content_bytes = 0usize;
     for (index, message) in req.messages.iter().enumerate() {
@@ -87,10 +101,15 @@ fn validate_chat_req(req: &ChatReq) -> Result<(), (&'static str, String)> {
         if total_content_bytes > MAX_TOTAL_CONTENT_BYTES {
             return Err((
                 "request_content_too_large",
-                format!("combined message content exceeds the {MAX_TOTAL_CONTENT_BYTES}-byte limit"),
+                format!(
+                    "combined message content exceeds the {MAX_TOTAL_CONTENT_BYTES}-byte limit"
+                ),
             ));
         }
-        if !matches!(message.role.as_str(), "system" | "developer" | "user" | "assistant" | "tool") {
+        if !matches!(
+            message.role.as_str(),
+            "system" | "developer" | "user" | "assistant" | "tool"
+        ) {
             return Err((
                 "invalid_message_role",
                 format!("messages[{index}].role '{}' is not supported", message.role),
@@ -114,20 +133,31 @@ fn validate_chat_req(req: &ChatReq) -> Result<(), (&'static str, String)> {
     Ok(())
 }
 
-fn api_error(status: axum::http::StatusCode, error_type: &str, code: &str, message: impl Into<String>) -> axum::response::Response {
-    (status, Json(serde_json::json!({
-        "error": {
-            "message": message.into(),
-            "type": error_type,
-            "code": code,
-        }
-    }))).into_response()
+fn api_error(
+    status: axum::http::StatusCode,
+    error_type: &str,
+    code: &str,
+    message: impl Into<String>,
+) -> axum::response::Response {
+    (
+        status,
+        Json(serde_json::json!({
+            "error": {
+                "message": message.into(),
+                "type": error_type,
+                "code": code,
+            }
+        })),
+    )
+        .into_response()
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+        )
         .init();
 
     let cli = Cli::parse();
@@ -138,7 +168,10 @@ async fn main() -> anyhow::Result<()> {
 
     if let Some(provider) = cli.test_adapter {
         let permit = pool.acquire(&provider).await?;
-        println!("Testing adapter '{}' with embedded Obscura (queue {}ms)...", provider, permit.queue_ms);
+        println!(
+            "Testing adapter '{}' with embedded Obscura (queue {}ms)...",
+            provider, permit.queue_ms
+        );
         drop(permit);
         // Live-send phases (Go RunAdapterTest, restored-tree form) for
         // ALL providers — Rust v1 diagnostics only did discover+print.
@@ -158,7 +191,8 @@ async fn main() -> anyhow::Result<()> {
                 for e in &rep.errors {
                     println!("  error: {e}");
                 }
-                if rep.errors.is_empty() && rep.session_ok && rep.input_found && rep.response_token {
+                if rep.errors.is_empty() && rep.session_ok && rep.input_found && rep.response_token
+                {
                     println!("test-adapter: all phases passed — adapter is healthy");
                 }
             }
@@ -199,7 +233,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/ready", get(readiness))
         .route("/v1/models", get(models))
         .route("/v1/chat/completions", post(chat_completions))
-        .route("/v1/conversations/:conversation_id", delete(delete_conversation))
+        .route(
+            "/v1/conversations/:conversation_id",
+            delete(delete_conversation),
+        )
         .route("/login", get(login_page))
         .route("/login/api/status", get(login_status))
         .route("/login/api/:provider/start", post(login_start))
@@ -232,7 +269,11 @@ async fn refresh_models(state: &Arc<AppState>) {
         }
         match state.pool.discover(&p.name).await {
             Ok(models) => {
-                state.models_cache.write().await.insert(p.name.clone(), models);
+                state
+                    .models_cache
+                    .write()
+                    .await
+                    .insert(p.name.clone(), models);
             }
             Err(e) => tracing::warn!(provider = %p.name, "model discovery failed: {e}"),
         }
@@ -253,7 +294,8 @@ async fn protect_login_api(req: Request<Body>, next: Next) -> Response {
     // browser request with an attacker-controlled Host that resolves to
     // 127.0.0.1. Enforce the loopback authority on every route, not only
     // the browser-control endpoints.
-    let host_is_loopback = headers.get(axum::http::header::HOST)
+    let host_is_loopback = headers
+        .get(axum::http::header::HOST)
         .and_then(|value| value.to_str().ok())
         .map(is_loopback_authority)
         .unwrap_or(false);
@@ -261,10 +303,7 @@ async fn protect_login_api(req: Request<Body>, next: Next) -> Response {
     let fetch_site = headers.get("sec-fetch-site").and_then(|v| v.to_str().ok());
     let is_login_api = req.uri().path().starts_with("/login/api/");
     let origin_is_safe = !origin_present || login_origin_is_same_authority(headers);
-    if !host_is_loopback
-        || (is_login_api && fetch_site == Some("cross-site"))
-        || !origin_is_safe
-    {
+    if !host_is_loopback || (is_login_api && fetch_site == Some("cross-site")) || !origin_is_safe {
         return (
             StatusCode::FORBIDDEN,
             Json(serde_json::json!({
@@ -274,7 +313,8 @@ async fn protect_login_api(req: Request<Body>, next: Next) -> Response {
                     "code": "unsafe_local_request"
                 }
             })),
-        ).into_response();
+        )
+            .into_response();
     }
     next.run(req).await
 }
@@ -285,10 +325,19 @@ fn login_origin_is_same_authority(headers: &HeaderMap) -> bool {
         // Sec-Fetch-Site check above still rejects explicitly cross-site calls.
         return true;
     };
-    let Ok(origin) = origin.to_str() else { return false; };
-    let Some((scheme, authority)) = origin.split_once("://") else { return false; };
-    if scheme != "http" && scheme != "https" { return false; }
-    let Some(host) = headers.get(axum::http::header::HOST).and_then(|v| v.to_str().ok()) else {
+    let Ok(origin) = origin.to_str() else {
+        return false;
+    };
+    let Some((scheme, authority)) = origin.split_once("://") else {
+        return false;
+    };
+    if scheme != "http" && scheme != "https" {
+        return false;
+    }
+    let Some(host) = headers
+        .get(axum::http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+    else {
         return false;
     };
 
@@ -304,7 +353,9 @@ fn is_loopback_authority(authority: &str) -> bool {
         return false;
     }
     let (host, port) = if authority.starts_with('[') {
-        let Some((host, rest)) = authority.split_once(']') else { return false; };
+        let Some((host, rest)) = authority.split_once(']') else {
+            return false;
+        };
         let port = if rest.is_empty() {
             None
         } else if let Some(port) = rest.strip_prefix(':') {
@@ -325,7 +376,10 @@ fn is_loopback_authority(authority: &str) -> bool {
             return false;
         }
     }
-    matches!(host.to_ascii_lowercase().as_str(), "localhost" | "127.0.0.1" | "[::1" | "[::1]")
+    matches!(
+        host.to_ascii_lowercase().as_str(),
+        "localhost" | "127.0.0.1" | "[::1" | "[::1]"
+    )
 }
 
 async fn login_page() -> impl IntoResponse {
@@ -350,11 +404,7 @@ async fn login_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         .iter()
         .map(|p| {
             let name = p.name();
-            let enabled = state
-                .cfg
-                .provider(name)
-                .map(|c| c.enabled)
-                .unwrap_or(false);
+            let enabled = state.cfg.provider(name).map(|c| c.enabled).unwrap_or(false);
             let (session_present, session_ts) = match session::load_session_file(name) {
                 Ok(Some(f)) => (true, Some(f.ts)),
                 _ => (false, None),
@@ -383,7 +433,8 @@ async fn login_start(
     Path(provider): Path<String>,
 ) -> impl IntoResponse {
     match state.pool.login_start(&provider).await {
-        Ok(url) => Json(serde_json::json!({ "ok": true, "provider": provider, "url": url })).into_response(),
+        Ok(url) => Json(serde_json::json!({ "ok": true, "provider": provider, "url": url }))
+            .into_response(),
         Err(e) => login_err(e.to_string()),
     }
 }
@@ -487,7 +538,8 @@ async fn readiness(State(state): State<Arc<AppState>>) -> impl IntoResponse {
                 "status": "not_ready",
                 "reason": "no_enabled_provider",
             })),
-        ).into_response();
+        )
+            .into_response();
     }
     (
         StatusCode::OK,
@@ -495,7 +547,8 @@ async fn readiness(State(state): State<Arc<AppState>>) -> impl IntoResponse {
             "status": "ready",
             "enabled_providers": enabled,
         })),
-    ).into_response()
+    )
+        .into_response()
 }
 
 /// Add a gateway-generated request ID to every response, including security
@@ -572,14 +625,15 @@ async fn models(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     Json(serde_json::json!({ "object": "list", "data": data }))
 }
 
-
 /// Conversation IDs are echoed into response IDs and tab affinity. Restrict
 /// them to bounded ASCII so formatting and byte slicing cannot panic on a
 /// malicious multibyte header value.
 fn valid_conversation_id(value: &str) -> bool {
     (8..=128).contains(&value.len())
         && value.is_ascii()
-        && value.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
 async fn chat_completions(
@@ -613,12 +667,14 @@ async fn chat_completions(
         Some(value) => {
             let value = match value.to_str() {
                 Ok(value) => value,
-                Err(_) => return api_error(
-                    axum::http::StatusCode::BAD_REQUEST,
-                    "invalid_request_error",
-                    "invalid_conversation_id",
-                    "X-Conversation-Id must be a valid ASCII identifier",
-                ),
+                Err(_) => {
+                    return api_error(
+                        axum::http::StatusCode::BAD_REQUEST,
+                        "invalid_request_error",
+                        "invalid_conversation_id",
+                        "X-Conversation-Id must be a valid ASCII identifier",
+                    )
+                }
             };
             if !valid_conversation_id(value) {
                 return api_error(
@@ -635,8 +691,13 @@ async fn chat_completions(
     // Assemble the provider prompt from the unified memory window. The
     // canonical transcript must be passed to the provider so follow-up
     // turns and provider switches retain conversation context.
-    let (context_prompt, windowed) = state.memory.build_context(conversation_id.as_deref(), &req.messages);
-    let has_history = conversation_id.as_deref().map(|cid| state.memory.has_history(cid)).unwrap_or(false);
+    let (context_prompt, windowed) = state
+        .memory
+        .build_context(conversation_id.as_deref(), &req.messages);
+    let has_history = conversation_id
+        .as_deref()
+        .map(|cid| state.memory.has_history(cid))
+        .unwrap_or(false);
     let prompt = context_prompt;
     if prompt.is_empty() {
         return api_error(
@@ -647,8 +708,15 @@ async fn chat_completions(
         );
     }
 
-    let candidates = state.router.resolve(&req.model, conversation_id.as_deref(), &state.memory);
-    let provider_model = req.model.split_once('/').map(|(_, model)| model).unwrap_or(req.model.as_str()).to_string();
+    let candidates = state
+        .router
+        .resolve(&req.model, conversation_id.as_deref(), &state.memory);
+    let provider_model = req
+        .model
+        .split_once('/')
+        .map(|(_, model)| model)
+        .unwrap_or(req.model.as_str())
+        .to_string();
     tracing::info!(model = %req.model, ?candidates, conv = ?conversation_id, "routing request");
     if candidates.is_empty() {
         return api_error(
@@ -670,7 +738,16 @@ async fn chat_completions(
         };
         tracing::debug!(provider = %provider_name, queue_ms = permit.queue_ms, "acquired provider slot");
 
-        let mut rx = match state.pool.send_stream(&provider_name, prompt.clone(), provider_model.clone(), has_history).await {
+        let mut rx = match state
+            .pool
+            .send_stream(
+                &provider_name,
+                prompt.clone(),
+                provider_model.clone(),
+                has_history,
+            )
+            .await
+        {
             Ok(rx) => rx,
             Err(e) => {
                 last_err = Some(e.to_string());
@@ -678,7 +755,8 @@ async fn chat_completions(
             }
         };
 
-        let new_conv_id = conversation_id.clone()
+        let new_conv_id = conversation_id
+            .clone()
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
         if req.stream {
@@ -758,7 +836,9 @@ async fn chat_completions(
         while let Some(item) = rx.recv().await {
             match item {
                 Ok(c) => {
-                    if c.done { break; }
+                    if c.done {
+                        break;
+                    }
                     full.push_str(&c.content);
                 }
                 Err(e) => {
@@ -785,7 +865,10 @@ async fn chat_completions(
         if let Err(error) = state.memory.store_turn(
             new_conv_id.clone(),
             windowed.clone(),
-            ChatMessage { role: "assistant".to_string(), content: full.clone() },
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: full.clone(),
+            },
             provider_name.clone(),
             format!("tab-{}", &new_conv_id[..8]),
         ) {
@@ -874,20 +957,27 @@ mod login_origin_tests {
 mod api_contract_tests {
     use super::*;
 
-
     #[test]
     fn rejects_empty_model_and_messages() {
         let empty_model: ChatReq = serde_json::from_value(serde_json::json!({
             "model": "  ",
             "messages": [{"role": "user", "content": "hello"}]
-        })).unwrap();
-        assert_eq!(validate_chat_req(&empty_model).unwrap_err().0, "model_required");
+        }))
+        .unwrap();
+        assert_eq!(
+            validate_chat_req(&empty_model).unwrap_err().0,
+            "model_required"
+        );
 
         let empty_messages: ChatReq = serde_json::from_value(serde_json::json!({
             "model": "auto",
             "messages": []
-        })).unwrap();
-        assert_eq!(validate_chat_req(&empty_messages).unwrap_err().0, "messages_required");
+        }))
+        .unwrap();
+        assert_eq!(
+            validate_chat_req(&empty_messages).unwrap_err().0,
+            "messages_required"
+        );
     }
 
     #[test]
@@ -895,15 +985,23 @@ mod api_contract_tests {
         let invalid_role: ChatReq = serde_json::from_value(serde_json::json!({
             "model": "auto",
             "messages": [{"role": "function", "content": "hello"}]
-        })).unwrap();
-        assert_eq!(validate_chat_req(&invalid_role).unwrap_err().0, "invalid_message_role");
+        }))
+        .unwrap();
+        assert_eq!(
+            validate_chat_req(&invalid_role).unwrap_err().0,
+            "invalid_message_role"
+        );
 
         let temperature: ChatReq = serde_json::from_value(serde_json::json!({
             "model": "auto",
             "messages": [{"role": "user", "content": "hello"}],
             "temperature": 0.2
-        })).unwrap();
-        assert_eq!(validate_chat_req(&temperature).unwrap_err().0, "unsupported_parameter");
+        }))
+        .unwrap();
+        assert_eq!(
+            validate_chat_req(&temperature).unwrap_err().0,
+            "unsupported_parameter"
+        );
     }
 
     #[test]
@@ -912,13 +1010,20 @@ mod api_contract_tests {
             "model": "auto",
             "messages": (0..257).map(|_| serde_json::json!({"role":"user","content":"x"})).collect::<Vec<_>>()
         })).unwrap();
-        assert_eq!(validate_chat_req(&too_many).unwrap_err().0, "too_many_messages");
+        assert_eq!(
+            validate_chat_req(&too_many).unwrap_err().0,
+            "too_many_messages"
+        );
 
         let too_large: ChatReq = serde_json::from_value(serde_json::json!({
             "model": "auto",
             "messages": [{"role":"user","content":"x".repeat(128 * 1024 + 1)}]
-        })).unwrap();
-        assert_eq!(validate_chat_req(&too_large).unwrap_err().0, "message_too_large");
+        }))
+        .unwrap();
+        assert_eq!(
+            validate_chat_req(&too_large).unwrap_err().0,
+            "message_too_large"
+        );
     }
 
     #[test]
@@ -933,8 +1038,12 @@ mod api_contract_tests {
                 {"role":"user","content":"q".repeat(100 * 1024)},
                 {"role":"assistant","content":"r".repeat(100 * 1024)}
             ]
-        })).unwrap();
-        assert_eq!(validate_chat_req(&req).unwrap_err().0, "request_content_too_large");
+        }))
+        .unwrap();
+        assert_eq!(
+            validate_chat_req(&req).unwrap_err().0,
+            "request_content_too_large"
+        );
     }
 
     #[test]
@@ -948,7 +1057,8 @@ mod api_contract_tests {
                 {"role": "assistant", "content": "hi"},
                 {"role": "tool", "content": "result"}
             ]
-        })).unwrap();
+        }))
+        .unwrap();
         assert!(validate_chat_req(&req).is_ok());
     }
 
@@ -957,7 +1067,8 @@ mod api_contract_tests {
         let parsed: ChatReq = serde_json::from_value(serde_json::json!({
             "model": "auto",
             "messages": [{"role": "user", "content": "hello"}]
-        })).expect("minimal request should deserialize");
+        }))
+        .expect("minimal request should deserialize");
         assert_eq!(parsed.model, "auto");
         assert_eq!(parsed.messages.len(), 1);
         assert!(!parsed.stream);
@@ -971,7 +1082,8 @@ mod api_contract_tests {
             "messages": [{"role": "user", "content": "hello"}],
             "tools": [],
             "top_p": 0.5
-        })).expect("unknown parameters should be captured for validation");
+        }))
+        .expect("unknown parameters should be captured for validation");
         let error = validate_chat_req(&req).unwrap_err();
         assert_eq!(error.0, "unsupported_parameter");
         assert!(error.1.contains("tools"));
@@ -1009,7 +1121,9 @@ mod conversation_id_tests {
 
     #[test]
     fn accepts_generated_uuid_and_safe_ids() {
-        assert!(valid_conversation_id("8c1d8e2a-1e2a-4f7c-93f8-84c5c39a8b12"));
+        assert!(valid_conversation_id(
+            "8c1d8e2a-1e2a-4f7c-93f8-84c5c39a8b12"
+        ));
         assert!(valid_conversation_id("conversation_123"));
     }
 

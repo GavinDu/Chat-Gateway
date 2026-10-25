@@ -1,6 +1,6 @@
-use std::sync::Arc;
 use crate::config::AppConfig;
 use crate::memory::UnifiedMemory;
+use std::sync::Arc;
 
 /// Provider priority + failover routing. Explicit model names must resolve;
 /// only "auto" opts into routing across all enabled providers.
@@ -9,34 +9,58 @@ pub struct ProviderRouter {
 }
 
 impl ProviderRouter {
-    pub fn new(cfg: Arc<AppConfig>) -> Self { Self { cfg } }
+    pub fn new(cfg: Arc<AppConfig>) -> Self {
+        Self { cfg }
+    }
 
     /// Resolve an explicit model to providers that advertise that exact model.
     /// A provider can be pinned with "provider/model". Unknown model names
     /// return an empty list instead of silently routing to an unrelated model.
-    pub fn resolve(&self, model: &str, conversation_id: Option<&str>, memory: &UnifiedMemory) -> Vec<String> {
+    pub fn resolve(
+        &self,
+        model: &str,
+        conversation_id: Option<&str>,
+        memory: &UnifiedMemory,
+    ) -> Vec<String> {
         let model_lc = model.trim().to_lowercase();
         if model_lc == "auto" {
             return self.with_affinity(self.enabled_in_priority_order(), conversation_id, memory);
         }
 
         let (pinned_provider, requested_model) = match model_lc.split_once('/') {
-            Some((provider, requested)) if !provider.is_empty() && !requested.is_empty() =>
-                (Some(provider), requested),
+            Some((provider, requested)) if !provider.is_empty() && !requested.is_empty() => {
+                (Some(provider), requested)
+            }
             _ => (None, model_lc.as_str()),
         };
 
-        let candidates: Vec<String> = self.cfg.providers.iter()
+        let candidates: Vec<String> = self
+            .cfg
+            .providers
+            .iter()
             .filter(|p| p.enabled)
-            .filter(|p| pinned_provider.map(|name| p.name.eq_ignore_ascii_case(name)).unwrap_or(true))
-            .filter(|p| p.models.iter().any(|m| m.eq_ignore_ascii_case(requested_model)))
+            .filter(|p| {
+                pinned_provider
+                    .map(|name| p.name.eq_ignore_ascii_case(name))
+                    .unwrap_or(true)
+            })
+            .filter(|p| {
+                p.models
+                    .iter()
+                    .any(|m| m.eq_ignore_ascii_case(requested_model))
+            })
             .map(|p| p.name.clone())
             .collect();
 
         self.with_affinity(candidates, conversation_id, memory)
     }
 
-    fn with_affinity(&self, mut candidates: Vec<String>, conversation_id: Option<&str>, memory: &UnifiedMemory) -> Vec<String> {
+    fn with_affinity(
+        &self,
+        mut candidates: Vec<String>,
+        conversation_id: Option<&str>,
+        memory: &UnifiedMemory,
+    ) -> Vec<String> {
         if let Some(cid) = conversation_id {
             if let Some(prev) = memory.get_provider(cid) {
                 if let Some(pos) = candidates.iter().position(|c| c == &prev) {
@@ -49,14 +73,19 @@ impl ProviderRouter {
     }
 
     fn enabled_in_priority_order(&self) -> Vec<String> {
-        self.cfg.providers.iter().filter(|p| p.enabled).map(|p| p.name.clone()).collect()
+        self.cfg
+            .providers
+            .iter()
+            .filter(|p| p.enabled)
+            .map(|p| p.name.clone())
+            .collect()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{ProviderConfig, MemoryConfig, ServerConfig, ObscuraConfig, AppConfig};
+    use crate::config::{AppConfig, MemoryConfig, ObscuraConfig, ProviderConfig, ServerConfig};
 
     fn router() -> ProviderRouter {
         let cfg = AppConfig {
@@ -64,8 +93,22 @@ mod tests {
             memory: MemoryConfig::default(),
             obscura: ObscuraConfig::default(),
             providers: vec![
-                ProviderConfig { name: "claude".into(), enabled: true, priority: 1, timeout_seconds: 30, session_pool_size: 1, models: vec!["sonnet".into()] },
-                ProviderConfig { name: "chatgpt".into(), enabled: true, priority: 2, timeout_seconds: 30, session_pool_size: 1, models: vec!["gpt-4o".into()] },
+                ProviderConfig {
+                    name: "claude".into(),
+                    enabled: true,
+                    priority: 1,
+                    timeout_seconds: 30,
+                    session_pool_size: 1,
+                    models: vec!["sonnet".into()],
+                },
+                ProviderConfig {
+                    name: "chatgpt".into(),
+                    enabled: true,
+                    priority: 2,
+                    timeout_seconds: 30,
+                    session_pool_size: 1,
+                    models: vec!["gpt-4o".into()],
+                },
             ],
         };
         ProviderRouter::new(Arc::new(cfg))
