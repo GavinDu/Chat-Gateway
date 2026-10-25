@@ -507,3 +507,36 @@ mod cookie_scope_tests {
         assert!(!cookie_domain_allowed("chatgpt", "openai.com:443"));
     }
 }
+
+#[cfg(all(test, unix))]
+mod session_directory_permissions_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[tokio::test]
+    async fn private_session_directory_is_created_and_existing_mode_is_hardened() {
+        let root = std::env::temp_dir().join(format!(
+            "chat-gateway-session-dir-permissions-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir(&root).unwrap();
+
+        let existing = root.join("existing");
+        std::fs::create_dir(&existing).unwrap();
+        std::fs::set_permissions(&existing, std::fs::Permissions::from_mode(0o755)).unwrap();
+        ensure_private_session_dir(&existing).await.unwrap();
+        assert_eq!(
+            std::fs::metadata(&existing).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+
+        let new_dir = root.join("new");
+        ensure_private_session_dir(&new_dir).await.unwrap();
+        assert_eq!(
+            std::fs::metadata(&new_dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
