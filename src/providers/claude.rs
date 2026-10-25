@@ -12,7 +12,7 @@ pub struct ClaudeAdapter {
 
 pub const SELECTORS: SelectorSet = SelectorSet {
     url: "https://claude.ai",
-    picker: &["button:has-text(\"Claude\")", "div[data-testid=\"model-selector\"]", "button.model-selector"],
+    picker: &["text:button=Claude", "div[data-testid=\"model-selector\"]", "button.model-selector"],
     input: &["div[contenteditable=\"true\"][data-placeholder]", "div.ProseMirror", "div[contenteditable=\"true\"]"],
     send: &["button[aria-label=\"Send Message\"]", "button:has(svg)[type=\"button\"]", "button[type=\"button\"]"],
     response: &["div[data-testid=\"assistant-message\"]", "div.font-claude-response", "div[data-is-streaming] .prose"],
