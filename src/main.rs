@@ -827,12 +827,19 @@ fn parse_login_action(req: LoginActReq) -> anyhow::Result<login::LoginAction> {
 }
 
 fn legacy_login_relay_enabled_from(value: Option<&str>) -> bool {
-    value.is_some_and(|value| matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+    value.is_some_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes"
+        )
+    })
 }
 
 fn legacy_login_relay_enabled() -> bool {
     legacy_login_relay_enabled_from(
-        std::env::var("CHAT_GATEWAY_LEGACY_LOGIN_RELAY").ok().as_deref(),
+        std::env::var("CHAT_GATEWAY_LEGACY_LOGIN_RELAY")
+            .ok()
+            .as_deref(),
     )
 }
 
@@ -2241,7 +2248,6 @@ mod adapter_diagnostic_tests {
         assert!(!adapter_report_is_healthy(&report));
     }
 }
-
 
 #[cfg(test)]
 mod legacy_login_relay_flag_tests {
