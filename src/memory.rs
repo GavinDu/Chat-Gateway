@@ -30,6 +30,14 @@ pub struct UnifiedMemory {
 }
 
 impl UnifiedMemory {
+    #[cfg(test)]
+    pub(crate) fn open_path_for_test(path: &std::path::Path, legacy: Option<&std::path::Path>, max_tokens: usize) -> anyhow::Result<Self> {
+        Ok(Self {
+            max_tokens,
+            connection: Mutex::new(sqlite::open(Some(path), legacy)?),
+        })
+    }
+
     pub fn new(max_tokens: usize) -> Self {
         Self {
             max_tokens,
