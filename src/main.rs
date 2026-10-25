@@ -722,10 +722,11 @@ async fn chat_completions(
         );
     }
 
-    let candidates = match state
-        .router
-        .resolve(&req.model, conversation_id.as_deref(), &state.memory)
-    {
+    let candidates = match state.router.resolve(
+        &req.model,
+        conversation_id.as_deref(),
+        &state.memory,
+    ) {
         Ok(candidates) => candidates,
         Err(error) => {
             tracing::error!(conversation_id = ?conversation_id, "provider affinity read failed: {error}");
