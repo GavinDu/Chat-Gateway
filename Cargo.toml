@@ -46,8 +46,8 @@ stealth = ["obscura-core/stealth"]
 # Obscura's workspace patches taffy + cosmic-text to vendored copies with
 # APIs its render layer uses (CssLineBreak, AlignItems::NORMAL, ...).
 # [patch] does not propagate through a git dependency, so the same two
-# vendored crates are carried here, copied verbatim from the obscura repo
-# at the pinned rev (see Cargo.lock).
+# vendored crates are carried here, copied verbatim from the Obscura repo
+# at the pinned rev; Cargo.lock records the same rev-qualified source.
 [patch.crates-io]
 taffy = { path = "vendor/taffy" }
 cosmic-text = { path = "vendor/cosmic-text" }
