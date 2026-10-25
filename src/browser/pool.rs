@@ -837,6 +837,7 @@ fn browser_thread(
                                             let Some(page) = login_pages.borrow().get(&provider).cloned() else {
                                                 anyhow::bail!("no active login page for {}", provider.name());
                                             };
+                                            login::validate_navigation_url_for_provider(provider.name(), &page.url())?;
                                             match page.query_selector(&selector) {
                                                 Some(el) => { el.click()?; Ok(format!("clicked {selector}")) }
                                                 None => anyhow::bail!("no element matches {selector}"),
@@ -846,6 +847,7 @@ fn browser_thread(
                                             let Some(page) = login_pages.borrow().get(&provider).cloned() else {
                                                 anyhow::bail!("no active login page for {}", provider.name());
                                             };
+                                            login::validate_navigation_url_for_provider(provider.name(), &page.url())?;
                                             let js = format!(
                                                 "(function(){{ var b=document.querySelectorAll('button, [role=\"button\"]')[{}]; if(!b) return false; b.click(); return true; }})()",
                                                 index
@@ -863,6 +865,7 @@ fn browser_thread(
                                             let Some(page) = login_pages.borrow().get(&provider).cloned() else {
                                                 anyhow::bail!("no active login page for {}", provider.name());
                                             };
+                                            login::validate_navigation_url_for_provider(provider.name(), &page.url())?;
                                             providers::common::human_type(&page, &[selector.as_str()], &text).await?;
                                             Ok(format!("typed into {selector}"))
                                         }
@@ -870,6 +873,7 @@ fn browser_thread(
                                             let Some(page) = login_pages.borrow().get(&provider).cloned() else {
                                                 anyhow::bail!("no active login page for {}", provider.name());
                                             };
+                                            login::validate_navigation_url_for_provider(provider.name(), &page.url())?;
                                             providers::common::press_enter(&page, &selector)?;
                                             Ok(format!("Enter dispatched on {selector}"))
                                         }
@@ -885,6 +889,12 @@ fn browser_thread(
                                             let mut page = browser.new_page().await?;
                                             page.goto(&url).await?;
                                             let final_url = page.url();
+                                            // A trusted URL may redirect elsewhere. Never leave a
+                                            // redirected, untrusted page available for relay actions.
+                                            if let Err(error) = login::validate_navigation_url_for_provider(provider.name(), &final_url) {
+                                                let _ = page.close();
+                                                anyhow::bail!("navigation redirected outside provider/SSO allowlists: {error}");
+                                            }
                                             login_pages.borrow_mut().insert(provider, Rc::new(page));
                                             Ok(format!("navigated to {final_url}"))
                                         }
