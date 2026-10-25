@@ -423,3 +423,63 @@ mod parse_view_tests {
         assert!(buttons.is_empty());
     }
 }
+
+#[cfg(test)]
+mod login_action_size_limit_tests {
+    use super::*;
+
+    #[test]
+    fn accepts_selector_and_text_at_documented_limits() {
+        let selector = "x".repeat(500);
+        let text = "x".repeat(4096);
+        assert!(LoginAction::Click {
+            selector: selector.clone()
+        }
+        .validate()
+        .is_ok());
+        assert!(LoginAction::Enter {
+            selector: selector.clone()
+        }
+        .validate()
+        .is_ok());
+        assert!(LoginAction::Type { selector, text }.validate().is_ok());
+    }
+
+    #[test]
+    fn rejects_selector_and_text_over_documented_limits() {
+        let selector = "x".repeat(501);
+        let text = "x".repeat(4097);
+        assert!(LoginAction::Click {
+            selector: selector.clone()
+        }
+        .validate()
+        .is_err());
+        assert!(LoginAction::Enter {
+            selector: selector.clone()
+        }
+        .validate()
+        .is_err());
+        assert!(LoginAction::Type {
+            selector: selector.clone(),
+            text: "value".to_string(),
+        }
+        .validate()
+        .is_err());
+        assert!(LoginAction::Type {
+            selector: "#input".to_string(),
+            text,
+        }
+        .validate()
+        .is_err());
+    }
+
+    #[test]
+    fn rejects_empty_type_payload_even_when_selector_is_valid() {
+        assert!(LoginAction::Type {
+            selector: "#input".to_string(),
+            text: String::new(),
+        }
+        .validate()
+        .is_err());
+    }
+}
