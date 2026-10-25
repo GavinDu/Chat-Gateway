@@ -513,7 +513,10 @@ mod request_body_error_tests {
         let response = oversized_chat_body_error();
         assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
         assert_eq!(
-            response.headers().get(axum::http::header::CONTENT_TYPE).unwrap(),
+            response
+                .headers()
+                .get(axum::http::header::CONTENT_TYPE)
+                .unwrap(),
             "application/json"
         );
         let bytes = axum::body::to_bytes(response.into_body(), 4096)
@@ -1406,7 +1409,10 @@ mod http_api_regression_tests {
         let body = json_body(response).await;
         assert_eq!(body["error"]["type"], "invalid_request_error");
         assert_eq!(body["error"]["code"], "request_too_large");
-        assert_eq!(body["error"]["message"], "request body exceeds the 1 MiB limit");
+        assert_eq!(
+            body["error"]["message"],
+            "request body exceeds the 1 MiB limit"
+        );
     }
 
     #[tokio::test]
