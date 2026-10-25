@@ -856,8 +856,8 @@ fn delete_conversation_response(memory: &UnifiedMemory, conversation_id: &str) -
             "conversation_not_found",
             "conversation does not exist",
         ),
-        Err(error) => {
-            tracing::error!(conversation_id = %conversation_id, "conversation deletion failed: {error}");
+        Err(_error) => {
+            tracing::error!(conversation_id = %conversation_id, "conversation deletion failed");
             api_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "server_error",
@@ -1147,7 +1147,7 @@ async fn chat_completions(
                         provider_c.clone(),
                         format!("tab-{}", &conv_stream[..8]),
                     ) {
-                        tracing::error!("conversation persistence failed after stream: {error}");
+                        tracing::error!(conversation_id = %conv_stream, "conversation persistence failed after stream");
                         let error = serde_json::json!({
                             "error": { "message": "conversation could not be persisted", "type": "server_error", "code": "memory_persistence_failed" }
                         });
@@ -1215,7 +1215,7 @@ async fn chat_completions(
             provider_name.clone(),
             format!("tab-{}", &new_conv_id[..8]),
         ) {
-            tracing::error!("conversation persistence failed: {error}");
+            tracing::error!(conversation_id = %new_conv_id, "conversation persistence failed");
             return api_error(
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                 "server_error",
