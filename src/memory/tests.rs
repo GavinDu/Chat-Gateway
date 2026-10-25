@@ -79,15 +79,21 @@ fn json_import_restores_order_and_affinity_and_preserves_source() {
     let bytes = snapshot(&fixture);
     {
         let memory = fixture.open();
-        assert_eq!(memory.get_provider("legacy").as_deref(), Some("qwen"));
-        assert_eq!(memory.get_tab("legacy").as_deref(), Some("legacy-tab"));
         assert_eq!(
-            memory.conversation("legacy").unwrap().messages,
+            memory.get_provider("legacy").unwrap().as_deref(),
+            Some("qwen")
+        );
+        assert_eq!(
+            memory.get_tab("legacy").unwrap().as_deref(),
+            Some("legacy-tab")
+        );
+        assert_eq!(
+            memory.conversation("legacy").unwrap().unwrap().messages,
             vec![m("user", "hello"), m("assistant", "hi")]
         );
     }
     assert_eq!(fs::read(fixture.json()).unwrap(), bytes);
-    assert!(fixture.open().has_history("legacy"));
+    assert!(fixture.open().has_history("legacy").unwrap());
 }
 
 #[test]
@@ -115,7 +121,7 @@ fn failed_import_rolls_back_schema_and_can_be_retried_without_source_loss() {
     assert_eq!((version, tables), (0, 0));
     drop(connection);
     snapshot(&fixture);
-    assert!(fixture.open().has_history("legacy"));
+    assert!(fixture.open().has_history("legacy").unwrap());
 }
 
 #[test]
@@ -137,7 +143,7 @@ fn completed_import_never_replays_json_or_resurrects_deleted_conversations() {
     }
     // Even a subsequently corrupt legacy file must not block a migrated store.
     fs::write(fixture.json(), b"corrupted old backup").unwrap();
-    assert!(!fixture.open().has_history("legacy"));
+    assert!(!fixture.open().has_history("legacy").unwrap());
 }
 
 #[test]
@@ -149,10 +155,16 @@ fn restart_recovers_messages_provider_and_tab() {
         store(&memory, "one", "second");
     }
     let memory = fixture.open();
-    assert_eq!(memory.get_provider("one").as_deref(), Some("chatgpt"));
-    assert_eq!(memory.get_tab("one").as_deref(), Some("tab-second"));
     assert_eq!(
-        memory.conversation("one").unwrap().messages,
+        memory.get_provider("one").unwrap().as_deref(),
+        Some("chatgpt")
+    );
+    assert_eq!(
+        memory.get_tab("one").unwrap().as_deref(),
+        Some("tab-second")
+    );
+    assert_eq!(
+        memory.conversation("one").unwrap().unwrap().messages,
         vec![
             m("user", "first"),
             m("assistant", "answer first"),
@@ -171,11 +183,11 @@ fn deletion_cascades_and_survives_restart() {
         store(&memory, "keep", "other");
         assert!(memory.delete_conversation("delete").unwrap());
         assert!(!memory.delete_conversation("delete").unwrap());
-        assert_eq!(memory.get_tab("delete"), None);
+        assert_eq!(memory.get_tab("delete").unwrap(), None);
     }
     let memory = fixture.open();
-    assert!(!memory.has_history("delete"));
-    assert!(memory.has_history("keep"));
+    assert!(!memory.has_history("delete").unwrap());
+    assert!(memory.has_history("keep").unwrap());
     let count: i64 = memory
         .lock()
         .unwrap()
@@ -193,7 +205,7 @@ fn injected_insert_failure_rolls_back_partial_messages_and_affinity() {
     let fixture = Fixture::new();
     let memory = fixture.open();
     store(&memory, "existing", "original");
-    let previous = memory.conversation("existing").unwrap();
+    let previous = memory.conversation("existing").unwrap().unwrap();
     memory
         .lock()
         .unwrap()
@@ -213,12 +225,15 @@ fn injected_insert_failure_rolls_back_partial_messages_and_affinity() {
             )
             .is_err());
     }
-    assert_eq!(memory.conversation("existing").unwrap(), previous);
-    assert!(!memory.has_history("new"));
+    assert_eq!(memory.conversation("existing").unwrap().unwrap(), previous);
+    assert!(!memory.has_history("new").unwrap());
     drop(memory);
     let restored = fixture.open();
-    assert_eq!(restored.conversation("existing").unwrap(), previous);
-    assert!(!restored.has_history("new"));
+    assert_eq!(
+        restored.conversation("existing").unwrap().unwrap(),
+        previous
+    );
+    assert!(!restored.has_history("new").unwrap());
 }
 
 #[test]
@@ -235,9 +250,9 @@ fn injected_delete_failure_preserves_conversation() {
         )
         .unwrap();
     assert!(memory.delete_conversation("keep").is_err());
-    assert!(memory.has_history("keep"));
+    assert!(memory.has_history("keep").unwrap());
     drop(memory);
-    assert!(fixture.open().has_history("keep"));
+    assert!(fixture.open().has_history("keep").unwrap());
 }
 
 #[test]
@@ -246,9 +261,9 @@ fn separate_connections_observe_commits_instead_of_stale_caches() {
     let first = fixture.open();
     let second = fixture.open();
     store(&first, "one", "hello");
-    assert!(second.has_history("one"));
+    assert!(second.has_history("one").unwrap());
     assert!(second.delete_conversation("one").unwrap());
-    assert!(!first.has_history("one"));
+    assert!(!first.has_history("one").unwrap());
 }
 
 fn concurrent_writes(same_conversation: bool) {
@@ -273,7 +288,7 @@ fn concurrent_writes(same_conversation: bool) {
     });
     let memory = fixture.open();
     if same_conversation {
-        let messages = memory.conversation("shared").unwrap().messages;
+        let messages = memory.conversation("shared").unwrap().unwrap().messages;
         assert_eq!(messages.len(), 16);
         let mut users = std::collections::HashSet::new();
         for pair in messages.chunks_exact(2) {
@@ -289,6 +304,7 @@ fn concurrent_writes(same_conversation: bool) {
             assert_eq!(
                 memory
                     .conversation(&format!("conv-{i}"))
+                    .unwrap()
                     .unwrap()
                     .messages
                     .len(),
@@ -327,6 +343,7 @@ fn concurrent_identical_transcript_replays_are_idempotent() {
             .open()
             .conversation("shared")
             .unwrap()
+            .unwrap()
             .messages
             .len(),
         2
@@ -360,7 +377,12 @@ fn concurrent_branched_full_transcripts_do_not_duplicate_shared_history() {
             });
         }
     });
-    let messages = fixture.open().conversation("shared").unwrap().messages;
+    let messages = fixture
+        .open()
+        .conversation("shared")
+        .unwrap()
+        .unwrap()
+        .messages;
     assert_eq!(messages.len(), 18);
     assert_eq!(messages.iter().filter(|m| m.content == "base").count(), 1);
 }
@@ -378,8 +400,11 @@ fn repeated_prompt_with_a_different_answer_is_a_new_turn() {
             "new-tab".into(),
         )
         .unwrap();
-    assert_eq!(memory.conversation("one").unwrap().messages.len(), 4);
-    assert_eq!(memory.get_tab("one").as_deref(), Some("new-tab"));
+    assert_eq!(
+        memory.conversation("one").unwrap().unwrap().messages.len(),
+        4
+    );
+    assert_eq!(memory.get_tab("one").unwrap().as_deref(), Some("new-tab"));
 }
 
 #[test]
@@ -408,8 +433,13 @@ fn full_and_sliding_transcripts_append_only_new_suffix() {
             "tab".into(),
         )
         .unwrap();
-    assert_eq!(memory.conversation("one").unwrap().messages.len(), 6);
-    let (prompt, messages) = memory.build_context(Some("one"), &[m("user", "fourth")]);
+    assert_eq!(
+        memory.conversation("one").unwrap().unwrap().messages.len(),
+        6
+    );
+    let (prompt, messages) = memory
+        .build_context(Some("one"), &[m("user", "fourth")])
+        .unwrap();
     assert_eq!(messages.len(), 7);
     assert!(prompt.ends_with("user: fourth"));
 }
@@ -418,10 +448,14 @@ fn full_and_sliding_transcripts_append_only_new_suffix() {
 fn context_token_window_and_unrelated_turn_are_preserved() {
     let mut memory = UnifiedMemory::new(8000);
     store(&memory, "one", "old");
-    let (_, messages) = memory.build_context(Some("one"), &[m("user", "unrelated")]);
+    let (_, messages) = memory
+        .build_context(Some("one"), &[m("user", "unrelated")])
+        .unwrap();
     assert_eq!(messages.len(), 3);
     memory.max_tokens = 1;
-    let (_, messages) = memory.build_context(Some("one"), &[m("user", "last")]);
+    let (_, messages) = memory
+        .build_context(Some("one"), &[m("user", "last")])
+        .unwrap();
     assert_eq!(messages, vec![m("user", "last")]);
 }
 
@@ -462,6 +496,25 @@ fn unversioned_nonempty_database_is_not_overwritten() {
         .unwrap();
     let error = open(&fixture.db(), None).err().unwrap();
     assert!(format!("{error:#}").contains("unversioned/nonempty"));
+}
+
+#[test]
+fn context_read_errors_are_returned_instead_of_panicking_or_dropping_history() {
+    let fixture = Fixture::new();
+    let memory = fixture.open();
+    store(&memory, "read-failure", "durable turn");
+
+    // Simulate a post-startup schema/storage failure through a second connection.
+    // The request path must return an error rather than panic or send empty history.
+    Connection::open(fixture.db())
+        .unwrap()
+        .execute_batch("DROP TABLE messages;")
+        .unwrap();
+
+    let result = memory.build_context(Some("read-failure"), &[m("user", "next turn")]);
+    assert!(result.is_err());
+    assert!(memory.get_provider("read-failure").is_err());
+    assert!(memory.has_history("read-failure").is_err());
 }
 
 #[test]

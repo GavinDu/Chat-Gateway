@@ -21,7 +21,7 @@ impl ProviderRouter {
         model: &str,
         conversation_id: Option<&str>,
         memory: &UnifiedMemory,
-    ) -> Vec<String> {
+    ) -> anyhow::Result<Vec<String>> {
         let model_lc = model.trim().to_lowercase();
         if model_lc == "auto" {
             return self.with_affinity(self.enabled_in_priority_order(), conversation_id, memory);
@@ -60,16 +60,16 @@ impl ProviderRouter {
         mut candidates: Vec<String>,
         conversation_id: Option<&str>,
         memory: &UnifiedMemory,
-    ) -> Vec<String> {
+    ) -> anyhow::Result<Vec<String>> {
         if let Some(cid) = conversation_id {
-            if let Some(prev) = memory.get_provider(cid) {
+            if let Some(prev) = memory.get_provider(cid)? {
                 if let Some(pos) = candidates.iter().position(|c| c == &prev) {
                     let first = candidates.remove(pos);
                     candidates.insert(0, first);
                 }
             }
         }
-        candidates
+        Ok(candidates)
     }
 
     fn enabled_in_priority_order(&self) -> Vec<String> {
@@ -118,21 +118,33 @@ mod tests {
     fn unknown_model_does_not_fall_back_to_unrelated_provider() {
         let r = router();
         let memory = UnifiedMemory::new(1000);
-        assert!(r.resolve("made-up-model", None, &memory).is_empty());
+        assert!(r
+            .resolve("made-up-model", None, &memory)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
     fn provider_can_be_pinned() {
         let r = router();
         let memory = UnifiedMemory::new(1000);
-        assert_eq!(r.resolve("chatgpt/gpt-4o", None, &memory), vec!["chatgpt"]);
-        assert!(r.resolve("claude/gpt-4o", None, &memory).is_empty());
+        assert_eq!(
+            r.resolve("chatgpt/gpt-4o", None, &memory).unwrap(),
+            vec!["chatgpt"]
+        );
+        assert!(r
+            .resolve("claude/gpt-4o", None, &memory)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
     fn auto_uses_enabled_priority_order() {
         let r = router();
         let memory = UnifiedMemory::new(1000);
-        assert_eq!(r.resolve("auto", None, &memory), vec!["claude", "chatgpt"]);
+        assert_eq!(
+            r.resolve("auto", None, &memory).unwrap(),
+            vec!["claude", "chatgpt"]
+        );
     }
 }

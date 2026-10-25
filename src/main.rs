@@ -756,13 +756,36 @@ async fn chat_completions(
     // Assemble the provider prompt from the unified memory window. The
     // canonical transcript must be passed to the provider so follow-up
     // turns and provider switches retain conversation context.
-    let (context_prompt, windowed) = state
+    let (context_prompt, windowed) = match state
         .memory
-        .build_context(conversation_id.as_deref(), &req.messages);
-    let has_history = conversation_id
-        .as_deref()
-        .map(|cid| state.memory.has_history(cid))
-        .unwrap_or(false);
+        .build_context(conversation_id.as_deref(), &req.messages)
+    {
+        Ok(context) => context,
+        Err(error) => {
+            tracing::error!(conversation_id = ?conversation_id, "conversation context read failed: {error}");
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                "memory_read_failed",
+                "conversation history could not be read safely",
+            );
+        }
+    };
+    let has_history = match conversation_id.as_deref() {
+        Some(cid) => match state.memory.has_history(cid) {
+            Ok(value) => value,
+            Err(error) => {
+                tracing::error!(conversation_id = %cid, "conversation history check failed: {error}");
+                return api_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "server_error",
+                    "memory_read_failed",
+                    "conversation history could not be read safely",
+                );
+            }
+        },
+        None => false,
+    };
     let prompt = context_prompt;
     if prompt.is_empty() {
         return api_error(
@@ -773,9 +796,22 @@ async fn chat_completions(
         );
     }
 
-    let candidates = state
-        .router
-        .resolve(&req.model, conversation_id.as_deref(), &state.memory);
+    let candidates = match state.router.resolve(
+        &req.model,
+        conversation_id.as_deref(),
+        &state.memory,
+    ) {
+        Ok(candidates) => candidates,
+        Err(error) => {
+            tracing::error!(conversation_id = ?conversation_id, "provider affinity read failed: {error}");
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                "memory_read_failed",
+                "conversation routing state could not be read safely",
+            );
+        }
+    };
     let provider_model = req
         .model
         .split_once('/')
@@ -1443,7 +1479,7 @@ mod http_api_regression_tests {
         drop(memory);
 
         let restored = UnifiedMemory::open_path_for_test(&path, None, 8000).unwrap();
-        assert!(!restored.has_history("conversation_http_1"));
+        assert!(!restored.has_history("conversation_http_1").unwrap());
         drop(restored);
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("sqlite3-journal"));
