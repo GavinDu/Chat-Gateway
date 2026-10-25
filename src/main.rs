@@ -403,7 +403,7 @@ fn login_err(msg: String) -> axum::response::Response {
 async fn login_status(State(state): State<Arc<AppState>>) -> axum::response::Response {
     let active = match state.pool.login_status_all().await {
         Ok(active) => active,
-        Err(error) => {
+        Err(_error) => {
             tracing::error!("login status lookup failed");
             return login_status_read_error();
         }
@@ -419,7 +419,7 @@ async fn login_status(State(state): State<Arc<AppState>>) -> axum::response::Res
         let (session_present, session_ts) = match session::load_session_file(name) {
             Ok(Some(file)) => (true, Some(file.ts)),
             Ok(None) => (false, None),
-            Err(error) => {
+            Err(_error) => {
                 tracing::error!(provider = name, "persisted login session read failed");
                 return login_status_read_error();
             }
@@ -566,7 +566,7 @@ mod corrupt_message_history_regression_tests {
                 content: "follow-up".into(),
             }],
         ) {
-            Err(_) => conversation_context_read_error(conversation_id),
+            Err(_) => conversation_context_read_error(Some("conversation-123")),
             Ok(_) => panic!("corrupt message history must fail closed"),
         };
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
