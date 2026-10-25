@@ -661,22 +661,49 @@ async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     }))
 }
 
-async fn models(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let cache = state.models_cache.read().await;
-    let mut data = vec![];
-    for p in &state.cfg.providers {
-        for m in &p.models {
-            data.push(serde_json::json!({ "id": m, "object": "model", "owned_by": p.name }));
-        }
-    }
-    for (provider, models) in cache.iter() {
-        for m in models {
-            if !data.iter().any(|d| d["id"] == *m) {
-                data.push(serde_json::json!({ "id": m, "object": "model", "owned_by": provider, "discovered": true }));
+fn build_model_list(cfg: &AppConfig, cache: &HashMap<String, Vec<String>>) -> serde_json::Value {
+    let enabled = cfg
+        .providers
+        .iter()
+        .filter(|provider| provider.enabled)
+        .map(|provider| provider.name.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    let mut data = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for provider in cfg.providers.iter().filter(|provider| provider.enabled) {
+        for model in &provider.models {
+            if seen.insert(model.clone()) {
+                data.push(serde_json::json!({
+                    "id": model,
+                    "object": "model",
+                    "owned_by": provider.name
+                }));
             }
         }
     }
-    Json(serde_json::json!({ "object": "list", "data": data }))
+
+    for (provider, models) in cache {
+        if !enabled.contains(provider.as_str()) {
+            continue;
+        }
+        for model in models {
+            if seen.insert(model.clone()) {
+                data.push(serde_json::json!({
+                    "id": model,
+                    "object": "model",
+                    "owned_by": provider,
+                    "discovered": true
+                }));
+            }
+        }
+    }
+    serde_json::json!({ "object": "list", "data": data })
+}
+
+async fn models(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let cache = state.models_cache.read().await;
+    Json(build_model_list(&state.cfg, &cache))
 }
 
 /// Conversation IDs are echoed into response IDs and tab affinity. Restrict
@@ -958,6 +985,70 @@ fn parse_and_validate_chat_req(body: &[u8]) -> Result<ChatReq, Response> {
         )
     })?;
     Ok(req)
+}
+
+#[cfg(test)]
+mod model_list_tests {
+    use super::*;
+
+    fn provider(name: &str, enabled: bool, models: &[&str]) -> config::ProviderConfig {
+        config::ProviderConfig {
+            name: name.to_owned(),
+            enabled,
+            priority: 1,
+            timeout_seconds: 30,
+            session_pool_size: 1,
+            models: models.iter().map(|model| (*model).to_owned()).collect(),
+        }
+    }
+
+    #[test]
+    fn excludes_configured_and_discovered_models_for_disabled_providers() {
+        let cfg = AppConfig {
+            server: config::ServerConfig::default(),
+            memory: config::MemoryConfig::default(),
+            obscura: config::ObscuraConfig::default(),
+            providers: vec![
+                provider("chatgpt", true, &["gpt-live"]),
+                provider("claude", false, &["claude-disabled"]),
+            ],
+        };
+        let cache = HashMap::from([
+            ("chatgpt".to_owned(), vec!["gpt-discovered".to_owned()]),
+            ("claude".to_owned(), vec!["claude-cached".to_owned()]),
+        ]);
+
+        let value = build_model_list(&cfg, &cache);
+        let ids = value["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|model| model["id"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec!["gpt-live", "gpt-discovered"]);
+    }
+
+    #[test]
+    fn configured_ids_win_over_duplicate_discovered_ids() {
+        let cfg = AppConfig {
+            server: config::ServerConfig::default(),
+            memory: config::MemoryConfig::default(),
+            obscura: config::ObscuraConfig::default(),
+            providers: vec![provider("chatgpt", true, &["gpt-live"])],
+        };
+        let cache = HashMap::from([(
+            "chatgpt".to_owned(),
+            vec!["gpt-live".to_owned(), "gpt-extra".to_owned()],
+        )]);
+
+        let value = build_model_list(&cfg, &cache);
+        let data = value["data"].as_array().unwrap();
+        assert_eq!(data.len(), 2);
+        assert_eq!(data[0]["owned_by"], "chatgpt");
+        assert!(data[0].get("discovered").is_none());
+        assert_eq!(data[1]["id"], "gpt-extra");
+        assert_eq!(data[1]["discovered"], true);
+    }
 }
 
 #[cfg(test)]
