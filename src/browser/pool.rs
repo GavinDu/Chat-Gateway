@@ -393,7 +393,7 @@ fn browser_thread(
                                 }
                             };
                             if let Some(file) = &session_file {
-                                if let Err(e) = session::restore_cookies(&browser, file) {
+                                if let Err(e) = session::restore_cookies(&browser, file, &pcfg.name) {
                                     tracing::warn!(provider = %pcfg.name, "cookie restore failed; provider may require login: {e}");
                                 }
                             }
@@ -499,7 +499,7 @@ fn browser_thread(
                                     }
                                 };
                                 if let Some(file) = session_file {
-                                    if let Err(error) = session::restore_cookies(&browser, &file) {
+                                    if let Err(error) = session::restore_cookies(&browser, &file, &provider.name) {
                                         report.errors.push(format!("session cookie restore failed: {error}"));
                                     }
                                     if page.goto(provider.login_url()).await.is_err() {
