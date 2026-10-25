@@ -85,7 +85,9 @@ impl ProviderRouter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{AppConfig, AuthConfig, MemoryConfig, ObscuraConfig, ProviderConfig, ServerConfig};
+    use crate::config::{
+        AppConfig, AuthConfig, MemoryConfig, ObscuraConfig, ProviderConfig, ServerConfig,
+    };
 
     fn router() -> ProviderRouter {
         let cfg = AppConfig {
