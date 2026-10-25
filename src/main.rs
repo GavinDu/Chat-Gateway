@@ -55,6 +55,33 @@ struct ChatReq {
     temperature: Option<f32>,
 }
 
+
+/// Validate request semantics separately from JSON decoding so the contract
+/// can be exercised without initializing browser-backed providers.
+fn validate_chat_req(req: &ChatReq) -> Result<(), (&'static str, String)> {
+    if req.model.trim().is_empty() {
+        return Err(("model_required", "model must not be empty".to_string()));
+    }
+    if req.messages.is_empty() {
+        return Err(("messages_required", "messages must contain at least one message".to_string()));
+    }
+    for (index, message) in req.messages.iter().enumerate() {
+        if !matches!(message.role.as_str(), "system" | "developer" | "user" | "assistant" | "tool") {
+            return Err((
+                "invalid_message_role",
+                format!("messages[{index}].role '{}' is not supported", message.role),
+            ));
+        }
+    }
+    if req.temperature.is_some() {
+        return Err((
+            "unsupported_parameter",
+            "temperature is not supported by the current browser-backed adapters".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 fn api_error(status: axum::http::StatusCode, error_type: &str, code: &str, message: impl Into<String>) -> axum::response::Response {
     (status, Json(serde_json::json!({
         "error": {
@@ -406,28 +433,12 @@ async fn chat_completions(
         }
     };
 
-    if req.model.trim().is_empty() {
-        return api_error(axum::http::StatusCode::BAD_REQUEST, "invalid_request_error", "model_required", "model must not be empty");
-    }
-    if req.messages.is_empty() {
-        return api_error(axum::http::StatusCode::BAD_REQUEST, "invalid_request_error", "messages_required", "messages must contain at least one message");
-    }
-    for (index, message) in req.messages.iter().enumerate() {
-        if !matches!(message.role.as_str(), "system" | "developer" | "user" | "assistant" | "tool") {
-            return api_error(
-                axum::http::StatusCode::BAD_REQUEST,
-                "invalid_request_error",
-                "invalid_message_role",
-                format!("messages[{index}].role '{}' is not supported", message.role),
-            );
-        }
-    }
-    if req.temperature.is_some() {
+    if let Err((code, message)) = validate_chat_req(&req) {
         return api_error(
             axum::http::StatusCode::BAD_REQUEST,
             "invalid_request_error",
-            "unsupported_parameter",
-            "temperature is not supported by the current browser-backed adapters",
+            code,
+            message,
         );
     }
 
@@ -629,6 +640,53 @@ mod login_origin_tests {
 #[cfg(test)]
 mod api_contract_tests {
     use super::*;
+
+
+    #[test]
+    fn rejects_empty_model_and_messages() {
+        let empty_model: ChatReq = serde_json::from_value(serde_json::json!({
+            "model": "  ",
+            "messages": [{"role": "user", "content": "hello"}]
+        })).unwrap();
+        assert_eq!(validate_chat_req(&empty_model).unwrap_err().0, "model_required");
+
+        let empty_messages: ChatReq = serde_json::from_value(serde_json::json!({
+            "model": "auto",
+            "messages": []
+        })).unwrap();
+        assert_eq!(validate_chat_req(&empty_messages).unwrap_err().0, "messages_required");
+    }
+
+    #[test]
+    fn rejects_unsupported_roles_and_temperature() {
+        let invalid_role: ChatReq = serde_json::from_value(serde_json::json!({
+            "model": "auto",
+            "messages": [{"role": "function", "content": "hello"}]
+        })).unwrap();
+        assert_eq!(validate_chat_req(&invalid_role).unwrap_err().0, "invalid_message_role");
+
+        let temperature: ChatReq = serde_json::from_value(serde_json::json!({
+            "model": "auto",
+            "messages": [{"role": "user", "content": "hello"}],
+            "temperature": 0.2
+        })).unwrap();
+        assert_eq!(validate_chat_req(&temperature).unwrap_err().0, "unsupported_parameter");
+    }
+
+    #[test]
+    fn accepts_supported_roles_and_no_unsupported_parameters() {
+        let req: ChatReq = serde_json::from_value(serde_json::json!({
+            "model": "auto",
+            "messages": [
+                {"role": "system", "content": "be concise"},
+                {"role": "developer", "content": "follow policy"},
+                {"role": "user", "content": "hello"},
+                {"role": "assistant", "content": "hi"},
+                {"role": "tool", "content": "result"}
+            ]
+        })).unwrap();
+        assert!(validate_chat_req(&req).is_ok());
+    }
 
     #[test]
     fn accepts_minimal_openai_chat_request() {
