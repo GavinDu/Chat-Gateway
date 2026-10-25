@@ -78,28 +78,28 @@ impl UnifiedMemory {
             .map_err(|error| anyhow::anyhow!("conversation database lock poisoned: {error}"))
     }
 
-    // Preserve the existing infallible read API, but never silently substitute
-    // empty history for a database error. Startup validates all durable data.
-    fn conversation(&self, id: &str) -> Option<Conversation> {
-        let mut connection = self.lock().expect("locking conversation database");
-        let tx = connection
-            .transaction()
-            .expect("starting conversation read");
-        let conversation =
-            sqlite::load(&tx, id).expect("reading conversation database; refusing empty fallback");
-        tx.commit().expect("completing conversation read");
-        conversation
+    /// Read a conversation without converting database errors into missing history.
+    fn conversation(&self, id: &str) -> anyhow::Result<Option<Conversation>> {
+        let mut connection = self.lock()?;
+        let tx = connection.transaction()?;
+        let conversation = sqlite::load(&tx, id)?;
+        tx.commit()
+            .map_err(|error| anyhow::anyhow!("completing conversation read: {error}"))?;
+        Ok(conversation)
     }
 
     pub fn build_context(
         &self,
         conversation_id: Option<&str>,
         new_messages: &[ChatMessage],
-    ) -> (String, Vec<ChatMessage>) {
-        let mut full = conversation_id
-            .and_then(|id| self.conversation(id))
-            .map(|conversation| conversation.messages)
-            .unwrap_or_default();
+    ) -> anyhow::Result<(String, Vec<ChatMessage>)> {
+        let mut full = match conversation_id {
+            Some(id) => self
+                .conversation(id)?
+                .map(|conversation| conversation.messages)
+                .unwrap_or_default(),
+            None => Vec::new(),
+        };
         full.extend(messages_after_overlap(&full, new_messages));
         let mut tokens = 0;
         let mut windowed = Vec::new();
@@ -117,7 +117,7 @@ impl UnifiedMemory {
             .map(|message| format!("{}: {}", message.role, message.content))
             .collect::<Vec<_>>()
             .join("\n");
-        (prompt, windowed)
+        Ok((prompt, windowed))
     }
 
     pub fn store_turn(
@@ -167,19 +167,18 @@ impl UnifiedMemory {
         Ok(deleted != 0)
     }
 
-    pub fn has_history(&self, cid: &str) -> bool {
-        self.conversation(cid)
-            .is_some_and(|conversation| !conversation.messages.is_empty())
+    pub fn has_history(&self, cid: &str) -> anyhow::Result<bool> {
+        Ok(self
+            .conversation(cid)?
+            .is_some_and(|conversation| !conversation.messages.is_empty()))
     }
 
-    pub fn get_tab(&self, cid: &str) -> Option<String> {
-        self.conversation(cid)
-            .and_then(|conversation| conversation.tab_id)
+    pub fn get_tab(&self, cid: &str) -> anyhow::Result<Option<String>> {
+        Ok(self.conversation(cid)?.and_then(|conversation| conversation.tab_id))
     }
 
-    pub fn get_provider(&self, cid: &str) -> Option<String> {
-        self.conversation(cid)
-            .and_then(|conversation| conversation.provider)
+    pub fn get_provider(&self, cid: &str) -> anyhow::Result<Option<String>> {
+        Ok(self.conversation(cid)?.and_then(|conversation| conversation.provider))
     }
 }
 
