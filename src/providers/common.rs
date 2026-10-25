@@ -249,7 +249,7 @@ pub async fn select_model(
             let mut hit = false;
             while start.elapsed().as_millis() < 3000 {
                 if let Some(el) = page.query_selector(trigger) {
-                    let _ = el.click();
+                    el.click()?;
                     hit = true;
                     break;
                 }
