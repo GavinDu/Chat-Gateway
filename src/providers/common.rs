@@ -226,28 +226,29 @@ pub fn normalize_model_labels(labels: Vec<String>) -> Vec<String> {
 /// click → 300ms → Escape + next pair on miss. Returns Err when a
 /// selection was attempted and every pair missed, so the caller can
 /// fail the attempt and let the router try the next provider.
+fn model_selection_is_noop(
+    model: &str,
+    pairs: &[(&str, &str)],
+    default_aliases: &[String],
+) -> bool {
+    let model = model.trim();
+    model.is_empty()
+        || pairs.is_empty()
+        || default_aliases
+            .iter()
+            .any(|alias| alias.trim().eq_ignore_ascii_case(model))
+}
+
 pub async fn select_model(
     page: &Page,
     pairs: &[(&str, &str)],
     model: &str,
     default_aliases: &[String],
 ) -> anyhow::Result<()> {
+    if model_selection_is_noop(model, pairs, default_aliases) {
+        return Ok(());
+    }
     let model = model.trim();
-    if model.is_empty() {
-        return Ok(());
-    }
-    if default_aliases
-        .iter()
-        .any(|a| a.trim().eq_ignore_ascii_case(model))
-    {
-        return Ok(());
-    }
-    // Providers without model-picker metadata cannot select a non-default
-    // model through the UI. Preserve the documented graceful no-op rather
-    // than failing every request for those providers.
-    if pairs.is_empty() {
-        return Ok(());
-    }
     let target_js = serde_json::to_string(&model.to_lowercase())?;
     for (trigger, options) in pairs {
         let found = {
@@ -407,4 +408,34 @@ pub async fn send_prompt(page: &Page, set: &SelectorSet, prompt: &str) -> anyhow
         .unwrap_or(set.input[0]);
     click_send_or_enter(page, set.send, input_sel, 5000).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod model_selection_tests {
+    use super::*;
+
+    #[test]
+    fn skips_selection_when_provider_has_no_picker_pairs() {
+        let aliases = vec!["default-model".to_string()];
+        assert!(model_selection_is_noop(
+            "provider-specific-model",
+            &[],
+            &aliases
+        ));
+    }
+
+    #[test]
+    fn skips_blank_and_configured_default_models() {
+        let pairs = [("#picker", "button[role=option]")];
+        let aliases = vec!["default-model".to_string()];
+        assert!(model_selection_is_noop("  ", &pairs, &aliases));
+        assert!(model_selection_is_noop(" DEFAULT-MODEL ", &pairs, &aliases));
+    }
+
+    #[test]
+    fn selects_non_default_models_when_picker_pairs_exist() {
+        let pairs = [("#picker", "button[role=option]")];
+        let aliases = vec!["default-model".to_string()];
+        assert!(!model_selection_is_noop("other-model", &pairs, &aliases));
+    }
 }
