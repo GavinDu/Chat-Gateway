@@ -984,7 +984,7 @@ async fn attach_request_id(req: Request<Body>, next: Next) -> Response {
         route = %route,
         status = response.status().as_u16(),
         duration_ms,
-        "http request completed"
+        "http request handled"
     );
 
     // Axum's DefaultBodyLimit rejection happens before the Bytes handler is
