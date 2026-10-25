@@ -132,6 +132,25 @@ fn cookie_domain_allowed(provider: &str, domain: &str) -> bool {
         .any(|base| domain == *base || domain.ends_with(&format!(".{base}")))
 }
 
+/// Validate cookie fields from disk before interpolating them into a Set-Cookie-style string.
+/// Session files can be stale or manually modified, so domain validation alone is insufficient.
+fn restored_cookie_fields_safe(cookie: &Cookie) -> bool {
+    let valid_name = !cookie.name.is_empty()
+        && cookie
+            .name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b));
+    let valid_value = cookie
+        .value
+        .bytes()
+        .all(|b| (0x21..=0x7e).contains(&b) && !matches!(b, b'"' | b',' | b';' | b'\\'));
+    let valid_path = cookie.path.starts_with('/')
+        && !cookie
+            .path
+            .bytes()
+            .any(|b| b.is_ascii_control() || b == b';');
+    valid_name && valid_value && valid_path
+}
 /// Ensure the directory holding reusable provider credentials is private.
 /// Existing directories are hardened too; relying only on the process umask is
 /// insufficient because it varies by deployment environment.
@@ -216,6 +235,10 @@ pub fn restore_cookies(browser: &Browser, file: &SessionFile, provider: &str) ->
         // time, not just when saving, to avoid cross-provider cookie injection.
         if !cookie_domain_allowed(provider, &c.domain) {
             tracing::warn!(provider, domain = %c.domain, "skipping cookie outside provider domain allowlist");
+            continue;
+        }
+        if !restored_cookie_fields_safe(c) {
+            tracing::warn!(provider, "skipping cookie with invalid persisted fields");
             continue;
         }
         let mut s = format!("{}={}", c.name, c.value);
@@ -317,6 +340,49 @@ mod local_storage_script_tests {
 #[cfg(test)]
 mod cookie_scope_tests {
     use super::*;
+
+    fn cookie(name: &str, value: &str, path: &str) -> Cookie {
+        Cookie {
+            name: name.to_string(),
+            value: value.to_string(),
+            domain: ".chatgpt.com".to_string(),
+            path: path.to_string(),
+            secure: true,
+            http_only: true,
+        }
+    }
+
+    #[test]
+    fn restored_cookie_fields_reject_injection_and_malformed_paths() {
+        assert!(restored_cookie_fields_safe(&cookie(
+            "__Secure-session",
+            "abc_123-xyz",
+            "/"
+        )));
+        assert!(!restored_cookie_fields_safe(&cookie(
+            "bad;name", "value", "/"
+        )));
+        assert!(!restored_cookie_fields_safe(&cookie(
+            "session",
+            "value; Secure",
+            "/"
+        )));
+        assert!(!restored_cookie_fields_safe(&cookie(
+            "session",
+            "value\r\nX-Evil: yes",
+            "/"
+        )));
+        assert!(!restored_cookie_fields_safe(&cookie(
+            "session",
+            "value",
+            "relative/path"
+        )));
+        assert!(!restored_cookie_fields_safe(&cookie(
+            "session",
+            "value",
+            "/safe\r\nInjected: yes"
+        )));
+    }
 
     #[test]
     fn provider_cookie_allowlist_rejects_cross_provider_and_suffix_spoofing() {
