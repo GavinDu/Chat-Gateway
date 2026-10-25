@@ -892,7 +892,6 @@ fn browser_thread(
                                             // A trusted URL may redirect elsewhere. Never leave a
                                             // redirected, untrusted page available for relay actions.
                                             if let Err(error) = login::validate_navigation_url_for_provider(provider.name(), &final_url) {
-                                                let _ = page.close();
                                                 anyhow::bail!("navigation redirected outside provider/SSO allowlists: {error}");
                                             }
                                             login_pages.borrow_mut().insert(provider, Rc::new(page));
