@@ -11,6 +11,33 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot, OwnedSemaphorePermit, Semaphore};
 
+fn effective_session_pool_size(configured: usize) -> usize {
+    configured.min(1)
+}
+
+#[cfg(test)]
+mod queue_capacity_tests {
+    use super::effective_session_pool_size;
+
+    #[test]
+    fn configured_capacity_never_exceeds_single_persistent_page() {
+        assert_eq!(effective_session_pool_size(1), 1);
+        assert_eq!(effective_session_pool_size(2), 1);
+        assert_eq!(effective_session_pool_size(8), 1);
+    }
+}
+
+#[derive(Debug)]
+pub struct ProviderBusyError;
+
+impl std::fmt::Display for ProviderBusyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("provider queue timeout expired")
+    }
+}
+
+impl std::error::Error for ProviderBusyError {}
+
 /// ObscuraPool - one persistent, pre-warmed page per provider
 /// (DashMap-indexed by provider name on the API side).
 ///
@@ -132,9 +159,18 @@ impl ObscuraPool {
         let semaphores = DashMap::new();
         for p in &cfg.providers {
             if p.enabled {
+                let effective_pool_size = effective_session_pool_size(p.session_pool_size);
+                if p.session_pool_size > effective_pool_size {
+                    tracing::warn!(
+                        provider = %p.name,
+                        configured_pool_size = p.session_pool_size,
+                        effective_pool_size,
+                        "session_pool_size capped at one until per-conversation pages are supported"
+                    );
+                }
                 semaphores.insert(
                     p.name.clone(),
-                    Arc::new(Semaphore::new(p.session_pool_size.max(1))),
+                    Arc::new(Semaphore::new(effective_pool_size)),
                 );
             }
         }
@@ -168,7 +204,17 @@ impl ObscuraPool {
             .get(provider)
             .map(|v| v.clone())
             .unwrap_or_else(|| Arc::new(Semaphore::new(2)));
-        let permit = sem.acquire_owned().await?;
+        let queue_timeout_seconds = self
+            .cfg
+            .provider(provider)
+            .map(|p| p.queue_timeout_seconds)
+            .unwrap_or(30);
+        let permit = tokio::time::timeout(
+            Duration::from_secs(queue_timeout_seconds),
+            sem.acquire_owned(),
+        )
+        .await
+        .map_err(|_| anyhow::Error::new(ProviderBusyError))??;
         Ok(ObscuraPermit {
             _permit: permit,
             queue_ms: start.elapsed().as_millis(),

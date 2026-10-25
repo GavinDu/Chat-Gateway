@@ -1065,11 +1065,18 @@ async fn chat_completions(
         );
     }
 
+    let candidate_count = candidates.len();
+    let mut busy_count = 0usize;
     let mut last_err: Option<String> = None;
     for provider_name in candidates {
         let permit = match state.pool.acquire(&provider_name).await {
             Ok(p) => p,
             Err(e) => {
+                if e.downcast_ref::<browser::pool::ProviderBusyError>()
+                    .is_some()
+                {
+                    busy_count += 1;
+                }
                 last_err = Some(e.to_string());
                 continue;
             }
@@ -1232,6 +1239,20 @@ async fn chat_completions(
         return (resp_headers, Json(body)).into_response();
     }
 
+    if candidate_count > 0 && busy_count == candidate_count {
+        let mut response = api_error(
+            axum::http::StatusCode::TOO_MANY_REQUESTS,
+            "server_error",
+            "provider_busy",
+            "all eligible providers are busy; retry shortly",
+        );
+        response.headers_mut().insert(
+            axum::http::header::RETRY_AFTER,
+            axum::http::HeaderValue::from_static("1"),
+        );
+        return response;
+    }
+
     api_error(
         axum::http::StatusCode::BAD_GATEWAY,
         "provider_error",
@@ -1272,6 +1293,7 @@ mod model_list_tests {
             enabled,
             priority: 1,
             timeout_seconds: 30,
+            queue_timeout_seconds: 30,
             session_pool_size: 1,
             models: models.iter().map(|model| (*model).to_owned()).collect(),
         }

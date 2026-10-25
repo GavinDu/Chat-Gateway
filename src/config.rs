@@ -79,6 +79,8 @@ pub struct ProviderConfig {
     pub priority: u32,
     #[serde(default = "default_timeout")]
     pub timeout_seconds: u64,
+    #[serde(default = "default_queue_timeout")]
+    pub queue_timeout_seconds: u64,
     #[serde(default = "default_pool")]
     pub session_pool_size: usize,
     #[serde(default)]
@@ -146,6 +148,12 @@ impl AppConfig {
                     provider.name
                 );
             }
+            if provider.queue_timeout_seconds == 0 {
+                anyhow::bail!(
+                    "provider '{}' queue_timeout_seconds must be greater than zero",
+                    provider.name
+                );
+            }
             if provider.session_pool_size == 0 {
                 anyhow::bail!(
                     "provider '{}' session_pool_size must be greater than zero",
@@ -183,6 +191,9 @@ fn default_priority() -> u32 {
 }
 fn default_timeout() -> u64 {
     120
+}
+fn default_queue_timeout() -> u64 {
+    30
 }
 fn default_pool() -> usize {
     2
@@ -246,6 +257,18 @@ mod tests {
 
         let pool = config("providers:\n  - name: chatgpt\n    session_pool_size: 0\n");
         assert!(pool.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_zero_queue_timeout() {
+        let cfg = config("providers:\n  - name: chatgpt\n    queue_timeout_seconds: 0\n");
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn defaults_queue_timeout_to_thirty_seconds() {
+        let cfg = config("providers:\n  - name: chatgpt\n");
+        assert_eq!(cfg.provider("chatgpt").unwrap().queue_timeout_seconds, 30);
     }
 
     #[test]
