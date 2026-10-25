@@ -1340,7 +1340,7 @@ mod http_api_regression_tests {
         drop(memory);
 
         let restored = UnifiedMemory::open_path_for_test(&path, None, 8000).unwrap();
-        assert!(!restored.has_history("conversation_http_1"));
+        assert!(!restored.has_history("conversation_http_1").unwrap());
         drop(restored);
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("sqlite3-journal"));
