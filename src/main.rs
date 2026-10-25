@@ -185,6 +185,7 @@ async fn main() -> anyhow::Result<()> {
 
     let app = Router::new()
         .route("/health", get(health))
+        .route("/ready", get(readiness))
         .route("/v1/models", get(models))
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/conversations/:conversation_id", delete(delete_conversation))
@@ -200,7 +201,9 @@ async fn main() -> anyhow::Result<()> {
         // so an oversized payload cannot consume unbounded memory before
         // request validation has a chance to reject it.
         .layer(DefaultBodyLimit::max(1024 * 1024))
-        .layer(middleware::from_fn(protect_login_api));
+        .layer(middleware::from_fn(protect_login_api))
+        // Keep request IDs on both successful responses and middleware rejections.
+        .layer(middleware::from_fn(attach_request_id));
 
     // Security default: the gateway exposes browser/session control routes and must not listen on public interfaces by default.
     // Remote access should be added only with explicit authentication and TLS.
@@ -458,6 +461,42 @@ async fn login_act(
         Ok(detail) => Json(serde_json::json!({ "ok": true, "detail": detail })).into_response(),
         Err(e) => login_err(e.to_string()),
     }
+}
+
+/// Readiness probe for process supervisors and local deployment wrappers.
+/// Startup already validates configuration and warms the browser pool before
+/// binding the listener; this endpoint reports whether at least one provider
+/// is configured as enabled.
+async fn readiness(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let enabled = state.cfg.providers.iter().filter(|p| p.enabled).count();
+    if enabled == 0 {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "status": "not_ready",
+                "reason": "no_enabled_provider",
+            })),
+        ).into_response();
+    }
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "status": "ready",
+            "enabled_providers": enabled,
+        })),
+    ).into_response()
+}
+
+/// Add a gateway-generated request ID to every response, including security
+/// middleware rejections, so callers can correlate failures with server logs
+/// without trusting arbitrary client-supplied IDs.
+async fn attach_request_id(req: Request<Body>, next: Next) -> Response {
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let mut response = next.run(req).await;
+    if let Ok(value) = axum::http::HeaderValue::from_str(&request_id) {
+        response.headers_mut().insert("x-request-id", value);
+    }
+    response
 }
 
 async fn delete_conversation(
