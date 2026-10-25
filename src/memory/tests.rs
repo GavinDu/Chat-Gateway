@@ -467,6 +467,25 @@ fn unversioned_nonempty_database_is_not_overwritten() {
 }
 
 #[test]
+fn context_read_errors_are_returned_instead_of_panicking_or_dropping_history() {
+    let fixture = Fixture::new();
+    let memory = fixture.open();
+    store(&memory, "read-failure", "durable turn");
+
+    // Simulate a post-startup schema/storage failure through a second connection.
+    // The request path must return an error rather than panic or send empty history.
+    Connection::open(fixture.db())
+        .unwrap()
+        .execute_batch("DROP TABLE messages;")
+        .unwrap();
+
+    let result = memory.build_context(Some("read-failure"), &[m("user", "next turn")]);
+    assert!(result.is_err());
+    assert!(memory.get_provider("read-failure").is_err());
+    assert!(memory.has_history("read-failure").is_err());
+}
+
+#[test]
 fn supported_version_with_missing_schema_fails_closed() {
     let fixture = Fixture::new();
     {
