@@ -33,9 +33,10 @@ snapshot — and you drive the page with relay actions (click, type, Enter, navi
 that the gateway executes inside the provider page. Complete the sign-in (including any SSO
 redirects — use Navigate if a step lands on a new URL), then press <b>Complete</b> to capture
 the session into <code>sessions/&lt;provider&gt;.json</code> for the normal send path.
-<br><br><b>Credentials:</b> this page has no username/password form. Relayed text is held in
-memory only for the single typing action — it is never logged, stored, or sent anywhere except
-into the provider page itself. Prefer your provider's SSO / passkey options where offered.
+<br><br><b>Credentials:</b> text relay is disabled by default; this page does not send text
+or passwords to the gateway. Use the browser extension to link an authenticated provider session.
+For trusted local development only, legacy typing can be explicitly enabled with
+<code>CHAT_GATEWAY_LEGACY_LOGIN_RELAY=1</code>; enabling it means text entered here reaches the gateway.
 <br><br><b>Honest limits:</b> captchas, 2FA prompts, and SSO popups cannot be solved by the
 relay — you must complete those steps through the relay actions themselves (e.g. type the 2FA
 code into the code field when it appears), and some providers' bot checks may refuse synthetic
@@ -57,13 +58,10 @@ back here and re-capture.</p>
 
 <h3>Relay action</h3>
 <div class="row">
-  <label>Selector <input id="relaySel" type="text" placeholder="#email, input[name='username'], textarea…"></label>
-  <label>Text to type <input id="relayText" type="password" autocomplete="off" placeholder="typed into the provider page only"></label>
-  <label><input id="showText" type="checkbox" onchange="document.getElementById('relayText').type=this.checked?'text':'password'"> show</label>
+  <label>Selector <input id="relaySel" type="text" placeholder="#continue, button[type='submit'], textarea…"></label>
 </div>
 <div class="row">
   <button onclick="act('click')">Click selector</button>
-  <button onclick="act('type')">Type into selector</button>
   <button onclick="act('enter')">Press Enter</button>
 </div>
 <div class="row">
@@ -160,10 +158,9 @@ async function clickButton(index) {
 async function act(kind) {
   const name = document.getElementById('selProvider').value;
   const selector = document.getElementById('relaySel').value.trim();
-  const text = document.getElementById('relayText').value;
   const url = document.getElementById('navUrl').value.trim();
-  const body = {action: kind, selector, text, url};
-  try { const r = await api('/login/api/' + name + '/act', 'POST', body); msg(r.detail || ('action ' + kind + ' done.')); document.getElementById('relayText').value = ''; setTimeout(refreshView, 800); }
+  const body = {action: kind, selector, url};
+  try { const r = await api('/login/api/' + name + '/act', 'POST', body); msg(r.detail || ('action ' + kind + ' done.')); setTimeout(refreshView, 800); }
   catch (e) { msg('action error: ' + e.message); }
 }
 
