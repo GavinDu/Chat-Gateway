@@ -1,4 +1,7 @@
-use chat_gateway_rs::{ChatMessage, UnifiedMemory};
+#[path = "../src/memory.rs"]
+mod memory;
+
+use memory::{ChatMessage, UnifiedMemory};
 use std::{
     env, fs,
     path::PathBuf,
@@ -43,6 +46,7 @@ fn main() -> anyhow::Result<()> {
     let root = env::temp_dir().join(format!("chat-gateway-bench-{}", uuid::Uuid::new_v4()));
     fs::create_dir_all(&root)?;
     let legacy = root.join("legacy.json");
+    let previous_override = env::var_os("CHAT_GATEWAY_MEMORY_PATH");
     env::set_var("CHAT_GATEWAY_MEMORY_PATH", &legacy);
 
     let result = (|| -> anyhow::Result<()> {
@@ -98,7 +102,11 @@ fn main() -> anyhow::Result<()> {
         Ok(())
     })();
 
-    env::remove_var("CHAT_GATEWAY_MEMORY_PATH");
+    if let Some(previous) = previous_override {
+        env::set_var("CHAT_GATEWAY_MEMORY_PATH", previous);
+    } else {
+        env::remove_var("CHAT_GATEWAY_MEMORY_PATH");
+    }
     let cleanup = fs::remove_dir_all(&root);
     result?;
     cleanup?;
