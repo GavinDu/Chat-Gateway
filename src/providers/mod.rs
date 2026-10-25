@@ -353,7 +353,13 @@ pub async fn run_send(
                     }
                     continue;
                 }
-                DeltaObservation::Stable => stable_ticks += 1,
+                DeltaObservation::Stable => {
+                    if streaming {
+                        stable_ticks = 0;
+                    } else {
+                        stable_ticks += 1;
+                    }
+                },
             }
 
             // Completion requires a conservative 15s idle grace plus no
