@@ -420,10 +420,7 @@ async fn login_status(State(state): State<Arc<AppState>>) -> axum::response::Res
             Ok(Some(file)) => (true, Some(file.ts)),
             Ok(None) => (false, None),
             Err(error) => {
-                tracing::error!(
-                    provider = name,
-                    "persisted login session read failed"
-                );
+                tracing::error!(provider = name, "persisted login session read failed");
                 return login_status_read_error();
             }
         };
