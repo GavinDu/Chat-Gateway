@@ -1,3 +1,4 @@
+#[path = "memory/sqlite.rs"]
 mod sqlite;
 
 use rusqlite::{Connection, TransactionBehavior};
@@ -206,4 +207,5 @@ fn messages_after_overlap(stored: &[ChatMessage], incoming: &[ChatMessage]) -> V
 }
 
 #[cfg(test)]
+#[path = "memory/tests.rs"]
 mod tests;

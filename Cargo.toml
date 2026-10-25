@@ -40,3 +40,8 @@ stealth = ["obscura-core/stealth"]
 [patch.crates-io]
 taffy = { path = "vendor/taffy" }
 cosmic-text = { path = "vendor/cosmic-text" }
+
+[[bench]]
+name = "memory_sqlite"
+path = "benches/memory_sqlite.rs"
+harness = false

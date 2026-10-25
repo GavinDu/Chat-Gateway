@@ -219,11 +219,40 @@ Honest limits of the login UI:
   knowing. Sessions expire — when a provider reports
   `session_expired`, re-capture it here.
 
+## Performance benchmarks
+
+Run the reproducible, provider-independent SQLite memory microbenchmark:
+
+```bash
+cargo bench --locked --bench memory_sqlite
+```
+
+It reports average, p50, p95, and throughput for durable `store_turn`,
+context construction with a 500-turn transcript, provider/tab affinity reads,
+and deletion. Each run uses a unique temporary directory and never opens the
+repository's real data or provider-session files. Results depend on the host,
+filesystem, Rust toolchain, and workload. This is a memory-layer microbenchmark,
+not an end-to-end provider TTFT or browser startup benchmark.
+
+A reference CI run on GitHub Actions `ubuntu-24.04` (Ubuntu 24.04.5, x86_64,
+Rust 1.99.1, optimized bench profile; 500 samples per operation) reported:
+
+| Operation | Average | p50 | p95 |
+| --- | ---: | ---: | ---: |
+| SQLite `store_turn` | 1.03 ms | 1.01 ms | 1.26 ms |
+| `build_context` with 500 stored turns | 446.94 µs | 444.39 µs | 474.90 µs |
+| Provider + tab affinity lookup | 648.29 µs | 647.63 µs | 661.49 µs |
+| SQLite delete | 862.71 µs | 838.62 µs | 1.02 ms |
+
+These are one CI run's observed values, not performance guarantees or regression
+thresholds. Repeat on the target deployment hardware before making capacity or
+latency decisions.
+
 ## Notes / honest limits
 
 - One persistent page per provider: concurrent sends to the same
   provider are serialized on that page (bounded by
   `session_pool_size` permits on the HTTP side).
-- The figures in MIGRATION.md (memory, TTFT, switch latency) are the
-  v2 design targets from the migration doc, not measurements taken in
-  this repo; there is no benchmark harness in the tree yet.
+- Provider startup, resident memory, provider switching, and TTFT are not
+  benchmarked by this harness; do not treat historical design targets as
+  measured results.
