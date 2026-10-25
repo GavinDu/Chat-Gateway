@@ -2466,10 +2466,7 @@ mod api_key_auth_tests {
         )
         .unwrap()
         .unwrap();
-        assert_eq!(
-            context.provider_allowlist,
-            Some(vec!["chatgpt".to_owned()])
-        );
+        assert_eq!(context.provider_allowlist, Some(vec!["chatgpt".to_owned()]));
         assert_eq!(
             authorize_api_request(
                 &config,
