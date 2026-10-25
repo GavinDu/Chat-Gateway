@@ -567,29 +567,51 @@ mod login_action_validation_tests {
     }
 }
 
+/// Convert an untrusted HTTP payload into a complete action before any browser
+/// dispatch. Missing fields are errors, never defaults that could trigger an
+/// unintended click or type operation.
+fn parse_login_action(req: LoginActReq) -> anyhow::Result<login::LoginAction> {
+    fn required_selector(selector: Option<String>, field: &str) -> anyhow::Result<String> {
+        let selector = selector.ok_or_else(|| anyhow::anyhow!("{field} is required"))?;
+        if selector.trim().is_empty() {
+            anyhow::bail!("{field} must not be blank");
+        }
+        Ok(selector)
+    }
+
+    match req.action.as_str() {
+        "click" => Ok(login::LoginAction::Click {
+            selector: required_selector(req.selector, "selector")?,
+        }),
+        "click_button" => Ok(login::LoginAction::ClickButton {
+            index: req.index.ok_or_else(|| anyhow::anyhow!("index is required"))?,
+        }),
+        "type" => Ok(login::LoginAction::Type {
+            selector: required_selector(req.selector, "selector")?,
+            text: req.text.ok_or_else(|| anyhow::anyhow!("text is required"))?,
+        }),
+        "enter" => Ok(login::LoginAction::Enter {
+            selector: required_selector(req.selector, "selector")?,
+        }),
+        "navigate" => {
+            let url = req.url.ok_or_else(|| anyhow::anyhow!("url is required"))?;
+            if url.trim().is_empty() {
+                anyhow::bail!("url must not be blank");
+            }
+            Ok(login::LoginAction::Navigate { url })
+        }
+        other => anyhow::bail!("unknown login action: {other}"),
+    }
+}
+
 async fn login_act(
     State(state): State<Arc<AppState>>,
     Path(provider): Path<String>,
     Json(req): Json<LoginActReq>,
 ) -> impl IntoResponse {
-    let action = match req.action.as_str() {
-        "click" => login::LoginAction::Click {
-            selector: req.selector.unwrap_or_default(),
-        },
-        "click_button" => login::LoginAction::ClickButton {
-            index: req.index.unwrap_or(0),
-        },
-        "type" => login::LoginAction::Type {
-            selector: req.selector.unwrap_or_default(),
-            text: req.text.unwrap_or_default(),
-        },
-        "enter" => login::LoginAction::Enter {
-            selector: req.selector.unwrap_or_default(),
-        },
-        "navigate" => login::LoginAction::Navigate {
-            url: req.url.unwrap_or_default(),
-        },
-        other => return login_err(format!("unknown login action: {other}")),
+    let action = match parse_login_action(req) {
+        Ok(action) => action,
+        Err(error) => return login_err(error.to_string()),
     };
     if let Err(error) = validate_login_action_for_provider(&provider, &action) {
         return login_err(error.to_string());
@@ -599,6 +621,61 @@ async fn login_act(
         // contain relayed text.
         Ok(detail) => Json(serde_json::json!({ "ok": true, "detail": detail })).into_response(),
         Err(e) => login_err(e.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod login_action_payload_tests {
+    use super::*;
+
+    fn parse(value: serde_json::Value) -> anyhow::Result<login::LoginAction> {
+        parse_login_action(serde_json::from_value(value)?)
+    }
+
+    #[test]
+    fn rejects_missing_or_blank_selectors() {
+        for payload in [
+            serde_json::json!({"action":"click"}),
+            serde_json::json!({"action":"click","selector":""}),
+            serde_json::json!({"action":"click","selector":"   "}),
+            serde_json::json!({"action":"type","selector":"#email","text":"secret"}),
+            serde_json::json!({"action":"enter","selector":""}),
+        ] {
+            assert!(parse(payload).is_err());
+        }
+    }
+
+    #[test]
+    fn rejects_missing_navigation_url_and_button_index() {
+        for payload in [
+            serde_json::json!({"action":"navigate"}),
+            serde_json::json!({"action":"navigate","url":" "}),
+            serde_json::json!({"action":"click_button"}),
+        ] {
+            assert!(parse(payload).is_err());
+        }
+    }
+
+    #[test]
+    fn rejects_missing_type_text_and_unknown_actions() {
+        assert!(parse(serde_json::json!({"action":"type","selector":"#email"})).is_err());
+        assert!(parse(serde_json::json!({"action":"hover"})).is_err());
+    }
+
+    #[test]
+    fn accepts_complete_action_payloads_without_changing_values() {
+        assert!(matches!(
+            parse(serde_json::json!({"action":"click","selector":"#continue"})).unwrap(),
+            login::LoginAction::Click { selector } if selector == "#continue"
+        ));
+        assert!(matches!(
+            parse(serde_json::json!({"action":"click_button","index":0})).unwrap(),
+            login::LoginAction::ClickButton { index: 0 }
+        ));
+        assert!(matches!(
+            parse(serde_json::json!({"action":"navigate","url":"https://chatgpt.com/"})).unwrap(),
+            login::LoginAction::Navigate { url } if url == "https://chatgpt.com/"
+        ));
     }
 }
 
