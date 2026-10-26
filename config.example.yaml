@@ -1,3 +1,7 @@
+auth:
+  # Empty keys keeps authentication disabled; the server remains loopback-only.
+  keys: []
+
 server:
   port: 8080
   chrome_profile_dir: ""
