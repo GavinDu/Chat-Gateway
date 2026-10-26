@@ -292,3 +292,9 @@ The HTTP server binds to `127.0.0.1` only. The login relay can control provider 
 The server binds to loopback only. For shared local development environments, configure `auth.keys[]` with a key name, the lowercase SHA-256 hash of its secret, and one or both scopes (`chat`, `admin`). Store only the hash in YAML; generate a one-time secret with `chat-gateway-rs --create-api-key NAME` and save the printed secret immediately. The plaintext is not persisted or logged. 
 
 When `auth.keys` is non-empty, every route except `/health` requires `Authorization: Bearer <secret>`. Chat routes require the `chat` scope; login/session-control routes and conversation deletion require `admin`. An empty key list disables API-key auth for backward-compatible loopback-only use; Host/Origin checks are not authentication and the listener must not be exposed remotely.
+
+## Metrics and request timing
+
+The loopback-only `/metrics` endpoint exposes Prometheus text metrics for HTTP request counts and handler latency, plus provider queue wait, time to first token (TTFT), provider work, total chat duration, and estimated gateway overhead. When API-key authentication is enabled, `/metrics` requires an `admin` scope. Route labels are normalized to a bounded vocabulary to avoid high-cardinality metrics.
+
+See [docs/METRICS.md](docs/METRICS.md) for metric definitions and interpretation.
