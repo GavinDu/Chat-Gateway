@@ -628,7 +628,7 @@ fn browser_thread(
                                 // Observe completion while forwarding chunks. Only a
                                 // successful done chunk triggers a session snapshot;
                                 // expired/failed sends must never persist stale state.
-                                let (save_tx, mut save_rx) = mpsc::channel(32);
+                                let (save_tx, mut save_rx) = mpsc::channel::<Result<ProviderChunk>>(32);
                                 let (completion_tx, completion_rx) = oneshot::channel();
                                 tokio::task::spawn_local(async move {
                                     let mut completed = false;
