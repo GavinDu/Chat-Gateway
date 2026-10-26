@@ -1434,7 +1434,9 @@ async fn chat_completions(
             let first = match tokio::time::timeout(first_chunk_timeout, async {
                 loop {
                     match rx.recv().await {
-                        Some(Ok(chunk)) if usable_initial_stream_chunk(&chunk.content, chunk.done) => {
+                        Some(Ok(chunk))
+                            if usable_initial_stream_chunk(&chunk.content, chunk.done) =>
+                        {
                             break Some(Ok(chunk));
                         }
                         Some(Ok(chunk)) if chunk.done => break Some(Ok(chunk)),
