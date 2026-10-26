@@ -20,7 +20,6 @@ pub const SELECTORS: SelectorSet = SelectorSet {
     ],
     send: &[
         "button[aria-label=\"Send\"]",
-        "button[type=\"submit\"]",
         "button.submit",
     ],
     response: &["div.markdown", "div.assistant-message", "div.prose"],
