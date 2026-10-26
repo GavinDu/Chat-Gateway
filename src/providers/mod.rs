@@ -265,6 +265,20 @@ pub async fn run_send(
     timeout: Duration,
     chunks: mpsc::Sender<Result<ProviderChunk>>,
 ) {
+    if crate::provider_guard::is_challenge_page(&page) {
+        crate::provider_guard::disable_provider(
+            adapter.name(),
+            "challenge page detected; manual review required",
+        );
+        let _ = chunks
+            .send(Err(anyhow::anyhow!(
+                "provider '{}' disabled after challenge page detection; manual review required",
+                adapter.name()
+            )))
+            .await;
+        return;
+    }
+
     // Baseline snapshot (Go concept, Rust form): capture the response
     // text BEFORE sending, so pre-existing text on a reused warm page
     // is never emitted as new. Rust v1 had no baseline (last_len
@@ -328,6 +342,20 @@ pub async fn run_send(
         }
 
         tokio::time::sleep(Duration::from_millis(350)).await;
+
+        if crate::provider_guard::is_challenge_page(&page) {
+            crate::provider_guard::disable_provider(
+                adapter.name(),
+                "challenge page detected; manual review required",
+            );
+            let _ = chunks
+                .send(Err(anyhow::anyhow!(
+                    "provider '{}' disabled after challenge page detection; manual review required",
+                    adapter.name()
+                )))
+                .await;
+            return;
+        }
 
         if is_new_response_node(baseline_response_count, adapter.response_count(&page)) {
             // A new DOM node is the strongest signal that the provider started
