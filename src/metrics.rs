@@ -39,7 +39,11 @@ impl Histogram {
             "{metric}_bucket{{{label}=\"{escaped}\",le=\"+Inf\"}} {cumulative}"
         );
         let _ = writeln!(out, "{metric}_sum{{{label}=\"{escaped}\"}} {}", self.sum);
-        let _ = writeln!(out, "{metric}_count{{{label}=\"{escaped}\"}} {}", self.count);
+        let _ = writeln!(
+            out,
+            "{metric}_count{{{label}=\"{escaped}\"}} {}",
+            self.count
+        );
     }
 }
 
