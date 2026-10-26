@@ -298,3 +298,7 @@ When `auth.keys` is non-empty, every route except `/health` requires `Authorizat
 The loopback-only `/metrics` endpoint exposes Prometheus text metrics for HTTP request counts and handler latency, plus provider queue wait, time to first token (TTFT), provider work, total chat duration, and estimated gateway overhead. When API-key authentication is enabled, `/metrics` requires an `admin` scope. Route labels are normalized to a bounded vocabulary to avoid high-cardinality metrics.
 
 See [docs/METRICS.md](docs/METRICS.md) for metric definitions and interpretation.
+
+## Provider pacing and challenge protection
+
+Each provider has a configurable `min_request_interval_ms` (default `5000`) and `daily_request_cap` (default `100`) in `config.yaml`. The gateway applies a small bounded jitter between provider sends and rejects sends after the UTC-day cap is reached. A detected CAPTCHA/security challenge disables that provider for the lifetime of the process and requires operator review/restart; the gateway does not attempt to bypass the challenge. These defaults are conservative starting points, not a guarantee that a provider's own policies permit automation.
