@@ -127,7 +127,9 @@ mod tests {
 
         let expired = status(provider);
         assert_eq!(expired.state, "needs_login");
-        let safe_error = expired.last_error.expect("expiry state should explain remediation");
+        let safe_error = expired
+            .last_error
+            .expect("expiry state should explain remediation");
         assert_eq!(safe_error, "provider session expired; re-login required");
         assert!(!safe_error.contains("secret-session-token"));
         assert!(!safe_error.contains("private@example.test"));
