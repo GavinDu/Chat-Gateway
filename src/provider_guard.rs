@@ -55,12 +55,32 @@ pub fn provider_disabled_reason(provider: &str) -> Option<&'static str> {
     budgets().lock().ok()?.get(provider).and_then(|entry| entry.disabled_reason)
 }
 
+fn has_challenge_marker(url: &str, body: &str) -> bool {
+    let url = url.to_ascii_lowercase();
+    let body = body.to_ascii_lowercase();
+    ["captcha", "challenge", "checkpoint", "verify-human", "verify_you_are_human"]
+        .iter()
+        .any(|needle| url.contains(needle))
+        || [
+            "verify you are human",
+            "confirm you are not a robot",
+            "unusual traffic",
+            "complete the captcha",
+            "security challenge",
+            "checking your browser",
+        ]
+        .iter()
+        .any(|needle| body.contains(needle))
+}
+
 /// Detect challenge pages without attempting to solve or bypass them.
 pub fn is_challenge_page(page: &Page) -> bool {
-    let url = page.url().to_ascii_lowercase();
-    if ["captcha", "challenge", "checkpoint", "verify-human", "verify_you_are_human"].iter().any(|needle| url.contains(needle)) { return true; }
-    let body = page.evaluate("document.body ? document.body.innerText.slice(0, 12000) : ''").as_str().unwrap_or("").to_ascii_lowercase();
-    ["verify you are human", "confirm you are not a robot", "unusual traffic", "complete the captcha", "security challenge", "checking your browser"].iter().any(|needle| body.contains(needle))
+    let url = page.url();
+    let body = page
+        .evaluate("document.body ? document.body.innerText.slice(0, 12000) : ''")
+        .as_str()
+        .unwrap_or("");
+    has_challenge_marker(&url, body)
 }
 
 #[cfg(test)]
@@ -77,6 +97,14 @@ mod tests {
         wait_for_request_slot(provider, 1, 1).await.unwrap();
         assert!(wait_for_request_slot(provider, 1, 1).await.is_err());
     }
+    #[test]
+    fn challenge_detector_matches_security_prompts_but_not_normal_chat_pages() {
+        assert!(has_challenge_marker("https://example.test/captcha", ""));
+        assert!(has_challenge_marker("https://example.test/", "Please verify you are human to continue"));
+        assert!(has_challenge_marker("https://example.test/", "Unusual traffic detected"));
+        assert!(!has_challenge_marker("https://example.test/chat", "Welcome back. How can I help?"));
+    }
+
     #[test]
     fn challenge_kill_switch_is_sticky() {
         let provider = "test-challenge-kill-switch";
