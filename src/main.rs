@@ -2635,7 +2635,7 @@ mod usage_estimate_tests {
     #[test]
     fn provider_headers_reject_invalid_header_values() {
         let mut headers = axum::http::HeaderMap::new();
-        add_gateway_headers(&mut headers, "claude\\r\\nX-Injected: yes", "model");
+        add_gateway_headers(&mut headers, "claude\r\nX-Injected: yes", "model");
         assert!(!headers.contains_key("X-Gateway-Provider"));
         assert_eq!(headers["X-Gateway-Model"], "model");
     }
