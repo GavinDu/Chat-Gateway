@@ -133,6 +133,18 @@ pub trait ChatProvider: Send + Sync {
     /// Current full text of the (last) response, if present.
     fn response_text(&self, page: &Page) -> Option<String>;
 
+    /// Count distinct response nodes before/after a send. This lets the
+    /// stream loop distinguish a new identical answer from stale text.
+    fn response_count(&self, page: &Page) -> usize {
+        let selectors =
+            serde_json::to_string(self.selector_set().response).unwrap_or_else(|_| "[]".to_owned());
+        page.evaluate(&format!(
+            "(() => {{ const nodes = new Set(); for (const selector of {selectors}) {{ try {{ document.querySelectorAll(selector).forEach(node => nodes.add(node)); }} catch (_) {{}} }} return nodes.size; }})()"
+        ))
+        .as_u64()
+        .unwrap_or(0) as usize
+    }
+
     /// Provider still generating (stop button / streaming attribute).
     fn is_streaming(&self, page: &Page) -> bool {
         common::is_streaming(page)
@@ -231,6 +243,10 @@ impl ResponseDeltaTracker {
     }
 }
 
+fn is_new_response_node(baseline_count: usize, current_count: usize) -> bool {
+    current_count > baseline_count
+}
+
 /// Generic send + stream-poll loop shared by all adapters. Poll response
 /// text every 350ms and finish only after a conservative idle grace period
 /// with no streaming indicator, or at the provider timeout. The grace period
@@ -254,6 +270,7 @@ pub async fn run_send(
     // is never emitted as new. Rust v1 had no baseline (last_len
     // started at 0); this fixes that stale-text bug while keeping
     // Rust v1's 350ms / stability / indicator completion.
+    let baseline_response_count = adapter.response_count(&page);
     let baseline = adapter.response_text(&page).filter(|t| !t.is_empty());
     let identical_answer_fallback = baseline.clone();
     let mut baseline = baseline;
@@ -311,6 +328,12 @@ pub async fn run_send(
         }
 
         tokio::time::sleep(Duration::from_millis(350)).await;
+
+        if is_new_response_node(baseline_response_count, adapter.response_count(&page)) {
+            // A new DOM node is the strongest signal that the provider started
+            // a fresh answer, even when its text matches the previous turn.
+            tracker = ResponseDeltaTracker::new(None);
+        }
 
         let streaming = adapter.is_streaming(&page);
         saw_streaming |= streaming;
@@ -408,6 +431,13 @@ pub async fn run_send(
 #[cfg(test)]
 mod response_delta_tracker_tests {
     use super::*;
+
+    #[test]
+    fn response_node_count_detects_new_node_but_not_reused_node() {
+        assert!(!is_new_response_node(3, 3));
+        assert!(is_new_response_node(3, 4));
+        assert!(!is_new_response_node(4, 3));
+    }
 
     #[test]
     fn waits_when_reused_page_still_shows_old_answer() {
