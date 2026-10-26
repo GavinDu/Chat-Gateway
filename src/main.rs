@@ -866,7 +866,6 @@ fn parse_login_action(req: LoginActReq) -> anyhow::Result<login::LoginAction> {
     }
 }
 
-
 fn legacy_login_relay_enabled_from(value: Option<&str>) -> bool {
     value.is_some_and(|value| {
         matches!(
