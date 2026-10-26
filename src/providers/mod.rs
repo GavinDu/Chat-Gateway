@@ -136,8 +136,8 @@ pub trait ChatProvider: Send + Sync {
     /// Count distinct response nodes before/after a send. This lets the
     /// stream loop distinguish a new identical answer from stale text.
     fn response_count(&self, page: &Page) -> usize {
-        let selectors = serde_json::to_string(self.selector_set().response)
-            .unwrap_or_else(|_| "[]".to_owned());
+        let selectors =
+            serde_json::to_string(self.selector_set().response).unwrap_or_else(|_| "[]".to_owned());
         page.evaluate(&format!(
             "(() => {{ const nodes = new Set(); for (const selector of {selectors}) {{ try {{ document.querySelectorAll(selector).forEach(node => nodes.add(node)); }} catch (_) {{}} }} return nodes.size; }})()"
         ))
@@ -424,7 +424,6 @@ mod response_delta_tracker_tests {
     }
 }
 
-
 #[cfg(test)]
 mod response_completion_regression_tests {
     use super::*;
@@ -444,7 +443,10 @@ mod response_completion_regression_tests {
         // run_send resets the tracker when the node count grows. The identical
         // answer is therefore emitted instead of being mistaken for stale text.
         tracker = ResponseDeltaTracker::new(None);
-        assert_eq!(tracker.observe("OK"), DeltaObservation::Delta("OK".to_owned()));
+        assert_eq!(
+            tracker.observe("OK"),
+            DeltaObservation::Delta("OK".to_owned())
+        );
     }
 
     #[test]
