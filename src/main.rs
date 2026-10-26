@@ -1201,17 +1201,22 @@ async fn delete_conversation(
 }
 
 async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let providers = state.cfg.providers.iter().map(|p| {
-        let session = provider_state::status(&p.name);
-        serde_json::json!({
-            "name": p.name,
-            "enabled": p.enabled,
-            "priority": p.priority,
-            "models": p.models,
-            "session_state": session.state,
-            "last_session_error": session.last_error,
+    let providers = state
+        .cfg
+        .providers
+        .iter()
+        .map(|p| {
+            let session = provider_state::status(&p.name);
+            serde_json::json!({
+                "name": p.name,
+                "enabled": p.enabled,
+                "priority": p.priority,
+                "models": p.models,
+                "session_state": session.state,
+                "last_session_error": session.last_error,
+            })
         })
-    }).collect::<Vec<_>>();
+        .collect::<Vec<_>>();
     Json(serde_json::json!({
         "status": "ok",
         "engine": "obscura-native (embedded)",
