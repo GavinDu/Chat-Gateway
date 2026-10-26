@@ -102,6 +102,12 @@ pub struct ProviderConfig {
     pub queue_timeout_seconds: u64,
     #[serde(default = "default_pool")]
     pub session_pool_size: usize,
+    /// Minimum delay between provider sends, with bounded jitter.
+    #[serde(default = "default_provider_interval_ms")]
+    pub min_request_interval_ms: u64,
+    /// Maximum provider sends per UTC day; zero is invalid.
+    #[serde(default = "default_provider_daily_cap")]
+    pub daily_request_cap: u32,
     #[serde(default)]
     pub models: Vec<String>,
 }
@@ -211,6 +217,18 @@ impl AppConfig {
                     provider.name
                 );
             }
+            if provider.min_request_interval_ms == 0 {
+                anyhow::bail!(
+                    "provider '{}' min_request_interval_ms must be greater than zero",
+                    provider.name
+                );
+            }
+            if provider.daily_request_cap == 0 {
+                anyhow::bail!(
+                    "provider '{}' daily_request_cap must be greater than zero",
+                    provider.name
+                );
+            }
         }
         Ok(())
     }
@@ -245,6 +263,12 @@ fn default_queue_timeout() -> u64 {
 }
 fn default_pool() -> usize {
     2
+}
+fn default_provider_interval_ms() -> u64 {
+    5_000
+}
+fn default_provider_daily_cap() -> u32 {
+    100
 }
 fn default_max_tokens() -> usize {
     8000
