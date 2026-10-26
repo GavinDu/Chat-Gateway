@@ -1425,14 +1425,19 @@ async fn chat_completions(
         let mut first_stream_chunk: Option<providers::ProviderChunk> = None;
         if req.stream {
             let first_chunk_timeout = std::time::Duration::from_secs(
-                state.cfg.provider(&provider_name)
+                state
+                    .cfg
+                    .provider(&provider_name)
                     .map(|provider| provider.timeout_seconds)
                     .unwrap_or(120),
             );
             let first = match tokio::time::timeout(first_chunk_timeout, rx.recv()).await {
-                Ok(Some(Ok(chunk))) if usable_initial_stream_chunk(&chunk.content, chunk.done) => chunk,
+                Ok(Some(Ok(chunk))) if usable_initial_stream_chunk(&chunk.content, chunk.done) => {
+                    chunk
+                },
                 Ok(Some(Ok(_))) => {
-                    last_err = Some("provider completed without output before stream started".to_string());
+                    last_err =
+                        Some("provider completed without output before stream started".to_string());
                     continue;
                 }
                 Ok(Some(Err(error))) => {
@@ -1456,7 +1461,8 @@ async fn chat_completions(
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
         if req.stream {
-            let first_chunk = first_stream_chunk.expect("streaming path prefetches its first chunk");
+            let first_chunk =
+                first_stream_chunk.expect("streaming path prefetches its first chunk");
             let state_c = state.clone();
             let windowed_c = windowed.clone();
             let provider_c = provider_name.clone();
