@@ -1140,7 +1140,8 @@ fn authorize_api_request(
         || path.starts_with("/relay/")
         || path == "/metrics"
         || (path.starts_with("/v1/conversations/")
-            && matches!(*method, axum::http::Method::GET | axum::http::Method::DELETE));
+            && (*method == axum::http::Method::GET
+                || *method == axum::http::Method::DELETE));
     let required_scope = if admin_route { "admin" } else { "chat" };
     if !key.scopes.iter().any(|scope| scope == required_scope) {
         return Err(AuthFailure::InsufficientScope);
