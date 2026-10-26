@@ -1592,6 +1592,8 @@ async fn chat_completions(
                 });
                 yield Ok::<_, anyhow::Error>(Event::default().data(role.to_string()));
                 let mut stream_error: Option<String> = None;
+                // Keep the raw detail only for internal session-state classification;
+                // client-facing stream errors remain generic and never expose it.
                 let mut provider_error_detail: Option<String> = None;
                 let mut pending: Option<Result<providers::ProviderChunk, anyhow::Error>> = Some(Ok(first_chunk));
                 while let Some(item) = match pending.take() {
