@@ -302,3 +302,7 @@ See [docs/METRICS.md](docs/METRICS.md) for metric definitions and interpretation
 ## Provider session health
 
 `GET /health` reports each configured provider's runtime `session_state`: `unknown` until a successful send, `ready` after a successful response, or `needs_login` after an explicit `session_expired` provider error. `needs_login` providers are skipped by routing and do not count toward `/ready`. After completing login, restart the gateway to clear the in-memory session state.
+
+## Provider pacing and challenge protection
+
+Each provider has a configurable `min_request_interval_ms` (default `5000`) and `daily_request_cap` (default `100`) in `config.yaml`. The gateway applies a small bounded jitter between provider sends and rejects sends after the UTC-day cap is reached. A detected CAPTCHA/security challenge disables that provider for the lifetime of the process and requires operator review/restart; the gateway does not attempt to bypass the challenge. These defaults are conservative starting points, not a guarantee that a provider's own policies permit automation.
