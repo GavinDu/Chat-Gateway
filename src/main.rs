@@ -1561,7 +1561,9 @@ async fn chat_completions(
                         break;
                     }
                     if ttft_ms.is_none() {
-                        ttft_ms = Some(provider_started.elapsed().as_millis().min(u64::MAX as u128) as u64);
+                        ttft_ms = Some(
+                            provider_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+                        );
                     }
                     full.push_str(&c.content);
                 }
