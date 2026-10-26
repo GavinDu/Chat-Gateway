@@ -22,6 +22,8 @@ providers:
     timeout_seconds: 120
     queue_timeout_seconds: 30
     session_pool_size: 1
+    min_request_interval_ms: 5000
+    daily_request_cap: 100
     models: [qwen, qwen3, qwen-plus, qwen-max]
   - name: metaai
     enabled: false
@@ -29,6 +31,8 @@ providers:
     timeout_seconds: 120
     queue_timeout_seconds: 30
     session_pool_size: 1
+    min_request_interval_ms: 5000
+    daily_request_cap: 100
     models: [meta-ai, llama, llama-4, llama-3.3]
   - name: claude
     enabled: false
@@ -36,6 +40,8 @@ providers:
     timeout_seconds: 150
     queue_timeout_seconds: 30
     session_pool_size: 1
+    min_request_interval_ms: 5000
+    daily_request_cap: 100
     models: [claude, claude-sonnet-4, claude-opus-4, claude-haiku-3.5, claude-sonnet, claude-opus]
   - name: chatgpt
     enabled: false
@@ -43,6 +49,8 @@ providers:
     timeout_seconds: 150
     queue_timeout_seconds: 30
     session_pool_size: 1
+    min_request_interval_ms: 5000
+    daily_request_cap: 100
     models: [gpt, chatgpt, gpt-5, gpt-4o, gpt-4o-mini, o1, o3-mini]
   - name: gemini
     enabled: false
@@ -50,6 +58,8 @@ providers:
     timeout_seconds: 120
     queue_timeout_seconds: 30
     session_pool_size: 1
+    min_request_interval_ms: 5000
+    daily_request_cap: 100
     models: [gemini, gemini-2.0-flash, gemini-1.5-pro, gemini-1.5-flash, gemini-pro]
   - name: grok
     enabled: false
@@ -57,6 +67,8 @@ providers:
     timeout_seconds: 120
     queue_timeout_seconds: 30
     session_pool_size: 1
+    min_request_interval_ms: 5000
+    daily_request_cap: 100
     models: [grok, grok-3, grok-3-mini, grok-2, grok-beta]
   - name: mistral
     enabled: false
@@ -64,6 +76,8 @@ providers:
     timeout_seconds: 120
     queue_timeout_seconds: 30
     session_pool_size: 1
+    min_request_interval_ms: 5000
+    daily_request_cap: 100
     models: [mistral, mistral-large, mistral-small, mixtral, codestral, pixtral]
   - name: perplexity
     enabled: false
@@ -71,4 +85,6 @@ providers:
     timeout_seconds: 120
     queue_timeout_seconds: 30
     session_pool_size: 1
+    min_request_interval_ms: 5000
+    daily_request_cap: 100
     models: [perplexity, sonar, sonar-pro, sonar-reasoning, pplx-8b, pplx-70b]
