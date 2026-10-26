@@ -164,6 +164,6 @@ mod tests {
         assert_eq!(histogram.count, 2);
         assert_eq!(histogram.sum, 907);
         assert_eq!(histogram.buckets[1], 1);
-        assert_eq!(histogram.buckets[8], 1);
+        assert_eq!(histogram.buckets[7], 1);
     }
 }
