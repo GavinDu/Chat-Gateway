@@ -382,7 +382,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/v1/chat/completions", post(chat_completions))
         .route(
             "/v1/conversations/:conversation_id",
-            delete(delete_conversation),
+            get(export_conversation).delete(delete_conversation),
         )
         .route("/login", get(login_page))
         .route("/login/api/status", get(login_status))
@@ -1211,6 +1211,42 @@ fn delete_conversation_response(memory: &UnifiedMemory, conversation_id: &str) -
             )
         }
     }
+}
+
+fn export_conversation_response(memory: &UnifiedMemory, conversation_id: &str) -> Response {
+    if !valid_conversation_id(conversation_id) {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            "invalid_conversation_id",
+            "conversation ID must be 8-128 ASCII letters, digits, '_' or '-'",
+        );
+    }
+    match memory.export_conversation(conversation_id) {
+        Ok(Some(conversation)) => Json(conversation).into_response(),
+        Ok(None) => api_error(
+            StatusCode::NOT_FOUND,
+            "invalid_request_error",
+            "conversation_not_found",
+            "conversation does not exist",
+        ),
+        Err(_error) => {
+            tracing::error!(conversation_id = %conversation_id, "conversation export failed");
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                "memory_persistence_failed",
+                "conversation could not be exported safely",
+            )
+        }
+    }
+}
+
+async fn export_conversation(
+    State(state): State<Arc<AppState>>,
+    Path(conversation_id): Path<String>,
+) -> Response {
+    export_conversation_response(&state.memory, &conversation_id)
 }
 
 async fn delete_conversation(
