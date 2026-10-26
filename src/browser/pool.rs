@@ -629,6 +629,7 @@ fn browser_thread(
                                 // successful done chunk triggers a session snapshot;
                                 // expired/failed sends must never persist stale state.
                                 let (save_tx, mut save_rx) = mpsc::channel(32);
+                                let page_for_save = page.clone();
                                 tokio::task::spawn_local(async move {
                                     let mut completed = false;
                                     while let Some(chunk) = save_rx.recv().await {
@@ -642,7 +643,7 @@ fn browser_thread(
                                     if completed {
                                         if let Err(error) = session::save_session_if_changed(
                                             &browser_for_save,
-                                            &page,
+                                            &page_for_save,
                                             &provider_name,
                                         ).await {
                                             tracing::warn!(provider = %provider_name, %error, "rotated session snapshot failed");
