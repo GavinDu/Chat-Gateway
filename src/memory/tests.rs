@@ -620,3 +620,17 @@ fn existing_database_permissions_are_tightened_and_symlinks_rejected() {
     symlink(fixture.db(), &link).unwrap();
     assert!(open(&link, None).is_err());
 }
+
+#[test]
+fn conversation_export_returns_complete_durable_record_and_missing_is_none() {
+    let fixture = Fixture::new();
+    let memory = fixture.open();
+    store(&memory, "export-me", "export payload");
+
+    let exported = memory.export_conversation("export-me").unwrap().unwrap();
+    assert_eq!(exported.id, "export-me");
+    assert_eq!(exported.provider.as_deref(), Some("chatgpt"));
+    assert_eq!(exported.tab_id.as_deref(), Some("tab-export payload"));
+    assert_eq!(exported.messages, vec![m("user", "export payload"), m("assistant", "answer export payload")]);
+    assert_eq!(memory.export_conversation("missing-export").unwrap(), None);
+}
