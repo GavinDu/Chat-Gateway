@@ -2831,6 +2831,15 @@ mod api_key_auth_tests {
             ),
             Err(AuthFailure::InsufficientScope)
         );
+        assert_eq!(
+            authorize_api_request(
+                &config,
+                Some("Bearer test-secret"),
+                "/v1/conversations/conversation_1",
+                &axum::http::Method::GET
+            ),
+            Err(AuthFailure::InsufficientScope)
+        );
     }
 
     #[test]
@@ -2841,6 +2850,20 @@ mod api_key_auth_tests {
             Some("Bearer test-secret"),
             "/login/api/status",
             &axum::http::Method::GET
+        )
+        .is_ok());
+        assert!(authorize_api_request(
+            &config,
+            Some("Bearer test-secret"),
+            "/v1/conversations/conversation_1",
+            &axum::http::Method::GET
+        )
+        .is_ok());
+        assert!(authorize_api_request(
+            &config,
+            Some("Bearer test-secret"),
+            "/v1/conversations/conversation_1",
+            &axum::http::Method::DELETE
         )
         .is_ok());
         assert!(authorize_api_request(&config, None, "/health", &axum::http::Method::GET).is_ok());
