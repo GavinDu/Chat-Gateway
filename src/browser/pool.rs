@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, oneshot, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{mpsc, oneshot, Notify, OwnedSemaphorePermit, Semaphore};
 
 fn effective_session_pool_size(configured: usize) -> usize {
     configured.min(1)
@@ -649,6 +649,8 @@ fn browser_thread(
                                 // expired/failed sends must never persist stale state.
                                 let (save_tx, mut save_rx) = mpsc::channel::<Result<ProviderChunk>>(32);
                                 let (completion_tx, completion_rx) = oneshot::channel();
+                                let cancel_send = Arc::new(Notify::new());
+                                let cancel_forwarder = cancel_send.clone();
                                 tokio::task::spawn_local(async move {
                                     let mut completed = false;
                                     while let Some(chunk) = save_rx.recv().await {
@@ -656,15 +658,23 @@ fn browser_thread(
                                             completed = true;
                                         }
                                         if chunks.send(chunk).await.is_err() {
+                                            // The HTTP client dropped the stream. Notify the
+                                            // producer so its in-flight browser operation is
+                                            // dropped instead of continuing work for nobody.
+                                            cancel_forwarder.notify_one();
                                             break;
                                         }
                                     }
                                     let _ = completion_tx.send(completed);
                                 });
                                 let page_for_save = page.clone();
-                                providers::run_send(adapter, page, prompt, timeout, save_tx).await;
+                                tokio::select! {
+                                    _ = cancel_send.notified() => return,
+                                    _ = providers::run_send(adapter, page, prompt, timeout, save_tx) => {}
+                                }
                                 // Save only after the send loop has finished and while
-                                // this provider's page lock is still held.
+                                // this provider's page lock is still held. A cancelled send
+                                // returns above without persisting a partial session.
                                 if completion_rx.await.unwrap_or(false) {
                                     if let Err(error) = session::save_session_if_changed(
                                         &browser_for_save,
