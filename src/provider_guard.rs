@@ -57,7 +57,9 @@ pub async fn wait_for_request_slot(
         }
         entry.daily_requests += 1;
         let scheduled = entry.next_start.max(now);
-        entry.next_start = scheduled + Duration::from_millis(min_interval_ms);
+        // Reserve the full jitter window so the actual start-to-start gap
+        // can never be shorter than the configured minimum interval.
+        entry.next_start = scheduled + Duration::from_millis(min_interval_ms + 250);
         let wait = scheduled.saturating_duration_since(now);
         let jitter_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
