@@ -506,3 +506,34 @@ mod response_completion_tests {
         assert!(!completion_ready(COMPLETION_IDLE_TICKS + 10, true));
     }
 }
+
+
+#[cfg(test)]
+mod provider_catalog_contract_tests {
+    use super::Provider;
+    use std::collections::HashSet;
+
+    #[test]
+    fn provider_catalog_names_are_unique_and_round_trip_exactly() {
+        let providers = Provider::all();
+        assert_eq!(providers.len(), 8, "the public provider catalog changed");
+
+        let mut names = HashSet::new();
+        for provider in providers {
+            let name = provider.name();
+            assert!(names.insert(name), "duplicate provider name: {name}");
+            assert_eq!(Provider::from_name(name), Some(provider));
+            assert!(Provider::from_name(&name.to_ascii_uppercase()).is_none(),
+                "provider lookup should remain exact and case-sensitive: {name}");
+            assert!(provider.login_url().starts_with("https://"),
+                "provider login URL must be HTTPS: {name}");
+        }
+    }
+
+    #[test]
+    fn unknown_provider_names_do_not_silently_select_a_provider() {
+        for name in ["", "unknown", "openai", "claude ", " Qwen"] {
+            assert_eq!(Provider::from_name(name), None, "unexpected match for {name:?}");
+        }
+    }
+}
