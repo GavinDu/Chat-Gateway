@@ -15,6 +15,7 @@ obscura:
   # storage_dir: ""  # persistent cookie/storage dir for the embedded browser
                      # (defaults to server.chrome_profile_dir when set)
 
+# Conservative provider pacing defaults; adjust only within each provider's rules.
 providers:
   - name: qwen
     enabled: false
