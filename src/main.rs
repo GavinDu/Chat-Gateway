@@ -172,6 +172,21 @@ fn validate_chat_req(req: &ChatReq) -> Result<(), (&'static str, String)> {
     Ok(())
 }
 
+fn estimate_tokens(text: &str) -> u64 {
+    // A conservative, provider-independent estimate for a browser-backed
+    // gateway that does not receive authoritative tokenizer usage.
+    ((text.chars().count() + 3) / 4) as u64
+}
+
+fn add_gateway_headers(headers: &mut axum::http::HeaderMap, provider: &str, model: &str) {
+    if let Ok(value) = axum::http::HeaderValue::from_bytes(provider.as_bytes()) {
+        headers.insert("X-Gateway-Provider", value);
+    }
+    if let Ok(value) = axum::http::HeaderValue::from_bytes(model.as_bytes()) {
+        headers.insert("X-Gateway-Model", value);
+    }
+}
+
 fn api_error(
     status: axum::http::StatusCode,
     error_type: &str,
@@ -1427,6 +1442,8 @@ async fn chat_completions(
             let windowed_c = windowed.clone();
             let provider_c = provider_name.clone();
             let model_c = req.model.clone();
+            let prompt_tokens_c = estimate_tokens(&prompt);
+            let provider_model_c = provider_model.clone();
             let conv_stream = new_conv_id.clone();
             let sse_stream = async_stream::stream! {
                 let _permit = permit;
@@ -1485,12 +1502,19 @@ async fn chat_completions(
                         yield Ok(Event::default().data("[DONE]"));
                         return;
                     }
+                    let completion_tokens = estimate_tokens(&full);
                     let finish = serde_json::json!({
                         "id": format!("chatcmpl-{}", &conv_stream[..8]),
                         "object": "chat.completion.chunk",
                         "created": chrono::Utc::now().timestamp(),
                         "model": model_c,
                         "choices": [{ "delta": {}, "index": 0, "finish_reason": "stop" }],
+                        "usage": {
+                            "prompt_tokens": prompt_tokens_c,
+                            "completion_tokens": completion_tokens,
+                            "total_tokens": prompt_tokens_c + completion_tokens
+                        },
+                        "x_usage_estimated": true,
                     });
                     yield Ok(Event::default().data(finish.to_string()));
                 }
@@ -1501,6 +1525,7 @@ async fn chat_completions(
             resp_headers.insert("Content-Type", "text/event-stream".parse().unwrap());
             resp_headers.insert("Cache-Control", "no-cache".parse().unwrap());
             resp_headers.insert("X-Accel-Buffering", "no".parse().unwrap());
+            add_gateway_headers(&mut resp_headers, &provider_name, &provider_model_c);
             return (resp_headers, Sse::new(sse_stream)).into_response();
         }
 
@@ -1556,16 +1581,25 @@ async fn chat_completions(
             );
         }
 
+        let prompt_tokens = estimate_tokens(&prompt);
+        let completion_tokens = estimate_tokens(&full);
         let body = serde_json::json!({
             "id": format!("chatcmpl-{}", &new_conv_id[..8]),
             "object": "chat.completion",
             "created": chrono::Utc::now().timestamp(),
             "model": req.model,
             "choices": [{ "message": { "role": "assistant", "content": full }, "finish_reason": "stop", "index": 0 }],
+            "usage": {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": prompt_tokens + completion_tokens
+            },
+            "x_usage_estimated": true,
             "conversation_id": new_conv_id,
         });
         let mut resp_headers = axum::http::HeaderMap::new();
         resp_headers.insert("X-Conversation-Id", new_conv_id.parse().unwrap());
+        add_gateway_headers(&mut resp_headers, &provider_name, &provider_model);
         return (resp_headers, Json(body)).into_response();
     }
 
@@ -2576,5 +2610,33 @@ mod legacy_login_relay_flag_tests {
         assert!(legacy_login_relay_enabled_from(Some("1")));
         assert!(legacy_login_relay_enabled_from(Some("true")));
         assert!(legacy_login_relay_enabled_from(Some(" YES ")));
+    }
+}
+
+#[cfg(test)]
+mod usage_estimate_tests {
+    use super::{add_gateway_headers, estimate_tokens};
+
+    #[test]
+    fn token_estimate_is_stable_and_handles_empty_text() {
+        assert_eq!(estimate_tokens(""), 0);
+        assert_eq!(estimate_tokens("abcd"), 1);
+        assert_eq!(estimate_tokens("abcde"), 2);
+    }
+
+    #[test]
+    fn provider_headers_identify_the_actual_route() {
+        let mut headers = axum::http::HeaderMap::new();
+        add_gateway_headers(&mut headers, "claude", "claude-sonnet");
+        assert_eq!(headers["X-Gateway-Provider"], "claude");
+        assert_eq!(headers["X-Gateway-Model"], "claude-sonnet");
+    }
+
+    #[test]
+    fn provider_headers_reject_invalid_header_values() {
+        let mut headers = axum::http::HeaderMap::new();
+        add_gateway_headers(&mut headers, "claude\\r\\nX-Injected: yes", "model");
+        assert!(!headers.contains_key("X-Gateway-Provider"));
+        assert_eq!(headers["X-Gateway-Model"], "model");
     }
 }
