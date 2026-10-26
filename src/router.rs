@@ -103,6 +103,8 @@ mod tests {
                     timeout_seconds: 30,
                     queue_timeout_seconds: 30,
                     session_pool_size: 1,
+                    min_request_interval_ms: 5_000,
+                    daily_request_cap: 100,
                     models: vec!["sonnet".into()],
                 },
                 ProviderConfig {
@@ -112,6 +114,8 @@ mod tests {
                     timeout_seconds: 30,
                     queue_timeout_seconds: 30,
                     session_pool_size: 1,
+                    min_request_interval_ms: 5_000,
+                    daily_request_cap: 100,
                     models: vec!["gpt-4o".into()],
                 },
             ],
