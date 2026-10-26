@@ -42,10 +42,7 @@ pub fn record_success(provider: &str) {
 fn indicates_expired_session(error: &str) -> bool {
     let normalized = error
         .to_ascii_lowercase()
-        .replace('_', " ")
-        .replace('-', " ")
-        .replace(':', " ")
-        .replace('.', " ")
+        .replace(['_', '-', ':', '.'], " ")
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");
