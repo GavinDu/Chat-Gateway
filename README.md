@@ -298,3 +298,7 @@ When `auth.keys` is non-empty, every route except `/health` requires `Authorizat
 The loopback-only `/metrics` endpoint exposes Prometheus text metrics for HTTP request counts and handler latency, plus provider queue wait, time to first token (TTFT), provider work, total chat duration, and estimated gateway overhead. When API-key authentication is enabled, `/metrics` requires an `admin` scope. Route labels are normalized to a bounded vocabulary to avoid high-cardinality metrics.
 
 See [docs/METRICS.md](docs/METRICS.md) for metric definitions and interpretation.
+
+## Provider session health
+
+`GET /health` reports each configured provider's runtime `session_state`: `unknown` until a successful send, `ready` after a successful response, or `needs_login` after an explicit `session_expired` provider error. `needs_login` providers are skipped by routing and do not count toward `/ready`. After completing login, restart the gateway to clear the in-memory session state.
