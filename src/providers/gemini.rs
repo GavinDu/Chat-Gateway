@@ -21,7 +21,6 @@ pub const SELECTORS: SelectorSet = SelectorSet {
     send: &[
         "button[aria-label=\"Send message\"]",
         "button.send-button",
-        "button:has(mat-icon)",
     ],
     response: &[
         "model-response",
