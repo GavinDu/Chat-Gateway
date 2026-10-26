@@ -171,6 +171,11 @@ impl UnifiedMemory {
             .map_err(|error| anyhow::anyhow!("committing conversation turn: {error}"))
     }
 
+    /// Export one complete conversation without exposing database internals.
+    pub fn export_conversation(&self, conversation_id: &str) -> anyhow::Result<Option<Conversation>> {
+        self.conversation(conversation_id)
+    }
+
     pub fn delete_conversation(&self, conversation_id: &str) -> anyhow::Result<bool> {
         let mut connection = self.lock()?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
