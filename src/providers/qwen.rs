@@ -14,7 +14,7 @@ pub const SELECTORS: SelectorSet = SelectorSet {
     url: "https://chat.qwen.ai",
     picker: &["text:button=Qwen", "div.model-selector", "[data-testid=\"model-picker\"]"],
     input: &["textarea[placeholder*=\"Ask\"]", "textarea[data-testid=\"chat-input\"]", "div[contenteditable=\"true\"][role=\"textbox\"]"],
-    send: &["button[type=\"submit\"]", "button[aria-label*=\"Send\"]", "button[data-testid=\"send-button\"]"],
+    send: &["button[aria-label*=\"Send\"]", "button[data-testid=\"send-button\"]"],
     response: &["div.markdown-body", "div[data-role=\"assistant\"]", "div.message-content"],
     model_keywords: "qwen",
     model_pairs: &[("[role='button'][aria-label*='select model' i], button[aria-label*='model' i], .model-selector button, [data-model-selector]", "[role='listbox'] [role='option'], [role='menuitem'], [role='option'], [data-model-option], .ant-select-item"), (".ant-select-selector", ".ant-select-item, [role='option']")],
