@@ -1479,7 +1479,9 @@ async fn chat_completions(
         let provider_cfg = match state.cfg.provider(&provider_name) {
             Some(cfg) => cfg,
             None => {
-                last_err = Some(format!("provider '{provider_name}' configuration disappeared"));
+                last_err = Some(format!(
+                    "provider '{provider_name}' configuration disappeared"
+                ));
                 continue;
             }
         };
