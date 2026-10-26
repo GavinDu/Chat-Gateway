@@ -252,11 +252,7 @@ pub async fn save_session(browser: &Browser, page: &Page, provider: &str) -> Res
 /// Persist a post-send snapshot only when the provider-scoped session changed.
 /// Writes are atomic and capped at one per provider per minute. A skipped
 /// changed snapshot will be retried after the interval on the next successful send.
-pub async fn save_session_if_changed(
-    browser: &Browser,
-    page: &Page,
-    provider: &str,
-) -> Result<()> {
+pub async fn save_session_if_changed(browser: &Browser, page: &Page, provider: &str) -> Result<()> {
     let file = capture_session(browser, page, provider).await?;
     let current_hash = session_state_hash(&file)?;
     let destination = session_path(provider)?;
