@@ -32,7 +32,7 @@ pub const SELECTORS: SelectorSet = SelectorSet {
         "div.prose",
         "div.answer-container",
     ],
-    model_keywords: "perplexity|sonar|grok|mistral|codestral|claude|gpt|gemini|qwen|llama|pixtral",
+    model_keywords: "perplexity|sonar",
     model_pairs: &[],
 };
 

@@ -24,7 +24,7 @@ pub const SELECTORS: SelectorSet = SelectorSet {
         "button.submit",
     ],
     response: &["div.markdown", "div.assistant-message", "div.prose"],
-    model_keywords: "mistral|sonar|grok|mistral|codestral|claude|gpt|gemini|qwen|llama|pixtral",
+    model_keywords: "mistral|codestral|pixtral|ministral",
     model_pairs: &[],
 };
 

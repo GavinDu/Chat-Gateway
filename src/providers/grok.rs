@@ -32,7 +32,7 @@ pub const SELECTORS: SelectorSet = SelectorSet {
         "div.markdown",
         "div.response-content",
     ],
-    model_keywords: "grok|sonar|grok|mistral|codestral|claude|gpt|gemini|qwen|llama|pixtral",
+    model_keywords: "grok",
     model_pairs: &[],
 };
 
