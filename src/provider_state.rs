@@ -39,8 +39,28 @@ pub fn record_success(provider: &str) {
     }
 }
 
+fn indicates_expired_session(error: &str) -> bool {
+    let normalized = error
+        .to_ascii_lowercase()
+        .replace(['_', '-', ':', '.'], " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    [
+        "session expired",
+        "session has expired",
+        "login required",
+        "please log in",
+        "please sign in",
+        "sign in to continue",
+        "authentication required",
+    ]
+    .iter()
+    .any(|marker| normalized.contains(marker))
+}
+
 pub fn record_error(provider: &str, error: &str) {
-    if !error.to_ascii_lowercase().contains("session_expired") {
+    if !indicates_expired_session(error) {
         return;
     }
     if let Ok(mut map) = states().lock() {
@@ -61,6 +81,40 @@ pub fn is_routable(provider: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recognizes_common_session_expiry_wording() {
+        for (index, message) in [
+            "Session expired",
+            "Your session has expired.",
+            "login-required",
+            "Please sign in to continue",
+            "Authentication required",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let provider = format!("test-expiry-wording-{index}");
+            record_error(&provider, message);
+            assert_eq!(status(&provider).state, "needs_login", "{message}");
+        }
+    }
+
+    #[test]
+    fn ignores_unrelated_authorization_and_network_errors() {
+        for (index, message) in [
+            "temporary network timeout",
+            "request unauthorized by policy",
+            "rate limit exceeded",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let provider = format!("test-non-expiry-{index}");
+            record_error(&provider, message);
+            assert_eq!(status(&provider).state, "unknown", "{message}");
+        }
+    }
 
     #[test]
     fn unknown_provider_is_routable_until_checked() {
