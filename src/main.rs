@@ -389,7 +389,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/login/api/:provider/view", get(login_view))
         .route("/login/api/:provider/act", post(login_act))
         .with_state(state.clone())
-        .layer(middleware::from_fn_with_state(state, authenticate_api_key))
+        .layer(middleware::from_fn_with_state(state.clone(), authenticate_api_key))
         // Semantic message limits run after JSON parsing; cap the raw body too
         // so an oversized payload cannot consume unbounded memory before
         // request validation has a chance to reject it.
