@@ -18,10 +18,7 @@ pub const SELECTORS: SelectorSet = SelectorSet {
         "div[contenteditable=\"true\"]",
         "textarea.chat-input",
     ],
-    send: &[
-        "button[aria-label=\"Send\"]",
-        "button.submit",
-    ],
+    send: &["button[aria-label=\"Send\"]", "button.submit"],
     response: &["div.markdown", "div.assistant-message", "div.prose"],
     model_keywords: "mistral|codestral|pixtral|ministral",
     model_pairs: &[],
