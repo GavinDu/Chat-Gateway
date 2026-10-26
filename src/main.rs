@@ -989,9 +989,9 @@ mod login_action_payload_tests {
 }
 
 /// Readiness probe for process supervisors and local deployment wrappers.
-/// Startup already validates configuration and warms the browser pool before
-/// binding the listener; this endpoint reports whether at least one provider
-/// is configured as enabled.
+/// Startup validates configuration and warms the browser pool before binding.
+/// Readiness requires at least one enabled provider whose session is not known
+/// to be expired; providers marked `needs_login` do not count as routable.
 fn readiness_response(enabled: usize) -> Response {
     if enabled == 0 {
         return (
@@ -1021,6 +1021,20 @@ async fn readiness(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         .filter(|p| p.enabled && provider_state::is_routable(&p.name))
         .count();
     readiness_response(routable)
+}
+
+#[cfg(test)]
+mod readiness_contract_tests {
+    use super::*;
+
+    #[test]
+    fn readiness_requires_at_least_one_routable_provider() {
+        let not_ready = readiness_response(0);
+        assert_eq!(not_ready.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let ready = readiness_response(1);
+        assert_eq!(ready.status(), StatusCode::OK);
+    }
 }
 
 async fn metrics_endpoint() -> impl IntoResponse {
