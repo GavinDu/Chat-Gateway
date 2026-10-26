@@ -631,6 +631,12 @@ fn conversation_export_returns_complete_durable_record_and_missing_is_none() {
     assert_eq!(exported.id, "export-me");
     assert_eq!(exported.provider.as_deref(), Some("chatgpt"));
     assert_eq!(exported.tab_id.as_deref(), Some("tab-export payload"));
-    assert_eq!(exported.messages, vec![m("user", "export payload"), m("assistant", "answer export payload")]);
+    assert_eq!(
+        exported.messages,
+        vec![
+            m("user", "export payload"),
+            m("assistant", "answer export payload"),
+        ]
+    );
     assert_eq!(memory.export_conversation("missing-export").unwrap(), None);
 }
