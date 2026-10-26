@@ -507,7 +507,6 @@ mod response_completion_tests {
     }
 }
 
-
 #[cfg(test)]
 mod provider_catalog_contract_tests {
     use super::Provider;
@@ -523,17 +522,25 @@ mod provider_catalog_contract_tests {
             let name = provider.name();
             assert!(names.insert(name), "duplicate provider name: {name}");
             assert_eq!(Provider::from_name(name), Some(provider));
-            assert!(Provider::from_name(&name.to_ascii_uppercase()).is_none(),
-                "provider lookup should remain exact and case-sensitive: {name}");
-            assert!(provider.login_url().starts_with("https://"),
-                "provider login URL must be HTTPS: {name}");
+            assert!(
+                Provider::from_name(&name.to_ascii_uppercase()).is_none(),
+                "provider lookup should remain exact and case-sensitive: {name}"
+            );
+            assert!(
+                provider.login_url().starts_with("https://"),
+                "provider login URL must be HTTPS: {name}"
+            );
         }
     }
 
     #[test]
     fn unknown_provider_names_do_not_silently_select_a_provider() {
         for name in ["", "unknown", "openai", "claude ", " Qwen"] {
-            assert_eq!(Provider::from_name(name), None, "unexpected match for {name:?}");
+            assert_eq!(
+                Provider::from_name(name),
+                None,
+                "unexpected match for {name:?}"
+            );
         }
     }
 }
