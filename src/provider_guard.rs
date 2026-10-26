@@ -132,7 +132,9 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_zero_budget_values() {
-        assert!(wait_for_request_slot("test-zero-interval", 0, 1).await.is_err());
+        assert!(wait_for_request_slot("test-zero-interval", 0, 1)
+            .await
+            .is_err());
         assert!(wait_for_request_slot("test-zero-cap", 1, 0).await.is_err());
     }
 
