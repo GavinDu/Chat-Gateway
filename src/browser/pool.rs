@@ -653,16 +653,25 @@ fn browser_thread(
                                 let cancel_forwarder = cancel_send.clone();
                                 tokio::task::spawn_local(async move {
                                     let mut completed = false;
-                                    while let Some(chunk) = save_rx.recv().await {
-                                        if matches!(&chunk, Ok(chunk) if chunk.done) {
-                                            completed = true;
-                                        }
-                                        if chunks.send(chunk).await.is_err() {
-                                            // The HTTP client dropped the stream. Notify the
-                                            // producer so its in-flight browser operation is
-                                            // dropped instead of continuing work for nobody.
-                                            cancel_forwarder.notify_one();
-                                            break;
+                                    loop {
+                                        tokio::select! {
+                                            // Detect disconnect immediately, even if the provider
+                                            // is currently waiting on a browser operation and has
+                                            // not produced another chunk yet.
+                                            _ = chunks.closed() => {
+                                                cancel_forwarder.notify_one();
+                                                break;
+                                            }
+                                            chunk = save_rx.recv() => {
+                                                let Some(chunk) = chunk else { break };
+                                                if matches!(&chunk, Ok(chunk) if chunk.done) {
+                                                    completed = true;
+                                                }
+                                                if chunks.send(chunk).await.is_err() {
+                                                    cancel_forwarder.notify_one();
+                                                    break;
+                                                }
+                                            }
                                         }
                                     }
                                     let _ = completion_tx.send(completed);
