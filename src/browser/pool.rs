@@ -101,6 +101,9 @@ enum Command {
         action: LoginAction,
         reply: oneshot::Sender<Result<String>>,
     },
+    Shutdown {
+        reply: oneshot::Sender<()>,
+    },
 }
 
 /// One provider's live login-page info for the /login status endpoint.
@@ -395,6 +398,18 @@ impl ObscuraPool {
         rx.await
             .map_err(|_| anyhow::anyhow!("browser thread dropped login act"))?
     }
+
+    /// Stop the browser worker after HTTP requests have drained.
+    pub async fn shutdown(&self) -> Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(Command::Shutdown { reply: tx })
+            .await
+            .map_err(|_| anyhow::anyhow!("browser thread gone during shutdown"))?;
+        rx.await
+            .map_err(|_| anyhow::anyhow!("browser thread dropped shutdown reply"))?;
+        Ok(())
+    }
 }
 
 /// Drop login pages idle longer than LOGIN_IDLE_TIMEOUT (Go's
@@ -577,6 +592,10 @@ fn browser_thread(
 
                 while let Some(cmd) = cmd_rx.recv().await {
                     match cmd {
+                        Command::Shutdown { reply } => {
+                            let _ = reply.send(());
+                            break;
+                        }
                         Command::Discover { provider, reply } => {
                             let browser = browser.clone();
                             let registry = registry.clone();
