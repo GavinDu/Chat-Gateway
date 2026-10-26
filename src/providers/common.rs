@@ -496,6 +496,14 @@ mod text_selector_tests {
                     "{} still uses a Playwright-only selector",
                     selectors.url
                 );
+                assert!(
+                    !matches!(
+                        *selector,
+                        "button[type=\"submit\"]" | "button:has(mat-icon)"
+                    ),
+                    "{} still uses a generic send-button selector",
+                    selectors.url
+                );
             }
         }
     }
