@@ -2203,6 +2203,13 @@ mod http_api_regression_tests {
         }
     }
 
+    async fn export_endpoint(
+        State(memory): State<Arc<UnifiedMemory>>,
+        Path(conversation_id): Path<String>,
+    ) -> Response {
+        export_conversation_response(&memory, &conversation_id)
+    }
+
     async fn delete_endpoint(
         State(memory): State<Arc<UnifiedMemory>>,
         Path(conversation_id): Path<String>,
@@ -2223,7 +2230,7 @@ mod http_api_regression_tests {
             .route("/v1/chat/completions", post(validation_endpoint))
             .route(
                 "/v1/conversations/:conversation_id",
-                delete(delete_endpoint),
+                get(export_endpoint).delete(delete_endpoint),
             )
             .with_state(memory)
             .layer(DefaultBodyLimit::max(1024 * 1024))
@@ -2387,6 +2394,59 @@ mod http_api_regression_tests {
             body["error"]["message"],
             "request body exceeds the 1 MiB limit"
         );
+    }
+
+    #[tokio::test]
+    async fn http_export_returns_complete_conversation_and_missing_is_not_found() {
+        let memory = Arc::new(UnifiedMemory::new(8000));
+        memory
+            .store_turn(
+                "conversation_export_1".into(),
+                vec![ChatMessage {
+                    role: "user".into(),
+                    content: "export prompt".into(),
+                }],
+                ChatMessage {
+                    role: "assistant".into(),
+                    content: "export answer".into(),
+                },
+                "chatgpt".into(),
+                "tab-export".into(),
+            )
+            .unwrap();
+
+        let response = app(memory.clone())
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/conversations/conversation_export_1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(response.headers().contains_key("x-request-id"));
+        let body = json_body(response).await;
+        assert_eq!(body["id"], "conversation_export_1");
+        assert_eq!(body["provider"], "chatgpt");
+        assert_eq!(body["tab_id"], "tab-export");
+        assert_eq!(body["messages"][0]["content"], "export prompt");
+        assert_eq!(body["messages"][1]["content"], "export answer");
+
+        let missing = app(memory)
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/conversations/conversation_export_missing")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+        let body = json_body(missing).await;
+        assert_eq!(body["error"]["code"], "conversation_not_found");
     }
 
     #[tokio::test]
