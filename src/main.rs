@@ -1295,6 +1295,10 @@ fn read_conversation_context(
     Ok((prompt, windowed, has_history))
 }
 
+fn usable_initial_stream_chunk(content: &str, done: bool) -> bool {
+    !done && !content.is_empty()
+}
+
 fn valid_conversation_id(value: &str) -> bool {
     (8..=128).contains(&value.len())
         && value.is_ascii()
@@ -1461,11 +1465,63 @@ async fn chat_completions(
         };
         let provider_started = Instant::now();
 
+        let mut first_stream_chunk: Option<providers::ProviderChunk> = None;
+        if req.stream {
+            let first_chunk_timeout = std::time::Duration::from_secs(
+                state
+                    .cfg
+                    .provider(&provider_name)
+                    .map(|provider| provider.timeout_seconds)
+                    .unwrap_or(120),
+            );
+            let first = match tokio::time::timeout(first_chunk_timeout, async {
+                loop {
+                    match rx.recv().await {
+                        Some(Ok(chunk))
+                            if usable_initial_stream_chunk(&chunk.content, chunk.done) =>
+                        {
+                            break Some(Ok(chunk));
+                        }
+                        Some(Ok(chunk)) if chunk.done => break Some(Ok(chunk)),
+                        Some(Ok(_empty_chunk)) => continue,
+                        Some(Err(error)) => break Some(Err(error)),
+                        None => break None,
+                    }
+                }
+            })
+            .await
+            {
+                Ok(Some(Ok(chunk))) if usable_initial_stream_chunk(&chunk.content, chunk.done) => {
+                    chunk
+                }
+                Ok(Some(Ok(_))) => {
+                    last_err =
+                        Some("provider completed without output before stream started".to_string());
+                    continue;
+                }
+                Ok(Some(Err(error))) => {
+                    last_err = Some(error.to_string());
+                    continue;
+                }
+                Ok(None) => {
+                    last_err = Some("provider stream closed before first output".to_string());
+                    continue;
+                }
+                Err(_) => {
+                    last_err = Some("provider timed out before first output".to_string());
+                    continue;
+                }
+            };
+            first_stream_chunk = Some(first);
+        }
+
         let new_conv_id = conversation_id
             .clone()
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
         if req.stream {
+            let first_chunk =
+                first_stream_chunk.expect("streaming path prefetches its first chunk");
             let state_c = state.clone();
             let windowed_c = windowed.clone();
             let provider_c = provider_name.clone();
@@ -1491,7 +1547,11 @@ async fn chat_completions(
                 });
                 yield Ok::<_, anyhow::Error>(Event::default().data(role.to_string()));
                 let mut stream_error: Option<String> = None;
-                while let Some(item) = rx.recv().await {
+                let mut pending: Option<Result<providers::ProviderChunk, anyhow::Error>> = Some(Ok(first_chunk));
+                while let Some(item) = match pending.take() {
+                    Some(item) => Some(item),
+                    None => rx.recv().await,
+                } {
                     match item {
                         Ok(c) => {
                             if c.done { break; }
@@ -2659,6 +2719,19 @@ mod api_key_auth_tests {
             ),
             Err(AuthFailure::MissingOrInvalid)
         );
+    }
+}
+
+#[cfg(test)]
+mod initial_stream_chunk_tests {
+    use super::usable_initial_stream_chunk;
+
+    #[test]
+    fn only_nonempty_content_can_start_a_stream() {
+        assert!(usable_initial_stream_chunk("first token", false));
+        assert!(!usable_initial_stream_chunk("", false));
+        assert!(!usable_initial_stream_chunk("", true));
+        assert!(!usable_initial_stream_chunk("content marked done", true));
     }
 }
 
