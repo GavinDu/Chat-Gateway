@@ -172,6 +172,7 @@ impl UnifiedMemory {
     }
 
     /// Export one complete conversation without exposing database internals.
+    /// Callers must apply authorization before returning this record to clients.
     pub fn export_conversation(
         &self,
         conversation_id: &str,
