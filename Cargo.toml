@@ -52,6 +52,8 @@ stealth = ["obscura-core/stealth"]
 [patch.crates-io]
 taffy = { path = "vendor/taffy" }
 cosmic-text = { path = "vendor/cosmic-text" }
+# Upstream wreq-util PR upgrades zstd to a fixed release for RUSTSEC-2026-0398.
+wreq-util = { git = "https://github.com/0x676e67/wreq-util", rev = "f7984ed81993dcf814fc49ad1fc63ba9dfd3d2b8" }
 
 [[bench]]
 name = "memory_sqlite"
