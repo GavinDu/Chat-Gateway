@@ -17,6 +17,11 @@ ignore = [
   { id = "RUSTSEC-2026-0206", reason = "rustybuzz is currently pulled by the pinned renderer; review when updating Obscura." },
   { id = "RUSTSEC-2026-0192", reason = "ttf-parser is currently pulled by the pinned renderer; review when updating Obscura." },
   { id = "RUSTSEC-2024-0449", reason = "unsafe-libyaml is used by serde_yaml; migration to a maintained YAML implementation is tracked separately." },
+  # TEMPORARY: pinned Obscura/wreq-util 3.0.0-rc.12 prevents a compatible upstream zstd upgrade.
+  # Review by 2026-11-26; remove these exceptions once a compatible fixed dependency is available.
+  { id = "RUSTSEC-2026-0391", reason = "Temporary 30-day exception: zstd 0.13.3 is transitively pinned by wreq-util 3.0.0-rc.12; review by 2026-11-26 and upgrade the dependency." },
+  { id = "RUSTSEC-2026-0398", reason = "Temporary 30-day exception: zstd-safe 7.3.0 is transitively pinned by wreq-util 3.0.0-rc.12; review by 2026-11-26 and upgrade the dependency." },
+  { id = "RUSTSEC-2026-0403", reason = "Temporary 30-day exception: zstd-safe 7.3.0 is transitively pinned by wreq-util 3.0.0-rc.12; review by 2026-11-26 and upgrade the dependency." },
 ]
 
 [licenses]
