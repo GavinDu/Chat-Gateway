@@ -175,7 +175,7 @@ fn validate_chat_req(req: &ChatReq) -> Result<(), (&'static str, String)> {
 fn estimate_tokens(text: &str) -> u64 {
     // A conservative, provider-independent estimate for a browser-backed
     // gateway that does not receive authoritative tokenizer usage.
-    ((text.chars().count() + 3) / 4) as u64
+    text.chars().count().div_ceil(4) as u64
 }
 
 fn add_gateway_headers(headers: &mut axum::http::HeaderMap, provider: &str, model: &str) {
