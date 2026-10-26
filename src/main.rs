@@ -22,6 +22,7 @@ mod config;
 mod login;
 mod memory;
 mod metrics;
+mod provider_state;
 mod providers;
 mod router;
 mod session;
@@ -1007,7 +1008,13 @@ fn readiness_response(enabled: usize) -> Response {
 }
 
 async fn readiness(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    readiness_response(state.cfg.providers.iter().filter(|p| p.enabled).count())
+    let routable = state
+        .cfg
+        .providers
+        .iter()
+        .filter(|p| p.enabled && provider_state::is_routable(&p.name))
+        .count();
+    readiness_response(routable)
 }
 
 async fn metrics_endpoint() -> impl IntoResponse {
@@ -1195,7 +1202,15 @@ async fn delete_conversation(
 
 async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let providers = state.cfg.providers.iter().map(|p| {
-        serde_json::json!({ "name": p.name, "enabled": p.enabled, "priority": p.priority, "models": p.models })
+        let session = provider_state::status(&p.name);
+        serde_json::json!({
+            "name": p.name,
+            "enabled": p.enabled,
+            "priority": p.priority,
+            "models": p.models,
+            "session_state": session.state,
+            "last_session_error": session.last_error,
+        })
     }).collect::<Vec<_>>();
     Json(serde_json::json!({
         "status": "ok",
@@ -1428,6 +1443,10 @@ async fn chat_completions(
     let mut busy_count = 0usize;
     let mut last_err: Option<String> = None;
     for provider_name in candidates {
+        if !provider_state::is_routable(&provider_name) {
+            last_err = Some(format!("provider '{provider_name}' needs login"));
+            continue;
+        }
         let permit = match state.pool.acquire(&provider_name).await {
             Ok(p) => p,
             Err(e) => {
@@ -1455,6 +1474,7 @@ async fn chat_completions(
         {
             Ok(rx) => rx,
             Err(e) => {
+                provider_state::record_error(&provider_name, &e.to_string());
                 last_err = Some(e.to_string());
                 continue;
             }
@@ -1527,11 +1547,13 @@ async fn chat_completions(
                     total_ms,
                 );
                 if let Some(message) = stream_error {
+                    provider_state::record_error(&provider_c, &message);
                     let error = serde_json::json!({
                         "error": { "message": message, "type": "provider_error", "code": "stream_failed" }
                     });
                     yield Ok(Event::default().data(error.to_string()));
                 } else {
+                    provider_state::record_success(&provider_c);
                     if let Err(_error) = state_c.memory.store_turn(
                         conv_stream.clone(),
                         windowed_c.clone(),
@@ -1601,6 +1623,7 @@ async fn chat_completions(
         let provider_work_ms = provider_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
         let total_ms = request_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
         if let Some(e) = failed {
+            provider_state::record_error(&provider_name, &e);
             metrics::record_provider_timings(
                 &provider_name,
                 "error",
@@ -1623,6 +1646,7 @@ async fn chat_completions(
             );
         }
 
+        provider_state::record_success(&provider_name);
         metrics::record_provider_timings(
             &provider_name,
             "success",
