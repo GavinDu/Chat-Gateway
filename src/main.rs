@@ -23,6 +23,7 @@ mod login;
 mod memory;
 mod metrics;
 mod provider_state;
+mod provider_guard;
 mod providers;
 mod router;
 mod session;
@@ -1456,6 +1457,10 @@ async fn chat_completions(
             last_err = Some(format!("provider '{provider_name}' needs login"));
             continue;
         }
+        if let Some(reason) = provider_guard::provider_disabled_reason(&provider_name) {
+            last_err = Some(format!("provider '{provider_name}' disabled: {reason}"));
+            continue;
+        }
         let permit = match state.pool.acquire(&provider_name).await {
             Ok(p) => p,
             Err(e) => {
@@ -1470,6 +1475,24 @@ async fn chat_completions(
         };
         tracing::debug!(provider = %provider_name, queue_ms = permit.queue_ms, "acquired provider slot");
         let queue_ms = permit.queue_ms.min(u64::MAX as u128) as u64;
+
+        let provider_cfg = match state.cfg.provider(&provider_name) {
+            Some(cfg) => cfg,
+            None => {
+                last_err = Some(format!("provider '{provider_name}' configuration disappeared"));
+                continue;
+            }
+        };
+        if let Err(error) = provider_guard::wait_for_request_slot(
+            &provider_name,
+            provider_cfg.min_request_interval_ms,
+            provider_cfg.daily_request_cap,
+        )
+        .await
+        {
+            last_err = Some(error.to_string());
+            continue;
+        }
 
         let mut rx = match state
             .pool
