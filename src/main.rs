@@ -1431,6 +1431,16 @@ async fn chat_completions(
             let sse_stream = async_stream::stream! {
                 let _permit = permit;
                 let mut full = String::new();
+                // OpenAI-compatible clients expect the assistant role on the
+                // first stream chunk, before content deltas.
+                let role = serde_json::json!({
+                    "id": format!("chatcmpl-{}", &conv_stream[..8]),
+                    "object": "chat.completion.chunk",
+                    "created": chrono::Utc::now().timestamp(),
+                    "model": model_c,
+                    "choices": [{ "delta": { "role": "assistant" }, "index": 0, "finish_reason": null }],
+                });
+                yield Ok::<_, anyhow::Error>(Event::default().data(role.to_string()));
                 let mut stream_error: Option<String> = None;
                 while let Some(item) = rx.recv().await {
                     match item {
@@ -1489,6 +1499,8 @@ async fn chat_completions(
             let mut resp_headers = axum::http::HeaderMap::new();
             resp_headers.insert("X-Conversation-Id", new_conv_id.parse().unwrap());
             resp_headers.insert("Content-Type", "text/event-stream".parse().unwrap());
+            resp_headers.insert("Cache-Control", "no-cache".parse().unwrap());
+            resp_headers.insert("X-Accel-Buffering", "no".parse().unwrap());
             return (resp_headers, Sse::new(sse_stream)).into_response();
         }
 
