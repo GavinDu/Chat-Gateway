@@ -629,7 +629,7 @@ fn browser_thread(
                                 // successful done chunk triggers a session snapshot;
                                 // expired/failed sends must never persist stale state.
                                 let (save_tx, mut save_rx) = mpsc::channel(32);
-                                let page_for_save = page.clone();
+                                let (completion_tx, completion_rx) = oneshot::channel();
                                 tokio::task::spawn_local(async move {
                                     let mut completed = false;
                                     while let Some(chunk) = save_rx.recv().await {
@@ -640,17 +640,21 @@ fn browser_thread(
                                             break;
                                         }
                                     }
-                                    if completed {
-                                        if let Err(error) = session::save_session_if_changed(
-                                            &browser_for_save,
-                                            &page_for_save,
-                                            &provider_name,
-                                        ).await {
-                                            tracing::warn!(provider = %provider_name, %error, "rotated session snapshot failed");
-                                        }
-                                    }
+                                    let _ = completion_tx.send(completed);
                                 });
+                                let page_for_save = page.clone();
                                 providers::run_send(adapter, page, prompt, timeout, save_tx).await;
+                                // Save only after the send loop has finished and while
+                                // this provider's page lock is still held.
+                                if completion_rx.await.unwrap_or(false) {
+                                    if let Err(error) = session::save_session_if_changed(
+                                        &browser_for_save,
+                                        &page_for_save,
+                                        &provider_name,
+                                    ).await {
+                                        tracing::warn!(provider = %provider_name, %error, "rotated session snapshot failed");
+                                    }
+                                }
                             });
                         }
                         Command::TestAdapter { provider, reply } => {
