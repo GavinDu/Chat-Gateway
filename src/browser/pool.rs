@@ -600,6 +600,8 @@ fn browser_thread(
                                 let _ = chunks.send(Err(anyhow::anyhow!("provider not enabled"))).await;
                                 continue;
                             };
+                            let browser_for_save = browser.clone();
+                            let provider_name = provider.name().to_string();
                             tokio::task::spawn_local(async move {
                                 let _guard = lock.lock().await;
                                 // Login/session-expiry detection (Go concept,
@@ -622,7 +624,32 @@ fn browser_thread(
                                         return;
                                     }
                                 }
-                                providers::run_send(adapter, page, prompt, timeout, chunks).await;
+
+                                // Observe completion while forwarding chunks. Only a
+                                // successful done chunk triggers a session snapshot;
+                                // expired/failed sends must never persist stale state.
+                                let (save_tx, mut save_rx) = mpsc::channel(32);
+                                tokio::task::spawn_local(async move {
+                                    let mut completed = false;
+                                    while let Some(chunk) = save_rx.recv().await {
+                                        if matches!(&chunk, Ok(chunk) if chunk.done) {
+                                            completed = true;
+                                        }
+                                        if chunks.send(chunk).await.is_err() {
+                                            break;
+                                        }
+                                    }
+                                    if completed {
+                                        if let Err(error) = session::save_session_if_changed(
+                                            &browser_for_save,
+                                            &page,
+                                            &provider_name,
+                                        ).await {
+                                            tracing::warn!(provider = %provider_name, %error, "rotated session snapshot failed");
+                                        }
+                                    }
+                                });
+                                providers::run_send(adapter, page, prompt, timeout, save_tx).await;
                             });
                         }
                         Command::TestAdapter { provider, reply } => {
@@ -743,6 +770,10 @@ fn browser_thread(
                                 }
                                 if !report.response_token {
                                     report.errors.push("response: no token within 45s".to_string());
+                                } else if let Err(error) =
+                                    session::save_session_if_changed(&browser, &page, provider.name()).await
+                                {
+                                    tracing::warn!(provider = provider.name(), %error, "probe session snapshot failed");
                                 }
                                 finish(report);
                             });
