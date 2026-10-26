@@ -1592,6 +1592,7 @@ async fn chat_completions(
                 });
                 yield Ok::<_, anyhow::Error>(Event::default().data(role.to_string()));
                 let mut stream_error: Option<String> = None;
+                let mut provider_error_detail: Option<String> = None;
                 let mut pending: Option<Result<providers::ProviderChunk, anyhow::Error>> = Some(Ok(first_chunk));
                 while let Some(item) = match pending.take() {
                     Some(item) => Some(item),
@@ -1615,6 +1616,7 @@ async fn chat_completions(
                         }
                         Err(e) => {
                             tracing::warn!(provider = %provider_c, "provider stream failed: {e}");
+                            provider_error_detail = Some(e.to_string());
                             stream_error = Some("provider stream failed; partial response was not committed".to_string());
                             break;
                         }
@@ -1632,7 +1634,10 @@ async fn chat_completions(
                     total_ms,
                 );
                 if let Some(message) = stream_error {
-                    provider_state::record_error(&provider_c, &message);
+                    provider_state::record_error(
+                        &provider_c,
+                        provider_error_detail.as_deref().unwrap_or(&message),
+                    );
                     let error = serde_json::json!({
                         "error": { "message": message, "type": "provider_error", "code": "stream_failed" }
                     });
