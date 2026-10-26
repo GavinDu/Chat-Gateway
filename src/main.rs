@@ -9,7 +9,7 @@ use axum::{
         sse::{Event, Sse},
         Html, IntoResponse,
     },
-    routing::{delete, get, post},
+    routing::{get, post},
     Json, Router,
 };
 use clap::Parser;
@@ -2169,7 +2169,7 @@ mod http_api_regression_tests {
     use super::*;
     use axum::{
         body::{to_bytes, Body},
-        routing::post,
+        routing::{delete, post},
     };
     use std::{
         path::PathBuf,
