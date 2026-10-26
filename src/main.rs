@@ -864,7 +864,6 @@ fn parse_login_action(req: LoginActReq) -> anyhow::Result<login::LoginAction> {
     }
 }
 
-
 fn legacy_login_relay_enabled_from(value: Option<&str>) -> bool {
     value.is_some_and(|value| {
         matches!(
@@ -2488,7 +2487,7 @@ mod api_key_auth_tests {
             &config,
             Some("Bearer test-secret"),
             "/v1/models",
-            &axum::http::Method::GET
+            &axum::http::Method::GET,
         )
         .unwrap()
         .unwrap();
