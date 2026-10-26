@@ -1,6 +1,7 @@
 use anyhow::Result;
 use obscura_core::{Browser, Page};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, HashMap},
     io::Write,
@@ -8,7 +9,6 @@ use std::{
     sync::{Mutex, OnceLock},
     time::{Duration, Instant},
 };
-use sha2::{Digest, Sha256};
 
 #[derive(Serialize, Deserialize)]
 pub struct SessionFile {
@@ -269,7 +269,10 @@ pub async fn save_session_if_changed(
         return Ok(());
     }
     if session_write_is_rate_limited(provider, Instant::now()) {
-        tracing::debug!(provider, "session changed but snapshot write is rate-limited");
+        tracing::debug!(
+            provider,
+            "session changed but snapshot write is rate-limited"
+        );
         return Ok(());
     }
     write_session_snapshot(file, provider).await
@@ -340,10 +343,26 @@ mod cookie_restore_result_tests {
     #[test]
     fn session_state_hash_ignores_timestamp_and_cookie_order() {
         let mut first = SessionFile {
-            local_storage: [("token".to_string(), "value".to_string())].into_iter().collect(),
+            local_storage: [("token".to_string(), "value".to_string())]
+                .into_iter()
+                .collect(),
             cookies: vec![
-                Cookie { name: "b".into(), value: "2".into(), domain: ".claude.ai".into(), path: "/".into(), secure: true, http_only: true },
-                Cookie { name: "a".into(), value: "1".into(), domain: ".claude.ai".into(), path: "/".into(), secure: true, http_only: true },
+                Cookie {
+                    name: "b".into(),
+                    value: "2".into(),
+                    domain: ".claude.ai".into(),
+                    path: "/".into(),
+                    secure: true,
+                    http_only: true,
+                },
+                Cookie {
+                    name: "a".into(),
+                    value: "1".into(),
+                    domain: ".claude.ai".into(),
+                    path: "/".into(),
+                    secure: true,
+                    http_only: true,
+                },
             ],
             ts: "old".into(),
         };
@@ -357,7 +376,14 @@ mod cookie_restore_result_tests {
     fn session_state_hash_changes_when_cookie_value_rotates() {
         let mut file = SessionFile {
             local_storage: std::collections::HashMap::new(),
-            cookies: vec![Cookie { name: "session".into(), value: "old".into(), domain: ".claude.ai".into(), path: "/".into(), secure: true, http_only: true }],
+            cookies: vec![Cookie {
+                name: "session".into(),
+                value: "old".into(),
+                domain: ".claude.ai".into(),
+                path: "/".into(),
+                secure: true,
+                http_only: true,
+            }],
             ts: "now".into(),
         };
         let old_hash = session_state_hash(&file).unwrap();
@@ -368,16 +394,24 @@ mod cookie_restore_result_tests {
     #[test]
     fn post_send_session_write_rate_limit_is_sixty_seconds() {
         let now = Instant::now();
-        let mut writes = LAST_SESSION_WRITE.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap();
+        let mut writes = LAST_SESSION_WRITE
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .unwrap();
         writes.insert("test-provider".to_string(), now);
         drop(writes);
-        assert!(session_write_is_rate_limited("test-provider", now + Duration::from_secs(59)));
-        assert!(!session_write_is_rate_limited("test-provider", now + Duration::from_secs(60)));
+        assert!(session_write_is_rate_limited(
+            "test-provider",
+            now + Duration::from_secs(59)
+        ));
+        assert!(!session_write_is_rate_limited(
+            "test-provider",
+            now + Duration::from_secs(60)
+        ));
         if let Ok(mut writes) = LAST_SESSION_WRITE.get().unwrap().lock() {
             writes.remove("test-provider");
         }
     }
-
 
     #[test]
     fn cookie_restore_succeeds_when_all_eligible_cookies_are_written() {
