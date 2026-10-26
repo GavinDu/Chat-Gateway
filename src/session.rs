@@ -1,8 +1,14 @@
 use anyhow::Result;
 use obscura_core::{Browser, Page};
 use serde::{Deserialize, Serialize};
-use std::io::Write;
-use std::path::Path;
+use std::{
+    collections::{BTreeMap, HashMap},
+    io::Write,
+    path::Path,
+    sync::{Mutex, OnceLock},
+    time::{Duration, Instant},
+};
+use sha2::{Digest, Sha256};
 
 #[derive(Serialize, Deserialize)]
 pub struct SessionFile {
@@ -175,10 +181,48 @@ async fn ensure_private_session_dir(path: &Path) -> Result<()> {
     }
     Ok(())
 }
-/// Capture cookies (from the browser's CookieStore - this is the v2 fix:
-/// v1 only persisted localStorage) + localStorage into
-/// sessions/<provider>.json.
-pub async fn save_session(browser: &Browser, page: &Page, provider: &str) -> Result<()> {
+/// Last successful session writes, shared by login completion and post-send
+/// refreshes so rapid provider activity cannot churn credential files.
+static LAST_SESSION_WRITE: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
+const SESSION_WRITE_INTERVAL: Duration = Duration::from_secs(60);
+
+fn session_write_is_rate_limited(provider: &str, now: Instant) -> bool {
+    LAST_SESSION_WRITE
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .ok()
+        .and_then(|writes| writes.get(provider).copied())
+        .is_some_and(|last| now.duration_since(last) < SESSION_WRITE_INTERVAL)
+}
+
+fn record_session_write(provider: &str) {
+    if let Ok(mut writes) = LAST_SESSION_WRITE
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+    {
+        writes.insert(provider.to_string(), Instant::now());
+    }
+}
+
+fn session_state_hash(file: &SessionFile) -> Result<String> {
+    // Ignore ts and normalize ordering so a cookie jar with unchanged values
+    // produces the same fingerprint across snapshots.
+    let local_storage: BTreeMap<&String, &String> = file.local_storage.iter().collect();
+    let mut cookies = file.cookies.clone();
+    cookies.sort_by(|left, right| {
+        (&left.domain, &left.name, &left.path, &left.value).cmp(&(
+            &right.domain,
+            &right.name,
+            &right.path,
+            &right.value,
+        ))
+    });
+    let serialized = serde_json::to_vec(&(local_storage, cookies))?;
+    let digest = Sha256::digest(serialized);
+    Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+async fn capture_session(browser: &Browser, page: &Page, provider: &str) -> Result<SessionFile> {
     let ls_value = page.evaluate("(function(){ const o = {}; for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); o[k] = localStorage.getItem(k); } return o; })()");
     let local_storage = parse_local_storage_snapshot(ls_value)?;
     // Obscura's cookie store is browser-wide. Persist only cookies in the
@@ -191,11 +235,47 @@ pub async fn save_session(browser: &Browser, page: &Page, provider: &str) -> Res
         .filter(|cookie| cookie_domain_allowed(provider, &cookie.domain))
         .map(Cookie::from)
         .collect();
-    let file = SessionFile {
+    Ok(SessionFile {
         local_storage,
         cookies,
         ts: chrono::Utc::now().to_rfc3339(),
-    };
+    })
+}
+
+/// Capture cookies (from the browser's CookieStore) and localStorage into
+/// sessions/<provider>.json. Login completion deliberately forces a save.
+pub async fn save_session(browser: &Browser, page: &Page, provider: &str) -> Result<()> {
+    let file = capture_session(browser, page, provider).await?;
+    write_session_snapshot(file, provider).await
+}
+
+/// Persist a post-send snapshot only when the provider-scoped session changed.
+/// Writes are atomic and capped at one per provider per minute. A skipped
+/// changed snapshot will be retried after the interval on the next successful send.
+pub async fn save_session_if_changed(
+    browser: &Browser,
+    page: &Page,
+    provider: &str,
+) -> Result<()> {
+    let file = capture_session(browser, page, provider).await?;
+    let current_hash = session_state_hash(&file)?;
+    let destination = session_path(provider)?;
+    let previous_hash = std::fs::read(&destination)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<SessionFile>(&bytes).ok())
+        .and_then(|previous| session_state_hash(&previous).ok());
+
+    if previous_hash.as_deref() == Some(current_hash.as_str()) {
+        return Ok(());
+    }
+    if session_write_is_rate_limited(provider, Instant::now()) {
+        tracing::debug!(provider, "session changed but snapshot write is rate-limited");
+        return Ok(());
+    }
+    write_session_snapshot(file, provider).await
+}
+
+async fn write_session_snapshot(file: SessionFile, provider: &str) -> Result<()> {
     ensure_private_session_dir(Path::new("sessions")).await?;
     let destination = session_path(provider)?;
     let serialized = serde_json::to_vec_pretty(&file)?;
@@ -203,6 +283,7 @@ pub async fn save_session(browser: &Browser, page: &Page, provider: &str) -> Res
     // Session files contain reusable authentication cookies. Create them
     // privately on Unix and replace the destination atomically.
     write_session_file_atomically(Path::new(&destination), &serialized)?;
+    record_session_write(provider);
     tracing::info!(
         provider = provider,
         cookies = file.cookies.len(),
@@ -256,6 +337,47 @@ fn ensure_cookie_restore_complete(failed_writes: usize) -> Result<()> {
 #[cfg(test)]
 mod cookie_restore_result_tests {
     use super::*;
+    #[test]
+    fn session_state_hash_ignores_timestamp_and_cookie_order() {
+        let mut first = SessionFile {
+            local_storage: [("token".to_string(), "value".to_string())].into_iter().collect(),
+            cookies: vec![
+                Cookie { name: "b".into(), value: "2".into(), domain: ".claude.ai".into(), path: "/".into(), secure: true, http_only: true },
+                Cookie { name: "a".into(), value: "1".into(), domain: ".claude.ai".into(), path: "/".into(), secure: true, http_only: true },
+            ],
+            ts: "old".into(),
+        };
+        let first_hash = session_state_hash(&first).unwrap();
+        first.ts = "new".into();
+        first.cookies.reverse();
+        assert_eq!(first_hash, session_state_hash(&first).unwrap());
+    }
+
+    #[test]
+    fn session_state_hash_changes_when_cookie_value_rotates() {
+        let mut file = SessionFile {
+            local_storage: std::collections::HashMap::new(),
+            cookies: vec![Cookie { name: "session".into(), value: "old".into(), domain: ".claude.ai".into(), path: "/".into(), secure: true, http_only: true }],
+            ts: "now".into(),
+        };
+        let old_hash = session_state_hash(&file).unwrap();
+        file.cookies[0].value = "rotated".into();
+        assert_ne!(old_hash, session_state_hash(&file).unwrap());
+    }
+
+    #[test]
+    fn post_send_session_write_rate_limit_is_sixty_seconds() {
+        let now = Instant::now();
+        let mut writes = LAST_SESSION_WRITE.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap();
+        writes.insert("test-provider".to_string(), now);
+        drop(writes);
+        assert!(session_write_is_rate_limited("test-provider", now + Duration::from_secs(59)));
+        assert!(!session_write_is_rate_limited("test-provider", now + Duration::from_secs(60)));
+        if let Ok(mut writes) = LAST_SESSION_WRITE.get().unwrap().lock() {
+            writes.remove("test-provider");
+        }
+    }
+
 
     #[test]
     fn cookie_restore_succeeds_when_all_eligible_cookies_are_written() {
