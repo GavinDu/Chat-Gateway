@@ -93,6 +93,13 @@ busy timeout, reconciling transcripts against the latest committed history.
 Identical completed-turn replays are idempotent; full and sliding-window
 transcripts append only their unseen suffix.
 
+`GET /v1/conversations/:conversation_id` exports the complete stored conversation
+as JSON, including messages and provider/tab metadata. It returns `404` when the
+conversation does not exist. Treat exports as sensitive data: they contain prompts
+and responses and should be stored only in a protected location. `DELETE` on the
+same path permanently removes the conversation from the active SQLite database;
+older JSON or SQLite backups may still contain it.
+
 `CHAT_GATEWAY_MEMORY_PATH` can select a database path. For compatibility, an
 existing override ending in `.json` remains the **import source**, and its sibling
 `.sqlite3` file becomes the database. Without an override, or with a direct
@@ -291,7 +298,7 @@ The HTTP server binds to `127.0.0.1` only. The login relay can control provider 
 
 The server binds to loopback only. For shared local development environments, configure `auth.keys[]` with a key name, the lowercase SHA-256 hash of its secret, and one or both scopes (`chat`, `admin`). Store only the hash in YAML; generate a one-time secret with `chat-gateway-rs --create-api-key NAME` and save the printed secret immediately. The plaintext is not persisted or logged. 
 
-When `auth.keys` is non-empty, every route except `/health` requires `Authorization: Bearer <secret>`. Chat routes require the `chat` scope; login/session-control routes and conversation deletion require `admin`. An empty key list disables API-key auth for backward-compatible loopback-only use; Host/Origin checks are not authentication and the listener must not be exposed remotely.
+When `auth.keys` is non-empty, every route except `/health` requires `Authorization: Bearer <secret>`. Chat routes require the `chat` scope; login/session-control routes and conversation export/deletion require `admin`. An empty key list disables API-key auth for backward-compatible loopback-only use; Host/Origin checks are not authentication and the listener must not be exposed remotely.
 
 ## Metrics and request timing
 

@@ -9,7 +9,7 @@ use axum::{
         sse::{Event, Sse},
         Html, IntoResponse,
     },
-    routing::{delete, get, post},
+    routing::{get, post},
     Json, Router,
 };
 use clap::Parser;
@@ -382,7 +382,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/v1/chat/completions", post(chat_completions))
         .route(
             "/v1/conversations/:conversation_id",
-            delete(delete_conversation),
+            get(export_conversation).delete(delete_conversation),
         )
         .route("/login", get(login_page))
         .route("/login/api/status", get(login_status))
@@ -1139,7 +1139,8 @@ fn authorize_api_request(
     let admin_route = path.starts_with("/login")
         || path.starts_with("/relay/")
         || path == "/metrics"
-        || (*method == axum::http::Method::DELETE && path.starts_with("/v1/conversations/"));
+        || (path.starts_with("/v1/conversations/")
+            && (*method == axum::http::Method::GET || *method == axum::http::Method::DELETE));
     let required_scope = if admin_route { "admin" } else { "chat" };
     if !key.scopes.iter().any(|scope| scope == required_scope) {
         return Err(AuthFailure::InsufficientScope);
@@ -1211,6 +1212,42 @@ fn delete_conversation_response(memory: &UnifiedMemory, conversation_id: &str) -
             )
         }
     }
+}
+
+fn export_conversation_response(memory: &UnifiedMemory, conversation_id: &str) -> Response {
+    if !valid_conversation_id(conversation_id) {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            "invalid_conversation_id",
+            "conversation ID must be 8-128 ASCII letters, digits, '_' or '-'",
+        );
+    }
+    match memory.export_conversation(conversation_id) {
+        Ok(Some(conversation)) => Json(conversation).into_response(),
+        Ok(None) => api_error(
+            StatusCode::NOT_FOUND,
+            "invalid_request_error",
+            "conversation_not_found",
+            "conversation does not exist",
+        ),
+        Err(_error) => {
+            tracing::error!(conversation_id = %conversation_id, "conversation export failed");
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                "memory_persistence_failed",
+                "conversation could not be exported safely",
+            )
+        }
+    }
+}
+
+async fn export_conversation(
+    State(state): State<Arc<AppState>>,
+    Path(conversation_id): Path<String>,
+) -> Response {
+    export_conversation_response(&state.memory, &conversation_id)
 }
 
 async fn delete_conversation(
@@ -2166,6 +2203,13 @@ mod http_api_regression_tests {
         }
     }
 
+    async fn export_endpoint(
+        State(memory): State<Arc<UnifiedMemory>>,
+        Path(conversation_id): Path<String>,
+    ) -> Response {
+        export_conversation_response(&memory, &conversation_id)
+    }
+
     async fn delete_endpoint(
         State(memory): State<Arc<UnifiedMemory>>,
         Path(conversation_id): Path<String>,
@@ -2186,7 +2230,7 @@ mod http_api_regression_tests {
             .route("/v1/chat/completions", post(validation_endpoint))
             .route(
                 "/v1/conversations/:conversation_id",
-                delete(delete_endpoint),
+                get(export_endpoint).delete(delete_endpoint),
             )
             .with_state(memory)
             .layer(DefaultBodyLimit::max(1024 * 1024))
@@ -2350,6 +2394,59 @@ mod http_api_regression_tests {
             body["error"]["message"],
             "request body exceeds the 1 MiB limit"
         );
+    }
+
+    #[tokio::test]
+    async fn http_export_returns_complete_conversation_and_missing_is_not_found() {
+        let memory = Arc::new(UnifiedMemory::new(8000));
+        memory
+            .store_turn(
+                "conversation_export_1".into(),
+                vec![ChatMessage {
+                    role: "user".into(),
+                    content: "export prompt".into(),
+                }],
+                ChatMessage {
+                    role: "assistant".into(),
+                    content: "export answer".into(),
+                },
+                "chatgpt".into(),
+                "tab-export".into(),
+            )
+            .unwrap();
+
+        let response = app(memory.clone())
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/conversations/conversation_export_1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(response.headers().contains_key("x-request-id"));
+        let body = json_body(response).await;
+        assert_eq!(body["id"], "conversation_export_1");
+        assert_eq!(body["provider"], "chatgpt");
+        assert_eq!(body["tab_id"], "tab-export");
+        assert_eq!(body["messages"][0]["content"], "export prompt");
+        assert_eq!(body["messages"][1]["content"], "export answer");
+
+        let missing = app(memory)
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/conversations/conversation_export_missing")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+        let body = json_body(missing).await;
+        assert_eq!(body["error"]["code"], "conversation_not_found");
     }
 
     #[tokio::test]
@@ -2734,6 +2831,15 @@ mod api_key_auth_tests {
             ),
             Err(AuthFailure::InsufficientScope)
         );
+        assert_eq!(
+            authorize_api_request(
+                &config,
+                Some("Bearer test-secret"),
+                "/v1/conversations/conversation_1",
+                &axum::http::Method::GET
+            ),
+            Err(AuthFailure::InsufficientScope)
+        );
     }
 
     #[test]
@@ -2744,6 +2850,20 @@ mod api_key_auth_tests {
             Some("Bearer test-secret"),
             "/login/api/status",
             &axum::http::Method::GET
+        )
+        .is_ok());
+        assert!(authorize_api_request(
+            &config,
+            Some("Bearer test-secret"),
+            "/v1/conversations/conversation_1",
+            &axum::http::Method::GET
+        )
+        .is_ok());
+        assert!(authorize_api_request(
+            &config,
+            Some("Bearer test-secret"),
+            "/v1/conversations/conversation_1",
+            &axum::http::Method::DELETE
         )
         .is_ok());
         assert!(authorize_api_request(&config, None, "/health", &axum::http::Method::GET).is_ok());
