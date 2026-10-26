@@ -332,6 +332,22 @@ mod tests {
     }
 
     #[test]
+    fn rejects_zero_provider_pacing_budgets() {
+        let interval = config(
+            "providers:\n  - name: chatgpt\n    min_request_interval_ms: 0\n",
+        );
+        assert!(interval.validate().is_err());
+
+        let cap = config("providers:\n  - name: chatgpt\n    daily_request_cap: 0\n");
+        assert!(cap.validate().is_err());
+
+        let defaults = config("providers:\n  - name: chatgpt\n");
+        assert!(defaults.validate().is_ok());
+        assert_eq!(defaults.providers[0].min_request_interval_ms, 5_000);
+        assert_eq!(defaults.providers[0].daily_request_cap, 100);
+    }
+
+    #[test]
     fn rejects_zero_queue_timeout() {
         let cfg = config("providers:\n  - name: chatgpt\n    queue_timeout_seconds: 0\n");
         assert!(cfg.validate().is_err());
