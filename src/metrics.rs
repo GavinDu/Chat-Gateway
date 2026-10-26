@@ -14,7 +14,10 @@ struct Histogram {
 
 impl Histogram {
     fn observe(&mut self, value: u64) {
-        let bucket = BOUNDS.iter().position(|bound| value <= *bound).unwrap_or(BOUNDS.len());
+        let bucket = BOUNDS
+            .iter()
+            .position(|bound| value <= *bound)
+            .unwrap_or(BOUNDS.len());
         self.buckets[bucket] += 1;
         self.count += 1;
         self.sum += value as u128;
@@ -61,7 +64,10 @@ fn data() -> &'static Mutex<MetricData> {
 pub fn record_http_request(route: &str, status: u16, duration_ms: u64) {
     if let Ok(mut data) = data().lock() {
         *data.requests.entry((route.to_owned(), status)).or_default() += 1;
-        data.handler_ms.entry(route.to_owned()).or_default().observe(duration_ms);
+        data.handler_ms
+            .entry(route.to_owned())
+            .or_default()
+            .observe(duration_ms);
     }
 }
 
@@ -74,21 +80,40 @@ pub fn record_provider_timings(
     total_ms: u64,
 ) {
     if let Ok(mut data) = data().lock() {
-        data.queue_ms.entry(provider.to_owned()).or_default().observe(queue_ms);
+        data.queue_ms
+            .entry(provider.to_owned())
+            .or_default()
+            .observe(queue_ms);
         if let Some(ttft) = ttft_ms {
-            data.ttft_ms.entry(provider.to_owned()).or_default().observe(ttft);
+            data.ttft_ms
+                .entry(provider.to_owned())
+                .or_default()
+                .observe(ttft);
         }
-        data.provider_work_ms.entry(provider.to_owned()).or_default().observe(provider_work_ms);
-        data.chat_total_ms.entry(provider.to_owned()).or_default().observe(total_ms);
-        data.gateway_overhead_ms.entry(provider.to_owned()).or_default().observe(
-            total_ms.saturating_sub(queue_ms.saturating_add(provider_work_ms)),
-        );
-        *data.provider_outcomes.entry((provider.to_owned(), outcome.to_owned())).or_default() += 1;
+        data.provider_work_ms
+            .entry(provider.to_owned())
+            .or_default()
+            .observe(provider_work_ms);
+        data.chat_total_ms
+            .entry(provider.to_owned())
+            .or_default()
+            .observe(total_ms);
+        data.gateway_overhead_ms
+            .entry(provider.to_owned())
+            .or_default()
+            .observe(total_ms.saturating_sub(queue_ms.saturating_add(provider_work_ms)));
+        *data
+            .provider_outcomes
+            .entry((provider.to_owned(), outcome.to_owned()))
+            .or_default() += 1;
     }
 }
 
 fn escape_label(value: &str) -> String {
-    value.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n")
+    value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
 }
 
 /// Restrict metric labels to a bounded route vocabulary to avoid cardinality attacks.
@@ -99,7 +124,10 @@ pub fn normalize_route(path: &str) -> String {
         "/login/api/*".to_owned()
     } else if path.starts_with("/relay/") {
         "/relay/*".to_owned()
-    } else if matches!(path, "/health" | "/ready" | "/metrics" | "/v1/models" | "/v1/chat/completions" | "/login") {
+    } else if matches!(
+        path,
+        "/health" | "/ready" | "/metrics" | "/v1/models" | "/v1/chat/completions" | "/login"
+    ) {
         path.to_owned()
     } else {
         "/other".to_owned()
@@ -129,7 +157,11 @@ pub fn render() -> String {
         ("gateway_overhead_ms", &data.gateway_overhead_ms),
     ] {
         let _ = writeln!(out, "# TYPE {metric} histogram");
-        let label = if metric == "gateway_http_handler_duration_ms" { "route" } else { "provider" };
+        let label = if metric == "gateway_http_handler_duration_ms" {
+            "route"
+        } else {
+            "provider"
+        };
         for (key, histogram) in values {
             histogram.render(&mut out, metric, label, key);
         }
@@ -152,8 +184,14 @@ mod tests {
 
     #[test]
     fn route_labels_have_bounded_cardinality() {
-        assert_eq!(normalize_route("/v1/conversations/secret-id"), "/v1/conversations/:id");
-        assert_eq!(normalize_route("/random/attacker-controlled-path"), "/other");
+        assert_eq!(
+            normalize_route("/v1/conversations/secret-id"),
+            "/v1/conversations/:id"
+        );
+        assert_eq!(
+            normalize_route("/random/attacker-controlled-path"),
+            "/other"
+        );
     }
 
     #[test]
