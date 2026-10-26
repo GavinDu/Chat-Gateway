@@ -329,6 +329,20 @@ pub async fn run_send(
 
         tokio::time::sleep(Duration::from_millis(350)).await;
 
+        if crate::provider_guard::is_challenge_page(&page) {
+            crate::provider_guard::disable_provider(
+                adapter.name(),
+                "challenge page detected; manual review required",
+            );
+            let _ = chunks
+                .send(Err(anyhow::anyhow!(
+                    "provider '{}' disabled after challenge page detection; manual review required",
+                    adapter.name()
+                )))
+                .await;
+            return;
+        }
+
         if is_new_response_node(baseline_response_count, adapter.response_count(&page)) {
             // A new DOM node is the strongest signal that the provider started
             // a fresh answer, even when its text matches the previous turn.
