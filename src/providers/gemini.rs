@@ -18,10 +18,7 @@ pub const SELECTORS: SelectorSet = SelectorSet {
         "div[contenteditable=\"true\"][role=\"textbox\"]",
         "div[contenteditable=\"true\"]",
     ],
-    send: &[
-        "button[aria-label=\"Send message\"]",
-        "button.send-button",
-    ],
+    send: &["button[aria-label=\"Send message\"]", "button.send-button"],
     response: &[
         "model-response",
         "div.response-container",
