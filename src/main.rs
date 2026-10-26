@@ -2168,7 +2168,7 @@ mod http_api_regression_tests {
     use super::*;
     use axum::{
         body::{to_bytes, Body},
-        routing::{delete, post},
+        routing::post,
     };
     use std::{
         path::PathBuf,
