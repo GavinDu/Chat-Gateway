@@ -117,6 +117,7 @@ mod tests {
     }
 
     #[test]
+    // Session diagnostics are user-visible state; never retain raw cookies or identity data.
     fn session_expiry_details_are_redacted_and_success_clears_them() {
         let provider = "test-provider-redacted-session-error";
         record_error(
