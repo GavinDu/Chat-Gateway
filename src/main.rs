@@ -1636,6 +1636,7 @@ async fn chat_completions(
                     total_ms,
                 );
                 if let Some(message) = stream_error {
+                    // Preserve sanitized session-expiry state for routing and health reporting.
                     provider_state::record_error(
                         &provider_c,
                         provider_error_detail.as_deref().unwrap_or(&message),
