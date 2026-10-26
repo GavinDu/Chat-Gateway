@@ -172,7 +172,10 @@ impl UnifiedMemory {
     }
 
     /// Export one complete conversation without exposing database internals.
-    pub fn export_conversation(&self, conversation_id: &str) -> anyhow::Result<Option<Conversation>> {
+    pub fn export_conversation(
+        &self,
+        conversation_id: &str,
+    ) -> anyhow::Result<Option<Conversation>> {
         self.conversation(conversation_id)
     }
 
