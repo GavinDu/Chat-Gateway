@@ -406,6 +406,9 @@ async fn main() -> anyhow::Result<()> {
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await?;
+    // HTTP requests have drained, so it is now safe to stop the browser worker.
+    state.pool.shutdown().await?;
+    drop(state);
     Ok(())
 }
 
