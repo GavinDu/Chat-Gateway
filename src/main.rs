@@ -1431,10 +1431,24 @@ async fn chat_completions(
                     .map(|provider| provider.timeout_seconds)
                     .unwrap_or(120),
             );
-            let first = match tokio::time::timeout(first_chunk_timeout, rx.recv()).await {
+            let first = match tokio::time::timeout(first_chunk_timeout, async {
+                loop {
+                    match rx.recv().await {
+                        Some(Ok(chunk)) if usable_initial_stream_chunk(&chunk.content, chunk.done) => {
+                            break Some(Ok(chunk));
+                        }
+                        Some(Ok(chunk)) if chunk.done => break Some(Ok(chunk)),
+                        Some(Ok(_empty_chunk)) => continue,
+                        Some(Err(error)) => break Some(Err(error)),
+                        None => break None,
+                    }
+                }
+            })
+            .await
+            {
                 Ok(Some(Ok(chunk))) if usable_initial_stream_chunk(&chunk.content, chunk.done) => {
                     chunk
-                },
+                }
                 Ok(Some(Ok(_))) => {
                     last_err =
                         Some("provider completed without output before stream started".to_string());
