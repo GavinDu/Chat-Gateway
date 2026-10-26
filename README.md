@@ -295,6 +295,8 @@ When `auth.keys` is non-empty, every route except `/health` requires `Authorizat
 
 ## Conversation memory, export, and retention
 
+Treat exported conversations as sensitive user data; protect access to exports and include them in backup-retention and deletion procedures.
+
 Conversation turns are persisted in the gateway's SQLite memory store so the API can rebuild context across requests. The gateway does **not** currently apply an automatic age-based retention period; stored conversations remain until explicitly deleted or the backing store is removed under the operator's data-management procedure. Operators should account for this when sizing disks, backing up the database, and defining their own retention requirements.
 
 - `GET /v1/conversations/:conversation_id` exports the stored conversation record, including its messages and provider/tab metadata, as JSON.
