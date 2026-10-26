@@ -649,6 +649,8 @@ fn browser_thread(
                                 // expired/failed sends must never persist stale state.
                                 let (save_tx, mut save_rx) = mpsc::channel::<Result<ProviderChunk>>(32);
                                 let (completion_tx, completion_rx) = oneshot::channel();
+                                // Keep cancellation separate from the provider result channel: a
+                                // dropped HTTP consumer must interrupt the browser send itself.
                                 let cancel_send = Arc::new(Notify::new());
                                 let cancel_forwarder = cancel_send.clone();
                                 tokio::task::spawn_local(async move {
