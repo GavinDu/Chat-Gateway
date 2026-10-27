@@ -9,6 +9,7 @@ server:
 memory:
   max_tokens: 8000
   strategy: "sliding_window"
+  retention_days: 0  # 0 disables automatic conversation expiry
 
 obscura:
   stealth: true
