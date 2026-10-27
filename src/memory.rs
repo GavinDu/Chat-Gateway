@@ -100,14 +100,48 @@ impl UnifiedMemory {
         Ok(conversation)
     }
 
+    fn conversation_for_owner(
+        &self,
+        owner_key_id: &str,
+        id: &str,
+    ) -> anyhow::Result<Option<Conversation>> {
+        let mut connection = self.lock()?;
+        let tx = connection.transaction()?;
+        let owner: Option<String> = tx
+            .query_row(
+                "SELECT owner_key_id FROM conversations WHERE id = ?1",
+                [id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let conversation = match owner {
+            Some(owner) if owner == owner_key_id => sqlite::load(&tx, id)?,
+            Some(_) => anyhow::bail!("conversation belongs to another API key"),
+            None => None,
+        };
+        tx.commit()
+            .map_err(|error| anyhow::anyhow!("completing scoped conversation read: {error}"))?;
+        Ok(conversation)
+    }
+
+    #[allow(dead_code)]
     pub fn build_context(
         &self,
         conversation_id: Option<&str>,
         new_messages: &[ChatMessage],
     ) -> anyhow::Result<(String, Vec<ChatMessage>)> {
+        self.build_context_for_owner("local", conversation_id, new_messages)
+    }
+
+    pub fn build_context_for_owner(
+        &self,
+        owner_key_id: &str,
+        conversation_id: Option<&str>,
+        new_messages: &[ChatMessage],
+    ) -> anyhow::Result<(String, Vec<ChatMessage>)> {
         let mut full = match conversation_id {
             Some(id) => self
-                .conversation(id)?
+                .conversation_for_owner(owner_key_id, id)?
                 .map(|conversation| conversation.messages)
                 .unwrap_or_default(),
             None => Vec::new(),
@@ -132,6 +166,7 @@ impl UnifiedMemory {
         Ok((prompt, windowed))
     }
 
+    #[allow(dead_code)]
     pub fn store_turn(
         &self,
         conversation_id: String,
@@ -140,8 +175,40 @@ impl UnifiedMemory {
         provider: String,
         tab_id: String,
     ) -> anyhow::Result<()> {
+        self.store_turn_for_owner(
+            "local",
+            conversation_id,
+            user_msgs,
+            assistant_msg,
+            provider,
+            tab_id,
+        )
+    }
+
+    pub fn store_turn_for_owner(
+        &self,
+        owner_key_id: &str,
+        conversation_id: String,
+        user_msgs: Vec<ChatMessage>,
+        assistant_msg: ChatMessage,
+        provider: String,
+        tab_id: String,
+    ) -> anyhow::Result<()> {
         let mut connection = self.lock()?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let existing_owner: Option<String> = tx
+            .query_row(
+                "SELECT owner_key_id FROM conversations WHERE id = ?1",
+                [&conversation_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if existing_owner
+            .as_deref()
+            .is_some_and(|existing| existing != owner_key_id)
+        {
+            anyhow::bail!("conversation belongs to another API key");
+        }
         let mut conversation =
             sqlite::load(&tx, &conversation_id)?.unwrap_or_else(|| Conversation {
                 id: conversation_id,
@@ -158,7 +225,6 @@ impl UnifiedMemory {
             && (conversation.messages.starts_with(&completed)
                 || conversation.messages.ends_with(&completed));
         let unseen = messages_after_overlap(&conversation.messages, &user_msgs);
-        // An identical completed turn replay must not append a second answer.
         let first = conversation.messages.len();
         if !replay {
             conversation.messages.extend(unseen);
@@ -166,24 +232,43 @@ impl UnifiedMemory {
         }
         conversation.provider = Some(provider);
         conversation.tab_id = Some(tab_id);
-        sqlite::append(&tx, &conversation, first)?;
+        sqlite::append_owned(&tx, &conversation, first, owner_key_id)?;
         tx.commit()
             .map_err(|error| anyhow::anyhow!("committing conversation turn: {error}"))
     }
 
     /// Export one complete conversation without exposing database internals.
     /// Callers must apply authorization before returning this record to clients.
+    /// Export one complete conversation for the legacy local tenant.
+    #[allow(dead_code)]
     pub fn export_conversation(
         &self,
         conversation_id: &str,
     ) -> anyhow::Result<Option<Conversation>> {
-        self.conversation(conversation_id)
+        self.export_conversation_for_owner("local", conversation_id)
     }
 
-    /// List conversation metadata without loading message bodies. Callers must
-    /// apply authorization before exposing this list to clients.
+    pub fn export_conversation_for_owner(
+        &self,
+        owner_key_id: &str,
+        conversation_id: &str,
+    ) -> anyhow::Result<Option<Conversation>> {
+        self.conversation_for_owner(owner_key_id, conversation_id)
+    }
+
+    /// List conversation metadata for the legacy local tenant.
+    #[allow(dead_code)]
     pub fn list_conversations(
         &self,
+        limit: usize,
+        offset: usize,
+    ) -> anyhow::Result<Vec<ConversationSummary>> {
+        self.list_conversations_for_owner("local", limit, offset)
+    }
+
+    pub fn list_conversations_for_owner(
+        &self,
+        owner_key_id: &str,
         limit: usize,
         offset: usize,
     ) -> anyhow::Result<Vec<ConversationSummary>> {
@@ -192,12 +277,17 @@ impl UnifiedMemory {
             "SELECT c.id, c.provider, COUNT(m.position)
              FROM conversations c
              LEFT JOIN messages m ON m.conversation_id = c.id
+             WHERE c.owner_key_id = ?1
              GROUP BY c.id, c.provider
              ORDER BY c.id
-             LIMIT ?1 OFFSET ?2",
+             LIMIT ?2 OFFSET ?3",
         )?;
         let rows = statement.query_map(
-            rusqlite::params![limit.min(100) as i64, offset.min(i64::MAX as usize) as i64],
+            rusqlite::params![
+                owner_key_id,
+                limit.min(100) as i64,
+                offset.min(i64::MAX as usize) as i64
+            ],
             |row| {
                 Ok(ConversationSummary {
                     id: row.get(0)?,
@@ -226,10 +316,22 @@ impl UnifiedMemory {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub fn delete_conversation(&self, conversation_id: &str) -> anyhow::Result<bool> {
+        self.delete_conversation_for_owner("local", conversation_id)
+    }
+
+    pub fn delete_conversation_for_owner(
+        &self,
+        owner_key_id: &str,
+        conversation_id: &str,
+    ) -> anyhow::Result<bool> {
         let mut connection = self.lock()?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let deleted = tx.execute("DELETE FROM conversations WHERE id = ?1", [conversation_id])?;
+        let deleted = tx.execute(
+            "DELETE FROM conversations WHERE id = ?1 AND owner_key_id = ?2",
+            rusqlite::params![conversation_id, owner_key_id],
+        )?;
         tx.commit()?;
         Ok(deleted != 0)
     }
@@ -246,11 +348,15 @@ impl UnifiedMemory {
         Ok(deleted)
     }
 
-    // Legacy read helpers remain used by the benchmark and routing tests.
+    // Legacy read helpers remain scoped to the local tenant for tests and CLI tools.
     #[allow(dead_code)]
     pub fn has_history(&self, cid: &str) -> anyhow::Result<bool> {
+        self.has_history_for_owner("local", cid)
+    }
+
+    pub fn has_history_for_owner(&self, owner_key_id: &str, cid: &str) -> anyhow::Result<bool> {
         Ok(self
-            .conversation(cid)?
+            .conversation_for_owner(owner_key_id, cid)?
             .is_some_and(|conversation| !conversation.messages.is_empty()))
     }
 
@@ -261,24 +367,44 @@ impl UnifiedMemory {
             .and_then(|conversation| conversation.tab_id))
     }
 
+    #[allow(dead_code)]
     pub fn get_provider(&self, cid: &str) -> anyhow::Result<Option<String>> {
+        self.get_provider_for_owner("local", cid)
+    }
+
+    pub fn get_provider_for_owner(
+        &self,
+        owner_key_id: &str,
+        cid: &str,
+    ) -> anyhow::Result<Option<String>> {
         Ok(self
-            .conversation(cid)?
+            .conversation_for_owner(owner_key_id, cid)?
             .and_then(|conversation| conversation.provider))
     }
 
-    /// Read a provider-specific remote-thread mapping for one conversation.
+    #[allow(dead_code)]
     pub fn get_provider_thread(
         &self,
+        conversation_id: &str,
+        provider: &str,
+    ) -> anyhow::Result<Option<ProviderThread>> {
+        self.get_provider_thread_for_owner("local", conversation_id, provider)
+    }
+
+    pub fn get_provider_thread_for_owner(
+        &self,
+        owner_key_id: &str,
         conversation_id: &str,
         provider: &str,
     ) -> anyhow::Result<Option<ProviderThread>> {
         let connection = self.lock()?;
         connection
             .query_row(
-                "SELECT thread_url, synced_through_message_id, model, updated_at
-                 FROM provider_threads WHERE conversation_id=?1 AND provider=?2",
-                rusqlite::params![conversation_id, provider],
+                "SELECT pt.thread_url, pt.synced_through_message_id, pt.model, pt.updated_at
+                 FROM provider_threads pt
+                 JOIN conversations c ON c.id = pt.conversation_id
+                 WHERE pt.conversation_id = ?1 AND pt.provider = ?2 AND c.owner_key_id = ?3",
+                rusqlite::params![conversation_id, provider, owner_key_id],
                 |row| {
                     Ok(ProviderThread {
                         conversation_id: conversation_id.to_owned(),
@@ -294,9 +420,27 @@ impl UnifiedMemory {
             .map_err(Into::into)
     }
 
-    /// Persist a provider thread mapping after the caller has verified the URL.
+    #[allow(dead_code)]
     pub fn upsert_provider_thread(&self, thread: &ProviderThread) -> anyhow::Result<()> {
+        self.upsert_provider_thread_for_owner("local", thread)
+    }
+
+    pub fn upsert_provider_thread_for_owner(
+        &self,
+        owner_key_id: &str,
+        thread: &ProviderThread,
+    ) -> anyhow::Result<()> {
         let connection = self.lock()?;
+        let owner: Option<String> = connection
+            .query_row(
+                "SELECT owner_key_id FROM conversations WHERE id = ?1",
+                [&thread.conversation_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if owner.as_deref() != Some(owner_key_id) {
+            anyhow::bail!("conversation is not owned by this API key");
+        }
         connection.execute(
             "INSERT INTO provider_threads(
                 conversation_id, provider, thread_url, synced_through_message_id, model, updated_at

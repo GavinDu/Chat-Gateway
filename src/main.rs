@@ -84,6 +84,8 @@ struct AdapterDiagnostic {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct AuthKeyContext {
+    /// Stable configured key name; never the raw bearer secret.
+    key_id: String,
     provider_allowlist: Option<Vec<String>>,
 }
 
@@ -1221,6 +1223,7 @@ fn authorize_api_request(
         return Err(AuthFailure::InsufficientScope);
     }
     Ok(Some(AuthKeyContext {
+        key_id: format!("key:{}", key.name),
         provider_allowlist: key.provider_allowlist.clone(),
     }))
 }
@@ -1255,7 +1258,16 @@ async fn authenticate_api_key(
     }
 }
 
+#[cfg(test)]
 fn delete_conversation_response(memory: &UnifiedMemory, conversation_id: &str) -> Response {
+    delete_conversation_response_for_owner(memory, "local", conversation_id)
+}
+
+fn delete_conversation_response_for_owner(
+    memory: &UnifiedMemory,
+    owner_key_id: &str,
+    conversation_id: &str,
+) -> Response {
     if !valid_conversation_id(conversation_id) {
         return api_error(
             StatusCode::BAD_REQUEST,
@@ -1264,7 +1276,7 @@ fn delete_conversation_response(memory: &UnifiedMemory, conversation_id: &str) -
             "conversation ID must be 8-128 ASCII letters, digits, '_' or '-'",
         );
     }
-    match memory.delete_conversation(conversation_id) {
+    match memory.delete_conversation_for_owner(owner_key_id, conversation_id) {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
         Ok(false) => api_error(
             StatusCode::NOT_FOUND,
@@ -1284,7 +1296,16 @@ fn delete_conversation_response(memory: &UnifiedMemory, conversation_id: &str) -
     }
 }
 
+#[cfg(test)]
 fn export_conversation_response(memory: &UnifiedMemory, conversation_id: &str) -> Response {
+    export_conversation_response_for_owner(memory, "local", conversation_id)
+}
+
+fn export_conversation_response_for_owner(
+    memory: &UnifiedMemory,
+    owner_key_id: &str,
+    conversation_id: &str,
+) -> Response {
     if !valid_conversation_id(conversation_id) {
         return api_error(
             StatusCode::BAD_REQUEST,
@@ -1293,7 +1314,7 @@ fn export_conversation_response(memory: &UnifiedMemory, conversation_id: &str) -
             "conversation ID must be 8-128 ASCII letters, digits, '_' or '-'",
         );
     }
-    match memory.export_conversation(conversation_id) {
+    match memory.export_conversation_for_owner(owner_key_id, conversation_id) {
         Ok(Some(conversation)) => Json(conversation).into_response(),
         Ok(None) => api_error(
             StatusCode::NOT_FOUND,
@@ -1322,10 +1343,18 @@ struct ConversationListQuery {
 async fn list_conversations(
     State(state): State<Arc<AppState>>,
     Query(query): Query<ConversationListQuery>,
+    auth_context: Option<Extension<AuthKeyContext>>,
 ) -> Response {
+    let owner_key_id = auth_context
+        .as_ref()
+        .map(|Extension(context)| context.key_id.as_str())
+        .unwrap_or("local");
     let limit = query.limit.unwrap_or(50).clamp(1, 100);
     let offset = query.offset.unwrap_or(0);
-    match state.memory.list_conversations(limit, offset) {
+    match state
+        .memory
+        .list_conversations_for_owner(owner_key_id, limit, offset)
+    {
         Ok(conversations) => Json(serde_json::json!({
             "data": conversations,
             "limit": limit,
@@ -1347,7 +1376,12 @@ async fn list_conversations(
 async fn get_provider_thread(
     State(state): State<Arc<AppState>>,
     Path((conversation_id, provider)): Path<(String, String)>,
+    auth_context: Option<Extension<AuthKeyContext>>,
 ) -> Response {
+    let owner_key_id = auth_context
+        .as_ref()
+        .map(|Extension(context)| context.key_id.as_str())
+        .unwrap_or("local");
     if !valid_conversation_id(&conversation_id) || !valid_provider_name(&provider) {
         return api_error(
             StatusCode::BAD_REQUEST,
@@ -1358,7 +1392,7 @@ async fn get_provider_thread(
     }
     match state
         .memory
-        .get_provider_thread(&conversation_id, &provider)
+        .get_provider_thread_for_owner(owner_key_id, &conversation_id, &provider)
     {
         Ok(Some(thread)) => Json(thread).into_response(),
         Ok(None) => api_error(
@@ -1382,8 +1416,13 @@ async fn get_provider_thread(
 async fn upsert_provider_thread(
     State(state): State<Arc<AppState>>,
     Path((conversation_id, provider)): Path<(String, String)>,
+    auth_context: Option<Extension<AuthKeyContext>>,
     Json(mut thread): Json<ProviderThread>,
 ) -> Response {
+    let owner_key_id = auth_context
+        .as_ref()
+        .map(|Extension(context)| context.key_id.as_str())
+        .unwrap_or("local");
     if !valid_conversation_id(&conversation_id)
         || !valid_provider_name(&provider)
         || thread.conversation_id != conversation_id
@@ -1409,7 +1448,10 @@ async fn upsert_provider_thread(
         .unwrap_or_default()
         .as_secs()
         .min(i64::MAX as u64) as i64;
-    match state.memory.upsert_provider_thread(&thread) {
+    match state
+        .memory
+        .upsert_provider_thread_for_owner(owner_key_id, &thread)
+    {
         Ok(()) => Json(thread).into_response(),
         Err(error) => {
             tracing::error!(%error, conversation_id, provider, "provider thread persistence failed");
@@ -1459,19 +1501,38 @@ fn valid_provider_thread_url(provider: &str, value: &str) -> bool {
 async fn export_conversation(
     State(state): State<Arc<AppState>>,
     Path(conversation_id): Path<String>,
+    auth_context: Option<Extension<AuthKeyContext>>,
 ) -> Response {
-    export_conversation_response(&state.memory, &conversation_id)
+    let owner_key_id = auth_context
+        .as_ref()
+        .map(|Extension(context)| context.key_id.as_str())
+        .unwrap_or("local");
+    export_conversation_response_for_owner(&state.memory, owner_key_id, &conversation_id)
 }
 
 async fn export_conversation_markdown(
     State(state): State<Arc<AppState>>,
     Path(conversation_id): Path<String>,
+    auth_context: Option<Extension<AuthKeyContext>>,
 ) -> Response {
-    export_conversation_markdown_response(&state.memory, &conversation_id)
+    let owner_key_id = auth_context
+        .as_ref()
+        .map(|Extension(context)| context.key_id.as_str())
+        .unwrap_or("local");
+    export_conversation_markdown_response_for_owner(&state.memory, owner_key_id, &conversation_id)
 }
 
+#[cfg(test)]
 fn export_conversation_markdown_response(
     memory: &UnifiedMemory,
+    conversation_id: &str,
+) -> Response {
+    export_conversation_markdown_response_for_owner(memory, "local", conversation_id)
+}
+
+fn export_conversation_markdown_response_for_owner(
+    memory: &UnifiedMemory,
+    owner_key_id: &str,
     conversation_id: &str,
 ) -> Response {
     if !valid_conversation_id(conversation_id) {
@@ -1482,7 +1543,7 @@ fn export_conversation_markdown_response(
             "conversation ID must be 8-128 ASCII letters, digits, '_' or '-'",
         );
     }
-    match memory.export_conversation(conversation_id) {
+    match memory.export_conversation_for_owner(owner_key_id, conversation_id) {
         Ok(Some(conversation)) => {
             let mut markdown = format!("# Conversation {}\n\n", conversation.id);
             if let Some(provider) = conversation.provider.as_deref() {
@@ -1530,8 +1591,13 @@ fn export_conversation_markdown_response(
 async fn delete_conversation(
     State(state): State<Arc<AppState>>,
     Path(conversation_id): Path<String>,
+    auth_context: Option<Extension<AuthKeyContext>>,
 ) -> Response {
-    delete_conversation_response(&state.memory, &conversation_id)
+    let owner_key_id = auth_context
+        .as_ref()
+        .map(|Extension(context)| context.key_id.as_str())
+        .unwrap_or("local");
+    delete_conversation_response_for_owner(&state.memory, owner_key_id, &conversation_id)
 }
 
 async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -1639,14 +1705,25 @@ fn conversation_context_read_error(conversation_id: Option<&str>) -> Response {
     )
 }
 
+#[cfg(test)]
 fn read_conversation_context(
     memory: &UnifiedMemory,
     conversation_id: Option<&str>,
     messages: &[ChatMessage],
 ) -> anyhow::Result<(String, Vec<ChatMessage>, bool)> {
-    let (prompt, windowed) = memory.build_context(conversation_id, messages)?;
+    read_conversation_context_for_owner(memory, "local", conversation_id, messages)
+}
+
+fn read_conversation_context_for_owner(
+    memory: &UnifiedMemory,
+    owner_key_id: &str,
+    conversation_id: Option<&str>,
+    messages: &[ChatMessage],
+) -> anyhow::Result<(String, Vec<ChatMessage>, bool)> {
+    let (prompt, windowed) =
+        memory.build_context_for_owner(owner_key_id, conversation_id, messages)?;
     let has_history = match conversation_id {
-        Some(id) => memory.has_history(id)?,
+        Some(id) => memory.has_history_for_owner(owner_key_id, id)?,
         None => false,
     };
     Ok((prompt, windowed, has_history))
@@ -1699,6 +1776,12 @@ async fn chat_completions(
         Err(response) => return response,
     };
 
+    let owner_key_id = auth_context
+        .as_ref()
+        .map(|Extension(context)| context.key_id.as_str())
+        .unwrap_or("local")
+        .to_owned();
+
     let conversation_id = match headers.get("X-Conversation-Id") {
         None => None,
         Some(value) => {
@@ -1727,13 +1810,17 @@ async fn chat_completions(
 
     // Read all context-dependent memory before any provider request. A read
     // failure must not degrade into an empty prompt or an unauthenticated turn.
-    let (context_prompt, windowed, has_history) =
-        match read_conversation_context(&state.memory, conversation_id.as_deref(), &req.messages) {
-            Ok(context) => context,
-            Err(_error) => {
-                return conversation_context_read_error(conversation_id.as_deref());
-            }
-        };
+    let (context_prompt, windowed, has_history) = match read_conversation_context_for_owner(
+        &state.memory,
+        &owner_key_id,
+        conversation_id.as_deref(),
+        &req.messages,
+    ) {
+        Ok(context) => context,
+        Err(_error) => {
+            return conversation_context_read_error(conversation_id.as_deref());
+        }
+    };
     let prompt = context_prompt;
     if prompt.is_empty() {
         return api_error(
@@ -1744,7 +1831,8 @@ async fn chat_completions(
         );
     }
 
-    let mut candidates = match state.router.resolve(
+    let mut candidates = match state.router.resolve_for_owner(
+        &owner_key_id,
         &req.model,
         conversation_id.as_deref(),
         &state.memory,
@@ -1918,6 +2006,7 @@ async fn chat_completions(
             let first_chunk =
                 first_stream_chunk.expect("streaming path prefetches its first chunk");
             let state_c = state.clone();
+            let owner_key_id_c = owner_key_id.clone();
             let windowed_c = windowed.clone();
             let provider_c = provider_name.clone();
             let model_c = req.model.clone();
@@ -2008,7 +2097,8 @@ async fn chat_completions(
                     yield Ok(Event::default().data(error.to_string()));
                 } else {
                     provider_state::record_success(&provider_c);
-                    if let Err(_error) = state_c.memory.store_turn(
+                    if let Err(_error) = state_c.memory.store_turn_for_owner(
+                        &owner_key_id_c,
                         conv_stream.clone(),
                         windowed_c.clone(),
                         ChatMessage { role: "assistant".to_string(), content: full.clone() },
@@ -2129,7 +2219,8 @@ async fn chat_completions(
             outcome = "success",
             "provider request completed"
         );
-        if let Err(_error) = state.memory.store_turn(
+        if let Err(_error) = state.memory.store_turn_for_owner(
+            &owner_key_id,
             new_conv_id.clone(),
             windowed.clone(),
             ChatMessage {
@@ -3236,6 +3327,20 @@ mod api_key_auth_tests {
                 provider_allowlist: Some(vec!["chatgpt".into()]),
             }],
         }
+    }
+
+    #[test]
+    fn authenticated_owner_id_is_stable_and_does_not_expose_the_secret() {
+        let context = authorize_api_request(
+            &auth(&["chat"]),
+            Some("Bearer test-secret"),
+            "/v1/models",
+            &axum::http::Method::GET,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(context.key_id, "key:test-client");
+        assert!(!context.key_id.contains("test-secret"));
     }
 
     #[test]
