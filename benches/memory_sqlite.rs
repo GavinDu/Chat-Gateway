@@ -1,4 +1,5 @@
-// The benchmark compiles the memory module without its unit-test call sites.
+// The benchmark compiles memory as a standalone module, so it must declare
+// every sibling module that memory imports at crate root.
 #[path = "../src/context.rs"]
 mod context;
 #[allow(dead_code)]
