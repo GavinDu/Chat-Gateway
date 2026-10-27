@@ -1520,7 +1520,9 @@ async fn chat_completions(
             &provider_name,
             provider_cfg.min_request_interval_ms,
             provider_cfg.daily_request_cap,
-        ).await {
+        )
+        .await
+        {
             last_err = Some(error.to_string());
             continue;
         }
