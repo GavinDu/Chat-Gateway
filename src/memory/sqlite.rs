@@ -115,6 +115,10 @@ fn initialize(connection: &mut Connection, legacy: Option<&Path>) -> Result<()> 
         tx.execute_batch(SCHEMA)?;
         tx.pragma_update(None, "application_id", APPLICATION_ID)?;
         tx.pragma_update(None, "user_version", VERSION)?;
+    } else if version == 1 && app == APPLICATION_ID {
+        // Version 2 adds a provider-thread map without rewriting existing turns.
+        tx.execute_batch(PROVIDER_THREADS_SCHEMA)?;
+        tx.pragma_update(None, "user_version", VERSION)?;
     } else if version != VERSION || app != APPLICATION_ID {
         bail!("unsupported conversation schema version {version} (expected {VERSION}) or application id {app}");
     }
@@ -176,7 +180,7 @@ fn validate_schema(connection: &Connection) -> Result<()> {
     // were changed, including constraints that SELECT alone cannot validate.
     let expected = Connection::open_in_memory()?;
     expected.execute_batch(SCHEMA)?;
-    for table in ["conversations", "messages", "metadata"] {
+    for table in ["conversations", "messages", "metadata", "provider_threads"] {
         let sql = |database: &Connection| -> Result<String> {
             Ok(database.query_row(
                 "SELECT sql FROM sqlite_master WHERE type='table' AND name=?1",
