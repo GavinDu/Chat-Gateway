@@ -211,14 +211,19 @@ impl SessionStore for VaultSessionStore {
 /// Browser-relayed imports require encrypted vault mode; they never fall back to plaintext.
 pub fn import_relay_session(provider: &str, mut file: SessionFile) -> Result<()> {
     let _legacy_path = session_path(provider)?;
-    if !matches!(std::env::var("CHAT_GATEWAY_SESSION_STORE").as_deref(), Ok("vault")) {
+    if !matches!(
+        std::env::var("CHAT_GATEWAY_SESSION_STORE").as_deref(),
+        Ok("vault")
+    ) {
         anyhow::bail!("browser relay imports require CHAT_GATEWAY_SESSION_STORE=vault");
     }
     if file.cookies.is_empty() || file.cookies.len() > 512 {
         anyhow::bail!("browser relay session must contain 1-512 cookies");
     }
     if !file.local_storage.is_empty() {
-        anyhow::bail!("browser relay localStorage import is not enabled until provider-specific key allowlists are configured");
+        anyhow::bail!(
+            "browser relay localStorage import is not enabled until provider-specific key allowlists are configured"
+        );
     }
     if file.cookies.iter().any(|cookie| {
         !cookie_domain_allowed(provider, &cookie.domain)
@@ -239,7 +244,11 @@ pub fn import_relay_session(provider: &str, mut file: SessionFile) -> Result<()>
     // The encrypted replacement is durable before any legacy plaintext copy is removed.
     remove_legacy_session_snapshot(provider)?;
     record_session_write(provider);
-    tracing::info!(provider, cookies = file.cookies.len(), "browser-relayed session imported into encrypted vault");
+    tracing::info!(
+        provider,
+        cookies = file.cookies.len(),
+        "browser-relayed session imported into encrypted vault"
+    );
     Ok(())
 }
 
@@ -255,7 +264,10 @@ pub fn delete_session(provider: &str) -> Result<bool> {
             Err(error) => return Err(error.into()),
         }
     }
-    if let Ok(mut writes) = LAST_SESSION_WRITE.get_or_init(|| Mutex::new(HashMap::new())).lock() {
+    if let Ok(mut writes) = LAST_SESSION_WRITE
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+    {
         writes.remove(provider);
     }
     Ok(removed)
