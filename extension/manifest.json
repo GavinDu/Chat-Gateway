@@ -40,7 +40,9 @@
     "https://mistral.ai/*",
     "https://*.mistral.ai/*",
     "https://perplexity.ai/*",
-    "https://*.perplexity.ai/*"
+    "https://*.perplexity.ai/*",
+    "https://fbcdn.net/*",
+    "https://*.fbcdn.net/*"
   ],
   "action": {
     "default_popup": "popup.html",
