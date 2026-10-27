@@ -900,7 +900,6 @@ fn provider_thread_mapping_is_provider_scoped_and_survives_restart() {
     );
 }
 
-
 #[test]
 fn retention_purge_removes_expired_conversations_and_provider_threads() {
     let fixture = Fixture::new();
