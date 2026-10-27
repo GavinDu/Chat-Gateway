@@ -9,7 +9,7 @@ use subtle::ConstantTimeEq;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     fs::{self, OpenOptions},
     io::Write,
     path::Path,
@@ -21,6 +21,7 @@ const PAIRING_LIFETIME: Duration = Duration::from_secs(10 * 60);
 const REQUEST_SKEW_SECONDS: i64 = 60;
 const NONCE_RETENTION: Duration = Duration::from_secs(5 * 60);
 const MAX_PAIR_ATTEMPTS: u8 = 5;
+const MAX_RELAY_REQUESTS_PER_MINUTE: usize = 120;
 
 pub struct RelayState {
     pairing_hash: [u8; 32],
@@ -28,6 +29,7 @@ pub struct RelayState {
     pairing_attempts: Mutex<u8>,
     install_token_hash: Mutex<Option<[u8; 32]>>,
     used_nonces: Mutex<HashMap<String, Instant>>,
+    request_times: Mutex<VecDeque<Instant>>,
 }
 
 impl RelayState {
@@ -46,6 +48,7 @@ impl RelayState {
                 pairing_attempts: Mutex::new(0),
                 install_token_hash: Mutex::new(load_install_token_hash()?),
                 used_nonces: Mutex::new(HashMap::new()),
+                request_times: Mutex::new(VecDeque::new()),
             },
             code,
         ))
@@ -182,6 +185,15 @@ pub async fn pair(
     Json(serde_json::json!({"ok":true,"token":token})).into_response()
 }
 
+fn relay_rate_limit_allows(request_times: &mut VecDeque<Instant>, now: Instant) -> bool {
+    request_times.retain(|time| now.duration_since(*time) < Duration::from_secs(60));
+    if request_times.len() >= MAX_RELAY_REQUESTS_PER_MINUTE {
+        return false;
+    }
+    request_times.push_back(now);
+    true
+}
+
 fn authenticated_request(app: &crate::AppState, headers: &HeaderMap) -> Result<(), Box<Response>> {
     if !relay_origin_is_allowed(headers) {
         return Err(Box::new(json_error(StatusCode::FORBIDDEN, "extension_origin_rejected", "the configured browser extension origin is required")));
@@ -218,7 +230,12 @@ fn authenticated_request(app: &crate::AppState, headers: &HeaderMap) -> Result<(
     if nonces.len() >= 10_000 {
         return Err(Box::new(json_error(StatusCode::TOO_MANY_REQUESTS, "relay_rate_limited", "too many relay requests; retry shortly")));
     }
-    nonces.insert(nonce.to_owned(), Instant::now());
+    let now = Instant::now();
+    let mut request_times = app.relay.request_times.lock().map_err(|_| Box::new(json_error(StatusCode::INTERNAL_SERVER_ERROR, "relay_unavailable", "relay state is unavailable")))?;
+    if !relay_rate_limit_allows(&mut request_times, now) {
+        return Err(Box::new(json_error(StatusCode::TOO_MANY_REQUESTS, "relay_rate_limited", "too many relay requests; retry shortly")));
+    }
+    nonces.insert(nonce.to_owned(), now);
     Ok(())
 }
 
@@ -304,6 +321,17 @@ mod tests {
         assert_eq!(code.len(), 8);
         assert!(code.bytes().all(|byte| byte.is_ascii_digit()));
         assert!(state.pairing_expires > Instant::now());
+    }
+
+    #[test]
+    fn relay_rate_limit_allows_120_requests_then_rejects_until_window_expires() {
+        let now = Instant::now();
+        let mut times = VecDeque::new();
+        for offset in 0..MAX_RELAY_REQUESTS_PER_MINUTE {
+            assert!(relay_rate_limit_allows(&mut times, now + Duration::from_millis(offset as u64)));
+        }
+        assert!(!relay_rate_limit_allows(&mut times, now + Duration::from_secs(30)));
+        assert!(relay_rate_limit_allows(&mut times, now + Duration::from_secs(61)));
     }
 
     #[test]
