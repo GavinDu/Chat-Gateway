@@ -383,6 +383,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/conversations", get(list_conversations))
         .route(
+            "/v1/conversations/:conversation_id/export.md",
+            get(export_conversation_markdown),
+        )
+        .route(
             "/v1/conversations/:conversation_id",
             get(export_conversation).delete(delete_conversation),
         )
@@ -1264,7 +1268,2007 @@ fn export_conversation_response(memory: &UnifiedMemory, conversation_id: &str) -
     }
 }
 
-#[derive(Debug, serde::Deserialize)]
+async fn export_conversation_markdown(
+    State(state): State<Arc<AppState>>,
+    Path(conversation_id): Path<String>,
+) -> Response {
+    export_conversation_markdown_response(&state.memory, &conversation_id)
+}
+
+fn export_conversation_markdown_response(memory: &UnifiedMemory, conversation_id: &str) -> Response {
+    if !valid_conversation_id(conversation_id) {
+        return api_error(StatusCode::BAD_REQUEST, "invalid_request_error", "invalid_conversation_id", "invalid conversation ID");
+    }
+    match memory.export_conversation(conversation_id) {
+        Ok(Some(conversation)) => {
+            let mut markdown = format!("# Conversation {}\n\n", conversation.id);
+            if let Some(provider) = conversation.provider.as_deref() {
+                markdown.push_str(&format!("- Provider: {}\n", provider));
+            }
+            if let Some(tab_id) = conversation.tab_id.as_deref() {
+                markdown.push_str(&format!("- Tab: {}\n", tab_id));
+            }
+            markdown.push('\n');
+            for (index, message) in conversation.messages.iter().enumerate() {
+                markdown.push_str(&format!("## {} — {}\n\n{}\n\n", index + 1, message.role, message.content));
+            }
+            ([(axum::http::header::CONTENT_TYPE, "text/markdown; charset=utf-8")], markdown).into_response()
+        }
+        Ok(None) => api_error(StatusCode::NOT_FOUND, "invalid_request_error", "conversation_not_found", "conversation does not exist"),
+        Err(_error) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "server_error", "memory_persistence_failed", "conversation could not be exported safely"),
+    }
+}
+
+async fn delete_conversation(
+    State(state): State<Arc<AppState>>,
+    Path(conversation_id): Path<String>,
+) -> Response {
+    delete_conversation_response(&state.memory, &conversation_id)
+}
+
+async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let providers = state
+        .cfg
+        .providers
+        .iter()
+        .map(|p| {
+            let session = provider_state::status(&p.name);
+            let challenge_disabled_reason = provider_guard::provider_disabled_reason(&p.name);
+            serde_json::json!({
+                "name": p.name,
+                "enabled": p.enabled,
+                "priority": p.priority,
+                "models": p.models,
+                "session_state": session.state,
+                "last_session_error": session.last_error,
+                "challenge_disabled": challenge_disabled_reason.is_some(),
+                "challenge_disabled_reason": challenge_disabled_reason,
+            })
+        })
+        .collect::<Vec<_>>();
+    Json(serde_json::json!({
+        "status": "ok",
+        "engine": "obscura-native (embedded)",
+        "sessions_loaded": "sessions/<provider>.json (restored at warm-up)",
+        "providers": providers,
+    }))
+}
+
+fn build_model_list(cfg: &AppConfig, cache: &HashMap<String, Vec<String>>) -> serde_json::Value {
+    let enabled = cfg
+        .providers
+        .iter()
+        .filter(|provider| provider.enabled)
+        .map(|provider| provider.name.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    let mut data = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for provider in cfg.providers.iter().filter(|provider| provider.enabled) {
+        for model in &provider.models {
+            if seen.insert(model.clone()) {
+                data.push(serde_json::json!({
+                    "id": model,
+                    "object": "model",
+                    "owned_by": provider.name
+                }));
+            }
+        }
+    }
+
+    for (provider, models) in cache {
+        if !enabled.contains(provider.as_str()) {
+            continue;
+        }
+        for model in models {
+            if seen.insert(model.clone()) {
+                data.push(serde_json::json!({
+                    "id": model,
+                    "object": "model",
+                    "owned_by": provider,
+                    "discovered": true
+                }));
+            }
+        }
+    }
+    serde_json::json!({ "object": "list", "data": data })
+}
+
+async fn models(
+    State(state): State<Arc<AppState>>,
+    auth_context: Option<Extension<AuthKeyContext>>,
+) -> impl IntoResponse {
+    let cache = state.models_cache.read().await;
+    let mut model_list = build_model_list(&state.cfg, &cache);
+    if let Some(Extension(context)) = auth_context {
+        if let Some(allowed) = context.provider_allowlist {
+            if let Some(models) = model_list
+                .get_mut("data")
+                .and_then(serde_json::Value::as_array_mut)
+            {
+                models.retain(|model| {
+                    model
+                        .get("owned_by")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|provider| allowed.iter().any(|item| item == provider))
+                });
+            }
+        }
+    }
+    Json(model_list)
+}
+
+/// Conversation IDs are echoed into response IDs and tab affinity. Restrict
+/// them to bounded ASCII so formatting and byte slicing cannot panic on a
+/// malicious multibyte header value.
+fn conversation_context_read_error(conversation_id: Option<&str>) -> Response {
+    tracing::error!(conversation_id = ?conversation_id, "conversation context read failed");
+    api_error(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "server_error",
+        "memory_read_failed",
+        "conversation history could not be read safely",
+    )
+}
+
+fn read_conversation_context(
+    memory: &UnifiedMemory,
+    conversation_id: Option<&str>,
+    messages: &[ChatMessage],
+) -> anyhow::Result<(String, Vec<ChatMessage>, bool)> {
+    let (prompt, windowed) = memory.build_context(conversation_id, messages)?;
+    let has_history = match conversation_id {
+        Some(id) => memory.has_history(id)?,
+        None => false,
+    };
+    Ok((prompt, windowed, has_history))
+}
+
+fn usable_initial_stream_chunk(content: &str, done: bool) -> bool {
+    !done && !content.is_empty()
+}
+
+fn valid_conversation_id(value: &str) -> bool {
+    (8..=128).contains(&value.len())
+        && value.is_ascii()
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+fn oversized_chat_body_error() -> Response {
+    api_error(
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "invalid_request_error",
+        "request_too_large",
+        "request body exceeds the 1 MiB limit",
+    )
+}
+
+async fn chat_completions(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    auth_context: Option<Extension<AuthKeyContext>>,
+    body: Result<axum::body::Bytes, axum::extract::rejection::BytesRejection>,
+) -> Response {
+    let request_started = Instant::now();
+    let body = match body {
+        Ok(body) => body,
+        Err(_) => {
+            // Bytes extraction happens before the handler body runs. Catch the
+            // rejection explicitly so oversized payloads keep the public API
+            // error envelope instead of Axum's default rejection body.
+            return oversized_chat_body_error();
+        }
+    };
+    let req = match parse_and_validate_chat_req(&body) {
+        Ok(req) => req,
+        Err(response) => return response,
+    };
+
+    let conversation_id = match headers.get("X-Conversation-Id") {
+        None => None,
+        Some(value) => {
+            let value = match value.to_str() {
+                Ok(value) => value,
+                Err(_) => {
+                    return api_error(
+                        axum::http::StatusCode::BAD_REQUEST,
+                        "invalid_request_error",
+                        "invalid_conversation_id",
+                        "X-Conversation-Id must be a valid ASCII identifier",
+                    )
+                }
+            };
+            if !valid_conversation_id(value) {
+                return api_error(
+                    axum::http::StatusCode::BAD_REQUEST,
+                    "invalid_request_error",
+                    "invalid_conversation_id",
+                    "X-Conversation-Id must be 8-128 ASCII letters, digits, '_' or '-'",
+                );
+            }
+            Some(value.to_string())
+        }
+    };
+
+    // Read all context-dependent memory before any provider request. A read
+    // failure must not degrade into an empty prompt or an unauthenticated turn.
+    let (context_prompt, windowed, has_history) =
+        match read_conversation_context(&state.memory, conversation_id.as_deref(), &req.messages) {
+            Ok(context) => context,
+            Err(_error) => {
+                return conversation_context_read_error(conversation_id.as_deref());
+            }
+        };
+    let prompt = context_prompt;
+    if prompt.is_empty() {
+        return api_error(
+            axum::http::StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            "empty_prompt",
+            "prompt must not be empty",
+        );
+    }
+
+    let mut candidates = match state.router.resolve(
+        &req.model,
+        conversation_id.as_deref(),
+        &state.memory,
+    ) {
+        Ok(candidates) => candidates,
+        Err(_error) => {
+            tracing::error!(conversation_id = ?conversation_id, "provider affinity read failed");
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                "memory_read_failed",
+                "conversation routing state could not be read safely",
+            );
+        }
+    };
+    let original_candidate_count = candidates.len();
+    if let Some(Extension(context)) = &auth_context {
+        if let Some(allowed) = &context.provider_allowlist {
+            candidates.retain(|provider| allowed.iter().any(|item| item == provider));
+            if candidates.is_empty() && original_candidate_count > 0 {
+                return api_error(
+                    StatusCode::FORBIDDEN,
+                    "authentication_error",
+                    "provider_not_allowed",
+                    "the API key is not allowed to use the requested provider",
+                );
+            }
+        }
+    }
+    let provider_model = req
+        .model
+        .split_once('/')
+        .map(|(_, model)| model)
+        .unwrap_or(req.model.as_str())
+        .to_string();
+    tracing::info!(model = %req.model, ?candidates, conv = ?conversation_id, "routing request");
+    if candidates.is_empty() {
+        return api_error(
+            axum::http::StatusCode::NOT_FOUND,
+            "invalid_request_error",
+            "model_not_found",
+            format!("model '{}' is not configured for an enabled provider; use /v1/models or model='auto'", req.model),
+        );
+    }
+
+    let candidate_count = candidates.len();
+    let mut busy_count = 0usize;
+    let mut last_err: Option<String> = None;
+    for provider_name in candidates {
+        if !provider_state::is_routable(&provider_name) {
+            last_err = Some(format!("provider '{provider_name}' needs login"));
+            continue;
+        }
+        if let Some(reason) = provider_guard::provider_disabled_reason(&provider_name) {
+            last_err = Some(format!("provider '{provider_name}' disabled: {reason}"));
+            continue;
+        }
+        let permit = match state.pool.acquire(&provider_name).await {
+            Ok(p) => p,
+            Err(e) => {
+                if e.downcast_ref::<browser::pool::ProviderBusyError>()
+                    .is_some()
+                {
+                    busy_count += 1;
+                }
+                last_err = Some(e.to_string());
+                continue;
+            }
+        };
+        tracing::debug!(provider = %provider_name, queue_ms = permit.queue_ms, "acquired provider slot");
+        let queue_ms = permit.queue_ms.min(u64::MAX as u128) as u64;
+
+        let provider_cfg = match state.cfg.provider(&provider_name) {
+            Some(cfg) => cfg,
+            None => {
+                last_err = Some(format!(
+                    "provider '{provider_name}' configuration disappeared"
+                ));
+                continue;
+            }
+        };
+        if let Some(reason) = provider_guard::provider_disabled_reason(&provider_name) {
+            last_err = Some(format!("provider '{provider_name}' disabled: {reason}"));
+            continue;
+        }
+        if let Err(error) = provider_guard::wait_for_request_slot(
+            &provider_name,
+            provider_cfg.min_request_interval_ms,
+            provider_cfg.daily_request_cap,
+        )
+        .await
+        {
+            last_err = Some(error.to_string());
+            continue;
+        }
+
+        let mut rx = match state
+            .pool
+            .send_stream(
+                &provider_name,
+                prompt.clone(),
+                provider_model.clone(),
+                has_history,
+            )
+            .await
+        {
+            Ok(rx) => rx,
+            Err(e) => {
+                provider_state::record_error(&provider_name, &e.to_string());
+                last_err = Some(e.to_string());
+                continue;
+            }
+        };
+        let provider_started = Instant::now();
+
+        let mut first_stream_chunk: Option<providers::ProviderChunk> = None;
+        if req.stream {
+            let first_chunk_timeout = std::time::Duration::from_secs(
+                state
+                    .cfg
+                    .provider(&provider_name)
+                    .map(|provider| provider.timeout_seconds)
+                    .unwrap_or(120),
+            );
+            let first = match tokio::time::timeout(first_chunk_timeout, async {
+                loop {
+                    match rx.recv().await {
+                        Some(Ok(chunk))
+                            if usable_initial_stream_chunk(&chunk.content, chunk.done) =>
+                        {
+                            break Some(Ok(chunk));
+                        }
+                        Some(Ok(chunk)) if chunk.done => break Some(Ok(chunk)),
+                        Some(Ok(_empty_chunk)) => continue,
+                        Some(Err(error)) => break Some(Err(error)),
+                        None => break None,
+                    }
+                }
+            })
+            .await
+            {
+                Ok(Some(Ok(chunk))) if usable_initial_stream_chunk(&chunk.content, chunk.done) => {
+                    chunk
+                }
+                Ok(Some(Ok(_))) => {
+                    last_err =
+                        Some("provider completed without output before stream started".to_string());
+                    continue;
+                }
+                Ok(Some(Err(error))) => {
+                    last_err = Some(error.to_string());
+                    continue;
+                }
+                Ok(None) => {
+                    last_err = Some("provider stream closed before first output".to_string());
+                    continue;
+                }
+                Err(_) => {
+                    last_err = Some("provider timed out before first output".to_string());
+                    continue;
+                }
+            };
+            first_stream_chunk = Some(first);
+        }
+
+        let new_conv_id = conversation_id
+            .clone()
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
+        if req.stream {
+            let first_chunk =
+                first_stream_chunk.expect("streaming path prefetches its first chunk");
+            let state_c = state.clone();
+            let windowed_c = windowed.clone();
+            let provider_c = provider_name.clone();
+            let model_c = req.model.clone();
+            let prompt_tokens_c = estimate_tokens(&prompt);
+            let provider_model_c = provider_model.clone();
+            let conv_stream = new_conv_id.clone();
+            let request_started_c = request_started;
+            let provider_started_c = provider_started;
+            let queue_ms_c = queue_ms;
+            let sse_stream = async_stream::stream! {
+                let _permit = permit;
+                let mut full = String::new();
+                let mut ttft_ms: Option<u64> = None;
+                // OpenAI-compatible clients expect the assistant role on the
+                // first stream chunk, before content deltas.
+                let role = serde_json::json!({
+                    "id": format!("chatcmpl-{}", &conv_stream[..8]),
+                    "object": "chat.completion.chunk",
+                    "created": chrono::Utc::now().timestamp(),
+                    "model": model_c,
+                    "choices": [{ "delta": { "role": "assistant" }, "index": 0, "finish_reason": null }],
+                });
+                yield Ok::<_, anyhow::Error>(Event::default().data(role.to_string()));
+                let mut stream_error: Option<String> = None;
+                // Keep the raw detail only for internal session-state classification;
+                // client-facing stream errors remain generic and never expose it.
+                let mut provider_error_detail: Option<String> = None;
+                let mut pending: Option<Result<providers::ProviderChunk, anyhow::Error>> = Some(Ok(first_chunk));
+                while let Some(item) = match pending.take() {
+                    Some(item) => Some(item),
+                    None => rx.recv().await,
+                } {
+                    match item {
+                        Ok(c) => {
+                            if c.done { break; }
+                            if ttft_ms.is_none() {
+                                ttft_ms = Some(provider_started_c.elapsed().as_millis().min(u64::MAX as u128) as u64);
+                            }
+                            full.push_str(&c.content);
+                            let data = serde_json::json!({
+                                "id": format!("chatcmpl-{}", &conv_stream[..8]),
+                                "object": "chat.completion.chunk",
+                                "created": chrono::Utc::now().timestamp(),
+                                "model": model_c,
+                                "choices": [{ "delta": { "content": c.content }, "index": 0, "finish_reason": null }],
+                            });
+                            yield Ok::<_, anyhow::Error>(Event::default().data(data.to_string()));
+                        }
+                        Err(e) => {
+                            tracing::warn!(provider = %provider_c, "provider stream failed: {e}");
+                            provider_error_detail = Some(e.to_string());
+                            stream_error = Some("provider stream failed; partial response was not committed".to_string());
+                            break;
+                        }
+                    }
+                }
+
+                let provider_work_ms = provider_started_c.elapsed().as_millis().min(u64::MAX as u128) as u64;
+                let total_ms = request_started_c.elapsed().as_millis().min(u64::MAX as u128) as u64;
+                metrics::record_provider_timings(
+                    &provider_c,
+                    if stream_error.is_some() { "error" } else { "success" },
+                    queue_ms_c,
+                    ttft_ms,
+                    provider_work_ms,
+                    total_ms,
+                );
+                if let Some(message) = stream_error {
+                    // Preserve sanitized session-expiry state for routing and health reporting.
+                    provider_state::record_error(
+                        &provider_c,
+                        provider_error_detail.as_deref().unwrap_or(&message),
+                    );
+                    let error = serde_json::json!({
+                        "error": { "message": message, "type": "provider_error", "code": "stream_failed" }
+                    });
+                    yield Ok(Event::default().data(error.to_string()));
+                } else {
+                    provider_state::record_success(&provider_c);
+                    if let Err(_error) = state_c.memory.store_turn(
+                        conv_stream.clone(),
+                        windowed_c.clone(),
+                        ChatMessage { role: "assistant".to_string(), content: full.clone() },
+                        provider_c.clone(),
+                        format!("tab-{}", &conv_stream[..8]),
+                    ) {
+                        tracing::error!(conversation_id = %conv_stream, "conversation persistence failed after stream");
+                        let error = serde_json::json!({
+                            "error": { "message": "conversation could not be persisted", "type": "server_error", "code": "memory_persistence_failed" }
+                        });
+                        yield Ok(Event::default().data(error.to_string()));
+                        yield Ok(Event::default().data("[DONE]"));
+                        return;
+                    }
+                    let completion_tokens = estimate_tokens(&full);
+                    let finish = serde_json::json!({
+                        "id": format!("chatcmpl-{}", &conv_stream[..8]),
+                        "object": "chat.completion.chunk",
+                        "created": chrono::Utc::now().timestamp(),
+                        "model": model_c,
+                        "choices": [{ "delta": {}, "index": 0, "finish_reason": "stop" }],
+                        "usage": {
+                            "prompt_tokens": prompt_tokens_c,
+                            "completion_tokens": completion_tokens,
+                            "total_tokens": prompt_tokens_c + completion_tokens
+                        },
+                        "x_usage_estimated": true,
+                    });
+                    yield Ok(Event::default().data(finish.to_string()));
+                }
+                yield Ok(Event::default().data("[DONE]"));
+            };
+            let mut resp_headers = axum::http::HeaderMap::new();
+            resp_headers.insert("X-Conversation-Id", new_conv_id.parse().unwrap());
+            resp_headers.insert("Content-Type", "text/event-stream".parse().unwrap());
+            resp_headers.insert("Cache-Control", "no-cache".parse().unwrap());
+            resp_headers.insert("X-Accel-Buffering", "no".parse().unwrap());
+            add_gateway_headers(&mut resp_headers, &provider_name, &provider_model_c);
+            return (resp_headers, Sse::new(sse_stream)).into_response();
+        }
+
+        // Non-streaming: retry another provider only if no response bytes were
+        // emitted. A partial response is an error, never a successful turn.
+        let mut full = String::new();
+        let mut failed: Option<String> = None;
+        let mut ttft_ms: Option<u64> = None;
+        while let Some(item) = rx.recv().await {
+            match item {
+                Ok(c) => {
+                    if c.done {
+                        break;
+                    }
+                    if ttft_ms.is_none() {
+                        ttft_ms = Some(
+                            provider_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+                        );
+                    }
+                    full.push_str(&c.content);
+                }
+                Err(e) => {
+                    failed = Some(e.to_string());
+                    break;
+                }
+            }
+        }
+        let provider_work_ms = provider_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+        let total_ms = request_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+        if let Some(e) = failed {
+            provider_state::record_error(&provider_name, &e);
+            metrics::record_provider_timings(
+                &provider_name,
+                "error",
+                queue_ms,
+                ttft_ms,
+                provider_work_ms,
+                total_ms,
+            );
+            if full.is_empty() {
+                tracing::warn!(provider = %provider_name, "provider failed before output: {e}");
+                last_err = Some(e);
+                continue;
+            }
+            tracing::warn!(provider = %provider_name, "provider failed after partial output");
+            return api_error(
+                axum::http::StatusCode::BAD_GATEWAY,
+                "provider_error",
+                "partial_response",
+                "provider failed after emitting a partial response; the turn was not committed",
+            );
+        }
+
+        provider_state::record_success(&provider_name);
+        metrics::record_provider_timings(
+            &provider_name,
+            "success",
+            queue_ms,
+            ttft_ms,
+            provider_work_ms,
+            total_ms,
+        );
+        if let Err(_error) = state.memory.store_turn(
+            new_conv_id.clone(),
+            windowed.clone(),
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: full.clone(),
+            },
+            provider_name.clone(),
+            format!("tab-{}", &new_conv_id[..8]),
+        ) {
+            tracing::error!(conversation_id = %new_conv_id, "conversation persistence failed");
+            return api_error(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                "memory_persistence_failed",
+                "conversation could not be persisted",
+            );
+        }
+
+        let prompt_tokens = estimate_tokens(&prompt);
+        let completion_tokens = estimate_tokens(&full);
+        let body = serde_json::json!({
+            "id": format!("chatcmpl-{}", &new_conv_id[..8]),
+            "object": "chat.completion",
+            "created": chrono::Utc::now().timestamp(),
+            "model": req.model,
+            "choices": [{ "message": { "role": "assistant", "content": full }, "finish_reason": "stop", "index": 0 }],
+            "usage": {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": prompt_tokens + completion_tokens
+            },
+            "x_usage_estimated": true,
+            "conversation_id": new_conv_id,
+        });
+        let mut resp_headers = axum::http::HeaderMap::new();
+        resp_headers.insert("X-Conversation-Id", new_conv_id.parse().unwrap());
+        add_gateway_headers(&mut resp_headers, &provider_name, &provider_model);
+        return (resp_headers, Json(body)).into_response();
+    }
+
+    if candidate_count > 0 && busy_count == candidate_count {
+        let mut response = api_error(
+            axum::http::StatusCode::TOO_MANY_REQUESTS,
+            "server_error",
+            "provider_busy",
+            "all eligible providers are busy; retry shortly",
+        );
+        response.headers_mut().insert(
+            axum::http::header::RETRY_AFTER,
+            axum::http::HeaderValue::from_static("1"),
+        );
+        return response;
+    }
+
+    api_error(
+        axum::http::StatusCode::BAD_GATEWAY,
+        "provider_error",
+        "provider_unavailable",
+        format!("all providers failed: {:?}", last_err),
+    )
+}
+
+// Returning a ready-to-send Axum response keeps validation errors consistent at the handler boundary.
+#[allow(clippy::result_large_err)]
+fn parse_and_validate_chat_req(body: &[u8]) -> Result<ChatReq, Response> {
+    let req = serde_json::from_slice::<ChatReq>(body).map_err(|error| {
+        api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            "invalid_json",
+            format!("invalid or unsupported request field: {error}"),
+        )
+    })?;
+    validate_chat_req(&req).map_err(|(code, message)| {
+        api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            code,
+            message,
+        )
+    })?;
+    Ok(req)
+}
+
+#[cfg(test)]
+mod model_list_tests {
+    use super::*;
+
+    fn provider(name: &str, enabled: bool, models: &[&str]) -> config::ProviderConfig {
+        config::ProviderConfig {
+            name: name.to_owned(),
+            enabled,
+            priority: 1,
+            timeout_seconds: 30,
+            queue_timeout_seconds: 30,
+            session_pool_size: 1,
+            min_request_interval_ms: 5_000,
+            daily_request_cap: 100,
+            models: models.iter().map(|model| (*model).to_owned()).collect(),
+        }
+    }
+
+    #[test]
+    fn excludes_configured_and_discovered_models_for_disabled_providers() {
+        let cfg = AppConfig {
+            server: config::ServerConfig::default(),
+            memory: config::MemoryConfig::default(),
+            obscura: config::ObscuraConfig::default(),
+            auth: config::AuthConfig::default(),
+            providers: vec![
+                provider("chatgpt", true, &["gpt-live"]),
+                provider("claude", false, &["claude-disabled"]),
+            ],
+        };
+        let cache = HashMap::from([
+            ("chatgpt".to_owned(), vec!["gpt-discovered".to_owned()]),
+            ("claude".to_owned(), vec!["claude-cached".to_owned()]),
+        ]);
+
+        let value = build_model_list(&cfg, &cache);
+        let ids = value["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|model| model["id"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec!["gpt-live", "gpt-discovered"]);
+    }
+
+    #[test]
+    fn configured_ids_win_over_duplicate_discovered_ids() {
+        let cfg = AppConfig {
+            server: config::ServerConfig::default(),
+            memory: config::MemoryConfig::default(),
+            obscura: config::ObscuraConfig::default(),
+            auth: config::AuthConfig::default(),
+            providers: vec![provider("chatgpt", true, &["gpt-live"])],
+        };
+        let cache = HashMap::from([(
+            "chatgpt".to_owned(),
+            vec!["gpt-live".to_owned(), "gpt-extra".to_owned()],
+        )]);
+
+        let value = build_model_list(&cfg, &cache);
+        let data = value["data"].as_array().unwrap();
+        assert_eq!(data.len(), 2);
+        assert_eq!(data[0]["owned_by"], "chatgpt");
+        assert!(data[0].get("discovered").is_none());
+        assert_eq!(data[1]["id"], "gpt-extra");
+        assert_eq!(data[1]["discovered"], true);
+    }
+}
+
+#[cfg(test)]
+mod login_origin_tests {
+    use super::*;
+
+    #[test]
+    fn allows_matching_local_origin_and_host() {
+        let mut headers = HeaderMap::new();
+        headers.insert("origin", "http://127.0.0.1:8080".parse().unwrap());
+        headers.insert("host", "127.0.0.1:8080".parse().unwrap());
+        assert!(login_origin_is_same_authority(&headers));
+    }
+
+    #[test]
+    fn rejects_origin_with_different_authority() {
+        let mut headers = HeaderMap::new();
+        headers.insert("origin", "https://evil.example".parse().unwrap());
+        headers.insert("host", "127.0.0.1:8080".parse().unwrap());
+        assert!(!login_origin_is_same_authority(&headers));
+    }
+
+    #[test]
+    fn rejects_non_loopback_host_authority() {
+        assert!(!is_loopback_authority("attacker.example:8080"));
+        assert!(!is_loopback_authority("localhost.attacker.example:8080"));
+    }
+
+    #[test]
+    fn rejects_dns_rebinding_hostname_even_when_origin_matches_host() {
+        let mut headers = HeaderMap::new();
+        headers.insert("origin", "http://attacker.example:8080".parse().unwrap());
+        headers.insert("host", "attacker.example:8080".parse().unwrap());
+        assert!(!login_origin_is_same_authority(&headers));
+    }
+
+    #[test]
+    fn accepts_only_explicit_loopback_authorities() {
+        assert!(is_loopback_authority("127.0.0.1:8080"));
+        assert!(is_loopback_authority("localhost:8080"));
+        assert!(is_loopback_authority("[::1]:8080"));
+        assert!(!is_loopback_authority("localhost.attacker.example:8080"));
+        assert!(!is_loopback_authority("127.0.0.2:8080"));
+        assert!(!is_loopback_authority("localhost:0"));
+    }
+
+    #[test]
+    fn allows_originless_local_automation_clients() {
+        let headers = HeaderMap::new();
+        assert!(login_origin_is_same_authority(&headers));
+    }
+}
+
+#[cfg(test)]
+mod api_contract_tests {
+    use super::*;
+
+    #[test]
+    fn rejects_empty_model_and_messages() {
+        let empty_model: ChatReq = serde_json::from_value(serde_json::json!({
+            "model": "  ",
+            "messages": [{"role": "user", "content": "hello"}]
+        }))
+        .unwrap();
+        assert_eq!(
+            validate_chat_req(&empty_model).unwrap_err().0,
+            "model_required"
+        );
+
+        let empty_messages: ChatReq = serde_json::from_value(serde_json::json!({
+            "model": "auto",
+            "messages": []
+        }))
+        .unwrap();
+        assert_eq!(
+            validate_chat_req(&empty_messages).unwrap_err().0,
+            "messages_required"
+        );
+    }
+
+    #[test]
+    fn rejects_unsupported_roles_and_temperature() {
+        let invalid_role: ChatReq = serde_json::from_value(serde_json::json!({
+            "model": "auto",
+            "messages": [{"role": "function", "content": "hello"}]
+        }))
+        .unwrap();
+        assert_eq!(
+            validate_chat_req(&invalid_role).unwrap_err().0,
+            "invalid_message_role"
+        );
+
+        let temperature: ChatReq = serde_json::from_value(serde_json::json!({
+            "model": "auto",
+            "messages": [{"role": "user", "content": "hello"}],
+            "temperature": 0.2
+        }))
+        .unwrap();
+        assert_eq!(
+            validate_chat_req(&temperature).unwrap_err().0,
+            "unsupported_parameter"
+        );
+    }
+
+    #[test]
+    fn rejects_excessive_message_count_and_content_size() {
+        let too_many: ChatReq = serde_json::from_value(serde_json::json!({
+            "model": "auto",
+            "messages": (0..257).map(|_| serde_json::json!({"role":"user","content":"x"})).collect::<Vec<_>>()
+        })).unwrap();
+        assert_eq!(
+            validate_chat_req(&too_many).unwrap_err().0,
+            "too_many_messages"
+        );
+
+        let too_large: ChatReq = serde_json::from_value(serde_json::json!({
+            "model": "auto",
+            "messages": [{"role":"user","content":"x".repeat(128 * 1024 + 1)}]
+        }))
+        .unwrap();
+        assert_eq!(
+            validate_chat_req(&too_large).unwrap_err().0,
+            "message_too_large"
+        );
+    }
+
+    #[test]
+    fn rejects_total_content_over_limit_even_when_each_message_is_valid() {
+        let req: ChatReq = serde_json::from_value(serde_json::json!({
+            "model": "auto",
+            "messages": [
+                {"role":"user","content":"x".repeat(100 * 1024)},
+                {"role":"assistant","content":"y".repeat(100 * 1024)},
+                {"role":"user","content":"z".repeat(100 * 1024)},
+                {"role":"assistant","content":"w".repeat(100 * 1024)},
+                {"role":"user","content":"q".repeat(100 * 1024)},
+                {"role":"assistant","content":"r".repeat(100 * 1024)}
+            ]
+        }))
+        .unwrap();
+        assert_eq!(
+            validate_chat_req(&req).unwrap_err().0,
+            "request_content_too_large"
+        );
+    }
+
+    #[test]
+    fn accepts_supported_roles_and_no_unsupported_parameters() {
+        let req: ChatReq = serde_json::from_value(serde_json::json!({
+            "model": "auto",
+            "messages": [
+                {"role": "system", "content": "be concise"},
+                {"role": "developer", "content": "follow policy"},
+                {"role": "user", "content": "hello"},
+                {"role": "assistant", "content": "hi"},
+                {"role": "tool", "content": "result"}
+            ]
+        }))
+        .unwrap();
+        assert!(validate_chat_req(&req).is_ok());
+    }
+
+    #[test]
+    fn accepts_minimal_openai_chat_request() {
+        let parsed: ChatReq = serde_json::from_value(serde_json::json!({
+            "model": "auto",
+            "messages": [{"role": "user", "content": "hello"}]
+        }))
+        .expect("minimal request should deserialize");
+        assert_eq!(parsed.model, "auto");
+        assert_eq!(parsed.messages.len(), 1);
+        assert!(!parsed.stream);
+        assert!(parsed.temperature.is_none());
+    }
+
+    #[test]
+    fn reports_unknown_request_fields_as_unsupported_parameters() {
+        let req = serde_json::from_value::<ChatReq>(serde_json::json!({
+            "model": "auto",
+            "messages": [{"role": "user", "content": "hello"}],
+            "tools": [],
+            "top_p": 0.5
+        }))
+        .expect("unknown parameters should be captured for validation");
+        let error = validate_chat_req(&req).unwrap_err();
+        assert_eq!(error.0, "unsupported_parameter");
+        assert!(error.1.contains("tools"));
+        assert!(error.1.contains("top_p"));
+    }
+
+    #[test]
+    fn structured_api_errors_have_openai_error_envelope() {
+        let response = api_error(
+            StatusCode::NOT_FOUND,
+            "invalid_request_error",
+            "model_not_found",
+            "model does not exist",
+        );
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn rejects_malformed_messages_before_provider_execution() {
+        let missing_messages = serde_json::from_value::<ChatReq>(serde_json::json!({
+            "model": "auto"
+        }));
+        assert!(missing_messages.is_err());
+
+        let missing_model = serde_json::from_value::<ChatReq>(serde_json::json!({
+            "messages": [{"role": "user", "content": "hello"}]
+        }));
+        assert!(missing_model.is_err());
+    }
+}
+
+#[cfg(test)]
+mod conversation_id_tests {
+    use super::*;
+
+    #[test]
+    fn accepts_generated_uuid_and_safe_ids() {
+        assert!(valid_conversation_id(
+            "8c1d8e2a-1e2a-4f7c-93f8-84c5c39a8b12"
+        ));
+        assert!(valid_conversation_id("conversation_123"));
+    }
+
+    #[test]
+    fn rejects_short_unicode_and_unsafe_ids() {
+        assert!(!valid_conversation_id("short"));
+        assert!(!valid_conversation_id("conversation-é"));
+        assert!(!valid_conversation_id("conversation/123"));
+        assert!(!valid_conversation_id(&"a".repeat(129)));
+    }
+}
+
+#[cfg(test)]
+mod http_api_regression_tests {
+    use super::*;
+    use axum::{
+        body::{to_bytes, Body},
+        routing::post,
+    };
+    use std::{
+        path::PathBuf,
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        },
+    };
+    use tower::ServiceExt;
+
+    async fn validation_endpoint(
+        body: Result<axum::body::Bytes, axum::extract::rejection::BytesRejection>,
+    ) -> Response {
+        let body = match body {
+            Ok(body) => body,
+            Err(_) => {
+                return api_error(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "invalid_request_error",
+                    "request_too_large",
+                    "request body exceeds the 1 MiB limit",
+                );
+            }
+        };
+        match parse_and_validate_chat_req(&body) {
+            Ok(request) => Json(serde_json::json!({
+                "accepted": true,
+                "model": request.model,
+            }))
+            .into_response(),
+            Err(response) => response,
+        }
+    }
+
+    async fn export_endpoint(
+        State(memory): State<Arc<UnifiedMemory>>,
+        Path(conversation_id): Path<String>,
+    ) -> Response {
+        export_conversation_response(&memory, &conversation_id)
+    }
+    async fn export_markdown_endpoint(
+        State(memory): State<Arc<UnifiedMemory>>,
+        Path(conversation_id): Path<String>,
+    ) -> Response {
+        export_conversation_markdown_response(&memory, &conversation_id)
+    }
+
+    async fn list_endpoint(
+        State(memory): State<Arc<UnifiedMemory>>,
+        Query(query): Query<ConversationListQuery>,
+    ) -> Response {
+        let limit = query.limit.unwrap_or(50).clamp(1, 100);
+        let offset = query.offset.unwrap_or(0);
+        match memory.list_conversations(limit, offset) {
+            Ok(conversations) => Json(serde_json::json!({
+                "data": conversations,
+                "limit": limit,
+                "offset": offset,
+            }))
+            .into_response(),
+            Err(_) => api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                "memory_persistence_failed",
+                "conversations could not be listed safely",
+            ),
+        }
+    }
+
+    async fn delete_endpoint(
+        State(memory): State<Arc<UnifiedMemory>>,
+        Path(conversation_id): Path<String>,
+    ) -> Response {
+        delete_conversation_response(&memory, &conversation_id)
+    }
+
+    async fn export_markdown_endpoint(
+        State(memory): State<Arc<UnifiedMemory>>,
+        Path(conversation_id): Path<String>,
+    ) -> Response {
+        export_conversation_markdown_response(&memory, &conversation_id)
+    }
+
+    async fn list_endpoint(
+        State(memory): State<Arc<UnifiedMemory>>,
+        Query(query): Query<ConversationListQuery>,
+    ) -> Response {
+        let limit = query.limit.unwrap_or(50).clamp(1, 100);
+        let offset = query.offset.unwrap_or(0);
+        match memory.list_conversations(limit, offset) {
+            Ok(conversations) => Json(serde_json::json!({
+                "data": conversations,
+                "limit": limit,
+                "offset": offset,
+            }))
+            .into_response(),
+            Err(_) => api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                "memory_persistence_failed",
+                "conversations could not be listed safely",
+            ),
+        }
+    }
+
+    async fn delete_endpoint(
+        State(memory): State<Arc<UnifiedMemory>>,
+        Path(conversation_id): Path<String>,
+    ) -> Response {
+        delete_conversation_response(&memory, &conversation_id)
+    }
+
+    fn test_db(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "chat-gateway-http-{label}-{}.sqlite3",
+            uuid::Uuid::new_v4()
+        ))
+    }
+
+    fn app(memory: Arc<UnifiedMemory>) -> Router {
+        Router::new()
+            .route("/ready", get(|| async { readiness_response(1) }))
+            .route("/v1/conversations", get(list_endpoint))
+            .route("/v1/chat/completions", post(validation_endpoint))
+            .route(
+                "/v1/conversations/:conversation_id/export.md",
+                get(export_markdown_endpoint),
+            )
+            .route(
+                "/v1/conversations/:conversation_id/export.md",
+                get(export_markdown_endpoint),
+            )
+            .route(
+                "/v1/conversations/:conversation_id",
+                get(export_endpoint).delete(delete_endpoint),
+            )
+            .with_state(memory)
+            .layer(DefaultBodyLimit::max(1024 * 1024))
+            .layer(middleware::from_fn(attach_request_id))
+    }
+
+    async fn json_body(response: Response) -> serde_json::Value {
+        let bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    async fn context_test_endpoint(
+        State((memory, provider_calls)): State<(Arc<UnifiedMemory>, Arc<AtomicUsize>)>,
+        Json(payload): Json<serde_json::Value>,
+    ) -> Response {
+        let conversation_id = payload.get("conversation_id").and_then(|v| v.as_str());
+        let messages = payload
+            .get("messages")
+            .cloned()
+            .and_then(|value| serde_json::from_value::<Vec<ChatMessage>>(value).ok())
+            .unwrap_or_default();
+        match read_conversation_context(&memory, conversation_id, &messages) {
+            Ok((prompt, _, has_history)) => {
+                provider_calls.fetch_add(1, Ordering::SeqCst);
+                Json(serde_json::json!({
+                    "accepted": true,
+                    "prompt": prompt,
+                    "has_history": has_history
+                }))
+                .into_response()
+            }
+            Err(_) => conversation_context_read_error(conversation_id),
+        }
+    }
+
+    #[tokio::test]
+    async fn http_markdown_export_returns_markdown_content_type_and_messages() {
+        let memory = Arc::new(UnifiedMemory::new(8000));
+        memory
+            .store_turn(
+                "conversation_md_export".into(),
+                vec![ChatMessage {
+                    role: "user".into(),
+                    content: "hello markdown".into(),
+                }],
+                ChatMessage {
+                    role: "assistant".into(),
+                    content: "answer".into(),
+                },
+                "chatgpt".into(),
+                "tab".into(),
+            )
+            .unwrap();
+        let response = app(memory)
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/conversations/conversation_md_export/export.md")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["content-type"], "text/markdown; charset=utf-8");
+        let bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(body.contains("# Conversation conversation_md_export"));
+        assert!(body.contains("hello markdown"));
+        assert!(body.contains("## 2 — assistant"));
+    }
+
+    #[tokio::test]
+    async fn http_markdown_export_returns_markdown_content_type_and_messages() {
+        let memory = Arc::new(UnifiedMemory::new(8000));
+        memory
+            .store_turn(
+                "conversation_md_export".into(),
+                vec![ChatMessage {
+                    role: "user".into(),
+                    content: "hello markdown".into(),
+                }],
+                ChatMessage {
+                    role: "assistant".into(),
+                    content: "answer".into(),
+                },
+                "chatgpt".into(),
+                "tab".into(),
+            )
+            .unwrap();
+        let response = app(memory)
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/conversations/conversation_md_export/export.md")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["content-type"], "text/markdown; charset=utf-8");
+        let bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(body.contains("# Conversation conversation_md_export"));
+        assert!(body.contains("hello markdown"));
+        assert!(body.contains("## 2 — assistant"));
+    }
+
+    #[tokio::test]
+    async fn http_conversation_list_returns_paged_metadata_without_messages() {
+        let memory = Arc::new(UnifiedMemory::new(8000));
+        for (id, text) in [("list_http_a", "alpha"), ("list_http_b", "bravo")] {
+            memory
+                .store_turn(
+                    id.to_owned(),
+                    vec![ChatMessage {
+                        role: "user".into(),
+                        content: text.into(),
+                    }],
+                    ChatMessage {
+                        role: "assistant".into(),
+                        content: "answer".into(),
+                    },
+                    "chatgpt".into(),
+                    "tab".into(),
+                )
+                .unwrap();
+        }
+        let response = app(memory)
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/conversations?limit=1&offset=1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["limit"], 1);
+        assert_eq!(body["offset"], 1);
+        assert_eq!(body["data"].as_array().unwrap().len(), 1);
+        assert_eq!(body["data"][0]["id"], "list_http_b");
+        assert_eq!(body["data"][0]["message_count"], 2);
+        assert!(body["data"][0].get("messages").is_none());
+    }
+
+    #[tokio::test]
+    async fn http_memory_read_failure_returns_structured_error_without_provider_call() {
+        let memory = Arc::new(UnifiedMemory::new(8000));
+        memory.drop_conversations_table_for_test().unwrap();
+        let provider_calls = Arc::new(AtomicUsize::new(0));
+        let app = Router::new()
+            .route("/v1/context-test", post(context_test_endpoint))
+            .with_state((memory, provider_calls.clone()))
+            .layer(middleware::from_fn(attach_request_id));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/context-test")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"conversation_id":"conversation_123","messages":[{"role":"user","content":"hello"}]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(response.headers().contains_key("x-request-id"));
+        let body = json_body(response).await;
+        assert_eq!(body["error"]["code"], "memory_read_failed");
+        assert_eq!(provider_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn http_readiness_and_request_id_contract() {
+        let memory = Arc::new(UnifiedMemory::new(8000));
+        let response = app(memory)
+            .oneshot(
+                Request::builder()
+                    .uri("/ready")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let request_id = response
+            .headers()
+            .get("x-request-id")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(uuid::Uuid::parse_str(request_id).is_ok());
+        assert_eq!(json_body(response).await["status"], "ready");
+
+        let response = app(Arc::new(UnifiedMemory::new(8000)))
+            .oneshot(
+                Request::builder()
+                    .uri("/ready")
+                    .header("host", "127.0.0.1:8080")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(response.headers().contains_key("x-request-id"));
+    }
+
+    #[tokio::test]
+    async fn http_chat_validation_returns_structured_openai_errors_without_provider_access() {
+        let memory = Arc::new(UnifiedMemory::new(8000));
+        let response = app(memory.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"model":"auto","messages":[{"role":"user","content":"hi"}],"tools":[]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(response.headers().contains_key("x-request-id"));
+        let body = json_body(response).await;
+        assert_eq!(body["error"]["type"], "invalid_request_error");
+        assert_eq!(body["error"]["code"], "unsupported_parameter");
+
+        let response = app(memory)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{ malformed"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(json_body(response).await["error"]["code"], "invalid_json");
+    }
+
+    #[tokio::test]
+    async fn oversized_chat_body_keeps_structured_error_and_request_id() {
+        let memory = Arc::new(UnifiedMemory::new(8000));
+        let oversized = "x".repeat(1024 * 1024 + 1);
+        let response = app(memory)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(oversized))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert!(response.headers().contains_key("x-request-id"));
+        let body = json_body(response).await;
+        assert_eq!(body["error"]["type"], "invalid_request_error");
+        assert_eq!(body["error"]["code"], "request_too_large");
+        assert_eq!(
+            body["error"]["message"],
+            "request body exceeds the 1 MiB limit"
+        );
+    }
+
+    #[tokio::test]
+    async fn http_export_returns_complete_conversation_and_missing_is_not_found() {
+        let memory = Arc::new(UnifiedMemory::new(8000));
+        memory
+            .store_turn(
+                "conversation_export_1".into(),
+                vec![ChatMessage {
+                    role: "user".into(),
+                    content: "export prompt".into(),
+                }],
+                ChatMessage {
+                    role: "assistant".into(),
+                    content: "export answer".into(),
+                },
+                "chatgpt".into(),
+                "tab-export".into(),
+            )
+            .unwrap();
+
+        let response = app(memory.clone())
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/conversations/conversation_export_1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(response.headers().contains_key("x-request-id"));
+        let body = json_body(response).await;
+        assert_eq!(body["id"], "conversation_export_1");
+        assert_eq!(body["provider"], "chatgpt");
+        assert_eq!(body["tab_id"], "tab-export");
+        assert_eq!(body["messages"][0]["content"], "export prompt");
+        assert_eq!(body["messages"][1]["content"], "export answer");
+
+        let missing = app(memory)
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/conversations/conversation_export_missing")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+        let body = json_body(missing).await;
+        assert_eq!(body["error"]["code"], "conversation_not_found");
+    }
+
+    #[tokio::test]
+    async fn http_delete_is_durable_across_database_restart() {
+        let path = test_db("delete");
+        let memory = Arc::new(UnifiedMemory::open_path_for_test(&path, None, 8000).unwrap());
+        memory
+            .store_turn(
+                "conversation_http_1".into(),
+                vec![ChatMessage {
+                    role: "user".into(),
+                    content: "private prompt".into(),
+                }],
+                ChatMessage {
+                    role: "assistant".into(),
+                    content: "private answer".into(),
+                },
+                "chatgpt".into(),
+                "tab-http".into(),
+            )
+            .unwrap();
+        let response = app(memory.clone())
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/v1/conversations/conversation_http_1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert!(response.headers().contains_key("x-request-id"));
+        drop(memory);
+
+        let restored = UnifiedMemory::open_path_for_test(&path, None, 8000).unwrap();
+        assert!(!restored.has_history("conversation_http_1").unwrap());
+        drop(restored);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-journal"));
+    }
+
+    #[tokio::test]
+    async fn http_delete_rejects_invalid_and_missing_conversation_ids() {
+        let memory = Arc::new(UnifiedMemory::new(8000));
+        let response = app(memory.clone())
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/v1/conversations/short")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            json_body(response).await["error"]["code"],
+            "invalid_conversation_id"
+        );
+
+        let response = app(memory)
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/v1/conversations/conversation_missing")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            json_body(response).await["error"]["code"],
+            "conversation_not_found"
+        );
+    }
+}
+
+#[cfg(test)]
+mod login_security_middleware_http_tests {
+    use super::*;
+    use axum::{body::Body, routing::get};
+    use tower::ServiceExt;
+
+    fn app() -> Router {
+        Router::new()
+            .route("/login/api/status", get(|| async { "ok" }))
+            .route("/health", get(|| async { "ok" }))
+            .layer(middleware::from_fn(protect_login_api))
+            .layer(middleware::from_fn(attach_request_id))
+    }
+
+    async fn request(uri: &str, headers: &[(&str, &str)]) -> Response {
+        let mut builder = Request::builder().uri(uri);
+        for (name, value) in headers {
+            builder = builder.header(*name, *value);
+        }
+        app()
+            .oneshot(builder.body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn rejects_non_loopback_host_at_http_boundary() {
+        let response = request("/login/api/status", &[("host", "attacker.example")]).await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert!(response.headers().contains_key("x-request-id"));
+    }
+
+    #[tokio::test]
+    async fn rejects_mismatched_origin_at_http_boundary() {
+        let response = request(
+            "/login/api/status",
+            &[
+                ("host", "127.0.0.1:8080"),
+                ("origin", "https://attacker.example"),
+            ],
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"]["code"], "unsafe_local_request");
+    }
+
+    #[tokio::test]
+    async fn rejects_cross_site_login_mutation_metadata() {
+        let response = request(
+            "/login/api/status",
+            &[("host", "127.0.0.1:8080"), ("sec-fetch-site", "cross-site")],
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn allows_matching_loopback_origin_and_originless_local_clients() {
+        let matching = request(
+            "/login/api/status",
+            &[
+                ("host", "127.0.0.1:8080"),
+                ("origin", "http://127.0.0.1:8080"),
+            ],
+        )
+        .await;
+        assert_eq!(matching.status(), StatusCode::OK);
+
+        let originless = request("/login/api/status", &[("host", "localhost:8080")]).await;
+        assert_eq!(originless.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn rejects_missing_host_and_dns_rebinding_even_when_origin_matches() {
+        let missing_host = request("/login/api/status", &[]).await;
+        assert_eq!(missing_host.status(), StatusCode::FORBIDDEN);
+
+        let rebinding = request(
+            "/login/api/status",
+            &[
+                ("host", "attacker.example:8080"),
+                ("origin", "http://attacker.example:8080"),
+            ],
+        )
+        .await;
+        assert_eq!(rebinding.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn protects_every_session_control_action_from_cross_origin_requests() {
+        for (method, path) in [
+            ("POST", "/login/api/openai/start"),
+            ("POST", "/login/api/openai/cancel"),
+            ("POST", "/login/api/openai/complete"),
+            ("GET", "/login/api/openai/view"),
+            ("POST", "/login/api/openai/act"),
+        ] {
+            let response = app()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(path)
+                        .header("host", "127.0.0.1:8080")
+                        .header("origin", "https://attacker.example")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{method} {path}");
+            assert!(
+                response.headers().contains_key("x-request-id"),
+                "{method} {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn server_listener_is_loopback_only_by_default() {
+        assert!(server_bind_addr(8080).ip().is_loopback());
+        assert_eq!(server_bind_addr(8080).port(), 8080);
+    }
+    #[tokio::test]
+    async fn host_protection_also_applies_to_non_login_routes() {
+        let response = request("/health", &[("host", "attacker.example")]).await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+}
+
+#[cfg(test)]
+mod loopback_authority_edge_tests {
+    use super::is_loopback_authority;
+
+    #[test]
+    fn accepts_only_valid_loopback_authorities_and_ports() {
+        for authority in [
+            "localhost",
+            "localhost:8080",
+            "127.0.0.1",
+            "127.0.0.1:8080",
+            "[::1]",
+            "[::1]:8080",
+        ] {
+            assert!(
+                is_loopback_authority(authority),
+                "expected loopback authority to be accepted: {authority}"
+            );
+        }
+
+        for authority in [
+            "localhost:",
+            "localhost:0",
+            "localhost:65536",
+            "localhost:not-a-port",
+            "localhost:8080/path",
+            "user@localhost:8080",
+            "localhost\\\\@attacker.example:8080",
+            "[::1",
+            "[::1]junk:8080",
+            "[::1]:0",
+            "[::1]:65536",
+            "127.0.0.2:8080",
+            "localhost.attacker.example:8080",
+        ] {
+            assert!(
+                !is_loopback_authority(authority),
+                "expected unsafe authority to be rejected: {authority}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod adapter_diagnostic_tests {
+    use super::*;
+
+    fn passing_report() -> browser::pool::TestAdapterReport {
+        browser::pool::TestAdapterReport {
+            session_ok: true,
+            probe: vec![("input".to_string(), Some("#prompt".to_string()))],
+            input_found: true,
+            send_clicked: true,
+            response_token: true,
+            errors: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn healthy_report_requires_all_critical_phases() {
+        assert!(adapter_report_is_healthy(&passing_report()));
+
+        let mut report = passing_report();
+        report.session_ok = false;
+        assert!(!adapter_report_is_healthy(&report));
+
+        let mut report = passing_report();
+        report.input_found = false;
+        assert!(!adapter_report_is_healthy(&report));
+
+        let mut report = passing_report();
+        report.response_token = false;
+        assert!(!adapter_report_is_healthy(&report));
+    }
+
+    #[test]
+    fn any_report_error_marks_adapter_unhealthy() {
+        let mut report = passing_report();
+        report.errors.push("send failed".to_string());
+        assert!(!adapter_report_is_healthy(&report));
+    }
+}
+
+#[cfg(test)]
+mod api_key_auth_tests {
+    use super::*;
+    use crate::config::{ApiKeyConfig, AuthConfig};
+
+    fn auth(scopes: &[&str]) -> AuthConfig {
+        AuthConfig {
+            keys: vec![ApiKeyConfig {
+                name: "test-client".into(),
+                secret_hash: hash_api_key("test-secret"),
+                scopes: scopes.iter().map(|scope| (*scope).to_owned()).collect(),
+                provider_allowlist: Some(vec!["chatgpt".into()]),
+            }],
+        }
+    }
+
+    #[test]
+    fn authentication_is_optional_only_when_no_keys_are_configured() {
+        assert!(authorize_api_request(
+            &AuthConfig::default(),
+            None,
+            "/v1/models",
+            &axum::http::Method::GET
+        )
+        .is_ok());
+        assert!(authorize_api_request(
+            &AuthConfig::default(),
+            None,
+            "/health",
+            &axum::http::Method::GET
+        )
+        .is_ok());
+        assert_eq!(
+            authorize_api_request(
+                &auth(&["chat"]),
+                None,
+                "/v1/models",
+                &axum::http::Method::GET
+            ),
+            Err(AuthFailure::MissingOrInvalid)
+        );
+    }
+
+    #[test]
+    fn bearer_secret_is_verified_by_hash_and_scope() {
+        let config = auth(&["chat"]);
+        assert_eq!(
+            authorize_api_request(
+                &config,
+                Some("Bearer wrong"),
+                "/v1/models",
+                &axum::http::Method::GET
+            ),
+            Err(AuthFailure::MissingOrInvalid)
+        );
+        assert!(authorize_api_request(
+            &config,
+            Some("Bearer test-secret"),
+            "/v1/models",
+            &axum::http::Method::GET
+        )
+        .is_ok());
+        let context = authorize_api_request(
+            &config,
+            Some("Bearer test-secret"),
+            "/v1/models",
+            &axum::http::Method::GET,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(context.provider_allowlist, Some(vec!["chatgpt".to_owned()]));
+        assert_eq!(
+            authorize_api_request(
+                &config,
+                Some("Bearer test-secret"),
+                "/login/api/status",
+                &axum::http::Method::GET
+            ),
+            Err(AuthFailure::InsufficientScope)
+        );
+        assert_eq!(
+            authorize_api_request(
+                &config,
+                Some("Bearer test-secret"),
+                "/v1/conversations/conversation_1",
+                &axum::http::Method::DELETE
+            ),
+            Err(AuthFailure::InsufficientScope)
+        );
+        assert_eq!(
+            authorize_api_request(
+                &config,
+                Some("Bearer test-secret"),
+                "/v1/conversations/conversation_1",
+                &axum::http::Method::GET
+            ),
+            Err(AuthFailure::InsufficientScope)
+        );
+        assert_eq!(
+            authorize_api_request(
+                &config,
+                Some("Bearer test-secret"),
+                "/v1/conversations",
+                &axum::http::Method::GET
+            ),
+            Err(AuthFailure::InsufficientScope)
+        );
+    }
+
+    #[test]
+    fn admin_key_can_access_admin_routes_and_health_needs_no_key() {
+        let config = auth(&["admin"]);
+        assert!(authorize_api_request(
+            &config,
+            Some("Bearer test-secret"),
+            "/login/api/status",
+            &axum::http::Method::GET
+        )
+        .is_ok());
+        assert!(authorize_api_request(
+            &config,
+            Some("Bearer test-secret"),
+            "/v1/conversations/conversation_1",
+            &axum::http::Method::GET
+        )
+        .is_ok());
+        assert!(authorize_api_request(
+            &config,
+            Some("Bearer test-secret"),
+            "/v1/conversations",
+            &axum::http::Method::GET
+        )
+        .is_ok());
+        assert!(authorize_api_request(
+            &config,
+            Some("Bearer test-secret"),
+            "/v1/conversations/conversation_1",
+            &axum::http::Method::DELETE
+        )
+        .is_ok());
+        assert!(authorize_api_request(&config, None, "/health", &axum::http::Method::GET).is_ok());
+    }
+
+    #[test]
+    fn bearer_scheme_is_case_insensitive_but_token_format_is_strict() {
+        let config = auth(&["chat"]);
+        assert!(authorize_api_request(
+            &config,
+            Some("bearer test-secret"),
+            "/v1/models",
+            &axum::http::Method::GET
+        )
+        .is_ok());
+        assert_eq!(
+            authorize_api_request(
+                &config,
+                Some("Bearer test-secret extra"),
+                "/v1/models",
+                &axum::http::Method::GET
+            ),
+            Err(AuthFailure::MissingOrInvalid)
+        );
+    }
+}
+
+#[cfg(test)]
+mod initial_stream_chunk_tests {
+    use super::usable_initial_stream_chunk;
+
+    #[test]
+    fn only_nonempty_content_can_start_a_stream() {
+        assert!(usable_initial_stream_chunk("first token", false));
+        assert!(!usable_initial_stream_chunk("", false));
+        assert!(!usable_initial_stream_chunk("", true));
+        assert!(!usable_initial_stream_chunk("content marked done", true));
+    }
+}
+
+#[cfg(test)]
+mod legacy_login_relay_flag_tests {
+    use super::legacy_login_relay_enabled_from;
+
+    #[test]
+    fn legacy_login_relay_is_disabled_by_default() {
+        assert!(!legacy_login_relay_enabled_from(None));
+        assert!(!legacy_login_relay_enabled_from(Some("")));
+        assert!(!legacy_login_relay_enabled_from(Some("false")));
+        assert!(!legacy_login_relay_enabled_from(Some("0")));
+    }
+
+    #[test]
+    fn legacy_login_relay_requires_explicit_truthy_opt_in() {
+        assert!(legacy_login_relay_enabled_from(Some("1")));
+        assert!(legacy_login_relay_enabled_from(Some("true")));
+        assert!(legacy_login_relay_enabled_from(Some(" YES ")));
+    }
+}
+
+#[cfg(test)]
+mod usage_estimate_tests {
+    use super::{add_gateway_headers, estimate_tokens};
+
+    #[test]
+    fn token_estimate_is_stable_and_handles_empty_text() {
+        assert_eq!(estimate_tokens(""), 0);
+        assert_eq!(estimate_tokens("abcd"), 1);
+        assert_eq!(estimate_tokens("abcde"), 2);
+    }
+
+    #[test]
+    fn provider_headers_identify_the_actual_route() {
+        let mut headers = axum::http::HeaderMap::new();
+        add_gateway_headers(&mut headers, "claude", "claude-sonnet");
+        assert_eq!(headers["X-Gateway-Provider"], "claude");
+        assert_eq!(headers["X-Gateway-Model"], "claude-sonnet");
+    }
+
+    #[test]
+    fn provider_headers_reject_invalid_header_values() {
+        let mut headers = axum::http::HeaderMap::new();
+        add_gateway_headers(&mut headers, "claude\r\nX-Injected: yes", "model");
+        assert!(!headers.contains_key("X-Gateway-Provider"));
+        assert_eq!(headers["X-Gateway-Model"], "model");
+    }
+}
+
+#[cfg(test)]
+mod openai_compatibility_metadata_tests {
+    use super::{add_gateway_headers, estimate_tokens};
+
+    #[test]
+    fn estimated_token_count_is_nonzero_for_nonempty_unicode_text() {
+        assert_eq!(estimate_tokens(""), 0);
+        assert_eq!(estimate_tokens("hello"), 2);
+        assert_eq!(estimate_tokens("你好"), 1);
+    }
+
+    #[test]
+    fn gateway_headers_report_selected_provider_and_model() {
+        let mut headers = axum::http::HeaderMap::new();
+        add_gateway_headers(&mut headers, "chatgpt", "gpt-4o");
+        assert_eq!(headers.get("X-Gateway-Provider").unwrap(), "chatgpt");
+        assert_eq!(headers.get("X-Gateway-Model").unwrap(), "gpt-4o");
+    }
+
+    #[test]
+    fn invalid_gateway_header_values_are_omitted() {
+        let mut headers = axum::http::HeaderMap::new();
+        add_gateway_headers(&mut headers, "bad\nprovider", "bad\nmodel");
+        assert!(!headers.contains_key("X-Gateway-Provider"));
+        assert!(!headers.contains_key("X-Gateway-Model"));
+    }
+}#[derive(Debug, serde::Deserialize)]
 struct ConversationListQuery {
     limit: Option<usize>,
     offset: Option<usize>,
