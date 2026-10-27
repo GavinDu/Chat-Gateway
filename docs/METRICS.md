@@ -5,6 +5,8 @@ authentication is enabled, this endpoint requires a key with the `admin`
 scope. Keep the listener loopback-only; metrics are operational diagnostics,
 not a public endpoint.
 
+The `gateway_provider_session_state` gauge emits three one-hot samples per configured provider, with the bounded `state` values `unknown`, `ready`, and `needs_login`. A value of `1` marks the current state and the other two values are `0`. Provider names are configured labels; never add conversation IDs, URLs, or session error details to these labels. `unknown` means no recognized state is currently recorded, not that a live health probe succeeded.
+
 ## Interpreting latency
 
 Use the bounded provider and outcome labels to compare request volume and
