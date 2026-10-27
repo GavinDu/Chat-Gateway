@@ -1935,6 +1935,7 @@ async fn chat_completions(
             let first_chunk =
                 first_stream_chunk.expect("streaming path prefetches its first chunk");
             let state_c = state.clone();
+            let owner_key_id_c = owner_key_id.clone();
             let windowed_c = windowed.clone();
             let provider_c = provider_name.clone();
             let model_c = req.model.clone();
@@ -2025,7 +2026,8 @@ async fn chat_completions(
                     yield Ok(Event::default().data(error.to_string()));
                 } else {
                     provider_state::record_success(&provider_c);
-                    if let Err(_error) = state_c.memory.store_turn(
+                    if let Err(_error) = state_c.memory.store_turn_for_owner(
+                        &owner_key_id_c,
                         conv_stream.clone(),
                         windowed_c.clone(),
                         ChatMessage { role: "assistant".to_string(), content: full.clone() },
@@ -2146,7 +2148,8 @@ async fn chat_completions(
             outcome = "success",
             "provider request completed"
         );
-        if let Err(_error) = state.memory.store_turn(
+        if let Err(_error) = state.memory.store_turn_for_owner(
+            &owner_key_id,
             new_conv_id.clone(),
             windowed.clone(),
             ChatMessage {
