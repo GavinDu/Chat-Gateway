@@ -421,7 +421,9 @@ async fn main() -> anyhow::Result<()> {
         shutdown_signal().await;
         let _ = shutdown_tx.send(());
     };
-    let mut server = Box::pin(axum::serve(listener, app).with_graceful_shutdown(shutdown));
+    let mut server = Box::pin(std::future::IntoFuture::into_future(
+        axum::serve(listener, app).with_graceful_shutdown(shutdown),
+    ));
     tokio::select! {
         result = &mut server => result?,
         _ = &mut shutdown_rx => {
