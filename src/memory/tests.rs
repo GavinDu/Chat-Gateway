@@ -799,3 +799,33 @@ fn conversation_listing_is_paged_and_reports_message_counts() {
     assert_eq!(second[0].id, "list-charlie");
     assert!(memory.list_conversations(0, 0).unwrap().is_empty());
 }
+
+#[test]
+fn sqlite_checkpoint_is_safe_after_durable_turns_and_can_repeat() {
+    let fixture = Fixture::new();
+    let memory = fixture.open();
+    memory
+        .store_turn(
+            "shutdown-checkpoint".into(),
+            vec![m("user", "persist before shutdown")],
+            m("assistant", "persisted"),
+            "chatgpt".into(),
+            "tab".into(),
+        )
+        .unwrap();
+
+    memory.checkpoint().unwrap();
+    memory.checkpoint().unwrap();
+
+    let conversation = memory
+        .export_conversation("shutdown-checkpoint")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        conversation.messages,
+        vec![
+            m("user", "persist before shutdown"),
+            m("assistant", "persisted")
+        ],
+    );
+}

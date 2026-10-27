@@ -420,6 +420,7 @@ async fn main() -> anyhow::Result<()> {
         .await?;
     // HTTP requests have drained, so it is now safe to stop the browser worker.
     state.pool.shutdown().await?;
+    state.memory.checkpoint()?;
     drop(state);
     Ok(())
 }
