@@ -102,10 +102,33 @@ mod session_path_tests {
     }
 }
 
-/// Load a saved session file, if one exists.
+/// Storage abstraction for provider authentication state. The file store is
+/// still the default; the encrypted vault can implement this seam without
+/// changing browser warm-up or login call sites.
+#[async_trait::async_trait(?Send)]
+pub trait SessionStore {
+    fn load(&self, provider: &str) -> Result<Option<SessionFile>>;
+    async fn save_if_changed(&self, browser: &Browser, page: &Page, provider: &str) -> Result<()>;
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FileSessionStore;
+
+#[async_trait::async_trait(?Send)]
+impl SessionStore for FileSessionStore {
+    fn load(&self, provider: &str) -> Result<Option<SessionFile>> {
+        let path = session_path(provider)?;
+        load_session_file_from_path(Path::new(&path))
+    }
+
+    async fn save_if_changed(&self, browser: &Browser, page: &Page, provider: &str) -> Result<()> {
+        save_session_if_changed_file(browser, page, provider).await
+    }
+}
+
+/// Load a saved session file, if one exists, using the default file store.
 pub fn load_session_file(provider: &str) -> Result<Option<SessionFile>> {
-    let path = session_path(provider)?;
-    load_session_file_from_path(Path::new(&path))
+    FileSessionStore.load(provider)
 }
 
 fn load_session_file_from_path(path: &Path) -> Result<Option<SessionFile>> {
@@ -253,6 +276,16 @@ pub async fn save_session(browser: &Browser, page: &Page, provider: &str) -> Res
 /// Writes are atomic and capped at one per provider per minute. A skipped
 /// changed snapshot will be retried after the interval on the next successful send.
 pub async fn save_session_if_changed(browser: &Browser, page: &Page, provider: &str) -> Result<()> {
+    FileSessionStore
+        .save_if_changed(browser, page, provider)
+        .await
+}
+
+async fn save_session_if_changed_file(
+    browser: &Browser,
+    page: &Page,
+    provider: &str,
+) -> Result<()> {
     let file = capture_session(browser, page, provider).await?;
     let current_hash = session_state_hash(&file)?;
     let destination = session_path(provider)?;
