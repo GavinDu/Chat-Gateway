@@ -1159,6 +1159,7 @@ fn authorize_api_request(
     let admin_route = path.starts_with("/login")
         || path.starts_with("/relay/")
         || path == "/metrics"
+        || path == "/v1/conversations"
         || (path.starts_with("/v1/conversations/")
             && (*method == axum::http::Method::GET || *method == axum::http::Method::DELETE));
     let required_scope = if admin_route { "admin" } else { "chat" };
@@ -2987,6 +2988,14 @@ mod api_key_auth_tests {
                 &axum::http::Method::GET
             ),
             Err(AuthFailure::InsufficientScope)
+        );        assert_eq!(
+            authorize_api_request(
+                &config,
+                Some("Bearer test-secret"),
+                "/v1/conversations",
+                &axum::http::Method::GET
+            ),
+            Err(AuthFailure::InsufficientScope)
         );
     }
 
@@ -3004,6 +3013,12 @@ mod api_key_auth_tests {
             &config,
             Some("Bearer test-secret"),
             "/v1/conversations/conversation_1",
+            &axum::http::Method::GET
+        )
+        .is_ok());        assert!(authorize_api_request(
+            &config,
+            Some("Bearer test-secret"),
+            "/v1/conversations",
             &axum::http::Method::GET
         )
         .is_ok());
