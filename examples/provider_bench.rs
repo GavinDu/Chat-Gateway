@@ -19,10 +19,10 @@ const FAKE_UPSTREAM_MS: u64 = 30;
 
 async fn fake_chat(Json(_request): Json<Value>) -> impl axum::response::IntoResponse {
     let stream = async_stream::stream! {
-        yield Ok(Event::default().data(json!({"choices":[{"delta":{"role":"assistant"},"index":0}]}).to_string()));
+        yield Ok::<Event, Infallible>(Event::default().data(json!({"choices":[{"delta":{"role":"assistant"},"index":0}]}).to_string()));
         tokio::time::sleep(Duration::from_millis(FAKE_UPSTREAM_MS)).await;
-        yield Ok(Event::default().data(json!({"choices":[{"delta":{"content":"benchmark-token"},"index":0}]}).to_string()));
-        yield Ok(Event::default().data("[DONE]"));
+        yield Ok::<Event, Infallible>(Event::default().data(json!({"choices":[{"delta":{"content":"benchmark-token"},"index":0}]}).to_string()));
+        yield Ok::<Event, Infallible>(Event::default().data("[DONE]"));
     };
     Sse::new(stream)
 }
@@ -55,7 +55,16 @@ fn request(url: &str, provider: &str, api_key: Option<&str>, pid: Option<&str>) 
         "stream": true
     }).to_string();
     let mut command = Command::new("curl");
-    command.args(["--silent", "--show-error", "--no-buffer", "--request", "POST", "--header", "Content-Type: application/json", "--data-binary", &payload]);
+    command
+        .arg("--silent")
+        .arg("--show-error")
+        .arg("--no-buffer")
+        .arg("--request")
+        .arg("POST")
+        .arg("--header")
+        .arg("Content-Type: application/json")
+        .arg("--data-binary")
+        .arg(&payload);
     if let Some(key) = api_key {
         command.arg("--header").arg(format!("Authorization: Bearer {key}"));
     }
