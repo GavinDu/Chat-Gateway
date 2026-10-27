@@ -120,6 +120,7 @@ mod tests {
     // Session diagnostics are user-visible state; never retain raw cookies or identity data.
     fn session_expiry_details_are_redacted_and_success_clears_them() {
         let provider = "test-provider-redacted-session-error";
+        // Simulate an upstream error that accidentally includes credential-like data.
         record_error(
             provider,
             "session expired: cookie=secret-session-token; user=private@example.test",
