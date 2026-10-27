@@ -187,6 +187,7 @@ impl UnifiedMemory {
             .map_err(Into::into)
     }
 
+    #[allow(dead_code)]
     pub fn store_turn(
         &self,
         conversation_id: String,
