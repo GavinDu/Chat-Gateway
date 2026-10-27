@@ -202,11 +202,6 @@ pub trait ChatProvider: Send + Sync {
         .unwrap_or(0) as usize
     }
 
-    /// Provider still generating (stop button / streaming attribute).
-    fn is_streaming(&self, page: &Page) -> bool {
-        common::is_streaming(page)
-    }
-
     /// Best-effort cancellation when the HTTP consumer disconnects.
     /// Providers with a Stop control use the shared selector; adapters may
     /// override this method when their UI needs a different action.
