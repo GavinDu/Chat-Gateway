@@ -3336,6 +3336,13 @@ mod api_key_auth_tests {
             &axum::http::Method::DELETE
         )
         .is_ok());
+        assert!(authorize_api_request(
+            &config,
+            Some("Bearer test-secret"),
+            "/v1/conversations/conversation_1/provider-threads/chatgpt",
+            &axum::http::Method::PUT
+        )
+        .is_ok());
         assert!(authorize_api_request(&config, None, "/health", &axum::http::Method::GET).is_ok());
     }
 
