@@ -20,7 +20,7 @@ use tokio::sync::RwLock;
 mod browser;
 mod config;
 mod login;
-mod memory;
+pub mod memory;
 mod metrics;
 mod provider_guard;
 mod provider_state;
@@ -30,7 +30,8 @@ mod session;
 
 use browser::pool::ObscuraPool;
 use config::AppConfig;
-use memory::{ChatMessage, UnifiedMemory};
+use memory::ChatMessage;
+pub use memory::{ProviderThread, UnifiedMemory};
 use router::ProviderRouter;
 
 #[derive(Parser, Debug)]
