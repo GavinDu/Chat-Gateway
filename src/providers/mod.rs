@@ -487,8 +487,19 @@ mod response_delta_tracker_tests {
 
     #[test]
     fn response_tracker_resets_only_once_after_new_node() {
-        assert!(should_reset_response_tracker(false, 3, 4));
+        let mut tracker = ResponseDeltaTracker::new(Some("old answer".to_string()));
+        if should_reset_response_tracker(false, 3, 4) {
+            tracker = ResponseDeltaTracker::new(None);
+        }
+        assert_eq!(
+            tracker.observe("same answer"),
+            DeltaObservation::Delta("same answer".to_string())
+        );
+
+        // The DOM node remains present on later polls, but must not reset the
+        // tracker again or cause the same complete answer to be emitted twice.
         assert!(!should_reset_response_tracker(true, 3, 4));
+        assert_eq!(tracker.observe("same answer"), DeltaObservation::Stable);
         assert!(!should_reset_response_tracker(false, 3, 3));
     }
 
