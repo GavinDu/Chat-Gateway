@@ -180,6 +180,13 @@ impl UnifiedMemory {
         self.conversation(conversation_id)
     }
 
+    /// Checkpoint the SQLite WAL after request processing has drained.
+    pub fn checkpoint(&self) -> anyhow::Result<()> {
+        let connection = self.lock()?;
+        connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+        Ok(())
+    }
+
     pub fn delete_conversation(&self, conversation_id: &str) -> anyhow::Result<bool> {
         let mut connection = self.lock()?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
