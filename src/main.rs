@@ -9,7 +9,7 @@ use axum::{
         sse::{Event, Sse},
         Html, IntoResponse,
     },
-    routing::{get, post},
+    routing::{get, post, put},
     Json, Router,
 };
 use clap::Parser;
@@ -30,7 +30,7 @@ mod session;
 
 use browser::pool::ObscuraPool;
 use config::AppConfig;
-use memory::{ChatMessage, UnifiedMemory};
+use memory::{ChatMessage, ProviderThread, UnifiedMemory};
 use router::ProviderRouter;
 
 #[derive(Parser, Debug)]
@@ -385,6 +385,10 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/v1/conversations/:conversation_id/export.md",
             get(export_conversation_markdown),
+        )
+        .route(
+            "/v1/conversations/:conversation_id/provider-threads/:provider",
+            get(get_provider_thread).put(upsert_provider_thread),
         )
         .route(
             "/v1/conversations/:conversation_id",
@@ -1169,7 +1173,9 @@ fn authorize_api_request(
         || path == "/metrics"
         || path == "/v1/conversations"
         || (path.starts_with("/v1/conversations/")
-            && (*method == axum::http::Method::GET || *method == axum::http::Method::DELETE));
+            && (*method == axum::http::Method::GET
+                || *method == axum::http::Method::DELETE
+                || *method == axum::http::Method::PUT));
     let required_scope = if admin_route { "admin" } else { "chat" };
     if !key.scopes.iter().any(|scope| scope == required_scope) {
         return Err(AuthFailure::InsufficientScope);
@@ -1295,6 +1301,110 @@ async fn list_conversations(
                 "conversations could not be listed safely",
             )
         }
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ProviderThreadInput {
+    thread_url: String,
+    synced_through_message_id: Option<String>,
+    model: Option<String>,
+}
+
+async fn get_provider_thread(
+    State(state): State<Arc<AppState>>,
+    Path((conversation_id, provider)): Path<(String, String)>,
+) -> Response {
+    if !valid_conversation_id(&conversation_id) {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            "invalid_conversation_id",
+            "invalid conversation ID",
+        );
+    }
+    match state.memory.get_provider_thread(&conversation_id, &provider) {
+        Ok(Some(thread)) => Json(thread).into_response(),
+        Ok(None) => api_error(
+            StatusCode::NOT_FOUND,
+            "invalid_request_error",
+            "provider_thread_not_found",
+            "provider thread mapping does not exist",
+        ),
+        Err(_error) => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "server_error",
+            "memory_persistence_failed",
+            "provider thread mapping could not be read safely",
+        ),
+    }
+}
+
+async fn upsert_provider_thread(
+    State(state): State<Arc<AppState>>,
+    Path((conversation_id, provider)): Path<(String, String)>,
+    Json(input): Json<ProviderThreadInput>,
+) -> Response {
+    if !valid_conversation_id(&conversation_id) {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            "invalid_conversation_id",
+            "invalid conversation ID",
+        );
+    }
+    if state.cfg.provider(&provider).is_none() {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            "unknown_provider",
+            "provider is not configured",
+        );
+    }
+    let host = input
+        .thread_url
+        .strip_prefix("https://")
+        .and_then(|value| value.split('/').next())
+        .unwrap_or_default();
+    if input.thread_url.len() > 2048
+        || host.is_empty()
+        || host.contains('@')
+        || host.starts_with('.')
+        || input.thread_url.bytes().any(|byte| byte.is_ascii_whitespace())
+        || input
+            .synced_through_message_id
+            .as_deref()
+            .is_some_and(|value| value.len() > 256)
+        || input.model.as_deref().is_some_and(|value| value.len() > 128)
+    {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            "invalid_thread_mapping",
+            "thread_url must be a valid-shaped HTTPS URL (max 2048 bytes); message ID and model are limited to 256 and 128 bytes",
+        );
+    }
+    let updated_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        .min(i64::MAX as u64) as i64;
+    let thread = ProviderThread {
+        conversation_id,
+        provider,
+        thread_url: input.thread_url,
+        synced_through_message_id: input.synced_through_message_id,
+        model: input.model,
+        updated_at,
+    };
+    match state.memory.upsert_provider_thread(&thread) {
+        Ok(()) => Json(thread).into_response(),
+        Err(_error) => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "server_error",
+            "memory_persistence_failed",
+            "provider thread mapping could not be stored safely",
+        ),
     }
 }
 
