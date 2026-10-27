@@ -917,4 +917,3 @@ fn context_budget_estimate_handles_multibyte_text_conservatively() {
             || context.len() == 1
     );
 }
-
