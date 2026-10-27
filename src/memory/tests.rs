@@ -799,3 +799,56 @@ fn conversation_listing_is_paged_and_reports_message_counts() {
     assert_eq!(second[0].id, "list-charlie");
     assert!(memory.list_conversations(0, 0).unwrap().is_empty());
 }
+
+#[test]
+fn provider_thread_mapping_is_provider_scoped_and_survives_restart() {
+    let fixture = Fixture::new();
+    {
+        let memory = fixture.open();
+        store(&memory, "thread-api", "seed");
+        memory
+            .upsert_provider_thread(&ProviderThread {
+                conversation_id: "thread-api".into(),
+                provider: "chatgpt".into(),
+                thread_url: "https://chatgpt.com/c/thread-a".into(),
+                synced_through_message_id: Some("message-3".into()),
+                model: Some("gpt-4o".into()),
+                updated_at: 100,
+            })
+            .unwrap();
+        memory
+            .upsert_provider_thread(&ProviderThread {
+                conversation_id: "thread-api".into(),
+                provider: "claude".into(),
+                thread_url: "https://claude.ai/chat/thread-b".into(),
+                synced_through_message_id: None,
+                model: Some("claude-sonnet".into()),
+                updated_at: 101,
+            })
+            .unwrap();
+        let updated = ProviderThread {
+            conversation_id: "thread-api".into(),
+            provider: "chatgpt".into(),
+            thread_url: "https://chatgpt.com/c/thread-a".into(),
+            synced_through_message_id: Some("message-4".into()),
+            model: Some("gpt-4o".into()),
+            updated_at: 102,
+        };
+        memory.upsert_provider_thread(&updated).unwrap();
+        assert_eq!(
+            memory.get_provider_thread("thread-api", "chatgpt").unwrap(),
+            Some(updated)
+        );
+        assert!(memory.get_provider_thread("thread-api", "gemini").unwrap().is_none());
+    }
+
+    let reopened = fixture.open();
+    assert_eq!(
+        reopened
+            .get_provider_thread("thread-api", "claude")
+            .unwrap()
+            .unwrap()
+            .thread_url,
+        "https://claude.ai/chat/thread-b"
+    );
+}
