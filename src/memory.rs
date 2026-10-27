@@ -171,6 +171,23 @@ impl UnifiedMemory {
             .map_err(|error| anyhow::anyhow!("committing conversation turn: {error}"))
     }
 
+    /// Flush SQLite's WAL and optimize the connection before process exit.
+    /// The server calls this only after Axum has drained in-flight requests.
+    pub fn checkpoint(&self) -> anyhow::Result<()> {
+        let connection = self.lock()?;
+        let (busy, _log_frames, _checkpointed_frames): (i64, i64, i64) =
+            connection.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })?;
+        if busy != 0 {
+            anyhow::bail!(
+                "SQLite WAL checkpoint could not complete because another connection is busy"
+            );
+        }
+        connection.execute_batch("PRAGMA optimize;")?;
+        Ok(())
+    }
+
     /// Export one complete conversation without exposing database internals.
     /// Callers must apply authorization before returning this record to clients.
     pub fn export_conversation(
