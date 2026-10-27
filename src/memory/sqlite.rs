@@ -15,6 +15,7 @@ const PROVIDER_THREADS_SCHEMA: &str = "
         updated_at INTEGER NOT NULL,
         PRIMARY KEY(conversation_id, provider)
     );
+    CREATE INDEX conversations_owner_key_id_idx ON conversations(owner_key_id, id);
 ";
 const SCHEMA: &str = "
     CREATE TABLE conversations (
@@ -141,6 +142,9 @@ fn initialize(connection: &mut Connection, legacy: Option<&Path>) -> Result<()> 
     } else if version != VERSION || app != APPLICATION_ID {
         bail!("unsupported conversation schema version {version} (expected {VERSION}) or application id {app}");
     }
+    tx.execute_batch(
+        "CREATE INDEX IF NOT EXISTS conversations_owner_key_id_idx ON conversations(owner_key_id, id);",
+    )?;
     validate_schema(&tx)?;
     let imported: Option<String> = tx
         .query_row(
