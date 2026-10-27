@@ -130,6 +130,7 @@ mod tests {
         let safe_error = expired
             .last_error
             .expect("expiry state should explain remediation");
+        // Health reporting may expose remediation guidance, never the original error payload.
         assert_eq!(safe_error, "provider session expired; re-login required");
         assert!(!safe_error.contains("secret-session-token"));
         assert!(!safe_error.contains("private@example.test"));
