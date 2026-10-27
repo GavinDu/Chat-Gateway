@@ -133,21 +133,9 @@ pub trait ChatProvider: Send + Sync {
     /// Current full text of the (last) response, if present.
     fn response_text(&self, page: &Page) -> Option<String>;
 
-    /// Count distinct response nodes before/after a send. This lets the
-    /// stream loop distinguish a new identical answer from stale text.
-    fn response_count(&self, page: &Page) -> usize {
-        let selectors =
-            serde_json::to_string(self.selector_set().response).unwrap_or_else(|_| "[]".to_owned());
-        page.evaluate(&format!(
-            "(() => {{ const nodes = new Set(); for (const selector of {selectors}) {{ try {{ document.querySelectorAll(selector).forEach(node => nodes.add(node)); }} catch (_) {{}} }} return nodes.size; }})()"
-        ))
-        .as_u64()
-        .unwrap_or(0) as usize
-    }
-
-    /// Provider still generating (stop button / streaming attribute).
-    fn is_streaming(&self, page: &Page) -> bool {
-        common::is_streaming(page)
+    /// Fetch text, node count, and streaming state in one page evaluation.
+    fn response_probe(&self, page: &Page) -> common::ResponseProbe {
+        common::response_probe(page, self.selector_set())
     }
 
     /// Best-effort cancellation when the HTTP consumer disconnects.
@@ -300,8 +288,9 @@ pub async fn run_send(
     // is never emitted as new. Rust v1 had no baseline (last_len
     // started at 0); this fixes that stale-text bug while keeping
     // Rust v1's 350ms / stability / indicator completion.
-    let baseline_response_count = adapter.response_count(&page);
-    let baseline = adapter.response_text(&page).filter(|t| !t.is_empty());
+    let baseline_probe = adapter.response_probe(&page);
+    let baseline_response_count = baseline_probe.count;
+    let baseline = baseline_probe.text.filter(|t| !t.is_empty());
     let identical_answer_fallback = baseline.clone();
     let mut baseline = baseline;
 
@@ -374,11 +363,12 @@ pub async fn run_send(
             return;
         }
 
+        let probe = adapter.response_probe(&page);
         if should_probe_response_count(response_node_detected)
             && should_reset_response_tracker(
                 response_node_detected,
                 baseline_response_count,
-                adapter.response_count(&page),
+                probe.count,
             )
         {
             // A new DOM node is the strongest signal that the provider started
@@ -389,10 +379,10 @@ pub async fn run_send(
             tracker = ResponseDeltaTracker::new(None);
         }
 
-        let streaming = adapter.is_streaming(&page);
+        let streaming = probe.streaming;
         saw_streaming |= streaming;
 
-        if let Some(txt) = adapter.response_text(&page) {
+        if let Some(txt) = probe.text {
             match tracker.observe(&txt) {
                 DeltaObservation::NoText | DeltaObservation::InvalidBoundary => continue,
                 DeltaObservation::WaitingForNewResponse => {
