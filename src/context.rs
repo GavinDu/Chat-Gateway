@@ -1,10 +1,52 @@
 use crate::memory::ChatMessage;
 
+/// Known provider-thread synchronization state supplied by the caller.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ThreadState {
+    pub provider: String,
+    /// Present only when the adapter can safely reopen the provider thread.
+    pub thread_url: Option<String>,
+    /// Number of durable gateway messages already synchronized to that thread.
+    pub synced_through_message_count: usize,
+}
+
+/// Pure send-path decision. The caller must persist updated thread state only
+/// after a successful committed turn; failed/cancelled sends never advance it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ContextPlan {
+    Delta(Vec<ChatMessage>),
+    Replay { prompt: String, messages: Vec<ChatMessage> },
+}
+
 /// Pure context planning helpers. This module intentionally has no database,
 /// provider, or async-runtime dependency so policy can be tested independently.
 pub(crate) struct ContextBuilder;
 
 impl ContextBuilder {
+    /// Choose a provider-thread delta only when the known thread is reopenable,
+    /// belongs to the requested provider, and is synchronized to the complete
+    /// durable history. Any uncertainty falls back to bounded transcript replay.
+    pub(crate) fn plan(
+        history: &[ChatMessage],
+        incoming: &[ChatMessage],
+        provider: &str,
+        thread: Option<&ThreadState>,
+        budget: usize,
+    ) -> ContextPlan {
+        let delta = messages_after_overlap(history, incoming);
+        let synchronized = thread.is_some_and(|state| {
+            state.provider == provider
+                && state.thread_url.as_deref().is_some_and(|url| !url.is_empty())
+                && state.synced_through_message_count == history.len()
+        });
+        if synchronized && !delta.is_empty() {
+            ContextPlan::Delta(delta)
+        } else {
+            let (prompt, messages) = Self::build(history, incoming, budget);
+            ContextPlan::Replay { prompt, messages }
+        }
+    }
+
     /// Reconcile a durable history with an incoming OpenAI-style transcript,
     /// then retain the newest messages that fit the configured token budget.
     pub(crate) fn build(
@@ -84,7 +126,7 @@ pub(crate) fn messages_after_overlap(
 #[allow(unused_imports)] // The standalone benchmark includes this module with test cfg enabled.
 mod tests {
     #[allow(unused_imports)]
-    use super::{estimate_message_tokens, messages_after_overlap, ContextBuilder};
+    use super::{estimate_message_tokens, messages_after_overlap, ContextBuilder, ContextPlan, ThreadState};
     use crate::memory::ChatMessage;
 
     fn m(role: &str, content: &str) -> ChatMessage {
@@ -120,6 +162,55 @@ mod tests {
         let (_, messages) = ContextBuilder::build(&history, &[], 10);
         assert!(messages.iter().any(|message| message.content == "latest"));
         assert!(messages.len() < history.len());
+    }
+
+    #[test]
+    fn handoff_uses_delta_only_for_reopenable_synchronized_same_provider_thread() {
+        let history = vec![m("user", "first"), m("assistant", "answer")];
+        let incoming = vec![
+            m("user", "first"),
+            m("assistant", "answer"),
+            m("user", "second"),
+        ];
+        let thread = ThreadState {
+            provider: "chatgpt".to_owned(),
+            thread_url: Some("https://chatgpt.com/c/thread-1".to_owned()),
+            synced_through_message_count: history.len(),
+        };
+        assert_eq!(
+            ContextBuilder::plan(&history, &incoming, "chatgpt", Some(&thread), 1000),
+            ContextPlan::Delta(vec![m("user", "second")])
+        );
+    }
+
+    #[test]
+    fn handoff_replays_on_provider_switch_missing_url_or_out_of_sync_thread() {
+        let history = vec![m("user", "first"), m("assistant", "answer")];
+        let incoming = vec![
+            m("user", "first"),
+            m("assistant", "answer"),
+            m("user", "second"),
+        ];
+        let synced = ThreadState {
+            provider: "chatgpt".to_owned(),
+            thread_url: Some("https://chatgpt.com/c/thread-1".to_owned()),
+            synced_through_message_count: history.len(),
+        };
+        for (provider, thread) in [
+            ("claude", Some(synced.clone())),
+            ("chatgpt", Some(ThreadState { thread_url: None, ..synced.clone() })),
+            ("chatgpt", Some(ThreadState { synced_through_message_count: 0, ..synced.clone() })),
+            ("chatgpt", None),
+        ] {
+            match ContextBuilder::plan(&history, &incoming, provider, thread.as_ref(), 1000) {
+                ContextPlan::Replay { prompt, messages } => {
+                    assert!(prompt.contains("user: first"));
+                    assert!(prompt.ends_with("user: second"));
+                    assert_eq!(messages.len(), 3);
+                }
+                ContextPlan::Delta(_) => panic!("uncertain thread state must replay history"),
+            }
+        }
     }
 
     #[test]
