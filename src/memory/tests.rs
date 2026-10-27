@@ -787,7 +787,10 @@ fn schema_v1_database_migrates_provider_thread_map_without_losing_conversations(
             |row| row.get(0),
         )
         .unwrap();
-    assert!(activity > 0, "migration must initialize activity timestamps");
+    assert!(
+        activity > 0,
+        "migration must initialize activity timestamps"
+    );
     assert_eq!(memory.purge_expired_conversations(1).unwrap(), 0);
 }
 
