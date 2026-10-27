@@ -37,6 +37,82 @@ impl SelectorSet {
 /// text matching is handled by the explicit text-selector helper below.
 pub const STREAMING_SELECTOR: &str = r#"[data-is-streaming="true"], button[aria-label*="Stop"]"#;
 
+/// Snapshot of the three DOM signals used by the response polling loop.
+/// A single page evaluation keeps the signals from drifting across ticks.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ResponseProbe {
+    pub text: Option<String>,
+    pub count: usize,
+    pub streaming: bool,
+}
+
+fn decode_response_probe(value: serde_json::Value) -> ResponseProbe {
+    ResponseProbe {
+        text: value
+            .get("text")
+            .and_then(serde_json::Value::as_str)
+            .filter(|text| !text.is_empty())
+            .map(str::to_owned),
+        count: value
+            .get("count")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0) as usize,
+        streaming: value
+            .get("streaming")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+    }
+}
+
+/// Read response text, response-node count, and streaming state in one
+/// JavaScript evaluation per polling tick.
+pub fn response_probe(page: &Page, set: &SelectorSet) -> ResponseProbe {
+    let Ok(selectors) = serde_json::to_string(set.response) else {
+        return ResponseProbe::default();
+    };
+    let Ok(streaming_selector) = serde_json::to_string(STREAMING_SELECTOR) else {
+        return ResponseProbe::default();
+    };
+    let script = format!(
+        r#"(() => {{
+            const selectors = {selectors};
+            const nodes = new Set();
+            let text = null;
+            for (const selector of selectors) {{
+                try {{
+                    let matches = [];
+                    if (selector.startsWith("text:")) {{
+                        const parts = selector.slice(5).split("=");
+                        if (parts.length >= 2 && parts[0]) {{
+                            const tag = parts.shift();
+                            const needle = parts.join("=");
+                            matches = Array.from(document.querySelectorAll(tag)).filter(el =>
+                                ((el.innerText || el.textContent || "").trim()).includes(needle)
+                            );
+                        }}
+                    }} else {{
+                        matches = Array.from(document.querySelectorAll(selector));
+                    }}
+                    matches.forEach(node => nodes.add(node));
+                    if (text === null && matches.length) {{
+                        const last = matches[matches.length - 1];
+                        const content = last.innerText || last.textContent || "";
+                        if (content) text = content;
+                    }}
+                }} catch (_) {{}}
+            }}
+            let streaming = false;
+            try {{ streaming = document.querySelector({streaming_selector}) !== null; }} catch (_) {{}}
+            if (!streaming) {{
+                streaming = Array.from(document.querySelectorAll("button"))
+                    .some(button => ((button.innerText || button.textContent || "").trim()).includes("Stop"));
+            }}
+            return {{ text, count: nodes.size, streaming }};
+        }})()"#
+    );
+    decode_response_probe(page.evaluate(&script))
+}
+
 /// Parse the internal `text:TAG=NEEDLE` selector syntax. This is deliberately
 /// not CSS: Obscura's selector engine must never receive Playwright-only pseudos.
 fn text_selector_parts(selector: &str) -> Option<(&str, &str)> {
@@ -81,6 +157,32 @@ pub fn element_exists(page: &Page, selector: &str) -> bool {
         text_selector_matches(page, selector)
     } else {
         page.query_selector(selector).is_some()
+    }
+}
+
+
+#[cfg(test)]
+mod response_probe_tests {
+    use super::{decode_response_probe, ResponseProbe};
+
+    #[test]
+    fn decodes_response_probe_fields_and_handles_malformed_values() {
+        assert_eq!(
+            decode_response_probe(serde_json::json!({
+                "text": "answer",
+                "count": 4,
+                "streaming": true
+            })),
+            ResponseProbe {
+                text: Some("answer".to_string()),
+                count: 4,
+                streaming: true,
+            }
+        );
+        assert_eq!(
+            decode_response_probe(serde_json::json!({"text": "", "count": -1})),
+            ResponseProbe::default()
+        );
     }
 }
 
