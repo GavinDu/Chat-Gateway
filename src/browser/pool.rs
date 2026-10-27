@@ -199,6 +199,13 @@ impl ObscuraPool {
         Ok(())
     }
 
+    /// Report whether the browser worker still owns its command receiver.
+    /// A closed receiver means every browser command will fail, so readiness
+    /// must not continue advertising this process as usable.
+    pub fn worker_alive(&self) -> bool {
+        !self.cmd_tx.is_closed()
+    }
+
     /// Bound concurrent sends per provider (v1 pool semantics).
     pub async fn acquire(&self, provider: &str) -> Result<ObscuraPermit> {
         let start = std::time::Instant::now();
