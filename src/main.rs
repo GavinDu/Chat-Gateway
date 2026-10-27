@@ -714,17 +714,21 @@ async fn login_complete(
     Path(provider): Path<String>,
 ) -> impl IntoResponse {
     match state.pool.login_complete(&provider).await {
-        Ok(r) => Json(serde_json::json!({
-            "ok": true, "provider": provider,
-            "session_path": r.session_path,
-            "warm_swapped": r.warm_swapped,
-            "warning": r.warning,
-        }))
-        .into_response(),
+        Ok(r) => {
+            // Successful human re-authentication must make the provider routable
+            // again; otherwise needs_login is sticky because routing skips sends.
+            provider_state::record_success(&provider);
+            Json(serde_json::json!({
+                "ok": true, "provider": provider,
+                "session_path": r.session_path,
+                "warm_swapped": r.warm_swapped,
+                "warning": r.warning,
+            }))
+            .into_response()
+        }
         Err(e) => login_err(e.to_string()),
     }
 }
-
 async fn login_view(
     State(state): State<Arc<AppState>>,
     Path(provider): Path<String>,
