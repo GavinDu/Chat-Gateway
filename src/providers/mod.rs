@@ -75,7 +75,7 @@ impl Provider {
 /// Provider adapter contract. `?Send` because adapters run on the
 /// browser thread (see browser::pool) where obscura pages live.
 #[async_trait(?Send)]
-pub trait ChatProvider: Send + Sync {
+pub trait SiteAdapter: Send + Sync {
     fn name(&self) -> &str;
     // Kept in the adapter contract for provider catalog diagnostics.
     #[allow(dead_code)]
@@ -150,7 +150,7 @@ pub enum ThreadSupport { UrlAddressable, SidebarClick, None }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TypingStrategy { SharedComposer }
 
-type AdapterFactory = fn(ProviderConfig) -> Arc<dyn ChatProvider>;
+type AdapterFactory = fn(ProviderConfig) -> Arc<dyn SiteAdapter>;
 
 #[allow(dead_code)]
 pub struct AdapterSpec {
@@ -178,14 +178,14 @@ pub const ADAPTERS: &[AdapterSpec] = &[
     AdapterSpec { provider: Provider::Perplexity, id: "perplexity", url: perplexity::SELECTORS.url, selectors: &perplexity::SELECTORS, model_pairs: perplexity::SELECTORS.model_pairs, strip_citations: true, streaming: StreamSignal::SharedStopControl, done: DoneSignal::StableResponseText, threads: ThreadSupport::UrlAddressable, typing: TypingStrategy::SharedComposer, factory: |cfg| Arc::new(perplexity::PerplexityAdapter { cfg }) },
 ];
 
-fn adapter_for(provider: Provider, cfg: ProviderConfig) -> Arc<dyn ChatProvider> {
+fn adapter_for(provider: Provider, cfg: ProviderConfig) -> Arc<dyn SiteAdapter> {
     let spec = ADAPTERS.iter().find(|spec| spec.provider == provider)
         .expect("every Provider variant must have an adapter catalog row");
     (spec.factory)(cfg)
 }
 
 /// Registry of adapters for the enabled, known providers in the config.
-pub fn build_registry(cfg: &AppConfig) -> HashMap<Provider, Arc<dyn ChatProvider>> {
+pub fn build_registry(cfg: &AppConfig) -> HashMap<Provider, Arc<dyn SiteAdapter>> {
     let mut map = HashMap::new();
     for p in &cfg.providers {
         if !p.enabled {
@@ -282,7 +282,7 @@ fn completion_ready(stable_ticks: u32, streaming: bool) -> bool {
 }
 
 pub async fn run_send(
-    adapter: Arc<dyn ChatProvider>,
+    adapter: Arc<dyn SiteAdapter>,
     page: Rc<Page>,
     prompt: String,
     timeout: Duration,
