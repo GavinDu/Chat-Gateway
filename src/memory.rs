@@ -222,7 +222,10 @@ impl UnifiedMemory {
     pub fn purge_expired_conversations(&self, cutoff_unix_seconds: i64) -> anyhow::Result<usize> {
         let mut connection = self.lock()?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let deleted = tx.execute("DELETE FROM conversations WHERE last_activity_at < ?1", [cutoff_unix_seconds])?;
+        let deleted = tx.execute(
+            "DELETE FROM conversations WHERE last_activity_at < ?1",
+            [cutoff_unix_seconds],
+        )?;
         tx.commit()?;
         Ok(deleted)
     }
