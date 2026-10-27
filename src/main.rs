@@ -3437,7 +3437,6 @@ mod provider_thread_url_tests {
     }
 }
 
-
 #[cfg(test)]
 mod initial_stream_chunk_tests {
     use super::usable_initial_stream_chunk;
