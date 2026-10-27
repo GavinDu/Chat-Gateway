@@ -138,10 +138,6 @@ pub fn normalize_route(path: &str) -> String {
     }
 }
 
-pub fn render() -> String {
-    render_with_provider_states(&[])
-}
-
 /// Render metrics plus the current session state for each configured provider.
 /// State values are emitted as a bounded one-hot gauge for dashboards.
 pub fn render_with_provider_states(provider_states: &[(String, String)]) -> String {
