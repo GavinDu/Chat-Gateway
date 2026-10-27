@@ -781,10 +781,28 @@ fn schema_v1_database_migrates_provider_thread_map_without_losing_conversations(
 }
 
 #[test]
-fn sqlite_checkpoint_is_safe_after_memory_operations() {
+fn sqlite_checkpoint_is_safe_after_durable_turns_and_can_repeat() {
     let fixture = Fixture::new();
     let memory = fixture.open();
-    store(&memory, "checkpoint-test", "hello");
+    memory
+        .store_turn(
+            "shutdown-checkpoint".into(),
+            vec![m("user", "persist before shutdown")],
+            m("assistant", "persisted"),
+            "chatgpt".into(),
+            "tab".into(),
+        )
+        .unwrap();
+
     memory.checkpoint().unwrap();
-    assert!(memory.has_history("checkpoint-test").unwrap());
+    memory.checkpoint().unwrap();
+
+    let conversation = memory
+        .export_conversation("shutdown-checkpoint")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        conversation.messages,
+        vec![m("user", "persist before shutdown"), m("assistant", "persisted")],
+    );
 }
