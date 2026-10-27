@@ -175,7 +175,14 @@ impl UnifiedMemory {
         provider: String,
         tab_id: String,
     ) -> anyhow::Result<()> {
-        self.store_turn_for_owner("local", conversation_id, user_msgs, assistant_msg, provider, tab_id)
+        self.store_turn_for_owner(
+            "local",
+            conversation_id,
+            user_msgs,
+            assistant_msg,
+            provider,
+            tab_id,
+        )
     }
 
     pub fn store_turn_for_owner(
@@ -347,11 +354,7 @@ impl UnifiedMemory {
         self.has_history_for_owner("local", cid)
     }
 
-    pub fn has_history_for_owner(
-        &self,
-        owner_key_id: &str,
-        cid: &str,
-    ) -> anyhow::Result<bool> {
+    pub fn has_history_for_owner(&self, owner_key_id: &str, cid: &str) -> anyhow::Result<bool> {
         Ok(self
             .conversation_for_owner(owner_key_id, cid)?
             .is_some_and(|conversation| !conversation.messages.is_empty()))
