@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Chat Gateway Relay</title>
+<style>
+body{font:14px system-ui,sans-serif;width:320px;margin:0;padding:16px;color:#172033}h1{font-size:17px;margin:0 0 12px}
+label{display:block;margin:10px 0 4px}input,select,button{box-sizing:border-box;width:100%;padding:9px;border:1px solid #aab3c2;border-radius:6px;background:white}
+button{margin-top:8px;cursor:pointer;font-weight:600}.danger{color:#9f2020}#status{margin:10px 0;white-space:pre-wrap;overflow-wrap:anywhere}.small{font-size:12px;color:#505b6b}
+</style></head><body>
+<h1>Chat Gateway Relay</h1><p class="small">Pairs only with the local gateway at 127.0.0.1:8080. Never enter provider passwords here.</p>
+<label for="code">One-time pairing code</label><input id="code" inputmode="numeric" autocomplete="one-time-code" maxlength="10">
+<button id="pair">Pair with gateway</button>
+<label for="provider">Provider tab to link</label><select id="provider">
+<option value="qwen">Qwen</option><option value="metaai">Meta AI</option><option value="claude">Claude</option><option value="chatgpt">ChatGPT</option><option value="gemini">Gemini</option><option value="grok">Grok</option><option value="mistral">Mistral</option><option value="perplexity">Perplexity</option></select>
+<button id="link">Review consent and link active tab</button><button id="refresh">Refresh linked-provider status</button><button id="unlink" class="danger">Unlink selected provider</button>
+<div id="status" role="status" aria-live="polite"></div><script src="popup.js"></script></body></html>
