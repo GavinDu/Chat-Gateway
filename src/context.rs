@@ -21,8 +21,13 @@ pub(crate) struct ThreadSyncState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(dead_code)]
 pub(crate) enum ContextPlan {
-    Delta { messages: Vec<ChatMessage> },
-    Replay { preamble: String, messages: Vec<ChatMessage> },
+    Delta {
+        messages: Vec<ChatMessage>,
+    },
+    Replay {
+        preamble: String,
+        messages: Vec<ChatMessage>,
+    },
 }
 
 impl ContextBuilder {
