@@ -56,12 +56,12 @@ struct Sample {
 fn request(
     url: &str,
     provider: &str,
+    model: &str,
     api_key: Option<&str>,
     pid: Option<&str>,
 ) -> anyhow::Result<Sample> {
     let payload = json!({
-        "provider": provider,
-        "model": "auto",
+        "model": model,
         "messages": [{"role":"user","content":"benchmark"}],
         "stream": true
     })
@@ -142,6 +142,10 @@ async fn main() -> anyhow::Result<()> {
         anyhow::bail!("--providers must contain at least one provider name");
     }
     let api_key = option(&args, "--api-key");
+    let model_name = option(&args, "--model").unwrap_or_else(|| "auto".to_owned());
+    if !fake && model_name == "auto" {
+        anyhow::bail!("live mode requires --model <configured-model-name> so each provider can be pinned");
+    }
     let pid = option(&args, "--pid");
     let url = if fake {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
@@ -180,7 +184,12 @@ async fn main() -> anyhow::Result<()> {
     let mut previous: Option<String> = None;
     for index in 0..iterations {
         let provider = &providers[index % providers.len()];
-        let sample = request(&url, provider, api_key.as_deref(), pid.as_deref())?;
+        let model = if fake {
+            "auto".to_owned()
+        } else {
+            format!("{provider}/{model_name}")
+        };
+        let sample = request(&url, provider, &model, api_key.as_deref(), pid.as_deref())?;
         let gateway_overhead = if fake {
             sample
                 .ttft_ms
