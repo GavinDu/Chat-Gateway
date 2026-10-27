@@ -110,7 +110,10 @@ mod tests {
     fn pure_builder_bounds_context_to_recent_messages() {
         let history = vec![
             m("user", "an old message that should fall outside the budget"),
-            m("assistant", "an old answer that should fall outside the budget"),
+            m(
+                "assistant",
+                "an old answer that should fall outside the budget",
+            ),
             m("user", "latest"),
         ];
         let (_, messages) = ContextBuilder::build(&history, &[], 10);
