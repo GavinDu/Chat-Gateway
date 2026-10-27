@@ -165,7 +165,10 @@ impl AppConfig {
         let mut auth_key_names = HashSet::new();
         for key in &self.auth.keys {
             if !auth_key_names.insert(key.name.trim().to_ascii_lowercase()) {
-                anyhow::bail!("auth key names must be unique (case-insensitive): '{}'", key.name);
+                anyhow::bail!(
+                    "auth key names must be unique (case-insensitive): '{}'",
+                    key.name
+                );
             }
             if key.name.trim().is_empty() {
                 anyhow::bail!("auth key name must not be empty");
