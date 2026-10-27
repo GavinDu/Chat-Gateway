@@ -1,7 +1,7 @@
 #[path = "memory/sqlite.rs"]
 mod sqlite;
 
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
+use rusqlite::{Connection, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use std::{
     path::PathBuf,
@@ -20,17 +20,6 @@ pub struct Conversation {
     pub messages: Vec<ChatMessage>,
     pub provider: Option<String>,
     pub tab_id: Option<String>,
-}
-
-/// Provider-specific browser thread association for one gateway conversation.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ProviderThread {
-    pub conversation_id: String,
-    pub provider: String,
-    pub thread_url: String,
-    pub synced_through_message_id: Option<String>,
-    pub model: Option<String>,
-    pub updated_at: i64,
 }
 
 /// SQLite is authoritative: there is no mutable conversation cache to diverge
@@ -220,65 +209,7 @@ impl UnifiedMemory {
             .and_then(|conversation| conversation.provider))
     }
 
-    /// Return the stored provider thread for one conversation, if it exists.
-    pub fn get_provider_thread(
-        &self,
-        conversation_id: &str,
-        provider: &str,
-    ) -> anyhow::Result<Option<ProviderThread>> {
-        let connection = self.lock()?;
-        Ok(connection
-            .query_row(
-                "SELECT conversation_id, provider, thread_url, synced_through_message_id, model, updated_at
-                 FROM provider_threads WHERE conversation_id=?1 AND provider=?2",
-                rusqlite::params![conversation_id, provider],
-                |row| {
-                    Ok(ProviderThread {
-                        conversation_id: row.get(0)?,
-                        provider: row.get(1)?,
-                        thread_url: row.get(2)?,
-                        synced_through_message_id: row.get(3)?,
-                        model: row.get(4)?,
-                        updated_at: row.get(5)?,
-                    })
-                },
-            )
-            .optional()?)
-    }
 
-    /// Upsert a provider-thread mapping after the adapter has verified the URL.
-    /// URL validation and navigation policy remain the adapter's responsibility.
-    pub fn upsert_provider_thread(&self, thread: &ProviderThread) -> anyhow::Result<()> {
-        let connection = self.lock()?;
-        connection.execute(
-            "INSERT INTO provider_threads(
-                conversation_id, provider, thread_url, synced_through_message_id, model, updated_at
-             ) VALUES(?1, ?2, ?3, ?4, ?5, ?6)
-             ON CONFLICT(conversation_id, provider) DO UPDATE SET
-                thread_url=excluded.thread_url,
-                synced_through_message_id=excluded.synced_through_message_id,
-                model=excluded.model,
-                updated_at=excluded.updated_at",
-            rusqlite::params![
-                thread.conversation_id,
-                thread.provider,
-                thread.thread_url,
-                thread.synced_through_message_id,
-                thread.model,
-                thread.updated_at,
-            ],
-        )?;
-        Ok(())
-    }
-
-    /// Remove every provider-thread mapping when its conversation is deleted.
-    pub fn delete_provider_threads(&self, conversation_id: &str) -> anyhow::Result<usize> {
-        let connection = self.lock()?;
-        Ok(connection.execute(
-            "DELETE FROM provider_threads WHERE conversation_id=?1",
-            [conversation_id],
-        )?)
-    }
 }
 
 fn messages_after_overlap(stored: &[ChatMessage], incoming: &[ChatMessage]) -> Vec<ChatMessage> {
