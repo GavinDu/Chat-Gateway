@@ -207,6 +207,49 @@ impl SessionStore for VaultSessionStore {
     }
 }
 
+/// Import a browser-linked session directly into the encrypted vault. Arbitrary
+/// localStorage export is deliberately disabled until each provider has a
+/// reviewed key allowlist.
+pub fn import_relay_session(provider: &str, file: &SessionFile) -> Result<()> {
+    if !matches!(std::env::var("CHAT_GATEWAY_SESSION_STORE").as_deref(), Ok("vault")) {
+        anyhow::bail!("browser relay requires CHAT_GATEWAY_SESSION_STORE=vault");
+    }
+    if !file.local_storage.is_empty() {
+        anyhow::bail!("localStorage import is disabled until provider-specific key allowlists are configured");
+    }
+    if file.cookies.len() > 512 {
+        anyhow::bail!("too many cookies in relay session");
+    }
+    for cookie in &file.cookies {
+        if !cookie_domain_allowed(provider, &cookie.domain) || !restored_cookie_fields_safe(cookie) {
+            anyhow::bail!("relay session contains a cookie outside the provider allowlist or with invalid fields");
+        }
+    }
+    let key = vault_key_from_env()?;
+    let destination = session_vault_path(provider)?;
+    ensure_private_session_dir_sync(Path::new("sessions"))?;
+    let encrypted = encrypt_session_snapshot(file, provider, &key)?;
+    write_session_file_atomically(Path::new(&destination), &encrypted)?;
+    remove_legacy_session_snapshot(provider)?;
+    record_session_write(provider);
+    tracing::info!(provider, cookies = file.cookies.len(), "browser relay session imported into encrypted vault");
+    Ok(())
+}
+
+pub fn delete_session_snapshot(provider: &str) -> Result<bool> {
+    let vault_path = session_vault_path(provider)?;
+    let legacy_path = session_path(provider)?;
+    let mut removed = false;
+    for path in [vault_path, legacy_path] {
+        match std::fs::remove_file(path) {
+            Ok(()) => removed = true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(removed)
+}
+
 fn session_vault_path(provider: &str) -> Result<String> {
     let legacy = session_path(provider)?;
     Ok(Path::new(&legacy)
