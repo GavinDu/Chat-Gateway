@@ -815,14 +815,16 @@ fn provider_thread_mapping_is_provider_scoped_and_survives_restart() {
             updated_at: 100,
         };
         memory.upsert_provider_thread(&chatgpt).unwrap();
-        memory.upsert_provider_thread(&ProviderThread {
-            conversation_id: "thread-api".into(),
-            provider: "claude".into(),
-            thread_url: "https://claude.ai/chat/thread-b".into(),
-            synced_through_message_id: None,
-            model: Some("claude-sonnet".into()),
-            updated_at: 101,
-        }).unwrap();
+        memory
+            .upsert_provider_thread(&ProviderThread {
+                conversation_id: "thread-api".into(),
+                provider: "claude".into(),
+                thread_url: "https://claude.ai/chat/thread-b".into(),
+                synced_through_message_id: None,
+                model: Some("claude-sonnet".into()),
+                updated_at: 101,
+            })
+            .unwrap();
         let updated = ProviderThread {
             synced_through_message_id: Some("message-4".into()),
             updated_at: 102,
@@ -833,11 +835,18 @@ fn provider_thread_mapping_is_provider_scoped_and_survives_restart() {
             memory.get_provider_thread("thread-api", "chatgpt").unwrap(),
             Some(updated)
         );
-        assert!(memory.get_provider_thread("thread-api", "gemini").unwrap().is_none());
+        assert!(memory
+            .get_provider_thread("thread-api", "gemini")
+            .unwrap()
+            .is_none());
     }
     let reopened = fixture.open();
     assert_eq!(
-        reopened.get_provider_thread("thread-api", "claude").unwrap().unwrap().thread_url,
+        reopened
+            .get_provider_thread("thread-api", "claude")
+            .unwrap()
+            .unwrap()
+            .thread_url,
         "https://claude.ai/chat/thread-b"
     );
 }
