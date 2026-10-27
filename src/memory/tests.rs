@@ -839,7 +839,10 @@ fn provider_thread_mapping_is_provider_scoped_and_survives_restart() {
             memory.get_provider_thread("thread-api", "chatgpt").unwrap(),
             Some(updated)
         );
-        assert!(memory.get_provider_thread("thread-api", "gemini").unwrap().is_none());
+        assert!(memory
+            .get_provider_thread("thread-api", "gemini")
+            .unwrap()
+            .is_none());
     }
 
     let reopened = fixture.open();
