@@ -596,9 +596,9 @@ fn database_and_transaction_journal_are_owner_only() {
     let tx = connection.transaction().unwrap();
     tx.execute("INSERT INTO conversations(id) VALUES('private')", [])
         .unwrap();
-    let journal = fixture.db().with_extension("sqlite3-journal");
+    let wal = PathBuf::from(format!("{}-wal", fixture.db().display()));
     assert_eq!(
-        fs::metadata(journal).unwrap().permissions().mode() & 0o777,
+        fs::metadata(&wal).unwrap().permissions().mode() & 0o777,
         0o600
     );
     tx.rollback().unwrap();
