@@ -142,6 +142,18 @@ impl UnifiedMemory {
         conversation_id: Option<&str>,
         new_messages: &[ChatMessage],
     ) -> anyhow::Result<(String, Vec<ChatMessage>)> {
+        let (prompt, context, _) =
+            self.build_context_for_owner_with_history(owner_key_id, conversation_id, new_messages)?;
+        Ok((prompt, context))
+    }
+
+    /// Build context and report persisted transcript presence from the same scoped read.
+    pub fn build_context_for_owner_with_history(
+        &self,
+        owner_key_id: &str,
+        conversation_id: Option<&str>,
+        new_messages: &[ChatMessage],
+    ) -> anyhow::Result<(String, Vec<ChatMessage>, bool)> {
         let (history, saved_summary) = match conversation_id {
             Some(id) => match self.conversation_for_owner(owner_key_id, id)? {
                 Some(conversation) => (conversation.messages, self.rolling_summary(id)?),
@@ -149,6 +161,7 @@ impl UnifiedMemory {
             },
             None => (Vec::new(), None),
         };
+        let has_history = !history.is_empty();
         let summary_message = saved_summary.map(|(summary, _covered)| ChatMessage {
             role: "system".to_owned(),
             content: format!("Conversation summary of earlier turns:\n{summary}"),
@@ -168,7 +181,7 @@ impl UnifiedMemory {
             context.insert(0, summary);
             prompt = crate::context::render_prompt(&context);
         }
-        Ok((prompt, context))
+        Ok((prompt, context, has_history))
     }
 
     fn rolling_summary(&self, conversation_id: &str) -> anyhow::Result<Option<(String, usize)>> {
