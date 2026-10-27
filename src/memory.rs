@@ -183,6 +183,27 @@ impl UnifiedMemory {
         provider: String,
         tab_id: String,
     ) -> anyhow::Result<()> {
+        self.store_turn_for_owner_with_tab_id(
+            owner_key_id,
+            conversation_id,
+            user_msgs,
+            assistant_msg,
+            provider,
+            Some(tab_id),
+        )
+    }
+
+    /// Persist a completed turn while explicitly controlling optional tab metadata.
+    /// Production chat completions use None until the browser supplies a real tab ID.
+    pub fn store_turn_for_owner_with_tab_id(
+        &self,
+        owner_key_id: &str,
+        conversation_id: String,
+        user_msgs: Vec<ChatMessage>,
+        assistant_msg: ChatMessage,
+        provider: String,
+        tab_id: Option<String>,
+    ) -> anyhow::Result<()> {
         let mut connection = self.lock()?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let existing_owner: Option<String> = tx
@@ -220,7 +241,7 @@ impl UnifiedMemory {
             conversation.messages.push(assistant_msg);
         }
         conversation.provider = Some(provider);
-        conversation.tab_id = Some(tab_id);
+        conversation.tab_id = tab_id;
         sqlite::append_owned(&tx, &conversation, first, owner_key_id)?;
         tx.commit()
             .map_err(|error| anyhow::anyhow!("committing conversation turn: {error}"))
