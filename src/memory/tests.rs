@@ -777,7 +777,7 @@ fn schema_v1_database_migrates_provider_thread_map_without_losing_conversations(
         .unwrap()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 3);
+    assert_eq!(version, 4);
     let activity: i64 = memory
         .lock()
         .unwrap()
@@ -791,6 +791,16 @@ fn schema_v1_database_migrates_provider_thread_map_without_losing_conversations(
         activity > 0,
         "migration should start retention from migration time"
     );
+    let owner: String = memory
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT owner_key_id FROM conversations WHERE id='existing'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(owner, "local", "legacy rows must remain in the local tenant");
     assert_eq!(memory.purge_expired_conversations(1).unwrap(), 0);
 }
 
