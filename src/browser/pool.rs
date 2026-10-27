@@ -187,6 +187,15 @@ impl ObscuraPool {
         Ok(pool)
     }
 
+    /// Whether the dedicated browser thread still owns its command receiver.
+    ///
+    /// A closed command channel means the worker exited or panicked; it does not imply automatic recovery. Readiness
+    /// must fail closed in that state instead of advertising the configured
+    /// providers as usable.
+    pub fn worker_alive(&self) -> bool {
+        !self.cmd_tx.is_closed()
+    }
+
     /// Await browser build + per-provider warm-up (v2 ordering: session
     /// cookies restored into the browser store BEFORE the first goto,
     /// localStorage after goto, then a reload-equivalent second goto).
