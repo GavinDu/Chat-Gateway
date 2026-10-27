@@ -58,6 +58,7 @@ const SCHEMA: &str = "
 ";
 
 pub(super) fn open(path: Option<&Path>, legacy: Option<&Path>) -> Result<Connection> {
+    let file_backed = path.is_some();
     let mut connection = match path {
         Some(path) => {
             let parent = path
@@ -93,6 +94,13 @@ pub(super) fn open(path: Option<&Path>, legacy: Option<&Path>) -> Result<Connect
         }
         None => Connection::open_in_memory()?,
     };
+    if file_backed {
+        let journal_mode: String =
+            connection.query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))?;
+        if !journal_mode.eq_ignore_ascii_case("wal") {
+            bail!("expected file-backed conversation database to use WAL mode, got {journal_mode}");
+        }
+    }
     initialize(&mut connection, legacy).with_context(|| {
         format!(
             "conversation database {} failed validation/migration; preserve it and restore a backup",
@@ -345,4 +353,38 @@ pub(super) fn append_owned(
         ])?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod sqlite_settings_tests {
+    use super::open;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn file_backed_database_uses_wal_and_configured_busy_timeout() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after UNIX epoch")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "chat-gateway-sqlite-settings-{}-{nonce}.db",
+            std::process::id()
+        ));
+        let connection = open(Some(&path), None).expect("database should initialize");
+
+        let journal_mode: String = connection
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .expect("journal mode should be readable");
+        assert_eq!(journal_mode.to_ascii_lowercase(), "wal");
+
+        let busy_timeout_ms: i64 = connection
+            .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
+            .expect("busy timeout should be readable");
+        assert_eq!(busy_timeout_ms, 30_000);
+
+        drop(connection);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(path.with_extension("db-shm"));
+    }
 }
