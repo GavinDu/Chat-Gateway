@@ -185,6 +185,18 @@ pub fn render_with_provider_states(provider_states: &[(String, String)]) -> Stri
             escape_label(outcome)
         );
     }
+    let _ = writeln!(out, "# TYPE gateway_provider_session_state gauge");
+    for (provider, state) in provider_states {
+        for known_state in ["unknown", "ready", "needs_login"] {
+            let value = u8::from(state == known_state);
+            let _ = writeln!(
+                out,
+                "gateway_provider_session_state{{provider=\"{}\",state=\"{}\"}} {value}",
+                escape_label(provider),
+                known_state
+            );
+        }
+    }
     out
 }
 
