@@ -123,8 +123,7 @@ fn has_challenge_marker(url: &str, body: &str) -> bool {
 /// Detect challenge pages without attempting to solve or bypass them.
 pub fn is_challenge_page(page: &Page) -> bool {
     let url = page.url();
-    let evaluation = page
-        .evaluate("document.body ? document.body.innerText.slice(0, 12000) : ''");
+    let evaluation = page.evaluate("document.body ? document.body.innerText.slice(0, 12000) : ''");
     let body = evaluation.as_str().unwrap_or("");
     has_challenge_marker(&url, body)
 }
