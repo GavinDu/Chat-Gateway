@@ -274,7 +274,12 @@ pub(super) fn append(
         "INSERT INTO conversations(id,provider,tab_id,last_activity_at) VALUES(?1,?2,?3,?4)
          ON CONFLICT(id) DO UPDATE SET provider=excluded.provider, tab_id=excluded.tab_id,
              last_activity_at=excluded.last_activity_at",
-        params![conversation.id, conversation.provider, conversation.tab_id, now],
+        params![
+            conversation.id,
+            conversation.provider,
+            conversation.tab_id,
+            now
+        ],
     )?;
     let mut insert = connection.prepare(
         "INSERT INTO messages(conversation_id,position,role,content) VALUES(?1,?2,?3,?4)",
