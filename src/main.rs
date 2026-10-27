@@ -1106,6 +1106,9 @@ mod readiness_contract_tests {
 
         let ready = readiness_response(true, 1);
         assert_eq!(ready.status(), StatusCode::OK);
+
+        let dead_worker = readiness_response(false, 1);
+        assert_eq!(dead_worker.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 }
 
