@@ -1073,11 +1073,14 @@ async fn metrics_endpoint(State(state): State<Arc<AppState>>) -> impl IntoRespon
 /// Add a gateway-generated request ID to every response, including security
 /// middleware rejections, so callers can correlate failures with server logs
 /// without trusting arbitrary client-supplied IDs.
-async fn attach_request_id(req: Request<Body>, next: Next) -> Response {
+async fn attach_request_id(mut req: Request<Body>, next: Next) -> Response {
     let request_id = uuid::Uuid::new_v4().to_string();
     let method = req.method().to_string();
     let route = metrics::normalize_route(req.uri().path());
     let is_chat_completion = req.uri().path() == "/v1/chat/completions";
+    if let Ok(value) = axum::http::HeaderValue::from_str(&request_id) {
+        req.headers_mut().insert("x-request-id", value);
+    }
     let started = Instant::now();
     let mut response = next.run(req).await;
     let duration_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
@@ -1522,6 +1525,11 @@ async fn chat_completions(
     auth_context: Option<Extension<AuthKeyContext>>,
     body: Result<axum::body::Bytes, axum::extract::rejection::BytesRejection>,
 ) -> Response {
+    let request_id = headers
+        .get("x-request-id")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("unknown")
+        .to_owned();
     let request_started = Instant::now();
     let body = match body {
         Ok(body) => body,
@@ -1765,6 +1773,7 @@ async fn chat_completions(
             let request_started_c = request_started;
             let provider_started_c = provider_started;
             let queue_ms_c = queue_ms;
+            let request_id_c = request_id.clone();
             let sse_stream = async_stream::stream! {
                 let _permit = permit;
                 let mut full = String::new();
@@ -1822,6 +1831,16 @@ async fn chat_completions(
                     ttft_ms,
                     provider_work_ms,
                     total_ms,
+                );
+                tracing::info!(
+                    request_id = %request_id_c,
+                    provider = %provider_c,
+                    queue_ms = queue_ms_c,
+                    ttft_ms = ?ttft_ms,
+                    provider_work_ms,
+                    total_ms,
+                    outcome = if stream_error.is_some() { "error" } else { "success" },
+                    "provider request completed"
                 );
                 if let Some(message) = stream_error {
                     // Preserve sanitized session-expiry state for routing and health reporting.
@@ -1913,6 +1932,16 @@ async fn chat_completions(
                 provider_work_ms,
                 total_ms,
             );
+            tracing::info!(
+                request_id = %request_id,
+                provider = %provider_name,
+                queue_ms,
+                ttft_ms = ?ttft_ms,
+                provider_work_ms,
+                total_ms,
+                outcome = "error",
+                "provider request completed"
+            );
             if full.is_empty() {
                 tracing::warn!(provider = %provider_name, "provider failed before output: {e}");
                 last_err = Some(e);
@@ -1935,6 +1964,16 @@ async fn chat_completions(
             ttft_ms,
             provider_work_ms,
             total_ms,
+        );
+        tracing::info!(
+            request_id = %request_id,
+            provider = %provider_name,
+            queue_ms,
+            ttft_ms = ?ttft_ms,
+            provider_work_ms,
+            total_ms,
+            outcome = "success",
+            "provider request completed"
         );
         if let Err(_error) = state.memory.store_turn(
             new_conv_id.clone(),

@@ -23,11 +23,15 @@ metric labels or structured-log fields.
 
 ## Request completion logs
 
-Each completed request emits one structured log entry containing the request
-ID, HTTP method, normalized route, status code, and elapsed duration. Use the
-request ID to correlate gateway logs with a client report. Avoid enabling
-debug logging in production without reviewing the provider/session privacy
-implications.
+Each completed HTTP request emits a structured log entry containing the
+request ID, HTTP method, normalized route, status code, and elapsed duration.
+Provider attempts also emit a structured completion entry with the same request
+ID, provider name, queue wait, TTFT (when available), provider-work duration,
+total chat duration, and success/error outcome. These entries deliberately omit
+prompt text, response bodies, conversation IDs, API keys, and session details.
+Use the request ID to correlate a client report with its provider timing. Avoid
+enabling debug logging in production without reviewing the provider/session
+privacy implications.
 
 ## Operational checks
 
