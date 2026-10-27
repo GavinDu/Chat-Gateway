@@ -84,10 +84,6 @@ pub fn element_exists(page: &Page, selector: &str) -> bool {
     }
 }
 
-pub fn is_streaming(page: &Page) -> bool {
-    element_exists(page, STREAMING_SELECTOR) || element_exists(page, "text:button=Stop")
-}
-
 /// Wait until any of the selectors matches (polls query_selector).
 pub async fn wait_for_selector(
     page: &Page,
