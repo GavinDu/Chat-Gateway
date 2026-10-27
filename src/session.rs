@@ -1081,4 +1081,15 @@ mod vault_tests {
         tampered[last] ^= 0x80;
         assert!(decrypt_session_snapshot(&tampered, "provider-a", &key).is_err());
     }
+
+    #[test]
+    fn encrypted_vault_rejects_wrong_key_and_truncated_envelopes() {
+        let encrypted = encrypt_session_snapshot(&sample_session(), "provider-a", &[0x44; 32]).unwrap();
+        assert!(decrypt_session_snapshot(&encrypted, "provider-a", &[0x45; 32]).is_err());
+        assert!(decrypt_session_snapshot(&encrypted[..10], "provider-a", &[0x44; 32]).is_err());
+        let mut unknown_version = encrypted;
+        unknown_version[5] = b'2';
+        assert!(decrypt_session_snapshot(&unknown_version, "provider-a", &[0x44; 32]).is_err());
+    }
+
 }
