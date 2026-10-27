@@ -1259,6 +1259,14 @@ async fn authenticate_api_key(
 }
 
 fn delete_conversation_response(memory: &UnifiedMemory, conversation_id: &str) -> Response {
+    delete_conversation_response_for_owner(memory, "local", conversation_id)
+}
+
+fn delete_conversation_response_for_owner(
+    memory: &UnifiedMemory,
+    owner_key_id: &str,
+    conversation_id: &str,
+) -> Response {
     if !valid_conversation_id(conversation_id) {
         return api_error(
             StatusCode::BAD_REQUEST,
@@ -1267,7 +1275,7 @@ fn delete_conversation_response(memory: &UnifiedMemory, conversation_id: &str) -
             "conversation ID must be 8-128 ASCII letters, digits, '_' or '-'",
         );
     }
-    match memory.delete_conversation(conversation_id) {
+    match memory.delete_conversation_for_owner(owner_key_id, conversation_id) {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
         Ok(false) => api_error(
             StatusCode::NOT_FOUND,
@@ -1288,6 +1296,14 @@ fn delete_conversation_response(memory: &UnifiedMemory, conversation_id: &str) -
 }
 
 fn export_conversation_response(memory: &UnifiedMemory, conversation_id: &str) -> Response {
+    export_conversation_response_for_owner(memory, "local", conversation_id)
+}
+
+fn export_conversation_response_for_owner(
+    memory: &UnifiedMemory,
+    owner_key_id: &str,
+    conversation_id: &str,
+) -> Response {
     if !valid_conversation_id(conversation_id) {
         return api_error(
             StatusCode::BAD_REQUEST,
@@ -1296,7 +1312,7 @@ fn export_conversation_response(memory: &UnifiedMemory, conversation_id: &str) -
             "conversation ID must be 8-128 ASCII letters, digits, '_' or '-'",
         );
     }
-    match memory.export_conversation(conversation_id) {
+    match memory.export_conversation_for_owner(owner_key_id, conversation_id) {
         Ok(Some(conversation)) => Json(conversation).into_response(),
         Ok(None) => api_error(
             StatusCode::NOT_FOUND,
@@ -1317,6 +1333,7 @@ fn export_conversation_response(memory: &UnifiedMemory, conversation_id: &str) -
 }
 
 #[derive(Debug, serde::Deserialize)]
+struct ConversationListQuery#[derive(Debug, serde::Deserialize)]
 struct ConversationListQuery {
     limit: Option<usize>,
     offset: Option<usize>,
@@ -1477,6 +1494,14 @@ fn export_conversation_markdown_response(
     memory: &UnifiedMemory,
     conversation_id: &str,
 ) -> Response {
+    export_conversation_markdown_response_for_owner(memory, "local", conversation_id)
+}
+
+fn export_conversation_markdown_response_for_owner(
+    memory: &UnifiedMemory,
+    owner_key_id: &str,
+    conversation_id: &str,
+) -> Response {
     if !valid_conversation_id(conversation_id) {
         return api_error(
             StatusCode::BAD_REQUEST,
@@ -1485,7 +1510,7 @@ fn export_conversation_markdown_response(
             "conversation ID must be 8-128 ASCII letters, digits, '_' or '-'",
         );
     }
-    match memory.export_conversation(conversation_id) {
+    match memory.export_conversation_for_owner(owner_key_id, conversation_id) {
         Ok(Some(conversation)) => {
             let mut markdown = format!("# Conversation {}\n\n", conversation.id);
             if let Some(provider) = conversation.provider.as_deref() {
@@ -1530,7 +1555,7 @@ fn export_conversation_markdown_response(
     }
 }
 
-async fn delete_conversation(
+async fn delete_conversation(async fn delete_conversation(
     State(state): State<Arc<AppState>>,
     Path(conversation_id): Path<String>,
 ) -> Response {
