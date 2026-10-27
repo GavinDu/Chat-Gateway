@@ -1740,13 +1740,7 @@ fn read_conversation_context_for_owner(
     conversation_id: Option<&str>,
     messages: &[ChatMessage],
 ) -> anyhow::Result<(String, Vec<ChatMessage>, bool)> {
-    let (prompt, windowed) =
-        memory.build_context_for_owner(owner_key_id, conversation_id, messages)?;
-    let has_history = match conversation_id {
-        Some(id) => memory.has_history_for_owner(owner_key_id, id)?,
-        None => false,
-    };
-    Ok((prompt, windowed, has_history))
+    memory.build_context_for_owner_with_history(owner_key_id, conversation_id, messages)
 }
 
 fn usable_initial_stream_chunk(content: &str, done: bool) -> bool {
