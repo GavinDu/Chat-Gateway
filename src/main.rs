@@ -1050,7 +1050,17 @@ mod login_action_payload_tests {
 /// Startup validates configuration and warms the browser pool before binding.
 /// Readiness requires at least one enabled provider whose session is not known
 /// to be expired; providers marked `needs_login` do not count as routable.
-fn readiness_response(enabled: usize) -> Response {
+fn readiness_response(worker_alive: bool, enabled: usize) -> Response {
+    if !worker_alive {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "status": "not_ready",
+                "reason": "browser_worker_down",
+            })),
+        )
+            .into_response();
+    }
     if enabled == 0 {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -1082,7 +1092,7 @@ async fn readiness(State(state): State<Arc<AppState>>) -> impl IntoResponse {
                 && provider_guard::provider_disabled_reason(&p.name).is_none()
         })
         .count();
-    readiness_response(routable)
+    readiness_response(state.pool.worker_alive(), routable)
 }
 
 #[cfg(test)]
@@ -1091,10 +1101,10 @@ mod readiness_contract_tests {
 
     #[test]
     fn readiness_requires_at_least_one_routable_provider() {
-        let not_ready = readiness_response(0);
+        let not_ready = readiness_response(true, 0);
         assert_eq!(not_ready.status(), StatusCode::SERVICE_UNAVAILABLE);
 
-        let ready = readiness_response(1);
+        let ready = readiness_response(true, 1);
         assert_eq!(ready.status(), StatusCode::OK);
     }
 }
