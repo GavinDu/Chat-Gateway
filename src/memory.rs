@@ -116,7 +116,7 @@ impl UnifiedMemory {
         let mut tokens = 0;
         let mut windowed = Vec::new();
         for msg in full.iter().rev() {
-            let t = (msg.content.len() as f32 / 4.0) as usize + 8;
+            let t = estimate_tokens(&msg.content);
             if tokens + t > self.max_tokens && !windowed.is_empty() {
                 break;
             }
@@ -328,6 +328,13 @@ fn messages_after_overlap(stored: &[ChatMessage], incoming: &[ChatMessage]) -> V
         }
     }
     incoming.to_vec()
+}
+
+/// Conservative tokenizer-free fallback for context budgeting. Dividing UTF-8
+/// bytes by three is less optimistic than bytes/4 and accounts better for CJK
+/// and emoji; the fixed allowance covers role/message framing.
+fn estimate_tokens(content: &str) -> usize {
+    content.len().saturating_add(2) / 3 + 8
 }
 
 #[cfg(test)]
