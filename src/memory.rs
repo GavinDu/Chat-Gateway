@@ -241,21 +241,30 @@ impl UnifiedMemory {
 
     /// Read a provider-specific remote-thread mapping for one conversation.
     #[allow(dead_code)] // Used by provider adapters as thread handoff is integrated.
-    pub fn get_provider_thread(&self, conversation_id: &str, provider: &str) -> anyhow::Result<Option<ProviderThread>> {
+    pub fn get_provider_thread(
+        &self,
+        conversation_id: &str,
+        provider: &str,
+    ) -> anyhow::Result<Option<ProviderThread>> {
         let connection = self.lock()?;
-        connection.query_row(
-            "SELECT thread_url, synced_through_message_id, model, updated_at
-             FROM provider_threads WHERE conversation_id=?1 AND provider=?2",
-            rusqlite::params![conversation_id, provider],
-            |row| Ok(ProviderThread {
-                conversation_id: conversation_id.to_owned(),
-                provider: provider.to_owned(),
-                thread_url: row.get(0)?,
-                synced_through_message_id: row.get(1)?,
-                model: row.get(2)?,
-                updated_at: row.get(3)?,
-            }),
-        ).optional().map_err(Into::into)
+        connection
+            .query_row(
+                "SELECT thread_url, synced_through_message_id, model, updated_at
+                 FROM provider_threads WHERE conversation_id=?1 AND provider=?2",
+                rusqlite::params![conversation_id, provider],
+                |row| {
+                    Ok(ProviderThread {
+                        conversation_id: conversation_id.to_owned(),
+                        provider: provider.to_owned(),
+                        thread_url: row.get(0)?,
+                        synced_through_message_id: row.get(1)?,
+                        model: row.get(2)?,
+                        updated_at: row.get(3)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
     }
 
     /// Persist a mapping only after the caller has verified a successful send.
@@ -272,8 +281,12 @@ impl UnifiedMemory {
                 model=excluded.model,
                 updated_at=excluded.updated_at",
             rusqlite::params![
-                thread.conversation_id, thread.provider, thread.thread_url,
-                thread.synced_through_message_id, thread.model, thread.updated_at,
+                thread.conversation_id,
+                thread.provider,
+                thread.thread_url,
+                thread.synced_through_message_id,
+                thread.model,
+                thread.updated_at,
             ],
         )?;
         Ok(())
