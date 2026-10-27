@@ -762,10 +762,15 @@ fn schema_v1_database_migrates_provider_thread_map_without_losing_conversations(
         memory.conversation("existing").unwrap().unwrap().messages,
         vec![m("user", "keep me")]
     );
-    assert_eq!(
-        memory.get_provider_thread("existing", "chatgpt").unwrap(),
-        None
-    );
+    let connection = memory.lock().unwrap();
+    let mapped_threads: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM provider_threads WHERE conversation_id=?1",
+            ["existing"],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(mapped_threads, 0);
     let version: i64 = memory
         .lock()
         .unwrap()
