@@ -112,6 +112,8 @@ pub async fn pair(
     let token = random.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
     let token_hash: [u8; 32] = Sha256::digest(token.as_bytes()).into();
     *token_slot = Some(token_hash);
+    // A successful exchange consumes the pairing code permanently.
+    *attempts = MAX_PAIR_ATTEMPTS;
     Json(serde_json::json!({"ok":true,"token":token})).into_response()
 }
 
@@ -136,7 +138,7 @@ fn authenticated_request(app: &crate::AppState, headers: &HeaderMap) -> Result<(
 
     let timestamp = headers.get("x-relay-timestamp").and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<i64>().ok());
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
-    if timestamp.is_none_or(|timestamp| (now - timestamp).abs() > REQUEST_SKEW_SECONDS) {
+    if timestamp.map_or(true, |timestamp| (now - timestamp).abs() > REQUEST_SKEW_SECONDS) {
         return Err(json_error(StatusCode::UNAUTHORIZED, "relay_request_expired", "relay request timestamp is missing or expired"));
     }
     let nonce = headers.get("x-relay-nonce").and_then(|v| v.to_str().ok()).unwrap_or("");
