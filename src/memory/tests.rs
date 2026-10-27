@@ -823,6 +823,9 @@ fn sqlite_checkpoint_is_safe_after_durable_turns_and_can_repeat() {
         .unwrap();
     assert_eq!(
         conversation.messages,
-        vec![m("user", "persist before shutdown"), m("assistant", "persisted")],
+        vec![
+            m("user", "persist before shutdown"),
+            m("assistant", "persisted")
+        ],
     );
 }
