@@ -116,7 +116,7 @@ impl UnifiedMemory {
         let mut tokens = 0;
         let mut windowed = Vec::new();
         for msg in full.iter().rev() {
-            let t = (msg.content.len() as f32 / 4.0) as usize + 8;
+            let t = estimate_tokens(&msg.content);
             if tokens + t > self.max_tokens && !windowed.is_empty() {
                 break;
             }
@@ -238,6 +238,15 @@ impl UnifiedMemory {
             .conversation(cid)?
             .and_then(|conversation| conversation.provider))
     }
+}
+
+/// Conservative tokenizer-free fallback: UTF-8 bytes divided by three is
+/// deliberately less optimistic than the former bytes/4 estimate and keeps
+/// CJK/emoji content from being severely under-counted. The fixed allowance
+/// covers role/message framing. A real provider tokenizer can replace this
+/// fallback when an optional tokenizer feature is enabled.
+fn estimate_tokens(content: &str) -> usize {
+    content.len().saturating_add(2) / 3 + 8
 }
 
 fn messages_after_overlap(stored: &[ChatMessage], incoming: &[ChatMessage]) -> Vec<ChatMessage> {
