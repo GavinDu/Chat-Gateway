@@ -885,3 +885,11 @@ fn provider_thread_mapping_is_provider_scoped_and_survives_restart() {
         "https://claude.ai/chat/thread-b"
     );
 }
+
+#[test]
+fn conservative_token_estimate_counts_unicode_without_underflow() {
+    assert_eq!(estimate_tokens(""), 8);
+    assert!(estimate_tokens("你好世界") >= 12);
+    assert!(estimate_tokens("😀🚀✨") >= 12);
+    assert!(estimate_tokens(&"a".repeat(120)) >= 48);
+}
