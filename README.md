@@ -64,6 +64,8 @@ continue the conversation: context is rebuilt from the unified memory
 store (sliding window, ~8k tokens by default) and the conversation keeps
 affinity to its last provider.
 
+Responses include `X-Gateway-Provider` and `X-Gateway-Model` when the selected values are valid HTTP header values. Usage token counts are estimates (`x_usage_estimated: true`), not provider-billed token counts; streaming responses emit the assistant role in the initial chunk and usage in the final chunk.
+
 ## Architecture
 
 ```
