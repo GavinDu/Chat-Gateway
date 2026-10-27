@@ -779,3 +779,12 @@ fn schema_v1_database_migrates_provider_thread_map_without_losing_conversations(
         .unwrap();
     assert_eq!(version, 2);
 }
+
+#[test]
+fn sqlite_checkpoint_is_safe_after_memory_operations() {
+    let fixture = Fixture::new();
+    let memory = fixture.open();
+    store(&memory, "checkpoint-test", "hello");
+    memory.checkpoint().unwrap();
+    assert!(memory.has_history("checkpoint-test").unwrap());
+}
