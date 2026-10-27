@@ -1124,7 +1124,6 @@ fn context_budget_estimate_handles_multibyte_text_conservatively() {
     );
 }
 
-
 #[test]
 fn rolling_summary_persists_and_context_keeps_recent_messages() {
     let fixture = Fixture::new();
@@ -1176,7 +1175,6 @@ fn rolling_summary_persists_and_context_keeps_recent_messages() {
         "summary metadata should survive database restart"
     );
 }
-
 
 #[test]
 fn schema_v4_migration_adds_summary_table_without_losing_tenant_data() {
