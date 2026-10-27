@@ -1,6 +1,6 @@
 use axum::{
     body::Body,
-    extract::{DefaultBodyLimit, Extension, Path, State},
+    extract::{DefaultBodyLimit, Extension, Path, Query, State},
     http::HeaderMap,
     http::{Request, StatusCode},
     middleware::{self, Next},
@@ -381,6 +381,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/metrics", get(metrics_endpoint))
         .route("/v1/models", get(models))
         .route("/v1/chat/completions", post(chat_completions))
+        .route("/v1/conversations", get(list_conversations))
         .route(
             "/v1/conversations/:conversation_id",
             get(export_conversation).delete(delete_conversation),
@@ -1257,6 +1258,37 @@ fn export_conversation_response(memory: &UnifiedMemory, conversation_id: &str) -
                 "server_error",
                 "memory_persistence_failed",
                 "conversation could not be exported safely",
+            )
+        }
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ConversationListQuery {
+    limit: Option<usize>,
+    offset: Option<usize>,
+}
+
+async fn list_conversations(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<ConversationListQuery>,
+) -> Response {
+    let limit = query.limit.unwrap_or(50).clamp(1, 100);
+    let offset = query.offset.unwrap_or(0);
+    match state.memory.list_conversations(limit, offset) {
+        Ok(conversations) => Json(serde_json::json!({
+            "data": conversations,
+            "limit": limit,
+            "offset": offset,
+        }))
+        .into_response(),
+        Err(_error) => {
+            tracing::error!("conversation list failed");
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                "memory_persistence_failed",
+                "conversations could not be listed safely",
             )
         }
     }
