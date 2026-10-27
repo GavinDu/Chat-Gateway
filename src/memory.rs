@@ -1,7 +1,7 @@
 #[path = "memory/sqlite.rs"]
 mod sqlite;
 
-use rusqlite::{Connection, TransactionBehavior};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use std::{
     path::PathBuf,
