@@ -606,6 +606,7 @@ dependencies = [
  "dashmap",
  "obscura",
  "regex",
+ "ring",
  "rusqlite",
  "serde",
  "serde_json",

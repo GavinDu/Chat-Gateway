@@ -1,5 +1,9 @@
 use anyhow::Result;
 use obscura_core::{Browser, Page};
+use ring::{
+    aead,
+    rand::{SecureRandom, SystemRandom},
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -126,9 +130,197 @@ impl SessionStore for FileSessionStore {
     }
 }
 
+/// Encrypted on-disk session storage. Select it at runtime with
+/// CHAT_GATEWAY_SESSION_STORE=vault and provide a 32-byte hex key through
+/// CHAT_GATEWAY_VAULT_KEY. Missing or invalid keys fail closed.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct VaultSessionStore;
+
+#[async_trait::async_trait(?Send)]
+impl SessionStore for VaultSessionStore {
+    fn load(&self, provider: &str) -> Result<Option<SessionFile>> {
+        let key = vault_key_from_env()?;
+        let vault_path = session_vault_path(provider)?;
+        match std::fs::read(&vault_path) {
+            Ok(bytes) => {
+                let session = decrypt_session_snapshot(&bytes, provider, &key)?;
+                remove_legacy_session_snapshot(provider)?;
+                return Ok(Some(session));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+
+        // One-time migration: only remove the legacy plaintext snapshot after
+        // the encrypted replacement has been durably written.
+        let legacy_path = session_path(provider)?;
+        let legacy = match std::fs::read(&legacy_path) {
+            Ok(bytes) => serde_json::from_slice::<SessionFile>(&bytes)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        ensure_private_session_dir_sync(Path::new("sessions"))?;
+        let encrypted = encrypt_session_snapshot(&legacy, provider, &key)?;
+        write_session_file_atomically(Path::new(&vault_path), &encrypted)?;
+        std::fs::remove_file(&legacy_path)?;
+        record_session_write(provider);
+        tracing::info!(provider, "migrated plaintext session into encrypted vault");
+        Ok(Some(legacy))
+    }
+
+    async fn save_if_changed(&self, browser: &Browser, page: &Page, provider: &str) -> Result<()> {
+        let key = vault_key_from_env()?;
+        let file = capture_session(browser, page, provider).await?;
+        let current_hash = session_state_hash(&file)?;
+        let destination = session_vault_path(provider)?;
+        let previous_hash = match std::fs::read(&destination) {
+            Ok(bytes) => Some(session_state_hash(&decrypt_session_snapshot(
+                &bytes, provider, &key,
+            )?)?),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
+
+        if previous_hash.as_deref() == Some(current_hash.as_str()) {
+            remove_legacy_session_snapshot(provider)?;
+            return Ok(());
+        }
+        if session_write_is_rate_limited(provider, Instant::now()) {
+            tracing::debug!(
+                provider,
+                "encrypted session changed but snapshot write is rate-limited"
+            );
+            return Ok(());
+        }
+        ensure_private_session_dir(Path::new("sessions")).await?;
+        let encrypted = encrypt_session_snapshot(&file, provider, &key)?;
+        write_session_file_atomically(Path::new(&destination), &encrypted)?;
+        // Do not leave a plaintext copy behind once encrypted persistence works.
+        remove_legacy_session_snapshot(provider)?;
+        record_session_write(provider);
+        tracing::info!(
+            provider,
+            cookies = file.cookies.len(),
+            "encrypted session saved"
+        );
+        Ok(())
+    }
+}
+
+fn session_vault_path(provider: &str) -> Result<String> {
+    let legacy = session_path(provider)?;
+    Ok(Path::new(&legacy)
+        .with_extension("vault")
+        .to_string_lossy()
+        .into_owned())
+}
+
+fn remove_legacy_session_snapshot(provider: &str) -> Result<()> {
+    let legacy_path = session_path(provider)?;
+    match std::fs::remove_file(&legacy_path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    Ok(())
+}
+
+fn vault_key_from_env() -> Result<[u8; 32]> {
+    let encoded = std::env::var("CHAT_GATEWAY_VAULT_KEY").map_err(|_| {
+        anyhow::anyhow!("CHAT_GATEWAY_VAULT_KEY is required for encrypted session storage")
+    })?;
+    if encoded.len() != 64 || !encoded.as_bytes().iter().all(u8::is_ascii_hexdigit) {
+        anyhow::bail!("CHAT_GATEWAY_VAULT_KEY must be exactly 64 hexadecimal characters");
+    }
+    let mut key = [0_u8; 32];
+    for (index, byte) in key.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&encoded[index * 2..index * 2 + 2], 16)
+            .map_err(|_| anyhow::anyhow!("CHAT_GATEWAY_VAULT_KEY contains invalid hexadecimal"))?;
+    }
+    Ok(key)
+}
+
+fn vault_aad(provider: &str) -> String {
+    format!("chat-gateway/session-vault/v1/{provider}")
+}
+
+fn encrypt_session_snapshot(
+    file: &SessionFile,
+    provider: &str,
+    key_bytes: &[u8; 32],
+) -> Result<Vec<u8>> {
+    const MAGIC: &[u8; 6] = b"CGSV1\0";
+    let mut nonce_bytes = [0_u8; 12];
+    SystemRandom::new()
+        .fill(&mut nonce_bytes)
+        .map_err(|_| anyhow::anyhow!("could not generate session-vault nonce"))?;
+    let unbound = aead::UnboundKey::new(&aead::AES_256_GCM, key_bytes)
+        .map_err(|_| anyhow::anyhow!("invalid AES-256-GCM vault key"))?;
+    let key = aead::LessSafeKey::new(unbound);
+    let mut ciphertext = serde_json::to_vec(file)?;
+    key.seal_in_place_append_tag(
+        aead::Nonce::assume_unique_for_key(nonce_bytes),
+        aead::Aad::from(vault_aad(provider).as_bytes()),
+        &mut ciphertext,
+    )
+    .map_err(|_| anyhow::anyhow!("could not encrypt session snapshot"))?;
+    let mut output = Vec::with_capacity(MAGIC.len() + nonce_bytes.len() + ciphertext.len());
+    output.extend_from_slice(MAGIC);
+    output.extend_from_slice(&nonce_bytes);
+    output.extend_from_slice(&ciphertext);
+    Ok(output)
+}
+
+fn decrypt_session_snapshot(
+    bytes: &[u8],
+    provider: &str,
+    key_bytes: &[u8; 32],
+) -> Result<SessionFile> {
+    const MAGIC: &[u8; 6] = b"CGSV1\0";
+    const NONCE_LEN: usize = 12;
+    const TAG_LEN: usize = 16;
+    if bytes.len() < MAGIC.len() + NONCE_LEN + TAG_LEN || !bytes.starts_with(MAGIC) {
+        anyhow::bail!("invalid encrypted session-vault envelope");
+    }
+    let nonce_start = MAGIC.len();
+    let nonce_end = nonce_start + NONCE_LEN;
+    let nonce_bytes: [u8; NONCE_LEN] = bytes[nonce_start..nonce_end]
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("invalid session-vault nonce"))?;
+    let unbound = aead::UnboundKey::new(&aead::AES_256_GCM, key_bytes)
+        .map_err(|_| anyhow::anyhow!("invalid AES-256-GCM vault key"))?;
+    let key = aead::LessSafeKey::new(unbound);
+    let mut ciphertext = bytes[nonce_end..].to_vec();
+    let plaintext = key
+        .open_in_place(
+            aead::Nonce::assume_unique_for_key(nonce_bytes),
+            aead::Aad::from(vault_aad(provider).as_bytes()),
+            &mut ciphertext,
+        )
+        .map_err(|_| anyhow::anyhow!("session-vault authentication failed"))?;
+    Ok(serde_json::from_slice(plaintext)?)
+}
+
+fn ensure_private_session_dir_sync(path: &Path) -> Result<()> {
+    std::fs::create_dir_all(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
 /// Load a saved session file, if one exists, using the default file store.
 pub fn load_session_file(provider: &str) -> Result<Option<SessionFile>> {
-    FileSessionStore.load(provider)
+    if matches!(
+        std::env::var("CHAT_GATEWAY_SESSION_STORE").as_deref(),
+        Ok("vault")
+    ) {
+        VaultSessionStore.load(provider)
+    } else {
+        FileSessionStore.load(provider)
+    }
 }
 
 fn load_session_file_from_path(path: &Path) -> Result<Option<SessionFile>> {
@@ -276,9 +468,18 @@ pub async fn save_session(browser: &Browser, page: &Page, provider: &str) -> Res
 /// Writes are atomic and capped at one per provider per minute. A skipped
 /// changed snapshot will be retried after the interval on the next successful send.
 pub async fn save_session_if_changed(browser: &Browser, page: &Page, provider: &str) -> Result<()> {
-    FileSessionStore
-        .save_if_changed(browser, page, provider)
-        .await
+    if matches!(
+        std::env::var("CHAT_GATEWAY_SESSION_STORE").as_deref(),
+        Ok("vault")
+    ) {
+        VaultSessionStore
+            .save_if_changed(browser, page, provider)
+            .await
+    } else {
+        FileSessionStore
+            .save_if_changed(browser, page, provider)
+            .await
+    }
 }
 
 async fn save_session_if_changed_file(
@@ -785,5 +986,56 @@ mod atomic_session_write_tests {
         assert!(write_session_file_atomically(&destination, b"secret").is_err());
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod vault_tests {
+    use super::*;
+
+    fn sample_session() -> SessionFile {
+        SessionFile {
+            local_storage: HashMap::from([(
+                "access_token".to_owned(),
+                "sensitive-value".to_owned(),
+            )]),
+            cookies: vec![Cookie {
+                name: "session".to_owned(),
+                value: "cookie-secret".to_owned(),
+                domain: "example.com".to_owned(),
+                path: "/".to_owned(),
+                secure: true,
+                http_only: true,
+            }],
+            ts: "2026-10-27T00:00:00Z".to_owned(),
+        }
+    }
+
+    #[test]
+    fn encrypted_vault_round_trips_without_storing_plaintext() {
+        let session = sample_session();
+        let key = [0x5a; 32];
+        let encrypted = encrypt_session_snapshot(&session, "provider-a", &key).unwrap();
+        assert!(encrypted.starts_with(b"CGSV1\0"));
+        assert!(!encrypted
+            .windows(b"sensitive-value".len())
+            .any(|w| w == b"sensitive-value"));
+        let restored = decrypt_session_snapshot(&encrypted, "provider-a", &key).unwrap();
+        assert_eq!(
+            restored.local_storage.get("access_token").unwrap(),
+            "sensitive-value"
+        );
+        assert_eq!(restored.cookies[0].value, "cookie-secret");
+    }
+
+    #[test]
+    fn encrypted_vault_rejects_tampering_and_wrong_provider() {
+        let key = [0x21; 32];
+        let encrypted = encrypt_session_snapshot(&sample_session(), "provider-a", &key).unwrap();
+        assert!(decrypt_session_snapshot(&encrypted, "provider-b", &key).is_err());
+        let mut tampered = encrypted;
+        let last = tampered.len() - 1;
+        tampered[last] ^= 0x80;
+        assert!(decrypt_session_snapshot(&tampered, "provider-a", &key).is_err());
     }
 }

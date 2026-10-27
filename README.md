@@ -164,6 +164,26 @@ reload-equivalent navigation. Note the cookie store is shared by the
 one embedded browser (all providers), which matches how the pages are
 warmed.
 
+### Encrypted session vault (opt-in)
+
+For encrypted persistence, set `CHAT_GATEWAY_SESSION_STORE=vault` and
+provide `CHAT_GATEWAY_VAULT_KEY` as exactly 64 hexadecimal characters
+(32 bytes). Supply the key through your deployment's secret manager; do not
+commit it, put it in logs, or pass it as a command-line argument. Vault files
+are stored as `sessions/<provider>.vault` and use AES-256-GCM with a fresh
+random nonce and provider-bound authenticated data. Writes use the same
+atomic, private-file handling as ordinary session snapshots.
+
+When vault mode is enabled, a missing/invalid key, a tampered vault, or a
+provider mismatch fails closed. On first load, an existing plaintext
+`sessions/<provider>.json` is migrated to an encrypted vault; the plaintext
+file is removed only after the encrypted file is written successfully. Keep
+the key backed up securely: vault files cannot be recovered without it.
+Key rotation is not automatic; keep the existing key available until the
+vault contents have been deliberately re-encrypted with the replacement key.
+Without `CHAT_GATEWAY_SESSION_STORE=vault`, legacy plaintext storage remains
+enabled for compatibility.
+
 ## Providers
 
 All 8 adapters share one interaction core (`providers/common.rs`):
