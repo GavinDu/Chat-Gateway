@@ -84,6 +84,8 @@ struct AdapterDiagnostic {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct AuthKeyContext {
+    /// Stable configured key name; never the raw bearer secret.
+    key_id: String,
     provider_allowlist: Option<Vec<String>>,
 }
 
@@ -1221,6 +1223,7 @@ fn authorize_api_request(
         return Err(AuthFailure::InsufficientScope);
     }
     Ok(Some(AuthKeyContext {
+        key_id: key.name.clone(),
         provider_allowlist: key.provider_allowlist.clone(),
     }))
 }
@@ -1641,12 +1644,14 @@ fn conversation_context_read_error(conversation_id: Option<&str>) -> Response {
 
 fn read_conversation_context(
     memory: &UnifiedMemory,
+    owner_key_id: &str,
     conversation_id: Option<&str>,
     messages: &[ChatMessage],
 ) -> anyhow::Result<(String, Vec<ChatMessage>, bool)> {
-    let (prompt, windowed) = memory.build_context(conversation_id, messages)?;
+    let (prompt, windowed) =
+        memory.build_context_for_owner(owner_key_id, conversation_id, messages)?;
     let has_history = match conversation_id {
-        Some(id) => memory.has_history(id)?,
+        Some(id) => memory.has_history_for_owner(owner_key_id, id)?,
         None => false,
     };
     Ok((prompt, windowed, has_history))
@@ -1699,6 +1704,12 @@ async fn chat_completions(
         Err(response) => return response,
     };
 
+    let owner_key_id = auth_context
+        .as_ref()
+        .map(|Extension(context)| context.key_id.as_str())
+        .unwrap_or("local")
+        .to_owned();
+
     let conversation_id = match headers.get("X-Conversation-Id") {
         None => None,
         Some(value) => {
@@ -1728,7 +1739,12 @@ async fn chat_completions(
     // Read all context-dependent memory before any provider request. A read
     // failure must not degrade into an empty prompt or an unauthenticated turn.
     let (context_prompt, windowed, has_history) =
-        match read_conversation_context(&state.memory, conversation_id.as_deref(), &req.messages) {
+        match read_conversation_context(
+            &state.memory,
+            &owner_key_id,
+            conversation_id.as_deref(),
+            &req.messages,
+        ) {
             Ok(context) => context,
             Err(_error) => {
                 return conversation_context_read_error(conversation_id.as_deref());
@@ -1744,7 +1760,8 @@ async fn chat_completions(
         );
     }
 
-    let mut candidates = match state.router.resolve(
+    let mut candidates = match state.router.resolve_for_owner(
+        &owner_key_id,
         &req.model,
         conversation_id.as_deref(),
         &state.memory,
