@@ -2998,7 +2998,6 @@ mod usage_estimate_tests {
     }
 }
 
-
 #[cfg(test)]
 mod openai_compatibility_metadata_tests {
     use super::{add_gateway_headers, estimate_tokens};
