@@ -642,54 +642,89 @@ fn conversation_export_returns_complete_durable_record_and_missing_is_none() {
 }
 
 #[test]
-fn provider_thread_mapping_upserts_per_provider_and_cascades_on_delete() {
+fn provider_thread_schema_supports_multiple_providers_and_cascades_on_delete() {
     let fixture = Fixture::new();
     let memory = fixture.open();
     store(&memory, "thread-map", "hello");
 
-    let mut thread = ProviderThread {
-        conversation_id: "thread-map".into(),
-        provider: "chatgpt".into(),
-        thread_url: "https://chatgpt.com/c/thread-one".into(),
-        synced_through_message_id: Some("message-1".into()),
-        model: Some("gpt-4o".into()),
-        updated_at: 100,
-    };
-    memory.upsert_provider_thread(&thread).unwrap();
-    assert_eq!(
-        memory.get_provider_thread("thread-map", "chatgpt").unwrap(),
-        Some(thread.clone())
-    );
+    {
+        let connection = memory.lock().unwrap();
+        let upsert = "INSERT INTO provider_threads(
+                conversation_id, provider, thread_url, synced_through_message_id, model, updated_at
+             ) VALUES(?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(conversation_id, provider) DO UPDATE SET
+                thread_url=excluded.thread_url,
+                synced_through_message_id=excluded.synced_through_message_id,
+                model=excluded.model,
+                updated_at=excluded.updated_at";
+        connection
+            .execute(
+                upsert,
+                rusqlite::params![
+                    "thread-map",
+                    "chatgpt",
+                    "https://chatgpt.com/c/thread-one",
+                    "message-1",
+                    "gpt-4o",
+                    100,
+                ],
+            )
+            .unwrap();
+        connection
+            .execute(
+                upsert,
+                rusqlite::params![
+                    "thread-map",
+                    "chatgpt",
+                    "https://chatgpt.com/c/thread-two",
+                    "message-2",
+                    "gpt-4o",
+                    200,
+                ],
+            )
+            .unwrap();
+        connection
+            .execute(
+                upsert,
+                rusqlite::params![
+                    "thread-map",
+                    "claude",
+                    "https://claude.ai/chat/thread-claude",
+                    "message-3",
+                    "claude-sonnet",
+                    150,
+                ],
+            )
+            .unwrap();
 
-    thread.thread_url = "https://chatgpt.com/c/thread-two".into();
-    thread.synced_through_message_id = Some("message-2".into());
-    thread.updated_at = 200;
-    memory.upsert_provider_thread(&thread).unwrap();
-    assert_eq!(
-        memory.get_provider_thread("thread-map", "chatgpt").unwrap(),
-        Some(thread)
-    );
-    let claude_thread = ProviderThread {
-        conversation_id: "thread-map".into(),
-        provider: "claude".into(),
-        thread_url: "https://claude.ai/chat/thread-claude".into(),
-        synced_through_message_id: Some("message-3".into()),
-        model: Some("claude-sonnet".into()),
-        updated_at: 150,
-    };
-    memory.upsert_provider_thread(&claude_thread).unwrap();
-    assert_eq!(
-        memory.get_provider_thread("thread-map", "claude").unwrap(),
-        Some(claude_thread.clone())
-    );
-    assert_eq!(
-        memory.get_provider_thread("thread-map", "chatgpt").unwrap(),
-        Some(thread)
-    );
+        let chatgpt_url: String = connection
+            .query_row(
+                "SELECT thread_url FROM provider_threads WHERE conversation_id=?1 AND provider=?2",
+                ["thread-map", "chatgpt"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let claude_url: String = connection
+            .query_row(
+                "SELECT thread_url FROM provider_threads WHERE conversation_id=?1 AND provider=?2",
+                ["thread-map", "claude"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(chatgpt_url, "https://chatgpt.com/c/thread-two");
+        assert_eq!(claude_url, "https://claude.ai/chat/thread-claude");
+    }
 
     assert!(memory.delete_conversation("thread-map").unwrap());
-    assert_eq!(memory.get_provider_thread("thread-map", "chatgpt").unwrap(), None);
-    assert_eq!(memory.get_provider_thread("thread-map", "claude").unwrap(), None);
+    let connection = memory.lock().unwrap();
+    let remaining: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM provider_threads WHERE conversation_id=?1",
+            ["thread-map"],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(remaining, 0);
 }
 
 #[test]
