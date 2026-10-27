@@ -423,8 +423,18 @@ pub async fn run_send(
             1,
             poll_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
         );
+        let lower_url = snapshot.url.to_ascii_lowercase();
+        let url_challenge = [
+            "captcha",
+            "challenge",
+            "checkpoint",
+            "verify-human",
+            "verify_you_are_human",
+        ]
+        .iter()
+        .any(|marker| lower_url.contains(marker));
 
-        if snapshot.challenge {
+        if snapshot.challenge || url_challenge {
             crate::provider_guard::disable_provider(
                 adapter.name(),
                 "challenge page detected; manual review required",
