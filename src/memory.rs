@@ -113,23 +113,74 @@ impl UnifiedMemory {
             None => Vec::new(),
         };
         full.extend(messages_after_overlap(&full, new_messages));
+
+        // A persisted summary covers a prefix of the durable transcript. Keep
+        // the suffix verbatim, and reserve budget for the summary so recent
+        // turns are not silently discarded to fit old history.
+        let summary = match conversation_id {
+            Some(id) => self.rolling_summary(id)?,
+            None => None,
+        };
+        let mut summary_message = None;
+        if let Some((text, covered)) = summary {
+            if covered > 0 && covered <= full.len() {
+                full.drain(..covered);
+                summary_message = Some(ChatMessage {
+                    role: "system".to_string(),
+                    content: format!("Conversation summary of earlier turns: {text}"),
+                });
+            }
+        }
+        let summary_tokens = summary_message
+            .as_ref()
+            .map(|message| estimate_message_tokens(&message.content) + 8)
+            .unwrap_or(0);
+        let include_summary = summary_message.is_some() && summary_tokens < self.max_tokens;
+        let message_budget = if include_summary {
+            self.max_tokens.saturating_sub(summary_tokens)
+        } else {
+            self.max_tokens
+        };
+
         let mut tokens = 0;
         let mut windowed = Vec::new();
         for msg in full.iter().rev() {
             let t = estimate_message_tokens(&msg.content) + 8;
-            if tokens + t > self.max_tokens && !windowed.is_empty() {
+            if tokens + t > message_budget && !windowed.is_empty() {
                 break;
             }
             tokens += t;
             windowed.push(msg.clone());
         }
         windowed.reverse();
+        if include_summary {
+            if let Some(summary) = summary_message {
+                windowed.insert(0, summary);
+            }
+        }
         let prompt = windowed
             .iter()
             .map(|message| format!("{}: {}", message.role, message.content))
             .collect::<Vec<_>>()
             .join("\n");
         Ok((prompt, windowed))
+    }
+
+    fn rolling_summary(&self, conversation_id: &str) -> anyhow::Result<Option<(String, usize)>> {
+        let connection = self.lock()?;
+        connection
+            .query_row(
+                "SELECT summary, covered_through_position FROM conversation_summaries WHERE conversation_id=?1",
+                [conversation_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?.max(0) as usize,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(Into::into)
     }
 
     pub fn store_turn(
@@ -167,6 +218,32 @@ impl UnifiedMemory {
         conversation.provider = Some(provider);
         conversation.tab_id = Some(tab_id);
         sqlite::append(&tx, &conversation, first)?;
+
+        // Keep a bounded extractive summary once the durable transcript grows.
+        // This operation is deterministic and local: a failed summary write
+        // rolls back the turn rather than leaving summary metadata inconsistent.
+        const RECENT_MESSAGES_TO_KEEP: usize = 8;
+        const SUMMARY_START_THRESHOLD: usize = 16;
+        if conversation.messages.len() >= SUMMARY_START_THRESHOLD {
+            let covered = conversation.messages.len() - RECENT_MESSAGES_TO_KEEP;
+            let summary = extractive_rolling_summary(&conversation.messages[..covered], 1200);
+            if !summary.is_empty() {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs()
+                    .min(i64::MAX as u64) as i64;
+                tx.execute(
+                    "INSERT INTO conversation_summaries(conversation_id,summary,covered_through_position,updated_at)
+                     VALUES(?1,?2,?3,?4)
+                     ON CONFLICT(conversation_id) DO UPDATE SET
+                        summary=excluded.summary,
+                        covered_through_position=excluded.covered_through_position,
+                        updated_at=excluded.updated_at",
+                    rusqlite::params![conversation.id, summary, covered as i64, now],
+                )?;
+            }
+        }
         tx.commit()
             .map_err(|error| anyhow::anyhow!("committing conversation turn: {error}"))
     }
@@ -317,6 +394,30 @@ impl UnifiedMemory {
         )?;
         Ok(())
     }
+}
+
+/// Build a bounded, deterministic extractive summary from old messages.
+/// This avoids an external model call in the persistence transaction; a future
+/// model-backed summarizer can replace this behind the same failure-safe seam.
+fn extractive_rolling_summary(messages: &[ChatMessage], max_chars: usize) -> String {
+    let mut lines = Vec::new();
+    let mut used = 0usize;
+    for message in messages.iter().rev() {
+        let normalized = message.content.split_whitespace().collect::<Vec<_>>().join(" ");
+        if normalized.is_empty() {
+            continue;
+        }
+        let excerpt = normalized.chars().take(180).collect::<String>();
+        let line = format!("{}: {}", message.role, excerpt);
+        let cost = line.chars().count() + 1;
+        if used + cost > max_chars && !lines.is_empty() {
+            break;
+        }
+        used += cost;
+        lines.push(line);
+    }
+    lines.reverse();
+    lines.join("\n")
 }
 
 /// Conservative, dependency-free token estimate for context budgeting.
