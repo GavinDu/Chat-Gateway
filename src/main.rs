@@ -1059,7 +1059,10 @@ async fn metrics_endpoint(State(state): State<Arc<AppState>>) -> impl IntoRespon
         axum::http::header::CONTENT_TYPE,
         axum::http::HeaderValue::from_static("text/plain; version=0.0.4; charset=utf-8"),
     );
-    (headers, metrics::render_with_provider_states(&provider_states))
+    (
+        headers,
+        metrics::render_with_provider_states(&provider_states),
+    )
 }
 
 /// Add a gateway-generated request ID to every response, including security
