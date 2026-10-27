@@ -35,7 +35,16 @@
     "https://mistral.ai/*",
     "https://*.mistral.ai/*",
     "https://perplexity.ai/*",
-    "https://*.perplexity.ai/*"
+    "https://*.perplexity.ai/*",
+    "https://*.googleusercontent.com/*",
+    "https://fbcdn.net/*",
+    "https://*.fbcdn.net/*",
+    "https://twitter.com/*",
+    "https://*.twitter.com/*",
+    "https://x.ai/*",
+    "https://*.x.ai/*",
+    "https://aliyun.com/*",
+    "https://*.aliyun.com/*"
   ],
   "action": {
     "default_popup": "popup.html"
