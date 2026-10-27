@@ -1751,7 +1751,14 @@ fn record_attempt_error(
     let provider_work_ms = provider_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
     let total_ms = request_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
     provider_state::record_error(provider, error);
-    metrics::record_provider_timings(provider, "error", queue_ms, None, provider_work_ms, total_ms);
+    metrics::record_provider_timings(
+        provider,
+        "error",
+        queue_ms,
+        None,
+        provider_work_ms,
+        total_ms,
+    );
 }
 
 async fn first_event(
@@ -2011,13 +2018,25 @@ async fn chat_completions(
                 FirstEvent::Chunk(chunk) => chunk,
                 FirstEvent::EmptyCompletion => {
                     let error = "provider completed without output before stream started";
-                    record_attempt_error(&provider_name, error, queue_ms, provider_started, request_started);
+                    record_attempt_error(
+                        &provider_name,
+                        error,
+                        queue_ms,
+                        provider_started,
+                        request_started,
+                    );
                     last_err = Some(error.to_string());
                     continue;
                 }
                 FirstEvent::Error(error) => {
                     let message = error.to_string();
-                    record_attempt_error(&provider_name, &message, queue_ms, provider_started, request_started);
+                    record_attempt_error(
+                        &provider_name,
+                        &message,
+                        queue_ms,
+                        provider_started,
+                        request_started,
+                    );
                     last_err = Some(message);
                     continue;
                 }
@@ -2029,10 +2048,19 @@ async fn chat_completions(
                 }
                 FirstEvent::Timeout => {
                     let error = "provider timed out before first output";
-                    let provider_work_ms = provider_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
-                    let total_ms = request_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+                    let provider_work_ms =
+                        provider_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+                    let total_ms =
+                        request_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
                     provider_state::record_error(&provider_name, error);
-                    metrics::record_provider_timings(&provider_name, "error", queue_ms, None, provider_work_ms, total_ms);
+                    metrics::record_provider_timings(
+                        &provider_name,
+                        "error",
+                        queue_ms,
+                        None,
+                        provider_work_ms,
+                        total_ms,
+                    );
                     last_err = Some(error.to_string());
                     continue;
                 }
@@ -3714,7 +3742,6 @@ mod openai_compatibility_metadata_tests {
     }
 }
 
-
 #[cfg(test)]
 mod first_event_tests {
     use super::{first_event, record_attempt_error, FirstEvent};
@@ -3733,7 +3760,13 @@ mod first_event_tests {
         let FirstEvent::Error(error) = event else {
             panic!("expected first-event error");
         };
-        record_attempt_error(provider, &error.to_string(), 0, Instant::now(), Instant::now());
+        record_attempt_error(
+            provider,
+            &error.to_string(),
+            0,
+            Instant::now(),
+            Instant::now(),
+        );
 
         assert_eq!(crate::provider_state::status(provider).state, "needs_login");
         let metrics = crate::metrics::render_with_provider_states(&[]);
