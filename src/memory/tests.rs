@@ -640,3 +640,85 @@ fn conversation_export_returns_complete_durable_record_and_missing_is_none() {
     );
     assert_eq!(memory.export_conversation("missing-export").unwrap(), None);
 }
+
+#[test]
+fn provider_thread_mapping_upserts_per_provider_and_cascades_on_delete() {
+    let fixture = Fixture::new();
+    let memory = fixture.open();
+    store(&memory, "thread-map", "hello");
+
+    let mut thread = ProviderThread {
+        conversation_id: "thread-map".into(),
+        provider: "chatgpt".into(),
+        thread_url: "https://chatgpt.com/c/thread-one".into(),
+        synced_through_message_id: Some("message-1".into()),
+        model: Some("gpt-4o".into()),
+        updated_at: 100,
+    };
+    memory.upsert_provider_thread(&thread).unwrap();
+    assert_eq!(
+        memory.get_provider_thread("thread-map", "chatgpt").unwrap(),
+        Some(thread.clone())
+    );
+
+    thread.thread_url = "https://chatgpt.com/c/thread-two".into();
+    thread.synced_through_message_id = Some("message-2".into());
+    thread.updated_at = 200;
+    memory.upsert_provider_thread(&thread).unwrap();
+    assert_eq!(
+        memory.get_provider_thread("thread-map", "chatgpt").unwrap(),
+        Some(thread)
+    );
+    assert_eq!(memory.get_provider_thread("thread-map", "claude").unwrap(), None);
+
+    assert!(memory.delete_conversation("thread-map").unwrap());
+    assert_eq!(memory.get_provider_thread("thread-map", "chatgpt").unwrap(), None);
+}
+
+#[test]
+fn schema_v1_database_migrates_provider_thread_map_without_losing_conversations() {
+    let fixture = Fixture::new();
+    {
+        let connection = Connection::open(fixture.db()).unwrap();
+        connection
+            .execute_batch(
+                "PRAGMA foreign_keys=ON;
+                 CREATE TABLE conversations (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    provider TEXT,
+                    tab_id TEXT
+                 );
+                 CREATE TABLE messages (
+                    conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+                    position INTEGER NOT NULL CHECK(position >= 0),
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    PRIMARY KEY(conversation_id, position)
+                 );
+                 CREATE TABLE metadata (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL);
+                 INSERT INTO conversations(id,provider,tab_id) VALUES('existing','chatgpt','tab-existing');
+                 INSERT INTO messages(conversation_id,position,role,content) VALUES('existing',0,'user','keep me');
+                 INSERT INTO metadata(key,value) VALUES('legacy_import_complete','1');
+                 PRAGMA application_id=1129795405;
+                 PRAGMA user_version=1;",
+            )
+            .unwrap();
+    }
+
+    let memory = open(&fixture.db(), None).unwrap();
+    assert_eq!(
+        memory.conversation("existing").unwrap().unwrap().messages,
+        vec![m("user", "keep me")]
+    );
+    assert_eq!(
+        memory.get_provider_thread("existing", "chatgpt").unwrap(),
+        None
+    );
+    let version: i64 = memory
+        .lock()
+        .unwrap()
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, 2);
+}
+
