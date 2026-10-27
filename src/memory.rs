@@ -124,6 +124,7 @@ impl UnifiedMemory {
         Ok(conversation)
     }
 
+    #[allow(dead_code)]
     pub fn build_context(
         &self,
         conversation_id: Option<&str>,
@@ -165,6 +166,7 @@ impl UnifiedMemory {
         Ok((prompt, windowed))
     }
 
+    #[allow(dead_code)]
     pub fn store_turn(
         &self,
         conversation_id: String,
@@ -231,6 +233,7 @@ impl UnifiedMemory {
     /// Export one complete conversation without exposing database internals.
     /// Callers must apply authorization before returning this record to clients.
     /// Export one complete conversation for the legacy local tenant.
+    #[allow(dead_code)]
     pub fn export_conversation(
         &self,
         conversation_id: &str,
@@ -247,6 +250,7 @@ impl UnifiedMemory {
     }
 
     /// List conversation metadata for the legacy local tenant.
+    #[allow(dead_code)]
     pub fn list_conversations(
         &self,
         limit: usize,
@@ -305,6 +309,7 @@ impl UnifiedMemory {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub fn delete_conversation(&self, conversation_id: &str) -> anyhow::Result<bool> {
         self.delete_conversation_for_owner("local", conversation_id)
     }
@@ -359,6 +364,7 @@ impl UnifiedMemory {
             .and_then(|conversation| conversation.tab_id))
     }
 
+    #[allow(dead_code)]
     pub fn get_provider(&self, cid: &str) -> anyhow::Result<Option<String>> {
         self.get_provider_for_owner("local", cid)
     }
@@ -373,6 +379,7 @@ impl UnifiedMemory {
             .and_then(|conversation| conversation.provider))
     }
 
+    #[allow(dead_code)]
     pub fn get_provider_thread(
         &self,
         conversation_id: &str,
@@ -410,6 +417,7 @@ impl UnifiedMemory {
             .map_err(Into::into)
     }
 
+    #[allow(dead_code)]
     pub fn upsert_provider_thread(&self, thread: &ProviderThread) -> anyhow::Result<()> {
         self.upsert_provider_thread_for_owner("local", thread)
     }
