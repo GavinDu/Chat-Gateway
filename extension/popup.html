@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chat Gateway Relay</title>
+  <style>
+    body { font: 14px system-ui, sans-serif; width: 320px; margin: 0; padding: 16px; color: #202124; }
+    h1 { font-size: 17px; margin: 0 0 12px; }
+    label { display: block; margin: 10px 0 4px; font-weight: 600; }
+    input, select, button { box-sizing: border-box; width: 100%; padding: 8px; font: inherit; }
+    button { margin-top: 8px; cursor: pointer; }
+    #status { white-space: pre-wrap; overflow-wrap: anywhere; margin-top: 12px; color: #444; }
+    .hint { color: #666; font-size: 12px; line-height: 1.4; }
+  </style>
+</head>
+<body>
+  <h1>Chat Gateway Browser Relay</h1>
+  <p class="hint">Use only on a provider tab you intentionally logged into. The extension never reads passwords or page text.</p>
+  <label for="port">Gateway port</label>
+  <input id="port" type="number" min="1" max="65535" value="8080">
+  <label for="code">One-time pairing code</label>
+  <input id="code" inputmode="numeric" autocomplete="off" maxlength="6" placeholder="Shown once by gateway">
+  <button id="pair">Pair with local gateway</button>
+  <label for="provider">Provider for this tab</label>
+  <select id="provider">
+    <option value="chatgpt">ChatGPT</option>
+    <option value="claude">Claude</option>
+    <option value="gemini">Gemini</option>
+    <option value="metaai">Meta AI</option>
+    <option value="grok">Grok</option>
+    <option value="qwen">Qwen</option>
+    <option value="mistral">Mistral</option>
+    <option value="perplexity">Perplexity</option>
+  </select>
+  <button id="capture">Import cookies from current tab</button>
+  <button id="refresh">Refresh linked-session status</button>
+  <button id="unlink">Unpair this extension</button>
+  <div id="status" role="status" aria-live="polite">Not paired in this browser session.</div>
+  <script src="popup.js"></script>
+</body>
+</html>
