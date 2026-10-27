@@ -2042,7 +2042,13 @@ async fn chat_completions(
                 }
                 FirstEvent::Closed => {
                     let error = "provider stream closed before first output";
-                    record_attempt_error(&provider_name, error, queue_ms, provider_started, request_started);
+                    record_attempt_error(
+                        &provider_name,
+                        error,
+                        queue_ms,
+                        provider_started,
+                        request_started,
+                    );
                     last_err = Some(error.to_string());
                     continue;
                 }
@@ -3741,7 +3747,6 @@ mod openai_compatibility_metadata_tests {
         assert!(!headers.contains_key("X-Gateway-Model"));
     }
 }
-
 #[cfg(test)]
 mod first_event_tests {
     use super::{first_event, record_attempt_error, FirstEvent};
