@@ -80,7 +80,7 @@ pub(crate) fn messages_after_overlap(
     incoming.to_vec()
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(bench)))]
 mod tests {
     use super::{estimate_message_tokens, messages_after_overlap, ContextBuilder};
     use crate::memory::ChatMessage;
