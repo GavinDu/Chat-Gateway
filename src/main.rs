@@ -2997,3 +2997,31 @@ mod usage_estimate_tests {
         assert_eq!(headers["X-Gateway-Model"], "model");
     }
 }
+
+#[cfg(test)]
+mod openai_compatibility_metadata_tests {
+    use super::{add_gateway_headers, estimate_tokens};
+
+    #[test]
+    fn estimated_token_count_is_nonzero_for_nonempty_unicode_text() {
+        assert_eq!(estimate_tokens(""), 0);
+        assert_eq!(estimate_tokens("hello"), 2);
+        assert_eq!(estimate_tokens("你好"), 1);
+    }
+
+    #[test]
+    fn gateway_headers_report_selected_provider_and_model() {
+        let mut headers = axum::http::HeaderMap::new();
+        add_gateway_headers(&mut headers, "chatgpt", "gpt-4o");
+        assert_eq!(headers.get("X-Gateway-Provider").unwrap(), "chatgpt");
+        assert_eq!(headers.get("X-Gateway-Model").unwrap(), "gpt-4o");
+    }
+
+    #[test]
+    fn invalid_gateway_header_values_are_omitted() {
+        let mut headers = axum::http::HeaderMap::new();
+        add_gateway_headers(&mut headers, "bad\nprovider", "bad\nmodel");
+        assert!(!headers.contains_key("X-Gateway-Provider"));
+        assert!(!headers.contains_key("X-Gateway-Model"));
+    }
+}
