@@ -640,3 +640,142 @@ fn conversation_export_returns_complete_durable_record_and_missing_is_none() {
     );
     assert_eq!(memory.export_conversation("missing-export").unwrap(), None);
 }
+
+#[test]
+fn provider_thread_schema_supports_multiple_providers_and_cascades_on_delete() {
+    let fixture = Fixture::new();
+    let memory = fixture.open();
+    store(&memory, "thread-map", "hello");
+
+    {
+        let connection = memory.lock().unwrap();
+        let upsert = "INSERT INTO provider_threads(
+                conversation_id, provider, thread_url, synced_through_message_id, model, updated_at
+             ) VALUES(?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(conversation_id, provider) DO UPDATE SET
+                thread_url=excluded.thread_url,
+                synced_through_message_id=excluded.synced_through_message_id,
+                model=excluded.model,
+                updated_at=excluded.updated_at";
+        connection
+            .execute(
+                upsert,
+                rusqlite::params![
+                    "thread-map",
+                    "chatgpt",
+                    "https://chatgpt.com/c/thread-one",
+                    "message-1",
+                    "gpt-4o",
+                    100,
+                ],
+            )
+            .unwrap();
+        connection
+            .execute(
+                upsert,
+                rusqlite::params![
+                    "thread-map",
+                    "chatgpt",
+                    "https://chatgpt.com/c/thread-two",
+                    "message-2",
+                    "gpt-4o",
+                    200,
+                ],
+            )
+            .unwrap();
+        connection
+            .execute(
+                upsert,
+                rusqlite::params![
+                    "thread-map",
+                    "claude",
+                    "https://claude.ai/chat/thread-claude",
+                    "message-3",
+                    "claude-sonnet",
+                    150,
+                ],
+            )
+            .unwrap();
+
+        let chatgpt_url: String = connection
+            .query_row(
+                "SELECT thread_url FROM provider_threads WHERE conversation_id=?1 AND provider=?2",
+                ["thread-map", "chatgpt"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let claude_url: String = connection
+            .query_row(
+                "SELECT thread_url FROM provider_threads WHERE conversation_id=?1 AND provider=?2",
+                ["thread-map", "claude"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(chatgpt_url, "https://chatgpt.com/c/thread-two");
+        assert_eq!(claude_url, "https://claude.ai/chat/thread-claude");
+    }
+
+    assert!(memory.delete_conversation("thread-map").unwrap());
+    let connection = memory.lock().unwrap();
+    let remaining: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM provider_threads WHERE conversation_id=?1",
+            ["thread-map"],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(remaining, 0);
+}
+
+#[test]
+fn schema_v1_database_migrates_provider_thread_map_without_losing_conversations() {
+    let fixture = Fixture::new();
+    {
+        let connection = Connection::open(fixture.db()).unwrap();
+        connection
+            .execute_batch(
+                "PRAGMA foreign_keys=ON;
+                 CREATE TABLE conversations (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    provider TEXT,
+                    tab_id TEXT
+                 );
+                 CREATE TABLE messages (
+                    conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+                    position INTEGER NOT NULL CHECK(position >= 0),
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    PRIMARY KEY(conversation_id, position)
+                 );
+                 CREATE TABLE metadata (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL);
+                 INSERT INTO conversations(id,provider,tab_id) VALUES('existing','chatgpt','tab-existing');
+                 INSERT INTO messages(conversation_id,position,role,content) VALUES('existing',0,'user','keep me');
+                 INSERT INTO metadata(key,value) VALUES('legacy_import_complete','1');
+                 PRAGMA application_id=1128748877;
+                 PRAGMA user_version=1;",
+            )
+            .unwrap();
+    }
+
+    let memory = open(&fixture.db(), None).unwrap();
+    assert_eq!(
+        memory.conversation("existing").unwrap().unwrap().messages,
+        vec![m("user", "keep me")]
+    );
+    let connection = memory.lock().unwrap();
+    let mapped_threads: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM provider_threads WHERE conversation_id=?1",
+            ["existing"],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(mapped_threads, 0);
+    drop(connection);
+    let version: i64 = memory
+        .lock()
+        .unwrap()
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, 2);
+}
