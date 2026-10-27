@@ -9,7 +9,7 @@ use axum::{
         sse::{Event, Sse},
         Html, IntoResponse,
     },
-    routing::{get, post},
+    routing::{get, post, put},
     Json, Router,
 };
 use clap::Parser;
@@ -383,6 +383,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/v1/models", get(models))
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/conversations", get(list_conversations))
+        .route(
+            "/v1/conversations/:conversation_id/provider-threads/:provider",
+            get(get_provider_thread).put(upsert_provider_thread),
+        )
         .route(
             "/v1/conversations/:conversation_id",
             get(export_conversation).delete(delete_conversation),
@@ -1291,6 +1295,72 @@ async fn list_conversations(
                 "server_error",
                 "memory_persistence_failed",
                 "conversations could not be listed safely",
+            )
+        }
+    }
+}
+
+async fn get_provider_thread(
+    State(state): State<Arc<AppState>>,
+    Path((conversation_id, provider)): Path<(String, String)>,
+) -> Response {
+    match state.memory.get_provider_thread(&conversation_id, &provider) {
+        Ok(Some(thread)) => Json(thread).into_response(),
+        Ok(None) => api_error(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "provider_thread_not_found",
+            "no provider thread is stored for this conversation and provider",
+        ),
+        Err(error) => {
+            tracing::error!(%error, "provider thread lookup failed");
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                "memory_read_failed",
+                "provider thread could not be read safely",
+            )
+        }
+    }
+}
+
+async fn upsert_provider_thread(
+    State(state): State<Arc<AppState>>,
+    Path((conversation_id, provider)): Path<(String, String)>,
+    Json(mut thread): Json<ProviderThread>,
+) -> Response {
+    if thread.conversation_id != conversation_id || thread.provider != provider {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            "provider_thread_path_mismatch",
+            "body conversation_id and provider must match the request path",
+        );
+    }
+    if thread.thread_url.len() > 4096
+        || !(thread.thread_url.starts_with("https://") || thread.thread_url.starts_with("http://"))
+    {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            "invalid_provider_thread_url",
+            "thread_url must be an HTTP(S) URL no longer than 4096 bytes",
+        );
+    }
+    thread.updated_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        .min(i64::MAX as u64) as i64;
+    match state.memory.upsert_provider_thread(&thread) {
+        Ok(()) => Json(thread).into_response(),
+        Err(error) => {
+            tracing::error!(%error, conversation_id, provider, "provider thread persistence failed");
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                "memory_persistence_failed",
+                "provider thread could not be stored safely",
             )
         }
     }
