@@ -22,7 +22,10 @@ pub const SELECTORS: SelectorSet = SelectorSet {
         "div[contenteditable=\"true\"][role=\"textbox\"]",
         "textarea[name=\"message\"]",
     ],
-    send: &["button[aria-label=\"Send\"]", "button.send-button"],
+    send: &[
+        "button[aria-label=\"Send\"]",
+        "button.send-button",
+    ],
     response: &[
         "div[data-testid=\"grok-response\"]",
         "div.markdown",
