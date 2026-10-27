@@ -142,12 +142,18 @@ async fn main() -> anyhow::Result<()> {
     for index in 0..iterations {
         let provider = &providers[index % providers.len()];
         let sample = request(&url, provider, api_key.as_deref(), pid.as_deref())?;
+        let gateway_overhead = if fake {
+            sample.ttft_ms.map(|ttft| (ttft - FAKE_UPSTREAM_MS as f64).max(0.0))
+        } else {
+            None
+        };
         println!(
-            "sample={} provider={} total_ms={:.2} ttft_ms={} rss_kib={}",
+            "sample={} provider={} total_ms={:.2} ttft_ms={} fake_gateway_overhead_ms={} rss_kib={}",
             index + 1,
             sample.provider,
             sample.total_ms,
             sample.ttft_ms.map(|v| format!("{v:.2}")).unwrap_or_else(|| "n/a".to_owned()),
+            gateway_overhead.map(|v| format!("{v:.2}")).unwrap_or_else(|| "n/a".to_owned()),
             sample.rss_kib.map(|v| v.to_string()).unwrap_or_else(|| "n/a".to_owned()),
         );
         if previous.as_deref().is_some_and(|last| last != provider) {
