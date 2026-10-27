@@ -322,6 +322,8 @@ The server binds to loopback only. For shared local development environments, co
 
 When `auth.keys` is non-empty, every route except `/health` requires `Authorization: Bearer <secret>`. Chat routes require the `chat` scope; login/session-control routes and conversation export/deletion require `admin`. An empty key list disables API-key auth for backward-compatible loopback-only use; Host/Origin checks are not authentication and the listener must not be exposed remotely.
 
+Each configured key name is its stable conversation-owner ID and key names must be unique (case-insensitive). A key can list, continue, export, delete, or attach provider-thread mappings only for its own conversations; another key's conversation ID is not sufficient to access its context. Existing conversations migrated from older SQLite schemas are assigned to the `local` owner and are not automatically transferred to a configured key. Back up the database before enabling multi-key auth; if you need to transfer legacy data, stop the gateway and explicitly assign ownership in a reviewed migration rather than sharing bearer IDs.
+
 ## Conversation memory, export, and retention
 
 Treat exported conversations as sensitive user data; protect access to exports and include them in backup-retention and deletion procedures.
