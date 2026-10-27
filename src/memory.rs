@@ -210,6 +210,21 @@ impl UnifiedMemory {
             .map_err(Into::into)
     }
 
+    /// Flush SQLite WAL pages after HTTP requests have drained.
+    pub fn checkpoint(&self) -> anyhow::Result<()> {
+        let connection = self.lock()?;
+        let (busy, _log_frames, _checkpointed_frames): (i64, i64, i64) = connection.query_row(
+            "PRAGMA wal_checkpoint(TRUNCATE)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        if busy != 0 {
+            anyhow::bail!("SQLite WAL checkpoint could not complete because another connection is busy");
+        }
+        connection.execute_batch("PRAGMA optimize;")?;
+        Ok(())
+    }
+
     pub fn delete_conversation(&self, conversation_id: &str) -> anyhow::Result<bool> {
         let mut connection = self.lock()?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
