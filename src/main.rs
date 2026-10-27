@@ -383,6 +383,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/conversations", get(list_conversations))
         .route(
+            "/v1/conversations/:conversation_id/export.md",
+            get(export_conversation_markdown),
+        )
+        .route(
             "/v1/conversations/:conversation_id",
             get(export_conversation).delete(delete_conversation),
         )
@@ -1300,6 +1304,70 @@ async fn export_conversation(
     Path(conversation_id): Path<String>,
 ) -> Response {
     export_conversation_response(&state.memory, &conversation_id)
+}
+
+async fn export_conversation_markdown(
+    State(state): State<Arc<AppState>>,
+    Path(conversation_id): Path<String>,
+) -> Response {
+    export_conversation_markdown_response(&state.memory, &conversation_id)
+}
+
+fn export_conversation_markdown_response(
+    memory: &UnifiedMemory,
+    conversation_id: &str,
+) -> Response {
+    if !valid_conversation_id(conversation_id) {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            "invalid_conversation_id",
+            "conversation ID must be 8-128 ASCII letters, digits, '_' or '-'",
+        );
+    }
+    match memory.export_conversation(conversation_id) {
+        Ok(Some(conversation)) => {
+            let mut markdown = format!("# Conversation {}\n\n", conversation.id);
+            if let Some(provider) = conversation.provider.as_deref() {
+                markdown.push_str(&format!("- Provider: {provider}\n"));
+            }
+            if let Some(tab_id) = conversation.tab_id.as_deref() {
+                markdown.push_str(&format!("- Tab: {tab_id}\n"));
+            }
+            markdown.push('\n');
+            for (index, message) in conversation.messages.iter().enumerate() {
+                markdown.push_str(&format!(
+                    "## {} — {}\n\n{}\n\n",
+                    index + 1,
+                    message.role,
+                    message.content
+                ));
+            }
+            (
+                [(
+                    axum::http::header::CONTENT_TYPE,
+                    "text/markdown; charset=utf-8",
+                )],
+                markdown,
+            )
+                .into_response()
+        }
+        Ok(None) => api_error(
+            StatusCode::NOT_FOUND,
+            "invalid_request_error",
+            "conversation_not_found",
+            "conversation does not exist",
+        ),
+        Err(_error) => {
+            tracing::error!(conversation_id = %conversation_id, "conversation Markdown export failed");
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                "memory_persistence_failed",
+                "conversation could not be exported safely",
+            )
+        }
+    }
 }
 
 async fn delete_conversation(
