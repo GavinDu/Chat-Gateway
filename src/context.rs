@@ -17,7 +17,10 @@ pub(crate) struct ThreadState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ContextPlan {
     Delta(Vec<ChatMessage>),
-    Replay { prompt: String, messages: Vec<ChatMessage> },
+    Replay {
+        prompt: String,
+        messages: Vec<ChatMessage>,
+    },
 }
 
 /// Pure context planning helpers. This module intentionally has no database,
@@ -39,7 +42,10 @@ impl ContextBuilder {
         let delta = messages_after_overlap(history, incoming);
         let synchronized = thread.is_some_and(|state| {
             state.provider == provider
-                && state.thread_url.as_deref().is_some_and(|url| !url.is_empty())
+                && state
+                    .thread_url
+                    .as_deref()
+                    .is_some_and(|url| !url.is_empty())
                 && state.synced_through_message_count == history.len()
         });
         if synchronized && !delta.is_empty() {
@@ -129,7 +135,9 @@ pub(crate) fn messages_after_overlap(
 #[allow(unused_imports)] // The standalone benchmark includes this module with test cfg enabled.
 mod tests {
     #[allow(unused_imports)]
-    use super::{estimate_message_tokens, messages_after_overlap, ContextBuilder, ContextPlan, ThreadState};
+    use super::{
+        estimate_message_tokens, messages_after_overlap, ContextBuilder, ContextPlan, ThreadState,
+    };
     use crate::memory::ChatMessage;
 
     fn m(role: &str, content: &str) -> ChatMessage {
@@ -201,8 +209,20 @@ mod tests {
         };
         for (provider, thread) in [
             ("claude", Some(synced.clone())),
-            ("chatgpt", Some(ThreadState { thread_url: None, ..synced.clone() })),
-            ("chatgpt", Some(ThreadState { synced_through_message_count: 0, ..synced.clone() })),
+            (
+                "chatgpt",
+                Some(ThreadState {
+                    thread_url: None,
+                    ..synced.clone()
+                }),
+            ),
+            (
+                "chatgpt",
+                Some(ThreadState {
+                    synced_through_message_count: 0,
+                    ..synced.clone()
+                }),
+            ),
             ("chatgpt", None),
         ] {
             match ContextBuilder::plan(&history, &incoming, provider, thread.as_ref(), 1000) {
