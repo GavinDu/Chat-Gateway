@@ -16,6 +16,7 @@ impl ProviderRouter {
     /// Resolve an explicit model to providers that advertise that exact model.
     /// A provider can be pinned with "provider/model". Unknown model names
     /// return an empty list instead of silently routing to an unrelated model.
+    #[allow(dead_code)]
     pub fn resolve(
         &self,
         model: &str,
