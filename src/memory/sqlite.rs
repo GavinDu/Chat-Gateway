@@ -123,10 +123,20 @@ fn initialize(connection: &mut Connection, legacy: Option<&Path>) -> Result<()> 
         tx.execute_batch(
             "ALTER TABLE conversations ADD COLUMN last_activity_at INTEGER NOT NULL DEFAULT 0;",
         )?;
+        // Older schemas did not record activity. Start their retention clock
+        // at migration time so enabling TTL cannot immediately erase old data.
+        tx.execute_batch(
+            "UPDATE conversations SET last_activity_at = unixepoch() WHERE last_activity_at = 0;",
+        )?;
         tx.pragma_update(None, "user_version", VERSION)?;
     } else if version == 2 && app == APPLICATION_ID {
         tx.execute_batch(
             "ALTER TABLE conversations ADD COLUMN last_activity_at INTEGER NOT NULL DEFAULT 0;",
+        )?;
+        // Older schemas did not record activity. Start their retention clock
+        // at migration time so enabling TTL cannot immediately erase old data.
+        tx.execute_batch(
+            "UPDATE conversations SET last_activity_at = unixepoch() WHERE last_activity_at = 0;",
         )?;
         tx.pragma_update(None, "user_version", VERSION)?;
     } else if version != VERSION || app != APPLICATION_ID {
