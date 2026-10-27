@@ -262,10 +262,6 @@ fn messages_after_overlap(stored: &[ChatMessage], incoming: &[ChatMessage]) -> V
     incoming.to_vec()
 }
 
-#[cfg(test)]
-#[path = "memory/tests.rs"]
-mod tests;
-
 /// Metadata returned by the paged conversation listing endpoint.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ConversationSummary {
@@ -273,3 +269,7 @@ pub struct ConversationSummary {
     pub provider: Option<String>,
     pub message_count: usize,
 }
+
+#[cfg(test)]
+#[path = "memory/tests.rs"]
+mod tests;
