@@ -1223,7 +1223,7 @@ fn authorize_api_request(
         return Err(AuthFailure::InsufficientScope);
     }
     Ok(Some(AuthKeyContext {
-        key_id: key.name.clone(),
+        key_id: format!("key:{}", key.name),
         provider_allowlist: key.provider_allowlist.clone(),
     }))
 }
