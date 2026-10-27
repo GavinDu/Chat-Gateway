@@ -311,6 +311,7 @@ Conversation turns are persisted in the gateway's SQLite memory store so the API
 - `GET /v1/conversations?limit=50&offset=0` lists conversation IDs, provider names, and message counts without returning message bodies. `limit` defaults to 50 and is capped at 100; `offset` defaults to 0.
 - `GET /v1/conversations/:conversation_id` exports the stored conversation record, including its messages and provider/tab metadata, as JSON.
 - `GET /v1/conversations/:conversation_id/export.md` exports the same conversation as Markdown with role-labelled messages.
+- `GET /v1/conversations/:conversation_id/provider-threads/:provider` reads a provider-specific remote-thread mapping; `PUT` upserts it. Both require an `admin` API key when authentication is enabled. Writes accept only HTTPS URLs on the expected provider host.
 - `DELETE /v1/conversations/:conversation_id` deletes a conversation from the live memory store. Deletion from separate backups is governed by the operator's backup-retention policy. Clients should treat an export as a data copy and apply their own access controls and deletion policy to downloaded files.
 - When API-key authentication is enabled, conversation listing, export, and deletion require the `admin` scope. Treat exported JSON and SQLite backups as potentially sensitive conversation data.
 - An unknown conversation returns `404 conversation_not_found`; malformed IDs return a client error. Export does not include provider cookies or session files.
