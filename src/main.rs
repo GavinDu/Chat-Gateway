@@ -30,7 +30,7 @@ mod providers;
 mod router;
 mod session;
 
-use api::{validate_chat_req, ChatReq};
+use api::{api_error, add_gateway_headers, estimate_tokens, validate_chat_req, ChatReq};
 use browser::pool::ObscuraPool;
 use config::AppConfig;
 use memory::{ChatMessage, ProviderThread, UnifiedMemory};
@@ -98,39 +98,6 @@ struct AppState {
     memory: Arc<UnifiedMemory>,
     router: ProviderRouter,
     models_cache: Arc<RwLock<HashMap<String, Vec<String>>>>,
-}
-
-fn estimate_tokens(text: &str) -> u64 {
-    // Share the same conservative estimator used by context budgeting.
-    context::estimate_message_tokens(text) as u64
-}
-
-fn add_gateway_headers(headers: &mut axum::http::HeaderMap, provider: &str, model: &str) {
-    if let Ok(value) = axum::http::HeaderValue::from_bytes(provider.as_bytes()) {
-        headers.insert("X-Gateway-Provider", value);
-    }
-    if let Ok(value) = axum::http::HeaderValue::from_bytes(model.as_bytes()) {
-        headers.insert("X-Gateway-Model", value);
-    }
-}
-
-fn api_error(
-    status: axum::http::StatusCode,
-    error_type: &str,
-    code: &str,
-    message: impl Into<String>,
-) -> axum::response::Response {
-    (
-        status,
-        Json(serde_json::json!({
-            "error": {
-                "message": message.into(),
-                "type": error_type,
-                "code": code,
-            }
-        })),
-    )
-        .into_response()
 }
 
 #[tokio::main]
