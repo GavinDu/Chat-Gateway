@@ -3322,6 +3322,20 @@ mod api_key_auth_tests {
     }
 
     #[test]
+    fn authenticated_owner_id_is_stable_and_does_not_expose_the_secret() {
+        let context = authorize_api_request(
+            &auth(&["chat"]),
+            Some("Bearer test-secret"),
+            "/v1/models",
+            &axum::http::Method::GET,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(context.key_id, "key:test-client");
+        assert!(!context.key_id.contains("test-secret"));
+    }
+
+    #[test]
     fn authentication_is_optional_only_when_no_keys_are_configured() {
         assert!(authorize_api_request(
             &AuthConfig::default(),
