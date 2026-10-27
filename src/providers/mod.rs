@@ -167,17 +167,95 @@ pub struct AdapterSpec {
     factory: AdapterFactory,
 }
 
-pub const ADAPTERS: &[AdapterSpec] = &[
-    AdapterSpec { provider: Provider::Qwen, id: "qwen", url: qwen::SELECTORS.url, selectors: &qwen::SELECTORS, model_pairs: qwen::SELECTORS.model_pairs, strip_citations: false, streaming: StreamSignal::SharedStopControl, done: DoneSignal::StableResponseText, threads: ThreadSupport::UrlAddressable, typing: TypingStrategy::SharedComposer, factory: |cfg| Arc::new(qwen::QwenAdapter { cfg }) },
-    AdapterSpec { provider: Provider::MetaAI, id: "metaai", url: metaai::SELECTORS.url, selectors: &metaai::SELECTORS, model_pairs: metaai::SELECTORS.model_pairs, strip_citations: false, streaming: StreamSignal::SharedStopControl, done: DoneSignal::StableResponseText, threads: ThreadSupport::SidebarClick, typing: TypingStrategy::SharedComposer, factory: |cfg| Arc::new(metaai::MetaAIAdapter { cfg }) },
-    AdapterSpec { provider: Provider::Claude, id: "claude", url: claude::SELECTORS.url, selectors: &claude::SELECTORS, model_pairs: claude::SELECTORS.model_pairs, strip_citations: false, streaming: StreamSignal::SharedStopControl, done: DoneSignal::StableResponseText, threads: ThreadSupport::UrlAddressable, typing: TypingStrategy::SharedComposer, factory: |cfg| Arc::new(claude::ClaudeAdapter { cfg }) },
-    AdapterSpec { provider: Provider::ChatGPT, id: "chatgpt", url: chatgpt::SELECTORS.url, selectors: &chatgpt::SELECTORS, model_pairs: chatgpt::SELECTORS.model_pairs, strip_citations: false, streaming: StreamSignal::SharedStopControl, done: DoneSignal::StableResponseText, threads: ThreadSupport::UrlAddressable, typing: TypingStrategy::SharedComposer, factory: |cfg| Arc::new(chatgpt::ChatGPTAdapter { cfg }) },
-    AdapterSpec { provider: Provider::Gemini, id: "gemini", url: gemini::SELECTORS.url, selectors: &gemini::SELECTORS, model_pairs: gemini::SELECTORS.model_pairs, strip_citations: false, streaming: StreamSignal::SharedStopControl, done: DoneSignal::StableResponseText, threads: ThreadSupport::UrlAddressable, typing: TypingStrategy::SharedComposer, factory: |cfg| Arc::new(gemini::GeminiAdapter { cfg }) },
-    AdapterSpec { provider: Provider::Grok, id: "grok", url: grok::SELECTORS.url, selectors: &grok::SELECTORS, model_pairs: grok::SELECTORS.model_pairs, strip_citations: false, streaming: StreamSignal::SharedStopControl, done: DoneSignal::StableResponseText, threads: ThreadSupport::UrlAddressable, typing: TypingStrategy::SharedComposer, factory: |cfg| Arc::new(grok::GrokAdapter { cfg }) },
-    AdapterSpec { provider: Provider::Mistral, id: "mistral", url: mistral::SELECTORS.url, selectors: &mistral::SELECTORS, model_pairs: mistral::SELECTORS.model_pairs, strip_citations: false, streaming: StreamSignal::SharedStopControl, done: DoneSignal::StableResponseText, threads: ThreadSupport::UrlAddressable, typing: TypingStrategy::SharedComposer, factory: |cfg| Arc::new(mistral::MistralAdapter { cfg }) },
-    AdapterSpec { provider: Provider::Perplexity, id: "perplexity", url: perplexity::SELECTORS.url, selectors: &perplexity::SELECTORS, model_pairs: perplexity::SELECTORS.model_pairs, strip_citations: true, streaming: StreamSignal::SharedStopControl, done: DoneSignal::StableResponseText, threads: ThreadSupport::UrlAddressable, typing: TypingStrategy::SharedComposer, factory: |cfg| Arc::new(perplexity::PerplexityAdapter { cfg }) },
-];
+const fn adapter_spec(
+    provider: Provider,
+    id: &'static str,
+    selectors: &'static common::SelectorSet,
+    strip_citations: bool,
+    threads: ThreadSupport,
+    factory: AdapterFactory,
+) -> AdapterSpec {
+    AdapterSpec {
+        provider,
+        id,
+        url: selectors.url,
+        selectors,
+        model_pairs: selectors.model_pairs,
+        strip_citations,
+        streaming: StreamSignal::SharedStopControl,
+        done: DoneSignal::StableResponseText,
+        threads,
+        typing: TypingStrategy::SharedComposer,
+        factory,
+    }
+}
 
+pub const ADAPTERS: &[AdapterSpec] = &[
+    adapter_spec(
+        Provider::Qwen,
+        "qwen",
+        &qwen::SELECTORS,
+        false,
+        ThreadSupport::UrlAddressable,
+        |cfg| Arc::new(qwen::QwenAdapter { cfg }),
+    ),
+    adapter_spec(
+        Provider::MetaAI,
+        "metaai",
+        &metaai::SELECTORS,
+        false,
+        ThreadSupport::SidebarClick,
+        |cfg| Arc::new(metaai::MetaAIAdapter { cfg }),
+    ),
+    adapter_spec(
+        Provider::Claude,
+        "claude",
+        &claude::SELECTORS,
+        false,
+        ThreadSupport::UrlAddressable,
+        |cfg| Arc::new(claude::ClaudeAdapter { cfg }),
+    ),
+    adapter_spec(
+        Provider::ChatGPT,
+        "chatgpt",
+        &chatgpt::SELECTORS,
+        false,
+        ThreadSupport::UrlAddressable,
+        |cfg| Arc::new(chatgpt::ChatGPTAdapter { cfg }),
+    ),
+    adapter_spec(
+        Provider::Gemini,
+        "gemini",
+        &gemini::SELECTORS,
+        false,
+        ThreadSupport::UrlAddressable,
+        |cfg| Arc::new(gemini::GeminiAdapter { cfg }),
+    ),
+    adapter_spec(
+        Provider::Grok,
+        "grok",
+        &grok::SELECTORS,
+        false,
+        ThreadSupport::UrlAddressable,
+        |cfg| Arc::new(grok::GrokAdapter { cfg }),
+    ),
+    adapter_spec(
+        Provider::Mistral,
+        "mistral",
+        &mistral::SELECTORS,
+        false,
+        ThreadSupport::UrlAddressable,
+        |cfg| Arc::new(mistral::MistralAdapter { cfg }),
+    ),
+    adapter_spec(
+        Provider::Perplexity,
+        "perplexity",
+        &perplexity::SELECTORS,
+        true,
+        ThreadSupport::UrlAddressable,
+        |cfg| Arc::new(perplexity::PerplexityAdapter { cfg }),
+    ),
+];
 fn adapter_for(provider: Provider, cfg: ProviderConfig) -> Arc<dyn SiteAdapter> {
     let spec = ADAPTERS.iter().find(|spec| spec.provider == provider)
         .expect("every Provider variant must have an adapter catalog row");
