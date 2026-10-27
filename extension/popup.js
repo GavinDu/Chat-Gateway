@@ -62,6 +62,19 @@ $("refresh").addEventListener("click", async () => {
   try { await refreshStatus(); message("Status refreshed."); } catch (error) { message(error.message); }
 });
 
+
+$("unlink").addEventListener("click", async () => {
+  try {
+    const provider = $("provider").value;
+    const response = await relayFetch("/relay/v1/session/" + encodeURIComponent(provider), {method:"DELETE",body:"{}"});
+    if (!response.ok) throw new Error("Could not unlink " + provider + ".");
+    const stored = await chrome.storage.local.get(["linkedProviders"]);
+    await chrome.storage.local.set({linkedProviders:(stored.linkedProviders || []).filter(value => value !== provider)});
+    message("Vault record deleted for " + provider + ". Restart the gateway to clear any session still held in the browser engine.");
+    await refreshStatus();
+  } catch (error) { message(error.message); }
+});
+
 $("unpair").addEventListener("click", async () => {
   try {
     const response = await relayFetch("/relay/v1/unpair",{method:"POST",body:"{}"});
