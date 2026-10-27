@@ -216,7 +216,6 @@ fn api_error(
         .into_response()
 }
 
-
 #[derive(Debug)]
 struct RelayPairingState {
     pairing_code_hash: String,
@@ -417,9 +416,8 @@ async fn relay_status(headers: HeaderMap) -> Response {
     for provider in providers::Provider::all() {
         let name = provider.name();
         match session::load_session_file(name) {
-            Ok(file) => providers.push(
-                serde_json::json!({"provider": name, "session_present": file.is_some()}),
-            ),
+            Ok(file) => providers
+                .push(serde_json::json!({"provider": name, "session_present": file.is_some()})),
             Err(_error) => {
                 return api_error(
                     StatusCode::SERVICE_UNAVAILABLE,
@@ -744,7 +742,10 @@ async fn main() -> anyhow::Result<()> {
     let pairing_code = initialize_relay_pairing();
     let listener = tokio::net::TcpListener::bind(addr).await?;
     println!("Chat Gateway v2 Obscura Native listening on {}", addr);
-    println!("Browser relay pairing code (expires in 5 minutes; shown once): {}", pairing_code);
+    println!(
+        "Browser relay pairing code (expires in 5 minutes; shown once): {}",
+        pairing_code
+    );
     if std::env::var("CHAT_GATEWAY_EXTENSION_ID").is_err() {
         tracing::warn!("browser relay disabled until CHAT_GATEWAY_EXTENSION_ID is configured to the installed Chrome extension ID");
     }
