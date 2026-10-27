@@ -3,7 +3,7 @@ use anyhow::{bail, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use std::{collections::HashMap, fs, path::Path, time::Duration};
 
-const VERSION: i64 = 3;
+const VERSION: i64 = 4;
 const APPLICATION_ID: i64 = 0x4347574d; // CGWM
 const PROVIDER_THREADS_SCHEMA: &str = "
     CREATE TABLE provider_threads (
@@ -21,7 +21,8 @@ const SCHEMA: &str = "
         id TEXT PRIMARY KEY NOT NULL,
         provider TEXT,
         tab_id TEXT,
-        last_activity_at INTEGER NOT NULL DEFAULT 0
+        last_activity_at INTEGER NOT NULL DEFAULT 0,
+        owner_key_id TEXT NOT NULL DEFAULT 'local'
     );
     CREATE TABLE messages (
         conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
@@ -117,22 +118,24 @@ fn initialize(connection: &mut Connection, legacy: Option<&Path>) -> Result<()> 
         tx.pragma_update(None, "application_id", APPLICATION_ID)?;
         tx.pragma_update(None, "user_version", VERSION)?;
     } else if version == 1 && app == APPLICATION_ID {
-        // Version 2 added provider-thread mappings; version 3 adds activity
-        // timestamps used by opt-in conversation retention.
+        // Migrate provider-thread mappings, retention timestamps, and tenant ownership.
         tx.execute_batch(PROVIDER_THREADS_SCHEMA)?;
         tx.execute_batch(
-            "ALTER TABLE conversations ADD COLUMN last_activity_at INTEGER NOT NULL DEFAULT 0;",
-        )?;
-        tx.execute_batch(
-            "UPDATE conversations SET last_activity_at = unixepoch() WHERE last_activity_at = 0;",
+            "ALTER TABLE conversations ADD COLUMN last_activity_at INTEGER NOT NULL DEFAULT 0;
+             ALTER TABLE conversations ADD COLUMN owner_key_id TEXT NOT NULL DEFAULT 'local';
+             UPDATE conversations SET last_activity_at = unixepoch() WHERE last_activity_at = 0;",
         )?;
         tx.pragma_update(None, "user_version", VERSION)?;
     } else if version == 2 && app == APPLICATION_ID {
         tx.execute_batch(
-            "ALTER TABLE conversations ADD COLUMN last_activity_at INTEGER NOT NULL DEFAULT 0;",
+            "ALTER TABLE conversations ADD COLUMN last_activity_at INTEGER NOT NULL DEFAULT 0;
+             ALTER TABLE conversations ADD COLUMN owner_key_id TEXT NOT NULL DEFAULT 'local';
+             UPDATE conversations SET last_activity_at = unixepoch() WHERE last_activity_at = 0;",
         )?;
+        tx.pragma_update(None, "user_version", VERSION)?;
+    } else if version == 3 && app == APPLICATION_ID {
         tx.execute_batch(
-            "UPDATE conversations SET last_activity_at = unixepoch() WHERE last_activity_at = 0;",
+            "ALTER TABLE conversations ADD COLUMN owner_key_id TEXT NOT NULL DEFAULT 'local';",
         )?;
         tx.pragma_update(None, "user_version", VERSION)?;
     } else if version != VERSION || app != APPLICATION_ID {
@@ -261,20 +264,44 @@ pub(super) fn append(
     conversation: &Conversation,
     first: usize,
 ) -> Result<()> {
+    append_owned(connection, conversation, first, "local")
+}
+
+pub(super) fn append_owned(
+    connection: &Connection,
+    conversation: &Conversation,
+    first: usize,
+    owner_key_id: &str,
+) -> Result<()> {
+    let existing_owner: Option<String> = connection
+        .query_row(
+            "SELECT owner_key_id FROM conversations WHERE id = ?1",
+            [&conversation.id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if existing_owner
+        .as_deref()
+        .is_some_and(|existing| existing != owner_key_id)
+    {
+        bail!("conversation belongs to another API key");
+    }
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
         .min(i64::MAX as u64) as i64;
     connection.execute(
-        "INSERT INTO conversations(id,provider,tab_id,last_activity_at) VALUES(?1,?2,?3,?4)
+        "INSERT INTO conversations(id,provider,tab_id,last_activity_at,owner_key_id)
+         VALUES(?1,?2,?3,?4,?5)
          ON CONFLICT(id) DO UPDATE SET provider=excluded.provider, tab_id=excluded.tab_id,
              last_activity_at=excluded.last_activity_at",
         params![
             conversation.id,
             conversation.provider,
             conversation.tab_id,
-            now
+            now,
+            owner_key_id,
         ],
     )?;
     let mut insert = connection.prepare(
