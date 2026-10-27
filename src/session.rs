@@ -142,7 +142,11 @@ impl SessionStore for VaultSessionStore {
         let key = vault_key_from_env()?;
         let vault_path = session_vault_path(provider)?;
         match std::fs::read(&vault_path) {
-            Ok(bytes) => return decrypt_session_snapshot(&bytes, provider, &key).map(Some),
+            Ok(bytes) => {
+                let session = decrypt_session_snapshot(&bytes, provider, &key)?;
+                remove_legacy_session_snapshot(provider)?;
+                return Ok(Some(session));
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }
@@ -178,6 +182,7 @@ impl SessionStore for VaultSessionStore {
         };
 
         if previous_hash.as_deref() == Some(current_hash.as_str()) {
+            remove_legacy_session_snapshot(provider)?;
             return Ok(());
         }
         if session_write_is_rate_limited(provider, Instant::now()) {
@@ -191,12 +196,7 @@ impl SessionStore for VaultSessionStore {
         let encrypted = encrypt_session_snapshot(&file, provider, &key)?;
         write_session_file_atomically(Path::new(&destination), &encrypted)?;
         // Do not leave a plaintext copy behind once encrypted persistence works.
-        let legacy_path = session_path(provider)?;
-        match std::fs::remove_file(&legacy_path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
+        remove_legacy_session_snapshot(provider)?;
         record_session_write(provider);
         tracing::info!(
             provider,
@@ -213,6 +213,16 @@ fn session_vault_path(provider: &str) -> Result<String> {
         .with_extension("vault")
         .to_string_lossy()
         .into_owned())
+}
+
+fn remove_legacy_session_snapshot(provider: &str) -> Result<()> {
+    let legacy_path = session_path(provider)?;
+    match std::fs::remove_file(&legacy_path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    Ok(())
 }
 
 fn vault_key_from_env() -> Result<[u8; 32]> {
