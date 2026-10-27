@@ -256,7 +256,6 @@ impl UnifiedMemory {
     }
 
     /// Read a provider-specific remote-thread mapping for one conversation.
-    #[allow(dead_code)] // Used by provider adapters as thread handoff is integrated.
     pub fn get_provider_thread(
         &self,
         conversation_id: &str,
@@ -284,7 +283,6 @@ impl UnifiedMemory {
     }
 
     /// Persist a mapping only after the caller has verified a successful send.
-    #[allow(dead_code)] // Used by provider adapters as thread handoff is integrated.
     pub fn upsert_provider_thread(&self, thread: &ProviderThread) -> anyhow::Result<()> {
         let connection = self.lock()?;
         connection.execute(
@@ -337,7 +335,6 @@ fn messages_after_overlap(stored: &[ChatMessage], incoming: &[ChatMessage]) -> V
 mod tests;
 
 /// Persisted provider-side thread identity and the last synchronized gateway message.
-#[allow(dead_code)] // Constructed by provider adapters when thread handoff is integrated.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProviderThread {
     pub conversation_id: String,
