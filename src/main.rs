@@ -1,6 +1,6 @@
 use axum::{
     body::Body,
-    extract::{DefaultBodyLimit, Extension, Path, State},
+    extract::{DefaultBodyLimit, Extension, Path, Query, State},
     http::HeaderMap,
     http::{Request, StatusCode},
     middleware::{self, Next},
@@ -381,6 +381,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/metrics", get(metrics_endpoint))
         .route("/v1/models", get(models))
         .route("/v1/chat/completions", post(chat_completions))
+        .route("/v1/conversations", get(list_conversations))
         .route(
             "/v1/conversations/:conversation_id",
             get(export_conversation).delete(delete_conversation),
@@ -1158,6 +1159,7 @@ fn authorize_api_request(
     let admin_route = path.starts_with("/login")
         || path.starts_with("/relay/")
         || path == "/metrics"
+        || path == "/v1/conversations"
         || (path.starts_with("/v1/conversations/")
             && (*method == axum::http::Method::GET || *method == axum::http::Method::DELETE));
     let required_scope = if admin_route { "admin" } else { "chat" };
@@ -1257,6 +1259,37 @@ fn export_conversation_response(memory: &UnifiedMemory, conversation_id: &str) -
                 "server_error",
                 "memory_persistence_failed",
                 "conversation could not be exported safely",
+            )
+        }
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ConversationListQuery {
+    limit: Option<usize>,
+    offset: Option<usize>,
+}
+
+async fn list_conversations(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<ConversationListQuery>,
+) -> Response {
+    let limit = query.limit.unwrap_or(50).clamp(1, 100);
+    let offset = query.offset.unwrap_or(0);
+    match state.memory.list_conversations(limit, offset) {
+        Ok(conversations) => Json(serde_json::json!({
+            "data": conversations,
+            "limit": limit,
+            "offset": offset,
+        }))
+        .into_response(),
+        Err(_error) => {
+            tracing::error!("conversation list failed");
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                "memory_persistence_failed",
+                "conversations could not be listed safely",
             )
         }
     }
@@ -2263,6 +2296,28 @@ mod http_api_regression_tests {
         }
     }
 
+    async fn list_endpoint(
+        State(memory): State<Arc<UnifiedMemory>>,
+        Query(query): Query<ConversationListQuery>,
+    ) -> Response {
+        let limit = query.limit.unwrap_or(50).clamp(1, 100);
+        let offset = query.offset.unwrap_or(0);
+        match memory.list_conversations(limit, offset) {
+            Ok(conversations) => Json(serde_json::json!({
+                "data": conversations,
+                "limit": limit,
+                "offset": offset,
+            }))
+            .into_response(),
+            Err(_) => api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                "memory_persistence_failed",
+                "conversations could not be listed safely",
+            ),
+        }
+    }
+
     async fn export_endpoint(
         State(memory): State<Arc<UnifiedMemory>>,
         Path(conversation_id): Path<String>,
@@ -2287,6 +2342,7 @@ mod http_api_regression_tests {
     fn app(memory: Arc<UnifiedMemory>) -> Router {
         Router::new()
             .route("/ready", get(|| async { readiness_response(1) }))
+            .route("/v1/conversations", get(list_endpoint))
             .route("/v1/chat/completions", post(validation_endpoint))
             .route(
                 "/v1/conversations/:conversation_id",
@@ -2324,6 +2380,45 @@ mod http_api_regression_tests {
             }
             Err(_) => conversation_context_read_error(conversation_id),
         }
+    }
+
+    #[tokio::test]
+    async fn http_conversation_list_returns_paged_metadata_without_messages() {
+        let memory = Arc::new(UnifiedMemory::new(8000));
+        for (id, text) in [("list_http_a", "alpha"), ("list_http_b", "bravo")] {
+            memory
+                .store_turn(
+                    id.to_owned(),
+                    vec![ChatMessage {
+                        role: "user".into(),
+                        content: text.into(),
+                    }],
+                    ChatMessage {
+                        role: "assistant".into(),
+                        content: "answer".into(),
+                    },
+                    "chatgpt".into(),
+                    "tab".into(),
+                )
+                .unwrap();
+        }
+        let response = app(memory)
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/conversations?limit=1&offset=1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["limit"], 1);
+        assert_eq!(body["offset"], 1);
+        assert_eq!(body["data"].as_array().unwrap().len(), 1);
+        assert_eq!(body["data"][0]["id"], "list_http_b");
+        assert_eq!(body["data"][0]["message_count"], 2);
+        assert!(body["data"][0].get("messages").is_none());
     }
 
     #[tokio::test]
