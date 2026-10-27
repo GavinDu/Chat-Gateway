@@ -281,14 +281,32 @@ These are one CI run's observed values, not performance guarantees or regression
 thresholds. Repeat on the target deployment hardware before making capacity or
 latency decisions.
 
+Run the provider request probe against a deterministic fake SSE backend (also
+used by CI) or an already-running local gateway:
+
+```bash
+cargo run --locked --example provider_bench -- --fake --smoke
+cargo run --locked --example provider_bench -- --url http://127.0.0.1:8080/v1/chat/completions --providers chatgpt,claude --iterations 20 --pid <gateway-pid>
+```
+
+Live mode requires an available gateway and a valid API key when authentication
+is enabled; pass `--api-key <secret>` rather than putting secrets in URLs.
+Install `curl` on the machine running the probe. It reports per-request total
+time and TTFT, TTFT samples after switching provider labels, and (when `--pid`
+is provided) process-wide RSS snapshots in KiB. Fake mode reports a synthetic
+overhead estimate by subtracting its fixed 30 ms fake upstream delay from TTFT;
+that number is a harness sanity check, not a production gateway-overhead result.
+Live results include gateway plus provider work. Use `/metrics` to inspect
+queue/provider timing separately. Record OS, CPU, Rust version, provider
+configuration, and sample count alongside results; live provider behavior and
+host load can materially affect measurements.
+
 ## Notes / honest limits
 
 - One persistent page per provider: concurrent sends to the same
   provider are serialized on that page (bounded by
   `session_pool_size` permits on the HTTP side).
-- Provider startup, resident memory, provider switching, and TTFT are not
-  benchmarked by this harness; do not treat historical design targets as
-  measured results.
+- Provider startup and per-page incremental RSS are not isolated by the SQLite microbenchmark. Use the provider probe below for request-level TTFT, provider-switch samples, and optional process-wide RSS snapshots; it does not claim to isolate per-page memory.
 
 
 ## Local security boundary
