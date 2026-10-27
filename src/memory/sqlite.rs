@@ -15,7 +15,6 @@ const PROVIDER_THREADS_SCHEMA: &str = "
         updated_at INTEGER NOT NULL,
         PRIMARY KEY(conversation_id, provider)
     );
-    CREATE INDEX conversations_owner_key_id_idx ON conversations(owner_key_id, id);
 ";
 const SCHEMA: &str = "
     CREATE TABLE conversations (
