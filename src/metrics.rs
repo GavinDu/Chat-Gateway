@@ -209,7 +209,6 @@ mod tests {
         assert_eq!(histogram.buckets[7], 1);
     }
 
-
     #[test]
     fn prometheus_labels_escape_backslashes_quotes_and_newlines() {
         assert_eq!(escape_label("a\\b\"c\nd"), "a\\\\b\\\"c\\nd");
