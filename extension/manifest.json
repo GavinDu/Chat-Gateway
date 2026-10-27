@@ -1,0 +1,49 @@
+{
+  "manifest_version": 3,
+  "name": "Chat Gateway Browser Relay",
+  "version": "0.1.0",
+  "description": "Explicitly link a provider browser session to a loopback-only Chat Gateway.",
+  "permissions": [
+    "activeTab",
+    "cookies",
+    "storage"
+  ],
+  "optional_host_permissions": [
+    "http://127.0.0.1/*",
+    "http://localhost/*",
+    "https://chatgpt.com/*",
+    "https://*.chatgpt.com/*",
+    "https://openai.com/*",
+    "https://*.openai.com/*",
+    "https://claude.ai/*",
+    "https://*.claude.ai/*",
+    "https://anthropic.com/*",
+    "https://*.anthropic.com/*",
+    "https://gemini.google.com/*",
+    "https://google.com/*",
+    "https://*.google.com/*",
+    "https://meta.ai/*",
+    "https://*.meta.ai/*",
+    "https://facebook.com/*",
+    "https://*.facebook.com/*",
+    "https://grok.com/*",
+    "https://*.grok.com/*",
+    "https://x.com/*",
+    "https://*.x.com/*",
+    "https://qwen.ai/*",
+    "https://*.qwen.ai/*",
+    "https://mistral.ai/*",
+    "https://*.mistral.ai/*",
+    "https://perplexity.ai/*",
+    "https://*.perplexity.ai/*"
+  ],
+  "action": {
+    "default_popup": "popup.html"
+  },
+  "background": {
+    "service_worker": "service_worker.js"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'"
+  }
+}
