@@ -245,7 +245,17 @@ impl UnifiedMemory {
 /// UTF-8 byte length underestimates token counts for many scripts and emoji;
 /// use Unicode scalar count with a tighter divisor, plus a small message overhead.
 fn estimate_message_tokens(content: &str) -> usize {
-    content.chars().count().saturating_add(2) / 3
+    let mut ascii = 0usize;
+    let mut non_ascii = 0usize;
+    for character in content.chars() {
+        if character.is_ascii() {
+            ascii += 1;
+        } else {
+            // CJK characters and emoji can each consume a token or more.
+            non_ascii += 1;
+        }
+    }
+    ascii.saturating_add(2) / 3 + non_ascii
 }
 
 fn messages_after_overlap(stored: &[ChatMessage], incoming: &[ChatMessage]) -> Vec<ChatMessage> {
