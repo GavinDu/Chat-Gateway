@@ -1365,15 +1365,27 @@ async fn upsert_provider_thread(
             "provider is not configured",
         );
     }
+    let host = input
+        .thread_url
+        .strip_prefix("https://")
+        .and_then(|value| value.split('/').next())
+        .unwrap_or_default();
     if input.thread_url.len() > 2048
-        || !input.thread_url.starts_with("https://")
+        || host.is_empty()
+        || host.contains('@')
+        || host.starts_with('.')
         || input.thread_url.bytes().any(|byte| byte.is_ascii_whitespace())
+        || input
+            .synced_through_message_id
+            .as_deref()
+            .is_some_and(|value| value.len() > 256)
+        || input.model.as_deref().is_some_and(|value| value.len() > 128)
     {
         return api_error(
             StatusCode::BAD_REQUEST,
             "invalid_request_error",
-            "invalid_thread_url",
-            "thread_url must be an HTTPS URL without whitespace and at most 2048 bytes",
+            "invalid_thread_mapping",
+            "thread_url must be a valid-shaped HTTPS URL (max 2048 bytes); message ID and model are limited to 256 and 128 bytes",
         );
     }
     let updated_at = std::time::SystemTime::now()
