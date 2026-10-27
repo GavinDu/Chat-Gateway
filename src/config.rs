@@ -369,11 +369,11 @@ mod tests {
         let defaults = config("");
         assert_eq!(defaults.memory.retention_days, 0);
 
-        let enabled = config("memory:\\n  retention_days: 30\\n");
+        let enabled = config("memory:\n  retention_days: 30\n");
         assert_eq!(enabled.memory.retention_days, 30);
         assert!(enabled.validate().is_ok());
 
-        let excessive = config("memory:\\n  retention_days: 36501\\n");
+        let excessive = config("memory:\n  retention_days: 36501\n");
         assert!(excessive.validate().is_err());
     }
 
