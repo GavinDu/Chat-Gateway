@@ -1258,6 +1258,7 @@ async fn authenticate_api_key(
     }
 }
 
+#[cfg(test)]
 fn delete_conversation_response(memory: &UnifiedMemory, conversation_id: &str) -> Response {
     delete_conversation_response_for_owner(memory, "local", conversation_id)
 }
@@ -1295,6 +1296,7 @@ fn delete_conversation_response_for_owner(
     }
 }
 
+#[cfg(test)]
 fn export_conversation_response(memory: &UnifiedMemory, conversation_id: &str) -> Response {
     export_conversation_response_for_owner(memory, "local", conversation_id)
 }
@@ -1514,6 +1516,7 @@ async fn export_conversation_markdown(
     export_conversation_markdown_response_for_owner(&state.memory, owner_key_id, &conversation_id)
 }
 
+#[cfg(test)]
 fn export_conversation_markdown_response(
     memory: &UnifiedMemory,
     conversation_id: &str,
@@ -1696,6 +1699,7 @@ fn conversation_context_read_error(conversation_id: Option<&str>) -> Response {
     )
 }
 
+#[cfg(test)]
 fn read_conversation_context(
     memory: &UnifiedMemory,
     conversation_id: Option<&str>,
