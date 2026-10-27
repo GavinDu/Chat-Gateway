@@ -162,11 +162,7 @@ impl UnifiedMemory {
             None => Vec::new(),
         };
         let has_history = !history.is_empty();
-        let (prompt, windowed) = ContextBuilder::build(
-            &history,
-            new_messages,
-            self.max_tokens,
-        );
+        let (prompt, windowed) = ContextBuilder::build(&history, new_messages, self.max_tokens);
         Ok((prompt, windowed, has_history))
     }
 
