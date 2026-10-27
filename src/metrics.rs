@@ -230,10 +230,8 @@ mod tests {
 
     #[test]
     fn session_state_metrics_are_one_hot() {
-        let metrics = render_with_provider_states(&[(
-            "provider-test".to_owned(),
-            "needs_login".to_owned(),
-        )]);
+        let metrics =
+            render_with_provider_states(&[("provider-test".to_owned(), "needs_login".to_owned())]);
         assert!(metrics.contains(
             "gateway_provider_session_state{provider=\"provider-test\",state=\"needs_login\"} 1"
         ));
