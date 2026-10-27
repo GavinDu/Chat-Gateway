@@ -3,7 +3,7 @@ use anyhow::{bail, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use std::{collections::HashMap, fs, path::Path, time::Duration};
 
-const VERSION: i64 = 3;
+const VERSION: i64 = 4;
 const APPLICATION_ID: i64 = 0x4347574d; // CGWM
 const PROVIDER_THREADS_SCHEMA: &str = "
     CREATE TABLE provider_threads (
@@ -14,6 +14,12 @@ const PROVIDER_THREADS_SCHEMA: &str = "
         model TEXT,
         updated_at INTEGER NOT NULL,
         PRIMARY KEY(conversation_id, provider)
+    );
+    CREATE TABLE conversation_summaries (
+        conversation_id TEXT PRIMARY KEY NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+        summary TEXT NOT NULL,
+        covered_through_position INTEGER NOT NULL CHECK(covered_through_position >= 0),
+        updated_at INTEGER NOT NULL
     );
 ";
 const SCHEMA: &str = "
@@ -120,6 +126,7 @@ fn initialize(connection: &mut Connection, legacy: Option<&Path>) -> Result<()> 
         // Version 2 added provider-thread mappings; version 3 adds activity
         // timestamps used by opt-in conversation retention.
         tx.execute_batch(PROVIDER_THREADS_SCHEMA)?;
+        tx.execute_batch(ROLLING_SUMMARIES_SCHEMA)?;
         tx.execute_batch(
             "ALTER TABLE conversations ADD COLUMN last_activity_at INTEGER NOT NULL DEFAULT 0;",
         )?;
@@ -134,6 +141,10 @@ fn initialize(connection: &mut Connection, legacy: Option<&Path>) -> Result<()> 
         tx.execute_batch(
             "UPDATE conversations SET last_activity_at = unixepoch() WHERE last_activity_at = 0;",
         )?;
+        tx.execute_batch(ROLLING_SUMMARIES_SCHEMA)?;
+        tx.pragma_update(None, "user_version", VERSION)?;
+    } else if version == 3 && app == APPLICATION_ID {
+        tx.execute_batch(ROLLING_SUMMARIES_SCHEMA)?;
         tx.pragma_update(None, "user_version", VERSION)?;
     } else if version != VERSION || app != APPLICATION_ID {
         bail!("unsupported conversation schema version {version} (expected {VERSION}) or application id {app}");
@@ -196,7 +207,7 @@ fn validate_schema(connection: &Connection) -> Result<()> {
     // were changed, including constraints that SELECT alone cannot validate.
     let expected = Connection::open_in_memory()?;
     expected.execute_batch(SCHEMA)?;
-    for table in ["conversations", "messages", "metadata", "provider_threads"] {
+    for table in ["conversations", "messages", "metadata", "provider_threads", "conversation_summaries"] {
         let sql = |database: &Connection| -> Result<String> {
             Ok(database.query_row(
                 "SELECT sql FROM sqlite_master WHERE type='table' AND name=?1",
