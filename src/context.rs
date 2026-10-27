@@ -81,6 +81,7 @@ pub(crate) fn messages_after_overlap(
 }
 
 #[cfg(test)]
+#[allow(unused_imports)] // The standalone benchmark includes this module with test cfg enabled.
 mod tests {
     use super::{estimate_message_tokens, messages_after_overlap, ContextBuilder};
     use crate::memory::ChatMessage;
