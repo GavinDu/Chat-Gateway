@@ -192,13 +192,7 @@ async fn main() -> anyhow::Result<()> {
         } else {
             format!("{provider}/{model_name}")
         };
-        let sample = request(
-            &url,
-            provider,
-            &model,
-            api_key.as_deref(),
-            pid.as_deref(),
-        )?;
+        let sample = request(&url, provider, &model, api_key.as_deref(), pid.as_deref())?;
         let gateway_overhead = if fake {
             sample
                 .ttft_ms
