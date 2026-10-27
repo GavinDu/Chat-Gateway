@@ -2367,6 +2367,13 @@ mod http_api_regression_tests {
         export_conversation_response(&memory, &conversation_id)
     }
 
+    async fn export_markdown_endpoint(
+        State(memory): State<Arc<UnifiedMemory>>,
+        Path(conversation_id): Path<String>,
+    ) -> Response {
+        export_conversation_markdown_response(&memory, &conversation_id)
+    }
+
     async fn list_endpoint(
         State(memory): State<Arc<UnifiedMemory>>,
         Query(query): Query<ConversationListQuery>,
@@ -2407,6 +2414,10 @@ mod http_api_regression_tests {
         Router::new()
             .route("/ready", get(|| async { readiness_response(1) }))
             .route("/v1/conversations", get(list_endpoint))
+            .route(
+                "/v1/conversations/:conversation_id/export.md",
+                get(export_markdown_endpoint),
+            )
             .route("/v1/chat/completions", post(validation_endpoint))
             .route(
                 "/v1/conversations/:conversation_id",
@@ -2444,6 +2455,47 @@ mod http_api_regression_tests {
             }
             Err(_) => conversation_context_read_error(conversation_id),
         }
+    }
+
+    #[tokio::test]
+    async fn markdown_export_returns_role_labelled_text() {
+        let memory = Arc::new(UnifiedMemory::new(8000));
+        memory
+            .store_turn(
+                "markdown_export".into(),
+                vec![ChatMessage {
+                    role: "user".into(),
+                    content: "hello from export".into(),
+                }],
+                ChatMessage {
+                    role: "assistant".into(),
+                    content: "answer from export".into(),
+                },
+                "chatgpt".into(),
+                "tab".into(),
+            )
+            .unwrap();
+        let response = app(memory)
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/conversations/markdown_export/export.md")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()["content-type"],
+            "text/markdown; charset=utf-8"
+        );
+        let bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let markdown = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(markdown.contains("# Conversation markdown_export"));
+        assert!(markdown.contains("## 1 — user"));
+        assert!(markdown.contains("hello from export"));
+        assert!(markdown.contains("## 2 — assistant"));
+        assert!(markdown.contains("answer from export"));
     }
 
     #[tokio::test]
