@@ -56,6 +56,8 @@ struct MetricData {
     provider_work_ms: BTreeMap<String, Histogram>,
     chat_total_ms: BTreeMap<String, Histogram>,
     gateway_overhead_ms: BTreeMap<String, Histogram>,
+    poll_tick_ms: BTreeMap<String, Histogram>,
+    poll_evaluations: BTreeMap<String, u64>,
     provider_outcomes: BTreeMap<(String, String), u64>,
 }
 
@@ -72,6 +74,17 @@ pub fn record_http_request(route: &str, status: u16, duration_ms: u64) {
             .entry(route.to_owned())
             .or_default()
             .observe(duration_ms);
+    }
+}
+
+/// Record one browser polling tick and the number of DOM evaluations used.
+pub fn record_browser_poll(provider: &str, evaluations: u64, duration_ms: u64) {
+    if let Ok(mut data) = data().lock() {
+        data.poll_tick_ms
+            .entry(provider.to_owned())
+            .or_default()
+            .observe(duration_ms);
+        *data.poll_evaluations.entry(provider.to_owned()).or_default() += evaluations;
     }
 }
 
@@ -172,6 +185,18 @@ pub fn render_with_provider_states(provider_states: &[(String, String)]) -> Stri
             histogram.render(&mut out, metric, label, key);
         }
     }
+    let _ = writeln!(out, "# TYPE gateway_poll_tick_ms histogram");
+    for (provider, histogram) in &data.poll_tick_ms {
+        histogram.render(&mut out, "gateway_poll_tick_ms", "provider", provider);
+    }
+    let _ = writeln!(out, "# TYPE gateway_poll_evaluations_total counter");
+    for (provider, count) in &data.poll_evaluations {
+        let _ = writeln!(
+            out,
+            "gateway_poll_evaluations_total{{provider=\"{}\"}} {count}",
+            escape_label(provider)
+        );
+    }
     let _ = writeln!(out, "# TYPE gateway_provider_requests_total counter");
     for ((provider, outcome), count) in &data.provider_outcomes {
         let _ = writeln!(
@@ -199,6 +224,14 @@ pub fn render_with_provider_states(provider_states: &[(String, String)]) -> Stri
 #[cfg(test)]
 mod tests {
     use super::{escape_label, normalize_route, render_with_provider_states, Histogram};
+
+    #[test]
+    fn browser_poll_metrics_track_evaluations_and_tick_duration() {
+        super::record_browser_poll("poll-test", 1, 7);
+        let metrics = render_with_provider_states(&[]);
+        assert!(metrics.contains("gateway_poll_evaluations_total{provider=\"poll-test\"} 1"));
+        assert!(metrics.contains("gateway_poll_tick_ms_count{provider=\"poll-test\"} 1"));
+    }
 
     #[test]
     fn route_labels_have_bounded_cardinality() {
