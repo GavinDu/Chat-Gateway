@@ -202,7 +202,9 @@ pub fn render_with_provider_states(provider_states: &[(String, String)]) -> Stri
 
 #[cfg(test)]
 mod tests {
-    use super::{escape_label, normalize_route, render_with_provider_states, Histogram};
+    use super::{
+        escape_label, normalize_route, render_with_provider_states, Histogram,
+    };
 
     #[test]
     fn route_labels_have_bounded_cardinality() {
@@ -242,5 +244,4 @@ mod tests {
         assert!(metrics.contains("gateway_provider_session_state{provider=\"provider-test\",state=\"ready\"} 0"));
         assert!(metrics.contains("gateway_provider_session_state{provider=\"provider-test\",state=\"unknown\"} 0"));
     }
-
 }
