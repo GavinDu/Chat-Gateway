@@ -53,6 +53,24 @@ jobs:
           diff -ru vendor/taffy "$repo/vendor/taffy"
           diff -ru vendor/cosmic-text "$repo/vendor/cosmic-text"
 
+      - name: Verify wreq-util vendored patch
+        run: |
+          set -euo pipefail
+          version="3.0.0-rc.12"
+          archive="$RUNNER_TEMP/wreq-util.crate"
+          upstream="$RUNNER_TEMP/wreq-util-upstream"
+          curl --fail --silent --show-error --location \
+            "https://crates.io/api/v1/crates/wreq-util/$version/download" --output "$archive"
+          mkdir -p "$upstream"
+          tar -xzf "$archive" -C "$upstream"
+          upstream_dir="$upstream/wreq-util-$version"
+          test -d "$upstream_dir"
+          diff -ru --exclude=Cargo.toml --exclude=Cargo.toml.orig --exclude=.cargo_vcs_info.json --exclude=.github --exclude=.gitignore --exclude=CHANGELOG.md --exclude=Cargo.lock --exclude=examples --exclude=release-plz.toml --exclude=rustfmt.toml --exclude=tests --exclude=PATCHES.md vendor/wreq-util "$upstream_dir"
+          grep -Fq 'version = "3.0.0-rc.12"' vendor/wreq-util/Cargo.toml
+          grep -Fq 'zstd = { version = "0.14.3", optional = true }' vendor/wreq-util/Cargo.toml
+          grep -Fq '"zstd 0.14.3"' Cargo.lock
+          ! grep -Fq '"zstd 0.13.3"' Cargo.lock
+
       - name: Install native build dependencies
         run: |
           sudo apt-get update
