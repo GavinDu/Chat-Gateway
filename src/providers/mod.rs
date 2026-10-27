@@ -454,8 +454,25 @@ pub async fn run_send(
         }
 
         tokio::time::sleep(Duration::from_millis(350)).await;
+        let poll_started = Instant::now();
+        let probe = adapter.response_probe(&page);
+        crate::metrics::record_browser_poll(
+            adapter.name(),
+            1,
+            poll_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+        );
+        let lower_url = probe.url.to_ascii_lowercase();
+        let url_challenge = [
+            "captcha",
+            "challenge",
+            "checkpoint",
+            "verify-human",
+            "verify_you_are_human",
+        ]
+        .iter()
+        .any(|marker| lower_url.contains(marker));
 
-        if crate::provider_guard::is_challenge_page(&page) {
+        if probe.challenge || url_challenge {
             crate::provider_guard::disable_provider(
                 adapter.name(),
                 "challenge page detected; manual review required",
@@ -468,8 +485,6 @@ pub async fn run_send(
                 .await;
             return;
         }
-
-        let probe = adapter.response_probe(&page);
         if should_probe_response_count(response_node_detected)
             && should_reset_response_tracker(
                 response_node_detected,

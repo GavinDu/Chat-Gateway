@@ -44,6 +44,8 @@ pub struct ResponseProbe {
     pub text: Option<String>,
     pub count: usize,
     pub streaming: bool,
+    pub url: String,
+    pub challenge: bool,
 }
 
 fn decode_response_probe(value: serde_json::Value) -> ResponseProbe {
@@ -59,6 +61,15 @@ fn decode_response_probe(value: serde_json::Value) -> ResponseProbe {
             .unwrap_or(0) as usize,
         streaming: value
             .get("streaming")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        url: value
+            .get("url")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        challenge: value
+            .get("challenge")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false),
     }
@@ -105,9 +116,14 @@ pub fn response_probe(page: &Page, set: &SelectorSet) -> ResponseProbe {
             try {{ streaming = document.querySelector({streaming_selector}) !== null; }} catch (_) {{}}
             if (!streaming) {{
                 streaming = Array.from(document.querySelectorAll("button"))
-                    .some(button => ((button.innerText || button.textContent || "").trim()).includes("Stop"));
+                    .some(button => ((button.innerText || button.textContent || "").trim()).toLowerCase().includes("stop"));
             }}
-            return {{ text, count: nodes.size, streaming }};
+            const url = String(location.href || "");
+            const lowerUrl = url.toLowerCase();
+            const body = (document.body?.innerText || "").slice(0, 12000).toLowerCase();
+            const challenge = ["captcha", "challenge", "checkpoint", "verify-human", "verify_you_are_human"].some(marker => lowerUrl.includes(marker))
+                || ["verify you are human", "confirm you are not a robot", "unusual traffic", "complete the captcha", "security challenge", "checking your browser"].some(marker => body.includes(marker));
+            return {{ text, count: nodes.size, streaming, url, challenge }};
         }})()"#
     );
     decode_response_probe(page.evaluate(&script))
@@ -170,12 +186,16 @@ mod response_probe_tests {
             decode_response_probe(serde_json::json!({
                 "text": "answer",
                 "count": 4,
-                "streaming": true
+                "streaming": true,
+                "url": "https://provider.example/challenge",
+                "challenge": true
             })),
             ResponseProbe {
                 text: Some("answer".to_string()),
                 count: 4,
                 streaming: true,
+                url: "https://provider.example/challenge".to_owned(),
+                challenge: true,
             }
         );
         assert_eq!(
