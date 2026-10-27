@@ -5,6 +5,9 @@ use crate::context::ContextBuilder;
 pub(crate) use crate::context::messages_after_overlap;
 #[cfg(test)]
 pub(crate) use crate::context::estimate_message_tokens;
+pub(crate) use crate::context::messages_after_overlap;
+#[cfg(test)]
+pub(crate) use crate::context::estimate_message_tokens;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use std::{
