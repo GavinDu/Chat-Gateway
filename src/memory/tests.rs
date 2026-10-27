@@ -829,3 +829,12 @@ fn sqlite_checkpoint_is_safe_after_durable_turns_and_can_repeat() {
         ],
     );
 }
+
+
+#[test]
+fn conservative_token_estimate_counts_unicode_without_underflow() {
+    assert_eq!(estimate_tokens(""), 8);
+    assert!(estimate_tokens("你好世界") >= 12);
+    assert!(estimate_tokens("😀🚀✨") >= 12);
+    assert!(estimate_tokens(&"a".repeat(120)) >= 48);
+}
