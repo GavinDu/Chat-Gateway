@@ -2,6 +2,7 @@
 mod sqlite;
 
 use crate::context::ContextBuilder;
+use crate::context::messages_after_overlap;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use std::{
