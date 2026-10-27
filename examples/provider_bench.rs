@@ -166,9 +166,13 @@ async fn main() -> anyhow::Result<()> {
         providers.join(",")
     );
     if fake {
-        println!("fake_upstream_delay_ms={FAKE_UPSTREAM_MS}; gateway_overhead is TTFT minus this configured delay (synthetic, not a production estimate)");
+        println!(
+            "fake_upstream_delay_ms={FAKE_UPSTREAM_MS}; gateway_overhead is TTFT minus this configured delay (synthetic, not a production estimate)"
+        );
     } else {
-        println!("live measurements include gateway and upstream work; use /metrics to separate queue/provider timing. No prompts are logged.");
+        println!(
+            "live measurements include gateway and upstream work; use /metrics to separate queue/provider timing. No prompts are logged."
+        );
     }
 
     let mut samples = Vec::with_capacity(iterations);
@@ -189,9 +193,17 @@ async fn main() -> anyhow::Result<()> {
             index + 1,
             sample.provider,
             sample.total_ms,
-            sample.ttft_ms.map(|v| format!("{v:.2}")).unwrap_or_else(|| "n/a".to_owned()),
-            gateway_overhead.map(|v| format!("{v:.2}")).unwrap_or_else(|| "n/a".to_owned()),
-            sample.rss_kib.map(|v| v.to_string()).unwrap_or_else(|| "n/a".to_owned()),
+            sample
+                .ttft_ms
+                .map(|v| format!("{v:.2}"))
+                .unwrap_or_else(|| "n/a".to_owned()),
+            gateway_overhead
+                .map(|v| format!("{v:.2}"))
+                .unwrap_or_else(|| "n/a".to_owned()),
+            sample
+                .rss_kib
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "n/a".to_owned()),
         );
         if previous.as_deref().is_some_and(|last| last != provider) {
             if let Some(ttft) = sample.ttft_ms {
@@ -214,8 +226,14 @@ async fn main() -> anyhow::Result<()> {
         .iter()
         .filter_map(|sample| sample.rss_kib)
         .collect::<Vec<_>>();
-    println!("summary total_ms_median={:?} ttft_ms_median={:?} provider_switch_ttft_ms_median={:?} rss_kib_median={:?}",
-        median(&mut totals), median(&mut ttfts), median(&mut switch_ttft), median(&mut rss.iter().map(|v| *v as f64).collect::<Vec<_>>()));
+    let mut rss_samples = rss.iter().map(|value| *value as f64).collect::<Vec<_>>();
+    println!(
+        "summary total_ms_median={:?} ttft_ms_median={:?} provider_switch_ttft_ms_median={:?} rss_kib_median={:?}",
+        median(&mut totals),
+        median(&mut ttfts),
+        median(&mut switch_ttft),
+        median(&mut rss_samples)
+    );
     if fake && !samples.iter().any(|sample| sample.ttft_ms.is_some()) {
         anyhow::bail!("fake benchmark did not observe a streamed content token");
     }
