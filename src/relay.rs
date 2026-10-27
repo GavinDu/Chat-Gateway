@@ -240,7 +240,7 @@ pub async fn import_session(
     Path(provider): Path<String>,
     Json(file): Json<crate::session::SessionFile>,
 ) -> Response {
-    if let Err(response) = authenticated_request(&app, &headers) { return response; }
+    if let Err(response) = authenticated_request(&app, &headers) { return *response; }
     match crate::session::import_relay_session(&provider, &file) {
         Ok(()) => Json(serde_json::json!({"ok":true,"provider":provider,"linked":true})).into_response(),
         Err(error) => {
