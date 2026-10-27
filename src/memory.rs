@@ -508,9 +508,6 @@ impl UnifiedMemory {
     }
 }
 
-/// Conservative, dependency-free token estimate for context budgeting.
-/// ASCII text averages several characters per token, while CJK and emoji
-/// can consume a token per scalar value; count non-ASCII characters separately.
 /// Build a bounded deterministic extractive summary from older messages.
 fn extractive_rolling_summary(messages: &[ChatMessage], max_chars: usize) -> String {
     let mut lines = Vec::new();
