@@ -240,8 +240,14 @@ mod tests {
             "provider-test".to_owned(),
             "needs_login".to_owned(),
         )]);
-        assert!(metrics.contains("gateway_provider_session_state{provider=\"provider-test\",state=\"needs_login\"} 1"));
-        assert!(metrics.contains("gateway_provider_session_state{provider=\"provider-test\",state=\"ready\"} 0"));
-        assert!(metrics.contains("gateway_provider_session_state{provider=\"provider-test\",state=\"unknown\"} 0"));
+        assert!(metrics.contains(
+            "gateway_provider_session_state{provider=\"provider-test\",state=\"needs_login\"} 1"
+        ));
+        assert!(metrics.contains(
+            "gateway_provider_session_state{provider=\"provider-test\",state=\"ready\"} 0"
+        ));
+        assert!(metrics.contains(
+            "gateway_provider_session_state{provider=\"provider-test\",state=\"unknown\"} 0"
+        ));
     }
 }
