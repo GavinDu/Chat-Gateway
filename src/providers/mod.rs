@@ -127,8 +127,14 @@ fn poll_snapshot(page: &Page, selectors: &common::SelectorSet) -> PollSnapshot {
                     }}
                 }} catch (_) {{}}
             }}
-            let streaming = false;
-            try {{ streaming = !!document.querySelector({streaming_selector}); }} catch (_) {{}}
+            const streaming = (() => {{
+                try {{
+                    if (document.querySelector({streaming_selector})) return true;
+                }} catch (_) {{}}
+                return Array.from(document.querySelectorAll('button')).some(button =>
+                    ((button.innerText || button.textContent || '').trim()).toLowerCase().includes('stop')
+                );
+            }})();
             const url = String(location.href || '');
             const body = (document.body?.innerText || '').slice(0, 12000).toLowerCase();
             const lowerUrl = url.toLowerCase();
