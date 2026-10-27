@@ -1050,7 +1050,17 @@ mod login_action_payload_tests {
 /// Startup validates configuration and warms the browser pool before binding.
 /// Readiness requires at least one enabled provider whose session is not known
 /// to be expired; providers marked `needs_login` do not count as routable.
-fn readiness_response(enabled: usize) -> Response {
+fn readiness_response(enabled: usize, worker_alive: bool) -> Response {
+    if !worker_alive {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "status": "not_ready",
+                "reason": "browser_worker_unavailable",
+            })),
+        )
+            .into_response();
+    }
     if enabled == 0 {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -1072,6 +1082,9 @@ fn readiness_response(enabled: usize) -> Response {
 }
 
 async fn readiness(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    if !state.pool.worker_alive() {
+        return readiness_response(0, false);
+    }
     let routable = state
         .cfg
         .providers
@@ -1082,7 +1095,7 @@ async fn readiness(State(state): State<Arc<AppState>>) -> impl IntoResponse {
                 && provider_guard::provider_disabled_reason(&p.name).is_none()
         })
         .count();
-    readiness_response(routable)
+    readiness_response(routable, true)
 }
 
 #[cfg(test)]
@@ -1091,11 +1104,16 @@ mod readiness_contract_tests {
 
     #[test]
     fn readiness_requires_at_least_one_routable_provider() {
-        let not_ready = readiness_response(0);
+        let not_ready = readiness_response(0, true);
         assert_eq!(not_ready.status(), StatusCode::SERVICE_UNAVAILABLE);
 
-        let ready = readiness_response(1);
+        let ready = readiness_response(1, true);
         assert_eq!(ready.status(), StatusCode::OK);
+
+        let worker_dead = readiness_response(1, false);
+        assert_eq!(worker_dead.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = worker_dead.into_body();
+        let _ = body;
     }
 }
 
