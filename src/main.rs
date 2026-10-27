@@ -1733,6 +1733,43 @@ fn usable_initial_stream_chunk(content: &str, done: bool) -> bool {
     !done && !content.is_empty()
 }
 
+enum FirstEvent {
+    Chunk(providers::ProviderChunk),
+    EmptyCompletion,
+    Error(anyhow::Error),
+    Closed,
+    Timeout,
+}
+
+async fn first_event(
+    rx: &mut tokio::sync::mpsc::Receiver<anyhow::Result<providers::ProviderChunk>>,
+    timeout: std::time::Duration,
+) -> FirstEvent {
+    match tokio::time::timeout(timeout, async {
+        loop {
+            match rx.recv().await {
+                Some(Ok(chunk)) if usable_initial_stream_chunk(&chunk.content, chunk.done) => {
+                    break Some(Ok(chunk));
+                }
+                Some(Ok(chunk)) if chunk.done => break Some(Ok(chunk)),
+                Some(Ok(_empty_chunk)) => continue,
+                Some(Err(error)) => break Some(Err(error)),
+                None => break None,
+            }
+        }
+    })
+    .await
+    {
+        Ok(Some(Ok(chunk))) if usable_initial_stream_chunk(&chunk.content, chunk.done) => {
+            FirstEvent::Chunk(chunk)
+        }
+        Ok(Some(Ok(_))) => FirstEvent::EmptyCompletion,
+        Ok(Some(Err(error))) => FirstEvent::Error(error),
+        Ok(None) => FirstEvent::Closed,
+        Err(_) => FirstEvent::Timeout,
+    }
+}
+
 fn valid_conversation_id(value: &str) -> bool {
     (8..=128).contains(&value.len())
         && value.is_ascii()
@@ -1957,41 +1994,42 @@ async fn chat_completions(
                     .map(|provider| provider.timeout_seconds)
                     .unwrap_or(120),
             );
-            let first = match tokio::time::timeout(first_chunk_timeout, async {
-                loop {
-                    match rx.recv().await {
-                        Some(Ok(chunk))
-                            if usable_initial_stream_chunk(&chunk.content, chunk.done) =>
-                        {
-                            break Some(Ok(chunk));
-                        }
-                        Some(Ok(chunk)) if chunk.done => break Some(Ok(chunk)),
-                        Some(Ok(_empty_chunk)) => continue,
-                        Some(Err(error)) => break Some(Err(error)),
-                        None => break None,
-                    }
-                }
-            })
-            .await
-            {
-                Ok(Some(Ok(chunk))) if usable_initial_stream_chunk(&chunk.content, chunk.done) => {
-                    chunk
-                }
-                Ok(Some(Ok(_))) => {
-                    last_err =
-                        Some("provider completed without output before stream started".to_string());
-                    continue;
-                }
-                Ok(Some(Err(error))) => {
+            let first = match first_event(&mut rx, first_chunk_timeout).await {
+                FirstEvent::Chunk(chunk) => chunk,
+                FirstEvent::EmptyCompletion => {
+                    let error = "provider completed without output before stream started";
+                    let provider_work_ms = provider_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+                    let total_ms = request_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+                    provider_state::record_error(&provider_name, error);
+                    metrics::record_provider_timings(&provider_name, "error", queue_ms, None, provider_work_ms, total_ms);
                     last_err = Some(error.to_string());
                     continue;
                 }
-                Ok(None) => {
-                    last_err = Some("provider stream closed before first output".to_string());
+                FirstEvent::Error(error) => {
+                    let message = error.to_string();
+                    let provider_work_ms = provider_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+                    let total_ms = request_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+                    provider_state::record_error(&provider_name, &message);
+                    metrics::record_provider_timings(&provider_name, "error", queue_ms, None, provider_work_ms, total_ms);
+                    last_err = Some(message);
                     continue;
                 }
-                Err(_) => {
-                    last_err = Some("provider timed out before first output".to_string());
+                FirstEvent::Closed => {
+                    let error = "provider stream closed before first output";
+                    let provider_work_ms = provider_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+                    let total_ms = request_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+                    provider_state::record_error(&provider_name, error);
+                    metrics::record_provider_timings(&provider_name, "error", queue_ms, None, provider_work_ms, total_ms);
+                    last_err = Some(error.to_string());
+                    continue;
+                }
+                FirstEvent::Timeout => {
+                    let error = "provider timed out before first output";
+                    let provider_work_ms = provider_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+                    let total_ms = request_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+                    provider_state::record_error(&provider_name, error);
+                    metrics::record_provider_timings(&provider_name, "error", queue_ms, None, provider_work_ms, total_ms);
+                    last_err = Some(error.to_string());
                     continue;
                 }
             };
