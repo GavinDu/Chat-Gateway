@@ -241,7 +241,16 @@ impl UnifiedMemory {
             conversation.messages.push(assistant_msg);
         }
         conversation.provider = Some(provider);
-        conversation.tab_id = tab_id;
+        if let Some(tab_id) = tab_id {
+            conversation.tab_id = Some(tab_id);
+        } else if conversation
+            .tab_id
+            .as_deref()
+            .is_some_and(|tab_id| tab_id.starts_with("tab-"))
+        {
+            // Remove legacy synthetic identifiers without erasing real tab metadata.
+            conversation.tab_id = None;
+        }
         sqlite::append_owned(&tx, &conversation, first, owner_key_id)?;
         tx.commit()
             .map_err(|error| anyhow::anyhow!("committing conversation turn: {error}"))
