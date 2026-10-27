@@ -116,7 +116,7 @@ impl UnifiedMemory {
         let mut tokens = 0;
         let mut windowed = Vec::new();
         for msg in full.iter().rev() {
-            let t = (msg.content.len() as f32 / 4.0) as usize + 8;
+            let t = estimate_message_tokens(&msg.content) + 8;
             if tokens + t > self.max_tokens && !windowed.is_empty() {
                 break;
             }
@@ -238,6 +238,14 @@ impl UnifiedMemory {
             .conversation(cid)?
             .and_then(|conversation| conversation.provider))
     }
+}
+
+
+/// Conservative, dependency-free token estimate for context budgeting.
+/// UTF-8 byte length underestimates token counts for many scripts and emoji;
+/// use Unicode scalar count with a tighter divisor, plus a small message overhead.
+fn estimate_message_tokens(content: &str) -> usize {
+    content.chars().count().saturating_add(2) / 3
 }
 
 fn messages_after_overlap(stored: &[ChatMessage], incoming: &[ChatMessage]) -> Vec<ChatMessage> {
