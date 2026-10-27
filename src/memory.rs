@@ -1,6 +1,7 @@
 #[path = "memory/sqlite.rs"]
 mod sqlite;
 
+use crate::context::estimate_message_tokens;
 use crate::context::messages_after_overlap;
 use crate::context::ContextBuilder;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
@@ -141,18 +142,50 @@ impl UnifiedMemory {
         conversation_id: Option<&str>,
         new_messages: &[ChatMessage],
     ) -> anyhow::Result<(String, Vec<ChatMessage>)> {
-        let history = match conversation_id {
-            Some(id) => self
-                .conversation_for_owner(owner_key_id, id)?
-                .map(|conversation| conversation.messages)
-                .unwrap_or_default(),
-            None => Vec::new(),
+        let (history, saved_summary) = match conversation_id {
+            Some(id) => match self.conversation_for_owner(owner_key_id, id)? {
+                Some(conversation) => (conversation.messages, self.rolling_summary(id)?),
+                None => (Vec::new(), None),
+            },
+            None => (Vec::new(), None),
         };
-        Ok(ContextBuilder::build(
-            &history,
-            new_messages,
-            self.max_tokens,
-        ))
+        let summary_message = saved_summary.map(|(summary, _covered)| ChatMessage {
+            role: "system".to_owned(),
+            content: format!("Conversation summary of earlier turns:\n{summary}"),
+        });
+        let summary_tokens = summary_message
+            .as_ref()
+            .map(|message| estimate_message_tokens(&message.content).saturating_add(8))
+            .unwrap_or(0);
+        let message_budget = if summary_message.is_some() {
+            self.max_tokens.saturating_sub(summary_tokens)
+        } else {
+            self.max_tokens
+        };
+        let (mut prompt, mut context) =
+            ContextBuilder::build(&history, new_messages, message_budget);
+        if let Some(summary) = summary_message {
+            context.insert(0, summary);
+            prompt = crate::context::render_prompt(&context);
+        }
+        Ok((prompt, context))
+    }
+
+    fn rolling_summary(&self, conversation_id: &str) -> anyhow::Result<Option<(String, usize)>> {
+        let connection = self.lock()?;
+        connection
+            .query_row(
+                "SELECT summary, covered_through_position FROM conversation_summaries WHERE conversation_id=?1",
+                [conversation_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?.max(0) as usize,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(Into::into)
     }
 
     #[allow(dead_code)]
@@ -222,6 +255,29 @@ impl UnifiedMemory {
         conversation.provider = Some(provider);
         conversation.tab_id = Some(tab_id);
         sqlite::append_owned(&tx, &conversation, first, owner_key_id)?;
+        // Maintain a bounded deterministic summary in the same transaction as the turn.
+        const RECENT_MESSAGES_TO_KEEP: usize = 8;
+        const SUMMARY_START_THRESHOLD: usize = 16;
+        if conversation.messages.len() >= SUMMARY_START_THRESHOLD {
+            let covered = conversation.messages.len() - RECENT_MESSAGES_TO_KEEP;
+            let summary = extractive_rolling_summary(&conversation.messages[..covered], 1200);
+            if !summary.is_empty() {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs()
+                    .min(i64::MAX as u64) as i64;
+                tx.execute(
+                    "INSERT INTO conversation_summaries(conversation_id,summary,covered_through_position,updated_at)
+                     VALUES(?1,?2,?3,?4)
+                     ON CONFLICT(conversation_id) DO UPDATE SET
+                        summary=excluded.summary,
+                        covered_through_position=excluded.covered_through_position,
+                        updated_at=excluded.updated_at",
+                    rusqlite::params![conversation.id, summary, covered as i64, now],
+                )?;
+            }
+        }
         tx.commit()
             .map_err(|error| anyhow::anyhow!("committing conversation turn: {error}"))
     }
@@ -450,6 +506,31 @@ impl UnifiedMemory {
         )?;
         Ok(())
     }
+}
+
+fn extractive_rolling_summary(messages: &[ChatMessage], max_chars: usize) -> String {
+    let mut lines = Vec::new();
+    let mut used = 0usize;
+    for message in messages.iter().rev() {
+        let normalized = message
+            .content
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        if normalized.is_empty() {
+            continue;
+        }
+        let excerpt = normalized.chars().take(180).collect::<String>();
+        let line = format!("{}: {}", message.role, excerpt);
+        let cost = line.chars().count() + 1;
+        if used + cost > max_chars && !lines.is_empty() {
+            break;
+        }
+        used += cost;
+        lines.push(line);
+    }
+    lines.reverse();
+    lines.join("\n")
 }
 
 #[cfg(test)]
