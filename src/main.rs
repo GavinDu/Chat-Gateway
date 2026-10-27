@@ -1333,8 +1333,6 @@ fn export_conversation_response_for_owner(
 }
 
 #[derive(Debug, serde::Deserialize)]
-#[derive(Debug, serde::Deserialize)]
-struct ConversationListQuery
 struct ConversationListQuery {
     limit: Option<usize>,
     offset: Option<usize>,
