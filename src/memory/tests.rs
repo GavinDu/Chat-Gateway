@@ -771,6 +771,7 @@ fn schema_v1_database_migrates_provider_thread_map_without_losing_conversations(
         )
         .unwrap();
     assert_eq!(mapped_threads, 0);
+    drop(connection);
     let version: i64 = memory
         .lock()
         .unwrap()
