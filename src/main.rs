@@ -19,6 +19,7 @@ use tokio::sync::RwLock;
 
 mod browser;
 mod config;
+mod context;
 mod login;
 mod memory;
 mod metrics;
@@ -176,9 +177,8 @@ fn validate_chat_req(req: &ChatReq) -> Result<(), (&'static str, String)> {
 }
 
 fn estimate_tokens(text: &str) -> u64 {
-    // A conservative, provider-independent estimate for a browser-backed
-    // gateway that does not receive authoritative tokenizer usage.
-    text.chars().count().div_ceil(4) as u64
+    // Share the same conservative estimator used by context budgeting.
+    context::estimate_message_tokens(text) as u64
 }
 
 fn add_gateway_headers(headers: &mut axum::http::HeaderMap, provider: &str, model: &str) {
@@ -3547,7 +3547,7 @@ mod openai_compatibility_metadata_tests {
     fn estimated_token_count_is_nonzero_for_nonempty_unicode_text() {
         assert_eq!(estimate_tokens(""), 0);
         assert_eq!(estimate_tokens("hello"), 2);
-        assert_eq!(estimate_tokens("你好"), 1);
+        assert_eq!(estimate_tokens("你好"), 2);
     }
 
     #[test]
