@@ -779,3 +779,23 @@ fn schema_v1_database_migrates_provider_thread_map_without_losing_conversations(
         .unwrap();
     assert_eq!(version, 2);
 }
+
+#[test]
+fn conversation_listing_is_paged_and_reports_message_counts() {
+    let fixture = Fixture::new();
+    let memory = fixture.open();
+    store(&memory, "list-alpha", "alpha");
+    store(&memory, "list-bravo", "bravo");
+    store(&memory, "list-charlie", "charlie");
+
+    let first = memory.list_conversations(2, 0).unwrap();
+    assert_eq!(first.len(), 2);
+    assert_eq!(first[0].id, "list-alpha");
+    assert_eq!(first[0].provider.as_deref(), Some("chatgpt"));
+    assert_eq!(first[0].message_count, 2);
+
+    let second = memory.list_conversations(2, 2).unwrap();
+    assert_eq!(second.len(), 1);
+    assert_eq!(second[0].id, "list-charlie");
+    assert!(memory.list_conversations(0, 0).unwrap().is_empty());
+}
