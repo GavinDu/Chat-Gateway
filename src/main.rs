@@ -1325,7 +1325,7 @@ fn export_conversation_markdown_response(memory: &UnifiedMemory, conversation_id
             if let Some(tab_id) = conversation.tab_id.as_deref() {
                 markdown.push_str(&format!("- Tab: {}\n", tab_id));
             }
-            markdown.push_str("\n");
+            markdown.push('\n');
             for (index, message) in conversation.messages.iter().enumerate() {
                 markdown.push_str(&format!("## {} — {}\n\n{}\n\n", index + 1, message.role, message.content));
             }
