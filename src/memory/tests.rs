@@ -1255,3 +1255,26 @@ fn schema_v4_migration_adds_summary_table_without_losing_tenant_data() {
         "preserve this v4 message"
     );
 }
+
+
+#[test]
+fn completed_turn_without_real_tab_does_not_persist_synthetic_tab_id() {
+    let fixture = Fixture::new();
+    let memory = fixture.open();
+    memory
+        .store_turn_for_owner_with_tab_id(
+            "key:test",
+            "conversation-without-tab".into(),
+            vec![m("user", "hello")],
+            m("assistant", "hi"),
+            "chatgpt".into(),
+            None,
+        )
+        .unwrap();
+
+    let conversation = memory
+        .conversation_for_owner("key:test", "conversation-without-tab")
+        .unwrap()
+        .unwrap();
+    assert_eq!(conversation.tab_id, None);
+}
