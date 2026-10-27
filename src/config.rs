@@ -1,5 +1,5 @@
 use serde::Deserialize;
-use std::path::Path;
+use std::{collections::HashSet, path::Path};
 
 /// Minimal YAML config, same shape as v1's config.example.yaml:
 /// server / memory / obscura / providers (name, enabled, priority,
@@ -162,7 +162,11 @@ impl AppConfig {
             "mistral",
             "perplexity",
         ];
+        let mut auth_key_names = HashSet::new();
         for key in &self.auth.keys {
+            if !auth_key_names.insert(key.name.trim().to_ascii_lowercase()) {
+                anyhow::bail!("auth key names must be unique (case-insensitive): '{}'", key.name);
+            }
             if key.name.trim().is_empty() {
                 anyhow::bail!("auth key name must not be empty");
             }
