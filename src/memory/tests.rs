@@ -1124,7 +1124,6 @@ fn context_budget_estimate_handles_multibyte_text_conservatively() {
     );
 }
 
-
 #[test]
 fn completed_turn_without_real_tab_does_not_persist_synthetic_tab_id() {
     let fixture = Fixture::new();
