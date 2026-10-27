@@ -20,7 +20,7 @@ async function api(path, options = {}) {
   const base = gateway();
   const auth = await token();
   const headers = { "Content-Type": "application/json", ...(options.headers || {}) };
-  if (auth) headers.Authorization = `Bearer ${auth}`;
+  if (auth) { headers.Authorization = `Bearer ${auth}`; headers["X-Relay-Timestamp"] = String(Math.floor(Date.now() / 1000)); headers["X-Relay-Nonce"] = crypto.randomUUID(); }
   const response = await fetch(base + path, { ...options, headers, cache: "no-store" });
   const body = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(body?.error?.message || body?.error || `Gateway returned HTTP ${response.status}`);
