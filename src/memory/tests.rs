@@ -1002,7 +1002,9 @@ fn rolling_summary_persists_and_context_keeps_recent_messages() {
         "the latest user turn must remain verbatim"
     );
     assert!(
-        context.iter().any(|message| message.content.contains("assistant response 11")),
+        context
+            .iter()
+            .any(|message| message.content.contains("assistant response 11")),
         "the latest assistant response must remain verbatim"
     );
 
