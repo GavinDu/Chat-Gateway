@@ -25,6 +25,7 @@ mod memory;
 mod metrics;
 mod provider_guard;
 mod provider_state;
+mod relay;
 mod providers;
 mod router;
 mod session;
@@ -96,6 +97,7 @@ struct AppState {
     memory: Arc<UnifiedMemory>,
     router: ProviderRouter,
     models_cache: Arc<RwLock<HashMap<String, Vec<String>>>>,
+    relay: Arc<relay::RelayState>,
 }
 
 #[derive(serde::Deserialize)]
@@ -361,12 +363,15 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    let (relay_state, pairing_code) = relay::RelayState::new()?;
+    println!("Browser relay pairing code (single use, expires in 10 minutes): {pairing_code}");
     let state = Arc::new(AppState {
         cfg: cfg.clone(),
         pool: pool.clone(),
         memory: Arc::new(UnifiedMemory::from_env(cfg.memory.max_tokens)?),
         router: ProviderRouter::new(cfg.clone()),
         models_cache: Arc::new(RwLock::new(HashMap::new())),
+        relay: Arc::new(relay_state),
     });
 
     // Background model discovery (reads pickers without sending messages)
@@ -429,6 +434,11 @@ async fn main() -> anyhow::Result<()> {
         .route("/login/api/:provider/complete", post(login_complete))
         .route("/login/api/:provider/view", get(login_view))
         .route("/login/api/:provider/act", post(login_act))
+        .route("/relay/v1/pair", post(relay::pair))
+        .route("/relay/v1/status", get(relay::status))
+        .route("/relay/v1/session/:provider", post(relay::import_session).delete(relay::unlink))
+        .route("/relay/v1/unpair", post(relay::unpair))
+        .route("/relay/v1/*path", axum::routing::options(relay::preflight))
         .with_state(state.clone())
         .layer(middleware::from_fn_with_state(
             state.cfg.auth.clone(),
@@ -546,7 +556,12 @@ async fn protect_login_api(req: Request<Body>, next: Next) -> Response {
     let origin_present = headers.contains_key(axum::http::header::ORIGIN);
     let fetch_site = headers.get("sec-fetch-site").and_then(|v| v.to_str().ok());
     let is_login_api = req.uri().path().starts_with("/login/api/");
-    let origin_is_safe = !origin_present || login_origin_is_same_authority(headers);
+    let is_relay_api = req.uri().path().starts_with("/relay/v1/");
+    let origin_is_safe = if is_relay_api {
+        relay::relay_origin_is_allowed(headers)
+    } else {
+        !origin_present || login_origin_is_same_authority(headers)
+    };
     if !host_is_loopback || (is_login_api && fetch_site == Some("cross-site")) || !origin_is_safe {
         return (
             StatusCode::FORBIDDEN,
@@ -1209,6 +1224,10 @@ fn authorize_api_request(
     path: &str,
     method: &axum::http::Method,
 ) -> Result<Option<AuthKeyContext>, AuthFailure> {
+    if path.starts_with("/relay/v1/") {
+        // Relay handlers enforce a separate extension-origin + install-token protocol.
+        return Ok(None);
+    }
     if auth.keys.is_empty() || path == "/health" {
         return Ok(None);
     }
