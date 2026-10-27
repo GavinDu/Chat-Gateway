@@ -333,9 +333,7 @@ mod tests {
 
     #[test]
     fn rejects_zero_provider_pacing_budgets() {
-        let interval = config(
-            "providers:\n  - name: chatgpt\n    min_request_interval_ms: 0\n",
-        );
+        let interval = config("providers:\n  - name: chatgpt\n    min_request_interval_ms: 0\n");
         assert!(interval.validate().is_err());
 
         let cap = config("providers:\n  - name: chatgpt\n    daily_request_cap: 0\n");
