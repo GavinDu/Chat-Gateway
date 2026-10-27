@@ -830,7 +830,6 @@ fn sqlite_checkpoint_is_safe_after_durable_turns_and_can_repeat() {
     );
 }
 
-
 #[test]
 fn conservative_token_estimate_counts_unicode_without_underflow() {
     assert_eq!(estimate_tokens(""), 8);
