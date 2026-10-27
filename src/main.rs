@@ -1342,10 +1342,15 @@ struct ConversationListQuery {
 async fn list_conversations(
     State(state): State<Arc<AppState>>,
     Query(query): Query<ConversationListQuery>,
+    auth_context: Option<Extension<AuthKeyContext>>,
 ) -> Response {
+    let owner_key_id = auth_context
+        .as_ref()
+        .map(|Extension(context)| context.key_id.as_str())
+        .unwrap_or("local");
     let limit = query.limit.unwrap_or(50).clamp(1, 100);
     let offset = query.offset.unwrap_or(0);
-    match state.memory.list_conversations(limit, offset) {
+    match state.memory.list_conversations_for_owner(owner_key_id, limit, offset) {
         Ok(conversations) => Json(serde_json::json!({
             "data": conversations,
             "limit": limit,
@@ -1367,7 +1372,12 @@ async fn list_conversations(
 async fn get_provider_thread(
     State(state): State<Arc<AppState>>,
     Path((conversation_id, provider)): Path<(String, String)>,
+    auth_context: Option<Extension<AuthKeyContext>>,
 ) -> Response {
+    let owner_key_id = auth_context
+        .as_ref()
+        .map(|Extension(context)| context.key_id.as_str())
+        .unwrap_or("local");
     if !valid_conversation_id(&conversation_id) || !valid_provider_name(&provider) {
         return api_error(
             StatusCode::BAD_REQUEST,
@@ -1378,7 +1388,7 @@ async fn get_provider_thread(
     }
     match state
         .memory
-        .get_provider_thread(&conversation_id, &provider)
+        .get_provider_thread_for_owner(owner_key_id, &conversation_id, &provider)
     {
         Ok(Some(thread)) => Json(thread).into_response(),
         Ok(None) => api_error(
@@ -1403,7 +1413,12 @@ async fn upsert_provider_thread(
     State(state): State<Arc<AppState>>,
     Path((conversation_id, provider)): Path<(String, String)>,
     Json(mut thread): Json<ProviderThread>,
+    auth_context: Option<Extension<AuthKeyContext>>,
 ) -> Response {
+    let owner_key_id = auth_context
+        .as_ref()
+        .map(|Extension(context)| context.key_id.as_str())
+        .unwrap_or("local");
     if !valid_conversation_id(&conversation_id)
         || !valid_provider_name(&provider)
         || thread.conversation_id != conversation_id
@@ -1429,7 +1444,7 @@ async fn upsert_provider_thread(
         .unwrap_or_default()
         .as_secs()
         .min(i64::MAX as u64) as i64;
-    match state.memory.upsert_provider_thread(&thread) {
+    match state.memory.upsert_provider_thread_for_owner(owner_key_id, &thread) {
         Ok(()) => Json(thread).into_response(),
         Err(error) => {
             tracing::error!(%error, conversation_id, provider, "provider thread persistence failed");
@@ -1443,7 +1458,7 @@ async fn upsert_provider_thread(
     }
 }
 
-fn valid_provider_name(provider: &str) -> bool {
+fn valid_provider_name(fn valid_provider_name(provider: &str) -> bool {
     matches!(
         provider,
         "chatgpt" | "claude" | "gemini" | "grok" | "qwen" | "mistral" | "perplexity" | "metaai"
@@ -1479,18 +1494,28 @@ fn valid_provider_thread_url(provider: &str, value: &str) -> bool {
 async fn export_conversation(
     State(state): State<Arc<AppState>>,
     Path(conversation_id): Path<String>,
+    auth_context: Option<Extension<AuthKeyContext>>,
 ) -> Response {
-    export_conversation_response(&state.memory, &conversation_id)
+    let owner_key_id = auth_context
+        .as_ref()
+        .map(|Extension(context)| context.key_id.as_str())
+        .unwrap_or("local");
+    export_conversation_response_for_owner(&state.memory, owner_key_id, &conversation_id)
 }
 
 async fn export_conversation_markdown(
     State(state): State<Arc<AppState>>,
     Path(conversation_id): Path<String>,
+    auth_context: Option<Extension<AuthKeyContext>>,
 ) -> Response {
-    export_conversation_markdown_response(&state.memory, &conversation_id)
+    let owner_key_id = auth_context
+        .as_ref()
+        .map(|Extension(context)| context.key_id.as_str())
+        .unwrap_or("local");
+    export_conversation_markdown_response_for_owner(&state.memory, owner_key_id, &conversation_id)
 }
 
-fn export_conversation_markdown_response(
+fn export_conversation_markdown_response(fn export_conversation_markdown_response(
     memory: &UnifiedMemory,
     conversation_id: &str,
 ) -> Response {
@@ -1555,14 +1580,19 @@ fn export_conversation_markdown_response_for_owner(
     }
 }
 
-async fn delete_conversation(async fn delete_conversation(
+async fn delete_conversation(
     State(state): State<Arc<AppState>>,
     Path(conversation_id): Path<String>,
+    auth_context: Option<Extension<AuthKeyContext>>,
 ) -> Response {
-    delete_conversation_response(&state.memory, &conversation_id)
+    let owner_key_id = auth_context
+        .as_ref()
+        .map(|Extension(context)| context.key_id.as_str())
+        .unwrap_or("local");
+    delete_conversation_response_for_owner(&state.memory, owner_key_id, &conversation_id)
 }
 
-async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+async fn health(async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let providers = state
         .cfg
         .providers
