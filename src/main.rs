@@ -399,7 +399,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/login/api/:provider/act", post(login_act))
         .with_state(state.clone())
         .layer(middleware::from_fn_with_state(
-            state.clone(),
+            state.cfg.auth.clone(),
             authenticate_api_key,
         ))
         // Semantic message limits run after JSON parsing; cap the raw body too
@@ -1180,7 +1180,7 @@ fn authorize_api_request(
 }
 
 async fn authenticate_api_key(
-    State(state): State<Arc<AppState>>,
+    State(auth): State<config::AuthConfig>,
     mut req: Request<Body>,
     next: Next,
 ) -> Response {
@@ -1188,12 +1188,7 @@ async fn authenticate_api_key(
         .headers()
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok());
-    match authorize_api_request(
-        &state.cfg.auth,
-        authorization,
-        req.uri().path(),
-        req.method(),
-    ) {
+    match authorize_api_request(&auth, authorization, req.uri().path(), req.method()) {
         Ok(Some(context)) => {
             req.extensions_mut().insert(context);
             next.run(req).await
@@ -3210,6 +3205,56 @@ mod api_key_auth_tests {
         )
         .is_ok());
         assert!(authorize_api_request(&config, None, "/health", &axum::http::Method::GET).is_ok());
+    }
+
+    #[tokio::test]
+    async fn http_middleware_rejects_missing_keys_and_enforces_admin_scope() {
+        use tower::ServiceExt;
+
+        let app = Router::new()
+            .route("/v1/models", get(|| async { StatusCode::OK }))
+            .route("/login/api/status", get(|| async { StatusCode::OK }))
+            .layer(middleware::from_fn_with_state(
+                auth(&["chat"]),
+                authenticate_api_key,
+            ));
+
+        let missing = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/models")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::UNAUTHORIZED);
+
+        let chat = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/models")
+                    .header(axum::http::header::AUTHORIZATION, "Bearer test-secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(chat.status(), StatusCode::OK);
+
+        let admin = app
+            .oneshot(
+                Request::builder()
+                    .uri("/login/api/status")
+                    .header(axum::http::header::AUTHORIZATION, "Bearer test-secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(admin.status(), StatusCode::FORBIDDEN);
     }
 
     #[test]
