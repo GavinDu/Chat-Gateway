@@ -376,9 +376,10 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Conversation retention is opt-in; zero keeps all conversations.
-    if cfg.memory.retention_days > 0 {
+    let retention_days = cfg.memory.retention_days;
+    if retention_days > 0 {
         let memory = state.memory.clone();
-        let retention_seconds = i64::from(cfg.memory.retention_days) * 86_400;
+        let retention_seconds = i64::from(retention_days) * 86_400;
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
             loop {
@@ -390,7 +391,7 @@ async fn main() -> anyhow::Result<()> {
                 let cutoff = now.saturating_sub(retention_seconds);
                 match memory.purge_expired_conversations(cutoff) {
                     Ok(deleted) if deleted > 0 => {
-                        tracing::info!(deleted, retention_days = cfg.memory.retention_days, "purged expired conversations");
+                        tracing::info!(deleted, retention_days, "purged expired conversations");
                     }
                     Ok(_) => {}
                     Err(error) => tracing::error!(%error, "conversation retention purge failed"),
