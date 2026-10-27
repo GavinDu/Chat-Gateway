@@ -777,7 +777,7 @@ fn schema_v1_database_migrates_provider_thread_map_without_losing_conversations(
         .unwrap()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 4);
+    assert_eq!(version, 5);
     let activity: i64 = memory
         .lock()
         .unwrap()
@@ -1086,7 +1086,7 @@ fn schema_v3_migration_assigns_existing_conversations_to_local_owner() {
         .unwrap()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 4);
+    assert_eq!(version, 5);
 }
 
 #[test]
@@ -1094,11 +1094,8 @@ fn context_budget_estimate_handles_multibyte_text_conservatively() {
     let ascii = "hello world";
     let cjk = "你好世界你好世界";
     let emoji = "🙂🙂🙂🙂";
-    assert!(
-        crate::context::estimate_message_tokens(cjk)
-            >= crate::context::estimate_message_tokens(ascii)
-    );
-    assert!(crate::context::estimate_message_tokens(emoji) > 0);
+    assert!(super::estimate_message_tokens(cjk) >= super::estimate_message_tokens(ascii));
+    assert!(super::estimate_message_tokens(emoji) > 0);
 
     let fixture = Fixture::new();
     let mut memory = fixture.open();
@@ -1117,9 +1114,141 @@ fn context_budget_estimate_handles_multibyte_text_conservatively() {
     assert!(
         context
             .iter()
-            .map(|msg| crate::context::estimate_message_tokens(&msg.content) + 8)
+            .map(|msg| super::estimate_message_tokens(&msg.content) + 8)
             .sum::<usize>()
             <= 12
             || context.len() == 1
+    );
+}
+
+#[test]
+fn rolling_summary_persists_and_context_keeps_recent_messages() {
+    let fixture = Fixture::new();
+    let memory = fixture.open();
+
+    for index in 0..12 {
+        memory
+            .store_turn(
+                "rolling-summary".into(),
+                vec![m(
+                    "user",
+                    &format!("user turn {index}: details that should remain in durable history"),
+                )],
+                m(
+                    "assistant",
+                    &format!("assistant response {index}: durable response details"),
+                ),
+                "chatgpt".into(),
+                "tab".into(),
+            )
+            .unwrap();
+    }
+
+    let (prompt, context) = memory.build_context(Some("rolling-summary"), &[]).unwrap();
+    assert!(
+        prompt.contains("Conversation summary of earlier turns:"),
+        "long conversations should include the persisted rolling summary"
+    );
+    assert!(
+        context
+            .iter()
+            .any(|message| message.content.contains("user turn 11")),
+        "the latest user turn must remain verbatim"
+    );
+    assert!(
+        context
+            .iter()
+            .any(|message| message.content.contains("assistant response 11")),
+        "the latest assistant response must remain verbatim"
+    );
+
+    drop(memory);
+    let reopened = fixture.open();
+    let (reopened_prompt, _) = reopened
+        .build_context(Some("rolling-summary"), &[])
+        .unwrap();
+    assert!(
+        reopened_prompt.contains("Conversation summary of earlier turns:"),
+        "summary metadata should survive database restart"
+    );
+}
+
+#[test]
+fn schema_v4_migration_adds_summary_table_without_losing_tenant_data() {
+    let fixture = Fixture::new();
+    let connection = Connection::open(fixture.db()).unwrap();
+    connection
+        .execute_batch(
+            "PRAGMA application_id=0x4347574d;
+             PRAGMA user_version=4;
+             CREATE TABLE conversations (
+                 id TEXT PRIMARY KEY NOT NULL,
+                 provider TEXT,
+                 tab_id TEXT,
+                 last_activity_at INTEGER NOT NULL DEFAULT 0,
+                 owner_key_id TEXT NOT NULL DEFAULT 'local'
+             );
+             CREATE TABLE messages (
+                 conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+                 position INTEGER NOT NULL CHECK(position >= 0),
+                 role TEXT NOT NULL,
+                 content TEXT NOT NULL,
+                 PRIMARY KEY(conversation_id, position)
+             );
+             CREATE TABLE metadata (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL);
+             CREATE TABLE provider_threads (
+                 conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+                 provider TEXT NOT NULL,
+                 thread_url TEXT NOT NULL,
+                 synced_through_message_id TEXT,
+                 model TEXT,
+                 updated_at INTEGER NOT NULL,
+                 PRIMARY KEY(conversation_id, provider)
+             );
+             CREATE INDEX conversations_owner_key_id_idx ON conversations(owner_key_id, id);
+             INSERT INTO metadata(key,value) VALUES('legacy_import_complete','1');
+             INSERT INTO conversations(id,provider,tab_id,last_activity_at,owner_key_id)
+                 VALUES('v4-tenant','chatgpt','tab-v4',123,'tenant-a');
+             INSERT INTO messages(conversation_id,position,role,content)
+                 VALUES('v4-tenant',0,'user','preserve this v4 message');",
+        )
+        .unwrap();
+    drop(connection);
+
+    let memory = open(&fixture.db(), None).unwrap();
+    let version: i64 = memory
+        .lock()
+        .unwrap()
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, 5);
+    let owner: String = memory
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT owner_key_id FROM conversations WHERE id='v4-tenant'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(owner, "tenant-a");
+    let summary_table: i64 = memory
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='conversation_summaries'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(summary_table, 1);
+    assert_eq!(
+        memory
+            .export_conversation_for_owner("tenant-a", "v4-tenant")
+            .unwrap()
+            .unwrap()
+            .messages[0]
+            .content,
+        "preserve this v4 message"
     );
 }
