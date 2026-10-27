@@ -190,6 +190,14 @@ impl ObscuraPool {
     /// Await browser build + per-provider warm-up (v2 ordering: session
     /// cookies restored into the browser store BEFORE the first goto,
     /// localStorage after goto, then a reload-equivalent second goto).
+    /// Reports whether the browser command receiver is still connected.
+    ///
+    /// Tokio closes the command channel when the browser worker exits or panics,
+    /// which lets readiness fail closed instead of advertising a dead worker.
+    pub fn worker_alive(&self) -> bool {
+        !self.cmd_tx.is_closed()
+    }
+
     pub async fn warm_all(&self) -> Result<()> {
         let mut slot = self.ready.lock().await;
         if let Some(rx) = slot.take() {
