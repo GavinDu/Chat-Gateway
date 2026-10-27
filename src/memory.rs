@@ -1,6 +1,8 @@
 #[path = "memory/sqlite.rs"]
 mod sqlite;
 
+use crate::context::ContextBuilder;
+pub(crate) use crate::context::{estimate_message_tokens, messages_after_overlap};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -105,31 +107,14 @@ impl UnifiedMemory {
         conversation_id: Option<&str>,
         new_messages: &[ChatMessage],
     ) -> anyhow::Result<(String, Vec<ChatMessage>)> {
-        let mut full = match conversation_id {
+        let history = match conversation_id {
             Some(id) => self
                 .conversation(id)?
                 .map(|conversation| conversation.messages)
                 .unwrap_or_default(),
             None => Vec::new(),
         };
-        full.extend(messages_after_overlap(&full, new_messages));
-        let mut tokens = 0;
-        let mut windowed = Vec::new();
-        for msg in full.iter().rev() {
-            let t = estimate_message_tokens(&msg.content) + 8;
-            if tokens + t > self.max_tokens && !windowed.is_empty() {
-                break;
-            }
-            tokens += t;
-            windowed.push(msg.clone());
-        }
-        windowed.reverse();
-        let prompt = windowed
-            .iter()
-            .map(|message| format!("{}: {}", message.role, message.content))
-            .collect::<Vec<_>>()
-            .join("\n");
-        Ok((prompt, windowed))
+        Ok(ContextBuilder::build(&history, new_messages, self.max_tokens))
     }
 
     pub fn store_turn(
@@ -317,45 +302,6 @@ impl UnifiedMemory {
         )?;
         Ok(())
     }
-}
-
-/// Conservative, dependency-free token estimate for context budgeting.
-/// ASCII text averages several characters per token, while CJK and emoji
-/// can consume a token per scalar value; count non-ASCII characters separately.
-fn estimate_message_tokens(content: &str) -> usize {
-    let mut ascii = 0usize;
-    let mut non_ascii = 0usize;
-    for character in content.chars() {
-        if character.is_ascii() {
-            ascii += 1;
-        } else {
-            non_ascii += 1;
-        }
-    }
-    ascii.saturating_add(2) / 3 + non_ascii
-}
-
-fn messages_after_overlap(stored: &[ChatMessage], incoming: &[ChatMessage]) -> Vec<ChatMessage> {
-    if incoming.is_empty() {
-        return Vec::new();
-    }
-    let common_prefix = stored
-        .iter()
-        .zip(incoming)
-        .take_while(|(a, b)| a == b)
-        .count();
-    // A complete shared prefix can precede independently committed concurrent
-    // turns. Reconcile it even when the incoming branch is no longer a suffix.
-    // A single matching user message alone may instead be an intentional repeat.
-    if common_prefix == stored.len() || common_prefix >= 2 {
-        return incoming[common_prefix..].to_vec();
-    }
-    for overlap in (1..=stored.len().min(incoming.len())).rev() {
-        if stored[stored.len() - overlap..] == incoming[..overlap] {
-            return incoming[overlap..].to_vec();
-        }
-    }
-    incoming.to_vec()
 }
 
 #[cfg(test)]
