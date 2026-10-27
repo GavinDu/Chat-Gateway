@@ -207,6 +207,60 @@ impl SessionStore for VaultSessionStore {
     }
 }
 
+/// Import a session snapshot received from an explicitly paired browser extension.
+/// Browser-relayed imports require encrypted vault mode; they never fall back to plaintext.
+pub fn import_relay_session(provider: &str, mut file: SessionFile) -> Result<()> {
+    let _legacy_path = session_path(provider)?;
+    if !matches!(std::env::var("CHAT_GATEWAY_SESSION_STORE").as_deref(), Ok("vault")) {
+        anyhow::bail!("browser relay imports require CHAT_GATEWAY_SESSION_STORE=vault");
+    }
+    if file.cookies.is_empty() || file.cookies.len() > 512 {
+        anyhow::bail!("browser relay session must contain 1-512 cookies");
+    }
+    if !file.local_storage.is_empty() {
+        anyhow::bail!("browser relay localStorage import is not enabled until provider-specific key allowlists are configured");
+    }
+    if file.cookies.iter().any(|cookie| {
+        !cookie_domain_allowed(provider, &cookie.domain)
+            || !restored_cookie_fields_safe(cookie)
+            || cookie.name.len() > 256
+            || cookie.value.len() > 16 * 1024
+            || cookie.domain.len() > 253
+            || cookie.path.len() > 2048
+    }) {
+        anyhow::bail!("browser relay session contains an invalid or unrelated cookie");
+    }
+    file.ts = chrono::Utc::now().to_rfc3339();
+    let key = vault_key_from_env()?;
+    ensure_private_session_dir_sync(Path::new("sessions"))?;
+    let encrypted = encrypt_session_snapshot(&file, provider, &key)?;
+    let destination = session_vault_path(provider)?;
+    write_session_file_atomically(Path::new(&destination), &encrypted)?;
+    // The encrypted replacement is durable before any legacy plaintext copy is removed.
+    remove_legacy_session_snapshot(provider)?;
+    record_session_write(provider);
+    tracing::info!(provider, cookies = file.cookies.len(), "browser-relayed session imported into encrypted vault");
+    Ok(())
+}
+
+/// Remove both encrypted and legacy records for a provider. Missing files are fine.
+pub fn delete_session(provider: &str) -> Result<bool> {
+    let vault_path = session_vault_path(provider)?;
+    let legacy_path = session_path(provider)?;
+    let mut removed = false;
+    for path in [&vault_path, &legacy_path] {
+        match std::fs::remove_file(path) {
+            Ok(()) => removed = true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    if let Ok(mut writes) = LAST_SESSION_WRITE.get_or_init(|| Mutex::new(HashMap::new())).lock() {
+        writes.remove(provider);
+    }
+    Ok(removed)
+}
+
 fn session_vault_path(provider: &str) -> Result<String> {
     let legacy = session_path(provider)?;
     Ok(Path::new(&legacy)
