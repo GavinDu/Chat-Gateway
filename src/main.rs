@@ -1319,7 +1319,10 @@ async fn get_provider_thread(
             "conversation ID or provider is invalid",
         );
     }
-    match state.memory.get_provider_thread(&conversation_id, &provider) {
+    match state
+        .memory
+        .get_provider_thread(&conversation_id, &provider)
+    {
         Ok(Some(thread)) => Json(thread).into_response(),
         Ok(None) => api_error(
             StatusCode::NOT_FOUND,
@@ -3360,14 +3363,38 @@ mod provider_thread_url_tests {
 
     #[test]
     fn provider_thread_urls_require_https_and_provider_owned_hosts() {
-        assert!(valid_provider_thread_url("chatgpt", "https://chatgpt.com/c/123"));
-        assert!(valid_provider_thread_url("claude", "https://claude.ai/chat/123"));
-        assert!(!valid_provider_thread_url("chatgpt", "http://chatgpt.com/c/123"));
-        assert!(!valid_provider_thread_url("chatgpt", "https://chatgpt.com.attacker.invalid/c/123"));
-        assert!(!valid_provider_thread_url("chatgpt", "https://attacker.invalid/c/123"));
-        assert!(!valid_provider_thread_url("chatgpt", "https://user@chatgpt.com/c/123"));
-        assert!(!valid_provider_thread_url("unknown", "https://chatgpt.com/c/123"));
-        assert!(!valid_provider_thread_url("chatgpt", "https://chatgpt.com:8443/c/123"));
+        assert!(valid_provider_thread_url(
+            "chatgpt",
+            "https://chatgpt.com/c/123"
+        ));
+        assert!(valid_provider_thread_url(
+            "claude",
+            "https://claude.ai/chat/123"
+        ));
+        assert!(!valid_provider_thread_url(
+            "chatgpt",
+            "http://chatgpt.com/c/123"
+        ));
+        assert!(!valid_provider_thread_url(
+            "chatgpt",
+            "https://chatgpt.com.attacker.invalid/c/123"
+        ));
+        assert!(!valid_provider_thread_url(
+            "chatgpt",
+            "https://attacker.invalid/c/123"
+        ));
+        assert!(!valid_provider_thread_url(
+            "chatgpt",
+            "https://user@chatgpt.com/c/123"
+        ));
+        assert!(!valid_provider_thread_url(
+            "unknown",
+            "https://chatgpt.com/c/123"
+        ));
+        assert!(!valid_provider_thread_url(
+            "chatgpt",
+            "https://chatgpt.com:8443/c/123"
+        ));
     }
 }
 
