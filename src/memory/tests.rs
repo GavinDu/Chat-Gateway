@@ -829,3 +829,31 @@ fn sqlite_checkpoint_is_safe_after_durable_turns_and_can_repeat() {
         ],
     );
 }
+
+#[test]
+fn context_budget_estimate_handles_multibyte_text_conservatively() {
+    let ascii = "hello world";
+    let cjk = "你好世界你好世界";
+    let emoji = "🙂🙂🙂🙂";
+    assert!(super::estimate_message_tokens(cjk) >= super::estimate_message_tokens(ascii));
+    assert!(super::estimate_message_tokens(emoji) > 0);
+
+    let fixture = Fixture::new();
+    let memory = fixture.open();
+    memory.max_tokens = 12;
+    memory
+        .store_turn(
+            "unicode-budget".into(),
+            vec![m("user", "你好世界你好世界你好世界你好世界")],
+            m("assistant", "🙂🙂🙂🙂🙂🙂🙂🙂"),
+            "chatgpt".into(),
+            "tab".into(),
+        )
+        .unwrap();
+    let (_, context) = memory.build_context(Some("unicode-budget"), &[]).unwrap();
+    assert!(!context.is_empty());
+    assert!(
+        context.iter().map(|msg| super::estimate_message_tokens(&msg.content) + 8).sum::<usize>() <= 12
+            || context.len() == 1
+    );
+}
