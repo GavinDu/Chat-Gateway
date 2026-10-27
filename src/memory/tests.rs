@@ -967,8 +967,6 @@ fn context_budget_estimate_handles_multibyte_text_conservatively() {
             || context.len() == 1
     );
 }
-
-
 #[test]
 fn rolling_summary_persists_and_context_keeps_recent_messages() {
     let fixture = Fixture::new();
