@@ -180,6 +180,36 @@ impl UnifiedMemory {
         self.conversation(conversation_id)
     }
 
+    /// List conversation metadata without loading message bodies. Callers must
+    /// apply authorization before exposing this list to clients.
+    pub fn list_conversations(
+        &self,
+        limit: usize,
+        offset: usize,
+    ) -> anyhow::Result<Vec<ConversationSummary>> {
+        let connection = self.lock()?;
+        let mut statement = connection.prepare(
+            "SELECT c.id, c.provider, COUNT(m.position)
+             FROM conversations c
+             LEFT JOIN messages m ON m.conversation_id = c.id
+             GROUP BY c.id, c.provider
+             ORDER BY c.id
+             LIMIT ?1 OFFSET ?2",
+        )?;
+        let rows = statement.query_map(
+            rusqlite::params![limit.min(100) as i64, offset.min(i64::MAX as usize) as i64],
+            |row| {
+                Ok(ConversationSummary {
+                    id: row.get(0)?,
+                    provider: row.get(1)?,
+                    message_count: row.get::<_, i64>(2)?.max(0) as usize,
+                })
+            },
+        )?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
     pub fn delete_conversation(&self, conversation_id: &str) -> anyhow::Result<bool> {
         let mut connection = self.lock()?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -236,3 +266,11 @@ fn messages_after_overlap(stored: &[ChatMessage], incoming: &[ChatMessage]) -> V
 #[cfg(test)]
 #[path = "memory/tests.rs"]
 mod tests;
+
+/// Metadata returned by the paged conversation listing endpoint.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConversationSummary {
+    pub id: String,
+    pub provider: Option<String>,
+    pub message_count: usize,
+}
