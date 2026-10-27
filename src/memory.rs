@@ -217,6 +217,15 @@ impl UnifiedMemory {
         tx.commit()?;
         Ok(deleted != 0)
     }
+    /// Delete conversations whose last activity is older than the cutoff.
+    /// SQLite foreign keys cascade deletion to messages and provider threads.
+    pub fn purge_expired_conversations(&self, cutoff_unix_seconds: i64) -> anyhow::Result<usize> {
+        let mut connection = self.lock()?;
+        let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let deleted = tx.execute("DELETE FROM conversations WHERE last_activity_at > 0 AND last_activity_at < ?1", [cutoff_unix_seconds])?;
+        tx.commit()?;
+        Ok(deleted)
+    }
 
     // Legacy read helpers remain used by the benchmark and routing tests.
     #[allow(dead_code)]
