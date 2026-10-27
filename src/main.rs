@@ -2382,7 +2382,6 @@ mod http_api_regression_tests {
     }
 
     #[tokio::test]
-    #[tokio::test]
     async fn http_conversation_list_returns_paged_metadata_without_messages() {
         let memory = Arc::new(UnifiedMemory::new(8000));
         for (id, text) in [("list_http_a", "alpha"), ("list_http_b", "bravo")] {
@@ -2415,6 +2414,7 @@ mod http_api_regression_tests {
         assert!(body["data"][0].get("messages").is_none());
     }
 
+    #[tokio::test]
     async fn http_memory_read_failure_returns_structured_error_without_provider_call() {
         let memory = Arc::new(UnifiedMemory::new(8000));
         memory.drop_conversations_table_for_test().unwrap();
