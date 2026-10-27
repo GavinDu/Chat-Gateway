@@ -22,9 +22,24 @@ impl ProviderRouter {
         conversation_id: Option<&str>,
         memory: &UnifiedMemory,
     ) -> anyhow::Result<Vec<String>> {
+        self.resolve_for_owner("local", model, conversation_id, memory)
+    }
+
+    pub fn resolve_for_owner(
+        &self,
+        owner_key_id: &str,
+        model: &str,
+        conversation_id: Option<&str>,
+        memory: &UnifiedMemory,
+    ) -> anyhow::Result<Vec<String>> {
         let model_lc = model.trim().to_lowercase();
         if model_lc == "auto" {
-            return self.with_affinity(self.enabled_in_priority_order(), conversation_id, memory);
+            return self.with_affinity(
+                owner_key_id,
+                self.enabled_in_priority_order(),
+                conversation_id,
+                memory,
+            );
         }
 
         let (pinned_provider, requested_model) = match model_lc.split_once('/') {
@@ -52,17 +67,18 @@ impl ProviderRouter {
             .map(|p| p.name.clone())
             .collect();
 
-        self.with_affinity(candidates, conversation_id, memory)
+        self.with_affinity(owner_key_id, candidates, conversation_id, memory)
     }
 
     fn with_affinity(
         &self,
+        owner_key_id: &str,
         mut candidates: Vec<String>,
         conversation_id: Option<&str>,
         memory: &UnifiedMemory,
     ) -> anyhow::Result<Vec<String>> {
         if let Some(cid) = conversation_id {
-            if let Some(prev) = memory.get_provider(cid)? {
+            if let Some(prev) = memory.get_provider_for_owner(owner_key_id, cid)? {
                 if let Some(pos) = candidates.iter().position(|c| c == &prev) {
                     let first = candidates.remove(pos);
                     candidates.insert(0, first);
