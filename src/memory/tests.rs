@@ -990,9 +990,7 @@ fn rolling_summary_persists_and_context_keeps_recent_messages() {
             .unwrap();
     }
 
-    let (prompt, context) = memory
-        .build_context(Some("rolling-summary"), &[])
-        .unwrap();
+    let (prompt, context) = memory.build_context(Some("rolling-summary"), &[]).unwrap();
     assert!(
         prompt.contains("Conversation summary of earlier turns:"),
         "long conversations should include the persisted rolling summary"
