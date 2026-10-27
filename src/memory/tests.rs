@@ -1017,3 +1017,72 @@ fn conversations_and_provider_threads_are_isolated_by_api_key_owner() {
         .unwrap());
 }
 
+#[test]
+fn schema_v3_migration_assigns_existing_conversations_to_local_owner() {
+    let fixture = Fixture::new();
+    {
+        let connection = rusqlite::Connection::open(fixture.db()).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE conversations (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    provider TEXT,
+                    tab_id TEXT,
+                    last_activity_at INTEGER NOT NULL DEFAULT 0
+                 );
+                 CREATE TABLE messages (
+                    conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+                    position INTEGER NOT NULL CHECK(position >= 0),
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    PRIMARY KEY(conversation_id, position)
+                 );
+                 CREATE TABLE metadata (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL);
+                 CREATE TABLE provider_threads (
+                    conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+                    provider TEXT NOT NULL,
+                    thread_url TEXT NOT NULL,
+                    synced_through_message_id TEXT,
+                    model TEXT,
+                    updated_at INTEGER NOT NULL,
+                    PRIMARY KEY(conversation_id, provider)
+                 );
+                 INSERT INTO conversations(id,provider,tab_id,last_activity_at)
+                    VALUES('legacy-v3','chatgpt','tab-v3',123);
+                 INSERT INTO messages(conversation_id,position,role,content)
+                    VALUES('legacy-v3',0,'user','preserve this turn');
+                 INSERT INTO metadata(key,value) VALUES('legacy_import_complete','1');
+                 PRAGMA application_id=1128748877;
+                 PRAGMA user_version=3;",
+            )
+            .unwrap();
+    }
+
+    let memory = open(&fixture.db(), None).unwrap();
+    let owner: String = memory
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT owner_key_id FROM conversations WHERE id='legacy-v3'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(owner, "local");
+    assert_eq!(
+        memory
+            .export_conversation_for_owner("local", "legacy-v3")
+            .unwrap()
+            .unwrap()
+            .messages[0]
+            .content,
+        "preserve this turn"
+    );
+    let version: i64 = memory
+        .lock()
+        .unwrap()
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, 4);
+}
+
