@@ -184,7 +184,7 @@ pub fn render() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_route, Histogram};
+    use super::{escape_label, normalize_route, Histogram};
 
     #[test]
     fn route_labels_have_bounded_cardinality() {
@@ -209,3 +209,8 @@ mod tests {
         assert_eq!(histogram.buckets[7], 1);
     }
 }
+
+    #[test]
+    fn prometheus_labels_escape_backslashes_quotes_and_newlines() {
+        assert_eq!(escape_label("a\\\\b\\\"c\\nd"), "a\\\\\\\\b\\\\\\\"c\\\\nd");
+    }
