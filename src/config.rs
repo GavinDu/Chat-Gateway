@@ -325,6 +325,14 @@ mod tests {
     }
 
     #[test]
+    fn rejects_duplicate_api_key_names_case_insensitively() {
+        let cfg = config(
+            "auth:\n  keys:\n    - name: alpha\n      secret_hash: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n      scopes: [chat]\n    - name: ALPHA\n      secret_hash: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n      scopes: [admin]\n",
+        );
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
     fn permits_a_safe_configuration_with_no_enabled_providers() {
         let none = config("providers:\n  - name: chatgpt\n    enabled: false\n");
         assert!(none.validate().is_ok());
