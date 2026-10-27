@@ -217,6 +217,7 @@ struct RelayPairingState {
     pairing_code_hash: String,
     pairing_expires_at: Instant,
     token_hash: Option<String>,
+    attempts: u8,
 }
 static RELAY_PAIRING: OnceLock<Mutex<RelayPairingState>> = OnceLock::new();
 
@@ -227,6 +228,7 @@ fn initialize_relay_pairing() -> String {
         pairing_code_hash: hash_api_key(&code),
         pairing_expires_at: Instant::now() + Duration::from_secs(300),
         token_hash: None,
+        attempts: 0,
     }));
     code
 }
@@ -270,8 +272,12 @@ async fn relay_pair(headers: HeaderMap, Json(body): Json<serde_json::Value>) -> 
         Ok(state) => state,
         Err(_) => return api_error(StatusCode::SERVICE_UNAVAILABLE, "server_error", "relay_unavailable", "browser relay pairing is unavailable"),
     };
-    if state.token_hash.is_some() || Instant::now() >= state.pairing_expires_at
-        || !constant_time_eq(state.pairing_code_hash.as_bytes(), hash_api_key(code).as_bytes()) {
+    if state.token_hash.is_some() || Instant::now() >= state.pairing_expires_at || state.attempts >= 5 {
+        return api_error(StatusCode::UNAUTHORIZED, "authentication_error", "invalid_pairing_code", "pairing code is invalid, expired, or already used");
+    }
+    state.attempts = state.attempts.saturating_add(1);
+    if !constant_time_eq(state.pairing_code_hash.as_bytes(), hash_api_key(code).as_bytes()) {
+        if state.attempts >= 5 { state.pairing_expires_at = Instant::now(); }
         return api_error(StatusCode::UNAUTHORIZED, "authentication_error", "invalid_pairing_code", "pairing code is invalid, expired, or already used");
     }
     let token = format!("relay_{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple());
@@ -282,11 +288,15 @@ async fn relay_pair(headers: HeaderMap, Json(body): Json<serde_json::Value>) -> 
 
 async fn relay_status(headers: HeaderMap) -> Response {
     if !relay_token_valid(&headers) { return relay_unauthorized(); }
-    let providers = providers::Provider::all().into_iter().map(|provider| {
+    let mut providers = Vec::new();
+    for provider in providers::Provider::all() {
         let name = provider.name();
-        let session_present = session::load_session_file(name).map(|value| value.is_some()).unwrap_or(false);
-        serde_json::json!({"provider": name, "session_present": session_present})
-    }).collect::<Vec<_>>();
+        match session::load_session_file(name) {
+            Ok(file) => providers.push(serde_json::json!({"provider": name, "session_present": file.is_some()})),
+            Err(_error) => return api_error(StatusCode::SERVICE_UNAVAILABLE, "server_error", "relay_status_unavailable",
+                "provider session status could not be read safely"),
+        }
+    }
     Json(serde_json::json!({"paired": true, "providers": providers})).into_response()
 }
 
