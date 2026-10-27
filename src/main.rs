@@ -415,10 +415,25 @@ async fn main() -> anyhow::Result<()> {
     let addr = server_bind_addr(cfg.server.port);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     println!("Chat Gateway v2 Obscura Native listening on {}", addr);
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
-    // HTTP requests have drained. Stop the browser worker before flushing storage.
+    // Notify the outer select when shutdown is requested so draining has a
+    // bounded grace period. Without this timer, a stuck streaming response can
+    // keep the process alive indefinitely after SIGTERM.
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
+    let shutdown = async move {
+        shutdown_signal().await;
+        let _ = shutdown_tx.send(());
+    };
+    let mut server = Box::pin(axum::serve(listener, app).with_graceful_shutdown(shutdown));
+    tokio::select! {
+        result = &mut server => result?,
+        _ = &mut shutdown_rx => {
+            match tokio::time::timeout(std::time::Duration::from_secs(30), &mut server).await {
+                Ok(result) => result?,
+                Err(_) => tracing::warn!("graceful shutdown exceeded 30 seconds; forcing shutdown"),
+            }
+        }
+    }
+    // HTTP requests have drained or the grace period expired. Stop the browser worker before flushing storage.
     state.pool.shutdown().await?;
     state.memory.checkpoint()?;
     drop(state);
