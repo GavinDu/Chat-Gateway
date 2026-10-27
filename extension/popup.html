@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Chat Gateway Relay</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <main>
+    <h1>Chat Gateway Relay</h1>
+    <p class="warning">Only link provider accounts you are authorized to use. Passwords and MFA are never collected. Session cookies are bearer credentials.</p>
+    <label>Local gateway URL <input id="gateway" value="http://127.0.0.1:3000" spellcheck="false"></label>
+    <section id="pairing">
+      <label>One-time pairing code <input id="code" inputmode="numeric" maxlength="8" autocomplete="one-time-code"></label>
+      <button id="pair">Pair extension</button>
+    </section>
+    <section id="linked" hidden>
+      <label>Provider
+        <select id="provider">
+          <option value="chatgpt">ChatGPT</option><option value="claude">Claude</option>
+          <option value="gemini">Gemini</option><option value="qwen">Qwen</option>
+          <option value="metaai">Meta AI</option><option value="grok">Grok</option>
+          <option value="mistral">Mistral</option><option value="perplexity">Perplexity</option>
+        </select>
+      </label>
+      <button id="link">Review permissions & link</button>
+      <button id="refresh" class="secondary">Refresh status</button>
+      <ul id="status"></ul>
+      <button id="unpair" class="danger">Unpair this extension</button>
+    </section>
+    <p id="message" role="status" aria-live="polite"></p>
+    <p class="small">Local-only MVP. Keep the gateway bound to loopback. Use encrypted vault mode with a stable key before linking sessions.</p>
+  </main>
+  <script src="shared.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>
