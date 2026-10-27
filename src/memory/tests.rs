@@ -1164,13 +1164,14 @@ fn rolling_summary_persists_and_context_keeps_recent_messages() {
 
     drop(memory);
     let reopened = fixture.open();
-    let (reopened_prompt, _) = reopened.build_context(Some("rolling-summary"), &[]).unwrap();
+    let (reopened_prompt, _) = reopened
+        .build_context(Some("rolling-summary"), &[])
+        .unwrap();
     assert!(
         reopened_prompt.contains("Conversation summary of earlier turns:"),
         "summary metadata should survive database restart"
     );
 }
-
 
 #[test]
 fn schema_v4_migration_adds_summary_table_without_losing_tenant_data() {
