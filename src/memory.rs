@@ -116,7 +116,7 @@ impl UnifiedMemory {
         let mut tokens = 0;
         let mut windowed = Vec::new();
         for msg in full.iter().rev() {
-            let t = (msg.content.len() as f32 / 4.0) as usize + 8;
+            let t = estimate_message_tokens(&msg.content) + 8;
             if tokens + t > self.max_tokens && !windowed.is_empty() {
                 break;
             }
@@ -317,6 +317,22 @@ impl UnifiedMemory {
         )?;
         Ok(())
     }
+}
+
+/// Conservative, dependency-free token estimate for context budgeting.
+/// ASCII text averages several characters per token, while CJK and emoji
+/// can consume a token per scalar value; count non-ASCII characters separately.
+fn estimate_message_tokens(content: &str) -> usize {
+    let mut ascii = 0usize;
+    let mut non_ascii = 0usize;
+    for character in content.chars() {
+        if character.is_ascii() {
+            ascii += 1;
+        } else {
+            non_ascii += 1;
+        }
+    }
+    ascii.saturating_add(2) / 3 + non_ascii
 }
 
 fn messages_after_overlap(stored: &[ChatMessage], incoming: &[ChatMessage]) -> Vec<ChatMessage> {
