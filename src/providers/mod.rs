@@ -52,53 +52,37 @@ pub enum Provider {
 
 impl Provider {
     pub fn name(&self) -> &'static str {
-        match self {
-            Self::Qwen => "qwen",
-            Self::MetaAI => "metaai",
-            Self::Claude => "claude",
-            Self::ChatGPT => "chatgpt",
-            Self::Gemini => "gemini",
-            Self::Grok => "grok",
-            Self::Mistral => "mistral",
-            Self::Perplexity => "perplexity",
-        }
+        ADAPTERS
+            .iter()
+            .find(|spec| spec.provider == *self)
+            .map(|spec| spec.id)
+            .expect("every Provider variant must have an adapter catalog row")
     }
 
     pub fn from_name(name: &str) -> Option<Provider> {
-        Self::all().into_iter().find(|p| p.name() == name)
+        ADAPTERS
+            .iter()
+            .find(|spec| spec.id == name)
+            .map(|spec| spec.provider)
     }
 
     pub fn login_url(&self) -> &'static str {
-        match self {
-            Self::Qwen => qwen::SELECTORS.url,
-            Self::MetaAI => metaai::SELECTORS.url,
-            Self::Claude => claude::SELECTORS.url,
-            Self::ChatGPT => chatgpt::SELECTORS.url,
-            Self::Gemini => gemini::SELECTORS.url,
-            Self::Grok => grok::SELECTORS.url,
-            Self::Mistral => mistral::SELECTORS.url,
-            Self::Perplexity => perplexity::SELECTORS.url,
-        }
+        ADAPTERS
+            .iter()
+            .find(|spec| spec.provider == *self)
+            .map(|spec| spec.url)
+            .expect("every Provider variant must have an adapter catalog row")
     }
 
     pub fn all() -> Vec<Provider> {
-        vec![
-            Self::Qwen,
-            Self::MetaAI,
-            Self::Claude,
-            Self::ChatGPT,
-            Self::Gemini,
-            Self::Grok,
-            Self::Mistral,
-            Self::Perplexity,
-        ]
+        ADAPTERS.iter().map(|spec| spec.provider).collect()
     }
 }
 
 /// Provider adapter contract. `?Send` because adapters run on the
 /// browser thread (see browser::pool) where obscura pages live.
 #[async_trait(?Send)]
-pub trait ChatProvider: Send + Sync {
+pub trait SiteAdapter: Send + Sync {
     fn name(&self) -> &str;
     // Kept in the adapter contract for provider catalog diagnostics.
     #[allow(dead_code)]
@@ -152,21 +136,143 @@ pub trait ChatProvider: Send + Sync {
     fn selector_set(&self) -> &common::SelectorSet;
 }
 
-fn adapter_for(provider: Provider, cfg: ProviderConfig) -> Arc<dyn ChatProvider> {
-    match provider {
-        Provider::Qwen => Arc::new(qwen::QwenAdapter { cfg }),
-        Provider::MetaAI => Arc::new(metaai::MetaAIAdapter { cfg }),
-        Provider::Claude => Arc::new(claude::ClaudeAdapter { cfg }),
-        Provider::ChatGPT => Arc::new(chatgpt::ChatGPTAdapter { cfg }),
-        Provider::Gemini => Arc::new(gemini::GeminiAdapter { cfg }),
-        Provider::Grok => Arc::new(grok::GrokAdapter { cfg }),
-        Provider::Mistral => Arc::new(mistral::MistralAdapter { cfg }),
-        Provider::Perplexity => Arc::new(perplexity::PerplexityAdapter { cfg }),
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamSignal {
+    SharedStopControl,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DoneSignal {
+    StableResponseText,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub enum ThreadSupport {
+    UrlAddressable,
+    SidebarClick,
+    None,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TypingStrategy {
+    SharedComposer,
+}
+
+type AdapterFactory = fn(ProviderConfig) -> Arc<dyn SiteAdapter>;
+
+#[allow(dead_code)]
+pub struct AdapterSpec {
+    pub provider: Provider,
+    pub id: &'static str,
+    pub url: &'static str,
+    pub selectors: &'static common::SelectorSet,
+    pub model_pairs: &'static [(&'static str, &'static str)],
+    pub strip_citations: bool,
+    pub streaming: StreamSignal,
+    pub done: DoneSignal,
+    pub threads: ThreadSupport,
+    pub typing: TypingStrategy,
+    factory: AdapterFactory,
+}
+
+const fn adapter_spec(
+    provider: Provider,
+    id: &'static str,
+    selectors: &'static common::SelectorSet,
+    strip_citations: bool,
+    threads: ThreadSupport,
+    factory: AdapterFactory,
+) -> AdapterSpec {
+    AdapterSpec {
+        provider,
+        id,
+        url: selectors.url,
+        selectors,
+        model_pairs: selectors.model_pairs,
+        strip_citations,
+        streaming: StreamSignal::SharedStopControl,
+        done: DoneSignal::StableResponseText,
+        threads,
+        typing: TypingStrategy::SharedComposer,
+        factory,
     }
 }
 
+pub const ADAPTERS: &[AdapterSpec] = &[
+    adapter_spec(
+        Provider::Qwen,
+        "qwen",
+        &qwen::SELECTORS,
+        false,
+        ThreadSupport::UrlAddressable,
+        |cfg| Arc::new(qwen::QwenAdapter { cfg }),
+    ),
+    adapter_spec(
+        Provider::MetaAI,
+        "metaai",
+        &metaai::SELECTORS,
+        false,
+        ThreadSupport::SidebarClick,
+        |cfg| Arc::new(metaai::MetaAIAdapter { cfg }),
+    ),
+    adapter_spec(
+        Provider::Claude,
+        "claude",
+        &claude::SELECTORS,
+        false,
+        ThreadSupport::UrlAddressable,
+        |cfg| Arc::new(claude::ClaudeAdapter { cfg }),
+    ),
+    adapter_spec(
+        Provider::ChatGPT,
+        "chatgpt",
+        &chatgpt::SELECTORS,
+        false,
+        ThreadSupport::UrlAddressable,
+        |cfg| Arc::new(chatgpt::ChatGPTAdapter { cfg }),
+    ),
+    adapter_spec(
+        Provider::Gemini,
+        "gemini",
+        &gemini::SELECTORS,
+        false,
+        ThreadSupport::UrlAddressable,
+        |cfg| Arc::new(gemini::GeminiAdapter { cfg }),
+    ),
+    adapter_spec(
+        Provider::Grok,
+        "grok",
+        &grok::SELECTORS,
+        false,
+        ThreadSupport::UrlAddressable,
+        |cfg| Arc::new(grok::GrokAdapter { cfg }),
+    ),
+    adapter_spec(
+        Provider::Mistral,
+        "mistral",
+        &mistral::SELECTORS,
+        false,
+        ThreadSupport::UrlAddressable,
+        |cfg| Arc::new(mistral::MistralAdapter { cfg }),
+    ),
+    adapter_spec(
+        Provider::Perplexity,
+        "perplexity",
+        &perplexity::SELECTORS,
+        true,
+        ThreadSupport::UrlAddressable,
+        |cfg| Arc::new(perplexity::PerplexityAdapter { cfg }),
+    ),
+];
+
+fn adapter_for(provider: Provider, cfg: ProviderConfig) -> Arc<dyn SiteAdapter> {
+    let spec = ADAPTERS
+        .iter()
+        .find(|spec| spec.provider == provider)
+        .expect("every Provider variant must have an adapter catalog row");
+    (spec.factory)(cfg)
+}
+
 /// Registry of adapters for the enabled, known providers in the config.
-pub fn build_registry(cfg: &AppConfig) -> HashMap<Provider, Arc<dyn ChatProvider>> {
+pub fn build_registry(cfg: &AppConfig) -> HashMap<Provider, Arc<dyn SiteAdapter>> {
     let mut map = HashMap::new();
     for p in &cfg.providers {
         if !p.enabled {
@@ -263,7 +369,7 @@ fn completion_ready(stable_ticks: u32, streaming: bool) -> bool {
 }
 
 pub async fn run_send(
-    adapter: Arc<dyn ChatProvider>,
+    adapter: Arc<dyn SiteAdapter>,
     page: Rc<Page>,
     prompt: String,
     timeout: Duration,
@@ -577,7 +683,7 @@ mod response_completion_tests {
 
 #[cfg(test)]
 mod provider_catalog_contract_tests {
-    use super::Provider;
+    use super::{Provider, ADAPTERS};
     use std::collections::HashSet;
 
     #[test]
@@ -598,6 +704,34 @@ mod provider_catalog_contract_tests {
                 provider.login_url().starts_with("https://"),
                 "provider login URL must be HTTPS: {name}"
             );
+        }
+    }
+
+    #[test]
+    fn adapter_table_is_the_single_unique_provider_catalog() {
+        assert_eq!(ADAPTERS.len(), 8);
+        let mut ids = HashSet::new();
+        let mut urls = HashSet::new();
+        for spec in ADAPTERS {
+            assert!(ids.insert(spec.id), "duplicate provider id: {}", spec.id);
+            assert!(
+                urls.insert(spec.url),
+                "duplicate provider URL: {}",
+                spec.url
+            );
+            assert_eq!(spec.provider.name(), spec.id);
+            assert_eq!(spec.provider.login_url(), spec.url);
+            assert_eq!(spec.selectors.url, spec.url);
+            assert_eq!(spec.model_pairs, spec.selectors.model_pairs);
+            let keywords: Vec<_> = spec.selectors.model_keywords.split('|').collect();
+            let unique: HashSet<_> = keywords.iter().copied().collect();
+            assert_eq!(
+                keywords.len(),
+                unique.len(),
+                "duplicate model keyword for {}",
+                spec.id
+            );
+            assert!(spec.url.starts_with("https://"));
         }
     }
 

@@ -1,6 +1,6 @@
 use crate::config::ProviderConfig;
 use crate::providers::common::{self, SelectorSet};
-use crate::providers::{AdapterSelectors, ChatProvider};
+use crate::providers::{AdapterSelectors, SiteAdapter};
 use anyhow::Result;
 use async_trait::async_trait;
 use obscura_core::Page;
@@ -36,7 +36,7 @@ pub const SELECTORS: SelectorSet = SelectorSet {
 };
 
 #[async_trait(?Send)]
-impl ChatProvider for PerplexityAdapter {
+impl SiteAdapter for PerplexityAdapter {
     fn name(&self) -> &str {
         "perplexity"
     }

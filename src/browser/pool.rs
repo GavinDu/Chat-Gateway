@@ -451,7 +451,7 @@ fn touch_login_meta(login_meta: &Rc<RefCell<HashMap<Provider, LoginMeta>>>, prov
 fn build_login_view(
     provider: Provider,
     page: &obscura_core::Page,
-    registry: &Rc<HashMap<Provider, Arc<dyn providers::ChatProvider>>>,
+    registry: &Rc<HashMap<Provider, Arc<dyn providers::SiteAdapter>>>,
 ) -> LoginView {
     let url = page.url();
     let is_login = providers::common::is_login_page(page);
@@ -483,7 +483,7 @@ fn build_login_view(
 fn login_active_info(
     provider: Provider,
     page: &obscura_core::Page,
-    registry: &Rc<HashMap<Provider, Arc<dyn providers::ChatProvider>>>,
+    registry: &Rc<HashMap<Provider, Arc<dyn providers::SiteAdapter>>>,
 ) -> LoginActiveInfo {
     let view = build_login_view(provider, page, registry);
     LoginActiveInfo {
