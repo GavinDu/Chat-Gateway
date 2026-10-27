@@ -575,7 +575,23 @@ async fn protect_login_api(req: Request<Body>, next: Next) -> Response {
         )
             .into_response();
     }
-    next.run(req).await
+    let allowed_relay_origin = if is_relay_api {
+        headers.get(axum::http::header::ORIGIN).cloned()
+    } else {
+        None
+    };
+    let mut response = next.run(req).await;
+    if let Some(origin) = allowed_relay_origin {
+        response.headers_mut().insert(
+            axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN,
+            origin,
+        );
+        response.headers_mut().insert(
+            axum::http::header::VARY,
+            axum::http::HeaderValue::from_static("Origin"),
+        );
+    }
+    response
 }
 
 fn login_origin_is_same_authority(headers: &HeaderMap) -> bool {
