@@ -980,7 +980,10 @@ fn rolling_summary_persists_and_context_keeps_recent_messages() {
                     "user",
                     &format!("user turn {index}: details that should remain in durable history"),
                 )],
-                m("assistant", &format!("assistant response {index}: durable response details")),
+                m(
+                    "assistant",
+                    &format!("assistant response {index}: durable response details"),
+                ),
                 "chatgpt".into(),
                 "tab".into(),
             )
