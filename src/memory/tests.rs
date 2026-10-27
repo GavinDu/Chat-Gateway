@@ -935,3 +935,75 @@ fn retention_purge_removes_expired_conversations_and_cascades_threads() {
         .unwrap();
     assert_eq!(thread_count, 0);
 }
+
+#[test]
+fn conversations_and_provider_threads_are_isolated_by_api_key_owner() {
+    let fixture = Fixture::new();
+    let memory = fixture.open();
+    memory
+        .store_turn_for_owner(
+            "alpha",
+            "tenant-chat-1".into(),
+            vec![m("user", "private prompt")],
+            m("assistant", "private answer"),
+            "chatgpt".into(),
+            "tab-tenant".into(),
+        )
+        .unwrap();
+    memory
+        .upsert_provider_thread_for_owner(
+            "alpha",
+            &ProviderThread {
+                conversation_id: "tenant-chat-1".into(),
+                provider: "chatgpt".into(),
+                thread_url: "https://chatgpt.com/c/private-thread".into(),
+                synced_through_message_id: Some("message-1".into()),
+                model: Some("gpt-4o".into()),
+                updated_at: 100,
+            },
+        )
+        .unwrap();
+
+    assert!(memory
+        .build_context_for_owner("bravo", Some("tenant-chat-1"), &[])
+        .is_err());
+    assert!(memory
+        .export_conversation_for_owner("bravo", "tenant-chat-1")
+        .is_err());
+    assert!(memory
+        .list_conversations_for_owner("bravo", 100, 0)
+        .unwrap()
+        .is_empty());
+    assert!(!memory
+        .delete_conversation_for_owner("bravo", "tenant-chat-1")
+        .unwrap());
+    assert!(memory
+        .get_provider_thread_for_owner("bravo", "tenant-chat-1", "chatgpt")
+        .unwrap()
+        .is_none());
+    assert!(memory
+        .store_turn_for_owner(
+            "bravo",
+            "tenant-chat-1".into(),
+            vec![m("user", "attempted takeover")],
+            m("assistant", "must not persist"),
+            "claude".into(),
+            "tab-other".into(),
+        )
+        .is_err());
+    assert_eq!(
+        memory
+            .export_conversation_for_owner("alpha", "tenant-chat-1")
+            .unwrap()
+            .unwrap()
+            .messages
+            .last()
+            .unwrap()
+            .content,
+        "private answer"
+    );
+    assert!(memory
+        .delete_conversation_for_owner("alpha", "tenant-chat-1")
+        .unwrap());
+}
+
