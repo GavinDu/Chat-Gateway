@@ -1,0 +1,27 @@
+name: Browser Relay Extension
+on:
+  pull_request:
+    paths:
+      - "extension/**"
+      - ".github/workflows/browser-relay-extension.yml"
+  push:
+    branches: [main]
+    paths:
+      - "extension/**"
+      - ".github/workflows/browser-relay-extension.yml"
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Validate manifest JSON and least-privilege constraints
+        run: |
+          node -e 'const fs=require("fs");const m=JSON.parse(fs.readFileSync("extension/manifest.json","utf8"));if(m.manifest_version!==3)throw Error("Manifest V3 required");if(m.permissions.includes("history")||m.permissions.includes("debugger")||m.permissions.includes("<all_urls>"))throw Error("Overbroad extension permission");if(m.host_permissions.some(x=>x.includes("<all_urls>")))throw Error("Wildcard host permission forbidden");if(!m.host_permissions.includes("http://127.0.0.1:8080/*"))throw Error("Loopback gateway permission missing");console.log("manifest valid")'
+      - name: Check JavaScript syntax
+        run: |
+          node --check extension/background.js
+          node --check extension/content.js
+          node --check extension/popup.js
