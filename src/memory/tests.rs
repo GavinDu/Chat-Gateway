@@ -829,3 +829,54 @@ fn sqlite_checkpoint_is_safe_after_durable_turns_and_can_repeat() {
         ],
     );
 }
+
+#[test]
+fn provider_thread_mapping_is_provider_scoped_and_survives_restart() {
+    let fixture = Fixture::new();
+    {
+        let memory = fixture.open();
+        store(&memory, "thread-api", "seed");
+        let chatgpt = ProviderThread {
+            conversation_id: "thread-api".into(),
+            provider: "chatgpt".into(),
+            thread_url: "https://chatgpt.com/c/thread-a".into(),
+            synced_through_message_id: Some("message-3".into()),
+            model: Some("gpt-4o".into()),
+            updated_at: 100,
+        };
+        memory.upsert_provider_thread(&chatgpt).unwrap();
+        memory
+            .upsert_provider_thread(&ProviderThread {
+                conversation_id: "thread-api".into(),
+                provider: "claude".into(),
+                thread_url: "https://claude.ai/chat/thread-b".into(),
+                synced_through_message_id: None,
+                model: Some("claude-sonnet".into()),
+                updated_at: 101,
+            })
+            .unwrap();
+        let updated = ProviderThread {
+            synced_through_message_id: Some("message-4".into()),
+            updated_at: 102,
+            ..chatgpt
+        };
+        memory.upsert_provider_thread(&updated).unwrap();
+        assert_eq!(
+            memory.get_provider_thread("thread-api", "chatgpt").unwrap(),
+            Some(updated)
+        );
+        assert!(memory
+            .get_provider_thread("thread-api", "gemini")
+            .unwrap()
+            .is_none());
+    }
+    let reopened = fixture.open();
+    assert_eq!(
+        reopened
+            .get_provider_thread("thread-api", "claude")
+            .unwrap()
+            .unwrap()
+            .thread_url,
+        "https://claude.ai/chat/thread-b"
+    );
+}
