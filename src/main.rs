@@ -14,7 +14,7 @@ use axum::{
 };
 use clap::Parser;
 use sha2::{Digest, Sha256};
-use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Instant};
+use std::{collections::HashMap, net::SocketAddr, sync::{Arc, Mutex, OnceLock}, time::{Duration, Instant}};
 use tokio::sync::RwLock;
 
 mod browser;
@@ -209,6 +209,118 @@ fn api_error(
         })),
     )
         .into_response()
+}
+
+
+#[derive(Debug)]
+struct RelayPairingState {
+    pairing_code_hash: String,
+    pairing_expires_at: Instant,
+    token_hash: Option<String>,
+}
+static RELAY_PAIRING: OnceLock<Mutex<RelayPairingState>> = OnceLock::new();
+
+fn initialize_relay_pairing() -> String {
+    let random = uuid::Uuid::new_v4().simple().to_string();
+    let code = format!("{:06}", u32::from_str_radix(&random[..8], 16).unwrap_or(0) % 1_000_000);
+    let _ = RELAY_PAIRING.set(Mutex::new(RelayPairingState {
+        pairing_code_hash: hash_api_key(&code),
+        pairing_expires_at: Instant::now() + Duration::from_secs(300),
+        token_hash: None,
+    }));
+    code
+}
+
+fn relay_origin_is_allowed(headers: &HeaderMap) -> bool {
+    let Some(extension_id) = std::env::var("CHAT_GATEWAY_EXTENSION_ID").ok() else { return false; };
+    if extension_id.len() != 32 || !extension_id.bytes().all(|byte| (b'a'..=b'p').contains(&byte)) { return false; }
+    let expected = format!("chrome-extension://{extension_id}");
+    headers.get(axum::http::header::ORIGIN).and_then(|value| value.to_str().ok())
+        .is_some_and(|origin| origin == expected)
+}
+
+fn relay_token_valid(headers: &HeaderMap) -> bool {
+    let Some(token) = headers.get(axum::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok()).and_then(|value| value.strip_prefix("Bearer "))
+    else { return false; };
+    let Some(state) = RELAY_PAIRING.get() else { return false; };
+    let Ok(state) = state.lock() else { return false; };
+    state.token_hash.as_deref().is_some_and(|expected| constant_time_eq(expected.as_bytes(), hash_api_key(token).as_bytes()))
+}
+
+fn relay_unauthorized() -> Response {
+    api_error(StatusCode::UNAUTHORIZED, "authentication_error", "relay_pairing_required",
+        "a valid browser-relay pairing token is required")
+}
+
+async fn relay_pair(headers: HeaderMap, Json(body): Json<serde_json::Value>) -> Response {
+    if !relay_origin_is_allowed(&headers) {
+        return api_error(StatusCode::FORBIDDEN, "security_error", "relay_origin_rejected", "browser extension origin is not configured");
+    }
+    let Some(code) = body.get("code").and_then(|value| value.as_str()) else {
+        return api_error(StatusCode::BAD_REQUEST, "invalid_request_error", "pairing_code_required", "a six-digit pairing code is required");
+    };
+    if code.len() != 6 || !code.bytes().all(|byte| byte.is_ascii_digit()) {
+        return api_error(StatusCode::BAD_REQUEST, "invalid_request_error", "invalid_pairing_code", "pairing code is invalid or expired");
+    }
+    let Some(state) = RELAY_PAIRING.get() else {
+        return api_error(StatusCode::SERVICE_UNAVAILABLE, "server_error", "relay_unavailable", "browser relay pairing is not initialized");
+    };
+    let mut state = match state.lock() {
+        Ok(state) => state,
+        Err(_) => return api_error(StatusCode::SERVICE_UNAVAILABLE, "server_error", "relay_unavailable", "browser relay pairing is unavailable"),
+    };
+    if state.token_hash.is_some() || Instant::now() >= state.pairing_expires_at
+        || !constant_time_eq(state.pairing_code_hash.as_bytes(), hash_api_key(code).as_bytes()) {
+        return api_error(StatusCode::UNAUTHORIZED, "authentication_error", "invalid_pairing_code", "pairing code is invalid, expired, or already used");
+    }
+    let token = format!("relay_{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple());
+    state.token_hash = Some(hash_api_key(&token));
+    state.pairing_code_hash.clear();
+    Json(serde_json::json!({"ok": true, "token": token})).into_response()
+}
+
+async fn relay_status(headers: HeaderMap) -> Response {
+    if !relay_token_valid(&headers) { return relay_unauthorized(); }
+    let providers = providers::Provider::all().into_iter().map(|provider| {
+        let name = provider.name();
+        let session_present = session::load_session_file(name).map(|value| value.is_some()).unwrap_or(false);
+        serde_json::json!({"provider": name, "session_present": session_present})
+    }).collect::<Vec<_>>();
+    Json(serde_json::json!({"paired": true, "providers": providers})).into_response()
+}
+
+async fn relay_import_session(headers: HeaderMap, Path(provider): Path<String>, Json(file): Json<session::SessionFile>) -> Response {
+    if !relay_token_valid(&headers) { return relay_unauthorized(); }
+    match session::import_relay_session(&provider, file) {
+        Ok(()) => Json(serde_json::json!({"ok": true, "provider": provider})).into_response(),
+        Err(_error) => {
+            tracing::warn!(provider, "browser-relay session import rejected");
+            api_error(StatusCode::BAD_REQUEST, "invalid_request_error", "session_import_rejected",
+                "session was rejected; check provider selection, cookie scope, and encrypted-vault configuration")
+        }
+    }
+}
+
+async fn relay_delete_session(headers: HeaderMap, Path(provider): Path<String>) -> Response {
+    if !relay_token_valid(&headers) { return relay_unauthorized(); }
+    match session::delete_session(&provider) {
+        Ok(removed) => Json(serde_json::json!({"ok": true, "provider": provider, "removed": removed})).into_response(),
+        Err(_error) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "server_error", "session_unlink_failed", "provider session could not be removed safely"),
+    }
+}
+
+async fn relay_unlink(headers: HeaderMap) -> Response {
+    if !relay_token_valid(&headers) { return relay_unauthorized(); }
+    let Some(state) = RELAY_PAIRING.get() else { return relay_unauthorized(); };
+    match state.lock() {
+        Ok(mut state) => {
+            state.token_hash = None;
+            state.pairing_code_hash.clear();
+            Json(serde_json::json!({"ok": true, "paired": false, "message": "relay token revoked; restart the gateway to pair again"})).into_response()
+        }
+        Err(_) => api_error(StatusCode::SERVICE_UNAVAILABLE, "server_error", "relay_unavailable", "browser relay could not be unlinked safely"),
+    }
 }
 
 #[tokio::main]
@@ -429,6 +541,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/login/api/:provider/complete", post(login_complete))
         .route("/login/api/:provider/view", get(login_view))
         .route("/login/api/:provider/act", post(login_act))
+        .route("/relay/v1/pair", post(relay_pair))
+        .route("/relay/v1/status", get(relay_status))
+        .route("/relay/v1/sessions/:provider", post(relay_import_session).delete(relay_delete_session))
+        .route("/relay/v1/unlink", post(relay_unlink))
         .with_state(state.clone())
         .layer(middleware::from_fn_with_state(
             state.cfg.auth.clone(),
@@ -445,8 +561,11 @@ async fn main() -> anyhow::Result<()> {
     // Security default: the gateway exposes browser/session control routes and must not listen on public interfaces by default.
     // Remote access should be added only with explicit authentication and TLS.
     let addr = server_bind_addr(cfg.server.port);
+    let pairing_code = initialize_relay_pairing();
     let listener = tokio::net::TcpListener::bind(addr).await?;
     println!("Chat Gateway v2 Obscura Native listening on {}", addr);
+    println!("Browser relay pairing code (expires in 5 minutes; shown once): {}", pairing_code);
+    if std::env::var("CHAT_GATEWAY_EXTENSION_ID").is_err() { tracing::warn!("browser relay disabled until CHAT_GATEWAY_EXTENSION_ID is configured to the installed Chrome extension ID"); }
     // Bound graceful draining so a stuck stream cannot prevent shutdown forever.
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
     let shutdown = async move {
@@ -546,7 +665,8 @@ async fn protect_login_api(req: Request<Body>, next: Next) -> Response {
     let origin_present = headers.contains_key(axum::http::header::ORIGIN);
     let fetch_site = headers.get("sec-fetch-site").and_then(|v| v.to_str().ok());
     let is_login_api = req.uri().path().starts_with("/login/api/");
-    let origin_is_safe = !origin_present || login_origin_is_same_authority(headers);
+    let is_relay_api = req.uri().path().starts_with("/relay/v1/");
+    let origin_is_safe = if is_relay_api { relay_origin_is_allowed(headers) } else { !origin_present || login_origin_is_same_authority(headers) };
     if !host_is_loopback || (is_login_api && fetch_site == Some("cross-site")) || !origin_is_safe {
         return (
             StatusCode::FORBIDDEN,
@@ -1253,6 +1373,7 @@ async fn authenticate_api_key(
     mut req: Request<Body>,
     next: Next,
 ) -> Response {
+    if req.uri().path().starts_with("/relay/v1/") { return next.run(req).await; }
     let authorization = req
         .headers()
         .get(axum::http::header::AUTHORIZATION)
