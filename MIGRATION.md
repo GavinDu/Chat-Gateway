@@ -57,6 +57,7 @@ cargo clippy --all-targets --locked -- -D warnings
 cargo fmt --all -- --check
 cargo test --locked
 cargo bench --locked --bench memory_sqlite
+cargo run --locked --example provider_bench -- --fake --smoke
 docker build --pull --tag chat-gateway-rs:ci .
 docker run --rm --entrypoint /usr/local/bin/chat-gateway-rs chat-gateway-rs:ci --help
 ```
