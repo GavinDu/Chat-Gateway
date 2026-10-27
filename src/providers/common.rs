@@ -186,12 +186,16 @@ mod response_probe_tests {
             decode_response_probe(serde_json::json!({
                 "text": "answer",
                 "count": 4,
-                "streaming": true
+                "streaming": true,
+                "url": "https://provider.example/challenge",
+                "challenge": true
             })),
             ResponseProbe {
                 text: Some("answer".to_string()),
                 count: 4,
                 streaming: true,
+                url: "https://provider.example/challenge".to_owned(),
+                challenge: true,
             }
         );
         assert_eq!(
