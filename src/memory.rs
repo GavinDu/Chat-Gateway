@@ -229,6 +229,26 @@ impl UnifiedMemory {
         provider: String,
         tab_id: String,
     ) -> anyhow::Result<()> {
+        self.store_turn_for_owner_with_tab_id(
+            owner_key_id,
+            conversation_id,
+            user_msgs,
+            assistant_msg,
+            provider,
+            Some(tab_id),
+        )
+    }
+
+    /// Persist a completed turn with optional real browser tab metadata.
+    pub fn store_turn_for_owner_with_tab_id(
+        &self,
+        owner_key_id: &str,
+        conversation_id: String,
+        user_msgs: Vec<ChatMessage>,
+        assistant_msg: ChatMessage,
+        provider: String,
+        tab_id: Option<String>,
+    ) -> anyhow::Result<()> {
         let mut connection = self.lock()?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let existing_owner: Option<String> = tx
@@ -266,7 +286,16 @@ impl UnifiedMemory {
             conversation.messages.push(assistant_msg);
         }
         conversation.provider = Some(provider);
-        conversation.tab_id = Some(tab_id);
+        if let Some(tab_id) = tab_id {
+            conversation.tab_id = Some(tab_id);
+        } else if conversation
+            .tab_id
+            .as_deref()
+            .is_some_and(|tab_id| tab_id.starts_with("tab-"))
+        {
+            // Remove legacy synthetic identifiers without erasing real tab metadata.
+            conversation.tab_id = None;
+        }
         sqlite::append_owned(&tx, &conversation, first, owner_key_id)?;
         // Maintain a bounded deterministic summary in the same transaction as the turn.
         const RECENT_MESSAGES_TO_KEEP: usize = 8;
