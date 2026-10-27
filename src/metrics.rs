@@ -202,7 +202,7 @@ pub fn render_with_provider_states(provider_states: &[(String, String)]) -> Stri
 
 #[cfg(test)]
 mod tests {
-    use super::{escape_label, normalize_route, Histogram};
+    use super::{escape_label, normalize_route, render_with_provider_states, Histogram};
 
     #[test]
     fn route_labels_have_bounded_cardinality() {
@@ -231,4 +231,16 @@ mod tests {
     fn prometheus_labels_escape_backslashes_quotes_and_newlines() {
         assert_eq!(escape_label("a\\b\"c\nd"), "a\\\\b\\\"c\\nd");
     }
+
+    #[test]
+    fn session_state_metrics_are_one_hot() {
+        let metrics = render_with_provider_states(&[(
+            "provider-test".to_owned(),
+            "needs_login".to_owned(),
+        )]);
+        assert!(metrics.contains("gateway_provider_session_state{provider=\"provider-test\",state=\"needs_login\"} 1"));
+        assert!(metrics.contains("gateway_provider_session_state{provider=\"provider-test\",state=\"ready\"} 0"));
+        assert!(metrics.contains("gateway_provider_session_state{provider=\"provider-test\",state=\"unknown\"} 0"));
+    }
+
 }
