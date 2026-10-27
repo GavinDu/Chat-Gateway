@@ -4,7 +4,8 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use ring::{constant_time, rand::{SecureRandom, SystemRandom}};
+use ring::rand::{SecureRandom, SystemRandom};
+use subtle::ConstantTimeEq;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::{
@@ -158,7 +159,7 @@ pub async fn pair(
     }
     *attempts = attempts.saturating_add(1);
     let candidate: [u8; 32] = Sha256::digest(request.code.as_bytes()).into();
-    if constant_time::verify_slices_are_equal(&candidate, &app.relay.pairing_hash).is_err() {
+    if !bool::from(candidate.ct_eq(&app.relay.pairing_hash)) {
         return json_error(StatusCode::UNAUTHORIZED, "pairing_rejected", "pairing code is invalid or expired");
     }
     let mut token_slot = match app.relay.install_token_hash.lock() {
@@ -181,48 +182,48 @@ pub async fn pair(
     Json(serde_json::json!({"ok":true,"token":token})).into_response()
 }
 
-fn authenticated_request(app: &crate::AppState, headers: &HeaderMap) -> Result<(), Response> {
+fn authenticated_request(app: &crate::AppState, headers: &HeaderMap) -> Result<(), Box<Response>> {
     if !relay_origin_is_allowed(headers) {
-        return Err(json_error(StatusCode::FORBIDDEN, "extension_origin_rejected", "the configured browser extension origin is required"));
+        return Err(Box::new(json_error(StatusCode::FORBIDDEN, "extension_origin_rejected", "the configured browser extension origin is required")));
     }
     let authorization = headers.get(header::AUTHORIZATION).and_then(|value| value.to_str().ok());
     let token = authorization.and_then(|value| value.strip_prefix("Bearer "));
     let Some(token) = token else {
-        return Err(json_error(StatusCode::UNAUTHORIZED, "relay_auth_required", "a paired extension token is required"));
+        return Err(Box::new(json_error(StatusCode::UNAUTHORIZED, "relay_auth_required", "a paired extension token is required")));
     };
     let candidate: [u8; 32] = Sha256::digest(token.as_bytes()).into();
-    let token_slot = app.relay.install_token_hash.lock().map_err(|_| json_error(StatusCode::INTERNAL_SERVER_ERROR, "relay_unavailable", "relay state is unavailable"))?;
+    let token_slot = app.relay.install_token_hash.lock().map_err(|_| Box::new(json_error(StatusCode::INTERNAL_SERVER_ERROR, "relay_unavailable", "relay state is unavailable")))?;
     let Some(expected) = token_slot.as_ref() else {
-        return Err(json_error(StatusCode::UNAUTHORIZED, "relay_auth_required", "the extension is not paired"));
+        return Err(Box::new(json_error(StatusCode::UNAUTHORIZED, "relay_auth_required", "the extension is not paired")));
     };
-    if constant_time::verify_slices_are_equal(&candidate, expected).is_err() {
-        return Err(json_error(StatusCode::UNAUTHORIZED, "relay_auth_required", "the paired extension token is invalid"));
+    if !bool::from(candidate.ct_eq(expected)) {
+        return Err(Box::new(json_error(StatusCode::UNAUTHORIZED, "relay_auth_required", "the paired extension token is invalid")));
     }
     drop(token_slot);
 
     let timestamp = headers.get("x-relay-timestamp").and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<i64>().ok());
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
-    if timestamp.map_or(true, |timestamp| (now - timestamp).abs() > REQUEST_SKEW_SECONDS) {
-        return Err(json_error(StatusCode::UNAUTHORIZED, "relay_request_expired", "relay request timestamp is missing or expired"));
+    if timestamp.is_none_or(|timestamp| (now - timestamp).abs() > REQUEST_SKEW_SECONDS) {
+        return Err(Box::new(json_error(StatusCode::UNAUTHORIZED, "relay_request_expired", "relay request timestamp is missing or expired")));
     }
     let nonce = headers.get("x-relay-nonce").and_then(|v| v.to_str().ok()).unwrap_or("");
     if nonce.len() < 32 || nonce.len() > 128 || !nonce.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err(json_error(StatusCode::BAD_REQUEST, "relay_nonce_invalid", "relay request nonce is invalid"));
+        return Err(Box::new(json_error(StatusCode::BAD_REQUEST, "relay_nonce_invalid", "relay request nonce is invalid")));
     }
-    let mut nonces = app.relay.used_nonces.lock().map_err(|_| json_error(StatusCode::INTERNAL_SERVER_ERROR, "relay_unavailable", "relay state is unavailable"))?;
+    let mut nonces = app.relay.used_nonces.lock().map_err(|_| Box::new(json_error(StatusCode::INTERNAL_SERVER_ERROR, "relay_unavailable", "relay state is unavailable")))?;
     nonces.retain(|_, inserted| inserted.elapsed() < NONCE_RETENTION);
     if nonces.contains_key(nonce) {
-        return Err(json_error(StatusCode::UNAUTHORIZED, "relay_nonce_reused", "relay request nonce has already been used"));
+        return Err(Box::new(json_error(StatusCode::UNAUTHORIZED, "relay_nonce_reused", "relay request nonce has already been used")));
     }
     if nonces.len() >= 10_000 {
-        return Err(json_error(StatusCode::TOO_MANY_REQUESTS, "relay_rate_limited", "too many relay requests; retry shortly"));
+        return Err(Box::new(json_error(StatusCode::TOO_MANY_REQUESTS, "relay_rate_limited", "too many relay requests; retry shortly")));
     }
     nonces.insert(nonce.to_owned(), Instant::now());
     Ok(())
 }
 
 pub async fn status(State(app): State<Arc<crate::AppState>>, headers: HeaderMap) -> Response {
-    if let Err(response) = authenticated_request(&app, &headers) { return response; }
+    if let Err(response) = authenticated_request(&app, &headers) { return *response; }
     let providers = ["qwen", "metaai", "claude", "chatgpt", "gemini", "grok", "mistral", "perplexity"]
         .iter()
         .map(|provider| {
