@@ -2163,6 +2163,20 @@ mod api_contract_tests {
     }
 
     #[test]
+    fn explicitly_rejects_unsupported_stream_options_include_usage() {
+        let req = serde_json::from_value::<ChatReq>(serde_json::json!({
+            "model": "auto",
+            "messages": [{"role": "user", "content": "hello"}],
+            "stream": true,
+            "stream_options": {"include_usage": true}
+        }))
+        .expect("stream_options should deserialize into the unsupported-field map");
+        let error = validate_chat_req(&req).unwrap_err();
+        assert_eq!(error.0, "unsupported_parameter");
+        assert!(error.1.contains("stream_options"));
+    }
+
+    #[test]
     fn reports_unknown_request_fields_as_unsupported_parameters() {
         let req = serde_json::from_value::<ChatReq>(serde_json::json!({
             "model": "auto",
