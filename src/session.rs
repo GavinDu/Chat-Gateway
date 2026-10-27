@@ -1,11 +1,11 @@
 use anyhow::Result;
 use obscura_core::{Browser, Page};
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use ring::{
     aead,
     rand::{SecureRandom, SystemRandom},
 };
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, HashMap},
     io::Write,
@@ -313,7 +313,10 @@ fn ensure_private_session_dir_sync(path: &Path) -> Result<()> {
 
 /// Load a saved session file, if one exists, using the default file store.
 pub fn load_session_file(provider: &str) -> Result<Option<SessionFile>> {
-    if matches!(std::env::var("CHAT_GATEWAY_SESSION_STORE").as_deref(), Ok("vault")) {
+    if matches!(
+        std::env::var("CHAT_GATEWAY_SESSION_STORE").as_deref(),
+        Ok("vault")
+    ) {
         VaultSessionStore.load(provider)
     } else {
         FileSessionStore.load(provider)
@@ -465,7 +468,10 @@ pub async fn save_session(browser: &Browser, page: &Page, provider: &str) -> Res
 /// Writes are atomic and capped at one per provider per minute. A skipped
 /// changed snapshot will be retried after the interval on the next successful send.
 pub async fn save_session_if_changed(browser: &Browser, page: &Page, provider: &str) -> Result<()> {
-    if matches!(std::env::var("CHAT_GATEWAY_SESSION_STORE").as_deref(), Ok("vault")) {
+    if matches!(
+        std::env::var("CHAT_GATEWAY_SESSION_STORE").as_deref(),
+        Ok("vault")
+    ) {
         VaultSessionStore
             .save_if_changed(browser, page, provider)
             .await
