@@ -100,14 +100,47 @@ impl UnifiedMemory {
         Ok(conversation)
     }
 
+    fn conversation_for_owner(
+        &self,
+        owner_key_id: &str,
+        id: &str,
+    ) -> anyhow::Result<Option<Conversation>> {
+        let mut connection = self.lock()?;
+        let tx = connection.transaction()?;
+        let owner: Option<String> = tx
+            .query_row(
+                "SELECT owner_key_id FROM conversations WHERE id = ?1",
+                [id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let conversation = match owner {
+            Some(owner) if owner == owner_key_id => sqlite::load(&tx, id)?,
+            Some(_) => anyhow::bail!("conversation belongs to another API key"),
+            None => None,
+        };
+        tx.commit()
+            .map_err(|error| anyhow::anyhow!("completing scoped conversation read: {error}"))?;
+        Ok(conversation)
+    }
+
     pub fn build_context(
         &self,
         conversation_id: Option<&str>,
         new_messages: &[ChatMessage],
     ) -> anyhow::Result<(String, Vec<ChatMessage>)> {
+        self.build_context_for_owner("local", conversation_id, new_messages)
+    }
+
+    pub fn build_context_for_owner(
+        &self,
+        owner_key_id: &str,
+        conversation_id: Option<&str>,
+        new_messages: &[ChatMessage],
+    ) -> anyhow::Result<(String, Vec<ChatMessage>)> {
         let mut full = match conversation_id {
             Some(id) => self
-                .conversation(id)?
+                .conversation_for_owner(owner_key_id, id)?
                 .map(|conversation| conversation.messages)
                 .unwrap_or_default(),
             None => Vec::new(),
@@ -140,8 +173,33 @@ impl UnifiedMemory {
         provider: String,
         tab_id: String,
     ) -> anyhow::Result<()> {
+        self.store_turn_for_owner("local", conversation_id, user_msgs, assistant_msg, provider, tab_id)
+    }
+
+    pub fn store_turn_for_owner(
+        &self,
+        owner_key_id: &str,
+        conversation_id: String,
+        user_msgs: Vec<ChatMessage>,
+        assistant_msg: ChatMessage,
+        provider: String,
+        tab_id: String,
+    ) -> anyhow::Result<()> {
         let mut connection = self.lock()?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let existing_owner: Option<String> = tx
+            .query_row(
+                "SELECT owner_key_id FROM conversations WHERE id = ?1",
+                [&conversation_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if existing_owner
+            .as_deref()
+            .is_some_and(|existing| existing != owner_key_id)
+        {
+            anyhow::bail!("conversation belongs to another API key");
+        }
         let mut conversation =
             sqlite::load(&tx, &conversation_id)?.unwrap_or_else(|| Conversation {
                 id: conversation_id,
@@ -158,7 +216,6 @@ impl UnifiedMemory {
             && (conversation.messages.starts_with(&completed)
                 || conversation.messages.ends_with(&completed));
         let unseen = messages_after_overlap(&conversation.messages, &user_msgs);
-        // An identical completed turn replay must not append a second answer.
         let first = conversation.messages.len();
         if !replay {
             conversation.messages.extend(unseen);
@@ -166,7 +223,7 @@ impl UnifiedMemory {
         }
         conversation.provider = Some(provider);
         conversation.tab_id = Some(tab_id);
-        sqlite::append(&tx, &conversation, first)?;
+        sqlite::append_owned(&tx, &conversation, first, owner_key_id)?;
         tx.commit()
             .map_err(|error| anyhow::anyhow!("committing conversation turn: {error}"))
     }
