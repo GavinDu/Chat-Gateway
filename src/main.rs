@@ -218,6 +218,7 @@ struct RelayPairingState {
     pairing_expires_at: Instant,
     token_hash: Option<String>,
     attempts: u8,
+    used_nonces: HashMap<String, Instant>,
 }
 static RELAY_PAIRING: OnceLock<Mutex<RelayPairingState>> = OnceLock::new();
 
@@ -229,6 +230,7 @@ fn initialize_relay_pairing() -> String {
         pairing_expires_at: Instant::now() + Duration::from_secs(300),
         token_hash: None,
         attempts: 0,
+        used_nonces: HashMap::new(),
     }));
     code
 }
@@ -245,9 +247,23 @@ fn relay_token_valid(headers: &HeaderMap) -> bool {
     let Some(token) = headers.get(axum::http::header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok()).and_then(|value| value.strip_prefix("Bearer "))
     else { return false; };
+    let Some(timestamp) = headers.get("x-relay-timestamp").and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok()) else { return false; };
+    let Some(nonce) = headers.get("x-relay-nonce").and_then(|value| value.to_str().ok()) else { return false; };
+    if nonce.len() != 36 || !nonce.bytes().all(|byte| byte.is_ascii_hexdigit() || byte == b'-') { return false; }
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+    if timestamp.abs_diff(now) > 30 { return false; }
     let Some(state) = RELAY_PAIRING.get() else { return false; };
-    let Ok(state) = state.lock() else { return false; };
-    state.token_hash.as_deref().is_some_and(|expected| constant_time_eq(expected.as_bytes(), hash_api_key(token).as_bytes()))
+    let Ok(mut state) = state.lock() else { return false; };
+    let valid_token = state.token_hash.as_deref().is_some_and(|expected| {
+        constant_time_eq(expected.as_bytes(), hash_api_key(token).as_bytes())
+    });
+    if !valid_token { return false; }
+    let instant = Instant::now();
+    state.used_nonces.retain(|_, created| instant.duration_since(*created) <= Duration::from_secs(60));
+    if state.used_nonces.contains_key(nonce) { return false; }
+    state.used_nonces.insert(nonce.to_owned(), instant);
+    true
 }
 
 fn relay_unauthorized() -> Response {
