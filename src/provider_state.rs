@@ -117,6 +117,32 @@ mod tests {
     }
 
     #[test]
+    // Session diagnostics are user-visible state; never retain raw cookies or identity data.
+    fn session_expiry_details_are_redacted_and_success_clears_them() {
+        let provider = "test-provider-redacted-session-error";
+        // Simulate an upstream error that accidentally includes credential-like data.
+        record_error(
+            provider,
+            "session expired: cookie=secret-session-token; user=private@example.test",
+        );
+
+        let expired = status(provider);
+        assert_eq!(expired.state, "needs_login");
+        let safe_error = expired
+            .last_error
+            .expect("expiry state should explain remediation");
+        // Health reporting may expose remediation guidance, never the original error payload.
+        assert_eq!(safe_error, "provider session expired; re-login required");
+        assert!(!safe_error.contains("secret-session-token"));
+        assert!(!safe_error.contains("private@example.test"));
+
+        record_success(provider);
+        let ready = status(provider);
+        assert_eq!(ready.state, "ready");
+        assert_eq!(ready.last_error, None);
+    }
+
+    #[test]
     fn unknown_provider_is_routable_until_checked() {
         assert!(is_routable("test-provider-unknown"));
         assert_eq!(status("test-provider-unknown").state, "unknown");
