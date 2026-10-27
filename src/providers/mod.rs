@@ -133,26 +133,9 @@ pub trait ChatProvider: Send + Sync {
     /// Current full text of the (last) response, if present.
     fn response_text(&self, page: &Page) -> Option<String>;
 
-    /// Count distinct response nodes before/after a send. This lets the
-    /// stream loop distinguish a new identical answer from stale text.
-    fn response_count(&self, page: &Page) -> usize {
-        let selectors =
-            serde_json::to_string(self.selector_set().response).unwrap_or_else(|_| "[]".to_owned());
-        page.evaluate(&format!(
-            "(() => {{ const nodes = new Set(); for (const selector of {selectors}) {{ try {{ document.querySelectorAll(selector).forEach(node => nodes.add(node)); }} catch (_) {{}} }} return nodes.size; }})()"
-        ))
-        .as_u64()
-        .unwrap_or(0) as usize
-    }
-
     /// Fetch text, node count, and streaming state in one page evaluation.
     fn response_probe(&self, page: &Page) -> common::ResponseProbe {
         common::response_probe(page, self.selector_set())
-    }
-
-    /// Provider still generating (stop button / streaming attribute).
-    fn is_streaming(&self, page: &Page) -> bool {
-        common::is_streaming(page)
     }
 
     /// Best-effort cancellation when the HTTP consumer disconnects.
