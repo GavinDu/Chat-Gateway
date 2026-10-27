@@ -2389,8 +2389,14 @@ mod http_api_regression_tests {
             memory
                 .store_turn(
                     id.to_owned(),
-                    vec![ChatMessage { role: "user".into(), content: text.into() }],
-                    ChatMessage { role: "assistant".into(), content: "answer".into() },
+                    vec![ChatMessage {
+                        role: "user".into(),
+                        content: text.into(),
+                    }],
+                    ChatMessage {
+                        role: "assistant".into(),
+                        content: "answer".into(),
+                    },
                     "chatgpt".into(),
                     "tab".into(),
                 )
@@ -2988,7 +2994,8 @@ mod api_key_auth_tests {
                 &axum::http::Method::GET
             ),
             Err(AuthFailure::InsufficientScope)
-        );        assert_eq!(
+        );
+        assert_eq!(
             authorize_api_request(
                 &config,
                 Some("Bearer test-secret"),
@@ -3015,7 +3022,8 @@ mod api_key_auth_tests {
             "/v1/conversations/conversation_1",
             &axum::http::Method::GET
         )
-        .is_ok());        assert!(authorize_api_request(
+        .is_ok());
+        assert!(authorize_api_request(
             &config,
             Some("Bearer test-secret"),
             "/v1/conversations",
