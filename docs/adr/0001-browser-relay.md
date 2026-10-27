@@ -1,6 +1,6 @@
 # ADR 0001: Browser-relay login protocol and threat model
 
-- **Status:** Proposed — owner decision required
+- **Status:** Accepted — owner approved on 2026-10-27
 - **Date:** 2026-10-25
 - **Scope:** Browser session linking and use of provider web sessions by Chat Gateway
 
@@ -57,5 +57,5 @@ The exact local-storage key allowlist, cookie requirements, and whether a provid
 - The extension + encrypted-vault path is the recommended first milestone; live-tab relay remains a later option if session transfer proves unreliable or violates provider policy.
 - The gateway and browser should normally share a host and egress IP, but provider terms and account policies take precedence. The project must not attempt to evade provider access restrictions.
 - A per-provider capability matrix is required before enabling each adapter.
-- **Owner decision requested:** approve or amend the recommended extension + encrypted-vault first milestone, Chrome-first scope, and same-host topology before implementation is treated as final.
-- Follow-up issues for the extension, vault, pairing, and live-tab relay should be reconciled only after this decision is approved.
+- **Owner decision (2026-10-27):** Approved as proposed: extension + encrypted vault as the first milestone, Chrome-first scope, and same-host/loopback-only topology. Implementation remains gated on the security requirements in this ADR and fresh CI.
+- Follow-up issues for the extension, vault, and pairing may now proceed against this accepted decision. Live-tab relay remains a separate later option, not part of the first milestone.
