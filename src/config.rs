@@ -59,6 +59,9 @@ pub struct MemoryConfig {
     pub max_tokens: usize,
     #[serde(default = "default_strategy")]
     pub strategy: String,
+    /// Retain conversations for this many days; zero disables automatic purge.
+    #[serde(default)]
+    pub retention_days: u32,
 }
 
 impl Default for MemoryConfig {
@@ -66,6 +69,7 @@ impl Default for MemoryConfig {
         Self {
             max_tokens: default_max_tokens(),
             strategy: default_strategy(),
+            retention_days: 0,
         }
     }
 }
@@ -137,6 +141,9 @@ impl AppConfig {
         }
         if self.memory.max_tokens == 0 {
             anyhow::bail!("memory.max_tokens must be greater than zero");
+        }
+        if self.memory.retention_days > 36_500 {
+            anyhow::bail!("memory.retention_days must be 0 (disabled) or at most 36500 days");
         }
         if self.memory.strategy != "sliding_window" {
             anyhow::bail!(
@@ -355,6 +362,19 @@ mod tests {
     fn defaults_queue_timeout_to_thirty_seconds() {
         let cfg = config("providers:\n  - name: chatgpt\n");
         assert_eq!(cfg.provider("chatgpt").unwrap().queue_timeout_seconds, 30);
+    }
+
+    #[test]
+    fn conversation_retention_is_disabled_by_default_and_bounded_when_enabled() {
+        let defaults = config("");
+        assert_eq!(defaults.memory.retention_days, 0);
+
+        let enabled = config("memory:\\n  retention_days: 30\\n");
+        assert_eq!(enabled.memory.retention_days, 30);
+        assert!(enabled.validate().is_ok());
+
+        let excessive = config("memory:\\n  retention_days: 36501\\n");
+        assert!(excessive.validate().is_err());
     }
 
     #[test]
