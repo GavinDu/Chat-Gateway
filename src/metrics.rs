@@ -138,7 +138,9 @@ pub fn normalize_route(path: &str) -> String {
     }
 }
 
-pub fn render() -> String {
+/// Render metrics plus the current session state for each configured provider.
+/// State values are emitted as a bounded one-hot gauge for dashboards.
+pub fn render_with_provider_states(provider_states: &[(String, String)]) -> String {
     let Ok(data) = data().lock() else {
         return String::new();
     };
@@ -179,12 +181,24 @@ pub fn render() -> String {
             escape_label(outcome)
         );
     }
+    let _ = writeln!(out, "# TYPE gateway_provider_session_state gauge");
+    for (provider, state) in provider_states {
+        for known_state in ["unknown", "ready", "needs_login"] {
+            let value = u8::from(state == known_state);
+            let _ = writeln!(
+                out,
+                "gateway_provider_session_state{{provider=\"{}\",state=\"{}\"}} {value}",
+                escape_label(provider),
+                known_state
+            );
+        }
+    }
     out
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{escape_label, normalize_route, Histogram};
+    use super::{escape_label, normalize_route, render_with_provider_states, Histogram};
 
     #[test]
     fn route_labels_have_bounded_cardinality() {
@@ -212,5 +226,20 @@ mod tests {
     #[test]
     fn prometheus_labels_escape_backslashes_quotes_and_newlines() {
         assert_eq!(escape_label("a\\b\"c\nd"), "a\\\\b\\\"c\\nd");
+    }
+
+    #[test]
+    fn session_state_metrics_are_one_hot() {
+        let metrics =
+            render_with_provider_states(&[("provider-test".to_owned(), "needs_login".to_owned())]);
+        assert!(metrics.contains(
+            "gateway_provider_session_state{provider=\"provider-test\",state=\"needs_login\"} 1"
+        ));
+        assert!(metrics.contains(
+            "gateway_provider_session_state{provider=\"provider-test\",state=\"ready\"} 0"
+        ));
+        assert!(metrics.contains(
+            "gateway_provider_session_state{provider=\"provider-test\",state=\"unknown\"} 0"
+        ));
     }
 }

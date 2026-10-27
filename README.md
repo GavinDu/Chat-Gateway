@@ -317,7 +317,7 @@ There is no built-in TTL or automatic backup purge today. Do not interpret live-
 
 ## Metrics and request timing
 
-The loopback-only `/metrics` endpoint exposes Prometheus text metrics for HTTP request counts and handler latency, plus provider queue wait, time to first token (TTFT), provider work, total chat duration, and estimated gateway overhead. When API-key authentication is enabled, `/metrics` requires an `admin` scope. Route labels are normalized to a bounded vocabulary to avoid high-cardinality metrics.
+The loopback-only `/metrics` endpoint exposes Prometheus text metrics for HTTP request counts and handler latency, plus provider queue wait, time to first token (TTFT), provider work, total chat duration, estimated gateway overhead, and the one-hot `gateway_provider_session_state` gauge (`unknown`, `ready`, or `needs_login`). When API-key authentication is enabled, `/metrics` requires an `admin` scope. Route labels are normalized to a bounded vocabulary to avoid high-cardinality metrics.
 
 See [docs/METRICS.md](docs/METRICS.md) for metric definitions and interpretation.
 
