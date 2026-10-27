@@ -15,6 +15,8 @@ const PROVIDER_THREADS_SCHEMA: &str = "
         updated_at INTEGER NOT NULL,
         PRIMARY KEY(conversation_id, provider)
     );
+";
+const ROLLING_SUMMARIES_SCHEMA: &str = "
     CREATE TABLE conversation_summaries (
         conversation_id TEXT PRIMARY KEY NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
         summary TEXT NOT NULL,
@@ -45,6 +47,12 @@ const SCHEMA: &str = "
         model TEXT,
         updated_at INTEGER NOT NULL,
         PRIMARY KEY(conversation_id, provider)
+    );
+    CREATE TABLE conversation_summaries (
+        conversation_id TEXT PRIMARY KEY NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+        summary TEXT NOT NULL,
+        covered_through_position INTEGER NOT NULL CHECK(covered_through_position >= 0),
+        updated_at INTEGER NOT NULL
     );
 ";
 
