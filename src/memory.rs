@@ -2,10 +2,6 @@
 mod sqlite;
 
 use crate::context::ContextBuilder;
-#[allow(unused_imports)]
-// Used by the memory unit-test module; the standalone benchmark doesn't call it.
-pub(crate) use crate::context::{estimate_message_tokens, messages_after_overlap};
-
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use std::{
