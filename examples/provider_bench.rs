@@ -17,7 +17,7 @@ use std::{
 
 const FAKE_UPSTREAM_MS: u64 = 30;
 
-async fn fake_chat(Json(_request): Json<Value>) -> Sse<impl futures_util_placeholder::Stream<Item = Result<Event, Infallible>>> {
+async fn fake_chat(Json(_request): Json<Value>) -> impl axum::response::IntoResponse {
     let stream = async_stream::stream! {
         yield Ok(Event::default().data(json!({"choices":[{"delta":{"role":"assistant"},"index":0}]}).to_string()));
         tokio::time::sleep(Duration::from_millis(FAKE_UPSTREAM_MS)).await;
@@ -47,7 +47,7 @@ struct Sample {
     rss_kib: Option<u64>,
 }
 
-fn request(url: &str, provider: &str, api_key: Option<&str>, pid: Option<&str>, fake: bool) -> anyhow::Result<Sample> {
+fn request(url: &str, provider: &str, api_key: Option<&str>, pid: Option<&str>) -> anyhow::Result<Sample> {
     let payload = json!({
         "provider": provider,
         "model": "auto",
@@ -57,12 +57,12 @@ fn request(url: &str, provider: &str, api_key: Option<&str>, pid: Option<&str>, 
     let mut command = Command::new("curl");
     command.args(["--silent", "--show-error", "--no-buffer", "--request", "POST", "--header", "Content-Type: application/json", "--data-binary", &payload]);
     if let Some(key) = api_key {
-        command.args(["--header", &format!("Authorization: Bearer {key}")]);
+        command.arg("--header").arg(format!("Authorization: Bearer {key}"));
     }
     let mut child = command
         .arg(url)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::inherit())
         .spawn()
         .map_err(|error| anyhow::anyhow!("could not start curl; install curl to run this benchmark: {error}"))?;
     let stdout = child.stdout.take().ok_or_else(|| anyhow::anyhow!("curl stdout was not captured"))?;
@@ -141,7 +141,7 @@ async fn main() -> anyhow::Result<()> {
     let mut previous: Option<String> = None;
     for index in 0..iterations {
         let provider = &providers[index % providers.len()];
-        let sample = request(&url, provider, api_key.as_deref(), pid.as_deref(), fake)?;
+        let sample = request(&url, provider, api_key.as_deref(), pid.as_deref())?;
         println!(
             "sample={} provider={} total_ms={:.2} ttft_ms={} rss_kib={}",
             index + 1,
