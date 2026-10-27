@@ -403,7 +403,11 @@ fn extractive_rolling_summary(messages: &[ChatMessage], max_chars: usize) -> Str
     let mut lines = Vec::new();
     let mut used = 0usize;
     for message in messages.iter().rev() {
-        let normalized = message.content.split_whitespace().collect::<Vec<_>>().join(" ");
+        let normalized = message
+            .content
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
         if normalized.is_empty() {
             continue;
         }
