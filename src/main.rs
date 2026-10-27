@@ -383,6 +383,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/conversations", get(list_conversations))
         .route(
+            "/v1/conversations/:conversation_id/export.md",
+            get(export_conversation_markdown),
+        )
+        .route(
             "/v1/conversations/:conversation_id",
             get(export_conversation).delete(delete_conversation),
         )
@@ -1300,6 +1304,36 @@ async fn export_conversation(
     Path(conversation_id): Path<String>,
 ) -> Response {
     export_conversation_response(&state.memory, &conversation_id)
+}
+async fn export_conversation_markdown(
+    State(state): State<Arc<AppState>>,
+    Path(conversation_id): Path<String>,
+) -> Response {
+    export_conversation_markdown_response(&state.memory, &conversation_id)
+}
+
+fn export_conversation_markdown_response(memory: &UnifiedMemory, conversation_id: &str) -> Response {
+    if !valid_conversation_id(conversation_id) {
+        return api_error(StatusCode::BAD_REQUEST, "invalid_request_error", "invalid_conversation_id", "invalid conversation ID");
+    }
+    match memory.export_conversation(conversation_id) {
+        Ok(Some(conversation)) => {
+            let mut markdown = format!("# Conversation {}\n\n", conversation.id);
+            if let Some(provider) = conversation.provider.as_deref() {
+                markdown.push_str(&format!("- Provider: {}\n", provider));
+            }
+            if let Some(tab_id) = conversation.tab_id.as_deref() {
+                markdown.push_str(&format!("- Tab: {}\n", tab_id));
+            }
+            markdown.push_str("\n");
+            for (index, message) in conversation.messages.iter().enumerate() {
+                markdown.push_str(&format!("## {} — {}\n\n{}\n\n", index + 1, message.role, message.content));
+            }
+            ([(axum::http::header::CONTENT_TYPE, "text/markdown; charset=utf-8")], markdown).into_response()
+        }
+        Ok(None) => api_error(StatusCode::NOT_FOUND, "invalid_request_error", "conversation_not_found", "conversation does not exist"),
+        Err(_error) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "server_error", "memory_persistence_failed", "conversation could not be exported safely"),
+    }
 }
 
 async fn delete_conversation(
@@ -2302,6 +2336,12 @@ mod http_api_regression_tests {
     ) -> Response {
         export_conversation_response(&memory, &conversation_id)
     }
+    async fn export_markdown_endpoint(
+        State(memory): State<Arc<UnifiedMemory>>,
+        Path(conversation_id): Path<String>,
+    ) -> Response {
+        export_conversation_markdown_response(&memory, &conversation_id)
+    }
 
     async fn list_endpoint(
         State(memory): State<Arc<UnifiedMemory>>,
@@ -2345,6 +2385,10 @@ mod http_api_regression_tests {
             .route("/v1/conversations", get(list_endpoint))
             .route("/v1/chat/completions", post(validation_endpoint))
             .route(
+                "/v1/conversations/:conversation_id/export.md",
+                get(export_markdown_endpoint),
+            )
+            .route(
                 "/v1/conversations/:conversation_id",
                 get(export_endpoint).delete(delete_endpoint),
             )
@@ -2380,6 +2424,31 @@ mod http_api_regression_tests {
             }
             Err(_) => conversation_context_read_error(conversation_id),
         }
+    }
+
+    #[tokio::test]
+    async fn http_markdown_export_returns_markdown_content_type_and_messages() {
+        let memory = Arc::new(UnifiedMemory::new(8000));
+        memory
+            .store_turn(
+                "conversation_md_export".into(),
+                vec![ChatMessage { role: "user".into(), content: "hello markdown".into() }],
+                ChatMessage { role: "assistant".into(), content: "answer".into() },
+                "chatgpt".into(),
+                "tab".into(),
+            )
+            .unwrap();
+        let response = app(memory)
+            .oneshot(Request::builder().uri("/v1/conversations/conversation_md_export/export.md").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["content-type"], "text/markdown; charset=utf-8");
+        let bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(body.contains("# Conversation conversation_md_export"));
+        assert!(body.contains("hello markdown"));
+        assert!(body.contains("## 2 — assistant"));
     }
 
     #[tokio::test]
