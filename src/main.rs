@@ -1276,6 +1276,15 @@ struct ConversationListQuery {
     offset: Option<usize>,
 }
 
+#[derive(Debug, Deserialize)]
+struct ProviderThreadInput {
+    thread_url: String,
+    #[serde(default)]
+    synced_through_message_id: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+}
+
 async fn list_conversations(
     State(state): State<Arc<AppState>>,
     Query(query): Query<ConversationListQuery>,
