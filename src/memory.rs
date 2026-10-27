@@ -2,7 +2,8 @@
 mod sqlite;
 
 use crate::context::ContextBuilder;
-#[allow(unused_imports)] // Used by the memory unit-test module; the standalone benchmark doesn't call it.
+#[allow(unused_imports)]
+// Used by the memory unit-test module; the standalone benchmark doesn't call it.
 pub(crate) use crate::context::{estimate_message_tokens, messages_after_overlap};
 
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
@@ -150,7 +151,11 @@ impl UnifiedMemory {
                 .unwrap_or_default(),
             None => Vec::new(),
         };
-        Ok(ContextBuilder::build(&history, new_messages, self.max_tokens))
+        Ok(ContextBuilder::build(
+            &history,
+            new_messages,
+            self.max_tokens,
+        ))
     }
 
     #[allow(dead_code)]
