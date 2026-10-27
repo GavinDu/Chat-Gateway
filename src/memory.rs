@@ -236,10 +236,7 @@ impl UnifiedMemory {
 
     /// Delete conversations older than the supplied Unix timestamp. Related
     /// messages and provider-thread mappings are removed by SQLite cascades.
-    pub fn purge_expired_conversations(
-        &self,
-        cutoff_unix_seconds: i64,
-    ) -> anyhow::Result<usize> {
+    pub fn purge_expired_conversations(&self, cutoff_unix_seconds: i64) -> anyhow::Result<usize> {
         let mut connection = self.lock()?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let deleted = tx.execute(
