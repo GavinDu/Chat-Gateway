@@ -1121,7 +1121,6 @@ fn context_budget_estimate_handles_multibyte_text_conservatively() {
     );
 }
 
-
 #[test]
 fn rolling_summary_persists_and_context_keeps_recent_messages() {
     let fixture = Fixture::new();
@@ -1145,9 +1144,7 @@ fn rolling_summary_persists_and_context_keeps_recent_messages() {
             .unwrap();
     }
 
-    let (prompt, context) = memory
-        .build_context(Some("rolling-summary"), &[])
-        .unwrap();
+    let (prompt, context) = memory.build_context(Some("rolling-summary"), &[]).unwrap();
     assert!(
         prompt.contains("Conversation summary of earlier turns:"),
         "long conversations should include the persisted rolling summary"
@@ -1167,9 +1164,7 @@ fn rolling_summary_persists_and_context_keeps_recent_messages() {
 
     drop(memory);
     let reopened = fixture.open();
-    let (reopened_prompt, _) = reopened
-        .build_context(Some("rolling-summary"), &[])
-        .unwrap();
+    let (reopened_prompt, _) = reopened.build_context(Some("rolling-summary"), &[]).unwrap();
     assert!(
         reopened_prompt.contains("Conversation summary of earlier turns:"),
         "summary metadata should survive database restart"
