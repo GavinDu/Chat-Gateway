@@ -306,7 +306,7 @@ When `auth.keys` is non-empty, every route except `/health` requires `Authorizat
 
 Treat exported conversations as sensitive user data; protect access to exports and include them in backup-retention and deletion procedures.
 
-Conversation turns are persisted in the gateway's SQLite memory store so the API can rebuild context across requests. The gateway does **not** currently apply an automatic age-based retention period; stored conversations remain until explicitly deleted or the backing store is removed under the operator's data-management procedure. Operators should account for this when sizing disks, backing up the database, and defining their own retention requirements. Adding automatic TTL requires a separate purge implementation and backup-retention policy; this documentation does not imply that either is active.
+Conversation turns are persisted in the gateway's SQLite memory store so the API can rebuild context across requests. Automatic age-based retention is opt-in through `memory.retention_days`: `0` (the default) disables automatic purge; positive values retain conversations for that many days. The background worker checks hourly and deletes expired conversations from the live SQLite store, cascading to messages and provider-thread mappings. The setting does not erase exports or independent database backups, which remain subject to the operator's backup-retention policy.
 
 - `GET /v1/conversations?limit=50&offset=0` lists conversation IDs, provider names, and message counts without returning message bodies. `limit` defaults to 50 and is capped at 100; `offset` defaults to 0.
 - `GET /v1/conversations/:conversation_id` exports the stored conversation record, including its messages and provider/tab metadata, as JSON.
@@ -316,7 +316,7 @@ Conversation turns are persisted in the gateway's SQLite memory store so the API
 - When API-key authentication is enabled, conversation listing, export, and deletion require the `admin` scope. Treat exported JSON and SQLite backups as potentially sensitive conversation data.
 - An unknown conversation returns `404 conversation_not_found`; malformed IDs return a client error. Export does not include provider cookies or session files.
 
-There is no built-in TTL or automatic backup purge today. Do not interpret live-store deletion as proof that copies in backups have been erased.
+The TTL applies only to the live store. Do not interpret live-store deletion as proof that copies in backups or downloaded exports have been erased.
 
 ## Metrics and request timing
 
