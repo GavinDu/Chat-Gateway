@@ -777,7 +777,21 @@ fn schema_v1_database_migrates_provider_thread_map_without_losing_conversations(
         .unwrap()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 2);
+    assert_eq!(version, 3);
+    let activity: i64 = memory
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT last_activity_at FROM conversations WHERE id=?1",
+            ["existing"],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        activity > 0,
+        "migration should start retention from migration time"
+    );
+    assert_eq!(memory.purge_expired_conversations(1).unwrap(), 0);
 }
 
 #[test]
@@ -828,4 +842,46 @@ fn sqlite_checkpoint_is_safe_after_durable_turns_and_can_repeat() {
             m("assistant", "persisted")
         ],
     );
+}
+
+
+#[test]
+fn retention_purge_removes_expired_conversations_and_provider_threads() {
+    let fixture = Fixture::new();
+    let memory = fixture.open();
+    store(&memory, "expired-conversation", "old prompt");
+    {
+        let connection = memory.lock().unwrap();
+        connection
+            .execute(
+                "UPDATE conversations SET last_activity_at=1 WHERE id=?1",
+                ["expired-conversation"],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO provider_threads(conversation_id,provider,thread_url,updated_at)
+                 VALUES(?1,?2,?3,?4)",
+                rusqlite::params![
+                    "expired-conversation",
+                    "chatgpt",
+                    "https://example.test/thread",
+                    1_i64
+                ],
+            )
+            .unwrap();
+    }
+
+    assert_eq!(memory.purge_expired_conversations(i64::MAX).unwrap(), 1);
+    assert!(memory
+        .export_conversation("expired-conversation")
+        .unwrap()
+        .is_none());
+    let connection = memory.lock().unwrap();
+    let thread_count: i64 = connection
+        .query_row("SELECT COUNT(*) FROM provider_threads", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(thread_count, 0);
 }
