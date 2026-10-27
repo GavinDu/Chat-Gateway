@@ -247,6 +247,16 @@ fn is_new_response_node(baseline_count: usize, current_count: usize) -> bool {
     current_count > baseline_count
 }
 
+/// A response-node count remains above the baseline for every subsequent poll.
+/// Reset the text tracker only on the first observation of a new node.
+fn should_reset_response_tracker(
+    already_detected: bool,
+    baseline_count: usize,
+    current_count: usize,
+) -> bool {
+    !already_detected && is_new_response_node(baseline_count, current_count)
+}
+
 /// Generic send + stream-poll loop shared by all adapters. Poll response
 /// text every 350ms and finish only after a conservative idle grace period
 /// with no streaming indicator, or at the provider timeout. The grace period
@@ -317,6 +327,7 @@ pub async fn run_send(
     let mut tracker = ResponseDeltaTracker::new(baseline.take());
     let mut stable_ticks = 0u32;
     let mut saw_streaming = false;
+    let mut response_node_detected = false;
 
     loop {
         if chunks.is_closed() {
@@ -357,9 +368,16 @@ pub async fn run_send(
             return;
         }
 
-        if is_new_response_node(baseline_response_count, adapter.response_count(&page)) {
+        if should_reset_response_tracker(
+            response_node_detected,
+            baseline_response_count,
+            adapter.response_count(&page),
+        ) {
             // A new DOM node is the strongest signal that the provider started
             // a fresh answer, even when its text matches the previous turn.
+            // Latch this transition: the node remains present on later polls,
+            // and resetting on every poll would re-emit the full answer.
+            response_node_detected = true;
             tracker = ResponseDeltaTracker::new(None);
         }
 
@@ -465,6 +483,24 @@ mod response_delta_tracker_tests {
         assert!(!is_new_response_node(3, 3));
         assert!(is_new_response_node(3, 4));
         assert!(!is_new_response_node(4, 3));
+    }
+
+    #[test]
+    fn response_tracker_resets_only_once_after_new_node() {
+        let mut tracker = ResponseDeltaTracker::new(Some("old answer".to_string()));
+        if should_reset_response_tracker(false, 3, 4) {
+            tracker = ResponseDeltaTracker::new(None);
+        }
+        assert_eq!(
+            tracker.observe("same answer"),
+            DeltaObservation::Delta("same answer".to_string())
+        );
+
+        // The DOM node remains present on later polls, but must not reset the
+        // tracker again or cause the same complete answer to be emitted twice.
+        assert!(!should_reset_response_tracker(true, 3, 4));
+        assert_eq!(tracker.observe("same answer"), DeltaObservation::Stable);
+        assert!(!should_reset_response_tracker(false, 3, 3));
     }
 
     #[test]
