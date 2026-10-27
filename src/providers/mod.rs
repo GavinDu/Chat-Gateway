@@ -416,7 +416,13 @@ pub async fn run_send(
         }
 
         tokio::time::sleep(Duration::from_millis(350)).await;
+        let poll_started = Instant::now();
         let snapshot = poll_snapshot(&page, adapter.selector_set());
+        crate::metrics::record_browser_poll(
+            adapter.name(),
+            1,
+            poll_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+        );
 
         if snapshot.challenge {
             crate::provider_guard::disable_provider(
