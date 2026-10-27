@@ -669,10 +669,27 @@ fn provider_thread_mapping_upserts_per_provider_and_cascades_on_delete() {
         memory.get_provider_thread("thread-map", "chatgpt").unwrap(),
         Some(thread)
     );
-    assert_eq!(memory.get_provider_thread("thread-map", "claude").unwrap(), None);
+    let claude_thread = ProviderThread {
+        conversation_id: "thread-map".into(),
+        provider: "claude".into(),
+        thread_url: "https://claude.ai/chat/thread-claude".into(),
+        synced_through_message_id: Some("message-3".into()),
+        model: Some("claude-sonnet".into()),
+        updated_at: 150,
+    };
+    memory.upsert_provider_thread(&claude_thread).unwrap();
+    assert_eq!(
+        memory.get_provider_thread("thread-map", "claude").unwrap(),
+        Some(claude_thread.clone())
+    );
+    assert_eq!(
+        memory.get_provider_thread("thread-map", "chatgpt").unwrap(),
+        Some(thread)
+    );
 
     assert!(memory.delete_conversation("thread-map").unwrap());
     assert_eq!(memory.get_provider_thread("thread-map", "chatgpt").unwrap(), None);
+    assert_eq!(memory.get_provider_thread("thread-map", "claude").unwrap(), None);
 }
 
 #[test]
