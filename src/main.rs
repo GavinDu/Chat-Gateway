@@ -2731,7 +2731,7 @@ mod http_api_regression_tests {
 
     fn app(memory: Arc<UnifiedMemory>) -> Router {
         Router::new()
-            .route("/ready", get(|| async { readiness_response(1) }))
+            .route("/ready", get(|| async { readiness_response(true, 1) }))
             .route("/v1/conversations", get(list_endpoint))
             .route("/v1/chat/completions", post(validation_endpoint))
             .route(
