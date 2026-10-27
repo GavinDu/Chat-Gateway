@@ -841,7 +841,7 @@ fn context_budget_estimate_handles_multibyte_text_conservatively() {
     assert!(super::estimate_message_tokens(emoji) > 0);
 
     let fixture = Fixture::new();
-    let memory = fixture.open();
+    let mut memory = fixture.open();
     memory.max_tokens = 12;
     memory
         .store_turn(
