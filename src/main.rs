@@ -1411,8 +1411,8 @@ async fn get_provider_thread(
 async fn upsert_provider_thread(
     State(state): State<Arc<AppState>>,
     Path((conversation_id, provider)): Path<(String, String)>,
-    Json(mut thread): Json<ProviderThread>,
     auth_context: Option<Extension<AuthKeyContext>>,
+    Json(mut thread): Json<ProviderThread>,
 ) -> Response {
     let owner_key_id = auth_context
         .as_ref()
