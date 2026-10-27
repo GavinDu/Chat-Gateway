@@ -1351,7 +1351,10 @@ async fn list_conversations(
         .unwrap_or("local");
     let limit = query.limit.unwrap_or(50).clamp(1, 100);
     let offset = query.offset.unwrap_or(0);
-    match state.memory.list_conversations_for_owner(owner_key_id, limit, offset) {
+    match state
+        .memory
+        .list_conversations_for_owner(owner_key_id, limit, offset)
+    {
         Ok(conversations) => Json(serde_json::json!({
             "data": conversations,
             "limit": limit,
@@ -1445,7 +1448,10 @@ async fn upsert_provider_thread(
         .unwrap_or_default()
         .as_secs()
         .min(i64::MAX as u64) as i64;
-    match state.memory.upsert_provider_thread_for_owner(owner_key_id, &thread) {
+    match state
+        .memory
+        .upsert_provider_thread_for_owner(owner_key_id, &thread)
+    {
         Ok(()) => Json(thread).into_response(),
         Err(error) => {
             tracing::error!(%error, conversation_id, provider, "provider thread persistence failed");
@@ -1804,18 +1810,17 @@ async fn chat_completions(
 
     // Read all context-dependent memory before any provider request. A read
     // failure must not degrade into an empty prompt or an unauthenticated turn.
-    let (context_prompt, windowed, has_history) =
-        match read_conversation_context_for_owner(
-            &state.memory,
-            &owner_key_id,
-            conversation_id.as_deref(),
-            &req.messages,
-        ) {
-            Ok(context) => context,
-            Err(_error) => {
-                return conversation_context_read_error(conversation_id.as_deref());
-            }
-        };
+    let (context_prompt, windowed, has_history) = match read_conversation_context_for_owner(
+        &state.memory,
+        &owner_key_id,
+        conversation_id.as_deref(),
+        &req.messages,
+    ) {
+        Ok(context) => context,
+        Err(_error) => {
+            return conversation_context_read_error(conversation_id.as_deref());
+        }
+    };
     let prompt = context_prompt;
     if prompt.is_empty() {
         return api_error(
