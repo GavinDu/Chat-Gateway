@@ -166,10 +166,11 @@ impl SessionStore for VaultSessionStore {
         let file = capture_session(browser, page, provider).await?;
         let current_hash = session_state_hash(&file)?;
         let destination = session_vault_path(provider)?;
-        let previous_hash = std::fs::read(&destination)
-            .ok()
-            .and_then(|bytes| decrypt_session_snapshot(&bytes, provider, &key).ok())
-            .and_then(|previous| session_state_hash(&previous).ok());
+        let previous_hash = match std::fs::read(&destination) {
+            Ok(bytes) => Some(session_state_hash(&decrypt_session_snapshot(&bytes, provider, &key)?)?),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
 
         if previous_hash.as_deref() == Some(current_hash.as_str()) {
             return Ok(());
