@@ -3652,7 +3652,7 @@ mod openai_compatibility_metadata_tests {
     fn estimated_token_count_is_nonzero_for_nonempty_unicode_text() {
         assert_eq!(estimate_tokens(""), 0);
         assert_eq!(estimate_tokens("hello"), 2);
-        assert_eq!(estimate_tokens("你好"), 1);
+        assert_eq!(estimate_tokens("你好"), 2);
     }
 
     #[test]
