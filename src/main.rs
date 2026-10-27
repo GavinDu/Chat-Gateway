@@ -2432,14 +2432,25 @@ mod http_api_regression_tests {
         memory
             .store_turn(
                 "conversation_md_export".into(),
-                vec![ChatMessage { role: "user".into(), content: "hello markdown".into() }],
-                ChatMessage { role: "assistant".into(), content: "answer".into() },
+                vec![ChatMessage {
+                    role: "user".into(),
+                    content: "hello markdown".into(),
+                }],
+                ChatMessage {
+                    role: "assistant".into(),
+                    content: "answer".into(),
+                },
                 "chatgpt".into(),
                 "tab".into(),
             )
             .unwrap();
         let response = app(memory)
-            .oneshot(Request::builder().uri("/v1/conversations/conversation_md_export/export.md").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/conversations/conversation_md_export/export.md")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
