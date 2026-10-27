@@ -1,8 +1,8 @@
 #[path = "memory/sqlite.rs"]
 mod sqlite;
 
-use crate::context::ContextBuilder;
 use crate::context::messages_after_overlap;
+use crate::context::ContextBuilder;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use std::{
