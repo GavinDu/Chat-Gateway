@@ -674,7 +674,7 @@ mod response_completion_tests {
 
 #[cfg(test)]
 mod provider_catalog_contract_tests {
-    use super::Provider;
+    use super::{Provider, ADAPTERS};
     use std::collections::HashSet;
 
     #[test]
@@ -695,6 +695,25 @@ mod provider_catalog_contract_tests {
                 provider.login_url().starts_with("https://"),
                 "provider login URL must be HTTPS: {name}"
             );
+        }
+    }
+
+    #[test]
+    fn adapter_table_is_the_single_unique_provider_catalog() {
+        assert_eq!(ADAPTERS.len(), 8);
+        let mut ids = HashSet::new();
+        let mut urls = HashSet::new();
+        for spec in ADAPTERS {
+            assert!(ids.insert(spec.id), "duplicate provider id: {}", spec.id);
+            assert!(urls.insert(spec.url), "duplicate provider URL: {}", spec.url);
+            assert_eq!(spec.provider.name(), spec.id);
+            assert_eq!(spec.provider.login_url(), spec.url);
+            assert_eq!(spec.selectors.url, spec.url);
+            assert_eq!(spec.model_pairs, spec.selectors.model_pairs);
+            let keywords: Vec<_> = spec.selectors.model_keywords.split('|').collect();
+            let unique: HashSet<_> = keywords.iter().copied().collect();
+            assert_eq!(keywords.len(), unique.len(), "duplicate model keyword for {}", spec.id);
+            assert!(spec.url.starts_with("https://"));
         }
     }
 
