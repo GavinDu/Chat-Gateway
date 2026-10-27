@@ -255,7 +255,7 @@ pub async fn unlink(
     headers: HeaderMap,
     Path(provider): Path<String>,
 ) -> Response {
-    if let Err(response) = authenticated_request(&app, &headers) { return response; }
+    if let Err(response) = authenticated_request(&app, &headers) { return *response; }
     match crate::session::delete_session_snapshot(&provider) {
         Ok(removed) => {
             tracing::info!(provider, "browser relay provider unlinked from persistent storage");
@@ -266,7 +266,7 @@ pub async fn unlink(
 }
 
 pub async fn unpair(State(app): State<Arc<crate::AppState>>, headers: HeaderMap) -> Response {
-    if let Err(response) = authenticated_request(&app, &headers) { return response; }
+    if let Err(response) = authenticated_request(&app, &headers) { return *response; }
     match app.relay.install_token_hash.lock() {
         Ok(mut token) => {
             if delete_install_token_hash().is_err() {
