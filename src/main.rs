@@ -9,7 +9,7 @@ use axum::{
         sse::{Event, Sse},
         Html, IntoResponse,
     },
-    routing::{get, post, put},
+    routing::{get, post},
     Json, Router,
 };
 use clap::Parser;
