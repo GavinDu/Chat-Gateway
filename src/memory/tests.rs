@@ -829,3 +829,37 @@ fn sqlite_checkpoint_is_safe_after_durable_turns_and_can_repeat() {
         ],
     );
 }
+
+#[test]
+fn provider_thread_mapping_is_scoped_and_persists_across_reopen() {
+    let fixture = Fixture::new();
+    let memory = fixture.open();
+    store(&memory, "thread-api-test", "hello");
+    let thread = ProviderThread {
+        conversation_id: "thread-api-test".to_owned(),
+        provider: "chatgpt".to_owned(),
+        thread_url: "https://chatgpt.com/c/thread-123".to_owned(),
+        synced_through_message_id: Some("msg-1".to_owned()),
+        model: Some("gpt".to_owned()),
+        updated_at: 1_800_000_000,
+    };
+    memory.upsert_provider_thread(&thread).unwrap();
+    assert_eq!(
+        memory
+            .get_provider_thread("thread-api-test", "chatgpt")
+            .unwrap(),
+        Some(thread.clone())
+    );
+    assert!(memory
+        .get_provider_thread("thread-api-test", "gemini")
+        .unwrap()
+        .is_none());
+    drop(memory);
+    assert_eq!(
+        fixture
+            .open()
+            .get_provider_thread("thread-api-test", "chatgpt")
+            .unwrap(),
+        Some(thread)
+    );
+}
