@@ -3,8 +3,19 @@ use anyhow::{bail, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use std::{collections::HashMap, fs, path::Path, time::Duration};
 
-const VERSION: i64 = 1;
+const VERSION: i64 = 2;
 const APPLICATION_ID: i64 = 0x4347574d; // CGWM
+const PROVIDER_THREADS_SCHEMA: &str = "
+    CREATE TABLE provider_threads (
+        conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+        provider TEXT NOT NULL,
+        thread_url TEXT NOT NULL,
+        synced_through_message_id TEXT,
+        model TEXT,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY(conversation_id, provider)
+    );
+";
 const SCHEMA: &str = "
     CREATE TABLE conversations (
         id TEXT PRIMARY KEY NOT NULL,
@@ -19,6 +30,15 @@ const SCHEMA: &str = "
         PRIMARY KEY(conversation_id, position)
     );
     CREATE TABLE metadata (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL);
+    CREATE TABLE provider_threads (
+        conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+        provider TEXT NOT NULL,
+        thread_url TEXT NOT NULL,
+        synced_through_message_id TEXT,
+        model TEXT,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY(conversation_id, provider)
+    );
 ";
 
 pub(super) fn open(path: Option<&Path>, legacy: Option<&Path>) -> Result<Connection> {
