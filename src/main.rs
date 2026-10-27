@@ -1741,6 +1741,19 @@ enum FirstEvent {
     Timeout,
 }
 
+fn record_attempt_error(
+    provider: &str,
+    error: &str,
+    queue_ms: u64,
+    provider_started: Instant,
+    request_started: Instant,
+) {
+    let provider_work_ms = provider_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+    let total_ms = request_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+    provider_state::record_error(provider, error);
+    metrics::record_provider_timings(provider, "error", queue_ms, None, provider_work_ms, total_ms);
+}
+
 async fn first_event(
     rx: &mut tokio::sync::mpsc::Receiver<anyhow::Result<providers::ProviderChunk>>,
     timeout: std::time::Duration,
@@ -1998,28 +2011,19 @@ async fn chat_completions(
                 FirstEvent::Chunk(chunk) => chunk,
                 FirstEvent::EmptyCompletion => {
                     let error = "provider completed without output before stream started";
-                    let provider_work_ms = provider_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
-                    let total_ms = request_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
-                    provider_state::record_error(&provider_name, error);
-                    metrics::record_provider_timings(&provider_name, "error", queue_ms, None, provider_work_ms, total_ms);
+                    record_attempt_error(&provider_name, error, queue_ms, provider_started, request_started);
                     last_err = Some(error.to_string());
                     continue;
                 }
                 FirstEvent::Error(error) => {
                     let message = error.to_string();
-                    let provider_work_ms = provider_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
-                    let total_ms = request_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
-                    provider_state::record_error(&provider_name, &message);
-                    metrics::record_provider_timings(&provider_name, "error", queue_ms, None, provider_work_ms, total_ms);
+                    record_attempt_error(&provider_name, &message, queue_ms, provider_started, request_started);
                     last_err = Some(message);
                     continue;
                 }
                 FirstEvent::Closed => {
                     let error = "provider stream closed before first output";
-                    let provider_work_ms = provider_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
-                    let total_ms = request_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
-                    provider_state::record_error(&provider_name, error);
-                    metrics::record_provider_timings(&provider_name, "error", queue_ms, None, provider_work_ms, total_ms);
+                    record_attempt_error(&provider_name, error, queue_ms, provider_started, request_started);
                     last_err = Some(error.to_string());
                     continue;
                 }
