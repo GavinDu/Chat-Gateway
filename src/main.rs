@@ -9,7 +9,7 @@ use axum::{
         sse::{Event, Sse},
         Html, IntoResponse,
     },
-    routing::{get, post},
+    routing::{get, post, put},
     Json, Router,
 };
 use clap::Parser;
@@ -30,7 +30,7 @@ mod session;
 
 use browser::pool::ObscuraPool;
 use config::AppConfig;
-use memory::{ChatMessage, UnifiedMemory};
+use memory::{ChatMessage, ProviderThread, UnifiedMemory};
 use router::ProviderRouter;
 
 #[derive(Parser, Debug)]
@@ -382,6 +382,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/v1/models", get(models))
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/conversations", get(list_conversations))
+        .route(
+            "/v1/conversations/:conversation_id/provider-threads/:provider",
+            get(get_provider_thread).put(upsert_provider_thread),
+        )
         .route(
             "/v1/conversations/:conversation_id/export.md",
             get(export_conversation_markdown),
@@ -1167,6 +1171,7 @@ fn authorize_api_request(
         || path.starts_with("/relay/")
         || path == "/metrics"
         || path == "/v1/conversations"
+        || path.contains("/provider-threads/")
         || (path.starts_with("/v1/conversations/")
             && (*method == axum::http::Method::GET || *method == axum::http::Method::DELETE));
     let required_scope = if admin_route { "admin" } else { "chat" };
@@ -1300,6 +1305,115 @@ async fn list_conversations(
             )
         }
     }
+}
+
+async fn get_provider_thread(
+    State(state): State<Arc<AppState>>,
+    Path((conversation_id, provider)): Path<(String, String)>,
+) -> Response {
+    if !valid_conversation_id(&conversation_id) || !valid_provider_name(&provider) {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            "invalid_provider_thread_key",
+            "conversation ID or provider is invalid",
+        );
+    }
+    match state.memory.get_provider_thread(&conversation_id, &provider) {
+        Ok(Some(thread)) => Json(thread).into_response(),
+        Ok(None) => api_error(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "provider_thread_not_found",
+            "no provider thread is stored for this conversation and provider",
+        ),
+        Err(error) => {
+            tracing::error!(%error, "provider thread lookup failed");
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                "memory_read_failed",
+                "provider thread could not be read safely",
+            )
+        }
+    }
+}
+
+async fn upsert_provider_thread(
+    State(state): State<Arc<AppState>>,
+    Path((conversation_id, provider)): Path<(String, String)>,
+    Json(mut thread): Json<ProviderThread>,
+) -> Response {
+    if !valid_conversation_id(&conversation_id)
+        || !valid_provider_name(&provider)
+        || thread.conversation_id != conversation_id
+        || thread.provider != provider
+    {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            "provider_thread_path_mismatch",
+            "body conversation_id and provider must match the valid request path",
+        );
+    }
+    if !valid_provider_thread_url(&provider, &thread.thread_url) {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            "invalid_provider_thread_url",
+            "thread_url must be an HTTPS URL on the expected provider domain",
+        );
+    }
+    thread.updated_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        .min(i64::MAX as u64) as i64;
+    match state.memory.upsert_provider_thread(&thread) {
+        Ok(()) => Json(thread).into_response(),
+        Err(error) => {
+            tracing::error!(%error, conversation_id, provider, "provider thread persistence failed");
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                "memory_persistence_failed",
+                "provider thread could not be stored safely",
+            )
+        }
+    }
+}
+
+fn valid_provider_name(provider: &str) -> bool {
+    matches!(
+        provider,
+        "chatgpt" | "claude" | "gemini" | "grok" | "qwen" | "mistral" | "perplexity" | "metaai"
+    )
+}
+
+fn valid_provider_thread_url(provider: &str, value: &str) -> bool {
+    if value.len() > 4096 || !value.starts_with("https://") || value.contains('@') {
+        return false;
+    }
+    let authority = value["https://".len()..]
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if authority.is_empty() || authority.contains(':') {
+        return false;
+    }
+    let allowed_hosts: &[&str] = match provider {
+        "chatgpt" => &["chatgpt.com", "chat.openai.com"],
+        "claude" => &["claude.ai"],
+        "gemini" => &["gemini.google.com"],
+        "grok" => &["grok.com", "x.com"],
+        "qwen" => &["chat.qwen.ai", "qwen.ai"],
+        "mistral" => &["chat.mistral.ai", "lechat.mistral.ai"],
+        "perplexity" => &["perplexity.ai"],
+        "metaai" => &["meta.ai"],
+        _ => &[],
+    };
+    allowed_hosts.contains(&authority.as_str())
 }
 
 async fn export_conversation(
