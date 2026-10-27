@@ -193,7 +193,7 @@ impl UnifiedMemory {
              LEFT JOIN messages m ON m.conversation_id = c.id
              GROUP BY c.id, c.provider
              ORDER BY c.id
-             LIMIT ?1 OFFSET ?2
+             LIMIT ?1 OFFSET ?2"
         )?;
         let rows = statement.query_map(
             rusqlite::params![limit.min(100) as i64, offset.min(i64::MAX as usize) as i64],
