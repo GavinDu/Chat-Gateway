@@ -281,6 +281,15 @@ These are one CI run's observed values, not performance guarantees or regression
 thresholds. Repeat on the target deployment hardware before making capacity or
 latency decisions.
 
+Run the provider request probe against a deterministic fake SSE backend (used by CI) or an already-running local gateway:
+
+```bash
+cargo run --locked --example provider_bench -- --fake --smoke
+cargo run --locked --example provider_bench -- --url http://127.0.0.1:8080/v1/chat/completions --providers chatgpt,claude --iterations 20 --pid <gateway-pid>
+```
+
+Live mode requires a running gateway and a valid API key when authentication is enabled; pass `--api-key <secret>`. Install `curl` on the machine running the probe. It reports request total time, time to first token (TTFT), TTFT after provider-label switches, and optional process-wide RSS snapshots. Fake mode's gateway-overhead estimate subtracts its fixed 30 ms synthetic upstream delay and is only a harness sanity check, not a production estimate. Live measurements include gateway and provider work; use `/metrics` to inspect queue and provider timing separately. Record OS, CPU, Rust version, provider configuration and sample count with results.
+
 ## Notes / honest limits
 
 - One persistent page per provider: concurrent sends to the same
