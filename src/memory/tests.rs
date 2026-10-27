@@ -699,7 +699,7 @@ fn schema_v1_database_migrates_provider_thread_map_without_losing_conversations(
                  INSERT INTO conversations(id,provider,tab_id) VALUES('existing','chatgpt','tab-existing');
                  INSERT INTO messages(conversation_id,position,role,content) VALUES('existing',0,'user','keep me');
                  INSERT INTO metadata(key,value) VALUES('legacy_import_complete','1');
-                 PRAGMA application_id=1129795405;
+                 PRAGMA application_id=1128748877;
                  PRAGMA user_version=1;",
             )
             .unwrap();
