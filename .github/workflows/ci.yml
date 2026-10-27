@@ -65,7 +65,7 @@ jobs:
           tar -xzf "$archive" -C "$upstream"
           upstream_dir="$upstream/wreq-util-$version"
           test -d "$upstream_dir"
-          diff -ru --exclude=Cargo.toml --exclude=.cargo_vcs_info.json vendor/wreq-util "$upstream_dir"
+          diff -ru --exclude=Cargo.toml --exclude=Cargo.toml.orig --exclude=.cargo_vcs_info.json vendor/wreq-util "$upstream_dir"
           grep -Fq 'version = "3.0.0-rc.12"' vendor/wreq-util/Cargo.toml
           grep -Fq 'zstd = { version = "0.14.3", optional = true }' vendor/wreq-util/Cargo.toml
           grep -Fq '"zstd 0.14.3"' Cargo.lock
