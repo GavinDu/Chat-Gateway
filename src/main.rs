@@ -20,7 +20,7 @@ use tokio::sync::RwLock;
 mod browser;
 mod config;
 mod login;
-mod memory;
+pub mod memory;
 mod metrics;
 mod provider_guard;
 mod provider_state;
