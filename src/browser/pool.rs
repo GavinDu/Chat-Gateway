@@ -189,7 +189,7 @@ impl ObscuraPool {
 
     /// Whether the dedicated browser thread still owns its command receiver.
     ///
-    /// A closed command channel means the worker exited or panicked. Readiness
+    /// A closed command channel means the worker exited or panicked; it does not imply automatic recovery. Readiness
     /// must fail closed in that state instead of advertising the configured
     /// providers as usable.
     pub fn worker_alive(&self) -> bool {
