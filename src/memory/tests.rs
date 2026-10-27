@@ -815,13 +815,21 @@ fn provider_thread_mapping_is_scoped_and_persists_across_reopen() {
     };
     memory.upsert_provider_thread(&thread).unwrap();
     assert_eq!(
-        memory.get_provider_thread("thread-api-test", "chatgpt").unwrap(),
+        memory
+            .get_provider_thread("thread-api-test", "chatgpt")
+            .unwrap(),
         Some(thread.clone())
     );
-    assert!(memory.get_provider_thread("thread-api-test", "gemini").unwrap().is_none());
+    assert!(memory
+        .get_provider_thread("thread-api-test", "gemini")
+        .unwrap()
+        .is_none());
     drop(memory);
     assert_eq!(
-        fixture.open().get_provider_thread("thread-api-test", "chatgpt").unwrap(),
+        fixture
+            .open()
+            .get_provider_thread("thread-api-test", "chatgpt")
+            .unwrap(),
         Some(thread)
     );
 }
