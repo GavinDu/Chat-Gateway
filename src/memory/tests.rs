@@ -787,7 +787,10 @@ fn schema_v1_database_migrates_provider_thread_map_without_losing_conversations(
             |row| row.get(0),
         )
         .unwrap();
-    assert!(activity > 0, "migration should start retention from migration time");
+    assert!(
+        activity > 0,
+        "migration should start retention from migration time"
+    );
     assert_eq!(memory.purge_expired_conversations(1).unwrap(), 0);
 }
 
@@ -834,12 +837,15 @@ fn retention_purge_removes_expired_conversations_and_cascades_threads() {
     }
 
     assert_eq!(memory.purge_expired_conversations(i64::MAX).unwrap(), 1);
-    assert!(
-        memory.export_conversation("expired-conversation").unwrap().is_none()
-    );
+    assert!(memory
+        .export_conversation("expired-conversation")
+        .unwrap()
+        .is_none());
     let connection = memory.lock().unwrap();
     let thread_count: i64 = connection
-        .query_row("SELECT COUNT(*) FROM provider_threads", [], |row| row.get(0))
+        .query_row("SELECT COUNT(*) FROM provider_threads", [], |row| {
+            row.get(0)
+        })
         .unwrap();
     assert_eq!(thread_count, 0);
 }
