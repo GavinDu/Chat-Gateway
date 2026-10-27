@@ -799,3 +799,11 @@ fn conversation_listing_is_paged_and_reports_message_counts() {
     assert_eq!(second[0].id, "list-charlie");
     assert!(memory.list_conversations(0, 0).unwrap().is_empty());
 }
+
+#[test]
+fn conservative_token_estimate_counts_unicode_without_underflow() {
+    assert_eq!(estimate_tokens(""), 8);
+    assert!(estimate_tokens("你好世界") >= 12);
+    assert!(estimate_tokens("😀🚀✨") >= 12);
+    assert!(estimate_tokens(&"a".repeat(120)) >= 48);
+}
