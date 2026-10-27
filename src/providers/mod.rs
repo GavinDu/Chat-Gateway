@@ -95,6 +95,57 @@ impl Provider {
     }
 }
 
+/// Combined steady-state poll result. One browser evaluation gathers
+/// response text, node count, generation state, URL, and challenge markers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PollSnapshot {
+    text: Option<String>,
+    response_count: usize,
+    streaming: bool,
+    url: String,
+    challenge: bool,
+}
+
+fn poll_snapshot(page: &Page, selectors: &common::SelectorSet) -> PollSnapshot {
+    let response_selectors =
+        serde_json::to_string(selectors.response).unwrap_or_else(|_| "[]".to_owned());
+    let streaming_selector = serde_json::to_string(common::STREAMING_SELECTOR)
+        .unwrap_or_else(|_| r#""[data-is-streaming=\"true\"], button[aria-label*=\"Stop\"]""#.to_owned());
+    let value = page.evaluate(&format!(
+        r#"(() => {{
+            const responseSelectors = {response_selectors};
+            const nodes = new Set();
+            let text = null;
+            for (const selector of responseSelectors) {{
+                try {{
+                    const matches = Array.from(document.querySelectorAll(selector));
+                    matches.forEach(node => nodes.add(node));
+                    if (matches.length) {{
+                        const candidate = matches[matches.length - 1];
+                        const content = (candidate.innerText || candidate.textContent || '').trim();
+                        if (content) {{ text = content; break; }}
+                    }}
+                }} catch (_) {{}}
+            }}
+            let streaming = false;
+            try {{ streaming = !!document.querySelector({streaming_selector}); }} catch (_) {{}}
+            const url = String(location.href || '');
+            const body = (document.body?.innerText || '').slice(0, 12000).toLowerCase();
+            const lowerUrl = url.toLowerCase();
+            const challenge = ['captcha','challenge','checkpoint','verify-human','verify_you_are_human'].some(x => lowerUrl.includes(x))
+                || ['verify you are human','confirm you are not a robot','unusual traffic','complete the captcha','security challenge','checking your browser'].some(x => body.includes(x));
+            return {{text, count: nodes.size, streaming, url, challenge}};
+        }})()"#
+    ));
+    PollSnapshot {
+        text: value.get("text").and_then(serde_json::Value::as_str).map(str::to_owned),
+        response_count: value.get("count").and_then(serde_json::Value::as_u64).unwrap_or(0) as usize,
+        streaming: value.get("streaming").and_then(serde_json::Value::as_bool).unwrap_or(false),
+        url: value.get("url").and_then(serde_json::Value::as_str).unwrap_or_default().to_owned(),
+        challenge: value.get("challenge").and_then(serde_json::Value::as_bool).unwrap_or(false),
+    }
+}
+
 /// Provider adapter contract. `?Send` because adapters run on the
 /// browser thread (see browser::pool) where obscura pages live.
 #[async_trait(?Send)]
@@ -359,8 +410,9 @@ pub async fn run_send(
         }
 
         tokio::time::sleep(Duration::from_millis(350)).await;
+        let snapshot = poll_snapshot(&page, adapter.selector_set());
 
-        if crate::provider_guard::is_challenge_page(&page) {
+        if snapshot.challenge {
             crate::provider_guard::disable_provider(
                 adapter.name(),
                 "challenge page detected; manual review required",
@@ -378,7 +430,7 @@ pub async fn run_send(
             && should_reset_response_tracker(
                 response_node_detected,
                 baseline_response_count,
-                adapter.response_count(&page),
+                snapshot.response_count,
             )
         {
             // A new DOM node is the strongest signal that the provider started
@@ -389,10 +441,10 @@ pub async fn run_send(
             tracker = ResponseDeltaTracker::new(None);
         }
 
-        let streaming = adapter.is_streaming(&page);
+        let streaming = snapshot.streaming;
         saw_streaming |= streaming;
 
-        if let Some(txt) = adapter.response_text(&page) {
+        if let Some(txt) = snapshot.text {
             match tracker.observe(&txt) {
                 DeltaObservation::NoText | DeltaObservation::InvalidBoundary => continue,
                 DeltaObservation::WaitingForNewResponse => {
