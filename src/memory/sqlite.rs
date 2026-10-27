@@ -3,8 +3,19 @@ use anyhow::{bail, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use std::{collections::HashMap, fs, path::Path, time::Duration};
 
-const VERSION: i64 = 1;
+const VERSION: i64 = 2;
 const APPLICATION_ID: i64 = 0x4347574d; // CGWM
+const PROVIDER_THREADS_SCHEMA: &str = "
+    CREATE TABLE provider_threads (
+        conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+        provider TEXT NOT NULL,
+        thread_url TEXT NOT NULL,
+        synced_through_message_id TEXT,
+        model TEXT,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY(conversation_id, provider)
+    );
+";
 const SCHEMA: &str = "
     CREATE TABLE conversations (
         id TEXT PRIMARY KEY NOT NULL,
@@ -19,6 +30,15 @@ const SCHEMA: &str = "
         PRIMARY KEY(conversation_id, position)
     );
     CREATE TABLE metadata (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL);
+    CREATE TABLE provider_threads (
+        conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+        provider TEXT NOT NULL,
+        thread_url TEXT NOT NULL,
+        synced_through_message_id TEXT,
+        model TEXT,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY(conversation_id, provider)
+    );
 ";
 
 pub(super) fn open(path: Option<&Path>, legacy: Option<&Path>) -> Result<Connection> {
@@ -95,6 +115,10 @@ fn initialize(connection: &mut Connection, legacy: Option<&Path>) -> Result<()> 
         tx.execute_batch(SCHEMA)?;
         tx.pragma_update(None, "application_id", APPLICATION_ID)?;
         tx.pragma_update(None, "user_version", VERSION)?;
+    } else if version == 1 && app == APPLICATION_ID {
+        // Version 2 adds a provider-thread map without rewriting existing turns.
+        tx.execute_batch(PROVIDER_THREADS_SCHEMA)?;
+        tx.pragma_update(None, "user_version", VERSION)?;
     } else if version != VERSION || app != APPLICATION_ID {
         bail!("unsupported conversation schema version {version} (expected {VERSION}) or application id {app}");
     }
@@ -152,11 +176,11 @@ fn initialize(connection: &mut Connection, legacy: Option<&Path>) -> Result<()> 
 }
 
 fn validate_schema(connection: &Connection) -> Result<()> {
-    // Version 1 is owned by this application. Fail closed if its definitions
+    // Version 2 is owned by this application. Fail closed if its definitions
     // were changed, including constraints that SELECT alone cannot validate.
     let expected = Connection::open_in_memory()?;
     expected.execute_batch(SCHEMA)?;
-    for table in ["conversations", "messages", "metadata"] {
+    for table in ["conversations", "messages", "metadata", "provider_threads"] {
         let sql = |database: &Connection| -> Result<String> {
             Ok(database.query_row(
                 "SELECT sql FROM sqlite_master WHERE type='table' AND name=?1",
