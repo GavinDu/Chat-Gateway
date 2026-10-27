@@ -52,17 +52,24 @@ pub enum Provider {
 
 impl Provider {
     pub fn name(&self) -> &'static str {
-        ADAPTERS.iter().find(|spec| spec.provider == *self)
+        ADAPTERS
+            .iter()
+            .find(|spec| spec.provider == *self)
             .map(|spec| spec.id)
             .expect("every Provider variant must have an adapter catalog row")
     }
 
     pub fn from_name(name: &str) -> Option<Provider> {
-        ADAPTERS.iter().find(|spec| spec.id == name).map(|spec| spec.provider)
+        ADAPTERS
+            .iter()
+            .find(|spec| spec.id == name)
+            .map(|spec| spec.provider)
     }
 
     pub fn login_url(&self) -> &'static str {
-        ADAPTERS.iter().find(|spec| spec.provider == *self)
+        ADAPTERS
+            .iter()
+            .find(|spec| spec.provider == *self)
             .map(|spec| spec.url)
             .expect("every Provider variant must have an adapter catalog row")
     }
@@ -142,14 +149,24 @@ pub trait SiteAdapter: Send + Sync {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StreamSignal { SharedStopControl }
+pub enum StreamSignal {
+    SharedStopControl,
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DoneSignal { StableResponseText }
+pub enum DoneSignal {
+    StableResponseText,
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
-pub enum ThreadSupport { UrlAddressable, SidebarClick, None }
+pub enum ThreadSupport {
+    UrlAddressable,
+    SidebarClick,
+    None,
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TypingStrategy { SharedComposer }
+pub enum TypingStrategy {
+    SharedComposer,
+}
 
 type AdapterFactory = fn(ProviderConfig) -> Arc<dyn SiteAdapter>;
 
@@ -259,7 +276,9 @@ pub const ADAPTERS: &[AdapterSpec] = &[
 ];
 
 fn adapter_for(provider: Provider, cfg: ProviderConfig) -> Arc<dyn SiteAdapter> {
-    let spec = ADAPTERS.iter().find(|spec| spec.provider == provider)
+    let spec = ADAPTERS
+        .iter()
+        .find(|spec| spec.provider == provider)
         .expect("every Provider variant must have an adapter catalog row");
     (spec.factory)(cfg)
 }
@@ -705,14 +724,23 @@ mod provider_catalog_contract_tests {
         let mut urls = HashSet::new();
         for spec in ADAPTERS {
             assert!(ids.insert(spec.id), "duplicate provider id: {}", spec.id);
-            assert!(urls.insert(spec.url), "duplicate provider URL: {}", spec.url);
+            assert!(
+                urls.insert(spec.url),
+                "duplicate provider URL: {}",
+                spec.url
+            );
             assert_eq!(spec.provider.name(), spec.id);
             assert_eq!(spec.provider.login_url(), spec.url);
             assert_eq!(spec.selectors.url, spec.url);
             assert_eq!(spec.model_pairs, spec.selectors.model_pairs);
             let keywords: Vec<_> = spec.selectors.model_keywords.split('|').collect();
             let unique: HashSet<_> = keywords.iter().copied().collect();
-            assert_eq!(keywords.len(), unique.len(), "duplicate model keyword for {}", spec.id);
+            assert_eq!(
+                keywords.len(),
+                unique.len(),
+                "duplicate model keyword for {}",
+                spec.id
+            );
             assert!(spec.url.starts_with("https://"));
         }
     }
