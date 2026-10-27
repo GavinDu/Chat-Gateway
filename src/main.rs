@@ -1112,8 +1112,6 @@ mod readiness_contract_tests {
 
         let worker_dead = readiness_response(1, false);
         assert_eq!(worker_dead.status(), StatusCode::SERVICE_UNAVAILABLE);
-        let body = worker_dead.into_body();
-        let _ = body;
     }
 }
 
