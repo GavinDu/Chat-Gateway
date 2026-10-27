@@ -255,7 +255,6 @@ impl UnifiedMemory {
             .and_then(|conversation| conversation.provider))
     }
 
-
     /// Read a provider-specific remote-thread mapping for one conversation.
     pub fn get_provider_thread(
         &self,
