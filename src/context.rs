@@ -1,6 +1,7 @@
 use crate::memory::ChatMessage;
 
 /// Known provider-thread synchronization state supplied by the caller.
+#[allow(dead_code)] // Used by the provider send-path integration tracked in #121.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ThreadState {
     pub provider: String,
@@ -12,6 +13,7 @@ pub(crate) struct ThreadState {
 
 /// Pure send-path decision. The caller must persist updated thread state only
 /// after a successful committed turn; failed/cancelled sends never advance it.
+#[allow(dead_code)] // Used by the provider send-path integration tracked in #121.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ContextPlan {
     Delta(Vec<ChatMessage>),
@@ -26,6 +28,7 @@ impl ContextBuilder {
     /// Choose a provider-thread delta only when the known thread is reopenable,
     /// belongs to the requested provider, and is synchronized to the complete
     /// durable history. Any uncertainty falls back to bounded transcript replay.
+    #[allow(dead_code)] // The pure planner lands before the adapter send-path wiring.
     pub(crate) fn plan(
         history: &[ChatMessage],
         incoming: &[ChatMessage],
