@@ -365,6 +365,19 @@ mod tests {
     }
 
     #[test]
+    fn conversation_retention_is_disabled_by_default_and_bounded_when_enabled() {
+        let defaults = config("");
+        assert_eq!(defaults.memory.retention_days, 0);
+
+        let enabled = config("memory:\n  retention_days: 30\n");
+        assert_eq!(enabled.memory.retention_days, 30);
+        assert!(enabled.validate().is_ok());
+
+        let excessive = config("memory:\n  retention_days: 36501\n");
+        assert!(excessive.validate().is_err());
+    }
+
+    #[test]
     fn rejects_zero_memory_budget_and_unknown_strategy() {
         let budget = config("memory:\n  max_tokens: 0\n");
         assert!(budget.validate().is_err());
