@@ -141,6 +141,19 @@ impl UnifiedMemory {
         conversation_id: Option<&str>,
         new_messages: &[ChatMessage],
     ) -> anyhow::Result<(String, Vec<ChatMessage>)> {
+        let (prompt, windowed, _) =
+            self.build_context_for_owner_with_history(owner_key_id, conversation_id, new_messages)?;
+        Ok((prompt, windowed))
+    }
+
+    /// Build the request context and report whether persisted history existed
+    /// from the same scoped read, avoiding a second SQLite transcript lookup.
+    pub fn build_context_for_owner_with_history(
+        &self,
+        owner_key_id: &str,
+        conversation_id: Option<&str>,
+        new_messages: &[ChatMessage],
+    ) -> anyhow::Result<(String, Vec<ChatMessage>, bool)> {
         let history = match conversation_id {
             Some(id) => self
                 .conversation_for_owner(owner_key_id, id)?
@@ -148,11 +161,13 @@ impl UnifiedMemory {
                 .unwrap_or_default(),
             None => Vec::new(),
         };
-        Ok(ContextBuilder::build(
+        let has_history = !history.is_empty();
+        let (prompt, windowed) = ContextBuilder::build(
             &history,
             new_messages,
             self.max_tokens,
-        ))
+        );
+        Ok((prompt, windowed, has_history))
     }
 
     #[allow(dead_code)]
