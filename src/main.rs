@@ -375,6 +375,34 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
+    // Conversation retention is opt-in; zero keeps all conversations.
+    let retention_days = cfg.memory.retention_days;
+    if retention_days > 0 {
+        let memory = state.memory.clone();
+        let retention_seconds = i64::from(retention_days) * 86_400;
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
+            loop {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs()
+                    .min(i64::MAX as u64) as i64;
+                let cutoff = now.saturating_sub(retention_seconds);
+                match memory.purge_expired_conversations(cutoff) {
+                    Ok(deleted) if deleted > 0 => {
+                        tracing::info!(deleted, retention_days, "purged expired conversations");
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        tracing::error!(%error, "conversation retention purge failed");
+                    }
+                }
+                interval.tick().await;
+            }
+        });
+    }
+
     let app = Router::new()
         .route("/health", get(health))
         .route("/ready", get(readiness))
