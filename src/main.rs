@@ -1333,7 +1333,8 @@ fn export_conversation_response_for_owner(
 }
 
 #[derive(Debug, serde::Deserialize)]
-struct ConversationListQuery#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Deserialize)]
+struct ConversationListQuery
 struct ConversationListQuery {
     limit: Option<usize>,
     offset: Option<usize>,
@@ -1458,7 +1459,7 @@ async fn upsert_provider_thread(
     }
 }
 
-fn valid_provider_name(fn valid_provider_name(provider: &str) -> bool {
+fn valid_provider_name(provider: &str) -> bool {
     matches!(
         provider,
         "chatgpt" | "claude" | "gemini" | "grok" | "qwen" | "mistral" | "perplexity" | "metaai"
@@ -1515,7 +1516,7 @@ async fn export_conversation_markdown(
     export_conversation_markdown_response_for_owner(&state.memory, owner_key_id, &conversation_id)
 }
 
-fn export_conversation_markdown_response(fn export_conversation_markdown_response(
+fn export_conversation_markdown_response(
     memory: &UnifiedMemory,
     conversation_id: &str,
 ) -> Response {
@@ -1592,7 +1593,7 @@ async fn delete_conversation(
     delete_conversation_response_for_owner(&state.memory, owner_key_id, &conversation_id)
 }
 
-async fn health(async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let providers = state
         .cfg
         .providers
