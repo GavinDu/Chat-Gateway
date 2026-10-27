@@ -1,7 +1,7 @@
 #[path = "memory/sqlite.rs"]
 mod sqlite;
 
-use rusqlite::{Connection, TransactionBehavior};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use std::{
     path::PathBuf,
@@ -254,6 +254,57 @@ impl UnifiedMemory {
             .conversation(cid)?
             .and_then(|conversation| conversation.provider))
     }
+
+    /// Read a provider-specific remote-thread mapping for one conversation.
+    pub fn get_provider_thread(
+        &self,
+        conversation_id: &str,
+        provider: &str,
+    ) -> anyhow::Result<Option<ProviderThread>> {
+        let connection = self.lock()?;
+        connection
+            .query_row(
+                "SELECT thread_url, synced_through_message_id, model, updated_at
+                 FROM provider_threads WHERE conversation_id=?1 AND provider=?2",
+                rusqlite::params![conversation_id, provider],
+                |row| {
+                    Ok(ProviderThread {
+                        conversation_id: conversation_id.to_owned(),
+                        provider: provider.to_owned(),
+                        thread_url: row.get(0)?,
+                        synced_through_message_id: row.get(1)?,
+                        model: row.get(2)?,
+                        updated_at: row.get(3)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    /// Persist a provider thread mapping after the caller has verified the URL.
+    pub fn upsert_provider_thread(&self, thread: &ProviderThread) -> anyhow::Result<()> {
+        let connection = self.lock()?;
+        connection.execute(
+            "INSERT INTO provider_threads(
+                conversation_id, provider, thread_url, synced_through_message_id, model, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(conversation_id, provider) DO UPDATE SET
+                thread_url=excluded.thread_url,
+                synced_through_message_id=excluded.synced_through_message_id,
+                model=excluded.model,
+                updated_at=excluded.updated_at",
+            rusqlite::params![
+                thread.conversation_id,
+                thread.provider,
+                thread.thread_url,
+                thread.synced_through_message_id,
+                thread.model,
+                thread.updated_at,
+            ],
+        )?;
+        Ok(())
+    }
 }
 
 fn messages_after_overlap(stored: &[ChatMessage], incoming: &[ChatMessage]) -> Vec<ChatMessage> {
@@ -282,6 +333,17 @@ fn messages_after_overlap(stored: &[ChatMessage], incoming: &[ChatMessage]) -> V
 #[cfg(test)]
 #[path = "memory/tests.rs"]
 mod tests;
+
+/// Persisted provider-side thread identity and the last synchronized gateway message.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProviderThread {
+    pub conversation_id: String,
+    pub provider: String,
+    pub thread_url: String,
+    pub synced_through_message_id: Option<String>,
+    pub model: Option<String>,
+    pub updated_at: i64,
+}
 
 /// Metadata returned by the paged conversation listing endpoint.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
