@@ -942,3 +942,47 @@ mod atomic_session_write_tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 }
+
+
+#[cfg(test)]
+mod vault_tests {
+    use super::*;
+
+    fn sample_session() -> SessionFile {
+        SessionFile {
+            local_storage: HashMap::from([("access_token".to_owned(), "sensitive-value".to_owned())]),
+            cookies: vec![Cookie {
+                name: "session".to_owned(),
+                value: "cookie-secret".to_owned(),
+                domain: "example.com".to_owned(),
+                path: "/".to_owned(),
+                secure: true,
+                http_only: true,
+            }],
+            ts: "2026-10-27T00:00:00Z".to_owned(),
+        }
+    }
+
+    #[test]
+    fn encrypted_vault_round_trips_without_storing_plaintext() {
+        let session = sample_session();
+        let key = [0x5a; 32];
+        let encrypted = encrypt_session_snapshot(&session, "provider-a", &key).unwrap();
+        assert!(encrypted.starts_with(b"CGSV1\0"));
+        assert!(!encrypted.windows(b"sensitive-value".len()).any(|w| w == b"sensitive-value"));
+        let restored = decrypt_session_snapshot(&encrypted, "provider-a", &key).unwrap();
+        assert_eq!(restored.local_storage.get("access_token").unwrap(), "sensitive-value");
+        assert_eq!(restored.cookies[0].value, "cookie-secret");
+    }
+
+    #[test]
+    fn encrypted_vault_rejects_tampering_and_wrong_provider() {
+        let key = [0x21; 32];
+        let encrypted = encrypt_session_snapshot(&sample_session(), "provider-a", &key).unwrap();
+        assert!(decrypt_session_snapshot(&encrypted, "provider-b", &key).is_err());
+        let mut tampered = encrypted;
+        let last = tampered.len() - 1;
+        tampered[last] ^= 0x80;
+        assert!(decrypt_session_snapshot(&tampered, "provider-a", &key).is_err());
+    }
+}
