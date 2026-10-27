@@ -53,7 +53,7 @@ $("link").addEventListener("click", async () => {
     const stored = await chrome.storage.local.get(["linkedProviders"]);
     const linkedProviders = Array.from(new Set([...(stored.linkedProviders || []),provider]));
     await chrome.storage.local.set({linkedProviders});
-    message("Linked " + provider + ". Cookie updates will be synced while the provider permission remains granted.");
+    message("Linked " + provider + ". Restart Chat Gateway to load the session into its embedded browser; cookie changes are saved for the next restart.");
     await refreshStatus();
   } catch (error) { message(error.message); }
 });
