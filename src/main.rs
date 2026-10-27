@@ -1071,7 +1071,21 @@ fn readiness_response(enabled: usize) -> Response {
         .into_response()
 }
 
+fn browser_worker_unavailable_response() -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(serde_json::json!({
+            "status": "not_ready",
+            "reason": "browser_worker_unavailable",
+        })),
+    )
+        .into_response()
+}
+
 async fn readiness(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    if !state.pool.worker_alive() {
+        return browser_worker_unavailable_response();
+    }
     let routable = state
         .cfg
         .providers
@@ -1088,6 +1102,12 @@ async fn readiness(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 #[cfg(test)]
 mod readiness_contract_tests {
     use super::*;
+
+    #[test]
+    fn readiness_fails_closed_when_browser_worker_is_unavailable() {
+        let response = browser_worker_unavailable_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
 
     #[test]
     fn readiness_requires_at_least_one_routable_provider() {
