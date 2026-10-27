@@ -1305,10 +1305,6 @@ async fn get_provider_thread(
     State(state): State<Arc<AppState>>,
     Path((conversation_id, provider)): Path<(String, String)>,
 ) -> Response {
-    match state.memoync fn get_provider_thread(
-    State(state): State<Arc<AppState>>,
-    Path((conversation_id, provider)): Path<(String, String)>,
-) -> Response {
     if !valid_conversation_id(&conversation_id) {
         return api_error(
             StatusCode::BAD_REQUEST,
