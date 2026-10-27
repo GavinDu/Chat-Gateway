@@ -2,7 +2,9 @@
 mod sqlite;
 
 use crate::context::ContextBuilder;
-pub(crate) use crate::context::{estimate_message_tokens, messages_after_overlap};
+pub(crate) use crate::context::messages_after_overlap;
+#[cfg(test)]
+pub(crate) use crate::context::estimate_message_tokens;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -151,6 +153,7 @@ impl UnifiedMemory {
         Ok(ContextBuilder::build(&history, new_messages, self.max_tokens))
     }
 
+    #[allow(dead_code)]
     pub fn store_turn(
         &self,
         conversation_id: String,
