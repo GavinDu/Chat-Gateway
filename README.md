@@ -300,6 +300,19 @@ The server binds to loopback only. For shared local development environments, co
 
 When `auth.keys` is non-empty, every route except `/health` requires `Authorization: Bearer <secret>`. Chat routes require the `chat` scope; login/session-control routes and conversation export/deletion require `admin`. An empty key list disables API-key auth for backward-compatible loopback-only use; Host/Origin checks are not authentication and the listener must not be exposed remotely.
 
+## Conversation memory, export, and retention
+
+Treat exported conversations as sensitive user data; protect access to exports and include them in backup-retention and deletion procedures.
+
+Conversation turns are persisted in the gateway's SQLite memory store so the API can rebuild context across requests. The gateway does **not** currently apply an automatic age-based retention period; stored conversations remain until explicitly deleted or the backing store is removed under the operator's data-management procedure. Operators should account for this when sizing disks, backing up the database, and defining their own retention requirements. Adding automatic TTL requires a separate purge implementation and backup-retention policy; this documentation does not imply that either is active.
+
+- `GET /v1/conversations/:conversation_id` exports the stored conversation record, including its messages and provider/tab metadata, as JSON.
+- `DELETE /v1/conversations/:conversation_id` deletes a conversation from the live memory store. Deletion from separate backups is governed by the operator's backup-retention policy. Clients should treat an export as a data copy and apply their own access controls and deletion policy to downloaded files.
+- When API-key authentication is enabled, both export and deletion require the `admin` scope. Treat exported JSON and SQLite backups as potentially sensitive conversation data.
+- An unknown conversation returns `404 conversation_not_found`; malformed IDs return a client error. Export does not include provider cookies or session files.
+
+There is no built-in TTL or automatic backup purge today. Do not interpret live-store deletion as proof that copies in backups have been erased.
+
 ## Metrics and request timing
 
 The loopback-only `/metrics` endpoint exposes Prometheus text metrics for HTTP request counts and handler latency, plus provider queue wait, time to first token (TTFT), provider work, total chat duration, and estimated gateway overhead. When API-key authentication is enabled, `/metrics` requires an `admin` scope. Route labels are normalized to a bounded vocabulary to avoid high-cardinality metrics.
