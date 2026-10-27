@@ -84,7 +84,10 @@ pub fn record_browser_poll(provider: &str, evaluations: u64, duration_ms: u64) {
             .entry(provider.to_owned())
             .or_default()
             .observe(duration_ms);
-        *data.poll_evaluations.entry(provider.to_owned()).or_default() += evaluations;
+        *data
+            .poll_evaluations
+            .entry(provider.to_owned())
+            .or_default() += evaluations;
     }
 }
 
