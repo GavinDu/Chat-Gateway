@@ -844,7 +844,6 @@ fn sqlite_checkpoint_is_safe_after_durable_turns_and_can_repeat() {
     );
 }
 
-
 #[test]
 fn retention_purge_removes_expired_conversations_and_provider_threads() {
     let fixture = Fixture::new();
