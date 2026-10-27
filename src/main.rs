@@ -3713,3 +3713,48 @@ mod openai_compatibility_metadata_tests {
         assert!(!headers.contains_key("X-Gateway-Model"));
     }
 }
+
+
+#[cfg(test)]
+mod first_event_tests {
+    use super::{first_event, record_attempt_error, FirstEvent};
+    use std::time::{Duration, Instant};
+
+    #[tokio::test]
+    async fn first_event_surfaces_session_expiry_before_any_chunk() {
+        let provider = "test-first-event-session-expiry";
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        tx.send(Err(anyhow::anyhow!("session_expired: please sign in")))
+            .await
+            .unwrap();
+        drop(tx);
+
+        let event = first_event(&mut rx, Duration::from_millis(100)).await;
+        let FirstEvent::Error(error) = event else {
+            panic!("expected first-event error");
+        };
+        record_attempt_error(provider, &error.to_string(), 0, Instant::now(), Instant::now());
+
+        assert_eq!(crate::provider_state::status(provider).state, "needs_login");
+        let metrics = crate::metrics::render_with_provider_states(&[]);
+        assert!(metrics.contains(&format!(
+            "gateway_provider_requests_total{{provider=\"{provider}\",outcome=\"error\"}} 1"
+        )));
+    }
+
+    #[tokio::test]
+    async fn first_event_distinguishes_closed_and_timed_out_streams() {
+        let (tx, mut closed_rx) = tokio::sync::mpsc::channel(1);
+        drop(tx);
+        assert!(matches!(
+            first_event(&mut closed_rx, Duration::from_millis(100)).await,
+            FirstEvent::Closed
+        ));
+
+        let (_tx, mut idle_rx) = tokio::sync::mpsc::channel(1);
+        assert!(matches!(
+            first_event(&mut idle_rx, Duration::from_millis(1)).await,
+            FirstEvent::Timeout
+        ));
+    }
+}
