@@ -218,7 +218,7 @@ fn vault_aad(provider: &str) -> String {
 }
 
 fn encrypt_session_snapshot(file: &SessionFile, provider: &str, key_bytes: &[u8; 32]) -> Result<Vec<u8>> {
-    const MAGIC: &[u8; 6] = b"CGSV1\\0";
+    const MAGIC: &[u8; 6] = b"CGSV1\0";
     let mut nonce_bytes = [0_u8; 12];
     SystemRandom::new()
         .fill(&mut nonce_bytes)
@@ -241,7 +241,7 @@ fn encrypt_session_snapshot(file: &SessionFile, provider: &str, key_bytes: &[u8;
 }
 
 fn decrypt_session_snapshot(bytes: &[u8], provider: &str, key_bytes: &[u8; 32]) -> Result<SessionFile> {
-    const MAGIC: &[u8; 6] = b"CGSV1\\0";
+    const MAGIC: &[u8; 6] = b"CGSV1\0";
     const NONCE_LEN: usize = 12;
     const TAG_LEN: usize = 16;
     if bytes.len() < MAGIC.len() + NONCE_LEN + TAG_LEN || !bytes.starts_with(MAGIC) {
