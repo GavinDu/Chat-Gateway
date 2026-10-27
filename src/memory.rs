@@ -256,7 +256,6 @@ impl UnifiedMemory {
     }
 }
 
-
 /// Conservative, dependency-free token estimate for context budgeting.
 /// ASCII text averages several characters per token, while CJK and emoji
 /// can consume a token per scalar value; count non-ASCII characters separately.
