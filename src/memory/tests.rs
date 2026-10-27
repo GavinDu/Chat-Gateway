@@ -976,7 +976,10 @@ fn rolling_summary_persists_and_context_keeps_recent_messages() {
         memory
             .store_turn(
                 "rolling-summary".into(),
-                vec![m("user", &format!("user turn {index}: details that should remain in durable history"))],
+                vec![m(
+                    "user",
+                    &format!("user turn {index}: details that should remain in durable history"),
+                )],
                 m("assistant", &format!("assistant response {index}: durable response details")),
                 "chatgpt".into(),
                 "tab".into(),
