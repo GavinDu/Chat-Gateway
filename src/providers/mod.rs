@@ -146,6 +146,7 @@ pub enum StreamSignal { SharedStopControl }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DoneSignal { StableResponseText }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum ThreadSupport { UrlAddressable, SidebarClick, None }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TypingStrategy { SharedComposer }
@@ -672,7 +673,7 @@ mod response_completion_tests {
 
 #[cfg(test)]
 mod provider_catalog_contract_tests {
-    use super::{AdapterSpec, Provider, ADAPTERS};
+    use super::{Provider, ADAPTERS};
     use std::collections::HashSet;
 
     #[test]
