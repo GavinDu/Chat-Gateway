@@ -996,7 +996,9 @@ fn rolling_summary_persists_and_context_keeps_recent_messages() {
         "long conversations should include the persisted rolling summary"
     );
     assert!(
-        context.iter().any(|message| message.content.contains("user turn 11")),
+        context
+            .iter()
+            .any(|message| message.content.contains("user turn 11")),
         "the latest user turn must remain verbatim"
     );
     assert!(
