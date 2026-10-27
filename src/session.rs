@@ -108,12 +108,7 @@ mod session_path_tests {
 #[async_trait::async_trait(?Send)]
 pub trait SessionStore {
     fn load(&self, provider: &str) -> Result<Option<SessionFile>>;
-    async fn save_if_changed(
-        &self,
-        browser: &Browser,
-        page: &Page,
-        provider: &str,
-    ) -> Result<()>;
+    async fn save_if_changed(&self, browser: &Browser, page: &Page, provider: &str) -> Result<()>;
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -126,12 +121,7 @@ impl SessionStore for FileSessionStore {
         load_session_file_from_path(Path::new(&path))
     }
 
-    async fn save_if_changed(
-        &self,
-        browser: &Browser,
-        page: &Page,
-        provider: &str,
-    ) -> Result<()> {
+    async fn save_if_changed(&self, browser: &Browser, page: &Page, provider: &str) -> Result<()> {
         save_session_if_changed_file(browser, page, provider).await
     }
 }
@@ -285,11 +275,7 @@ pub async fn save_session(browser: &Browser, page: &Page, provider: &str) -> Res
 /// Persist a post-send snapshot only when the provider-scoped session changed.
 /// Writes are atomic and capped at one per provider per minute. A skipped
 /// changed snapshot will be retried after the interval on the next successful send.
-pub async fn save_session_if_changed(
-    browser: &Browser,
-    page: &Page,
-    provider: &str,
-) -> Result<()> {
+pub async fn save_session_if_changed(browser: &Browser, page: &Page, provider: &str) -> Result<()> {
     FileSessionStore
         .save_if_changed(browser, page, provider)
         .await
