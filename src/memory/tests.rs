@@ -800,7 +800,10 @@ fn schema_v1_database_migrates_provider_thread_map_without_losing_conversations(
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(owner, "local", "legacy rows must remain in the local tenant");
+    assert_eq!(
+        owner, "local",
+        "legacy rows must remain in the local tenant"
+    );
     assert_eq!(memory.purge_expired_conversations(1).unwrap(), 0);
 }
 
@@ -1085,7 +1088,6 @@ fn schema_v3_migration_assigns_existing_conversations_to_local_owner() {
         .unwrap();
     assert_eq!(version, 4);
 }
-
 
 #[test]
 fn context_budget_estimate_handles_multibyte_text_conservatively() {
