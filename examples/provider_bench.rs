@@ -142,8 +142,7 @@ async fn main() -> anyhow::Result<()> {
         anyhow::bail!("--providers must contain at least one provider name");
     }
     let api_key = option(&args, "--api-key");
-    let model_name = option(&args, "--model")
-        .unwrap_or_else(|| "auto".to_owned());
+    let model_name = option(&args, "--model").unwrap_or_else(|| "auto".to_owned());
     if !fake && model_name == "auto" {
         anyhow::bail!(
             "live mode requires --model <configured-model-name> so each provider can be pinned"
