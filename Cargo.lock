@@ -617,6 +617,7 @@ dependencies = [
  "tower",
  "uuid",
  "sha2",
+ "subtle",
 ]
 
 [[package]]
