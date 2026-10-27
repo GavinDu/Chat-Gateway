@@ -257,6 +257,12 @@ fn should_reset_response_tracker(
     !already_detected && is_new_response_node(baseline_count, current_count)
 }
 
+/// Avoid evaluating the DOM for response-node counts after the new response
+/// node has already been detected; the count remains elevated on every poll.
+fn should_probe_response_count(response_node_detected: bool) -> bool {
+    !response_node_detected
+}
+
 /// Generic send + stream-poll loop shared by all adapters. Poll response
 /// text every 350ms and finish only after a conservative idle grace period
 /// with no streaming indicator, or at the provider timeout. The grace period
@@ -368,11 +374,13 @@ pub async fn run_send(
             return;
         }
 
-        if should_reset_response_tracker(
-            response_node_detected,
-            baseline_response_count,
-            adapter.response_count(&page),
-        ) {
+        if should_probe_response_count(response_node_detected)
+            && should_reset_response_tracker(
+                response_node_detected,
+                baseline_response_count,
+                adapter.response_count(&page),
+            )
+        {
             // A new DOM node is the strongest signal that the provider started
             // a fresh answer, even when its text matches the previous turn.
             // Latch this transition: the node remains present on later polls,
@@ -483,6 +491,12 @@ mod response_delta_tracker_tests {
         assert!(!is_new_response_node(3, 3));
         assert!(is_new_response_node(3, 4));
         assert!(!is_new_response_node(4, 3));
+    }
+
+    #[test]
+    fn response_count_probe_stops_after_new_node_is_detected() {
+        assert!(should_probe_response_count(false));
+        assert!(!should_probe_response_count(true));
     }
 
     #[test]
