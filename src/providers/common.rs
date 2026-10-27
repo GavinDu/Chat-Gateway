@@ -499,7 +499,10 @@ mod text_selector_tests {
                 assert!(
                     !matches!(
                         *selector,
-                        "button[type=\"submit\"]" | "button:has(mat-icon)"
+                        "button[type=\"submit\"]"
+                            | "button[type=\"submit\"]:has(svg)"
+                            | "button:has(svg)"
+                            | "button:has(mat-icon)"
                     ),
                     "{} still uses a generic send-button selector",
                     selectors.url
