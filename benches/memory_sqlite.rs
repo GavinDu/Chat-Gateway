@@ -1,4 +1,6 @@
 // The benchmark compiles the memory module without its unit-test call sites.
+#[path = "../src/context.rs"]
+mod context;
 #[allow(dead_code)]
 #[path = "../src/memory.rs"]
 mod memory;
