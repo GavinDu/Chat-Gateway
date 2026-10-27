@@ -2,7 +2,10 @@ use anyhow::Result;
 use obscura_core::{Browser, Page};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use ring::{aead, rand::{SecureRandom, SystemRandom}};
+use ring::{
+    aead,
+    rand::{SecureRandom, SystemRandom},
+};
 use std::{
     collections::{BTreeMap, HashMap},
     io::Write,
@@ -167,7 +170,9 @@ impl SessionStore for VaultSessionStore {
         let current_hash = session_state_hash(&file)?;
         let destination = session_vault_path(provider)?;
         let previous_hash = match std::fs::read(&destination) {
-            Ok(bytes) => Some(session_state_hash(&decrypt_session_snapshot(&bytes, provider, &key)?)?),
+            Ok(bytes) => Some(session_state_hash(&decrypt_session_snapshot(
+                &bytes, provider, &key,
+            )?)?),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => return Err(error.into()),
         };
@@ -176,7 +181,10 @@ impl SessionStore for VaultSessionStore {
             return Ok(());
         }
         if session_write_is_rate_limited(provider, Instant::now()) {
-            tracing::debug!(provider, "encrypted session changed but snapshot write is rate-limited");
+            tracing::debug!(
+                provider,
+                "encrypted session changed but snapshot write is rate-limited"
+            );
             return Ok(());
         }
         ensure_private_session_dir(Path::new("sessions")).await?;
@@ -190,19 +198,27 @@ impl SessionStore for VaultSessionStore {
             Err(error) => return Err(error.into()),
         }
         record_session_write(provider);
-        tracing::info!(provider, cookies = file.cookies.len(), "encrypted session saved");
+        tracing::info!(
+            provider,
+            cookies = file.cookies.len(),
+            "encrypted session saved"
+        );
         Ok(())
     }
 }
 
 fn session_vault_path(provider: &str) -> Result<String> {
     let legacy = session_path(provider)?;
-    Ok(Path::new(&legacy).with_extension("vault").to_string_lossy().into_owned())
+    Ok(Path::new(&legacy)
+        .with_extension("vault")
+        .to_string_lossy()
+        .into_owned())
 }
 
 fn vault_key_from_env() -> Result<[u8; 32]> {
-    let encoded = std::env::var("CHAT_GATEWAY_VAULT_KEY")
-        .map_err(|_| anyhow::anyhow!("CHAT_GATEWAY_VAULT_KEY is required for encrypted session storage"))?;
+    let encoded = std::env::var("CHAT_GATEWAY_VAULT_KEY").map_err(|_| {
+        anyhow::anyhow!("CHAT_GATEWAY_VAULT_KEY is required for encrypted session storage")
+    })?;
     if encoded.len() != 64 || !encoded.as_bytes().iter().all(u8::is_ascii_hexdigit) {
         anyhow::bail!("CHAT_GATEWAY_VAULT_KEY must be exactly 64 hexadecimal characters");
     }
@@ -218,7 +234,11 @@ fn vault_aad(provider: &str) -> String {
     format!("chat-gateway/session-vault/v1/{provider}")
 }
 
-fn encrypt_session_snapshot(file: &SessionFile, provider: &str, key_bytes: &[u8; 32]) -> Result<Vec<u8>> {
+fn encrypt_session_snapshot(
+    file: &SessionFile,
+    provider: &str,
+    key_bytes: &[u8; 32],
+) -> Result<Vec<u8>> {
     const MAGIC: &[u8; 6] = b"CGSV1\0";
     let mut nonce_bytes = [0_u8; 12];
     SystemRandom::new()
@@ -241,7 +261,11 @@ fn encrypt_session_snapshot(file: &SessionFile, provider: &str, key_bytes: &[u8;
     Ok(output)
 }
 
-fn decrypt_session_snapshot(bytes: &[u8], provider: &str, key_bytes: &[u8; 32]) -> Result<SessionFile> {
+fn decrypt_session_snapshot(
+    bytes: &[u8],
+    provider: &str,
+    key_bytes: &[u8; 32],
+) -> Result<SessionFile> {
     const MAGIC: &[u8; 6] = b"CGSV1\0";
     const NONCE_LEN: usize = 12;
     const TAG_LEN: usize = 16;
@@ -257,12 +281,13 @@ fn decrypt_session_snapshot(bytes: &[u8], provider: &str, key_bytes: &[u8; 32]) 
         .map_err(|_| anyhow::anyhow!("invalid AES-256-GCM vault key"))?;
     let key = aead::LessSafeKey::new(unbound);
     let mut ciphertext = bytes[nonce_end..].to_vec();
-    let plaintext = key.open_in_place(
-        aead::Nonce::assume_unique_for_key(nonce_bytes),
-        aead::Aad::from(vault_aad(provider).as_bytes()),
-        &mut ciphertext,
-    )
-    .map_err(|_| anyhow::anyhow!("session-vault authentication failed"))?;
+    let plaintext = key
+        .open_in_place(
+            aead::Nonce::assume_unique_for_key(nonce_bytes),
+            aead::Aad::from(vault_aad(provider).as_bytes()),
+            &mut ciphertext,
+        )
+        .map_err(|_| anyhow::anyhow!("session-vault authentication failed"))?;
     Ok(serde_json::from_slice(plaintext)?)
 }
 
@@ -431,9 +456,13 @@ pub async fn save_session(browser: &Browser, page: &Page, provider: &str) -> Res
 /// changed snapshot will be retried after the interval on the next successful send.
 pub async fn save_session_if_changed(browser: &Browser, page: &Page, provider: &str) -> Result<()> {
     if std::env::var("CHAT_GATEWAY_SESSION_STORE").as_deref() == Ok("vault") {
-        VaultSessionStore.save_if_changed(browser, page, provider).await
+        VaultSessionStore
+            .save_if_changed(browser, page, provider)
+            .await
     } else {
-        FileSessionStore.save_if_changed(browser, page, provider).await
+        FileSessionStore
+            .save_if_changed(browser, page, provider)
+            .await
     }
 }
 
@@ -944,14 +973,16 @@ mod atomic_session_write_tests {
     }
 }
 
-
 #[cfg(test)]
 mod vault_tests {
     use super::*;
 
     fn sample_session() -> SessionFile {
         SessionFile {
-            local_storage: HashMap::from([("access_token".to_owned(), "sensitive-value".to_owned())]),
+            local_storage: HashMap::from([(
+                "access_token".to_owned(),
+                "sensitive-value".to_owned(),
+            )]),
             cookies: vec![Cookie {
                 name: "session".to_owned(),
                 value: "cookie-secret".to_owned(),
@@ -970,9 +1001,14 @@ mod vault_tests {
         let key = [0x5a; 32];
         let encrypted = encrypt_session_snapshot(&session, "provider-a", &key).unwrap();
         assert!(encrypted.starts_with(b"CGSV1\0"));
-        assert!(!encrypted.windows(b"sensitive-value".len()).any(|w| w == b"sensitive-value"));
+        assert!(!encrypted
+            .windows(b"sensitive-value".len())
+            .any(|w| w == b"sensitive-value"));
         let restored = decrypt_session_snapshot(&encrypted, "provider-a", &key).unwrap();
-        assert_eq!(restored.local_storage.get("access_token").unwrap(), "sensitive-value");
+        assert_eq!(
+            restored.local_storage.get("access_token").unwrap(),
+            "sensitive-value"
+        );
         assert_eq!(restored.cookies[0].value, "cookie-secret");
     }
 
