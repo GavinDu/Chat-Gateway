@@ -218,7 +218,7 @@ fn initialize(connection: &mut Connection, legacy: Option<&Path>) -> Result<()> 
 }
 
 fn validate_schema(connection: &Connection) -> Result<()> {
-    // Version 4 is owned by this application. Fail closed if its definitions
+    // Version 5 is owned by this application. Fail closed if its definitions
     // were changed, including constraints that SELECT alone cannot validate.
     let expected = Connection::open_in_memory()?;
     expected.execute_batch(SCHEMA)?;
