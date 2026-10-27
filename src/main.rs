@@ -30,7 +30,7 @@ mod session;
 
 use browser::pool::ObscuraPool;
 use config::AppConfig;
-use memory::{ChatMessage, UnifiedMemory};
+use memory::{ChatMessage, ProviderThread, UnifiedMemory};
 use router::ProviderRouter;
 
 #[derive(Parser, Debug)]
