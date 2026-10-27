@@ -94,13 +94,6 @@ pub(super) fn open(path: Option<&Path>, legacy: Option<&Path>) -> Result<Connect
         }
         None => Connection::open_in_memory()?,
     };
-    if file_backed {
-        let journal_mode: String =
-            connection.query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))?;
-        if !journal_mode.eq_ignore_ascii_case("wal") {
-            bail!("expected file-backed conversation database to use WAL mode, got {journal_mode}");
-        }
-    }
     initialize(&mut connection, legacy).with_context(|| {
         format!(
             "conversation database {} failed validation/migration; preserve it and restore a backup",
@@ -108,6 +101,15 @@ pub(super) fn open(path: Option<&Path>, legacy: Option<&Path>) -> Result<Connect
                 .unwrap_or_else(|| ":memory:".into())
         )
     })?;
+    // Validate existing database bytes before changing journal mode. In particular,
+    // malformed files must fail closed with the migration context and stay intact.
+    if file_backed {
+        let journal_mode: String =
+            connection.query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))?;
+        if !journal_mode.eq_ignore_ascii_case("wal") {
+            bail!("expected file-backed conversation database to use WAL mode, got {journal_mode}");
+        }
+    }
     Ok(connection)
 }
 
