@@ -24,7 +24,6 @@ pub const SELECTORS: SelectorSet = SelectorSet {
     ],
     send: &[
         "button[aria-label=\"Send\"]",
-        "button[type=\"submit\"]:has(svg)",
         "button.send-button",
     ],
     response: &[
