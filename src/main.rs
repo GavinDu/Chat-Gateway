@@ -2196,13 +2196,13 @@ async fn chat_completions(
                     yield Ok(Event::default().data(error.to_string()));
                 } else {
                     provider_state::record_success(&provider_c);
-                    if let Err(_error) = state_c.memory.store_turn_for_owner(
+                    if let Err(_error) = state_c.memory.store_turn_for_owner_with_tab_id(
                         &owner_key_id_c,
                         conv_stream.clone(),
                         windowed_c.clone(),
                         ChatMessage { role: "assistant".to_string(), content: full.clone() },
                         provider_c.clone(),
-                        format!("tab-{}", &conv_stream[..8]),
+                        None,
                     ) {
                         tracing::error!(conversation_id = %conv_stream, "conversation persistence failed after stream");
                         let error = serde_json::json!({
@@ -2318,7 +2318,7 @@ async fn chat_completions(
             outcome = "success",
             "provider request completed"
         );
-        if let Err(_error) = state.memory.store_turn_for_owner(
+        if let Err(_error) = state.memory.store_turn_for_owner_with_tab_id(
             &owner_key_id,
             new_conv_id.clone(),
             windowed.clone(),
@@ -2327,7 +2327,7 @@ async fn chat_completions(
                 content: full.clone(),
             },
             provider_name.clone(),
-            format!("tab-{}", &new_conv_id[..8]),
+            None,
         ) {
             tracing::error!(conversation_id = %new_conv_id, "conversation persistence failed");
             return api_error(
