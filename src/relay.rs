@@ -12,7 +12,7 @@ use std::{
     collections::{HashMap, VecDeque},
     fs::{self, OpenOptions},
     io::Write,
-    path::Path,
+    path::Path as FsPath,
     sync::{Arc, Mutex},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -55,8 +55,8 @@ impl RelayState {
     }
 }
 
-fn install_token_hash_path() -> &'static Path {
-    Path::new("sessions/relay-install-token.sha256")
+fn install_token_hash_path() -> &'static FsPath {
+    FsPath::new("sessions/relay-install-token.sha256")
 }
 
 fn load_install_token_hash() -> anyhow::Result<Option<[u8; 32]>> {
