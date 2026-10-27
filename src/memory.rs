@@ -320,7 +320,7 @@ fn estimate_message_tokens(content: &str) -> usize {
             non_ascii += 1;
         }
     }
-    ascii.saturating_add(2) / 3 + non_ascii
+    ascii.div_ceil(3) + non_ascii
 }
 fn messages_after_overlap(stored: &[ChatMessage], incoming: &[ChatMessage]) -> Vec<ChatMessage> {
     if incoming.is_empty() {
