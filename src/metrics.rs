@@ -202,9 +202,7 @@ pub fn render_with_provider_states(provider_states: &[(String, String)]) -> Stri
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        escape_label, normalize_route, render_with_provider_states, Histogram,
-    };
+    use super::{escape_label, normalize_route, render_with_provider_states, Histogram};
 
     #[test]
     fn route_labels_have_bounded_cardinality() {
