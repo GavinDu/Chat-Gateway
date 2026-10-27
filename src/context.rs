@@ -18,8 +18,8 @@ pub(crate) struct ThreadSyncState {
 
 /// A provider send plan. Delta is safe only when the adapter can reopen a
 /// thread and the persisted provider thread is known to be in sync.
-#[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ContextPlan {
     Delta {
         messages: Vec<ChatMessage>,
@@ -29,7 +29,6 @@ pub(crate) enum ContextPlan {
         messages: Vec<ChatMessage>,
     },
 }
-
 
 impl ContextBuilder {
     /// Plan the smallest safe provider send without performing I/O.
@@ -145,7 +144,7 @@ pub(crate) fn messages_after_overlap(
 #[allow(unused_imports)] // The standalone benchmark includes this module with test cfg enabled.
 mod tests {
     #[allow(unused_imports)]
-    use super::{estimate_message_tokens, messages_after_overlap, ContextBuilder, ContextPlan, ThreadSyncState};
+    use super::{estimate_message_tokens, messages_after_overlap, ContextBuilder};
     use crate::memory::ChatMessage;
 
     fn m(role: &str, content: &str) -> ChatMessage {
