@@ -7,6 +7,8 @@ pub(crate) struct ContextBuilder;
 /// The minimum durable state needed to decide whether provider-side history
 /// is still synchronized with the gateway transcript.
 #[derive(Debug, Clone, PartialEq, Eq)]
+// The send-path integration lands after the context-builder foundation is merged.
+#[allow(dead_code)]
 pub(crate) struct ThreadSyncState {
     pub provider: String,
     pub thread_url: String,
@@ -17,6 +19,7 @@ pub(crate) struct ThreadSyncState {
 /// A provider send plan. Delta is safe only when the adapter can reopen a
 /// thread and the persisted provider thread is known to be in sync.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
 pub(crate) enum ContextPlan {
     Delta { messages: Vec<ChatMessage> },
     Replay { preamble: String, messages: Vec<ChatMessage> },
@@ -27,6 +30,8 @@ impl ContextBuilder {
     ///
     /// Any uncertainty (provider change, missing thread, unsupported reopen,
     /// or a stale sync marker) deliberately falls back to a bounded replay.
+    // Keep the pure policy available while the browser send path is being refactored.
+    #[allow(dead_code)]
     pub(crate) fn plan(
         history: &[ChatMessage],
         incoming: &[ChatMessage],
