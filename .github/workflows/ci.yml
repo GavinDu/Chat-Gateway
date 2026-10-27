@@ -81,3 +81,6 @@ jobs:
 
       - name: Run SQLite memory benchmark smoke test
         run: cargo bench --profile dev --locked --bench memory_sqlite -- --smoke
+
+      - name: Run provider benchmark harness smoke test
+        run: cargo run --locked --example provider_bench -- --fake --smoke
