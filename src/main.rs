@@ -3021,7 +3021,7 @@ mod openai_compatibility_metadata_tests {
     #[test]
     fn invalid_gateway_header_values_are_omitted() {
         let mut headers = axum::http::HeaderMap::new();
-        add_gateway_headers(&mut headers, "bad\\nprovider", "bad\\nmodel");
+        add_gateway_headers(&mut headers, "bad\nprovider", "bad\nmodel");
         assert!(!headers.contains_key("X-Gateway-Provider"));
         assert!(!headers.contains_key("X-Gateway-Model"));
     }
