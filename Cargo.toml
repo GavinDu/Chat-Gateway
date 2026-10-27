@@ -5,9 +5,13 @@
 # 1. Choose and review an exact 40-character upstream commit.
 # 2. Update the `rev` in Cargo.toml.
 # 3. Copy vendor/taffy and vendor/cosmic-text from that exact Obscura revision.
-# 4. Run cargo update -p obscura --precise <revision> (or refresh Cargo.lock).
-# 5. Run cargo test --locked and cargo bench --locked --bench memory_sqlite.
-# CI compares both vendored trees to the pinned upstream commit.
+# 4. Re-check vendor/wreq-util/PATCHES.md. Keep the [patch.crates-io] override only
+#    while the pinned dependency graph needs the zstd 0.14.3 override; remove it
+#    when the bumped Obscura/wreq-util chain no longer needs the patch.
+# 5. Run cargo update -p obscura --precise <revision> (or refresh Cargo.lock).
+# 6. Run cargo test --locked and cargo bench --locked --bench memory_sqlite.
+# CI compares both Obscura vendored trees to the pinned upstream commit and checks
+# vendor/wreq-util against its published crate plus the documented manifest patch.
 
 [package]
 name = "chat-gateway-rs"
