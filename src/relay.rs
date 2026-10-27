@@ -114,6 +114,7 @@ pub async fn pair(
     *token_slot = Some(token_hash);
     // A successful exchange consumes the pairing code permanently.
     *attempts = MAX_PAIR_ATTEMPTS;
+    tracing::info!("browser extension paired");
     Json(serde_json::json!({"ok":true,"token":token})).into_response()
 }
 
@@ -149,6 +150,9 @@ fn authenticated_request(app: &crate::AppState, headers: &HeaderMap) -> Result<(
     nonces.retain(|_, inserted| inserted.elapsed() < NONCE_RETENTION);
     if nonces.contains_key(nonce) {
         return Err(json_error(StatusCode::UNAUTHORIZED, "relay_nonce_reused", "relay request nonce has already been used"));
+    }
+    if nonces.len() >= 10_000 {
+        return Err(json_error(StatusCode::TOO_MANY_REQUESTS, "relay_rate_limited", "too many relay requests; retry shortly"));
     }
     nonces.insert(nonce.to_owned(), Instant::now());
     Ok(())
@@ -189,7 +193,10 @@ pub async fn unlink(
 ) -> Response {
     if let Err(response) = authenticated_request(&app, &headers) { return response; }
     match crate::session::delete_session_snapshot(&provider) {
-        Ok(removed) => Json(serde_json::json!({"ok":true,"provider":provider,"unlinked":removed})).into_response(),
+        Ok(removed) => {
+            tracing::info!(provider, "browser relay provider unlinked from persistent storage");
+            Json(serde_json::json!({"ok":true,"provider":provider,"unlinked":removed})).into_response()
+        },
         Err(_) => json_error(StatusCode::INTERNAL_SERVER_ERROR, "unlink_failed", "provider session could not be removed"),
     }
 }
@@ -199,6 +206,7 @@ pub async fn unpair(State(app): State<Arc<crate::AppState>>, headers: HeaderMap)
     match app.relay.install_token_hash.lock() {
         Ok(mut token) => {
             *token = None;
+            tracing::info!("browser extension unpaired");
             Json(serde_json::json!({"ok":true,"paired":false})).into_response()
         }
         Err(_) => json_error(StatusCode::INTERNAL_SERVER_ERROR, "relay_unavailable", "relay state is unavailable"),
