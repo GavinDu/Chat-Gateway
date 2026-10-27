@@ -52,7 +52,7 @@ stealth = ["obscura-core/stealth"]
 [patch.crates-io]
 taffy = { path = "vendor/taffy" }
 cosmic-text = { path = "vendor/cosmic-text" }
-wreq-util = { git = "https://github.com/0x676e67/wreq-util", rev = "f7984ed81993dcf814fc49ad1fc63ba9dfd3d2b8" }
+wreq-util = { path = "vendor/wreq-util" }
 
 [[bench]]
 name = "memory_sqlite"
