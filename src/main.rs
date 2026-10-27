@@ -1050,7 +1050,17 @@ mod login_action_payload_tests {
 /// Startup validates configuration and warms the browser pool before binding.
 /// Readiness requires at least one enabled provider whose session is not known
 /// to be expired; providers marked `needs_login` do not count as routable.
-fn readiness_response(enabled: usize) -> Response {
+fn readiness_response(enabled: usize, worker_alive: bool) -> Response {
+    if !worker_alive {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "status": "not_ready",
+                "reason": "browser_worker_unavailable",
+            })),
+        )
+            .into_response();
+    }
     if enabled == 0 {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -1072,6 +1082,9 @@ fn readiness_response(enabled: usize) -> Response {
 }
 
 async fn readiness(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    if !state.pool.worker_alive() {
+        return readiness_response(0, false);
+    }
     let routable = state
         .cfg
         .providers
@@ -1082,7 +1095,7 @@ async fn readiness(State(state): State<Arc<AppState>>) -> impl IntoResponse {
                 && provider_guard::provider_disabled_reason(&p.name).is_none()
         })
         .count();
-    readiness_response(routable)
+    readiness_response(routable, true)
 }
 
 #[cfg(test)]
@@ -1091,11 +1104,14 @@ mod readiness_contract_tests {
 
     #[test]
     fn readiness_requires_at_least_one_routable_provider() {
-        let not_ready = readiness_response(0);
+        let not_ready = readiness_response(0, true);
         assert_eq!(not_ready.status(), StatusCode::SERVICE_UNAVAILABLE);
 
-        let ready = readiness_response(1);
+        let ready = readiness_response(1, true);
         assert_eq!(ready.status(), StatusCode::OK);
+
+        let worker_dead = readiness_response(1, false);
+        assert_eq!(worker_dead.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 }
 
@@ -1737,6 +1753,63 @@ fn usable_initial_stream_chunk(content: &str, done: bool) -> bool {
     !done && !content.is_empty()
 }
 
+enum FirstEvent {
+    Chunk(providers::ProviderChunk),
+    EmptyCompletion,
+    Error(anyhow::Error),
+    Closed,
+    Timeout,
+}
+
+fn record_attempt_error(
+    provider: &str,
+    error: &str,
+    queue_ms: u64,
+    provider_started: Instant,
+    request_started: Instant,
+) {
+    let provider_work_ms = provider_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+    let total_ms = request_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+    provider_state::record_error(provider, error);
+    metrics::record_provider_timings(
+        provider,
+        "error",
+        queue_ms,
+        None,
+        provider_work_ms,
+        total_ms,
+    );
+}
+
+async fn first_event(
+    rx: &mut tokio::sync::mpsc::Receiver<anyhow::Result<providers::ProviderChunk>>,
+    timeout: std::time::Duration,
+) -> FirstEvent {
+    match tokio::time::timeout(timeout, async {
+        loop {
+            match rx.recv().await {
+                Some(Ok(chunk)) if usable_initial_stream_chunk(&chunk.content, chunk.done) => {
+                    break Some(Ok(chunk));
+                }
+                Some(Ok(chunk)) if chunk.done => break Some(Ok(chunk)),
+                Some(Ok(_empty_chunk)) => continue,
+                Some(Err(error)) => break Some(Err(error)),
+                None => break None,
+            }
+        }
+    })
+    .await
+    {
+        Ok(Some(Ok(chunk))) if usable_initial_stream_chunk(&chunk.content, chunk.done) => {
+            FirstEvent::Chunk(chunk)
+        }
+        Ok(Some(Ok(_))) => FirstEvent::EmptyCompletion,
+        Ok(Some(Err(error))) => FirstEvent::Error(error),
+        Ok(None) => FirstEvent::Closed,
+        Err(_) => FirstEvent::Timeout,
+    }
+}
+
 fn valid_conversation_id(value: &str) -> bool {
     (8..=128).contains(&value.len())
         && value.is_ascii()
@@ -1961,41 +2034,60 @@ async fn chat_completions(
                     .map(|provider| provider.timeout_seconds)
                     .unwrap_or(120),
             );
-            let first = match tokio::time::timeout(first_chunk_timeout, async {
-                loop {
-                    match rx.recv().await {
-                        Some(Ok(chunk))
-                            if usable_initial_stream_chunk(&chunk.content, chunk.done) =>
-                        {
-                            break Some(Ok(chunk));
-                        }
-                        Some(Ok(chunk)) if chunk.done => break Some(Ok(chunk)),
-                        Some(Ok(_empty_chunk)) => continue,
-                        Some(Err(error)) => break Some(Err(error)),
-                        None => break None,
-                    }
-                }
-            })
-            .await
-            {
-                Ok(Some(Ok(chunk))) if usable_initial_stream_chunk(&chunk.content, chunk.done) => {
-                    chunk
-                }
-                Ok(Some(Ok(_))) => {
-                    last_err =
-                        Some("provider completed without output before stream started".to_string());
-                    continue;
-                }
-                Ok(Some(Err(error))) => {
+            let first = match first_event(&mut rx, first_chunk_timeout).await {
+                FirstEvent::Chunk(chunk) => chunk,
+                FirstEvent::EmptyCompletion => {
+                    let error = "provider completed without output before stream started";
+                    record_attempt_error(
+                        &provider_name,
+                        error,
+                        queue_ms,
+                        provider_started,
+                        request_started,
+                    );
                     last_err = Some(error.to_string());
                     continue;
                 }
-                Ok(None) => {
-                    last_err = Some("provider stream closed before first output".to_string());
+                FirstEvent::Error(error) => {
+                    let message = error.to_string();
+                    record_attempt_error(
+                        &provider_name,
+                        &message,
+                        queue_ms,
+                        provider_started,
+                        request_started,
+                    );
+                    last_err = Some(message);
                     continue;
                 }
-                Err(_) => {
-                    last_err = Some("provider timed out before first output".to_string());
+                FirstEvent::Closed => {
+                    let error = "provider stream closed before first output";
+                    record_attempt_error(
+                        &provider_name,
+                        error,
+                        queue_ms,
+                        provider_started,
+                        request_started,
+                    );
+                    last_err = Some(error.to_string());
+                    continue;
+                }
+                FirstEvent::Timeout => {
+                    let error = "provider timed out before first output";
+                    let provider_work_ms =
+                        provider_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+                    let total_ms =
+                        request_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+                    provider_state::record_error(&provider_name, error);
+                    metrics::record_provider_timings(
+                        &provider_name,
+                        "error",
+                        queue_ms,
+                        None,
+                        provider_work_ms,
+                        total_ms,
+                    );
+                    last_err = Some(error.to_string());
                     continue;
                 }
             };
@@ -2718,7 +2810,7 @@ mod http_api_regression_tests {
 
     fn app(memory: Arc<UnifiedMemory>) -> Router {
         Router::new()
-            .route("/ready", get(|| async { readiness_response(1) }))
+            .route("/ready", get(|| async { readiness_response(1, true) }))
             .route("/v1/conversations", get(list_endpoint))
             .route("/v1/chat/completions", post(validation_endpoint))
             .route(
@@ -3673,5 +3765,54 @@ mod openai_compatibility_metadata_tests {
         add_gateway_headers(&mut headers, "bad\nprovider", "bad\nmodel");
         assert!(!headers.contains_key("X-Gateway-Provider"));
         assert!(!headers.contains_key("X-Gateway-Model"));
+    }
+}
+#[cfg(test)]
+mod first_event_tests {
+    use super::{first_event, record_attempt_error, FirstEvent};
+    use std::time::{Duration, Instant};
+
+    #[tokio::test]
+    async fn first_event_surfaces_session_expiry_before_any_chunk() {
+        let provider = "test-first-event-session-expiry";
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        tx.send(Err(anyhow::anyhow!("session_expired: please sign in")))
+            .await
+            .unwrap();
+        drop(tx);
+
+        let event = first_event(&mut rx, Duration::from_millis(100)).await;
+        let FirstEvent::Error(error) = event else {
+            panic!("expected first-event error");
+        };
+        record_attempt_error(
+            provider,
+            &error.to_string(),
+            0,
+            Instant::now(),
+            Instant::now(),
+        );
+
+        assert_eq!(crate::provider_state::status(provider).state, "needs_login");
+        let metrics = crate::metrics::render_with_provider_states(&[]);
+        assert!(metrics.contains(&format!(
+            "gateway_provider_requests_total{{provider=\"{provider}\",outcome=\"error\"}} 1"
+        )));
+    }
+
+    #[tokio::test]
+    async fn first_event_distinguishes_closed_and_timed_out_streams() {
+        let (tx, mut closed_rx) = tokio::sync::mpsc::channel(1);
+        drop(tx);
+        assert!(matches!(
+            first_event(&mut closed_rx, Duration::from_millis(100)).await,
+            FirstEvent::Closed
+        ));
+
+        let (_tx, mut idle_rx) = tokio::sync::mpsc::channel(1);
+        assert!(matches!(
+            first_event(&mut idle_rx, Duration::from_millis(1)).await,
+            FirstEvent::Timeout
+        ));
     }
 }
