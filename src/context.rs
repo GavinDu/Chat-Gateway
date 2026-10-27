@@ -6,9 +6,9 @@ pub(crate) struct ContextBuilder;
 
 /// The minimum durable state needed to decide whether provider-side history
 /// is still synchronized with the gateway transcript.
-#[derive(Debug, Clone, PartialEq, Eq)]
-// The send-path integration lands after the context-builder foundation is merged.
+/// The send-path integration lands after the context-builder foundation is merged.
 #[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ThreadSyncState {
     pub provider: String,
     pub thread_url: String,
