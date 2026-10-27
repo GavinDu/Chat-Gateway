@@ -215,7 +215,13 @@ fn validate_schema(connection: &Connection) -> Result<()> {
     // were changed, including constraints that SELECT alone cannot validate.
     let expected = Connection::open_in_memory()?;
     expected.execute_batch(SCHEMA)?;
-    for table in ["conversations", "messages", "metadata", "provider_threads", "conversation_summaries"] {
+    for table in [
+        "conversations",
+        "messages",
+        "metadata",
+        "provider_threads",
+        "conversation_summaries",
+    ] {
         let sql = |database: &Connection| -> Result<String> {
             Ok(database.query_row(
                 "SELECT sql FROM sqlite_master WHERE type='table' AND name=?1",
