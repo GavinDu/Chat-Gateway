@@ -842,7 +842,11 @@ fn provider_thread_mapping_is_provider_scoped_and_survives_restart() {
     }
     let reopened = fixture.open();
     assert_eq!(
-        reopened.get_provider_thread("thread-api", "claude").unwrap().unwrap().thread_url,
+        reopened
+            .get_provider_thread("thread-api", "claude")
+            .unwrap()
+            .unwrap()
+            .thread_url,
         "https://claude.ai/chat/thread-b"
     );
 }
