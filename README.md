@@ -306,6 +306,10 @@ The loopback-only `/metrics` endpoint exposes Prometheus text metrics for HTTP r
 
 See [docs/METRICS.md](docs/METRICS.md) for metric definitions and interpretation.
 
+## Provider pacing and challenge protection
+
+Each provider has a configurable `min_request_interval_ms` (default `5000`) and `daily_request_cap` (default `100`) in `config.yaml`. The gateway reserves request slots before sending and applies bounded jitter between sends. A provider that reaches its UTC-day cap is skipped until the counter resets at UTC midnight. A detected CAPTCHA/security challenge disables that provider for the lifetime of the process and requires operator review/restart; the gateway does not attempt to solve or bypass the challenge. These defaults are conservative starting points, not a guarantee that a provider's own policies permit automation.
+
 ## Provider session health
 
 `GET /health` reports each configured provider's runtime `session_state`: `unknown` until a successful send, `ready` after a successful response, or `needs_login` after an explicit `session_expired` provider error. `needs_login` providers are skipped by routing and do not count toward `/ready`. After completing login, restart the gateway to clear the in-memory session state.

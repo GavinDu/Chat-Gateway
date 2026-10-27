@@ -22,6 +22,7 @@ mod config;
 mod login;
 mod memory;
 mod metrics;
+mod provider_guard;
 mod provider_state;
 mod providers;
 mod router;
@@ -1018,7 +1019,11 @@ async fn readiness(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         .cfg
         .providers
         .iter()
-        .filter(|p| p.enabled && provider_state::is_routable(&p.name))
+        .filter(|p| {
+            p.enabled
+                && provider_state::is_routable(&p.name)
+                && provider_guard::provider_disabled_reason(&p.name).is_none()
+        })
         .count();
     readiness_response(routable)
 }
@@ -1264,6 +1269,7 @@ async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         .iter()
         .map(|p| {
             let session = provider_state::status(&p.name);
+            let challenge_disabled_reason = provider_guard::provider_disabled_reason(&p.name);
             serde_json::json!({
                 "name": p.name,
                 "enabled": p.enabled,
@@ -1271,6 +1277,8 @@ async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
                 "models": p.models,
                 "session_state": session.state,
                 "last_session_error": session.last_error,
+                "challenge_disabled": challenge_disabled_reason.is_some(),
+                "challenge_disabled_reason": challenge_disabled_reason,
             })
         })
         .collect::<Vec<_>>();
@@ -1513,6 +1521,10 @@ async fn chat_completions(
             last_err = Some(format!("provider '{provider_name}' needs login"));
             continue;
         }
+        if let Some(reason) = provider_guard::provider_disabled_reason(&provider_name) {
+            last_err = Some(format!("provider '{provider_name}' disabled: {reason}"));
+            continue;
+        }
         let permit = match state.pool.acquire(&provider_name).await {
             Ok(p) => p,
             Err(e) => {
@@ -1527,6 +1539,30 @@ async fn chat_completions(
         };
         tracing::debug!(provider = %provider_name, queue_ms = permit.queue_ms, "acquired provider slot");
         let queue_ms = permit.queue_ms.min(u64::MAX as u128) as u64;
+
+        let provider_cfg = match state.cfg.provider(&provider_name) {
+            Some(cfg) => cfg,
+            None => {
+                last_err = Some(format!(
+                    "provider '{provider_name}' configuration disappeared"
+                ));
+                continue;
+            }
+        };
+        if let Some(reason) = provider_guard::provider_disabled_reason(&provider_name) {
+            last_err = Some(format!("provider '{provider_name}' disabled: {reason}"));
+            continue;
+        }
+        if let Err(error) = provider_guard::wait_for_request_slot(
+            &provider_name,
+            provider_cfg.min_request_interval_ms,
+            provider_cfg.daily_request_cap,
+        )
+        .await
+        {
+            last_err = Some(error.to_string());
+            continue;
+        }
 
         let mut rx = match state
             .pool
@@ -1882,6 +1918,8 @@ mod model_list_tests {
             timeout_seconds: 30,
             queue_timeout_seconds: 30,
             session_pool_size: 1,
+            min_request_interval_ms: 5_000,
+            daily_request_cap: 100,
             models: models.iter().map(|model| (*model).to_owned()).collect(),
         }
     }
