@@ -286,11 +286,11 @@ used by CI) or an already-running local gateway:
 
 ```bash
 cargo run --locked --example provider_bench -- --fake --smoke
-cargo run --locked --example provider_bench -- --url http://127.0.0.1:8080/v1/chat/completions --providers chatgpt,claude --iterations 20 --pid <gateway-pid>
+cargo run --locked --example provider_bench -- --url http://127.0.0.1:8080/v1/chat/completions --providers chatgpt,claude --model <configured-model> --iterations 20 --pid <gateway-pid>
 ```
 
-Live mode requires an available gateway and a valid API key when authentication
-is enabled; pass `--api-key <secret>` rather than putting secrets in URLs.
+Live mode requires an available gateway, a configured model name advertised by each selected provider, and a valid API key when authentication
+is enabled; the probe pins each request as `provider/model`. Pass `--api-key <secret>` rather than putting secrets in URLs.
 Install `curl` on the machine running the probe. It reports per-request total
 time and TTFT, TTFT samples after switching provider labels, and (when `--pid`
 is provided) process-wide RSS snapshots in KiB. Fake mode reports a synthetic
