@@ -777,7 +777,7 @@ fn schema_v1_database_migrates_provider_thread_map_without_losing_conversations(
         .unwrap()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 3);
+    assert_eq!(version, 4);
     let activity: i64 = memory
         .lock()
         .unwrap()
@@ -965,5 +965,50 @@ fn context_budget_estimate_handles_multibyte_text_conservatively() {
             .sum::<usize>()
             <= 12
             || context.len() == 1
+    );
+}
+
+
+#[test]
+fn rolling_summary_persists_and_context_keeps_recent_messages() {
+    let fixture = Fixture::new();
+    let memory = fixture.open();
+
+    for index in 0..12 {
+        memory
+            .store_turn(
+                "rolling-summary".into(),
+                vec![m("user", &format!("user turn {index}: details that should remain in durable history"))],
+                m("assistant", &format!("assistant response {index}: durable response details")),
+                "chatgpt".into(),
+                "tab".into(),
+            )
+            .unwrap();
+    }
+
+    let (prompt, context) = memory
+        .build_context(Some("rolling-summary"), &[])
+        .unwrap();
+    assert!(
+        prompt.contains("Conversation summary of earlier turns:"),
+        "long conversations should include the persisted rolling summary"
+    );
+    assert!(
+        context.iter().any(|message| message.content.contains("user turn 11")),
+        "the latest user turn must remain verbatim"
+    );
+    assert!(
+        context.iter().any(|message| message.content.contains("assistant response 11")),
+        "the latest assistant response must remain verbatim"
+    );
+
+    drop(memory);
+    let reopened = fixture.open();
+    let (reopened_prompt, _) = reopened
+        .build_context(Some("rolling-summary"), &[])
+        .unwrap();
+    assert!(
+        reopened_prompt.contains("Conversation summary of earlier turns:"),
+        "summary metadata should survive database restart"
     );
 }
