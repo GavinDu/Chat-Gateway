@@ -306,7 +306,7 @@ When `auth.keys` is non-empty, every route except `/health` requires `Authorizat
 
 Treat exported conversations as sensitive user data; protect access to exports and include them in backup-retention and deletion procedures.
 
-Conversation turns are persisted in the gateway's SQLite memory store so the API can rebuild context across requests. The gateway does **not** currently apply an automatic age-based retention period; stored conversations remain until explicitly deleted or the backing store is removed under the operator's data-management procedure. Operators should account for this when sizing disks, backing up the database, and defining their own retention requirements. Adding automatic TTL requires a separate purge implementation and backup-retention policy; this documentation does not imply that either is active.
+Conversation turns are persisted in the gateway's SQLite memory store so the API can rebuild context across requests. Automatic age-based retention is opt-in: set `memory.retention_days` to a positive number to purge conversations after that many days (the background purge runs hourly); the default `0` disables automatic expiry. Purging cascades to stored messages and provider-thread mappings. This applies to the live SQLite store only; backup copies follow the operator's separate backup-retention policy.
 
 - `GET /v1/conversations?limit=50&offset=0` lists conversation IDs, provider names, and message counts without returning message bodies. `limit` defaults to 50 and is capped at 100; `offset` defaults to 0.
 - `GET /v1/conversations/:conversation_id` exports the stored conversation record, including its messages and provider/tab metadata, as JSON.
