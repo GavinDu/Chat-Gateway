@@ -160,7 +160,6 @@ pub fn element_exists(page: &Page, selector: &str) -> bool {
     }
 }
 
-
 #[cfg(test)]
 mod response_probe_tests {
     use super::{decode_response_probe, ResponseProbe};
