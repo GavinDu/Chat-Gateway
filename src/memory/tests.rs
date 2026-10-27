@@ -1094,7 +1094,10 @@ fn context_budget_estimate_handles_multibyte_text_conservatively() {
     let ascii = "hello world";
     let cjk = "你好世界你好世界";
     let emoji = "🙂🙂🙂🙂";
-    assert!(crate::context::estimate_message_tokens(cjk) >= crate::context::estimate_message_tokens(ascii));
+    assert!(
+        crate::context::estimate_message_tokens(cjk)
+            >= crate::context::estimate_message_tokens(ascii)
+    );
     assert!(crate::context::estimate_message_tokens(emoji) > 0);
 
     let fixture = Fixture::new();
