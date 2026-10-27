@@ -9,6 +9,9 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
+    fs::{self, OpenOptions},
+    io::Write,
+    path::Path,
     sync::{Arc, Mutex},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -40,11 +43,71 @@ impl RelayState {
                 pairing_hash: hash,
                 pairing_expires: Instant::now() + PAIRING_LIFETIME,
                 pairing_attempts: Mutex::new(0),
-                install_token_hash: Mutex::new(None),
+                install_token_hash: Mutex::new(load_install_token_hash()?),
                 used_nonces: Mutex::new(HashMap::new()),
             },
             code,
         ))
+    }
+}
+
+fn install_token_hash_path() -> &'static Path {
+    Path::new("sessions/relay-install-token.sha256")
+}
+
+fn load_install_token_hash() -> anyhow::Result<Option<[u8; 32]>> {
+    match fs::read(install_token_hash_path()) {
+        Ok(bytes) => {
+            let hash: [u8; 32] = bytes.try_into()
+                .map_err(|_| anyhow::anyhow!("persisted relay install token hash is malformed"))?;
+            Ok(Some(hash))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn persist_install_token_hash(hash: &[u8; 32]) -> anyhow::Result<()> {
+    fs::create_dir_all("sessions")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions("sessions", fs::Permissions::from_mode(0o700))?;
+    }
+    let temporary = format!("sessions/relay-install-token.sha256.tmp-{}", uuid::Uuid::new_v4());
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&temporary)?;
+    if let Err(error) = (|| -> anyhow::Result<()> {
+        file.write_all(hash)?;
+        file.sync_all()?;
+        Ok(())
+    })() {
+        drop(file);
+        let _ = fs::remove_file(&temporary);
+        return Err(error);
+    }
+    drop(file);
+    if let Err(error) = fs::rename(&temporary, install_token_hash_path()) {
+        let _ = fs::remove_file(&temporary);
+        return Err(error.into());
+    }
+    if let Ok(directory) = fs::File::open("sessions") {
+        directory.sync_all()?;
+    }
+    Ok(())
+}
+
+fn delete_install_token_hash() -> anyhow::Result<()> {
+    match fs::remove_file(install_token_hash_path()) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
     }
 }
 
@@ -102,15 +165,15 @@ pub async fn pair(
         Ok(value) => value,
         Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "relay_unavailable", "relay state is unavailable"),
     };
-    if token_slot.is_some() {
-        return json_error(StatusCode::CONFLICT, "already_paired", "this gateway already has a paired extension");
-    }
     let mut random = [0_u8; 32];
     if SystemRandom::new().fill(&mut random).is_err() {
         return json_error(StatusCode::INTERNAL_SERVER_ERROR, "relay_unavailable", "could not create install token");
     }
     let token = random.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
     let token_hash: [u8; 32] = Sha256::digest(token.as_bytes()).into();
+    if persist_install_token_hash(&token_hash).is_err() {
+        return json_error(StatusCode::INTERNAL_SERVER_ERROR, "relay_unavailable", "could not persist paired extension state");
+    }
     *token_slot = Some(token_hash);
     // A successful exchange consumes the pairing code permanently.
     *attempts = MAX_PAIR_ATTEMPTS;
@@ -205,6 +268,9 @@ pub async fn unpair(State(app): State<Arc<crate::AppState>>, headers: HeaderMap)
     if let Err(response) = authenticated_request(&app, &headers) { return response; }
     match app.relay.install_token_hash.lock() {
         Ok(mut token) => {
+            if delete_install_token_hash().is_err() {
+                return json_error(StatusCode::INTERNAL_SERVER_ERROR, "relay_unavailable", "could not revoke persisted extension state");
+            }
             *token = None;
             tracing::info!("browser extension unpaired");
             Json(serde_json::json!({"ok":true,"paired":false})).into_response()
