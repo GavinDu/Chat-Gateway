@@ -24,7 +24,7 @@ The default popup gateway URL is `http://127.0.0.1:3000`; adjust it if the confi
 5. **Unlink selected provider** deletes both encrypted and legacy on-disk records. Because the embedded browser may still have cookies in memory, restart the gateway after unlinking before relying on revocation. This limitation is intentional and remains a follow-up before the relay can be considered production-complete.
 6. **Unpair this extension** revokes the installation token. It does not delete provider records; unlink providers first if you want their vault entries removed.
 
-The gateway binds the relay routes to loopback and checks the exact `chrome-extension://<id>` origin. Paired requests require a bearer install token, timestamp, and one-use nonce. The token is returned once and stored in Chrome extension-local storage; protect the browser profile.
+The gateway binds the relay routes to loopback and checks the exact `chrome-extension://<id>` origin. Paired requests require a bearer install token, timestamp, and one-use nonce. The token is returned once and stored in Chrome extension-local storage; the gateway persists only its SHA-256 hash in the owner-only `sessions/relay-install-token.sha256` file so pairing survives restart. Unpair deletes the server-side hash and revokes the token. Protect the browser profile.
 
 ## Current limitations / rollout gate
 
