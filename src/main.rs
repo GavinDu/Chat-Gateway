@@ -391,11 +391,7 @@ async fn main() -> anyhow::Result<()> {
                 let cutoff = now.saturating_sub(retention_seconds);
                 match memory.purge_expired_conversations(cutoff) {
                     Ok(deleted) if deleted > 0 => {
-                        tracing::info!(
-                            deleted,
-                            retention_days,
-                            "purged expired conversations"
-                        );
+                        tracing::info!(deleted, retention_days, "purged expired conversations");
                     }
                     Ok(_) => {}
                     Err(error) => {
