@@ -62,6 +62,9 @@ pub trait ConversationStore: Send + Sync {
     /// Read at most the newest `max_messages` in chronological order.
     /// Kept as part of the storage contract while request call sites migrate.
     #[allow(dead_code)]
+    /// Bounded reads are part of the migration contract; production call sites
+    /// will adopt this path as transcript consumers move behind the trait.
+    #[allow(dead_code)]
     async fn read_history(
         self: Arc<Self>,
         owner_key_id: String,
@@ -251,6 +254,9 @@ impl UnifiedMemory {
     /// The owner check and row selection share a transaction so callers cannot
     /// accidentally read another tenant's conversation through a bounded path.
     #[allow(dead_code)] // Used by the async storage contract's bounded-history path.
+    // This bounded query backs the staged ConversationStore contract and is
+    // exercised by its tests before request-path migration is completed.
+    #[allow(dead_code)]
     pub fn conversation_history_for_owner_with_limit(
         &self,
         owner_key_id: &str,
