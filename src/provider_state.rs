@@ -70,6 +70,21 @@ pub fn record_unlinked(provider: &str) {
     }
 }
 
+/// Record an authentication failure discovered by the read-only session probe.
+/// This transition is typed; it does not depend on matching browser error strings.
+pub fn record_needs_login(provider: &str) {
+    record_error_state(provider, true, None);
+}
+
+/// Record a probe failure that did not prove the session had expired.
+pub fn record_probe_failure(provider: &str) {
+    record_error_state(
+        provider,
+        false,
+        SystemTime::now().checked_add(DEGRADED_RETRY_COOLDOWN),
+    );
+}
+
 pub fn record_success(provider: &str) {
     if let Ok(mut map) = states().lock() {
         map.insert(
