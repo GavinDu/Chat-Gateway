@@ -413,6 +413,43 @@ fn repeated_prompt_with_a_different_answer_is_a_new_turn() {
 }
 
 #[test]
+fn schema_v5_migrates_to_v6_with_long_term_memory_disabled_by_default() {
+    let fixture = Fixture::new();
+    {
+        let memory = fixture.open();
+        memory
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "DROP INDEX memory_items_owner_updated_idx;
+                 DROP INDEX memory_items_owner_key_idx;
+                 DROP TABLE memory_items;
+                 DROP TABLE memory_settings;
+                 PRAGMA user_version=5;",
+            )
+            .unwrap();
+    }
+    let memory = fixture.open();
+    let version: i64 = memory
+        .lock()
+        .unwrap()
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, 6);
+    assert!(!memory.long_term_memory_enabled("owner-a").unwrap());
+    memory
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT id FROM memory_items LIMIT 1",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .unwrap();
+}
+
+#[test]
 fn long_term_memory_is_opt_in_owner_scoped_and_deletable() {
     let memory = UnifiedMemory::new(8000);
     assert!(!memory.long_term_memory_enabled("owner-a").unwrap());
