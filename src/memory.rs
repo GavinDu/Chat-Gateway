@@ -260,9 +260,9 @@ impl UnifiedMemory {
             .map(|message| estimate_message_tokens(&message.content).saturating_add(8))
             .unwrap_or(0);
         let message_budget = if summary_message.is_some() {
-            self.max_tokens.saturating_sub(summary_tokens)
+            token_budget.saturating_sub(summary_tokens)
         } else {
-            self.max_tokens
+            token_budget
         };
         let (mut prompt, mut context) =
             ContextBuilder::build(&history, new_messages, message_budget);
