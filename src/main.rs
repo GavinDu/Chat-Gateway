@@ -404,7 +404,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/conversations", get(list_conversations))
         .route("/v1/memory/settings", get(get_long_term_memory_settings).put(put_long_term_memory_settings))
-        .route("/v1/memory/items", get(list_long_term_memory_items).put(save_long_term_memory_item))
+        .route("/v1/memory/items", get(list_long_term_memory_items).put(save_long_term_memory_item).delete(delete_all_long_term_memory_items))
         .route("/v1/memory/items/:item_id", axum::routing::delete(delete_long_term_memory_item))
         .route(
             "/v1/conversations/:conversation_id/provider-threads/:provider",
@@ -1358,6 +1358,11 @@ struct LongTermMemoryItemRequest {
     expires_at: Option<i64>,
 }
 
+#[derive(Debug, serde::Deserialize)]
+struct DeleteAllLongTermMemoryRequest {
+    confirm: bool,
+}
+
 fn memory_owner(auth_context: &Option<Extension<AuthKeyContext>>) -> &str {
     auth_context
         .as_ref()
@@ -1474,6 +1479,44 @@ async fn delete_long_term_memory_item(
         Ok(Ok(true)) => StatusCode::NO_CONTENT.into_response(),
         Ok(Ok(false)) => api_error(StatusCode::NOT_FOUND, "not_found", "memory_item_not_found", "memory item was not found"),
         _ => api_error(StatusCode::INTERNAL_SERVER_ERROR, "server_error", "memory_delete_failed", "memory item could not be deleted safely"),
+    }
+}
+
+async fn delete_all_long_term_memory_items(
+    State(state): State<Arc<AppState>>,
+    auth_context: Option<Extension<AuthKeyContext>>,
+    Json(request): Json<DeleteAllLongTermMemoryRequest>,
+) -> Response {
+    if !request.confirm {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            "confirmation_required",
+            "set confirm=true to delete all of your long-term memory items",
+        );
+    }
+    let memory = state.memory.clone();
+    let owner = memory_owner(&auth_context).to_owned();
+    match tokio::task::spawn_blocking(move || memory.delete_all_long_term_memory_items(&owner)).await {
+        Ok(Ok(deleted)) => Json(serde_json::json!({ "deleted": deleted })).into_response(),
+        Ok(Err(error)) => {
+            tracing::error!(%error, "long-term memory bulk deletion failed");
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                "memory_delete_failed",
+                "memory items could not be deleted safely",
+            )
+        }
+        Err(error) => {
+            tracing::error!(%error, "long-term memory bulk deletion task failed");
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                "memory_delete_failed",
+                "memory items could not be deleted safely",
+            )
+        }
     }
 }
 
