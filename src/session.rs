@@ -1403,15 +1403,19 @@ mod vault_tests {
     }
 
     #[test]
-    #[test]
     fn migration_preserves_plaintext_source_when_encrypted_write_fails() {
-        let root = std::env::temp_dir().join(format!("chat-gateway-vault-migration-write-failure-{}", uuid::Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!(
+            "chat-gateway-vault-migration-write-failure-{}",
+            uuid::Uuid::new_v4()
+        ));
         std::fs::create_dir_all(&root).unwrap();
         let legacy_path = root.join("legacy.json");
         let vault_path = root.join("vault.vault");
         std::fs::write(&legacy_path, serde_json::to_vec(&sample_session()).unwrap()).unwrap();
         std::fs::create_dir(&vault_path).unwrap();
-        assert!(migrate_legacy_snapshot(&legacy_path, &vault_path, "chatgpt", &[0x5a; 32]).is_err());
+        assert!(
+            migrate_legacy_snapshot(&legacy_path, &vault_path, "chatgpt", &[0x5a; 32]).is_err()
+        );
         assert!(legacy_path.is_file());
         assert!(vault_path.is_dir());
         std::fs::remove_dir_all(root).unwrap();
@@ -1419,7 +1423,10 @@ mod vault_tests {
 
     #[test]
     fn migration_rejects_malformed_legacy_source_without_deleting_it() {
-        let root = std::env::temp_dir().join(format!("chat-gateway-vault-migration-malformed-{}", uuid::Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!(
+            "chat-gateway-vault-migration-malformed-{}",
+            uuid::Uuid::new_v4()
+        ));
         std::fs::create_dir_all(&root).unwrap();
         let legacy_path = root.join("legacy.json");
         let vault_path = root.join("vault.vault");
@@ -1433,21 +1440,29 @@ mod vault_tests {
 
     #[test]
     fn migration_deletes_plaintext_only_after_authenticated_readback() {
-        let root = std::env::temp_dir().join(format!("chat-gateway-vault-migration-success-{}", uuid::Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!(
+            "chat-gateway-vault-migration-success-{}",
+            uuid::Uuid::new_v4()
+        ));
         std::fs::create_dir_all(&root).unwrap();
         let legacy_path = root.join("legacy.json");
         let vault_path = root.join("vault.vault");
         let sample = sample_session();
         std::fs::write(&legacy_path, serde_json::to_vec(&sample).unwrap()).unwrap();
-        let restored = migrate_legacy_snapshot(&legacy_path, &vault_path, "chatgpt", &[0x5a; 32]).unwrap();
+        let restored =
+            migrate_legacy_snapshot(&legacy_path, &vault_path, "chatgpt", &[0x5a; 32]).unwrap();
         assert!(!legacy_path.exists());
         assert!(vault_path.is_file());
-        assert_eq!(session_state_hash(&restored).unwrap(), session_state_hash(&sample).unwrap());
+        assert_eq!(
+            session_state_hash(&restored).unwrap(),
+            session_state_hash(&sample).unwrap()
+        );
         let encrypted = std::fs::read(&vault_path).unwrap();
         assert!(decrypt_session_snapshot(&encrypted, "chatgpt", &[0x5a; 32]).is_ok());
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    #[test]
     fn vault_key_parser_accepts_only_32_byte_hex_keys() {
         assert_eq!(*parse_vault_key(&"ab".repeat(32)).unwrap(), [0xab; 32]);
         assert!(parse_vault_key("abcd").is_err());
