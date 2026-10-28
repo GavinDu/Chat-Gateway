@@ -1873,7 +1873,6 @@ fn concurrent_independent_connections_preserve_all_turns() {
     }
 }
 
-
 #[test]
 fn version_seven_migration_clears_synthetic_tab_id_and_preserves_history() {
     let fixture = Fixture::new();
