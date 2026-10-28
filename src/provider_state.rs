@@ -11,6 +11,7 @@ pub enum ProviderSessionState {
     Unknown,
     Ready,
     NeedsLogin,
+    #[allow(dead_code)] // Used when transient failures gain explicit state transitions.
     Degraded,
 }
 
