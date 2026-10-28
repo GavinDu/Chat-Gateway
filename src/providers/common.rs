@@ -114,10 +114,10 @@ pub fn response_probe(page: &Page, set: &SelectorSet, check_body_challenge: bool
                     if (text === null && matches.length) {{
                         const last = matches[matches.length - 1];
                         const content = last.innerText || last.textContent || "";
-                        if (content) {
+                        if (content) {{
                             text = content;
                             lastResponseNode = last;
-                        }
+                        }}
                     }}
                 }} catch (_) {{}}
             }}
@@ -133,20 +133,20 @@ pub fn response_probe(page: &Page, set: &SelectorSet, check_body_challenge: bool
             const challenge = ["captcha", "challenge", "checkpoint", "verify-human", "verify_you_are_human"].some(marker => lowerUrl.includes(marker))
                 || ["verify you are human", "confirm you are not a robot", "unusual traffic", "complete the captcha", "security challenge", "checking your browser"].some(marker => body.includes(marker));
             let postAnswerAffordance = false;
-            if (lastResponseNode) {
+            if (lastResponseNode) {{
                 const scopeSelector = "article, [data-message-author-role='assistant'], [data-testid='assistant-message'], [data-testid*='conversation-turn'], [data-testid*='message']";
                 let scope = lastResponseNode;
-                for (let depth = 0; depth < 6 && scope; depth += 1, scope = scope.parentElement) {
+                for (let depth = 0; depth < 6 && scope; depth += 1, scope = scope.parentElement) {{
                     let buttons = [];
-                    try { buttons = Array.from(scope.querySelectorAll("button, [role='button']")); } catch (_) {}
+                    try {{ buttons = Array.from(scope.querySelectorAll("button, [role='button']")); }} catch (_) {{}}
                     const labels = buttons.map(button => ((button.getAttribute("aria-label") || "") + " " + (button.getAttribute("data-testid") || "") + " " + (button.innerText || button.textContent || "")).toLowerCase());
-                    if (labels.some(label => /copy|regenerate|retry|good response|bad response|thumbs up|thumbs down/.test(label))) {
+                    if (labels.some(label => /copy|regenerate|retry|good response|bad response|thumbs up|thumbs down/.test(label))) {{
                         postAnswerAffordance = true;
                         break;
-                    }
+                    }}
                     if (scope.matches && scope.matches(scopeSelector) && depth >= 3) break;
-                }
-            }
+                }}
+            }}
             return {{ text, count: nodes.size, streaming, postAnswerAffordance, url, challenge }};
         }})()"#,
         check_body_challenge = check_body_challenge,
