@@ -3827,6 +3827,36 @@ mod api_key_auth_tests {
 }
 
 #[cfg(test)]
+mod provider_thread_sync_marker_tests {
+    use super::transcript_marker;
+    use crate::memory::ChatMessage;
+
+    #[test]
+    fn transcript_fingerprint_is_stable_and_changes_when_history_changes() {
+        let first = vec![ChatMessage {
+            role: "user".to_owned(),
+            content: "first question".to_owned(),
+        }];
+        assert_eq!(transcript_marker(&first), transcript_marker(&first));
+
+        let edited = vec![ChatMessage {
+            role: "user".to_owned(),
+            content: "different question".to_owned(),
+        }];
+        assert_ne!(transcript_marker(&first), transcript_marker(&edited));
+
+        let extended = vec![
+            first[0].clone(),
+            ChatMessage {
+                role: "assistant".to_owned(),
+                content: "answer".to_owned(),
+            },
+        ];
+        assert_ne!(transcript_marker(&first), transcript_marker(&extended));
+    }
+}
+
+#[cfg(test)]
 mod provider_thread_url_tests {
     use super::{is_reopenable_provider_thread_url, valid_provider_thread_url};
 

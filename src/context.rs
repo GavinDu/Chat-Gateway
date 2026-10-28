@@ -4,10 +4,9 @@ use crate::memory::ChatMessage;
 /// provider, or async-runtime dependency so policy can be tested independently.
 pub(crate) struct ContextBuilder;
 
-/// The minimum durable state needed to decide whether provider-side history
-/// is still synchronized with the gateway transcript.
-/// The send-path integration lands after the context-builder foundation is merged.
-#[allow(dead_code)]
+/// The durable provider-thread state used by the chat send path to decide
+/// whether provider-side history is still synchronized with the gateway transcript.
+/// The marker fields contain the transcript fingerprint, not a raw message ID.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ThreadSyncState {
     pub provider: String,
@@ -18,7 +17,6 @@ pub(crate) struct ThreadSyncState {
 
 /// A provider send plan. Delta is safe only when the adapter can reopen a
 /// thread and the persisted provider thread is known to be in sync.
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ContextPlan {
     Delta {
@@ -35,8 +33,6 @@ impl ContextBuilder {
     ///
     /// Any uncertainty (provider change, missing thread, unsupported reopen,
     /// or a stale sync marker) deliberately falls back to a bounded replay.
-    // Keep the pure policy available while the browser send path is being refactored.
-    #[allow(dead_code)]
     pub(crate) fn plan(
         history: &[ChatMessage],
         incoming: &[ChatMessage],
