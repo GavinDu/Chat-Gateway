@@ -477,9 +477,18 @@ impl UnifiedMemory {
         owner_key_id: &str,
         cid: &str,
     ) -> anyhow::Result<Option<String>> {
-        Ok(self
-            .conversation_for_owner(owner_key_id, cid)?
-            .and_then(|conversation| conversation.provider))
+        // Routing needs only conversation metadata. Avoid loading every message
+        // just to recover provider affinity; context construction loads the
+        // transcript once after the route is selected.
+        let connection = self.lock()?;
+        connection
+            .query_row(
+                "SELECT provider FROM conversations WHERE id = ?1 AND owner_key_id = ?2",
+                rusqlite::params![cid, owner_key_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
     }
 
     #[allow(dead_code)]
