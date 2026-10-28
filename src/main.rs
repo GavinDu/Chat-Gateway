@@ -1273,6 +1273,7 @@ fn delete_conversation_response(memory: &UnifiedMemory, conversation_id: &str) -
     delete_conversation_response_for_owner(memory, "local", conversation_id)
 }
 
+#[cfg(test)]
 fn delete_conversation_response_for_owner(
     memory: &UnifiedMemory,
     owner_key_id: &str,
@@ -1311,6 +1312,7 @@ fn export_conversation_response(memory: &UnifiedMemory, conversation_id: &str) -
     export_conversation_response_for_owner(memory, "local", conversation_id)
 }
 
+#[cfg(test)]
 fn export_conversation_response_for_owner(
     memory: &UnifiedMemory,
     owner_key_id: &str,
@@ -1606,7 +1608,37 @@ async fn export_conversation(
         .as_ref()
         .map(|Extension(context)| context.key_id.as_str())
         .unwrap_or("local");
-    export_conversation_response_for_owner(&state.memory, owner_key_id, &conversation_id)
+    if !valid_conversation_id(&conversation_id) {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            "invalid_conversation_id",
+            "conversation ID must be 8-128 ASCII letters, digits, '_' or '-'",
+        );
+    }
+    match state
+        .memory
+        .clone()
+        .export_conversation_for_owner_blocking(owner_key_id.to_owned(), conversation_id.clone())
+        .await
+    {
+        Ok(Some(conversation)) => Json(conversation).into_response(),
+        Ok(None) => api_error(
+            StatusCode::NOT_FOUND,
+            "invalid_request_error",
+            "conversation_not_found",
+            "conversation does not exist",
+        ),
+        Err(_error) => {
+            tracing::error!(conversation_id = %conversation_id, "conversation export failed");
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                "memory_persistence_failed",
+                "conversation could not be exported safely",
+            )
+        }
+    }
 }
 
 async fn export_conversation_markdown(
@@ -1618,7 +1650,62 @@ async fn export_conversation_markdown(
         .as_ref()
         .map(|Extension(context)| context.key_id.as_str())
         .unwrap_or("local");
-    export_conversation_markdown_response_for_owner(&state.memory, owner_key_id, &conversation_id)
+    if !valid_conversation_id(&conversation_id) {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            "invalid_conversation_id",
+            "conversation ID must be 8-128 ASCII letters, digits, '_' or '-'",
+        );
+    }
+    match state
+        .memory
+        .clone()
+        .export_conversation_for_owner_blocking(owner_key_id.to_owned(), conversation_id.clone())
+        .await
+    {
+        Ok(Some(conversation)) => {
+            let mut markdown = format!("# Conversation {}\n\n", conversation.id);
+            if let Some(provider) = conversation.provider.as_deref() {
+                markdown.push_str(&format!("- Provider: {provider}\n"));
+            }
+            if let Some(tab_id) = conversation.tab_id.as_deref() {
+                markdown.push_str(&format!("- Tab: {tab_id}\n"));
+            }
+            markdown.push('\n');
+            for (index, message) in conversation.messages.iter().enumerate() {
+                markdown.push_str(&format!(
+                    "## {} — {}\n\n{}\n\n",
+                    index + 1,
+                    message.role,
+                    message.content
+                ));
+            }
+            (
+                [(
+                    axum::http::header::CONTENT_TYPE,
+                    "text/markdown; charset=utf-8",
+                )],
+                markdown,
+            )
+                .into_response()
+        }
+        Ok(None) => api_error(
+            StatusCode::NOT_FOUND,
+            "invalid_request_error",
+            "conversation_not_found",
+            "conversation does not exist",
+        ),
+        Err(_error) => {
+            tracing::error!(conversation_id = %conversation_id, "conversation Markdown export failed");
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                "memory_persistence_failed",
+                "conversation could not be exported safely",
+            )
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1629,6 +1716,7 @@ fn export_conversation_markdown_response(
     export_conversation_markdown_response_for_owner(memory, "local", conversation_id)
 }
 
+#[cfg(test)]
 fn export_conversation_markdown_response_for_owner(
     memory: &UnifiedMemory,
     owner_key_id: &str,
@@ -1696,7 +1784,37 @@ async fn delete_conversation(
         .as_ref()
         .map(|Extension(context)| context.key_id.as_str())
         .unwrap_or("local");
-    delete_conversation_response_for_owner(&state.memory, owner_key_id, &conversation_id)
+    if !valid_conversation_id(&conversation_id) {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            "invalid_conversation_id",
+            "conversation ID must be 8-128 ASCII letters, digits, '_' or '-'",
+        );
+    }
+    match state
+        .memory
+        .clone()
+        .delete_conversation_for_owner_blocking(owner_key_id.to_owned(), conversation_id.clone())
+        .await
+    {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => api_error(
+            StatusCode::NOT_FOUND,
+            "invalid_request_error",
+            "conversation_not_found",
+            "conversation does not exist",
+        ),
+        Err(_error) => {
+            tracing::error!(conversation_id = %conversation_id, "conversation deletion failed");
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                "memory_persistence_failed",
+                "conversation could not be deleted durably",
+            )
+        }
+    }
 }
 
 fn build_model_list(cfg: &AppConfig, cache: &HashMap<String, Vec<String>>) -> serde_json::Value {
