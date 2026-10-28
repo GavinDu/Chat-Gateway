@@ -58,6 +58,17 @@ impl MemoryEgressPolicy {
         })
     }
 
+    /// Return the effective explicit allowlist for safe operator inspection.
+    pub(crate) fn allowed_provider_ids(&self) -> Vec<String> {
+        let mut providers = self
+            .allowed_personal_memory_providers
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        providers.sort();
+        providers
+    }
+
     pub(crate) fn authorize(
         &self,
         provider: &str,
