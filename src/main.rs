@@ -1929,6 +1929,17 @@ async fn chat_completions(
         );
     }
 
+    let memory_egress_policy = match memory_egress::MemoryEgressPolicy::from_env() {
+        Ok(policy) => policy,
+        Err(_) => {
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                "memory_egress_policy_invalid",
+                "provider memory egress policy is invalid",
+            )
+        }
+    };
     let candidate_count = candidates.len();
     let mut busy_count = 0usize;
     let mut last_err: Option<String> = None;
@@ -2036,13 +2047,48 @@ async fn chat_completions(
             supports_reopen,
             8000,
         );
-        let (provider_prompt, thread_url) = match send_plan {
+        let (mut provider_prompt, thread_url) = match send_plan {
             ContextPlan::Delta { messages } => (
                 context::render_prompt(&messages),
                 saved_thread.map(|thread| thread.thread_url),
             ),
             ContextPlan::Replay { preamble, .. } => (format!("{preamble}\n{prompt}"), None),
         };
+
+        // Enforce data-handling policy at the last gateway boundary before
+        // provider-specific submission. Current-turn content and local
+        // transcript context are distinct from optional personal long-term
+        // memory. No long-term memory retrieval is currently wired into this
+        // request path; keep the injection point typed and fail-closed.
+        if memory_egress_policy
+            .authorize(&provider_name, memory_egress::ProviderDataClass::CurrentTurn)
+            .is_err()
+            || memory_egress_policy
+                .authorize(
+                    &provider_name,
+                    memory_egress::ProviderDataClass::ConversationContext,
+                )
+                .is_err()
+        {
+            last_err = Some("provider data-handling policy denied request".to_owned());
+            continue;
+        }
+        let personal_memory_items: Vec<memory_egress::PersonalMemoryItem> = Vec::new();
+        let allowed_personal_memory = match memory_egress_policy
+            .filter_personal_memory(&provider_name, &personal_memory_items)
+        {
+            Ok(items) => items,
+            Err(_) => {
+                last_err = Some("provider memory egress policy denied request".to_owned());
+                continue;
+            }
+        };
+        for item in allowed_personal_memory {
+            provider_prompt.push_str("\nPERSONAL_MEMORY_ITEM ");
+            provider_prompt.push_str(&item.id);
+            provider_prompt.push_str(": ");
+            provider_prompt.push_str(&item.content);
+        }
 
         let mut rx = match state
             .pool
