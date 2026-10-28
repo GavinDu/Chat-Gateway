@@ -1415,6 +1415,37 @@ mod vault_tests {
     }
 
     #[test]
+    fn invalid_existing_vault_fails_closed_and_preserves_legacy_source() {
+        let root = std::env::temp_dir().join(format!(
+            "chat-gateway-vault-no-plaintext-fallback-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let legacy_path = root.join("chatgpt.json");
+        let vault_path = root.join("chatgpt.vault");
+        let legacy_bytes = serde_json::to_vec(&sample_session()).unwrap();
+        std::fs::write(&legacy_path, &legacy_bytes).unwrap();
+        let encrypted = encrypt_session_snapshot(&sample_session(), "chatgpt", &[0x37; 32])
+            .unwrap();
+        std::fs::write(&vault_path, encrypted).unwrap();
+
+        let result = load_vault_session_from_paths(
+            "chatgpt",
+            &vault_path,
+            &legacy_path,
+            &[0x5a; 32],
+        );
+
+        assert!(result.is_err(), "an unreadable vault record must fail closed");
+        assert_eq!(
+            std::fs::read(&legacy_path).unwrap(),
+            legacy_bytes,
+            "failed vault decryption must not delete or silently load the plaintext source"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn migration_preserves_plaintext_source_when_encrypted_write_fails() {
         let root = std::env::temp_dir().join(format!(
             "chat-gateway-vault-migration-write-failure-{}",
