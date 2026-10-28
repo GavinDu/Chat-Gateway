@@ -537,6 +537,25 @@ fn bulk_memory_delete_is_scoped_to_owner_and_preserves_opt_in_setting() {
 }
 
 #[test]
+fn long_term_memory_upsert_preserves_item_identity_and_replaces_value() {
+    let memory = UnifiedMemory::new(8000);
+    memory.set_long_term_memory_enabled("owner-a", true).unwrap();
+    let original = memory
+        .save_long_term_memory_item("owner-a", "timezone", "America/New_York", None, 0.8, None)
+        .unwrap();
+    let updated = memory
+        .save_long_term_memory_item("owner-a", "timezone", "Europe/London", None, 1.0, None)
+        .unwrap();
+
+    assert_eq!(updated.id, original.id);
+    assert_eq!(updated.value, "Europe/London");
+    assert_eq!(updated.confidence, 1.0);
+    let items = memory.list_long_term_memory_items("owner-a").unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].id, original.id);
+}
+
+#[test]
 fn long_term_memory_provenance_cannot_reference_another_owners_conversation() {
     let memory = UnifiedMemory::new(8000);
     memory
