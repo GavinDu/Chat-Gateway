@@ -393,6 +393,31 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
+    // Re-check warmed provider pages periodically so sessions that expire while idle
+    // are removed from routing/readiness without waiting for user traffic.
+    {
+        let state = state.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+            loop {
+                for provider in state.cfg.providers.iter().filter(|provider| provider.enabled) {
+                    match state.pool.verify_session(&provider.name).await {
+                        Ok(()) => provider_state::record_success(&provider.name),
+                        Err(error) => {
+                            provider_state::record_error(&provider.name, &error.to_string());
+                            tracing::warn!(
+                                provider = %provider.name,
+                                %error,
+                                "provider session verification failed"
+                            );
+                        }
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            }
+        });
+    }
+
     // Retention is opt-in: a zero-day setting leaves conversation history untouched.
     let retention_days = cfg.memory.retention_days;
     if retention_days > 0 {
