@@ -1872,3 +1872,32 @@ fn concurrent_independent_connections_preserve_all_turns() {
         );
     }
 }
+
+#[tokio::test]
+async fn async_conversation_store_reads_and_persists_on_blocking_pool() {
+    let fixture = Fixture::new();
+    let store = Arc::new(fixture.open());
+
+    store
+        .clone()
+        .persist_turn(
+            "owner-async".to_string(),
+            "conversation-async".to_string(),
+            vec![m("user", "hello")],
+            m("assistant", "hi"),
+            "chatgpt".to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let transcript = store
+        .read_transcript(
+            "owner-async".to_string(),
+            "conversation-async".to_string(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(transcript, vec![m("user", "hello"), m("assistant", "hi")]);
+}
+
