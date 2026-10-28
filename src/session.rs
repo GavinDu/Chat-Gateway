@@ -257,10 +257,11 @@ pub fn clear_provider_cookies(browser: &Browser, provider: &str) -> Result<usize
         // The old value is never written back; ignore it when validating the
         // deletion tuple so unusual but valid values do not leave stale cookies.
         cookie.value.clear();
-        if !cookie_domain_allowed(provider, &cookie.domain)
-            || !restored_cookie_fields_safe(&cookie)
-        {
+        if !cookie_domain_allowed(provider, &cookie.domain) {
             continue;
+        }
+        if !restored_cookie_fields_safe(&cookie) {
+            anyhow::bail!("provider cookie has invalid fields and could not be safely revoked");
         }
         let path = if cookie.path.is_empty() { "/" } else { cookie.path.as_str() };
         let host_prefix = cookie.name.starts_with("__Host-");
