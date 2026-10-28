@@ -384,7 +384,7 @@ async fn main() -> anyhow::Result<()> {
                     // A false result means the page is not warmed yet, not that
                     // the provider session is invalid. Leave routing state unchanged.
                     Ok(false) => {}
-                    Err(error) => {
+                    Err(_error) => {
                         // Do not log raw probe errors; browser engines may include page or
                         // upstream details in their error messages.
                         tracing::warn!(
