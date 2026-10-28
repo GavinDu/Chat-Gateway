@@ -321,7 +321,11 @@ pub fn clear_provider_cookies(browser: &Browser, provider: &str) -> Result<usize
             continue;
         }
         let expired = cookie_expiration_header(&cookie)?;
-        let path = if cookie.path.is_empty() { "/" } else { cookie.path.as_str() };
+        let path = if cookie.path.is_empty() {
+            "/"
+        } else {
+            cookie.path.as_str()
+        };
         let url = format!(
             "https://{}{}",
             cookie.domain.trim_start_matches('.'),
