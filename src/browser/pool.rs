@@ -314,9 +314,15 @@ impl ObscuraPool {
     pub async fn refresh_session(&self, name: &str) -> Result<()> {
         let provider = self.login_provider(name)?;
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx.send(Command::RefreshSession { provider, reply: tx }).await
+        self.cmd_tx
+            .send(Command::RefreshSession {
+                provider,
+                reply: tx,
+            })
+            .await
             .map_err(|_| anyhow::anyhow!("browser thread gone"))?;
-        rx.await.map_err(|_| anyhow::anyhow!("browser thread dropped session refresh"))?
+        rx.await
+            .map_err(|_| anyhow::anyhow!("browser thread dropped session refresh"))?
     }
 
     /// Clear provider cookies and page storage before deleting its saved session.
@@ -324,9 +330,15 @@ impl ObscuraPool {
         let provider =
             Provider::from_name(name).ok_or_else(|| anyhow::anyhow!("unknown provider {name}"))?;
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx.send(Command::UnlinkSession { provider, reply: tx }).await
+        self.cmd_tx
+            .send(Command::UnlinkSession {
+                provider,
+                reply: tx,
+            })
+            .await
             .map_err(|_| anyhow::anyhow!("browser thread gone"))?;
-        rx.await.map_err(|_| anyhow::anyhow!("browser thread dropped session unlink"))?
+        rx.await
+            .map_err(|_| anyhow::anyhow!("browser thread dropped session unlink"))?
     }
 
     fn login_provider(&self, name: &str) -> Result<Provider> {
