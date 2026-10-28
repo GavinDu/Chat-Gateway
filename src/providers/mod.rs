@@ -750,18 +750,66 @@ mod response_delta_tracker_tests {
 
 #[cfg(test)]
 mod response_completion_tests {
-    use super::{completion_idle_ticks, completion_ready, DoneSignal, COMPLETION_IDLE_TICKS, EXPLICIT_DONE_IDLE_TICKS};
+    use super::{
+        completion_idle_ticks, completion_ready, DoneSignal, COMPLETION_IDLE_TICKS,
+        EXPLICIT_DONE_IDLE_TICKS,
+    };
 
     #[test]
-    fn requires_more_than_ten_seconds_of_idle_before_completion() {
-        assert!(!completion_ready(28, false));
-        assert!(!completion_ready(COMPLETION_IDLE_TICKS - 1, false));
-        assert!(completion_ready(COMPLETION_IDLE_TICKS, false));
+    fn stable_text_requires_conservative_idle_grace() {
+        assert!(!completion_ready(28, false, DoneSignal::StableResponseText, true));
+        assert!(!completion_ready(
+            COMPLETION_IDLE_TICKS - 1,
+            false,
+            DoneSignal::StableResponseText,
+            true,
+        ));
+        assert!(completion_ready(
+            COMPLETION_IDLE_TICKS,
+            false,
+            DoneSignal::StableResponseText,
+            true,
+        ));
     }
 
     #[test]
     fn active_streaming_prevents_completion_even_after_idle_ticks() {
-        assert!(!completion_ready(COMPLETION_IDLE_TICKS + 10, true));
+        assert!(!completion_ready(
+            COMPLETION_IDLE_TICKS + 10,
+            true,
+            DoneSignal::StableResponseText,
+            true,
+        ));
+    }
+
+    #[test]
+    fn explicit_stop_disappearance_uses_short_grace_only_after_streaming_was_seen() {
+        assert_eq!(
+            completion_idle_ticks(DoneSignal::StopControlDisappeared, true),
+            EXPLICIT_DONE_IDLE_TICKS,
+        );
+        assert_eq!(
+            completion_idle_ticks(DoneSignal::StopControlDisappeared, false),
+            COMPLETION_IDLE_TICKS,
+        );
+        assert!(!completion_ready(
+            EXPLICIT_DONE_IDLE_TICKS - 1,
+            false,
+            DoneSignal::StopControlDisappeared,
+            true,
+        ));
+        assert!(completion_ready(
+            EXPLICIT_DONE_IDLE_TICKS,
+            false,
+            DoneSignal::StopControlDisappeared,
+            true,
+        ));
+        assert!(!completion_ready(
+            EXPLICIT_DONE_IDLE_TICKS,
+            true,
+            DoneSignal::StopControlDisappeared,
+            true,
+        ));
     }
 }
 
