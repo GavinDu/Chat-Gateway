@@ -291,6 +291,106 @@ pub fn delete_session_snapshot(provider: &str) -> Result<bool> {
     Ok(removed)
 }
 
+/// Non-secret status returned by the explicit vault inventory command.
+#[derive(Debug, Clone)]
+pub struct VaultSessionInfo {
+    pub provider: String,
+    pub status: &'static str,
+}
+
+/// List configured provider vault records without exposing cookie or storage values.
+/// A malformed or wrong-key record is reported as "unreadable", never as plaintext.
+pub fn list_vault_sessions() -> Result<Vec<VaultSessionInfo>> {
+    let key = vault_key_from_env()?;
+    const PROVIDERS: &[&str] = &[
+        "qwen", "metaai", "claude", "chatgpt", "gemini", "grok", "mistral", "perplexity",
+    ];
+    let mut entries = Vec::with_capacity(PROVIDERS.len());
+    for provider in PROVIDERS {
+        let path = session_vault_path(provider)?;
+        let status = match std::fs::read(&path) {
+            Ok(bytes) => {
+                if decrypt_session_snapshot(&bytes, provider, &key).is_ok() {
+                    "valid"
+                } else {
+                    "unreadable"
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => "missing",
+            Err(error) => return Err(error.into()),
+        };
+        entries.push(VaultSessionInfo { provider: (*provider).to_string(), status });
+    }
+    Ok(entries)
+}
+
+/// Rotate all encrypted vault records as one best-effort transaction.
+/// Every input is decrypted and every replacement authenticated before any
+/// live record is replaced. Encrypted old records are retained in a private
+/// backup directory so an interrupted deployment can be recovered with the
+/// old key. Runtime write failures trigger rollback of already-replaced files.
+pub fn rotate_vault_key(new_key: &[u8; 32]) -> Result<(usize, String)> {
+    let old_key = vault_key_from_env()?;
+    if old_key == *new_key {
+        anyhow::bail!("new vault key must differ from the current key");
+    }
+
+    const PROVIDERS: &[&str] = &[
+        "qwen", "metaai", "claude", "chatgpt", "gemini", "grok", "mistral", "perplexity",
+    ];
+    let mut originals: Vec<(String, Vec<u8>, Vec<u8>)> = Vec::new();
+    for provider in PROVIDERS {
+        let path = session_vault_path(provider)?;
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        let session = decrypt_session_snapshot(&bytes, provider, &old_key)
+            .map_err(|_| anyhow::anyhow!("cannot rotate vault: {provider} record is unreadable with the current key"))?;
+        let replacement = encrypt_session_snapshot(&session, provider, new_key)?;
+        let verified = decrypt_session_snapshot(&replacement, provider, new_key)?;
+        if session_state_hash(&verified)? != session_state_hash(&session)? {
+            anyhow::bail!("vault rotation verification failed for provider {provider}");
+        }
+        originals.push((path, bytes, replacement));
+    }
+
+    if originals.is_empty() {
+        return Ok((0, String::new()));
+    }
+
+    let backup_dir = format!("sessions/.vault-rotation-{}", uuid::Uuid::new_v4());
+    ensure_private_session_dir_sync(Path::new(&backup_dir))?;
+    for (path, original, _) in &originals {
+        let name = Path::new(path).file_name()
+            .ok_or_else(|| anyhow::anyhow!("invalid vault path during key rotation"))?;
+        write_session_file_atomically(&Path::new(&backup_dir).join(name), original)?;
+    }
+
+    let mut replaced = 0usize;
+    for (path, _, replacement) in &originals {
+        if let Err(error) = write_session_file_atomically(Path::new(path), replacement) {
+            let mut rollback_failed = false;
+            for (rollback_path, original, _) in originals.iter().take(replaced) {
+                if write_session_file_atomically(Path::new(rollback_path), original).is_err() {
+                    rollback_failed = true;
+                }
+            }
+            if rollback_failed {
+                anyhow::bail!(
+                    "vault key rotation failed and automatic rollback was incomplete; encrypted recovery copies are in {backup_dir}"
+                );
+            }
+            anyhow::bail!(
+                "vault key rotation failed; prior records were restored and encrypted recovery copies remain in {backup_dir}: {error}"
+            );
+        }
+        replaced += 1;
+    }
+    Ok((replaced, backup_dir))
+}
+
 fn session_vault_path(provider: &str) -> Result<String> {
     let legacy = session_path(provider)?;
     Ok(Path::new(&legacy)
