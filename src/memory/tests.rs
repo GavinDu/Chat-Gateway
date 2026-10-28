@@ -1872,3 +1872,43 @@ fn concurrent_independent_connections_preserve_all_turns() {
         );
     }
 }
+
+#[test]
+fn provider_thread_mapping_survives_gateway_restart() {
+    let fixture = Fixture::new();
+    {
+        let memory = fixture.open();
+        store(&memory, "thread-restart", "first");
+        memory
+            .upsert_provider_thread(&ProviderThread {
+                conversation_id: "thread-restart".into(),
+                provider: "chatgpt".into(),
+                thread_url: "https://chatgpt.com/c/persisted-thread".into(),
+                synced_through_message_id: Some("transcript-fingerprint".into()),
+                model: Some("gpt-test".into()),
+                updated_at: 1_798_000_000,
+            })
+            .unwrap();
+    }
+
+    let reopened = fixture.open();
+    assert_eq!(
+        reopened
+            .get_provider_thread("thread-restart", "chatgpt")
+            .unwrap(),
+        Some(ProviderThread {
+            conversation_id: "thread-restart".into(),
+            provider: "chatgpt".into(),
+            thread_url: "https://chatgpt.com/c/persisted-thread".into(),
+            synced_through_message_id: Some("transcript-fingerprint".into()),
+            model: Some("gpt-test".into()),
+            updated_at: 1_798_000_000,
+        })
+    );
+    assert_eq!(
+        reopened
+            .get_provider_thread("thread-restart", "claude")
+            .unwrap(),
+        None
+    );
+}
