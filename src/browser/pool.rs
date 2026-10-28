@@ -915,6 +915,12 @@ fn browser_thread(
                                     let apply_result: Result<()> = async {
                                         session::restore_cookies(&browser, &file, provider_name)?;
                                         page.goto(provider.login_url()).await?;
+                                        let storage_cleared = page.evaluate(
+                                            "(()=>{try{localStorage.clear();return true;}catch(_){return false;}})()"
+                                        );
+                                        if !storage_cleared.as_bool().unwrap_or(false) {
+                                            anyhow::bail!("provider localStorage could not be cleared before session refresh");
+                                        }
                                         session::restore_local_storage(&page, &file)?;
                                         page.goto(provider.login_url()).await?;
                                         Ok(())
