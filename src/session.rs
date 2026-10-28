@@ -279,7 +279,11 @@ fn cookie_expiration_header(cookie: &Cookie) -> Result<String> {
     if !restored_cookie_fields_safe(cookie) {
         anyhow::bail!("provider cookie has invalid fields and could not be safely revoked");
     }
-    let path = if cookie.path.is_empty() { "/" } else { cookie.path.as_str() };
+    let path = if cookie.path.is_empty() {
+        "/"
+    } else {
+        cookie.path.as_str()
+    };
     let host_prefix = cookie.name.starts_with("__Host-");
     if (host_prefix && (path != "/" || !cookie.secure))
         || (cookie.name.starts_with("__Secure-") && !cookie.secure)
