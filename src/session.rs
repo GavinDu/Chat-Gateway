@@ -275,6 +275,62 @@ pub fn import_relay_session(provider: &str, file: &SessionFile) -> Result<()> {
     Ok(())
 }
 
+pub fn clear_provider_cookies(browser: &Browser, provider: &str) -> Result<usize> {
+    let store = browser.cookies();
+    let cookies = store.get_all();
+    let mut cleared = 0;
+    for browser_cookie in cookies {
+        let mut cookie = Cookie::from(browser_cookie);
+        // The old value is never written back; ignore it when validating the
+        // deletion tuple so unusual but valid values do not leave stale cookies.
+        cookie.value.clear();
+        if !cookie_domain_allowed(provider, &cookie.domain) {
+            continue;
+        }
+        if !restored_cookie_fields_safe(&cookie) {
+            anyhow::bail!("provider cookie has invalid fields and could not be safely revoked");
+        }
+        let path = if cookie.path.is_empty() {
+            "/"
+        } else {
+            cookie.path.as_str()
+        };
+        let host_prefix = cookie.name.starts_with("__Host-");
+        if (host_prefix && (path != "/" || !cookie.secure))
+            || (cookie.name.starts_with("__Secure-") && !cookie.secure)
+        {
+            anyhow::bail!("provider cookie prefix constraints prevent safe revocation");
+        }
+        let mut expired = format!("{}=; Max-Age=0; Path={}", cookie.name, path);
+        if host_prefix {
+            expired.push_str("; Secure");
+        } else {
+            expired.push_str(&format!("; Domain={}", cookie.domain));
+            if cookie.secure {
+                expired.push_str("; Secure");
+            }
+        }
+        if cookie.http_only {
+            expired.push_str("; HttpOnly");
+        }
+        let url = format!(
+            "https://{}{}",
+            cookie.domain.trim_start_matches('.'),
+            if path.starts_with('/') { path } else { "/" }
+        );
+        store.set(&expired, &url)?;
+        if store.get_all().iter().any(|remaining| {
+            remaining.name == cookie.name
+                && remaining.domain.trim_start_matches('.') == cookie.domain.trim_start_matches('.')
+                && remaining.path == cookie.path
+        }) {
+            anyhow::bail!("provider cookie remained in the browser jar after revocation");
+        }
+        cleared += 1;
+    }
+    Ok(cleared)
+}
+
 pub fn delete_session_snapshot(provider: &str) -> Result<bool> {
     let vault_path = session_vault_path(provider)?;
     let legacy_path = session_path(provider)?;
