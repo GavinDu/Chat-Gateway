@@ -5,7 +5,6 @@ use axum::{
     Json,
 };
 use ring::rand::{SecureRandom, SystemRandom};
-use subtle::ConstantTimeEq;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::{
@@ -16,6 +15,7 @@ use std::{
     sync::{Arc, Mutex},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+use subtle::ConstantTimeEq;
 
 const PAIRING_LIFETIME: Duration = Duration::from_secs(10 * 60);
 const REQUEST_SKEW_SECONDS: i64 = 60;
@@ -62,7 +62,8 @@ fn install_token_hash_path() -> &'static FsPath {
 fn load_install_token_hash() -> anyhow::Result<Option<[u8; 32]>> {
     match fs::read(install_token_hash_path()) {
         Ok(bytes) => {
-            let hash: [u8; 32] = bytes.try_into()
+            let hash: [u8; 32] = bytes
+                .try_into()
                 .map_err(|_| anyhow::anyhow!("persisted relay install token hash is malformed"))?;
             Ok(Some(hash))
         }
@@ -78,7 +79,10 @@ fn persist_install_token_hash(hash: &[u8; 32]) -> anyhow::Result<()> {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions("sessions", fs::Permissions::from_mode(0o700))?;
     }
-    let temporary = format!("sessions/relay-install-token.sha256.tmp-{}", uuid::Uuid::new_v4());
+    let temporary = format!(
+        "sessions/relay-install-token.sha256.tmp-{}",
+        uuid::Uuid::new_v4()
+    );
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -121,7 +125,11 @@ pub struct PairRequest {
 }
 
 fn json_error(status: StatusCode, code: &'static str, message: &'static str) -> Response {
-    (status, Json(serde_json::json!({"error":{"code":code,"message":message}}))).into_response()
+    (
+        status,
+        Json(serde_json::json!({"error":{"code":code,"message":message}})),
+    )
+        .into_response()
 }
 
 fn extension_id() -> Option<String> {
@@ -134,7 +142,9 @@ fn extension_id() -> Option<String> {
 
 /// The extension origin must match one configured Chrome extension ID exactly.
 pub fn relay_origin_is_allowed(headers: &HeaderMap) -> bool {
-    let Some(id) = extension_id() else { return false; };
+    let Some(id) = extension_id() else {
+        return false;
+    };
     let expected = format!("chrome-extension://{id}");
     headers
         .get(header::ORIGIN)
@@ -148,35 +158,74 @@ pub async fn pair(
     Json(request): Json<PairRequest>,
 ) -> Response {
     if !relay_origin_is_allowed(&headers) {
-        return json_error(StatusCode::FORBIDDEN, "extension_origin_rejected", "the configured browser extension origin is required");
+        return json_error(
+            StatusCode::FORBIDDEN,
+            "extension_origin_rejected",
+            "the configured browser extension origin is required",
+        );
     }
     if request.code.len() != 8 || !request.code.bytes().all(|b| b.is_ascii_digit()) {
-        return json_error(StatusCode::UNAUTHORIZED, "pairing_rejected", "pairing code is invalid or expired");
+        return json_error(
+            StatusCode::UNAUTHORIZED,
+            "pairing_rejected",
+            "pairing code is invalid or expired",
+        );
     }
     let mut attempts = match app.relay.pairing_attempts.lock() {
         Ok(value) => value,
-        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "relay_unavailable", "relay state is unavailable"),
+        Err(_) => {
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "relay_unavailable",
+                "relay state is unavailable",
+            )
+        }
     };
     if *attempts >= MAX_PAIR_ATTEMPTS || Instant::now() >= app.relay.pairing_expires {
-        return json_error(StatusCode::UNAUTHORIZED, "pairing_rejected", "pairing code is invalid or expired");
+        return json_error(
+            StatusCode::UNAUTHORIZED,
+            "pairing_rejected",
+            "pairing code is invalid or expired",
+        );
     }
     *attempts = attempts.saturating_add(1);
     let candidate: [u8; 32] = Sha256::digest(request.code.as_bytes()).into();
     if !bool::from(candidate.ct_eq(&app.relay.pairing_hash)) {
-        return json_error(StatusCode::UNAUTHORIZED, "pairing_rejected", "pairing code is invalid or expired");
+        return json_error(
+            StatusCode::UNAUTHORIZED,
+            "pairing_rejected",
+            "pairing code is invalid or expired",
+        );
     }
     let mut token_slot = match app.relay.install_token_hash.lock() {
         Ok(value) => value,
-        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "relay_unavailable", "relay state is unavailable"),
+        Err(_) => {
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "relay_unavailable",
+                "relay state is unavailable",
+            )
+        }
     };
     let mut random = [0_u8; 32];
     if SystemRandom::new().fill(&mut random).is_err() {
-        return json_error(StatusCode::INTERNAL_SERVER_ERROR, "relay_unavailable", "could not create install token");
+        return json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "relay_unavailable",
+            "could not create install token",
+        );
     }
-    let token = random.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+    let token = random
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
     let token_hash: [u8; 32] = Sha256::digest(token.as_bytes()).into();
     if persist_install_token_hash(&token_hash).is_err() {
-        return json_error(StatusCode::INTERNAL_SERVER_ERROR, "relay_unavailable", "could not persist paired extension state");
+        return json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "relay_unavailable",
+            "could not persist paired extension state",
+        );
     }
     *token_slot = Some(token_hash);
     // A successful exchange consumes the pairing code permanently.
@@ -196,58 +245,137 @@ fn relay_rate_limit_allows(request_times: &mut VecDeque<Instant>, now: Instant) 
 
 fn authenticated_request(app: &crate::AppState, headers: &HeaderMap) -> Result<(), Box<Response>> {
     if !relay_origin_is_allowed(headers) {
-        return Err(Box::new(json_error(StatusCode::FORBIDDEN, "extension_origin_rejected", "the configured browser extension origin is required")));
+        return Err(Box::new(json_error(
+            StatusCode::FORBIDDEN,
+            "extension_origin_rejected",
+            "the configured browser extension origin is required",
+        )));
     }
-    let authorization = headers.get(header::AUTHORIZATION).and_then(|value| value.to_str().ok());
+    let authorization = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok());
     let token = authorization.and_then(|value| value.strip_prefix("Bearer "));
     let Some(token) = token else {
-        return Err(Box::new(json_error(StatusCode::UNAUTHORIZED, "relay_auth_required", "a paired extension token is required")));
+        return Err(Box::new(json_error(
+            StatusCode::UNAUTHORIZED,
+            "relay_auth_required",
+            "a paired extension token is required",
+        )));
     };
     let candidate: [u8; 32] = Sha256::digest(token.as_bytes()).into();
-    let token_slot = app.relay.install_token_hash.lock().map_err(|_| Box::new(json_error(StatusCode::INTERNAL_SERVER_ERROR, "relay_unavailable", "relay state is unavailable")))?;
+    let token_slot = app.relay.install_token_hash.lock().map_err(|_| {
+        Box::new(json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "relay_unavailable",
+            "relay state is unavailable",
+        ))
+    })?;
     let Some(expected) = token_slot.as_ref() else {
-        return Err(Box::new(json_error(StatusCode::UNAUTHORIZED, "relay_auth_required", "the extension is not paired")));
+        return Err(Box::new(json_error(
+            StatusCode::UNAUTHORIZED,
+            "relay_auth_required",
+            "the extension is not paired",
+        )));
     };
     if !bool::from(candidate.ct_eq(expected)) {
-        return Err(Box::new(json_error(StatusCode::UNAUTHORIZED, "relay_auth_required", "the paired extension token is invalid")));
+        return Err(Box::new(json_error(
+            StatusCode::UNAUTHORIZED,
+            "relay_auth_required",
+            "the paired extension token is invalid",
+        )));
     }
     drop(token_slot);
 
-    let timestamp = headers.get("x-relay-timestamp").and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<i64>().ok());
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
+    let timestamp = headers
+        .get("x-relay-timestamp")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<i64>().ok());
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
     if timestamp.is_none_or(|timestamp| (now - timestamp).abs() > REQUEST_SKEW_SECONDS) {
-        return Err(Box::new(json_error(StatusCode::UNAUTHORIZED, "relay_request_expired", "relay request timestamp is missing or expired")));
+        return Err(Box::new(json_error(
+            StatusCode::UNAUTHORIZED,
+            "relay_request_expired",
+            "relay request timestamp is missing or expired",
+        )));
     }
-    let nonce = headers.get("x-relay-nonce").and_then(|v| v.to_str().ok()).unwrap_or("");
+    let nonce = headers
+        .get("x-relay-nonce")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
     if nonce.len() < 32 || nonce.len() > 128 || !nonce.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err(Box::new(json_error(StatusCode::BAD_REQUEST, "relay_nonce_invalid", "relay request nonce is invalid")));
+        return Err(Box::new(json_error(
+            StatusCode::BAD_REQUEST,
+            "relay_nonce_invalid",
+            "relay request nonce is invalid",
+        )));
     }
-    let mut nonces = app.relay.used_nonces.lock().map_err(|_| Box::new(json_error(StatusCode::INTERNAL_SERVER_ERROR, "relay_unavailable", "relay state is unavailable")))?;
+    let mut nonces = app.relay.used_nonces.lock().map_err(|_| {
+        Box::new(json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "relay_unavailable",
+            "relay state is unavailable",
+        ))
+    })?;
     nonces.retain(|_, inserted| inserted.elapsed() < NONCE_RETENTION);
     if nonces.contains_key(nonce) {
-        return Err(Box::new(json_error(StatusCode::UNAUTHORIZED, "relay_nonce_reused", "relay request nonce has already been used")));
+        return Err(Box::new(json_error(
+            StatusCode::UNAUTHORIZED,
+            "relay_nonce_reused",
+            "relay request nonce has already been used",
+        )));
     }
     if nonces.len() >= 10_000 {
-        return Err(Box::new(json_error(StatusCode::TOO_MANY_REQUESTS, "relay_rate_limited", "too many relay requests; retry shortly")));
+        return Err(Box::new(json_error(
+            StatusCode::TOO_MANY_REQUESTS,
+            "relay_rate_limited",
+            "too many relay requests; retry shortly",
+        )));
     }
     let now = Instant::now();
-    let mut request_times = app.relay.request_times.lock().map_err(|_| Box::new(json_error(StatusCode::INTERNAL_SERVER_ERROR, "relay_unavailable", "relay state is unavailable")))?;
+    let mut request_times = app.relay.request_times.lock().map_err(|_| {
+        Box::new(json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "relay_unavailable",
+            "relay state is unavailable",
+        ))
+    })?;
     if !relay_rate_limit_allows(&mut request_times, now) {
-        return Err(Box::new(json_error(StatusCode::TOO_MANY_REQUESTS, "relay_rate_limited", "too many relay requests; retry shortly")));
+        return Err(Box::new(json_error(
+            StatusCode::TOO_MANY_REQUESTS,
+            "relay_rate_limited",
+            "too many relay requests; retry shortly",
+        )));
     }
     nonces.insert(nonce.to_owned(), now);
     Ok(())
 }
 
 pub async fn status(State(app): State<Arc<crate::AppState>>, headers: HeaderMap) -> Response {
-    if let Err(response) = authenticated_request(&app, &headers) { return *response; }
-    let providers = ["qwen", "metaai", "claude", "chatgpt", "gemini", "grok", "mistral", "perplexity"]
-        .iter()
-        .map(|provider| {
-            let session_present = crate::session::load_session_file(provider).ok().flatten().is_some();
-            serde_json::json!({"provider":provider,"linked":session_present})
-        })
-        .collect::<Vec<_>>();
+    if let Err(response) = authenticated_request(&app, &headers) {
+        return *response;
+    }
+    let providers = [
+        "qwen",
+        "metaai",
+        "claude",
+        "chatgpt",
+        "gemini",
+        "grok",
+        "mistral",
+        "perplexity",
+    ]
+    .iter()
+    .map(|provider| {
+        let session_present = crate::session::load_session_file(provider)
+            .ok()
+            .flatten()
+            .is_some();
+        serde_json::json!({"provider":provider,"linked":session_present})
+    })
+    .collect::<Vec<_>>();
     Json(serde_json::json!({"ok":true,"providers":providers,"vault_mode":std::env::var("CHAT_GATEWAY_SESSION_STORE").as_deref()==Ok("vault")})).into_response()
 }
 
@@ -257,12 +385,20 @@ pub async fn import_session(
     Path(provider): Path<String>,
     Json(file): Json<crate::session::SessionFile>,
 ) -> Response {
-    if let Err(response) = authenticated_request(&app, &headers) { return *response; }
+    if let Err(response) = authenticated_request(&app, &headers) {
+        return *response;
+    }
     match crate::session::import_relay_session(&provider, &file) {
-        Ok(()) => Json(serde_json::json!({"ok":true,"provider":provider,"linked":true})).into_response(),
+        Ok(()) => {
+            Json(serde_json::json!({"ok":true,"provider":provider,"linked":true})).into_response()
+        }
         Err(error) => {
             tracing::warn!(provider, error = %error, "browser relay session import rejected");
-            json_error(StatusCode::BAD_REQUEST, "session_import_rejected", "session was rejected; check vault configuration and provider permissions")
+            json_error(
+                StatusCode::BAD_REQUEST,
+                "session_import_rejected",
+                "session was rejected; check vault configuration and provider permissions",
+            )
         }
     }
 }
@@ -272,28 +408,48 @@ pub async fn unlink(
     headers: HeaderMap,
     Path(provider): Path<String>,
 ) -> Response {
-    if let Err(response) = authenticated_request(&app, &headers) { return *response; }
+    if let Err(response) = authenticated_request(&app, &headers) {
+        return *response;
+    }
     match crate::session::delete_session_snapshot(&provider) {
         Ok(removed) => {
-            tracing::info!(provider, "browser relay provider unlinked from persistent storage");
-            Json(serde_json::json!({"ok":true,"provider":provider,"unlinked":removed})).into_response()
-        },
-        Err(_) => json_error(StatusCode::INTERNAL_SERVER_ERROR, "unlink_failed", "provider session could not be removed"),
+            tracing::info!(
+                provider,
+                "browser relay provider unlinked from persistent storage"
+            );
+            Json(serde_json::json!({"ok":true,"provider":provider,"unlinked":removed}))
+                .into_response()
+        }
+        Err(_) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "unlink_failed",
+            "provider session could not be removed",
+        ),
     }
 }
 
 pub async fn unpair(State(app): State<Arc<crate::AppState>>, headers: HeaderMap) -> Response {
-    if let Err(response) = authenticated_request(&app, &headers) { return *response; }
+    if let Err(response) = authenticated_request(&app, &headers) {
+        return *response;
+    }
     match app.relay.install_token_hash.lock() {
         Ok(mut token) => {
             if delete_install_token_hash().is_err() {
-                return json_error(StatusCode::INTERNAL_SERVER_ERROR, "relay_unavailable", "could not revoke persisted extension state");
+                return json_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "relay_unavailable",
+                    "could not revoke persisted extension state",
+                );
             }
             *token = None;
             tracing::info!("browser extension unpaired");
             Json(serde_json::json!({"ok":true,"paired":false})).into_response()
         }
-        Err(_) => json_error(StatusCode::INTERNAL_SERVER_ERROR, "relay_unavailable", "relay state is unavailable"),
+        Err(_) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "relay_unavailable",
+            "relay state is unavailable",
+        ),
     }
 }
 
@@ -304,9 +460,17 @@ pub async fn preflight(headers: HeaderMap) -> Response {
     let mut response = StatusCode::NO_CONTENT.into_response();
     let origin = format!("chrome-extension://{}", extension_id().unwrap_or_default());
     let headers = response.headers_mut();
-    if let Ok(value) = HeaderValue::from_str(&origin) { headers.insert("access-control-allow-origin", value); }
-    headers.insert("access-control-allow-methods", HeaderValue::from_static("GET, POST, DELETE, OPTIONS"));
-    headers.insert("access-control-allow-headers", HeaderValue::from_static("authorization, content-type, x-relay-timestamp, x-relay-nonce"));
+    if let Ok(value) = HeaderValue::from_str(&origin) {
+        headers.insert("access-control-allow-origin", value);
+    }
+    headers.insert(
+        "access-control-allow-methods",
+        HeaderValue::from_static("GET, POST, DELETE, OPTIONS"),
+    );
+    headers.insert(
+        "access-control-allow-headers",
+        HeaderValue::from_static("authorization, content-type, x-relay-timestamp, x-relay-nonce"),
+    );
     headers.insert("vary", HeaderValue::from_static("Origin"));
     response
 }
@@ -328,10 +492,19 @@ mod tests {
         let now = Instant::now();
         let mut times = VecDeque::new();
         for offset in 0..MAX_RELAY_REQUESTS_PER_MINUTE {
-            assert!(relay_rate_limit_allows(&mut times, now + Duration::from_millis(offset as u64)));
+            assert!(relay_rate_limit_allows(
+                &mut times,
+                now + Duration::from_millis(offset as u64)
+            ));
         }
-        assert!(!relay_rate_limit_allows(&mut times, now + Duration::from_secs(30)));
-        assert!(relay_rate_limit_allows(&mut times, now + Duration::from_secs(61)));
+        assert!(!relay_rate_limit_allows(
+            &mut times,
+            now + Duration::from_secs(30)
+        ));
+        assert!(relay_rate_limit_allows(
+            &mut times,
+            now + Duration::from_secs(61)
+        ));
     }
 
     #[test]
