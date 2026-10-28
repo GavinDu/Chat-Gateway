@@ -1346,9 +1346,9 @@ async fn get_provider_thread(
         );
     }
     match state
-                .memory
-                .clone()
-.get_provider_thread_for_owner_blocking(
+        .memory
+        .clone()
+        .get_provider_thread_for_owner_blocking(
             owner_key_id.to_owned(),
             conversation_id.clone(),
             provider.clone(),
@@ -1410,9 +1410,9 @@ async fn upsert_provider_thread(
         .as_secs()
         .min(i64::MAX as u64) as i64;
     match state
-                .memory
-                .clone()
-.upsert_provider_thread_for_owner_blocking(owner_key_id.to_owned(), thread.clone())
+        .memory
+        .clone()
+        .upsert_provider_thread_for_owner_blocking(owner_key_id.to_owned(), thread.clone())
         .await
     {
         Ok(()) => Json(thread).into_response(),
@@ -1449,9 +1449,9 @@ async fn persist_provider_thread(
         }
     };
     let messages = match state
-                .memory
-                .clone()
-.conversation_messages_for_owner_blocking(
+        .memory
+        .clone()
+        .conversation_messages_for_owner_blocking(
             owner_key_id.to_owned(),
             conversation_id.to_owned(),
         )
@@ -1472,9 +1472,9 @@ async fn persist_provider_thread(
         updated_at: chrono::Utc::now().timestamp(),
     };
     if let Err(error) = state
-                .memory
-                .clone()
-.upsert_provider_thread_for_owner_blocking(owner_key_id.to_owned(), thread)
+        .memory
+        .clone()
+        .upsert_provider_thread_for_owner_blocking(owner_key_id.to_owned(), thread)
         .await
     {
         tracing::warn!(provider, %error, "provider thread mapping could not be persisted");
@@ -2005,9 +2005,9 @@ async fn chat_completions(
         let saved_thread = match conversation_id.as_deref() {
             Some(id) => {
                 match state
-                .memory
-                .clone()
-.get_provider_thread_for_owner_blocking(
+                    .memory
+                    .clone()
+                    .get_provider_thread_for_owner_blocking(
                         owner_key_id.clone(),
                         id.to_owned(),
                         provider_name.clone(),
@@ -2370,17 +2370,22 @@ async fn chat_completions(
             outcome = "success",
             "provider request completed"
         );
-        if let Err(_error) = state.memory.clone().store_turn_for_owner_with_tab_id_blocking(
-            owner_key_id.clone(),
-            new_conv_id.clone(),
-            windowed.clone(),
-            ChatMessage {
-                role: "assistant".to_string(),
-                content: full.clone(),
-            },
-            provider_name.clone(),
-            None,
-        ).await {
+        if let Err(_error) = state
+            .memory
+            .clone()
+            .store_turn_for_owner_with_tab_id_blocking(
+                owner_key_id.clone(),
+                new_conv_id.clone(),
+                windowed.clone(),
+                ChatMessage {
+                    role: "assistant".to_string(),
+                    content: full.clone(),
+                },
+                provider_name.clone(),
+                None,
+            )
+            .await
+        {
             tracing::error!(conversation_id = %new_conv_id, "conversation persistence failed");
             return api_error(
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
