@@ -183,17 +183,24 @@ async fn main() -> anyhow::Result<()> {
         let encoded = std::env::var("CHAT_GATEWAY_VAULT_NEW_KEY").map_err(|_| {
             anyhow::anyhow!("CHAT_GATEWAY_VAULT_NEW_KEY is required for vault key rotation")
         })?;
-        let new_key = zeroize::Zeroizing::new(session::parse_vault_key(&encoded).map_err(|_| {
-            anyhow::anyhow!("CHAT_GATEWAY_VAULT_NEW_KEY must be exactly 64 hexadecimal characters")
-        })?);
+        let new_key =
+            zeroize::Zeroizing::new(session::parse_vault_key(&encoded).map_err(|_| {
+                anyhow::anyhow!(
+                    "CHAT_GATEWAY_VAULT_NEW_KEY must be exactly 64 hexadecimal characters"
+                )
+            })?);
         let (rotated, backup_dir) = session::rotate_vault_key(&new_key)?;
         if rotated == 0 {
             println!("No encrypted provider vault records found; nothing rotated.");
         } else {
             println!("Rotated {rotated} encrypted provider vault record(s).");
             println!("Encrypted recovery copies retained at: {backup_dir}");
-            println!("Update CHAT_GATEWAY_VAULT_KEY to the new key before restarting Chat Gateway.");
-            println!("Keep the old key and recovery copies until restart restoration has been verified.");
+            println!(
+                "Update CHAT_GATEWAY_VAULT_KEY to the new key before restarting Chat Gateway."
+            );
+            println!(
+                "Keep the old key and recovery copies until restart restoration has been verified."
+            );
         }
         return Ok(());
     }
