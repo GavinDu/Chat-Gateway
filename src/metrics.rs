@@ -249,6 +249,14 @@ mod tests {
     }
 
     #[test]
+    fn provider_completion_tail_metric_records_observations() {
+        super::record_provider_tail("tail-test", 1_234);
+        let metrics = render_with_provider_states(&[]);
+        assert!(metrics.contains("gateway_provider_tail_ms_count{provider=\"tail-test\"} 1"));
+        assert!(metrics.contains("gateway_provider_tail_ms_sum{provider=\"tail-test\"} 1234"));
+    }
+
+    #[test]
     fn route_labels_have_bounded_cardinality() {
         assert_eq!(
             normalize_route("/v1/conversations/secret-id"),
