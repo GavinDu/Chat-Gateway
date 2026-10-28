@@ -1729,6 +1729,21 @@ fn read_conversation_context_for_owner(
     memory.build_context_for_owner_with_history(owner_key_id, conversation_id, messages)
 }
 
+async fn read_conversation_context_with_transcript_for_owner(
+    memory: Arc<UnifiedMemory>,
+    owner_key_id: String,
+    conversation_id: Option<String>,
+    messages: Vec<ChatMessage>,
+) -> anyhow::Result<(String, Vec<ChatMessage>, bool, Vec<ChatMessage>)> {
+    memory
+        .build_context_for_owner_with_transcript_blocking(
+            owner_key_id,
+            conversation_id,
+            messages,
+        )
+        .await
+}
+
 fn usable_initial_stream_chunk(content: &str, done: bool) -> bool {
     !done && !content.is_empty()
 }
@@ -1867,19 +1882,20 @@ async fn chat_completions(
 
     // Read all context-dependent memory before any provider request. A read
     // failure must not degrade into an empty prompt or an unauthenticated turn.
-    let (context_prompt, windowed, has_history) = match state.memory.clone()
-        .build_context_for_owner_with_history_blocking(
+    let (context_prompt, windowed, has_history, stored_messages) =
+        match read_conversation_context_with_transcript_for_owner(
+            state.memory.clone(),
             owner_key_id.clone(),
             conversation_id.clone(),
             req.messages.clone(),
         )
         .await
-    {
-        Ok(context) => context,
-        Err(_error) => {
-            return conversation_context_read_error(conversation_id.as_deref());
-        }
-    };
+        {
+            Ok(context) => context,
+            Err(_error) => {
+                return conversation_context_read_error(conversation_id.as_deref());
+            }
+        };
     let prompt = context_prompt;
     if prompt.is_empty() {
         return api_error(
@@ -1991,16 +2007,6 @@ async fn chat_completions(
         tracing::debug!(provider = %provider_name, queue_ms = permit.queue_ms, "acquired provider slot");
         let queue_ms = permit.queue_ms.min(u64::MAX as u128) as u64;
 
-        let stored_messages = match conversation_id.as_deref() {
-            Some(id) => match state.memory.clone()
-                .conversation_messages_for_owner_blocking(owner_key_id.clone(), id.to_owned())
-                .await
-            {
-                Ok(messages) => messages,
-                Err(_) => return conversation_context_read_error(conversation_id.as_deref()),
-            },
-            None => Vec::new(),
-        };
         let saved_thread = match conversation_id.as_deref() {
             Some(id) => {
                 match state.memory.clone()
