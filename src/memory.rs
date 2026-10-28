@@ -8,7 +8,7 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use std::{
     path::PathBuf,
-    sync::{Mutex, MutexGuard},
+    sync::{Arc, Mutex, MutexGuard},
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -250,6 +250,32 @@ impl UnifiedMemory {
             provider,
             Some(tab_id),
         )
+    }
+
+    /// Persist a completed turn on Tokio's blocking pool so SQLite mutex waits,
+    /// transactions, and disk I/O never block an async runtime worker.
+    pub async fn store_turn_for_owner_with_tab_id_blocking(
+        self: Arc<Self>,
+        owner_key_id: String,
+        conversation_id: String,
+        user_msgs: Vec<ChatMessage>,
+        assistant_msg: ChatMessage,
+        provider: String,
+        tab_id: Option<String>,
+    ) -> anyhow::Result<()> {
+        let result = tokio::task::spawn_blocking(move || {
+            self.store_turn_for_owner_with_tab_id(
+                &owner_key_id,
+                conversation_id,
+                user_msgs,
+                assistant_msg,
+                provider,
+                tab_id,
+            )
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("conversation persistence task failed: {error}"))?;
+        result
     }
 
     /// Persist a completed turn with optional real browser tab metadata.
