@@ -1464,6 +1464,71 @@ mod vault_tests {
     }
 
     #[test]
+    fn multiple_provider_vault_records_restore_independently_after_restart() {
+        let root = std::env::temp_dir().join(format!(
+            "chat-gateway-vault-multi-provider-restart-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let key = [0x37; 32];
+        let provider_a = sample_session();
+        let mut provider_b = sample_session();
+        provider_b.local_storage.insert(
+            "access_token".to_owned(),
+            "provider-b-token".to_owned(),
+        );
+        provider_b.cookies[0].value = "provider-b-cookie".to_owned();
+
+        for (provider, session) in [
+            ("provider-a", &provider_a),
+            ("provider-b", &provider_b),
+        ] {
+            let path = root.join(format!("{provider}.vault"));
+            let encrypted = encrypt_session_snapshot(session, provider, &key).unwrap();
+            write_session_file_atomically(&path, &encrypted).unwrap();
+            assert!(
+                !std::fs::read(&path)
+                    .unwrap()
+                    .windows(b"provider-b-token".len())
+                    .any(|window| window == b"provider-b-token"),
+                "vault records must not contain plaintext session values"
+            );
+        }
+
+        // Re-open the persisted records using only the key, as a new process
+        // would after gateway restart; provider-bound AAD prevents cross-loads.
+        let restored_a = decrypt_session_snapshot(
+            &std::fs::read(root.join("provider-a.vault")).unwrap(),
+            "provider-a",
+            &key,
+        )
+        .unwrap();
+        let restored_b = decrypt_session_snapshot(
+            &std::fs::read(root.join("provider-b.vault")).unwrap(),
+            "provider-b",
+            &key,
+        )
+        .unwrap();
+        assert_eq!(
+            restored_a.local_storage.get("access_token").unwrap(),
+            "sensitive-value"
+        );
+        assert_eq!(
+            restored_b.local_storage.get("access_token").unwrap(),
+            "provider-b-token"
+        );
+        assert_eq!(restored_a.cookies[0].value, "cookie-secret");
+        assert_eq!(restored_b.cookies[0].value, "provider-b-cookie");
+        assert!(decrypt_session_snapshot(
+            &std::fs::read(root.join("provider-a.vault")).unwrap(),
+            "provider-b",
+            &key,
+        )
+        .is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn vault_key_parser_accepts_only_32_byte_hex_keys() {
         assert_eq!(*parse_vault_key(&"ab".repeat(32)).unwrap(), [0xab; 32]);
         assert!(parse_vault_key("abcd").is_err());
