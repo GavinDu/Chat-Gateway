@@ -54,6 +54,7 @@ struct MetricData {
     queue_ms: BTreeMap<String, Histogram>,
     ttft_ms: BTreeMap<String, Histogram>,
     provider_work_ms: BTreeMap<String, Histogram>,
+    provider_tail_ms: BTreeMap<String, Histogram>,
     chat_total_ms: BTreeMap<String, Histogram>,
     gateway_overhead_ms: BTreeMap<String, Histogram>,
     poll_tick_ms: BTreeMap<String, Histogram>,
@@ -88,6 +89,16 @@ pub fn record_browser_poll(provider: &str, evaluations: u64, duration_ms: u64) {
             .poll_evaluations
             .entry(provider.to_owned())
             .or_default() += evaluations;
+    }
+}
+
+/// Record the completion tail: elapsed time from the most recent emitted delta to done.
+pub fn record_provider_tail(provider: &str, duration_ms: u64) {
+    if let Ok(mut data) = data().lock() {
+        data.provider_tail_ms
+            .entry(provider.to_owned())
+            .or_default()
+            .observe(duration_ms);
     }
 }
 
@@ -175,6 +186,7 @@ pub fn render_with_provider_states(provider_states: &[(String, String)]) -> Stri
         ("gateway_provider_queue_duration_ms", &data.queue_ms),
         ("gateway_provider_ttft_ms", &data.ttft_ms),
         ("gateway_provider_work_duration_ms", &data.provider_work_ms),
+        ("gateway_provider_tail_ms", &data.provider_tail_ms),
         ("gateway_chat_total_duration_ms", &data.chat_total_ms),
         ("gateway_overhead_ms", &data.gateway_overhead_ms),
     ] {
@@ -234,6 +246,14 @@ mod tests {
         let metrics = render_with_provider_states(&[]);
         assert!(metrics.contains("gateway_poll_evaluations_total{provider=\"poll-test\"} 1"));
         assert!(metrics.contains("gateway_poll_tick_ms_count{provider=\"poll-test\"} 1"));
+    }
+
+    #[test]
+    fn provider_completion_tail_metric_records_observations() {
+        super::record_provider_tail("tail-test", 1_234);
+        let metrics = render_with_provider_states(&[]);
+        assert!(metrics.contains("gateway_provider_tail_ms_count{provider=\"tail-test\"} 1"));
+        assert!(metrics.contains("gateway_provider_tail_ms_sum{provider=\"tail-test\"} 1234"));
     }
 
     #[test]

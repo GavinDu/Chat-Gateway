@@ -432,6 +432,7 @@ pub async fn run_send(
         .then(|| regex::Regex::new(r"\[\d+\]").expect("static regex"));
     let mut tracker = ResponseDeltaTracker::new(baseline.take());
     let mut stable_ticks = 0u32;
+    let mut last_delta_at: Option<Instant> = None;
     let mut saw_streaming = false;
     let mut response_node_detected = false;
     let mut poll_count = 0u32;
@@ -547,6 +548,12 @@ pub async fn run_send(
                                 return;
                             }
                         }
+                        if let Some(last_delta_at) = last_delta_at {
+                            crate::metrics::record_provider_tail(
+                                adapter.name(),
+                                last_delta_at.elapsed().as_millis().min(u64::MAX as u128) as u64,
+                            );
+                        }
                         let _ = chunks
                             .send(Ok(ProviderChunk {
                                 content: String::new(),
@@ -562,6 +569,9 @@ pub async fn run_send(
                         delta = re.replace_all(&delta, "").to_string();
                     }
                     stable_ticks = 0;
+                    if !delta.is_empty() {
+                        last_delta_at = Some(Instant::now());
+                    }
                     if !delta.is_empty()
                         && chunks
                             .send(Ok(ProviderChunk {
@@ -589,6 +599,12 @@ pub async fn run_send(
             // active streaming indicator, avoiding truncation during long
             // reasoning or search pauses.
             if completion_ready(stable_ticks, streaming) {
+                if let Some(last_delta_at) = last_delta_at {
+                    crate::metrics::record_provider_tail(
+                        adapter.name(),
+                        last_delta_at.elapsed().as_millis().min(u64::MAX as u128) as u64,
+                    );
+                }
                 let _ = chunks
                     .send(Ok(ProviderChunk {
                         content: String::new(),
