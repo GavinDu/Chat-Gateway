@@ -212,6 +212,7 @@ mod response_probe_tests {
                 "text": "answer",
                 "count": 4,
                 "streaming": true,
+                "postAnswerAffordance": true,
                 "url": "https://provider.example/challenge",
                 "challenge": true
             })),
@@ -219,6 +220,7 @@ mod response_probe_tests {
                 text: Some("answer".to_string()),
                 count: 4,
                 streaming: true,
+                post_answer_affordance: true,
                 url: "https://provider.example/challenge".to_owned(),
                 challenge: true,
             }
