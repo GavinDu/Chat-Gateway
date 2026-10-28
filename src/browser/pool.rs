@@ -911,9 +911,14 @@ fn browser_thread(
                             let browser = browser.clone();
                             let pages = pages.clone();
                             let locks = locks.clone();
+                            let login_pages = login_pages.clone();
+                            let login_meta = login_meta.clone();
                             tokio::task::spawn_local(async move {
                                 let res: Result<bool> = async {
-                                    let lock = locks.borrow().get(&provider).cloned()
+                                    let lock = locks
+                                        .borrow()
+                                        .get(&provider)
+                                        .cloned()
                                         .unwrap_or_else(|| Rc::new(tokio::sync::Mutex::new(())));
                                     let _guard = lock.lock().await;
                                     let provider_name = provider.name();
@@ -923,22 +928,46 @@ fn browser_thread(
                                     } else {
                                         None
                                     };
-                                    session::clear_provider_cookies(&browser, provider_name)?;
-                                    if let Some(old_page) = pages.borrow().get(&provider).cloned() {
-                                        let _ = old_page.evaluate("try { localStorage.clear(); true } catch (_) { false }");
-                                    }
+
+                                    // Clear origin-scoped storage on a page at the provider
+                                    // origin before touching durable credentials. If this
+                                    // fails, leave the saved snapshot intact for retry.
                                     if let Some(page) = replacement.as_mut() {
                                         page.goto(provider.login_url()).await?;
+                                        let storage_cleared = page.evaluate(
+                                            "(()=>{try{localStorage.clear();return true;}catch(_){return false;}})()"
+                                        );
+                                        if !storage_cleared.as_bool().unwrap_or(false) {
+                                            anyhow::bail!("provider localStorage could not be cleared");
+                                        }
                                     }
-                                    let removed = session::delete_session_snapshot(provider_name)?;
-                                    if let Some(page) = replacement {
+
+                                    session::clear_provider_cookies(&browser, provider_name)?;
+
+                                    // Drop every page that might retain auth state in JS
+                                    // memory before the final navigation. If navigation
+                                    // fails, the provider has no warm page rather than
+                                    // retaining a stale authenticated page.
+                                    pages.borrow_mut().remove(&provider);
+                                    login_pages.borrow_mut().remove(&provider);
+                                    login_meta.borrow_mut().remove(&provider);
+
+                                    if let Some(mut page) = replacement {
+                                        page.goto(provider.login_url()).await?;
                                         pages.borrow_mut().insert(provider, Rc::new(page));
-                                    } else {
-                                        pages.borrow_mut().remove(&provider);
                                     }
-                                    tracing::info!(provider = provider_name, "browser relay session revoked from live browser");
+
+                                    // Delete disk snapshots only after live cleanup and
+                                    // page replacement have succeeded. On deletion failure,
+                                    // memory is still revoked and the caller gets an error.
+                                    let removed = session::delete_session_snapshot(provider_name)?;
+                                    tracing::info!(
+                                        provider = provider_name,
+                                        "browser relay session revoked from live browser"
+                                    );
                                     Ok(removed)
-                                }.await;
+                                }
+                                .await;
                                 let _ = reply.send(res);
                             });
                         }
