@@ -402,7 +402,8 @@ async fn main() -> anyhow::Result<()> {
             loop {
                 for provider in state.cfg.providers.iter().filter(|provider| provider.enabled) {
                     match state.pool.verify_session(&provider.name).await {
-                        Ok(()) => provider_state::record_success(&provider.name),
+                        Ok(true) => provider_state::record_success(&provider.name),
+                        Ok(false) => {}
                         Err(error) => {
                             provider_state::record_error(&provider.name, &error.to_string());
                             tracing::warn!(
