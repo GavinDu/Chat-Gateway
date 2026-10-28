@@ -25,8 +25,8 @@ mod memory;
 mod metrics;
 mod provider_guard;
 mod provider_state;
-mod relay;
 mod providers;
+mod relay;
 mod router;
 mod session;
 
@@ -436,7 +436,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/login/api/:provider/act", post(login_act))
         .route("/relay/v1/pair", post(relay::pair))
         .route("/relay/v1/status", get(relay::status))
-        .route("/relay/v1/session/:provider", post(relay::import_session).delete(relay::unlink))
+        .route(
+            "/relay/v1/session/:provider",
+            post(relay::import_session).delete(relay::unlink),
+        )
         .route("/relay/v1/unpair", post(relay::unpair))
         .route("/relay/v1/*path", axum::routing::options(relay::preflight))
         .with_state(state.clone())
@@ -582,10 +585,9 @@ async fn protect_login_api(req: Request<Body>, next: Next) -> Response {
     };
     let mut response = next.run(req).await;
     if let Some(origin) = allowed_relay_origin {
-        response.headers_mut().insert(
-            axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN,
-            origin,
-        );
+        response
+            .headers_mut()
+            .insert(axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN, origin);
         response.headers_mut().insert(
             axum::http::header::VARY,
             axum::http::HeaderValue::from_static("Origin"),
