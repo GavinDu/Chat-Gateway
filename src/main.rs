@@ -83,6 +83,21 @@ struct Cli {
         help = "Delete one provider's saved vault and legacy session records, then exit"
     )]
     delete_session_vault: Option<String>,
+
+    #[arg(
+        long,
+        conflicts_with_all = ["list_session_vaults", "delete_session_vault", "create_api_key", "test_adapter", "all", "json", "restore_session_vault_backup"],
+        help = "Rotate encrypted session vaults using CHAT_GATEWAY_VAULT_KEY and CHAT_GATEWAY_VAULT_NEW_KEY"
+    )]
+    rotate_session_vault_key: bool,
+
+    #[arg(
+        long,
+        value_name = "BACKUP_DIR",
+        conflicts_with_all = ["list_session_vaults", "delete_session_vault", "create_api_key", "test_adapter", "all", "json", "rotate_session_vault_key"],
+        help = "Restore a sessions/.vault-rotation-* backup using the old CHAT_GATEWAY_VAULT_KEY"
+    )]
+    restore_session_vault_backup: Option<String>,
 }
 
 fn adapter_report_is_healthy(report: &browser::pool::TestAdapterReport) -> bool {
