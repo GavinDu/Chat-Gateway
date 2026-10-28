@@ -1447,6 +1447,23 @@ async fn list_long_term_memory_items(
     }
 }
 
+fn long_term_memory_export_response(
+    enabled: bool,
+    items: Vec<memory::LongTermMemoryItem>,
+) -> Response {
+    let mut response = Json(serde_json::json!({
+        "format_version": 1,
+        "enabled": enabled,
+        "data": items,
+    }))
+    .into_response();
+    response.headers_mut().insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_static("attachment; filename=\"long-term-memory.json\""),
+    );
+    response
+}
+
 async fn export_long_term_memory_items(
     State(state): State<Arc<AppState>>,
     auth_context: Option<Extension<AuthKeyContext>>,
@@ -1460,19 +1477,7 @@ async fn export_long_term_memory_items(
     })
     .await
     {
-        Ok(Ok((enabled, items))) => {
-            let mut response = Json(serde_json::json!({
-                "format_version": 1,
-                "enabled": enabled,
-                "data": items,
-            }))
-            .into_response();
-            response.headers_mut().insert(
-                header::CONTENT_DISPOSITION,
-                HeaderValue::from_static("attachment; filename=\"long-term-memory.json\""),
-            );
-            response
-        }
+        Ok(Ok((enabled, items))) => long_term_memory_export_response(enabled, items),
         _ => api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "server_error",
@@ -4353,6 +4358,51 @@ mod first_event_tests {
             first_event(&mut idle_rx, Duration::from_millis(1)).await,
             FirstEvent::Timeout
         ));
+    }
+}
+
+#[cfg(test)]
+mod long_term_memory_export_tests {
+    use super::*;
+    use axum::body::to_bytes;
+
+    #[tokio::test]
+    async fn export_is_versioned_owner_scoped_json_attachment() {
+        let memory = UnifiedMemory::new(8000);
+        memory
+            .set_long_term_memory_enabled("owner-a", true)
+            .unwrap();
+        memory
+            .save_long_term_memory_item(
+                "owner-a",
+                "timezone",
+                "America/New_York",
+                None,
+                0.9,
+                None,
+            )
+            .unwrap();
+        memory
+            .set_long_term_memory_enabled("owner-b", true)
+            .unwrap();
+        memory
+            .save_long_term_memory_item("owner-b", "timezone", "Europe/London", None, 1.0, None)
+            .unwrap();
+
+        let items = memory.list_long_term_memory_items("owner-a").unwrap();
+        let response = long_term_memory_export_response(true, items);
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CONTENT_DISPOSITION).unwrap(),
+            "attachment; filename=\"long-term-memory.json\""
+        );
+        let bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let export: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(export["format_version"], 1);
+        assert_eq!(export["enabled"], true);
+        assert_eq!(export["data"].as_array().unwrap().len(), 1);
+        assert_eq!(export["data"][0]["memory_key"], "timezone");
+        assert_eq!(export["data"][0]["value"], "America/New_York");
     }
 }
 
