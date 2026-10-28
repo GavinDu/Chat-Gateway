@@ -1722,6 +1722,15 @@ fn read_conversation_context_for_owner(
     memory.build_context_for_owner_with_history(owner_key_id, conversation_id, messages)
 }
 
+fn read_conversation_context_with_transcript_for_owner(
+    memory: &UnifiedMemory,
+    owner_key_id: &str,
+    conversation_id: Option<&str>,
+    messages: &[ChatMessage],
+) -> anyhow::Result<(String, Vec<ChatMessage>, bool, Vec<ChatMessage>)> {
+    memory.build_context_for_owner_with_transcript(owner_key_id, conversation_id, messages)
+}
+
 fn usable_initial_stream_chunk(content: &str, done: bool) -> bool {
     !done && !content.is_empty()
 }
@@ -1860,31 +1869,19 @@ async fn chat_completions(
 
     // Read all context-dependent memory before any provider request. A read
     // failure must not degrade into an empty prompt or an unauthenticated turn.
-    let (context_prompt, windowed, has_history) = match read_conversation_context_for_owner(
-        &state.memory,
-        &owner_key_id,
-        conversation_id.as_deref(),
-        &req.messages,
-    ) {
-        Ok(context) => context,
-        Err(_error) => {
-            return conversation_context_read_error(conversation_id.as_deref());
-        }
-    };
+    let (context_prompt, windowed, has_history, stored_messages) =
+        match read_conversation_context_with_transcript_for_owner(
+            &state.memory,
+            &owner_key_id,
+            conversation_id.as_deref(),
+            &req.messages,
+        ) {
+            Ok(context) => context,
+            Err(_error) => {
+                return conversation_context_read_error(conversation_id.as_deref());
+            }
+        };
     let prompt = context_prompt;
-    // Read the durable transcript once per request, before iterating provider
-    // candidates. A failed provider attempt must not cause another SQLite read
-    // of the same conversation history.
-    let stored_messages = match conversation_id.as_deref() {
-        Some(id) => match state
-            .memory
-            .conversation_messages_for_owner(&owner_key_id, id)
-        {
-            Ok(messages) => messages,
-            Err(_) => return conversation_context_read_error(conversation_id.as_deref()),
-        },
-        None => Vec::new(),
-    };
     if prompt.is_empty() {
         return api_error(
             axum::http::StatusCode::BAD_REQUEST,
