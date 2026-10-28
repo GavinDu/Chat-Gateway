@@ -391,7 +391,7 @@ async fn main() -> anyhow::Result<()> {
                             provider = %provider_name,
                             "periodic provider session verification failed"
                         );
-                        provider_state::record_error(&provider_name, &error.to_string());
+                        provider_state::record_error(&provider_name, "periodic session verification failed");
                     }
                 }
                 tokio::time::sleep(std::time::Duration::from_secs(60 + jitter_seconds)).await;
