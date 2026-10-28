@@ -4596,7 +4596,9 @@ mod long_term_memory_retrieval_tests {
     #[test]
     fn retrieval_honors_zero_limit_and_ranks_confidence_deterministically() {
         let memory = UnifiedMemory::new(8000);
-        memory.set_long_term_memory_enabled("owner-a", true).unwrap();
+        memory
+            .set_long_term_memory_enabled("owner-a", true)
+            .unwrap();
         memory
             .save_long_term_memory_item("owner-a", "low", "lower confidence", None, 0.2, None)
             .unwrap();
