@@ -361,7 +361,6 @@ pub(super) fn append_owned(
 #[cfg(test)]
 mod connection_policy_tests {
     use super::open;
-    use rusqlite::Connection;
     use std::{fs, path::PathBuf, time::{SystemTime, UNIX_EPOCH}};
 
     fn temporary_database_path() -> PathBuf {
@@ -403,7 +402,5 @@ mod connection_policy_tests {
             .query_row("PRAGMA journal_mode", [], |row| row.get(0))
             .expect("journal mode should be readable");
         assert_ne!(journal_mode.to_ascii_lowercase(), "wal");
-        // Keep this import local to the test module's dependency surface stable.
-        let _ = Connection::open_in_memory().expect("SQLite in-memory connections work");
     }
 }
