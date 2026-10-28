@@ -134,7 +134,7 @@ mod tests {
     }
 
     #[test]
-    fn ignores_unrelated_authorization_and_network_errors() {
+    fn records_retryable_failures_as_degraded_without_blocking_routing() {
         for (index, message) in [
             "temporary network timeout",
             "request unauthorized by policy",
