@@ -1432,7 +1432,9 @@ mod vault_tests {
         let vault_path = root.join("vault.vault");
         let malformed = b"{not-json";
         std::fs::write(&legacy_path, malformed).unwrap();
-        assert!(migrate_legacy_snapshot(&legacy_path, &vault_path, "chatgpt", &[0x5a; 32]).is_err());
+        assert!(
+            migrate_legacy_snapshot(&legacy_path, &vault_path, "chatgpt", &[0x5a; 32]).is_err()
+        );
         assert_eq!(std::fs::read(&legacy_path).unwrap(), malformed);
         assert!(!vault_path.exists());
         std::fs::remove_dir_all(root).unwrap();
