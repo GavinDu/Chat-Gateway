@@ -381,6 +381,18 @@ async fn main() -> anyhow::Result<()> {
                     // A false result means the page is not warmed yet, not that
                     // the provider session is invalid. Leave routing state unchanged.
                     Ok(false) => {}
+                    Err(error)
+                        if error
+                            .downcast_ref::<BrowserWorkerUnavailableError>()
+                            .is_some_and(|error| error.is_retryable()) =>
+                    {
+                        // A dead/restarting worker is not evidence of an expired provider
+                        // session. Leave provider eligibility unchanged until the worker recovers.
+                        tracing::debug!(
+                            provider = %provider_name,
+                            "browser worker unavailable during session verification"
+                        );
+                    }
                     Err(_error) => {
                         tracing::warn!(
                             provider = %provider_name,
