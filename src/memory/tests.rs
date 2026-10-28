@@ -1338,6 +1338,50 @@ async fn async_turn_persistence_runs_and_commits_transactionally() {
     assert_eq!(conversation.tab_id, None);
 }
 
+#[tokio::test]
+async fn async_listing_and_retention_use_blocking_pool_and_preserve_owner_scope() {
+    let fixture = Fixture::new();
+    let memory = Arc::new(fixture.open());
+    store(&memory, "async-list-owner-a", "owner A");
+    memory
+        .store_turn_for_owner(
+            "key:owner-b",
+            "async-list-owner-b".into(),
+            vec![m("user", "private to owner B")],
+            m("assistant", "response"),
+            "chatgpt".into(),
+        )
+        .unwrap();
+
+    let listed = memory
+        .clone()
+        .list_conversations_for_owner_blocking("local".to_owned(), 10, 0)
+        .await
+        .unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].id, "async-list-owner-a");
+
+    let deleted = memory
+        .clone()
+        .purge_expired_conversations_blocking(i64::MAX)
+        .await
+        .unwrap();
+    assert_eq!(deleted, 2);
+
+    let remaining = memory
+        .clone()
+        .list_conversations_for_owner_blocking("local".to_owned(), 10, 0)
+        .await
+        .unwrap();
+    assert!(remaining.is_empty());
+    let other_owner = memory
+        .clone()
+        .list_conversations_for_owner_blocking("key:owner-b".to_owned(), 10, 0)
+        .await
+        .unwrap();
+    assert!(other_owner.is_empty());
+}
+
 #[test]
 fn completed_turn_without_real_tab_does_not_persist_synthetic_tab_id() {
     let fixture = Fixture::new();
