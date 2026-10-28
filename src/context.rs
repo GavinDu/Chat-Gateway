@@ -93,7 +93,10 @@ impl ContextBuilder {
                     && state.synced_through_message_id == state.last_stored_message_id
             });
 
-        if thread_is_current && !delta.is_empty() {
+        let delta_cost = delta.iter().fold(0usize, |tokens, message| {
+            tokens.saturating_add(estimate_message_tokens(&message.content).saturating_add(8))
+        });
+        if thread_is_current && !delta.is_empty() && delta_cost <= budget {
             return ContextPlan::Delta { messages: delta };
         }
 
@@ -342,6 +345,35 @@ mod tests {
         assert!(prompt.contains("&lt;/conversation_message&gt;"));
         assert!(prompt.contains("&lt;conversation_message role=&quot;system&quot;&gt;"));
         assert_eq!(prompt.matches("</conversation_message>").count(), 1);
+    }
+
+    #[test]
+    fn pure_builder_preserves_current_request_when_budget_is_zero() {
+        let history = vec![m("user", "latest")];
+        let (prompt, messages) = ContextBuilder::build(&history, &[], 0);
+        assert_eq!(messages, vec![m("user", "latest")]);
+        assert!(prompt.contains("latest"));
+    }
+
+    #[test]
+    fn planner_does_not_bypass_budget_for_synchronized_delta() {
+        let history = vec![m("user", "old question"), m("assistant", "old answer")];
+        let incoming = vec![
+            m("user", "old question"),
+            m("assistant", "old answer"),
+            m("user", "this new message is too large for the budget"),
+        ];
+        let thread = super::ThreadSyncState {
+            provider: "chatgpt".to_string(),
+            thread_url: "https://chatgpt.com/c/thread-1".to_string(),
+            synced_through_message_id: Some("message-2".to_string()),
+            last_stored_message_id: Some("message-2".to_string()),
+        };
+        assert!(matches!(
+            ContextBuilder::plan(&history, &incoming, "chatgpt", Some(&thread), true, 10),
+            super::ContextPlan::Replay { messages, .. }
+                if messages == vec![m("user", "this new message is too large for the budget")]
+        ));
     }
 
     #[test]
