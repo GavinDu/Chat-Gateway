@@ -4,7 +4,8 @@ const fs = require("node:fs");
 const vm = require("node:vm");
 const { webcrypto } = require("node:crypto");
 
-function loadShared(cookieFixtures = []) {
+function loadShared(cookieFixtures = [], hasAllPermissions = true) {
+  let cookieReads = 0;
   const context = {
     URL,
     Headers,
@@ -14,15 +15,18 @@ function loadShared(cookieFixtures = []) {
       cookies: {
         // Return the full fixture set to simulate a permissive/misbehaving
         // browser API; providerCookieSnapshot must still enforce its own scope.
-        getAll: async () => cookieFixtures
+        getAll: async () => { cookieReads += 1; return cookieFixtures; }
       },
-            storage: { local: { get: async () => ({}) } }
+      permissions: {
+        contains: async () => hasAllPermissions
+      },
+      storage: { local: { get: async () => ({}) } }
     }
   };
   vm.createContext(context);
   const source = fs.readFileSync(require.resolve("../shared.js"), "utf8");
   vm.runInContext(source + "\nglobalThis.__testApi = { normalizeGateway, providerCookieSnapshot, PROVIDERS };", context);
-  return context.__testApi;
+  return { ...context.__testApi, getCookieReads: () => cookieReads };
 }
 
 test("gateway normalization accepts only local HTTP origins", () => {
@@ -56,6 +60,15 @@ test("provider cookie snapshot excludes cookies outside that provider's domain r
   const snapshot = await api.providerCookieSnapshot("chatgpt");
   assert.deepEqual(JSON.parse(JSON.stringify(snapshot.cookies.map(cookie => cookie.name).sort())), ["auth", "session"]);
   assert.equal(snapshot.local_storage && Object.keys(snapshot.local_storage).length, 0);
+});
+
+test("partial provider host permissions reject cookie snapshot before reading cookies", async () => {
+  const api = loadShared([], false);
+  await assert.rejects(
+    () => api.providerCookieSnapshot("chatgpt"),
+    /Missing provider host permissions/
+  );
+  assert.equal(api.getCookieReads(), 0, "cookie data must not be read when permissions are incomplete");
 });
 
 test("unsupported provider cannot be used to collect a cookie snapshot", async () => {
