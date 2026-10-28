@@ -1822,6 +1822,38 @@ fn record_attempt_error(
     );
 }
 
+/// Keep provider timing metrics and completion logs identical for streaming
+/// and non-streaming requests. State transitions remain at the call site
+/// because stream errors carry additional session-expiry classification.
+fn record_provider_outcome(
+    request_id: &str,
+    provider: &str,
+    outcome: &str,
+    queue_ms: u64,
+    ttft_ms: Option<u64>,
+    provider_work_ms: u64,
+    total_ms: u64,
+) {
+    metrics::record_provider_timings(
+        provider,
+        outcome,
+        queue_ms,
+        ttft_ms,
+        provider_work_ms,
+        total_ms,
+    );
+    tracing::info!(
+        request_id = %request_id,
+        provider = %provider,
+        queue_ms,
+        ttft_ms = ?ttft_ms,
+        provider_work_ms,
+        total_ms,
+        outcome,
+        "provider request completed"
+    );
+}
+
 async fn first_event(
     rx: &mut tokio::sync::mpsc::Receiver<anyhow::Result<providers::ProviderChunk>>,
     timeout: std::time::Duration,
@@ -2313,23 +2345,14 @@ async fn chat_completions(
 
                 let provider_work_ms = provider_started_c.elapsed().as_millis().min(u64::MAX as u128) as u64;
                 let total_ms = request_started_c.elapsed().as_millis().min(u64::MAX as u128) as u64;
-                metrics::record_provider_timings(
+                record_provider_outcome(
+                    &request_id_c,
                     &provider_c,
                     if stream_error.is_some() { "error" } else { "success" },
                     queue_ms_c,
                     ttft_ms,
                     provider_work_ms,
                     total_ms,
-                );
-                tracing::info!(
-                    request_id = %request_id_c,
-                    provider = %provider_c,
-                    queue_ms = queue_ms_c,
-                    ttft_ms = ?ttft_ms,
-                    provider_work_ms,
-                    total_ms,
-                    outcome = if stream_error.is_some() { "error" } else { "success" },
-                    "provider request completed"
                 );
                 if let Some(message) = stream_error {
                     // Preserve sanitized session-expiry state for routing and health reporting.
@@ -2415,23 +2438,14 @@ async fn chat_completions(
         let total_ms = request_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
         if let Some(e) = failed {
             provider_state::record_error(&provider_name, &e);
-            metrics::record_provider_timings(
+            record_provider_outcome(
+                &request_id,
                 &provider_name,
                 "error",
                 queue_ms,
                 ttft_ms,
                 provider_work_ms,
                 total_ms,
-            );
-            tracing::info!(
-                request_id = %request_id,
-                provider = %provider_name,
-                queue_ms,
-                ttft_ms = ?ttft_ms,
-                provider_work_ms,
-                total_ms,
-                outcome = "error",
-                "provider request completed"
             );
             if full.is_empty() {
                 tracing::warn!(provider = %provider_name, "provider failed before output: {e}");
@@ -2448,23 +2462,14 @@ async fn chat_completions(
         }
 
         provider_state::record_success(&provider_name);
-        metrics::record_provider_timings(
+        record_provider_outcome(
+            &request_id,
             &provider_name,
             "success",
             queue_ms,
             ttft_ms,
             provider_work_ms,
             total_ms,
-        );
-        tracing::info!(
-            request_id = %request_id,
-            provider = %provider_name,
-            queue_ms,
-            ttft_ms = ?ttft_ms,
-            provider_work_ms,
-            total_ms,
-            outcome = "success",
-            "provider request completed"
         );
         if let Err(_error) = state
             .memory
