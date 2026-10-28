@@ -620,7 +620,9 @@ fn long_term_memory_disable_stops_retrieval_without_erasing_inspectable_items() 
 fn long_term_memory_retrieval_has_deterministic_ties_and_hard_limit() {
     let fixture = Fixture::new();
     let memory = fixture.open();
-    memory.set_long_term_memory_enabled("owner-a", true).unwrap();
+    memory
+        .set_long_term_memory_enabled("owner-a", true)
+        .unwrap();
     for index in 0..22 {
         memory
             .save_long_term_memory_item(
@@ -651,7 +653,11 @@ fn long_term_memory_retrieval_has_deterministic_ties_and_hard_limit() {
     let retrieved = memory
         .retrieve_long_term_memory_items("owner-a", 100)
         .unwrap();
-    assert_eq!(retrieved.len(), 20, "retrieval must cap caller-supplied limits");
+    assert_eq!(
+        retrieved.len(),
+        20,
+        "retrieval must cap caller-supplied limits"
+    );
     assert_eq!(
         retrieved.iter().map(|item| &item.id).collect::<Vec<_>>(),
         all.iter().take(20).map(|item| &item.id).collect::<Vec<_>>(),
