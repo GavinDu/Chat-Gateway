@@ -1442,7 +1442,12 @@ async fn persist_provider_thread(
     };
     let messages = match state
         .memory
-        .conversation_messages_for_owner(owner_key_id, conversation_id)
+        .clone()
+        .conversation_messages_for_owner_blocking(
+            owner_key_id.to_owned(),
+            conversation_id.to_owned(),
+        )
+        .await
     {
         Ok(messages) => messages,
         Err(error) => {
@@ -1460,7 +1465,9 @@ async fn persist_provider_thread(
     };
     if let Err(error) = state
         .memory
-        .upsert_provider_thread_for_owner(owner_key_id, &thread)
+        .clone()
+        .upsert_provider_thread_for_owner_blocking(owner_key_id.to_owned(), thread)
+        .await
     {
         tracing::warn!(provider, %error, "provider thread mapping could not be persisted");
     }
@@ -1995,7 +2002,13 @@ async fn chat_completions(
             Some(id) => {
                 match state
                     .memory
-                    .get_provider_thread_for_owner(&owner_key_id, id, &provider_name)
+                    .clone()
+                    .get_provider_thread_for_owner_blocking(
+                        owner_key_id.clone(),
+                        id.to_owned(),
+                        provider_name.clone(),
+                    )
+                    .await
                 {
                     Ok(thread) => thread.filter(|thread| {
                         is_reopenable_provider_thread_url(&provider_name, &thread.thread_url)
