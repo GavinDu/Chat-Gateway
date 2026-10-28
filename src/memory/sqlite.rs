@@ -3,7 +3,7 @@ use anyhow::{bail, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use std::{collections::HashMap, fs, path::Path, time::Duration};
 
-const VERSION: i64 = 5;
+const VERSION: i64 = 6;
 const APPLICATION_ID: i64 = 0x4347574d; // CGWM
 const PROVIDER_THREADS_SCHEMA: &str = "
     CREATE TABLE provider_threads (
@@ -23,6 +23,29 @@ const ROLLING_SUMMARIES_SCHEMA: &str = "
         covered_through_position INTEGER NOT NULL CHECK(covered_through_position >= 0),
         updated_at INTEGER NOT NULL
     );
+";
+const MEMORY_SCHEMA: &str = "
+    CREATE TABLE memory_settings (
+        owner_key_id TEXT PRIMARY KEY NOT NULL,
+        enabled INTEGER NOT NULL CHECK(enabled IN (0, 1)),
+        updated_at INTEGER NOT NULL
+    );
+    CREATE TABLE memory_items (
+        id TEXT PRIMARY KEY NOT NULL,
+        owner_key_id TEXT NOT NULL,
+        memory_key TEXT NOT NULL,
+        value TEXT NOT NULL,
+        source_conversation_id TEXT,
+        confidence REAL NOT NULL CHECK(confidence >= 0.0 AND confidence <= 1.0),
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        expires_at INTEGER,
+        CHECK(length(trim(memory_key)) > 0),
+        CHECK(length(trim(value)) > 0),
+        UNIQUE(owner_key_id, memory_key)
+    );
+    CREATE INDEX memory_items_owner_updated_idx ON memory_items(owner_key_id, updated_at DESC);
+    CREATE INDEX memory_items_owner_key_idx ON memory_items(owner_key_id, memory_key);
 ";
 const SCHEMA: &str = "
     CREATE TABLE conversations (
@@ -55,6 +78,28 @@ const SCHEMA: &str = "
         covered_through_position INTEGER NOT NULL CHECK(covered_through_position >= 0),
         updated_at INTEGER NOT NULL
     );
+
+    CREATE TABLE memory_settings (
+        owner_key_id TEXT PRIMARY KEY NOT NULL,
+        enabled INTEGER NOT NULL CHECK(enabled IN (0, 1)),
+        updated_at INTEGER NOT NULL
+    );
+    CREATE TABLE memory_items (
+        id TEXT PRIMARY KEY NOT NULL,
+        owner_key_id TEXT NOT NULL,
+        memory_key TEXT NOT NULL,
+        value TEXT NOT NULL,
+        source_conversation_id TEXT,
+        confidence REAL NOT NULL CHECK(confidence >= 0.0 AND confidence <= 1.0),
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        expires_at INTEGER,
+        CHECK(length(trim(memory_key)) > 0),
+        CHECK(length(trim(value)) > 0),
+        UNIQUE(owner_key_id, memory_key)
+    );
+    CREATE INDEX memory_items_owner_updated_idx ON memory_items(owner_key_id, updated_at DESC);
+    CREATE INDEX memory_items_owner_key_idx ON memory_items(owner_key_id, memory_key);
 ";
 
 pub(super) fn open(path: Option<&Path>, legacy: Option<&Path>) -> Result<Connection> {
@@ -150,6 +195,7 @@ fn initialize(connection: &mut Connection, legacy: Option<&Path>) -> Result<()> 
              UPDATE conversations SET last_activity_at = unixepoch() WHERE last_activity_at = 0;",
         )?;
         tx.execute_batch(ROLLING_SUMMARIES_SCHEMA)?;
+        tx.execute_batch(MEMORY_SCHEMA)?;
         tx.pragma_update(None, "user_version", VERSION)?;
     } else if version == 2 && app == APPLICATION_ID {
         tx.execute_batch(
@@ -158,15 +204,21 @@ fn initialize(connection: &mut Connection, legacy: Option<&Path>) -> Result<()> 
              UPDATE conversations SET last_activity_at = unixepoch() WHERE last_activity_at = 0;",
         )?;
         tx.execute_batch(ROLLING_SUMMARIES_SCHEMA)?;
+        tx.execute_batch(MEMORY_SCHEMA)?;
         tx.pragma_update(None, "user_version", VERSION)?;
     } else if version == 3 && app == APPLICATION_ID {
         tx.execute_batch(
             "ALTER TABLE conversations ADD COLUMN owner_key_id TEXT NOT NULL DEFAULT 'local';",
         )?;
         tx.execute_batch(ROLLING_SUMMARIES_SCHEMA)?;
+        tx.execute_batch(MEMORY_SCHEMA)?;
         tx.pragma_update(None, "user_version", VERSION)?;
     } else if version == 4 && app == APPLICATION_ID {
         tx.execute_batch(ROLLING_SUMMARIES_SCHEMA)?;
+        tx.execute_batch(MEMORY_SCHEMA)?;
+        tx.pragma_update(None, "user_version", VERSION)?;
+    } else if version == 5 && app == APPLICATION_ID {
+        tx.execute_batch(MEMORY_SCHEMA)?;
         tx.pragma_update(None, "user_version", VERSION)?;
     } else if version != VERSION || app != APPLICATION_ID {
         bail!("unsupported conversation schema version {version} (expected {VERSION}) or application id {app}");
@@ -228,7 +280,7 @@ fn initialize(connection: &mut Connection, legacy: Option<&Path>) -> Result<()> 
 }
 
 fn validate_schema(connection: &Connection) -> Result<()> {
-    // Version 5 is owned by this application. Fail closed if its definitions
+    // Version 6 is owned by this application. Fail closed if its definitions
     // were changed, including constraints that SELECT alone cannot validate.
     let expected = Connection::open_in_memory()?;
     expected.execute_batch(SCHEMA)?;
@@ -238,6 +290,8 @@ fn validate_schema(connection: &Connection) -> Result<()> {
         "metadata",
         "provider_threads",
         "conversation_summaries",
+        "memory_settings",
+        "memory_items",
     ] {
         let sql = |database: &Connection| -> Result<String> {
             Ok(database.query_row(

@@ -413,6 +413,232 @@ fn repeated_prompt_with_a_different_answer_is_a_new_turn() {
 }
 
 #[test]
+fn schema_v5_migrates_to_v6_with_long_term_memory_disabled_by_default() {
+    let fixture = Fixture::new();
+    {
+        let memory = fixture.open();
+        memory
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "DROP INDEX memory_items_owner_updated_idx;
+                 DROP INDEX memory_items_owner_key_idx;
+                 DROP TABLE memory_items;
+                 DROP TABLE memory_settings;
+                 PRAGMA user_version=5;",
+            )
+            .unwrap();
+    }
+    let memory = fixture.open();
+    let version: i64 = memory
+        .lock()
+        .unwrap()
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, 6);
+    assert!(!memory.long_term_memory_enabled("owner-a").unwrap());
+    let item_count: i64 = memory
+        .lock()
+        .unwrap()
+        .query_row("SELECT count(*) FROM memory_items", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(item_count, 0);
+}
+
+#[test]
+fn request_specific_context_budget_still_preserves_latest_user_message() {
+    let memory = UnifiedMemory::new(8000);
+    let (_, context, _, _) = memory
+        .build_context_for_owner_with_transcript_budget(
+            "owner-a",
+            None,
+            &[m("user", "latest request must remain")],
+            0,
+        )
+        .unwrap();
+    assert_eq!(context, vec![m("user", "latest request must remain")]);
+}
+
+#[test]
+fn long_term_memory_is_opt_in_owner_scoped_and_deletable() {
+    let memory = UnifiedMemory::new(8000);
+    assert!(!memory.long_term_memory_enabled("owner-a").unwrap());
+    assert!(memory
+        .save_long_term_memory_item("owner-a", "preference", "concise answers", None, 0.9, None)
+        .is_err());
+    assert!(memory
+        .retrieve_long_term_memory_items("owner-a", 5)
+        .unwrap()
+        .is_empty());
+
+    memory
+        .set_long_term_memory_enabled("owner-a", true)
+        .unwrap();
+    let item = memory
+        .save_long_term_memory_item("owner-a", "preference", "concise answers", None, 0.9, None)
+        .unwrap();
+    assert_eq!(item.memory_key, "preference");
+    assert_eq!(
+        memory
+            .retrieve_long_term_memory_items("owner-b", 5)
+            .unwrap()
+            .len(),
+        0
+    );
+    assert_eq!(
+        memory
+            .retrieve_long_term_memory_items("owner-a", 5)
+            .unwrap(),
+        vec![item.clone()]
+    );
+
+    assert!(!memory
+        .delete_long_term_memory_item("owner-b", &item.id)
+        .unwrap());
+    assert!(memory
+        .delete_long_term_memory_item("owner-a", &item.id)
+        .unwrap());
+    assert!(memory
+        .list_long_term_memory_items("owner-a")
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn bulk_memory_delete_is_scoped_to_owner_and_preserves_opt_in_setting() {
+    let memory = UnifiedMemory::new(8000);
+    memory
+        .set_long_term_memory_enabled("owner-a", true)
+        .unwrap();
+    memory
+        .set_long_term_memory_enabled("owner-b", true)
+        .unwrap();
+    memory
+        .save_long_term_memory_item("owner-a", "timezone", "America/New_York", None, 1.0, None)
+        .unwrap();
+    memory
+        .save_long_term_memory_item("owner-b", "timezone", "Europe/London", None, 1.0, None)
+        .unwrap();
+
+    assert_eq!(
+        memory.delete_all_long_term_memory_items("owner-a").unwrap(),
+        1
+    );
+    assert!(memory
+        .list_long_term_memory_items("owner-a")
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        memory.list_long_term_memory_items("owner-b").unwrap().len(),
+        1
+    );
+    assert!(memory.long_term_memory_enabled("owner-a").unwrap());
+    assert!(memory.long_term_memory_enabled("owner-b").unwrap());
+}
+
+#[test]
+fn long_term_memory_upsert_preserves_item_identity_and_replaces_value() {
+    let memory = UnifiedMemory::new(8000);
+    memory
+        .set_long_term_memory_enabled("owner-a", true)
+        .unwrap();
+    let original = memory
+        .save_long_term_memory_item("owner-a", "timezone", "America/New_York", None, 0.8, None)
+        .unwrap();
+    let updated = memory
+        .save_long_term_memory_item("owner-a", "timezone", "Europe/London", None, 1.0, None)
+        .unwrap();
+
+    assert_eq!(updated.id, original.id);
+    assert_eq!(updated.value, "Europe/London");
+    assert_eq!(updated.confidence, 1.0);
+    let items = memory.list_long_term_memory_items("owner-a").unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].id, original.id);
+}
+
+#[test]
+fn long_term_memory_provenance_cannot_reference_another_owners_conversation() {
+    let memory = UnifiedMemory::new(8000);
+    memory
+        .set_long_term_memory_enabled("owner-a", true)
+        .unwrap();
+    memory
+        .set_long_term_memory_enabled("owner-b", true)
+        .unwrap();
+    memory
+        .store_turn_for_owner(
+            "owner-a",
+            "source-conversation".into(),
+            vec![m("user", "private source")],
+            m("assistant", "private response"),
+            "chatgpt".into(),
+            "tab".into(),
+        )
+        .unwrap();
+
+    assert!(memory
+        .save_long_term_memory_item(
+            "owner-b",
+            "stolen-provenance",
+            "not allowed",
+            Some("source-conversation"),
+            0.9,
+            None,
+        )
+        .is_err());
+    assert!(memory
+        .list_long_term_memory_items("owner-b")
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn long_term_memory_disable_stops_retrieval_without_erasing_inspectable_items() {
+    let memory = UnifiedMemory::new(8000);
+    memory
+        .set_long_term_memory_enabled("owner-a", true)
+        .unwrap();
+    memory
+        .save_long_term_memory_item("owner-a", "timezone", "America/New_York", None, 1.0, None)
+        .unwrap();
+
+    memory
+        .set_long_term_memory_enabled("owner-a", false)
+        .unwrap();
+    assert!(memory
+        .retrieve_long_term_memory_items("owner-a", 5)
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        memory.list_long_term_memory_items("owner-a").unwrap().len(),
+        1
+    );
+}
+
+#[test]
+fn long_term_memory_rejects_invalid_confidence_and_expired_items() {
+    let memory = UnifiedMemory::new(8000);
+    memory
+        .set_long_term_memory_enabled("owner-a", true)
+        .unwrap();
+    assert!(memory
+        .save_long_term_memory_item("owner-a", "invalid", "value", None, f64::NAN, None)
+        .is_err());
+    memory
+        .save_long_term_memory_item("owner-a", "expired", "stale fact", None, 1.0, Some(1))
+        .unwrap();
+    assert!(memory
+        .retrieve_long_term_memory_items("owner-a", 5)
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        memory.list_long_term_memory_items("owner-a").unwrap().len(),
+        1
+    );
+}
+
+#[test]
 fn full_and_sliding_transcripts_append_only_new_suffix() {
     let memory = UnifiedMemory::new(8000);
     store(&memory, "one", "first");
@@ -779,7 +1005,17 @@ fn schema_v1_database_migrates_provider_thread_map_without_losing_conversations(
         .unwrap()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 5);
+    assert_eq!(version, 6);
+    let memory_tables: i64 = memory
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('memory_settings','memory_items')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(memory_tables, 2, "v1 migration must create memory tables");
     let activity: i64 = memory
         .lock()
         .unwrap()
@@ -1188,7 +1424,17 @@ fn schema_v3_migration_assigns_existing_conversations_to_local_owner() {
         .unwrap()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 5);
+    assert_eq!(version, 6);
+    let memory_tables: i64 = memory
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('memory_settings','memory_items')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(memory_tables, 2, "v3 migration must create memory tables");
 }
 
 #[test]
@@ -1326,7 +1572,17 @@ fn schema_v4_migration_adds_summary_table_without_losing_tenant_data() {
         .unwrap()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 5);
+    assert_eq!(version, 6);
+    let memory_tables: i64 = memory
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('memory_settings','memory_items')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(memory_tables, 2, "v4 migration must create memory tables");
     let owner: String = memory
         .lock()
         .unwrap()

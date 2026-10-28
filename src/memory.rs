@@ -17,6 +17,20 @@ pub struct ChatMessage {
     pub content: String,
 }
 
+/// A user-controlled, cross-conversation memory item. Items are never
+/// retrieved for prompts unless the owner has explicitly enabled memory.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LongTermMemoryItem {
+    pub id: String,
+    pub memory_key: String,
+    pub value: String,
+    pub source_conversation_id: Option<String>,
+    pub confidence: f64,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub expires_at: Option<i64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Conversation {
     pub id: String,
@@ -174,26 +188,6 @@ impl UnifiedMemory {
     }
 
     /// Build context and report persisted transcript presence from the same scoped read.
-    /// Build a context on Tokio's blocking pool; SQLite reads and lock waits must
-    /// not occupy an async runtime worker.
-    /// Build context and fetch its stored transcript without blocking a Tokio worker.
-    pub async fn build_context_for_owner_with_transcript_blocking(
-        self: Arc<Self>,
-        owner_key_id: String,
-        conversation_id: Option<String>,
-        new_messages: Vec<ChatMessage>,
-    ) -> anyhow::Result<(String, Vec<ChatMessage>, bool, Vec<ChatMessage>)> {
-        tokio::task::spawn_blocking(move || {
-            self.build_context_for_owner_with_transcript(
-                &owner_key_id,
-                conversation_id.as_deref(),
-                &new_messages,
-            )
-        })
-        .await
-        .map_err(|error| anyhow::anyhow!("conversation context task failed: {error}"))?
-    }
-
     /// Build context and report persisted transcript presence from the same scoped read.
     pub fn build_context_for_owner_with_history(
         &self,
@@ -214,6 +208,21 @@ impl UnifiedMemory {
         conversation_id: Option<&str>,
         new_messages: &[ChatMessage],
     ) -> anyhow::Result<(String, Vec<ChatMessage>, bool, Vec<ChatMessage>)> {
+        self.build_context_for_owner_with_transcript_budget(
+            owner_key_id,
+            conversation_id,
+            new_messages,
+            self.max_tokens,
+        )
+    }
+
+    pub fn build_context_for_owner_with_transcript_budget(
+        &self,
+        owner_key_id: &str,
+        conversation_id: Option<&str>,
+        new_messages: &[ChatMessage],
+        token_budget: usize,
+    ) -> anyhow::Result<(String, Vec<ChatMessage>, bool, Vec<ChatMessage>)> {
         let (history, saved_summary) = match conversation_id {
             Some(id) => match self.conversation_for_owner(owner_key_id, id)? {
                 Some(conversation) => (conversation.messages, self.rolling_summary(id)?),
@@ -231,9 +240,9 @@ impl UnifiedMemory {
             .map(|message| estimate_message_tokens(&message.content).saturating_add(8))
             .unwrap_or(0);
         let message_budget = if summary_message.is_some() {
-            self.max_tokens.saturating_sub(summary_tokens)
+            token_budget.saturating_sub(summary_tokens)
         } else {
-            self.max_tokens
+            token_budget
         };
         let (mut prompt, mut context) =
             ContextBuilder::build(&history, new_messages, message_budget);
@@ -242,6 +251,25 @@ impl UnifiedMemory {
             prompt = crate::context::render_prompt(&context);
         }
         Ok((prompt, context, has_history, history))
+    }
+
+    pub async fn build_context_for_owner_with_transcript_budget_blocking(
+        self: Arc<Self>,
+        owner_key_id: String,
+        conversation_id: Option<String>,
+        new_messages: Vec<ChatMessage>,
+        token_budget: usize,
+    ) -> anyhow::Result<(String, Vec<ChatMessage>, bool, Vec<ChatMessage>)> {
+        tokio::task::spawn_blocking(move || {
+            self.build_context_for_owner_with_transcript_budget(
+                &owner_key_id,
+                conversation_id.as_deref(),
+                &new_messages,
+                token_budget,
+            )
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("conversation context task failed: {error}"))?
     }
 
     fn rolling_summary(&self, conversation_id: &str) -> anyhow::Result<Option<(String, usize)>> {
@@ -739,6 +767,224 @@ impl UnifiedMemory {
         )?;
         Ok(())
     }
+
+    /// Long-term memory is opt-in. Missing settings deliberately mean disabled.
+    pub fn long_term_memory_enabled(&self, owner_key_id: &str) -> anyhow::Result<bool> {
+        let connection = self.lock()?;
+        let enabled = connection
+            .query_row(
+                "SELECT enabled FROM memory_settings WHERE owner_key_id=?1",
+                [owner_key_id],
+                |row| row.get::<_, bool>(0),
+            )
+            .optional()?
+            .unwrap_or(false);
+        Ok(enabled)
+    }
+
+    pub fn set_long_term_memory_enabled(
+        &self,
+        owner_key_id: &str,
+        enabled: bool,
+    ) -> anyhow::Result<()> {
+        if owner_key_id.trim().is_empty() {
+            anyhow::bail!("owner key is required");
+        }
+        let now = unix_timestamp();
+        let connection = self.lock()?;
+        connection.execute(
+            "INSERT INTO memory_settings(owner_key_id, enabled, updated_at) VALUES(?1, ?2, ?3)
+             ON CONFLICT(owner_key_id) DO UPDATE SET enabled=excluded.enabled, updated_at=excluded.updated_at",
+            rusqlite::params![owner_key_id, enabled, now],
+        )?;
+        Ok(())
+    }
+
+    /// Save or replace one owner-scoped memory key. Writes are rejected while
+    /// disabled, and source conversation provenance is checked against ownership.
+    pub fn save_long_term_memory_item(
+        &self,
+        owner_key_id: &str,
+        memory_key: &str,
+        value: &str,
+        source_conversation_id: Option<&str>,
+        confidence: f64,
+        expires_at: Option<i64>,
+    ) -> anyhow::Result<LongTermMemoryItem> {
+        if owner_key_id.trim().is_empty()
+            || memory_key.trim().is_empty()
+            || memory_key.chars().count() > 128
+            || value.trim().is_empty()
+            || value.chars().count() > 16_384
+            || !confidence.is_finite()
+            || !(0.0..=1.0).contains(&confidence)
+        {
+            anyhow::bail!("invalid long-term memory item");
+        }
+        let now = unix_timestamp();
+        let mut connection = self.lock()?;
+        let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let enabled: bool = tx
+            .query_row(
+                "SELECT enabled FROM memory_settings WHERE owner_key_id=?1",
+                [owner_key_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .unwrap_or(false);
+        if !enabled {
+            anyhow::bail!("long-term memory is disabled");
+        }
+        if let Some(source_id) = source_conversation_id {
+            let source_owner: Option<String> = tx
+                .query_row(
+                    "SELECT owner_key_id FROM conversations WHERE id=?1",
+                    [source_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if source_owner.as_deref() != Some(owner_key_id) {
+                anyhow::bail!("source conversation is not owned by this API key");
+            }
+        }
+        tx.execute(
+            "INSERT INTO memory_items(
+                id, owner_key_id, memory_key, value, source_conversation_id,
+                confidence, created_at, updated_at, expires_at
+             ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, ?8)
+             ON CONFLICT(owner_key_id, memory_key) DO UPDATE SET
+                value=excluded.value,
+                source_conversation_id=excluded.source_conversation_id,
+                confidence=excluded.confidence,
+                updated_at=excluded.updated_at,
+                expires_at=excluded.expires_at",
+            rusqlite::params![
+                uuid::Uuid::new_v4().to_string(),
+                owner_key_id,
+                memory_key.trim(),
+                value.trim(),
+                source_conversation_id,
+                confidence,
+                now,
+                expires_at,
+            ],
+        )?;
+        let item = tx.query_row(
+            "SELECT id, memory_key, value, source_conversation_id, confidence,
+                    created_at, updated_at, expires_at
+             FROM memory_items WHERE owner_key_id=?1 AND memory_key=?2",
+            rusqlite::params![owner_key_id, memory_key.trim()],
+            memory_item_from_row,
+        )?;
+        tx.commit()?;
+        Ok(item)
+    }
+
+    /// List every stored item for inspection/export, including expired items.
+    /// This deliberately remains available when retrieval is disabled.
+    pub fn list_long_term_memory_items(
+        &self,
+        owner_key_id: &str,
+    ) -> anyhow::Result<Vec<LongTermMemoryItem>> {
+        let connection = self.lock()?;
+        let mut statement = connection.prepare(
+            "SELECT id, memory_key, value, source_conversation_id, confidence,
+                    created_at, updated_at, expires_at
+             FROM memory_items WHERE owner_key_id=?1 ORDER BY updated_at DESC, id",
+        )?;
+        let rows = statement.query_map([owner_key_id], memory_item_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Retrieval is empty unless explicitly enabled and always excludes expired items.
+    pub fn retrieve_long_term_memory_items(
+        &self,
+        owner_key_id: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<LongTermMemoryItem>> {
+        // Keep the opt-in check and item read in one transaction. Separate
+        // statements without a transaction allow a concurrent disable to race
+        // between the setting check and retrieval, disclosing one last batch.
+        let mut connection = self.lock()?;
+        let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let enabled: bool = tx
+            .query_row(
+                "SELECT enabled FROM memory_settings WHERE owner_key_id=?1",
+                [owner_key_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .unwrap_or(false);
+        if !enabled {
+            tx.commit()?;
+            return Ok(Vec::new());
+        }
+
+        let limit = limit.clamp(1, 20) as i64;
+        let now = unix_timestamp();
+        let mut statement = tx.prepare(
+            "SELECT id, memory_key, value, source_conversation_id, confidence,
+                    created_at, updated_at, expires_at
+             FROM memory_items
+             WHERE owner_key_id=?1 AND (expires_at IS NULL OR expires_at > ?2)
+             ORDER BY confidence DESC, updated_at DESC, id
+             LIMIT ?3",
+        )?;
+        let rows = statement.query_map(
+            rusqlite::params![owner_key_id, now, limit],
+            memory_item_from_row,
+        )?;
+        let items = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(statement);
+        tx.commit()?;
+        Ok(items)
+    }
+
+    pub fn delete_long_term_memory_item(
+        &self,
+        owner_key_id: &str,
+        item_id: &str,
+    ) -> anyhow::Result<bool> {
+        let connection = self.lock()?;
+        Ok(connection.execute(
+            "DELETE FROM memory_items WHERE owner_key_id=?1 AND id=?2",
+            rusqlite::params![owner_key_id, item_id],
+        )? == 1)
+    }
+
+    /// Delete all long-term memory items belonging to one owner. This does not
+    /// affect the owner's opt-in setting or any conversation transcript.
+    pub fn delete_all_long_term_memory_items(&self, owner_key_id: &str) -> anyhow::Result<usize> {
+        if owner_key_id.trim().is_empty() {
+            anyhow::bail!("owner key is required");
+        }
+        let connection = self.lock()?;
+        Ok(connection.execute(
+            "DELETE FROM memory_items WHERE owner_key_id=?1",
+            [owner_key_id],
+        )?)
+    }
+}
+
+fn unix_timestamp() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        .min(i64::MAX as u64) as i64
+}
+
+fn memory_item_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<LongTermMemoryItem> {
+    Ok(LongTermMemoryItem {
+        id: row.get(0)?,
+        memory_key: row.get(1)?,
+        value: row.get(2)?,
+        source_conversation_id: row.get(3)?,
+        confidence: row.get(4)?,
+        created_at: row.get(5)?,
+        updated_at: row.get(6)?,
+        expires_at: row.get(7)?,
+    })
 }
 
 fn extractive_rolling_summary(messages: &[ChatMessage], max_chars: usize) -> String {
