@@ -53,7 +53,10 @@ $("link").addEventListener("click", async () => {
     const stored = await chrome.storage.local.get(["linkedProviders"]);
     const linkedProviders = Array.from(new Set([...(stored.linkedProviders || []),provider]));
     await chrome.storage.local.set({linkedProviders});
-    message("Linked " + provider + ". Restart Chat Gateway to load the session into its embedded browser; cookie changes are saved for the next restart.");
+    const result = await response.json();
+    message(result.applied
+      ? "Linked " + provider + ". The embedded browser session is active."
+      : "Linked " + provider + " in the vault, but live refresh failed. Restart Chat Gateway before using this session.");
     await refreshStatus();
   } catch (error) { message(error.message); }
 });
@@ -70,7 +73,10 @@ $("unlink").addEventListener("click", async () => {
     if (!response.ok) throw new Error("Could not unlink " + provider + ".");
     const stored = await chrome.storage.local.get(["linkedProviders"]);
     await chrome.storage.local.set({linkedProviders:(stored.linkedProviders || []).filter(value => value !== provider)});
-    message("Vault record deleted for " + provider + ". Restart the gateway to clear any session still held in the browser engine.");
+    const result = await response.json();
+    message(result.unlinked
+      ? "Unlinked " + provider + ". Its saved session and in-memory provider cookies were revoked."
+      : "No saved session existed for " + provider + "; in-memory provider cookies were cleared.");
     await refreshStatus();
   } catch (error) { message(error.message); }
 });
