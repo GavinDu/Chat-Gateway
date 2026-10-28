@@ -1822,3 +1822,53 @@ fn legacy_synthetic_tab_id_is_cleared_on_next_persisted_turn() {
         4
     );
 }
+
+#[test]
+fn concurrent_independent_connections_preserve_all_turns() {
+    let fixture = Fixture::new();
+    // Initialize the schema before releasing concurrent openers.
+    drop(fixture.open());
+    let workers = 6;
+    let barrier = Arc::new(Barrier::new(workers));
+    let mut joins = Vec::new();
+
+    for index in 0..workers {
+        let db = fixture.db();
+        let json = fixture.json();
+        let barrier = Arc::clone(&barrier);
+        joins.push(thread::spawn(move || {
+            let memory = open(&db, Some(&json)).expect("concurrent connection should open");
+            barrier.wait();
+            let id = format!("concurrent-{index}");
+            memory
+                .store_turn(
+                    id.clone(),
+                    vec![m("user", &format!("question-{index}"))],
+                    m("assistant", &format!("answer-{index}")),
+                    "chatgpt".into(),
+                    format!("real-tab-{index}"),
+                )
+                .expect("concurrent turn should commit");
+            id
+        }));
+    }
+
+    let ids = joins
+        .into_iter()
+        .map(|join| join.join().expect("worker should not panic"))
+        .collect::<Vec<_>>();
+    let memory = fixture.open();
+    for (index, id) in ids.iter().enumerate() {
+        let conversation = memory
+            .conversation(id)
+            .expect("conversation read should succeed")
+            .expect("committed conversation should exist");
+        assert_eq!(
+            conversation.messages,
+            vec![
+                m("user", &format!("question-{index}")),
+                m("assistant", &format!("answer-{index}"))
+            ]
+        );
+    }
+}
