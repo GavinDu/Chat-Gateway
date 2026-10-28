@@ -211,7 +211,7 @@ pub fn render_with_provider_states(provider_states: &[(String, String)]) -> Stri
     }
     let _ = writeln!(out, "# TYPE gateway_provider_session_state gauge");
     for (provider, state) in provider_states {
-        for known_state in ["unknown", "ready", "needs_login"] {
+        for known_state in ["unknown", "ready", "needs_login", "degraded"] {
             let value = u8::from(state == known_state);
             let _ = writeln!(
                 out,
