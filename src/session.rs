@@ -310,15 +310,24 @@ pub fn rotate_session_vault_from_env() -> Result<usize> {
 }
 
 pub fn rotate_session_vault_key(old_key: &[u8; 32], new_key: &[u8; 32]) -> Result<usize> {
-    if old_key == new_key {
-        anyhow::bail!("old and new vault keys must differ");
-    }
     const PROVIDERS: &[&str] = &[
         "qwen", "metaai", "claude", "chatgpt", "gemini", "grok", "mistral", "perplexity",
     ];
+    rotate_session_vault_records_in_dir(Path::new("sessions"), PROVIDERS, old_key, new_key)
+}
+
+fn rotate_session_vault_records_in_dir(
+    directory: &Path,
+    providers: &[&str],
+    old_key: &[u8; 32],
+    new_key: &[u8; 32],
+) -> Result<usize> {
+    if old_key == new_key {
+        anyhow::bail!("old and new vault keys must differ");
+    }
     let mut records: Vec<(String, std::path::PathBuf, Vec<u8>, Vec<u8>)> = Vec::new();
-    for provider in PROVIDERS {
-        let path = std::path::PathBuf::from(session_vault_path(provider)?);
+    for provider in providers {
+        let path = directory.join(format!("{provider}.vault"));
         let old_bytes = match std::fs::read(&path) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
@@ -343,7 +352,7 @@ pub fn rotate_session_vault_key(old_key: &[u8; 32], new_key: &[u8; 32]) -> Resul
             );
         }
     }
-    let mut backups = Vec::new();
+    let mut backups: Vec<std::path::PathBuf> = Vec::new();
     for (provider, path, old_bytes, _) in &records {
         let backup = path.with_extension("vault.rotate-backup");
         if let Err(error) = write_session_file_atomically(&backup, old_bytes) {
@@ -1254,6 +1263,54 @@ mod vault_tests {
             }],
             ts: "2026-10-27T00:00:00Z".to_owned(),
         }
+    }
+
+    #[test]
+    fn key_rotation_reencrypts_records_and_removes_rollback_backups() {
+        let dir = std::env::temp_dir().join(format!(
+            "chat-gateway-vault-rotation-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let old_key = [0x11; 32];
+        let new_key = [0x22; 32];
+        let original = sample_session();
+        let original_bytes = encrypt_session_snapshot(&original, "chatgpt", &old_key).unwrap();
+        let path = dir.join("chatgpt.vault");
+        std::fs::write(&path, original_bytes).unwrap();
+
+        assert_eq!(
+            rotate_session_vault_records_in_dir(&dir, &["chatgpt"], &old_key, &new_key).unwrap(),
+            1
+        );
+        let rotated = std::fs::read(&path).unwrap();
+        assert!(decrypt_session_snapshot(&rotated, "chatgpt", &old_key).is_err());
+        let decoded = decrypt_session_snapshot(&rotated, "chatgpt", &new_key).unwrap();
+        assert_eq!(
+            session_state_hash(&decoded).unwrap(),
+            session_state_hash(&original).unwrap()
+        );
+        assert!(!dir.join("chatgpt.vault.rotate-backup").exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn key_rotation_rejects_same_key_and_wrong_old_key_without_modifying_records() {
+        let dir = std::env::temp_dir().join(format!(
+            "chat-gateway-vault-rotation-fail-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let key = [0x33; 32];
+        let bytes = encrypt_session_snapshot(&sample_session(), "chatgpt", &key).unwrap();
+        let path = dir.join("chatgpt.vault");
+        std::fs::write(&path, &bytes).unwrap();
+
+        assert!(rotate_session_vault_records_in_dir(&dir, &["chatgpt"], &key, &key).is_err());
+        assert!(rotate_session_vault_records_in_dir(&dir, &["chatgpt"], &[0x44; 32], &[0x55; 32]).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        assert!(!dir.join("chatgpt.vault.rotate-backup").exists());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
