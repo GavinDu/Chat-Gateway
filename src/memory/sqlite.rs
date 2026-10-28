@@ -359,6 +359,7 @@ pub(super) fn append_owned(
 
 
 #[cfg(test)]
+#[cfg(test)]
 mod connection_policy_tests {
     use super::open;
     use std::{fs, path::PathBuf, time::{SystemTime, UNIX_EPOCH}};
