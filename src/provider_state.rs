@@ -261,6 +261,24 @@ mod tests {
     }
 
     #[test]
+    fn half_open_retry_is_claimed_by_only_one_concurrent_request() {
+        let provider = "test-provider-half-open-race";
+        record_error_state(provider, false, Some(SystemTime::UNIX_EPOCH));
+
+        let workers = (0..16)
+            .map(|_| {
+                std::thread::spawn(|| is_routable(provider))
+            })
+            .collect::<Vec<_>>();
+        let admitted = workers
+            .into_iter()
+            .filter(|worker| worker.join().expect("routing worker should finish"))
+            .count();
+
+        assert_eq!(admitted, 1, "only one concurrent request may claim the half-open slot");
+    }
+
+    #[test]
     fn state_string_conversion_is_stable_for_metrics_and_health() {
         assert_eq!(ProviderSessionState::Unknown.as_str(), "unknown");
         assert_eq!(ProviderSessionState::Ready.as_str(), "ready");
