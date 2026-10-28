@@ -2124,7 +2124,7 @@ async fn chat_completions(
     .await
     {
         Ok(Ok(candidates)) => candidates,
-        Ok(Err(_error)) | Err(_error) => {
+        Ok(Err(_)) | Err(_) => {
             tracing::error!(conversation_id = ?conversation_id, "provider affinity read failed");
             return api_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
