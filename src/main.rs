@@ -1500,7 +1500,12 @@ async fn save_long_term_memory_item(
         }
         Err(error) => {
             tracing::error!(%error, "long-term memory item task failed");
-            api_error(StatusCode::INTERNAL_SERVER_ERROR, "server_error", "memory_write_failed", "memory item could not be saved safely")
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                "memory_write_failed",
+                "memory item could not be saved safely",
+            )
         }
     }
 }
