@@ -79,7 +79,7 @@ enum Command {
     },
     VerifySession {
         provider: Provider,
-        reply: oneshot::Sender<Result<()>>,
+        reply: oneshot::Sender<Result<bool>>,
     },
     TestAdapter {
         provider: Provider,
@@ -389,7 +389,7 @@ impl ObscuraPool {
 
     /// Read-only authentication probe on the warmed page. The browser worker
     /// serializes it with sends through the provider's page lock.
-    pub async fn verify_session(&self, name: &str) -> Result<()> {
+    pub async fn verify_session(&self, name: &str) -> Result<bool> {
         let provider =
             Provider::from_name(name).ok_or_else(|| anyhow::anyhow!("unknown provider {name}"))?;
         let (tx, rx) = oneshot::channel();
@@ -986,15 +986,17 @@ fn browser_thread(
                             let locks = locks.clone();
                             let registry = registry.clone();
                             tokio::task::spawn_local(async move {
-                                let result: Result<()> = async {
-                                    let page = pages.borrow().get(&provider).cloned()
-                                        .ok_or_else(|| anyhow::anyhow!("provider page not warmed"))?;
+                                let result: Result<bool> = async {
                                     let lock = locks.borrow().get(&provider).cloned()
                                         .ok_or_else(|| anyhow::anyhow!("provider page lock missing"))?;
                                     let adapter = registry.get(&provider).cloned()
                                         .ok_or_else(|| anyhow::anyhow!("provider not enabled"))?;
                                     let _guard = lock.lock().await;
-                                    verify_session_page(provider, &page, adapter.as_ref())
+                                    let Some(page) = pages.borrow().get(&provider).cloned() else {
+                                        return Ok(false);
+                                    };
+                                    verify_session_page(provider, &page, adapter.as_ref())?;
+                                    Ok(true)
                                 }.await;
                                 let _ = reply.send(result);
                             });
