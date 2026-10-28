@@ -296,6 +296,31 @@ impl UnifiedMemory {
         )
     }
 
+    /// Persist a completed turn on Tokio's blocking pool so SQLite lock waits,
+    /// transactions, and disk I/O do not block an async runtime worker.
+    pub async fn store_turn_for_owner_with_tab_id_blocking(
+        self: Arc<Self>,
+        owner_key_id: String,
+        conversation_id: String,
+        user_msgs: Vec<ChatMessage>,
+        assistant_msg: ChatMessage,
+        provider: String,
+        tab_id: Option<String>,
+    ) -> anyhow::Result<()> {
+        tokio::task::spawn_blocking(move || {
+            self.store_turn_for_owner_with_tab_id(
+                &owner_key_id,
+                conversation_id,
+                user_msgs,
+                assistant_msg,
+                provider,
+                tab_id,
+            )
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("conversation persistence task failed: {error}"))?
+    }
+
     /// Persist a completed turn with optional real browser tab metadata.
     pub fn store_turn_for_owner_with_tab_id(
         &self,
