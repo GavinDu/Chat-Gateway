@@ -303,7 +303,14 @@ pub struct VaultSessionInfo {
 pub fn list_vault_sessions() -> Result<Vec<VaultSessionInfo>> {
     let key = vault_key_from_env()?;
     const PROVIDERS: &[&str] = &[
-        "qwen", "metaai", "claude", "chatgpt", "gemini", "grok", "mistral", "perplexity",
+        "qwen",
+        "metaai",
+        "claude",
+        "chatgpt",
+        "gemini",
+        "grok",
+        "mistral",
+        "perplexity",
     ];
     let mut entries = Vec::with_capacity(PROVIDERS.len());
     for provider in PROVIDERS {
@@ -325,7 +332,10 @@ pub fn list_vault_sessions() -> Result<Vec<VaultSessionInfo>> {
             }
             Err(error) => return Err(error.into()),
         };
-        entries.push(VaultSessionInfo { provider: (*provider).to_string(), status });
+        entries.push(VaultSessionInfo {
+            provider: (*provider).to_string(),
+            status,
+        });
     }
     Ok(entries)
 }
@@ -335,7 +345,10 @@ pub fn list_vault_sessions() -> Result<Vec<VaultSessionInfo>> {
 pub fn restore_vault_backup(backup_dir: &str) -> Result<usize> {
     let path = Path::new(backup_dir);
     if !path.is_dir()
-        || !path.file_name().and_then(|name| name.to_str()).is_some_and(|name| name.starts_with(".vault-rotation-"))
+        || !path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with(".vault-rotation-"))
         || path.parent() != Some(Path::new("sessions"))
     {
         anyhow::bail!("backup directory must be a sessions/.vault-rotation-* directory");
@@ -352,8 +365,9 @@ pub fn restore_vault_backup(backup_dir: &str) -> Result<usize> {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
             Err(error) => return Err(error.into()),
         };
-        decrypt_session_snapshot(&bytes, provider, &key)
-            .map_err(|_| anyhow::anyhow!("backup record for {provider} is not valid with the configured key"))?;
+        decrypt_session_snapshot(&bytes, provider, &key).map_err(|_| {
+            anyhow::anyhow!("backup record for {provider} is not valid with the configured key")
+        })?;
         backups.push((session_vault_path(provider)?, bytes));
     }
     if backups.is_empty() {
@@ -392,8 +406,11 @@ pub fn rotate_vault_key(new_key: &[u8; 32]) -> Result<(usize, String)> {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
             Err(error) => return Err(error.into()),
         };
-        let session = decrypt_session_snapshot(&bytes, provider, &old_key)
-            .map_err(|_| anyhow::anyhow!("cannot rotate vault: {provider} record is unreadable with the current key"))?;
+        let session = decrypt_session_snapshot(&bytes, provider, &old_key).map_err(|_| {
+            anyhow::anyhow!(
+                "cannot rotate vault: {provider} record is unreadable with the current key"
+            )
+        })?;
         let replacement = encrypt_session_snapshot(&session, provider, new_key)?;
         let verified = decrypt_session_snapshot(&replacement, provider, new_key)?;
         if session_state_hash(&verified)? != session_state_hash(&session)? {
@@ -409,7 +426,8 @@ pub fn rotate_vault_key(new_key: &[u8; 32]) -> Result<(usize, String)> {
     let backup_dir = format!("sessions/.vault-rotation-{}", uuid::Uuid::new_v4());
     ensure_private_session_dir_sync(Path::new(&backup_dir))?;
     for (path, original, _) in &originals {
-        let name = Path::new(path).file_name()
+        let name = Path::new(path)
+            .file_name()
             .ok_or_else(|| anyhow::anyhow!("invalid vault path during key rotation"))?;
         write_session_file_atomically(&Path::new(&backup_dir).join(name), original)?;
     }
