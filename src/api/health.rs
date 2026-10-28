@@ -1,4 +1,9 @@
-use axum::{extract::State, http::StatusCode, response::{IntoResponse, Response}, Json};
+use axum::{
+    extract::State,
+    http::StatusCode,
+    response::{IntoResponse, Response},
+    Json,
+};
 use std::sync::Arc;
 
 use crate::{provider_guard, provider_state, AppState};
