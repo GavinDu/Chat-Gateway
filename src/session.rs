@@ -732,7 +732,6 @@ pub fn load_session_file(provider: &str) -> Result<Option<SessionFile>> {
     }
 }
 
-#[cfg(test)]
 fn load_session_file_from_path(path: &Path) -> Result<Option<SessionFile>> {
     let data = match std::fs::read_to_string(path) {
         Ok(data) => data,
