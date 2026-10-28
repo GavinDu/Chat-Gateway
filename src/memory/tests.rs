@@ -413,6 +413,65 @@ fn repeated_prompt_with_a_different_answer_is_a_new_turn() {
 }
 
 #[test]
+fn long_term_memory_is_opt_in_owner_scoped_and_deletable() {
+    let memory = UnifiedMemory::new(8000);
+    assert!(!memory.long_term_memory_enabled("owner-a").unwrap());
+    assert!(memory
+        .save_long_term_memory_item("owner-a", "preference", "concise answers", None, 0.9, None)
+        .is_err());
+    assert!(memory
+        .retrieve_long_term_memory_items("owner-a", 5)
+        .unwrap()
+        .is_empty());
+
+    memory.set_long_term_memory_enabled("owner-a", true).unwrap();
+    let item = memory
+        .save_long_term_memory_item("owner-a", "preference", "concise answers", None, 0.9, None)
+        .unwrap();
+    assert_eq!(item.memory_key, "preference");
+    assert_eq!(memory.retrieve_long_term_memory_items("owner-b", 5).unwrap().len(), 0);
+    assert_eq!(memory.retrieve_long_term_memory_items("owner-a", 5).unwrap(), vec![item.clone()]);
+
+    assert!(memory.delete_long_term_memory_item("owner-b", &item.id).unwrap() == false);
+    assert!(memory.delete_long_term_memory_item("owner-a", &item.id).unwrap());
+    assert!(memory.list_long_term_memory_items("owner-a").unwrap().is_empty());
+}
+
+#[test]
+fn long_term_memory_disable_stops_retrieval_without_erasing_inspectable_items() {
+    let memory = UnifiedMemory::new(8000);
+    memory.set_long_term_memory_enabled("owner-a", true).unwrap();
+    memory
+        .save_long_term_memory_item("owner-a", "timezone", "America/New_York", None, 1.0, None)
+        .unwrap();
+
+    memory.set_long_term_memory_enabled("owner-a", false).unwrap();
+    assert!(memory.retrieve_long_term_memory_items("owner-a", 5).unwrap().is_empty());
+    assert_eq!(memory.list_long_term_memory_items("owner-a").unwrap().len(), 1);
+}
+
+#[test]
+fn long_term_memory_rejects_invalid_confidence_and_expired_items() {
+    let memory = UnifiedMemory::new(8000);
+    memory.set_long_term_memory_enabled("owner-a", true).unwrap();
+    assert!(memory
+        .save_long_term_memory_item("owner-a", "invalid", "value", None, f64::NAN, None)
+        .is_err());
+    memory
+        .save_long_term_memory_item(
+            "owner-a",
+            "expired",
+            "stale fact",
+            None,
+            1.0,
+            Some(1),
+        )
+        .unwrap();
+    assert!(memory.retrieve_long_term_memory_items("owner-a", 5).unwrap().is_empty());
+    assert_eq!(memory.list_long_term_memory_items("owner-a").unwrap().len(), 1);
+}
+
+#[test]
 fn full_and_sliding_transcripts_append_only_new_suffix() {
     let memory = UnifiedMemory::new(8000);
     store(&memory, "one", "first");
