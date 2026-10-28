@@ -428,8 +428,7 @@ mod concurrency_configuration_tests {
             connection.query_row("PRAGMA busy_timeout", [], |row| row.get(0))?;
         let foreign_keys: i64 =
             connection.query_row("PRAGMA foreign_keys", [], |row| row.get(0))?;
-        let synchronous: i64 =
-            connection.query_row("PRAGMA synchronous", [], |row| row.get(0))?;
+        let synchronous: i64 = connection.query_row("PRAGMA synchronous", [], |row| row.get(0))?;
         let schema_version: i64 =
             connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
         let application_id: i64 =
@@ -458,10 +457,8 @@ mod concurrency_configuration_tests {
         let first = super::open(Some(&path), None)?;
         let second = super::open(Some(&path), None)?;
 
-        let first_mode: String =
-            first.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
-        let second_mode: String =
-            second.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
+        let first_mode: String = first.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
+        let second_mode: String = second.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
         assert_eq!(first_mode.to_ascii_lowercase(), "wal");
         assert_eq!(second_mode.to_ascii_lowercase(), "wal");
 
@@ -511,5 +508,4 @@ mod concurrency_configuration_tests {
         let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
         Ok(())
     }
-
 }
