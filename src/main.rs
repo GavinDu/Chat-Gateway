@@ -1872,6 +1872,19 @@ async fn chat_completions(
         }
     };
     let prompt = context_prompt;
+    // Read the durable transcript once per request, before iterating provider
+    // candidates. A failed provider attempt must not cause another SQLite read
+    // of the same conversation history.
+    let stored_messages = match conversation_id.as_deref() {
+        Some(id) => match state
+            .memory
+            .conversation_messages_for_owner(&owner_key_id, id)
+        {
+            Ok(messages) => messages,
+            Err(_) => return conversation_context_read_error(conversation_id.as_deref()),
+        },
+        None => Vec::new(),
+    };
     if prompt.is_empty() {
         return api_error(
             axum::http::StatusCode::BAD_REQUEST,
@@ -1982,16 +1995,6 @@ async fn chat_completions(
         tracing::debug!(provider = %provider_name, queue_ms = permit.queue_ms, "acquired provider slot");
         let queue_ms = permit.queue_ms.min(u64::MAX as u128) as u64;
 
-        let stored_messages = match conversation_id.as_deref() {
-            Some(id) => match state
-                .memory
-                .conversation_messages_for_owner(&owner_key_id, id)
-            {
-                Ok(messages) => messages,
-                Err(_) => return conversation_context_read_error(conversation_id.as_deref()),
-            },
-            None => Vec::new(),
-        };
         let saved_thread = match conversation_id.as_deref() {
             Some(id) => {
                 match state
