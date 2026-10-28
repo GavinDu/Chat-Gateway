@@ -229,7 +229,11 @@ pub fn render_with_provider_states(provider_states: &[(String, String)]) -> Stri
         );
     }
     let _ = writeln!(out, "# TYPE gateway_browser_worker_restarts_total counter");
-    let _ = writeln!(out, "gateway_browser_worker_restarts_total {}", data.browser_worker_restarts);
+    let _ = writeln!(
+        out,
+        "gateway_browser_worker_restarts_total {}",
+        data.browser_worker_restarts
+    );
     let _ = writeln!(out, "# TYPE gateway_provider_session_state gauge");
     for (provider, state) in provider_states {
         for known_state in ["unknown", "ready", "needs_login", "degraded"] {
