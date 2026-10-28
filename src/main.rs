@@ -4201,3 +4201,52 @@ mod first_event_tests {
         ));
     }
 }
+
+#[cfg(test)]
+mod personal_memory_budget_tests {
+    use super::*;
+
+    #[test]
+    fn personal_memory_selection_never_exceeds_its_reserved_token_budget() {
+        let items = vec![
+            memory::LongTermMemoryItem {
+                id: "small".into(),
+                memory_key: "timezone".into(),
+                value: "America/New_York".into(),
+                source_conversation_id: None,
+                confidence: 1.0,
+                created_at: 1,
+                updated_at: 1,
+                expires_at: None,
+            },
+            memory::LongTermMemoryItem {
+                id: "large".into(),
+                memory_key: "long-note".into(),
+                value: "x".repeat(20_000),
+                source_conversation_id: None,
+                confidence: 0.9,
+                created_at: 1,
+                updated_at: 1,
+                expires_at: None,
+            },
+        ];
+        let (selected, used) = budget_personal_memory_items(items, 32);
+        assert!(used <= 32);
+        assert!(selected.iter().all(|item| item.id != "large"));
+        let (none, used) = budget_personal_memory_items(
+            vec![memory::LongTermMemoryItem {
+                id: "small".into(),
+                memory_key: "timezone".into(),
+                value: "America/New_York".into(),
+                source_conversation_id: None,
+                confidence: 1.0,
+                created_at: 1,
+                updated_at: 1,
+                expires_at: None,
+            }],
+            0,
+        );
+        assert!(none.is_empty());
+        assert_eq!(used, 0);
+    }
+}
