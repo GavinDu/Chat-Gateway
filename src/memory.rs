@@ -260,7 +260,6 @@ impl UnifiedMemory {
         }
         Ok((prompt, context, has_history, history))
     }
-    }
 
     fn rolling_summary(&self, conversation_id: &str) -> anyhow::Result<Option<(String, usize)>> {
         let connection = self.lock()?;
