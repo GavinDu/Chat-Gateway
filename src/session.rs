@@ -259,7 +259,6 @@ fn load_vault_session_from_paths(
     }
 }
 
-
 fn migrate_legacy_snapshot(
     legacy_path: &Path,
     vault_path: &Path,
