@@ -6,6 +6,7 @@ use ring::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use zeroize::{Zeroize, Zeroizing};
 use std::{
     collections::{BTreeMap, HashMap},
     io::Write,
@@ -21,6 +22,15 @@ pub struct SessionFile {
     pub ts: String,
 }
 
+impl Drop for SessionFile {
+    fn drop(&mut self) {
+        for value in self.local_storage.values_mut() {
+            value.zeroize();
+        }
+        // Cookie::drop zeroizes each reusable credential value.
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Cookie {
     pub name: String,
@@ -29,6 +39,12 @@ pub struct Cookie {
     pub path: String,
     pub secure: bool,
     pub http_only: bool,
+}
+
+impl Drop for Cookie {
+    fn drop(&mut self) {
+        self.value.zeroize();
+    }
 }
 
 impl From<obscura_core::Cookie> for Cookie {
@@ -309,10 +325,10 @@ fn remove_legacy_session_snapshot(provider: &str) -> Result<()> {
     Ok(())
 }
 
-fn vault_key_from_env() -> Result<[u8; 32]> {
-    let encoded = std::env::var("CHAT_GATEWAY_VAULT_KEY").map_err(|_| {
+fn vault_key_from_env() -> Result<Zeroizing<[u8; 32]>> {
+    let encoded = Zeroizing::new(std::env::var("CHAT_GATEWAY_VAULT_KEY").map_err(|_| {
         anyhow::anyhow!("CHAT_GATEWAY_VAULT_KEY is required for encrypted session storage")
-    })?;
+    })?);
     if encoded.len() != 64 || !encoded.as_bytes().iter().all(u8::is_ascii_hexdigit) {
         anyhow::bail!("CHAT_GATEWAY_VAULT_KEY must be exactly 64 hexadecimal characters");
     }
@@ -321,7 +337,7 @@ fn vault_key_from_env() -> Result<[u8; 32]> {
         *byte = u8::from_str_radix(&encoded[index * 2..index * 2 + 2], 16)
             .map_err(|_| anyhow::anyhow!("CHAT_GATEWAY_VAULT_KEY contains invalid hexadecimal"))?;
     }
-    Ok(key)
+    Ok(Zeroizing::new(key))
 }
 
 fn vault_aad(provider: &str) -> String {
@@ -341,7 +357,7 @@ fn encrypt_session_snapshot(
     let unbound = aead::UnboundKey::new(&aead::AES_256_GCM, key_bytes)
         .map_err(|_| anyhow::anyhow!("invalid AES-256-GCM vault key"))?;
     let key = aead::LessSafeKey::new(unbound);
-    let mut ciphertext = serde_json::to_vec(file)?;
+    let mut ciphertext = Zeroizing::new(serde_json::to_vec(file)?);
     key.seal_in_place_append_tag(
         aead::Nonce::assume_unique_for_key(nonce_bytes),
         aead::Aad::from(vault_aad(provider).as_bytes()),
@@ -374,7 +390,7 @@ fn decrypt_session_snapshot(
     let unbound = aead::UnboundKey::new(&aead::AES_256_GCM, key_bytes)
         .map_err(|_| anyhow::anyhow!("invalid AES-256-GCM vault key"))?;
     let key = aead::LessSafeKey::new(unbound);
-    let mut ciphertext = bytes[nonce_end..].to_vec();
+    let mut ciphertext = Zeroizing::new(bytes[nonce_end..].to_vec());
     let plaintext = key
         .open_in_place(
             aead::Nonce::assume_unique_for_key(nonce_bytes),
