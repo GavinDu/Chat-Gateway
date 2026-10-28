@@ -53,7 +53,7 @@ $("link").addEventListener("click", async () => {
     const stored = await chrome.storage.local.get(["linkedProviders"]);
     const linkedProviders = Array.from(new Set([...(stored.linkedProviders || []),provider]));
     await chrome.storage.local.set({linkedProviders});
-    message("Linked " + provider + ". Restart Chat Gateway to load the session into its embedded browser; cookie changes are saved for the next restart.");
+    message("Linked " + provider + ". The gateway activated this session in its embedded browser; subsequent cookie changes sync automatically.");
     await refreshStatus();
   } catch (error) { message(error.message); }
 });
@@ -70,7 +70,7 @@ $("unlink").addEventListener("click", async () => {
     if (!response.ok) throw new Error("Could not unlink " + provider + ".");
     const stored = await chrome.storage.local.get(["linkedProviders"]);
     await chrome.storage.local.set({linkedProviders:(stored.linkedProviders || []).filter(value => value !== provider)});
-    message("Vault record deleted for " + provider + ". Restart the gateway to clear any session still held in the browser engine.");
+    message("Unlinked " + provider + ". The gateway cleared the persisted session and its embedded-browser cookies and localStorage.");
     await refreshStatus();
   } catch (error) { message(error.message); }
 });
