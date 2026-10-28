@@ -376,6 +376,7 @@ pub fn restore_vault_backup(backup_dir: &str) -> Result<usize> {
         anyhow::bail!("backup directory must be a sessions/.vault-rotation-* directory");
     }
     let key = vault_key_from_env()?;
+    ensure_private_session_dir_sync(Path::new("sessions"))?;
     const PROVIDERS: &[&str] = &[
         "qwen", "metaai", "claude", "chatgpt", "gemini", "grok", "mistral", "perplexity",
     ];
@@ -411,6 +412,7 @@ pub fn rotate_vault_key(new_key: &[u8; 32]) -> Result<(usize, String)> {
         anyhow::bail!("new vault key must differ from the current key");
     }
 
+    ensure_private_session_dir_sync(Path::new("sessions"))?;
     const PROVIDERS: &[&str] = &[
         "qwen", "metaai", "claude", "chatgpt", "gemini", "grok", "mistral", "perplexity",
     ];
