@@ -1096,7 +1096,7 @@ async fn memory_egress_policy_status() -> Response {
             },
             "current_turn": "allowed",
             "conversation_context": "allowed",
-            "personal_memory_retrieval_wired": false,
+            "personal_memory_retrieval_wired": true,
         }))
         .into_response(),
         Err(_) => api_error(
@@ -2466,8 +2466,8 @@ async fn chat_completions(
         // Enforce data-handling policy at the last gateway boundary before
         // provider-specific submission. Current-turn content and local
         // transcript context are distinct from optional personal long-term
-        // memory. No long-term memory retrieval is currently wired into this
-        // request path; keep the injection point typed and fail-closed.
+        // memory. The typed egress policy filters retrieved items for each
+        // candidate before rendering them into that provider's prompt.
         if memory_egress_policy
             .authorize(
                 &provider_name,
