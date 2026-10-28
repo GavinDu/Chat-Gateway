@@ -306,7 +306,7 @@ fn authenticated_request_with_origin(
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64;
-    if timestamp.is_none_or(|timestamp| (now - timestamp).abs() > REQUEST_SKEW_SECONDS) {
+    if timestamp.is_none_or(|timestamp| now.abs_diff(timestamp) > REQUEST_SKEW_SECONDS as u64) {
         return Err(Box::new(json_error(
             StatusCode::UNAUTHORIZED,
             "relay_request_expired",
@@ -548,6 +548,18 @@ mod tests {
         *state.install_token_hash.lock().unwrap() = None;
         let after_revoke = valid_auth_headers(token, "22222222222222222222222222222222");
         assert!(authenticated_request_with_origin(&state, &after_revoke, true).is_err());
+    }
+
+    #[test]
+    fn extreme_timestamp_is_rejected_without_integer_overflow() {
+        let token = "paired-install-token";
+        let state = relay_state_with_token(Some(token));
+        let mut headers = valid_auth_headers(token, "33333333333333333333333333333333");
+        headers.insert(
+            "x-relay-timestamp",
+            HeaderValue::from_static("-9223372036854775808"),
+        );
+        assert!(authenticated_request_with_origin(&state, &headers, true).is_err());
     }
 
     #[test]
