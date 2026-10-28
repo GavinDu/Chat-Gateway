@@ -232,7 +232,7 @@ fn migrate_legacy_snapshot(
     provider: &str,
     key: &[u8; 32],
 ) -> Result<SessionFile> {
-    let legacy_bytes = std::fs::read(legacy_path)?;
+    let legacy_bytes = Zeroizing::new(std::fs::read(legacy_path)?);
     let legacy = serde_json::from_slice::<SessionFile>(&legacy_bytes)?;
     let parent = vault_path.parent().unwrap_or_else(|| Path::new("sessions"));
     ensure_private_session_dir_sync(parent)?;
