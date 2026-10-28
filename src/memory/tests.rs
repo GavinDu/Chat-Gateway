@@ -1814,12 +1814,26 @@ fn schema_v6_migration_clears_synthetic_tabs_and_preserves_real_metadata_and_his
         Some("https://chatgpt.com/c/real-thread")
     );
     assert_eq!(
-        migrated.conversation("synthetic-migration").unwrap().unwrap().messages,
-        vec![m("user", "keep synthetic history"), m("assistant", "answer keep synthetic history")]
+        migrated
+            .conversation("synthetic-migration")
+            .unwrap()
+            .unwrap()
+            .messages,
+        vec![
+            m("user", "keep synthetic history"),
+            m("assistant", "answer keep synthetic history")
+        ]
     );
     assert_eq!(
-        migrated.conversation("real-tab-migration").unwrap().unwrap().messages,
-        vec![m("user", "keep real-tab history"), m("assistant", "answer keep real-tab history")]
+        migrated
+            .conversation("real-tab-migration")
+            .unwrap()
+            .unwrap()
+            .messages,
+        vec![
+            m("user", "keep real-tab history"),
+            m("assistant", "answer keep real-tab history")
+        ]
     );
     let version: i64 = migrated
         .lock()
