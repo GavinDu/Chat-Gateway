@@ -455,9 +455,21 @@ impl UnifiedMemory {
     }
 
     pub fn has_history_for_owner(&self, owner_key_id: &str, cid: &str) -> anyhow::Result<bool> {
-        Ok(self
-            .conversation_for_owner(owner_key_id, cid)?
-            .is_some_and(|conversation| !conversation.messages.is_empty()))
+        // This is a routing hint, not a transcript read. Use EXISTS so the
+        // query can stop at the first message instead of deserializing history.
+        let connection = self.lock()?;
+        connection
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1
+                    FROM conversations c
+                    JOIN messages m ON m.conversation_id = c.id
+                    WHERE c.id = ?1 AND c.owner_key_id = ?2
+                )",
+                rusqlite::params![cid, owner_key_id],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
     }
 
     #[allow(dead_code)]
