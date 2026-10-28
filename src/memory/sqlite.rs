@@ -432,7 +432,8 @@ mod concurrency_configuration_tests {
                 "provider TEXT,\n        tab_id TEXT,\n        last_activity_at",
             );
             connection.execute_batch(&legacy_schema)?;
-            connection.execute_batch("PRAGMA application_id=1128742733; PRAGMA user_version=6;")?;
+            connection.pragma_update(None, "application_id", super::APPLICATION_ID)?;
+            connection.pragma_update(None, "user_version", 6)?;
             connection.execute(
                 "INSERT INTO conversations(id,provider,tab_id,last_activity_at,owner_key_id) VALUES('legacy','chatgpt','tab-123',1,'local')",
                 [],
