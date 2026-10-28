@@ -136,6 +136,19 @@ impl UnifiedMemory {
         self.build_context_for_owner("local", conversation_id, new_messages)
     }
 
+    /// Read the complete durable transcript for a conversation owned by this API key.
+    /// Used to verify whether a provider-side thread still matches the committed gateway state.
+    pub fn conversation_messages_for_owner(
+        &self,
+        owner_key_id: &str,
+        conversation_id: &str,
+    ) -> anyhow::Result<Vec<ChatMessage>> {
+        Ok(self
+            .conversation_for_owner(owner_key_id, conversation_id)?
+            .map(|conversation| conversation.messages)
+            .unwrap_or_default())
+    }
+
     pub fn build_context_for_owner(
         &self,
         owner_key_id: &str,
