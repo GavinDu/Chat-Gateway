@@ -38,6 +38,17 @@ impl MemoryEgressPolicy {
         Self::from_allowlist(&configured)
     }
 
+    /// Sorted provider IDs for the authenticated policy-inspection endpoint.
+    pub(crate) fn allowed_personal_memory_providers(&self) -> Vec<String> {
+        let mut providers = self
+            .allowed_personal_memory_providers
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        providers.sort();
+        providers
+    }
+
     /// Parse an explicit comma-separated allowlist. Keeping parsing pure makes
     /// policy validation deterministic and testable without process-global env.
     pub(crate) fn from_allowlist(configured: &str) -> anyhow::Result<Self> {
@@ -158,6 +169,10 @@ mod tests {
         );
 
         let allowed = MemoryEgressPolicy::from_allowlist(" ChatGPT, claude,chatgpt ").unwrap();
+        assert_eq!(
+            allowed.allowed_personal_memory_providers(),
+            vec!["chatgpt".to_owned(), "claude".to_owned()]
+        );
         assert_eq!(
             allowed.authorize("chatgpt", ProviderDataClass::PersonalLongTermMemory),
             Ok(())
