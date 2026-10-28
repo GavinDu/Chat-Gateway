@@ -412,6 +412,7 @@ pub(super) fn append_owned(
 }
 
 #[cfg(test)]
+#[allow(dead_code)] // This module is also compiled through the standalone SQLite benchmark.
 mod concurrency_configuration_tests {
     use super::*;
 
