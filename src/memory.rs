@@ -138,6 +138,19 @@ impl UnifiedMemory {
 
     /// Read the complete durable transcript for a conversation owned by this API key.
     /// Used to verify whether a provider-side thread still matches the committed gateway state.
+    /// Read a transcript on Tokio's blocking pool to avoid blocking an async worker.
+    pub async fn conversation_messages_for_owner_blocking(
+        self: Arc<Self>,
+        owner_key_id: String,
+        conversation_id: String,
+    ) -> anyhow::Result<Vec<ChatMessage>> {
+        tokio::task::spawn_blocking(move || {
+            self.conversation_messages_for_owner(&owner_key_id, &conversation_id)
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("conversation transcript task failed: {error}"))?
+    }
+
     pub fn conversation_messages_for_owner(
         &self,
         owner_key_id: &str,
@@ -161,6 +174,25 @@ impl UnifiedMemory {
     }
 
     /// Build context and report persisted transcript presence from the same scoped read.
+    /// Build a context on Tokio's blocking pool; SQLite reads and lock waits must
+    /// not occupy an async runtime worker.
+    pub async fn build_context_for_owner_with_history_blocking(
+        self: Arc<Self>,
+        owner_key_id: String,
+        conversation_id: Option<String>,
+        new_messages: Vec<ChatMessage>,
+    ) -> anyhow::Result<(String, Vec<ChatMessage>, bool)> {
+        tokio::task::spawn_blocking(move || {
+            self.build_context_for_owner_with_history(
+                &owner_key_id,
+                conversation_id.as_deref(),
+                &new_messages,
+            )
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("conversation context task failed: {error}"))?
+    }
+
     pub fn build_context_for_owner_with_history(
         &self,
         owner_key_id: &str,
@@ -570,6 +602,19 @@ impl UnifiedMemory {
     #[allow(dead_code)]
     pub fn upsert_provider_thread(&self, thread: &ProviderThread) -> anyhow::Result<()> {
         self.upsert_provider_thread_for_owner("local", thread)
+    }
+
+    /// Persist provider-thread metadata on Tokio's blocking pool.
+    pub async fn upsert_provider_thread_for_owner_blocking(
+        self: Arc<Self>,
+        owner_key_id: String,
+        thread: ProviderThread,
+    ) -> anyhow::Result<()> {
+        tokio::task::spawn_blocking(move || {
+            self.upsert_provider_thread_for_owner(&owner_key_id, &thread)
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("provider thread persistence task failed: {error}"))?
     }
 
     pub fn upsert_provider_thread_for_owner(
