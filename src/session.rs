@@ -493,6 +493,31 @@ pub fn restore_vault_backup(backup_dir: &str) -> Result<usize> {
     Ok(backups.len())
 }
 
+/// Validate and prepare every replacement before a rotation writes any
+/// live file. The returned tuples retain the original encrypted bytes for
+/// rollback and the verified replacement bytes for commit.
+fn prepare_vault_rotation_records(
+    records: Vec<(String, String, Vec<u8>)>,
+    old_key: &[u8; 32],
+    new_key: &[u8; 32],
+) -> Result<Vec<(String, Vec<u8>, Vec<u8>)>> {
+    let mut prepared = Vec::with_capacity(records.len());
+    for (provider, path, original) in records {
+        let session = decrypt_session_snapshot(&original, &provider, old_key).map_err(|_| {
+            anyhow::anyhow!(
+                "cannot rotate vault: {provider} record is unreadable with the current key"
+            )
+        })?;
+        let replacement = encrypt_session_snapshot(&session, &provider, new_key)?;
+        let verified = decrypt_session_snapshot(&replacement, &provider, new_key)?;
+        if session_state_hash(&verified)? != session_state_hash(&session)? {
+            anyhow::bail!("vault rotation verification failed for provider {provider}");
+        }
+        prepared.push((path, original, replacement));
+    }
+    Ok(prepared)
+}
+
 /// Rotate all encrypted vault records as one best-effort transaction.
 /// Every input is decrypted and every replacement authenticated before any
 /// live record is replaced. Encrypted old records are retained in a private
@@ -519,7 +544,7 @@ pub fn rotate_vault_key(new_key: &[u8; 32]) -> Result<(usize, String)> {
     for provider in PROVIDERS {
         let _ = VaultSessionStore.load(provider)?;
     }
-    let mut originals: Vec<(String, Vec<u8>, Vec<u8>)> = Vec::new();
+    let mut records: Vec<(String, String, Vec<u8>)> = Vec::new();
     for provider in PROVIDERS {
         let path = session_vault_path(provider)?;
         let bytes = match std::fs::read(&path) {
@@ -527,18 +552,11 @@ pub fn rotate_vault_key(new_key: &[u8; 32]) -> Result<(usize, String)> {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
             Err(error) => return Err(error.into()),
         };
-        let session = decrypt_session_snapshot(&bytes, provider, &old_key).map_err(|_| {
-            anyhow::anyhow!(
-                "cannot rotate vault: {provider} record is unreadable with the current key"
-            )
-        })?;
-        let replacement = encrypt_session_snapshot(&session, provider, new_key)?;
-        let verified = decrypt_session_snapshot(&replacement, provider, new_key)?;
-        if session_state_hash(&verified)? != session_state_hash(&session)? {
-            anyhow::bail!("vault rotation verification failed for provider {provider}");
-        }
-        originals.push((path, bytes, replacement));
+        records.push(((*provider).to_string(), path, bytes));
     }
+    // Prepare and authenticate every replacement before writing any live
+    // record. Keeping this phase pure makes the all-record preflight testable.
+    let originals = prepare_vault_rotation_records(records, &old_key, new_key)?;
 
     if originals.is_empty() {
         return Ok((0, String::new()));
@@ -1522,6 +1540,30 @@ mod vault_tests {
         )
         .is_err());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rotation_preflights_all_records_before_any_live_replacement() {
+        let old_key = [0x5a; 32];
+        let new_key = [0x6b; 32];
+        let valid = encrypt_session_snapshot(&sample_session(), "chatgpt", &old_key).unwrap();
+        let corrupt = b"not-an-authenticated-vault-record".to_vec();
+
+        let result = prepare_vault_rotation_records(
+            vec![
+                ("chatgpt".into(), "sessions/chatgpt.vault".into(), valid.clone()),
+                ("claude".into(), "sessions/claude.vault".into(), corrupt.clone()),
+            ],
+            &old_key,
+            &new_key,
+        );
+
+        assert!(result.unwrap_err().to_string().contains("claude"));
+        // The preflight helper performs no writes: valid old records remain
+        // readable with the old key, and the corrupted record is unchanged.
+        assert!(decrypt_session_snapshot(&valid, "chatgpt", &old_key).is_ok());
+        assert!(decrypt_session_snapshot(&valid, "chatgpt", &new_key).is_err());
+        assert_eq!(corrupt, b"not-an-authenticated-vault-record");
     }
 
     #[test]
