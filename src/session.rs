@@ -1425,18 +1425,17 @@ mod vault_tests {
         let vault_path = root.join("chatgpt.vault");
         let legacy_bytes = serde_json::to_vec(&sample_session()).unwrap();
         std::fs::write(&legacy_path, &legacy_bytes).unwrap();
-        let encrypted = encrypt_session_snapshot(&sample_session(), "chatgpt", &[0x37; 32])
-            .unwrap();
+        let encrypted =
+            encrypt_session_snapshot(&sample_session(), "chatgpt", &[0x37; 32]).unwrap();
         std::fs::write(&vault_path, encrypted).unwrap();
 
-        let result = load_vault_session_from_paths(
-            "chatgpt",
-            &vault_path,
-            &legacy_path,
-            &[0x5a; 32],
-        );
+        let result =
+            load_vault_session_from_paths("chatgpt", &vault_path, &legacy_path, &[0x5a; 32]);
 
-        assert!(result.is_err(), "an unreadable vault record must fail closed");
+        assert!(
+            result.is_err(),
+            "an unreadable vault record must fail closed"
+        );
         assert_eq!(
             std::fs::read(&legacy_path).unwrap(),
             legacy_bytes,
