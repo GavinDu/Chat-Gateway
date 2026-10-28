@@ -153,6 +153,27 @@ cargo test --locked
 cargo fmt --all -- --check
 ```
 
+## Provider latency benchmark
+
+Run the standard-library streaming benchmark against a running gateway. Supply
+comma-separated model aliases that are configured in `config.yaml`; use the
+same host, prompt, round count, and session state when comparing commits.
+
+```bash
+python3 scripts/provider_bench.py \
+  --base-url http://127.0.0.1:8080 \
+  --models auto,qwen,claude \
+  --rounds 3
+```
+
+Set `CHAT_GATEWAY_API_KEY` or pass `--api-key` when API-key auth is enabled.
+On Linux, optionally pass `--server-pid <gateway-pid>` to sample the gateway's
+`VmRSS` before and after each request. The script emits one JSON record per
+request and a final summary with median/p95 TTFT and total latency, provider
+switch TTFT, and optional RSS range. Timings are client-observed and include
+network and browser-provider variance; this is an operational benchmark, not a
+deterministic unit test. It does not log prompts, API keys, or response content.
+
 ## Provider sessions
 
 Sessions live in `sessions/<provider>.json`:
