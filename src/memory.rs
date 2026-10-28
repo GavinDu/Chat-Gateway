@@ -610,4 +610,3 @@ pub struct ConversationSummary {
     pub provider: Option<String>,
     pub message_count: usize,
 }
-
