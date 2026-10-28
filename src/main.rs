@@ -1921,9 +1921,15 @@ async fn read_conversation_context_with_transcript_for_owner(
     owner_key_id: String,
     conversation_id: Option<String>,
     messages: Vec<ChatMessage>,
+    token_budget: usize,
 ) -> anyhow::Result<(String, Vec<ChatMessage>, bool, Vec<ChatMessage>)> {
     memory
-        .build_context_for_owner_with_transcript_blocking(owner_key_id, conversation_id, messages)
+        .build_context_for_owner_with_transcript_budget_blocking(
+            owner_key_id,
+            conversation_id,
+            messages,
+            token_budget,
+        )
         .await
 }
 
