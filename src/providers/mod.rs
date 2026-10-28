@@ -576,7 +576,9 @@ pub async fn run_send(
                         stable_ticks = 0;
                         continue;
                     }
-                    if stable_ticks >= completion_idle_ticks(done_signal, saw_streaming, probe.post_answer_affordance) {
+                    if stable_ticks
+                        >= completion_idle_ticks(done_signal, saw_streaming, probe.post_answer_affordance)
+                    {
                         if let Some(answer) = &identical_answer_fallback {
                             let answer = if let Some(re) = &citation_re {
                                 re.replace_all(answer, "").to_string()
@@ -642,9 +644,9 @@ pub async fn run_send(
                 }
             }
 
-            // Completion requires a conservative 15s idle grace plus no
-            // active streaming indicator, avoiding truncation during long
-            // reasoning or search pauses.
+            // Require a stopped indicator and stable text. Providers with a
+            // verified post-answer affordance can finish after a short grace;
+            // all other cases retain the conservative ~15s fallback.
             if completion_ready(
                 stable_ticks,
                 streaming,
