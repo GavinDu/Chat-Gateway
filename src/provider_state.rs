@@ -150,6 +150,7 @@ mod tests {
                 ProviderSessionState::Degraded,
                 "{message}"
             );
+            assert!(is_routable(&provider), "{message} should remain routable");
         }
     }
 
