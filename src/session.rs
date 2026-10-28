@@ -275,6 +275,35 @@ pub fn import_relay_session(provider: &str, file: &SessionFile) -> Result<()> {
     Ok(())
 }
 
+fn cookie_expiration_header(cookie: &Cookie) -> Result<String> {
+    if !restored_cookie_fields_safe(cookie) {
+        anyhow::bail!("provider cookie has invalid fields and could not be safely revoked");
+    }
+    let path = if cookie.path.is_empty() { "/" } else { cookie.path.as_str() };
+    let host_prefix = cookie.name.starts_with("__Host-");
+    if (host_prefix && (path != "/" || !cookie.secure))
+        || (cookie.name.starts_with("__Secure-") && !cookie.secure)
+    {
+        anyhow::bail!("provider cookie prefix constraints prevent safe revocation");
+    }
+    let mut expired = format!("{}=; Max-Age=0; Path={}", cookie.name, path);
+    if host_prefix {
+        expired.push_str("; Secure");
+    } else {
+        expired.push_str(&format!("; Domain={}", cookie.domain));
+        if cookie.secure {
+            expired.push_str("; Secure");
+        }
+    }
+    if cookie.http_only {
+        expired.push_str("; HttpOnly");
+    }
+    Ok(expired)
+}
+
+/// Remove cookies for one provider from Obscura's shared browser jar.
+/// Every deletion is verified; failure aborts unlink before persistent records
+/// are deleted, preventing a false success response for live credentials.
 pub fn clear_provider_cookies(browser: &Browser, provider: &str) -> Result<usize> {
     let store = browser.cookies();
     let cookies = store.get_all();
@@ -287,32 +316,8 @@ pub fn clear_provider_cookies(browser: &Browser, provider: &str) -> Result<usize
         if !cookie_domain_allowed(provider, &cookie.domain) {
             continue;
         }
-        if !restored_cookie_fields_safe(&cookie) {
-            anyhow::bail!("provider cookie has invalid fields and could not be safely revoked");
-        }
-        let path = if cookie.path.is_empty() {
-            "/"
-        } else {
-            cookie.path.as_str()
-        };
-        let host_prefix = cookie.name.starts_with("__Host-");
-        if (host_prefix && (path != "/" || !cookie.secure))
-            || (cookie.name.starts_with("__Secure-") && !cookie.secure)
-        {
-            anyhow::bail!("provider cookie prefix constraints prevent safe revocation");
-        }
-        let mut expired = format!("{}=; Max-Age=0; Path={}", cookie.name, path);
-        if host_prefix {
-            expired.push_str("; Secure");
-        } else {
-            expired.push_str(&format!("; Domain={}", cookie.domain));
-            if cookie.secure {
-                expired.push_str("; Secure");
-            }
-        }
-        if cookie.http_only {
-            expired.push_str("; HttpOnly");
-        }
+        let expired = cookie_expiration_header(&cookie)?;
+        let path = if cookie.path.is_empty() { "/" } else { cookie.path.as_str() };
         let url = format!(
             "https://{}{}",
             cookie.domain.trim_start_matches('.'),
@@ -982,6 +987,21 @@ mod cookie_scope_tests {
             secure: true,
             http_only: true,
         }
+    }
+
+    #[test]
+    fn cookie_expiration_preserves_secure_cookie_prefix_requirements() {
+        let mut host_cookie = cookie("__Host-session", "value", "/");
+        host_cookie.domain = "chatgpt.com".to_string();
+        assert!(cookie_expiration_header(&host_cookie)
+            .unwrap()
+            .contains("Max-Age=0; Path=/; Secure"));
+        host_cookie.path = "/nested".to_string();
+        assert!(cookie_expiration_header(&host_cookie).is_err());
+
+        let mut secure_cookie = cookie("__Secure-session", "value", "/");
+        secure_cookie.secure = false;
+        assert!(cookie_expiration_header(&secure_cookie).is_err());
     }
 
     #[test]
