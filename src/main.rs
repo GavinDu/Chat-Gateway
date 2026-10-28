@@ -91,6 +91,14 @@ struct Cli {
         help = "Rotate encrypted vault records using CHAT_GATEWAY_VAULT_KEY and CHAT_GATEWAY_VAULT_NEW_KEY"
     )]
     vault_rotate_key: bool,
+
+    #[arg(
+        long,
+        value_name = "BACKUP_DIR",
+        conflicts_with_all = ["all", "test_adapter", "create_api_key", "vault_list", "vault_delete_provider", "vault_rotate_key"],
+        help = "Restore encrypted vault records from a sessions/.vault-rotation-* backup using the old key"
+    )]
+    vault_restore_backup: Option<String>,
 }
 
 fn adapter_report_is_healthy(report: &browser::pool::TestAdapterReport) -> bool {
@@ -163,6 +171,12 @@ async fn main() -> anyhow::Result<()> {
     if let Some(provider) = cli.vault_delete_provider.as_deref() {
         let removed = session::delete_session_snapshot(provider)?;
         println!("provider={provider} removed={removed}");
+        return Ok(());
+    }
+    if let Some(backup_dir) = cli.vault_restore_backup.as_deref() {
+        let restored = session::restore_vault_backup(backup_dir)?;
+        println!("Restored {restored} encrypted provider vault record(s) from {backup_dir}.");
+        println!("Keep CHAT_GATEWAY_VAULT_KEY set to the old key until a fresh rotation succeeds.");
         return Ok(());
     }
     if cli.vault_rotate_key {
