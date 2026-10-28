@@ -472,4 +472,44 @@ mod concurrency_configuration_tests {
         let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
         Ok(())
     }
+
+    #[test]
+    fn wal_reader_does_not_observe_uncommitted_writer_data() -> super::Result<()> {
+        let path = std::env::temp_dir().join(format!(
+            "chat-gateway-sqlite-isolation-{}.sqlite3",
+            uuid::Uuid::new_v4()
+        ));
+        let mut writer = super::open(Some(&path), None)?;
+        let reader = super::open(Some(&path), None)?;
+        let transaction =
+            writer.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        transaction.execute(
+            "INSERT INTO conversations(id,provider,tab_id,last_activity_at,owner_key_id)
+             VALUES (?1, NULL, NULL, 0, 'local')",
+            ["isolation-check"],
+        )?;
+
+        let before_commit: i64 = reader.query_row(
+            "SELECT COUNT(*) FROM conversations WHERE id=?1",
+            ["isolation-check"],
+            |row| row.get(0),
+        )?;
+        assert_eq!(before_commit, 0, "reader must not see uncommitted writes");
+
+        transaction.commit()?;
+        let after_commit: i64 = reader.query_row(
+            "SELECT COUNT(*) FROM conversations WHERE id=?1",
+            ["isolation-check"],
+            |row| row.get(0),
+        )?;
+        assert_eq!(after_commit, 1, "committed writes must become visible");
+
+        drop(reader);
+        drop(writer);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+        Ok(())
+    }
+
 }
