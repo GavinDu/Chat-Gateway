@@ -438,9 +438,9 @@ impl ObscuraPool {
                 reply: tx,
             })
             .await
-            .map_err(|_| anyhow::anyhow!("browser thread gone"))?;
+            .map_err(|_| browser_worker_unavailable())?;
         rx.await
-            .map_err(|_| anyhow::anyhow!("browser thread dropped session verification reply"))?
+            .map_err(|_| browser_worker_unavailable())?
     }
 
     /// Live-send test-adapter run for one provider (Go RunAdapterTest
