@@ -606,13 +606,16 @@ fn verify_session_page(
     page: &obscura_core::Page,
     adapter: &dyn providers::SiteAdapter,
 ) -> Result<()> {
-    providers::common::check_session(provider.name(), page)?;
+    let is_login_page = providers::common::is_login_page(page);
+    if is_login_page {
+        providers::common::check_session(provider.name(), page)?;
+    }
     let input_found = adapter
         .selector_set()
         .input
         .iter()
         .any(|selector| page.query_selector(selector).is_some());
-    if !input_found {
+    if !session_probe_page_healthy(is_login_page, input_found) {
         anyhow::bail!("session verification failed: chat input not found");
     }
     Ok(())
@@ -806,24 +809,12 @@ fn browser_thread(
                         loop {
                             {
                                 let _guard = lock.lock().await;
-                                let is_login = providers::common::is_login_page(&page);
-                                let input_found = adapter
-                                    .selector_set()
-                                    .input
-                                    .iter()
-                                    .any(|selector| page.query_selector(selector).is_some());
-                                if session_probe_page_healthy(is_login, input_found) {
-                                    crate::provider_state::record_success(provider.name());
-                                } else if is_login {
-                                    crate::provider_state::record_error(
+                                match verify_session_page(provider, &page, adapter.as_ref()) {
+                                    Ok(()) => crate::provider_state::record_success(provider.name()),
+                                    Err(error) => crate::provider_state::record_error(
                                         provider.name(),
-                                        "session_expired: provider session expired, re-login required",
-                                    );
-                                } else {
-                                    crate::provider_state::record_error(
-                                        provider.name(),
-                                        "session verification failed: chat input not found",
-                                    );
+                                        &error.to_string(),
+                                    ),
                                 }
                             }
                             tokio::time::sleep(Duration::from_secs(60 + jitter)).await;
