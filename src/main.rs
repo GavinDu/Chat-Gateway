@@ -1859,10 +1859,7 @@ async fn persist_provider_thread(
     let messages = match state
         .memory
         .clone()
-        .read_transcript(
-            owner_key_id.to_owned(),
-            conversation_id.to_owned(),
-        )
+        .read_transcript(owner_key_id.to_owned(), conversation_id.to_owned())
         .await
     {
         Ok(messages) => messages,
