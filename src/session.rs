@@ -493,14 +493,17 @@ pub fn restore_vault_backup(backup_dir: &str) -> Result<usize> {
     Ok(backups.len())
 }
 
+type VaultRotationInput = (String, String, Vec<u8>);
+type PreparedVaultRotationRecord = (String, Vec<u8>, Vec<u8>);
+
 /// Validate and prepare every replacement before a rotation writes any
-/// live file. The returned tuples retain the original encrypted bytes for
-/// rollback and the verified replacement bytes for commit.
+/// live file. The returned records retain original encrypted bytes for
+/// rollback and verified replacement bytes for commit.
 fn prepare_vault_rotation_records(
-    records: Vec<(String, String, Vec<u8>)>,
+    records: Vec<VaultRotationInput>,
     old_key: &[u8; 32],
     new_key: &[u8; 32],
-) -> Result<Vec<(String, Vec<u8>, Vec<u8>)>> {
+) -> Result<Vec<PreparedVaultRotationRecord>> {
     let mut prepared = Vec::with_capacity(records.len());
     for (provider, path, original) in records {
         let session = decrypt_session_snapshot(&original, &provider, old_key).map_err(|_| {
