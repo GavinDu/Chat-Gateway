@@ -4,19 +4,22 @@ const fs = require("node:fs");
 const vm = require("node:vm");
 const { webcrypto } = require("node:crypto");
 
-function loadShared(cookieFixtures = []) {
+function loadShared(cookieFixtures = [], permissionsGranted = true) {
   const context = {
     URL,
     Headers,
     crypto: webcrypto,
     fetch: async () => { throw new Error("fetch should not be called in these tests"); },
     chrome: {
+      permissions: {
+        contains: async () => permissionsGranted
+      },
       cookies: {
         // Return the full fixture set to simulate a permissive/misbehaving
         // browser API; providerCookieSnapshot must still enforce its own scope.
         getAll: async () => cookieFixtures
       },
-            storage: { local: { get: async () => ({}) } }
+      storage: { local: { get: async () => ({}) } }
     }
   };
   vm.createContext(context);
@@ -56,6 +59,16 @@ test("provider cookie snapshot excludes cookies outside that provider's domain r
   const snapshot = await api.providerCookieSnapshot("chatgpt");
   assert.deepEqual(JSON.parse(JSON.stringify(snapshot.cookies.map(cookie => cookie.name).sort())), ["auth", "session"]);
   assert.equal(snapshot.local_storage && Object.keys(snapshot.local_storage).length, 0);
+});
+
+test("partial host permissions reject a provider cookie snapshot", async () => {
+  const api = loadShared([
+    { name: "session", value: "keep", domain: ".chatgpt.com", path: "/", secure: true, httpOnly: true }
+  ], false);
+  await assert.rejects(
+    () => api.providerCookieSnapshot("chatgpt"),
+    /Missing provider host permissions/
+  );
 });
 
 test("unsupported provider cannot be used to collect a cookie snapshot", async () => {
