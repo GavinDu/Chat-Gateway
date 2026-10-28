@@ -518,7 +518,9 @@ fn context_read_errors_are_returned_instead_of_panicking_or_dropping_history() {
 
     let result = memory.build_context(Some("read-failure"), &[m("user", "next turn")]);
     assert!(result.is_err());
-    assert!(memory.get_provider("read-failure").is_err());
+    // Provider affinity is metadata-only and should remain readable even when
+    // the transcript table is unavailable; history/context reads must fail closed.
+    assert!(memory.get_provider("read-failure").is_ok());
     assert!(memory.has_history("read-failure").is_err());
 }
 
