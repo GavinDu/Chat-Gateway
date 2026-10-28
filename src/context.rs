@@ -390,4 +390,43 @@ mod tests {
         assert_eq!(messages_after_overlap(&stored, &incoming), incoming);
         assert!(estimate_message_tokens("你好🙂") >= 3);
     }
+
+
+    #[test]
+    fn interleaved_conversations_keep_provider_thread_deltas_isolated() {
+        let history_a = vec![m("user", "conversation A question"), m("assistant", "conversation A answer")];
+        let incoming_a = vec![
+            m("user", "conversation A question"),
+            m("assistant", "conversation A answer"),
+            m("user", "conversation A follow-up"),
+        ];
+        let history_b = vec![m("user", "conversation B question"), m("assistant", "conversation B answer")];
+        let incoming_b = vec![
+            m("user", "conversation B question"),
+            m("assistant", "conversation B answer"),
+            m("user", "conversation B follow-up"),
+        ];
+        let thread_a = super::ThreadSyncState {
+            provider: "chatgpt".to_string(),
+            thread_url: "https://chatgpt.com/c/thread-a".to_string(),
+            synced_through_message_id: Some("hash-a".to_string()),
+            last_stored_message_id: Some("hash-a".to_string()),
+        };
+        let thread_b = super::ThreadSyncState {
+            provider: "chatgpt".to_string(),
+            thread_url: "https://chatgpt.com/c/thread-b".to_string(),
+            synced_through_message_id: Some("hash-b".to_string()),
+            last_stored_message_id: Some("hash-b".to_string()),
+        };
+
+        let plan_a = ContextBuilder::plan(&history_a, &incoming_a, "chatgpt", Some(&thread_a), true, 1000);
+        let plan_b = ContextBuilder::plan(&history_b, &incoming_b, "chatgpt", Some(&thread_b), true, 1000);
+
+        assert_eq!(plan_a, super::ContextPlan::Delta { messages: vec![m("user", "conversation A follow-up")] });
+        assert_eq!(plan_b, super::ContextPlan::Delta { messages: vec![m("user", "conversation B follow-up")] });
+        let serialized_a = format!("{plan_a:?}");
+        let serialized_b = format!("{plan_b:?}");
+        assert!(!serialized_a.contains("conversation B"));
+        assert!(!serialized_b.contains("conversation A"));
+    }
 }
