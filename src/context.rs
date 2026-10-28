@@ -319,6 +319,58 @@ mod tests {
     }
 
     #[test]
+    fn planner_replays_when_sync_marker_is_missing_or_thread_url_is_empty() {
+        let history = vec![m("user", "prior question"), m("assistant", "prior answer")];
+        let incoming = vec![
+            m("user", "prior question"),
+            m("assistant", "prior answer"),
+            m("user", "next question"),
+        ];
+        let missing_marker = super::ThreadSyncState {
+            provider: "chatgpt".to_string(),
+            thread_url: "https://chatgpt.com/c/thread-1".to_string(),
+            synced_through_message_id: None,
+            last_stored_message_id: Some("message-2".to_string()),
+        };
+        let empty_url = super::ThreadSyncState {
+            provider: "chatgpt".to_string(),
+            thread_url: String::new(),
+            synced_through_message_id: Some("message-2".to_string()),
+            last_stored_message_id: Some("message-2".to_string()),
+        };
+
+        for thread in [&missing_marker, &empty_url] {
+            assert!(matches!(
+                ContextBuilder::plan(&history, &incoming, "chatgpt", Some(thread), true, 1000),
+                super::ContextPlan::Replay { .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn planner_replays_when_provider_thread_marker_is_stale_after_new_commit() {
+        let history = vec![m("user", "prior question"), m("assistant", "prior answer")];
+        let incoming = vec![
+            m("user", "prior question"),
+            m("assistant", "prior answer"),
+            m("user", "next question"),
+        ];
+        let thread = super::ThreadSyncState {
+            provider: "chatgpt".to_string(),
+            thread_url: "https://chatgpt.com/c/thread-1".to_string(),
+            synced_through_message_id: Some("before-commit".to_string()),
+            last_stored_message_id: Some("after-commit".to_string()),
+        };
+
+        assert!(matches!(
+            ContextBuilder::plan(&history, &incoming, "chatgpt", Some(&thread), true, 1000),
+            super::ContextPlan::Replay { preamble, messages }
+                if preamble.contains("CONVERSATION_CONTEXT_BEGIN")
+                    && messages.last().is_some_and(|message| message.content == "next question")
+        ));
+    }
+
+    #[test]
     fn overlap_handles_repeated_prompts_and_unicode_estimates() {
         let stored = vec![m("user", "repeat"), m("assistant", "first answer")];
         let incoming = vec![m("user", "repeat")];
