@@ -14,7 +14,7 @@ function loadShared(cookieFixtures = []) {
       cookies: {
         getAll: async ({ domain }) => cookieFixtures.filter(cookie => {
           const root = domain.toLowerCase();
-          const host = cookie.domain.replace(/^\\./, "").toLowerCase();
+          const host = cookie.domain.replace(/^\./, "").toLowerCase();
           return host === root || host.endsWith("." + root);
         })
       },
