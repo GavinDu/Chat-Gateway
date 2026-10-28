@@ -985,6 +985,16 @@ fn schema_v1_database_migrates_provider_thread_map_without_losing_conversations(
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
     assert_eq!(version, 6);
+    let memory_tables: i64 = memory
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('memory_settings','memory_items')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(memory_tables, 2, "v1 migration must create memory tables");
     let activity: i64 = memory
         .lock()
         .unwrap()
@@ -1311,6 +1321,16 @@ fn schema_v3_migration_assigns_existing_conversations_to_local_owner() {
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
     assert_eq!(version, 6);
+    let memory_tables: i64 = memory
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('memory_settings','memory_items')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(memory_tables, 2, "v3 migration must create memory tables");
 }
 
 #[test]
@@ -1449,6 +1469,16 @@ fn schema_v4_migration_adds_summary_table_without_losing_tenant_data() {
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
     assert_eq!(version, 6);
+    let memory_tables: i64 = memory
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('memory_settings','memory_items')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(memory_tables, 2, "v4 migration must create memory tables");
     let owner: String = memory
         .lock()
         .unwrap()
