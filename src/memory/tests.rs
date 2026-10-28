@@ -507,7 +507,9 @@ fn long_term_memory_is_opt_in_owner_scoped_and_deletable() {
 #[test]
 fn bulk_memory_delete_is_scoped_to_owner_and_preserves_opt_in_setting() {
     let memory = UnifiedMemory::new(8000);
-    memory.set_long_term_memory_enabled("owner-a", true).unwrap();
+    memory
+        .set_long_term_memory_enabled("owner-a", true)
+        .unwrap();
     memory
         .set_long_term_memory_enabled("owner-b", true)
         .unwrap();
@@ -522,7 +524,10 @@ fn bulk_memory_delete_is_scoped_to_owner_and_preserves_opt_in_setting() {
         memory.delete_all_long_term_memory_items("owner-a").unwrap(),
         1
     );
-    assert!(memory.list_long_term_memory_items("owner-a").unwrap().is_empty());
+    assert!(memory
+        .list_long_term_memory_items("owner-a")
+        .unwrap()
+        .is_empty());
     assert_eq!(
         memory.list_long_term_memory_items("owner-b").unwrap().len(),
         1
@@ -534,8 +539,12 @@ fn bulk_memory_delete_is_scoped_to_owner_and_preserves_opt_in_setting() {
 #[test]
 fn long_term_memory_provenance_cannot_reference_another_owners_conversation() {
     let memory = UnifiedMemory::new(8000);
-    memory.set_long_term_memory_enabled("owner-a", true).unwrap();
-    memory.set_long_term_memory_enabled("owner-b", true).unwrap();
+    memory
+        .set_long_term_memory_enabled("owner-a", true)
+        .unwrap();
+    memory
+        .set_long_term_memory_enabled("owner-b", true)
+        .unwrap();
     memory
         .store_turn_for_owner(
             "owner-a",
@@ -566,7 +575,9 @@ fn long_term_memory_provenance_cannot_reference_another_owners_conversation() {
 #[test]
 fn long_term_memory_disable_stops_retrieval_without_erasing_inspectable_items() {
     let memory = UnifiedMemory::new(8000);
-    memory.set_long_term_memory_enabled("owner-a", true).unwrap();
+    memory
+        .set_long_term_memory_enabled("owner-a", true)
+        .unwrap();
     memory
         .save_long_term_memory_item("owner-a", "timezone", "America/New_York", None, 1.0, None)
         .unwrap();
@@ -587,15 +598,23 @@ fn long_term_memory_disable_stops_retrieval_without_erasing_inspectable_items() 
 #[test]
 fn long_term_memory_rejects_invalid_confidence_and_expired_items() {
     let memory = UnifiedMemory::new(8000);
-    memory.set_long_term_memory_enabled("owner-a", true).unwrap();
+    memory
+        .set_long_term_memory_enabled("owner-a", true)
+        .unwrap();
     assert!(memory
         .save_long_term_memory_item("owner-a", "invalid", "value", None, f64::NAN, None)
         .is_err());
     memory
         .save_long_term_memory_item("owner-a", "expired", "stale fact", None, 1.0, Some(1))
         .unwrap();
-    assert!(memory.retrieve_long_term_memory_items("owner-a", 5).unwrap().is_empty());
-    assert_eq!(memory.list_long_term_memory_items("owner-a").unwrap().len(), 1);
+    assert!(memory
+        .retrieve_long_term_memory_items("owner-a", 5)
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        memory.list_long_term_memory_items("owner-a").unwrap().len(),
+        1
+    );
 }
 
 #[test]
