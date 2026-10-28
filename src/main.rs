@@ -3667,7 +3667,7 @@ mod api_key_auth_tests {
 
 #[cfg(test)]
 mod provider_thread_url_tests {
-    use super::valid_provider_thread_url;
+    use super::{is_reopenable_provider_thread_url, valid_provider_thread_url};
 
     #[test]
     fn provider_thread_urls_require_https_and_provider_owned_hosts() {
