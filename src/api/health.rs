@@ -103,7 +103,30 @@ mod readiness_contract_tests {
         let ready = readiness_response(1, true, 0);
         assert_eq!(ready.status(), StatusCode::OK);
 
-        let worker_dead = readiness_response(1, false, 0);
+        let worker_dead = readiness_response(1, false, 3);
         assert_eq!(worker_dead.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn readiness_reports_the_last_successfully_warmed_worker_generation() {
+        let response = readiness_response(1, true, 7);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("readiness body should be readable");
+        let body: serde_json::Value = serde_json::from_slice(&bytes)
+            .expect("readiness body should be JSON");
+        assert_eq!(body["worker_generation"], 7);
+    }
+
+    #[tokio::test]
+    async fn not_ready_reports_generation_while_worker_is_down() {
+        let response = readiness_response(0, false, 4);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("readiness body should be readable");
+        let body: serde_json::Value = serde_json::from_slice(&bytes)
+            .expect("readiness body should be JSON");
+        assert_eq!(body["reason"], "browser_worker_unavailable");
+        assert_eq!(body["worker_generation"], 4);
     }
 }
