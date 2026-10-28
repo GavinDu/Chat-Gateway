@@ -170,11 +170,17 @@ impl SessionStore for VaultSessionStore {
         // One-time migration: keep the plaintext source until the encrypted
         // destination has been written, authenticated, and read back successfully.
         let legacy_path = session_path(provider)?;
-        if !Path::new(&legacy_path).exists() {
-            return Ok(None);
+        match std::fs::metadata(&legacy_path) {
+            Ok(_) => migrate_legacy_snapshot(
+                Path::new(&legacy_path),
+                Path::new(&vault_path),
+                provider,
+                &key,
+            )
+            .map(Some),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.into()),
         }
-        migrate_legacy_snapshot(Path::new(&legacy_path), Path::new(&vault_path), provider, &key)
-            .map(Some)
     }
 
     async fn save_if_changed(&self, browser: &Browser, page: &Page, provider: &str) -> Result<()> {
