@@ -162,6 +162,21 @@ impl SessionStore for VaultSessionStore {
         ensure_private_session_dir_sync(Path::new("sessions"))?;
         let encrypted = encrypt_session_snapshot(&legacy, provider, &key)?;
         write_session_file_atomically(Path::new(&vault_path), &encrypted)?;
+
+        // Keep the plaintext source until the encrypted destination is
+        // re-read, authenticated, and verified to contain equivalent state.
+        let verified = (|| -> Result<()> {
+            let written = std::fs::read(&vault_path)?;
+            let restored = decrypt_session_snapshot(&written, provider, &key)?;
+            if session_state_hash(&restored)? != session_state_hash(&legacy)? {
+                anyhow::bail!("session-vault migration read-back validation failed");
+            }
+            Ok(())
+        })();
+        if let Err(error) = verified {
+            let _ = std::fs::remove_file(&vault_path);
+            return Err(error);
+        }
         std::fs::remove_file(&legacy_path)?;
         record_session_write(provider);
         tracing::info!(provider, "migrated plaintext session into encrypted vault");
