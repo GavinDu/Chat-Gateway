@@ -362,6 +362,24 @@ Conversation turns are persisted in the gateway's SQLite memory store so the API
 
 The TTL applies only to the live store. Do not interpret live-store deletion as proof that copies in backups or downloaded exports have been erased.
 
+## Provider memory egress policy
+
+Gateway-injected personal long-term memory is denied to all providers by default. Linking a provider or signing in is not consent to disclose personal memory. The policy is enforced immediately before the provider send, after routing/failover has selected a candidate; an unknown provider or malformed allowlist fails closed.
+
+Inspect the effective decision for every provider before enabling the feature with `cargo run -- --show-memory-egress-policy`. The command prints only provider IDs and allow/deny decisions; it does not print memory values or secrets.
+
+To explicitly allow personal long-term memory for specific providers, set `CHAT_GATEWAY_MEMORY_EGRESS_ALLOWLIST` to a comma-separated list of provider IDs, for example:
+
+```sh
+CHAT_GATEWAY_MEMORY_EGRESS_ALLOWLIST=chatgpt,claude
+```
+
+Inspect the effective policy with `GET /v1/admin/memory-egress-policy`; when API-key authentication is enabled, this endpoint requires the `admin` scope. It reports only the configured provider IDs and whether personal-memory retrieval is wired, never memory contents.
+
+Use only destinations you have deliberately authorized. An unset or empty variable denies personal long-term memory to every provider. Invalid provider IDs cause requests to fail with a generic policy error; logs do not include memory contents. Current-turn content and the conversation transcript are separate data classes and are not blocked by this personal-memory setting.
+
+The current chat request path does not yet retrieve or inject personal long-term memory. This guard establishes the default-deny boundary for future gateway-injected memory; it does not classify or redact sensitive text that a user explicitly includes in their current prompt or conversation history.
+ 
 ## Metrics and request timing
 
 The loopback-only `/metrics` endpoint exposes Prometheus text metrics for HTTP request counts and handler latency, plus provider queue wait, time to first token (TTFT), provider work, total chat duration, estimated gateway overhead, and the one-hot `gateway_provider_session_state` gauge (`unknown`, `ready`, or `needs_login`). When API-key authentication is enabled, `/metrics` requires an `admin` scope. Route labels are normalized to a bounded vocabulary to avoid high-cardinality metrics.

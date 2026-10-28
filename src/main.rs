@@ -23,6 +23,7 @@ mod config;
 mod context;
 mod login;
 mod memory;
+mod memory_egress;
 mod metrics;
 mod provider_guard;
 mod provider_state;
@@ -46,6 +47,13 @@ use router::ProviderRouter;
 struct Cli {
     #[arg(long, default_value = "config.yaml")]
     config: std::path::PathBuf,
+
+    #[arg(
+        long,
+        conflicts_with_all = ["all", "test_adapter", "create_api_key", "vault_list", "vault_delete_provider", "vault_rotate_key", "vault_restore_backup"],
+        help = "Print effective personal-memory egress policy for every provider and exit"
+    )]
+    show_memory_egress_policy: bool,
 
     #[arg(
         long,
@@ -142,6 +150,22 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let cli = Cli::parse();
+    if cli.show_memory_egress_policy {
+        let policy = memory_egress::MemoryEgressPolicy::from_env()
+            .map_err(|_| anyhow::anyhow!("provider memory egress policy is invalid"))?;
+        let allowed = policy.allowed_provider_ids();
+        println!("personal_long_term_memory_default=deny");
+        for provider in providers::Provider::all() {
+            let provider_id = provider.name();
+            let decision = if allowed.iter().any(|entry| entry == provider_id) {
+                "allow"
+            } else {
+                "deny"
+            };
+            println!("{provider_id}={decision}");
+        }
+        return Ok(());
+    }
     if let Some(name) = cli.create_api_key.as_deref() {
         if name.trim().is_empty()
             || !name
@@ -372,6 +396,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/health", get(api::health::health))
         .route("/ready", get(api::health::readiness))
         .route("/metrics", get(metrics_endpoint))
+        .route(
+            "/v1/admin/memory-egress-policy",
+            get(memory_egress_policy_status),
+        )
         .route("/v1/models", get(models))
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/conversations", get(list_conversations))
@@ -1043,6 +1071,28 @@ mod login_action_payload_tests {
 /// Startup validates configuration and warms the browser pool before binding.
 /// Readiness requires at least one enabled provider whose session is not known
 /// to be expired; providers marked `needs_login` do not count as routable.
+/// Return the effective memory-egress policy without exposing memory values.
+async fn memory_egress_policy_status() -> Response {
+    match memory_egress::MemoryEgressPolicy::from_env() {
+        Ok(policy) => Json(serde_json::json!({
+            "personal_long_term_memory": {
+                "default": "deny",
+                "allowed_providers": policy.allowed_personal_memory_providers(),
+            },
+            "current_turn": "allowed",
+            "conversation_context": "allowed",
+            "personal_memory_retrieval_wired": false,
+        }))
+        .into_response(),
+        Err(_) => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "server_error",
+            "memory_egress_policy_invalid",
+            "provider memory egress policy is invalid",
+        ),
+    }
+}
+
 async fn metrics_endpoint(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let provider_states = state
         .cfg
@@ -1169,6 +1219,7 @@ fn authorize_api_request(
     let admin_route = path.starts_with("/login")
         || path.starts_with("/relay/")
         || path == "/metrics"
+        || path == "/v1/admin/memory-egress-policy"
         || path == "/v1/conversations"
         || path.contains("/provider-threads/")
         || (path.starts_with("/v1/conversations/")
@@ -1948,6 +1999,17 @@ async fn chat_completions(
         );
     }
 
+    let memory_egress_policy = match memory_egress::MemoryEgressPolicy::from_env() {
+        Ok(policy) => policy,
+        Err(_) => {
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                "memory_egress_policy_invalid",
+                "provider memory egress policy is invalid",
+            )
+        }
+    };
     let candidate_count = candidates.len();
     let mut busy_count = 0usize;
     let mut last_err: Option<String> = None;
@@ -2051,13 +2113,47 @@ async fn chat_completions(
             supports_reopen,
             8000,
         );
-        let (provider_prompt, thread_url) = match send_plan {
+        let (mut provider_prompt, thread_url) = match send_plan {
             ContextPlan::Delta { messages } => (
                 context::render_prompt(&messages),
                 saved_thread.map(|thread| thread.thread_url),
             ),
             ContextPlan::Replay { preamble, .. } => (format!("{preamble}\n{prompt}"), None),
         };
+
+        // Enforce data-handling policy at the last gateway boundary before
+        // provider-specific submission. Current-turn content and local
+        // transcript context are distinct from optional personal long-term
+        // memory. No long-term memory retrieval is currently wired into this
+        // request path; keep the injection point typed and fail-closed.
+        if memory_egress_policy
+            .authorize(
+                &provider_name,
+                memory_egress::ProviderDataClass::CurrentTurn,
+            )
+            .is_err()
+            || memory_egress_policy
+                .authorize(
+                    &provider_name,
+                    memory_egress::ProviderDataClass::ConversationContext,
+                )
+                .is_err()
+        {
+            last_err = Some("provider data-handling policy denied request".to_owned());
+            continue;
+        }
+        let personal_memory_items: Vec<memory_egress::PersonalMemoryItem> = Vec::new();
+        if memory_egress_policy
+            .append_personal_memory_to_prompt(
+                &provider_name,
+                &mut provider_prompt,
+                &personal_memory_items,
+            )
+            .is_err()
+        {
+            last_err = Some("provider memory egress policy denied request".to_owned());
+            continue;
+        }
 
         let mut rx = match state
             .pool
@@ -3601,6 +3697,15 @@ mod api_key_auth_tests {
             ),
             Err(AuthFailure::InsufficientScope)
         );
+        assert_eq!(
+            authorize_api_request(
+                &config,
+                Some("Bearer test-secret"),
+                "/v1/admin/memory-egress-policy",
+                &axum::http::Method::GET
+            ),
+            Err(AuthFailure::InsufficientScope)
+        );
     }
 
     #[test]
@@ -3624,6 +3729,13 @@ mod api_key_auth_tests {
             &config,
             Some("Bearer test-secret"),
             "/v1/conversations",
+            &axum::http::Method::GET
+        )
+        .is_ok());
+        assert!(authorize_api_request(
+            &config,
+            Some("Bearer test-secret"),
+            "/v1/admin/memory-egress-policy",
             &axum::http::Method::GET
         )
         .is_ok());
