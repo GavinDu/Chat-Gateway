@@ -166,6 +166,8 @@ warmed.
 
 ### Encrypted session vault (opt-in)
 
+See [Session Vault Operations](docs/SESSION_VAULT_OPERATIONS.md) for production secret injection, inventory/deletion commands, rotation, and recovery procedures.
+
 For encrypted persistence, set `CHAT_GATEWAY_SESSION_STORE=vault` and
 provide `CHAT_GATEWAY_VAULT_KEY` as exactly 64 hexadecimal characters
 (32 bytes). Supply the key through your deployment's secret manager; do not
