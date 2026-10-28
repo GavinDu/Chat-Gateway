@@ -266,9 +266,7 @@ mod tests {
         record_error_state(provider, false, Some(SystemTime::UNIX_EPOCH));
 
         let workers = (0..16)
-            .map(|_| {
-                std::thread::spawn(|| is_routable(provider))
-            })
+            .map(|_| std::thread::spawn(|| is_routable(provider)))
             .collect::<Vec<_>>();
         let admitted = workers
             .into_iter()
@@ -276,7 +274,10 @@ mod tests {
             .filter(|admitted| *admitted)
             .count();
 
-        assert_eq!(admitted, 1, "only one concurrent request may claim the half-open slot");
+        assert_eq!(
+            admitted, 1,
+            "only one concurrent request may claim the half-open slot"
+        );
     }
 
     #[test]
