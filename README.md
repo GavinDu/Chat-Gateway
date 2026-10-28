@@ -366,6 +366,8 @@ The TTL applies only to the live store. Do not interpret live-store deletion as 
 
 Gateway-injected personal long-term memory is denied to all providers by default. Linking a provider or signing in is not consent to disclose personal memory. The policy is enforced immediately before the provider send, after routing/failover has selected a candidate; an unknown provider or malformed allowlist fails closed.
 
+Inspect the effective decision for every provider before enabling the feature with `cargo run -- --show-memory-egress-policy`. The command prints only provider IDs and allow/deny decisions; it does not print memory values or secrets.
+
 To explicitly allow personal long-term memory for specific providers, set `CHAT_GATEWAY_MEMORY_EGRESS_ALLOWLIST` to a comma-separated list of provider IDs, for example:
 
 ```sh
