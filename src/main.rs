@@ -1721,15 +1721,6 @@ fn read_conversation_context(
 }
 
 #[cfg(test)]
-fn read_conversation_context_for_owner(
-    memory: &UnifiedMemory,
-    owner_key_id: &str,
-    conversation_id: Option<&str>,
-    messages: &[ChatMessage],
-) -> anyhow::Result<(String, Vec<ChatMessage>, bool)> {
-    memory.build_context_for_owner_with_history(owner_key_id, conversation_id, messages)
-}
-
 async fn read_conversation_context_with_transcript_for_owner(
     memory: Arc<UnifiedMemory>,
     owner_key_id: String,
