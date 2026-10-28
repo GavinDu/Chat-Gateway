@@ -25,7 +25,10 @@ fn next_browser_worker_restart_backoff(current: Duration) -> Duration {
 #[cfg(test)]
 mod worker_supervisor_tests {
     use super::{next_browser_worker_restart_backoff, WorkerReadyGuard};
-    use std::sync::{atomic::{AtomicBool, Ordering}, Arc};
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
     use std::time::Duration;
 
     #[test]
