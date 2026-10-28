@@ -1440,9 +1440,12 @@ async fn persist_provider_thread(
             return;
         }
     };
-    let messages = match state
-        .memory
-        .conversation_messages_for_owner(owner_key_id, conversation_id)
+    let messages = match state.memory.clone()
+        .conversation_messages_for_owner_blocking(
+            owner_key_id.to_owned(),
+            conversation_id.to_owned(),
+        )
+        .await
     {
         Ok(messages) => messages,
         Err(error) => {
@@ -1458,9 +1461,9 @@ async fn persist_provider_thread(
         model: Some(model.to_owned()),
         updated_at: chrono::Utc::now().timestamp(),
     };
-    if let Err(error) = state
-        .memory
-        .upsert_provider_thread_for_owner(owner_key_id, &thread)
+    if let Err(error) = state.memory.clone()
+        .upsert_provider_thread_for_owner_blocking(owner_key_id.to_owned(), thread)
+        .await
     {
         tracing::warn!(provider, %error, "provider thread mapping could not be persisted");
     }
@@ -1860,12 +1863,14 @@ async fn chat_completions(
 
     // Read all context-dependent memory before any provider request. A read
     // failure must not degrade into an empty prompt or an unauthenticated turn.
-    let (context_prompt, windowed, has_history) = match read_conversation_context_for_owner(
-        &state.memory,
-        &owner_key_id,
-        conversation_id.as_deref(),
-        &req.messages,
-    ) {
+    let (context_prompt, windowed, has_history) = match state.memory.clone()
+        .build_context_for_owner_with_history_blocking(
+            owner_key_id.clone(),
+            conversation_id.clone(),
+            req.messages.clone(),
+        )
+        .await
+    {
         Ok(context) => context,
         Err(_error) => {
             return conversation_context_read_error(conversation_id.as_deref());
@@ -1983,9 +1988,9 @@ async fn chat_completions(
         let queue_ms = permit.queue_ms.min(u64::MAX as u128) as u64;
 
         let stored_messages = match conversation_id.as_deref() {
-            Some(id) => match state
-                .memory
-                .conversation_messages_for_owner(&owner_key_id, id)
+            Some(id) => match state.memory.clone()
+                .conversation_messages_for_owner_blocking(owner_key_id.clone(), id.to_owned())
+                .await
             {
                 Ok(messages) => messages,
                 Err(_) => return conversation_context_read_error(conversation_id.as_deref()),
