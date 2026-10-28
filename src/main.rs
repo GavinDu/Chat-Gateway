@@ -2057,7 +2057,7 @@ async fn chat_completions(
                 context::render_prompt(&messages),
                 saved_thread.map(|thread| thread.thread_url),
             ),
-            ContextPlan::Replay { .. } => (prompt.clone(), None),
+            ContextPlan::Replay { preamble, .. } => (format!("{preamble}\n{prompt}"), None),
         };
 
         let mut rx = match state
