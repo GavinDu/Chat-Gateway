@@ -359,7 +359,7 @@ fn should_probe_response_count(response_node_detected: bool) -> bool {
 
 /// Challenge-page body extraction is slower than URL inspection; sample it every five polls.
 fn should_check_body_challenge(poll_count: u32) -> bool {
-    poll_count % 5 == 0
+    poll_count.is_multiple_of(5)
 }
 
 /// Generic send + stream-poll loop shared by all adapters. Poll response
