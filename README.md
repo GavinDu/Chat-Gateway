@@ -374,6 +374,8 @@ To explicitly allow personal long-term memory for specific providers, set `CHAT_
 CHAT_GATEWAY_MEMORY_EGRESS_ALLOWLIST=chatgpt,claude
 ```
 
+Inspect the effective policy with `GET /v1/admin/memory-egress-policy`; when API-key authentication is enabled, this endpoint requires the `admin` scope. It reports only the configured provider IDs and whether personal-memory retrieval is wired, never memory contents.
+
 Use only destinations you have deliberately authorized. An unset or empty variable denies personal long-term memory to every provider. Invalid provider IDs cause requests to fail with a generic policy error; logs do not include memory contents. Current-turn content and the conversation transcript are separate data classes and are not blocked by this personal-memory setting.
 
 The current chat request path does not yet retrieve or inject personal long-term memory. This guard establishes the default-deny boundary for future gateway-injected memory; it does not classify or redact sensitive text that a user explicitly includes in their current prompt or conversation history.
