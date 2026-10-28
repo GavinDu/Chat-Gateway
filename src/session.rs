@@ -398,7 +398,14 @@ pub fn rotate_vault_key(new_key: &[u8; 32]) -> Result<(usize, String)> {
     }
 
     const PROVIDERS: &[&str] = &[
-        "qwen", "metaai", "claude", "chatgpt", "gemini", "grok", "mistral", "perplexity",
+        "qwen",
+        "metaai",
+        "claude",
+        "chatgpt",
+        "gemini",
+        "grok",
+        "mistral",
+        "perplexity",
     ];
     // Migrate any remaining legacy plaintext snapshots before rotation. The
     // vault loader verifies the encrypted replacement before removing plaintext.
