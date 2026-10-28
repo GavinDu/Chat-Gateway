@@ -446,7 +446,7 @@ fn full_and_sliding_transcripts_append_only_new_suffix() {
         .build_context(Some("one"), &[m("user", "fourth")])
         .unwrap();
     assert_eq!(messages.len(), 7);
-    assert!(prompt.ends_with("user: fourth"));
+    assert!(prompt.ends_with("fourth\n</conversation_message>\n"));
 }
 
 #[test]
