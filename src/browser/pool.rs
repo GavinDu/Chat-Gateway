@@ -884,23 +884,52 @@ fn browser_thread(
                             let browser = browser.clone();
                             let pages = pages.clone();
                             let locks = locks.clone();
+                            let login_pages = login_pages.clone();
+                            let login_meta = login_meta.clone();
                             tokio::task::spawn_local(async move {
                                 let res: Result<()> = async {
-                                    let lock = locks.borrow().get(&provider).cloned()
-                                        .ok_or_else(|| anyhow::anyhow!("provider page not warmed"))?;
+                                    let lock = locks
+                                        .borrow()
+                                        .get(&provider)
+                                        .cloned()
+                                        .ok_or_else(|| anyhow::anyhow!("provider page lock not warmed"))?;
                                     let _guard = lock.lock().await;
                                     let provider_name = provider.name();
+
+                                    // Remove any page that could retain the previous session before
+                                    // touching the shared cookie jar. A failed refresh must not leave
+                                    // the previous authenticated page available for later sends.
+                                    if let Some(old_page) = pages.borrow_mut().remove(&provider) {
+                                        let _ = old_page.evaluate(
+                                            "(()=>{try{localStorage.clear();return true;}catch(_){return false;}})()"
+                                        );
+                                    }
+                                    login_pages.borrow_mut().remove(&provider);
+                                    login_meta.borrow_mut().remove(&provider);
+                                    session::clear_provider_cookies(&browser, provider_name)?;
+
                                     let file = session::load_session_file(provider_name)?
                                         .ok_or_else(|| anyhow::anyhow!("no saved session for provider"))?;
                                     let mut page = browser.new_page().await?;
-                                    session::clear_provider_cookies(&browser, provider_name)?;
-                                    if let Err(error) = session::restore_cookies(&browser, &file, provider_name) {
+
+                                    let apply_result: Result<()> = async {
+                                        session::restore_cookies(&browser, &file, provider_name)?;
+                                        page.goto(provider.login_url()).await?;
+                                        session::restore_local_storage(&page, &file)?;
+                                        page.goto(provider.login_url()).await?;
+                                        Ok(())
+                                    }.await;
+
+                                    if let Err(error) = apply_result {
+                                        // Cookie restore can partially apply before reporting an
+                                        // error. Clear it again and do not publish the new page.
                                         let _ = session::clear_provider_cookies(&browser, provider_name);
+                                        let _ = page.evaluate(
+                                            "(()=>{try{localStorage.clear();return true;}catch(_){return false;}})()"
+                                        );
                                         return Err(error);
                                     }
-                                    page.goto(provider.login_url()).await?;
-                                    session::restore_local_storage(&page, &file)?;
-                                    page.goto(provider.login_url()).await?;
+
                                     pages.borrow_mut().insert(provider, Rc::new(page));
                                     Ok(())
                                 }.await;
