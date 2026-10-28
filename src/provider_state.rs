@@ -134,7 +134,10 @@ pub fn is_routable(provider: &str) -> bool {
     match current.state {
         ProviderSessionState::NeedsLogin => false,
         ProviderSessionState::Degraded => {
-            if current.retry_after.is_some_and(|retry_after| now >= retry_after) {
+            if current
+                .retry_after
+                .is_some_and(|retry_after| now >= retry_after)
+            {
                 // Atomically claim the half-open slot so concurrent requests
                 // cannot all hammer a provider at the end of the cooldown.
                 current.retry_after = now.checked_add(DEGRADED_RETRY_COOLDOWN);
@@ -196,8 +199,14 @@ mod tests {
             );
             let retry_after = status(&provider).retry_after.unwrap();
             record_error_state(&provider, false, Some(SystemTime::UNIX_EPOCH));
-            assert!(is_routable(&provider), "{message} should be half-open after cooldown");
-            assert!(!is_routable(&provider), "{message} must have only one half-open request");
+            assert!(
+                is_routable(&provider),
+                "{message} should be half-open after cooldown"
+            );
+            assert!(
+                !is_routable(&provider),
+                "{message} must have only one half-open request"
+            );
             assert!(status(&provider).retry_after.unwrap() > SystemTime::now());
             assert!(retry_after > SystemTime::now());
         }
