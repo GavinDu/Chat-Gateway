@@ -12,13 +12,11 @@ function loadShared(cookieFixtures = []) {
     fetch: async () => { throw new Error("fetch should not be called in these tests"); },
     chrome: {
       cookies: {
-        getAll: async ({ domain }) => cookieFixtures.filter(cookie => {
-          const root = domain.toLowerCase();
-          const host = cookie.domain.replace(/^\./, "").toLowerCase();
-          return host === root || host.endsWith("." + root);
-        })
+        // Return the full fixture set to simulate a permissive/misbehaving
+        // browser API; providerCookieSnapshot must still enforce its own scope.
+        getAll: async () => cookieFixtures
       },
-      storage: { local: { get: async () => ({}) } }
+            storage: { local: { get: async () => ({}) } }
     }
   };
   vm.createContext(context);
