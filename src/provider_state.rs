@@ -120,6 +120,26 @@ fn record_error_state(provider: &str, expired: bool, retry_after: Option<SystemT
     }
 }
 
+/// Non-mutating readiness check. Unlike request admission, this must not
+/// claim a degraded provider's half-open retry slot just because a health probe
+/// runs first.
+pub fn is_available(provider: &str) -> bool {
+    let now = SystemTime::now();
+    let Ok(map) = states().lock() else {
+        return false;
+    };
+    let Some(current) = map.get(provider) else {
+        return true;
+    };
+    match current.state {
+        ProviderSessionState::NeedsLogin => false,
+        ProviderSessionState::Degraded => current
+            .retry_after
+            .is_some_and(|retry_after| now >= retry_after),
+        ProviderSessionState::Unknown | ProviderSessionState::Ready => true,
+    }
+}
+
 /// Degraded providers are excluded during cooldown, then re-admitted for a
 /// half-open retry. A failed retry starts a fresh cooldown. Expired sessions
 /// require successful re-authentication and are never re-admitted by timeout.
@@ -258,6 +278,18 @@ mod tests {
         assert_eq!(status(provider).state, ProviderSessionState::Ready);
         assert!(is_routable(provider));
         assert_eq!(status(provider).retry_after, None);
+    }
+
+    #[test]
+    fn readiness_check_does_not_consume_half_open_retry_slot() {
+        let provider = "test-readiness-does-not-claim-half-open";
+        record_error_state(provider, false, Some(SystemTime::UNIX_EPOCH));
+
+        assert!(is_available(provider));
+        assert!(is_available(provider));
+        assert!(is_routable(provider));
+        assert!(!is_routable(provider));
+        assert!(!is_available(provider));
     }
 
     #[test]
