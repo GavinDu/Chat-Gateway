@@ -138,6 +138,19 @@ impl UnifiedMemory {
 
     /// Read the complete durable transcript for a conversation owned by this API key.
     /// Used to verify whether a provider-side thread still matches the committed gateway state.
+    /// Read a transcript on Tokio's blocking pool for async request paths.
+    pub async fn conversation_messages_for_owner_blocking(
+        self: Arc<Self>,
+        owner_key_id: String,
+        conversation_id: String,
+    ) -> anyhow::Result<Vec<ChatMessage>> {
+        tokio::task::spawn_blocking(move || {
+            self.conversation_messages_for_owner(&owner_key_id, &conversation_id)
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("conversation transcript task failed: {error}"))?
+    }
+
     pub fn conversation_messages_for_owner(
         &self,
         owner_key_id: &str,
