@@ -1380,6 +1380,14 @@ mod vault_tests {
     }
 
     #[test]
+    fn vault_key_parser_accepts_only_32_byte_hex_keys() {
+        assert_eq!(*parse_vault_key(&"ab".repeat(32)).unwrap(), [0xab; 32]);
+        assert!(parse_vault_key("abcd").is_err());
+        assert!(parse_vault_key(&"xz".repeat(32)).is_err());
+        assert!(parse_vault_key(&"ab".repeat(31)).is_err());
+    }
+
+    #[test]
     fn encrypted_vault_round_trips_without_storing_plaintext() {
         let session = sample_session();
         let key = [0x5a; 32];
