@@ -515,6 +515,13 @@ impl UnifiedMemory {
         .map_err(|error| anyhow::anyhow!("conversation list task failed: {error}"))?
     }
 
+    /// Flush SQLite WAL pages on Tokio's blocking pool after HTTP requests drain.
+    pub async fn checkpoint_blocking(self: Arc<Self>) -> anyhow::Result<()> {
+        tokio::task::spawn_blocking(move || self.checkpoint())
+            .await
+            .map_err(|error| anyhow::anyhow!("SQLite checkpoint task failed: {error}"))?
+    }
+
     /// Flush SQLite WAL pages after HTTP requests have drained.
     pub fn checkpoint(&self) -> anyhow::Result<()> {
         let connection = self.lock()?;
