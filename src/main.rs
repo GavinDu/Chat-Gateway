@@ -69,6 +69,36 @@ struct Cli {
         help = "Create a random chat API key, print it once and exit"
     )]
     create_api_key: Option<String>,
+
+    #[arg(
+        long,
+        conflicts_with_all = ["all", "test_adapter", "create_api_key", "vault_delete_provider", "vault_rotate_key"],
+        help = "List provider vault records and whether each is valid with CHAT_GATEWAY_VAULT_KEY"
+    )]
+    vault_list: bool,
+
+    #[arg(
+        long,
+        value_name = "PROVIDER",
+        conflicts_with_all = ["all", "test_adapter", "create_api_key", "vault_list", "vault_rotate_key"],
+        help = "Delete the named provider's persisted session snapshot (vault and legacy file)"
+    )]
+    vault_delete_provider: Option<String>,
+
+    #[arg(
+        long,
+        conflicts_with_all = ["all", "test_adapter", "create_api_key", "vault_list", "vault_delete_provider"],
+        help = "Rotate encrypted vault records using CHAT_GATEWAY_VAULT_KEY and CHAT_GATEWAY_VAULT_NEW_KEY"
+    )]
+    vault_rotate_key: bool,
+
+    #[arg(
+        long,
+        value_name = "BACKUP_DIR",
+        conflicts_with_all = ["all", "test_adapter", "create_api_key", "vault_list", "vault_delete_provider", "vault_rotate_key"],
+        help = "Restore encrypted vault records from a sessions/.vault-rotation-* backup using the old key"
+    )]
+    vault_restore_backup: Option<String>,
 }
 
 fn adapter_report_is_healthy(report: &browser::pool::TestAdapterReport) -> bool {
@@ -130,6 +160,46 @@ async fn main() -> anyhow::Result<()> {
         println!("  - name: {name}");
         println!("    secret_hash: \"{hash}\"");
         println!("    scopes: [chat]");
+        return Ok(());
+    }
+    if cli.vault_list {
+        for entry in session::list_vault_sessions()? {
+            println!("{}\t{}", entry.provider, entry.status);
+        }
+        return Ok(());
+    }
+    if let Some(provider) = cli.vault_delete_provider.as_deref() {
+        let removed = session::delete_session_snapshot(provider)?;
+        println!("provider={provider} removed={removed}");
+        return Ok(());
+    }
+    if let Some(backup_dir) = cli.vault_restore_backup.as_deref() {
+        let restored = session::restore_vault_backup(backup_dir)?;
+        println!("Restored {restored} encrypted provider vault record(s) from {backup_dir}.");
+        println!("Keep CHAT_GATEWAY_VAULT_KEY set to the old key until a fresh rotation succeeds.");
+        return Ok(());
+    }
+    if cli.vault_rotate_key {
+        let encoded =
+            zeroize::Zeroizing::new(std::env::var("CHAT_GATEWAY_VAULT_NEW_KEY").map_err(|_| {
+                anyhow::anyhow!("CHAT_GATEWAY_VAULT_NEW_KEY is required for vault key rotation")
+            })?);
+        let new_key = session::parse_vault_key(&encoded).map_err(|_| {
+            anyhow::anyhow!("CHAT_GATEWAY_VAULT_NEW_KEY must be exactly 64 hexadecimal characters")
+        })?;
+        let (rotated, backup_dir) = session::rotate_vault_key(&new_key)?;
+        if rotated == 0 {
+            println!("No encrypted provider vault records found; nothing rotated.");
+        } else {
+            println!("Rotated {rotated} encrypted provider vault record(s).");
+            println!("Encrypted recovery copies retained at: {backup_dir}");
+            println!(
+                "Update CHAT_GATEWAY_VAULT_KEY to the new key before restarting Chat Gateway."
+            );
+            println!(
+                "Keep the old key and recovery copies until restart restoration has been verified."
+            );
+        }
         return Ok(());
     }
     if cli.json && !cli.all && cli.test_adapter.is_none() {
