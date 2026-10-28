@@ -1279,7 +1279,10 @@ fn schema_v4_migration_adds_summary_table_without_losing_tenant_data() {
 fn context_snapshot_returns_stored_transcript_for_provider_retry_reuse() {
     let fixture = Fixture::new();
     let memory = fixture.open();
-    let stored = vec![m("user", "previous question"), m("assistant", "previous answer")];
+    let stored = vec![
+        m("user", "previous question"),
+        m("assistant", "previous answer"),
+    ];
     memory
         .store_turn_for_owner_with_tab_id(
             "key:transcript",
@@ -1327,7 +1330,10 @@ async fn async_turn_persistence_runs_and_commits_transactionally() {
         .unwrap();
     assert_eq!(
         conversation.messages,
-        vec![m("user", "hello from async persistence"), m("assistant", "persisted response")]
+        vec![
+            m("user", "hello from async persistence"),
+            m("assistant", "persisted response")
+        ]
     );
     assert_eq!(conversation.tab_id, None);
 }
