@@ -162,8 +162,8 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
     if cli.list_session_vaults {
-        for provider in session::list_encrypted_session_vaults()? {
-            println!("{provider}");
+        for entry in session::list_vault_sessions()? {
+            println!("{}\t{}", entry.provider, entry.status);
         }
         return Ok(());
     }
