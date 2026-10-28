@@ -56,7 +56,7 @@ impl ContextBuilder {
                 .zip(incoming)
                 .take_while(|(stored, incoming)| stored == incoming)
                 .count();
-            common_prefix > 0 && common_prefix < history.len() && common_prefix < incoming.len()
+            common_prefix < history.len() && common_prefix < incoming.len()
         };
         let thread_is_current = !has_divergent_branch
             && thread.is_some_and(|state| {
