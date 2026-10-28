@@ -380,7 +380,11 @@ async fn main() -> anyhow::Result<()> {
                     .as_secs()
                     .min(i64::MAX as u64) as i64;
                 let cutoff = now.saturating_sub(retention_seconds);
-                match memory.purge_expired_conversations(cutoff) {
+                match memory
+                    .clone()
+                    .purge_expired_conversations_blocking(cutoff)
+                    .await
+                {
                     Ok(deleted) if deleted > 0 => {
                         tracing::info!(deleted, retention_days, "purged expired conversations");
                     }
@@ -1359,7 +1363,9 @@ async fn list_conversations(
     let offset = query.offset.unwrap_or(0);
     match state
         .memory
-        .list_conversations_for_owner(owner_key_id, limit, offset)
+        .clone()
+        .list_conversations_for_owner_blocking(owner_key_id.to_owned(), limit, offset)
+        .await
     {
         Ok(conversations) => Json(serde_json::json!({
             "data": conversations,

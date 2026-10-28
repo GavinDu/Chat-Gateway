@@ -473,6 +473,21 @@ impl UnifiedMemory {
             .map_err(Into::into)
     }
 
+    /// List conversation metadata on Tokio's blocking pool. SQLite lock waits and
+    /// row decoding must not occupy an async runtime worker.
+    pub async fn list_conversations_for_owner_blocking(
+        self: Arc<Self>,
+        owner_key_id: String,
+        limit: usize,
+        offset: usize,
+    ) -> anyhow::Result<Vec<ConversationSummary>> {
+        tokio::task::spawn_blocking(move || {
+            self.list_conversations_for_owner(&owner_key_id, limit, offset)
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("conversation list task failed: {error}"))?
+    }
+
     /// Flush SQLite WAL pages after HTTP requests have drained.
     pub fn checkpoint(&self) -> anyhow::Result<()> {
         let connection = self.lock()?;
@@ -519,6 +534,16 @@ impl UnifiedMemory {
         )?;
         tx.commit()?;
         Ok(deleted)
+    }
+
+    /// Purge expired conversations on Tokio's blocking pool.
+    pub async fn purge_expired_conversations_blocking(
+        self: Arc<Self>,
+        cutoff_unix_seconds: i64,
+    ) -> anyhow::Result<usize> {
+        tokio::task::spawn_blocking(move || self.purge_expired_conversations(cutoff_unix_seconds))
+            .await
+            .map_err(|error| anyhow::anyhow!("conversation retention task failed: {error}"))?
     }
 
     // Legacy read helpers remain scoped to the local tenant for tests and CLI tools.
