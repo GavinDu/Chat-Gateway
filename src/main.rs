@@ -1347,7 +1347,13 @@ async fn get_provider_thread(
     }
     match state
         .memory
-        .get_provider_thread_for_owner(owner_key_id, &conversation_id, &provider)
+        .clone()
+        .get_provider_thread_for_owner_blocking(
+            owner_key_id.to_owned(),
+            conversation_id.clone(),
+            provider.clone(),
+        )
+        .await
     {
         Ok(Some(thread)) => Json(thread).into_response(),
         Ok(None) => api_error(
@@ -1405,7 +1411,9 @@ async fn upsert_provider_thread(
         .min(i64::MAX as u64) as i64;
     match state
         .memory
-        .upsert_provider_thread_for_owner(owner_key_id, &thread)
+        .clone()
+        .upsert_provider_thread_for_owner_blocking(owner_key_id.to_owned(), thread.clone())
+        .await
     {
         Ok(()) => Json(thread).into_response(),
         Err(error) => {
@@ -1442,7 +1450,12 @@ async fn persist_provider_thread(
     };
     let messages = match state
         .memory
-        .conversation_messages_for_owner(owner_key_id, conversation_id)
+        .clone()
+        .conversation_messages_for_owner_blocking(
+            owner_key_id.to_owned(),
+            conversation_id.to_owned(),
+        )
+        .await
     {
         Ok(messages) => messages,
         Err(error) => {
@@ -1460,7 +1473,9 @@ async fn persist_provider_thread(
     };
     if let Err(error) = state
         .memory
-        .upsert_provider_thread_for_owner(owner_key_id, &thread)
+        .clone()
+        .upsert_provider_thread_for_owner_blocking(owner_key_id.to_owned(), thread)
+        .await
     {
         tracing::warn!(provider, %error, "provider thread mapping could not be persisted");
     }
@@ -1710,16 +1725,18 @@ fn read_conversation_context(
     conversation_id: Option<&str>,
     messages: &[ChatMessage],
 ) -> anyhow::Result<(String, Vec<ChatMessage>, bool)> {
-    read_conversation_context_for_owner(memory, "local", conversation_id, messages)
+    memory.build_context_for_owner_with_history("local", conversation_id, messages)
 }
 
-fn read_conversation_context_for_owner(
-    memory: &UnifiedMemory,
-    owner_key_id: &str,
-    conversation_id: Option<&str>,
-    messages: &[ChatMessage],
-) -> anyhow::Result<(String, Vec<ChatMessage>, bool)> {
-    memory.build_context_for_owner_with_history(owner_key_id, conversation_id, messages)
+async fn read_conversation_context_with_transcript_for_owner(
+    memory: Arc<UnifiedMemory>,
+    owner_key_id: String,
+    conversation_id: Option<String>,
+    messages: Vec<ChatMessage>,
+) -> anyhow::Result<(String, Vec<ChatMessage>, bool, Vec<ChatMessage>)> {
+    memory
+        .build_context_for_owner_with_transcript_blocking(owner_key_id, conversation_id, messages)
+        .await
 }
 
 fn usable_initial_stream_chunk(content: &str, done: bool) -> bool {
@@ -1860,17 +1877,20 @@ async fn chat_completions(
 
     // Read all context-dependent memory before any provider request. A read
     // failure must not degrade into an empty prompt or an unauthenticated turn.
-    let (context_prompt, windowed, has_history) = match read_conversation_context_for_owner(
-        &state.memory,
-        &owner_key_id,
-        conversation_id.as_deref(),
-        &req.messages,
-    ) {
-        Ok(context) => context,
-        Err(_error) => {
-            return conversation_context_read_error(conversation_id.as_deref());
-        }
-    };
+    let (context_prompt, windowed, has_history, stored_messages) =
+        match read_conversation_context_with_transcript_for_owner(
+            state.memory.clone(),
+            owner_key_id.clone(),
+            conversation_id.clone(),
+            req.messages.clone(),
+        )
+        .await
+        {
+            Ok(context) => context,
+            Err(_error) => {
+                return conversation_context_read_error(conversation_id.as_deref());
+            }
+        };
     let prompt = context_prompt;
     if prompt.is_empty() {
         return api_error(
@@ -1982,21 +2002,17 @@ async fn chat_completions(
         tracing::debug!(provider = %provider_name, queue_ms = permit.queue_ms, "acquired provider slot");
         let queue_ms = permit.queue_ms.min(u64::MAX as u128) as u64;
 
-        let stored_messages = match conversation_id.as_deref() {
-            Some(id) => match state
-                .memory
-                .conversation_messages_for_owner(&owner_key_id, id)
-            {
-                Ok(messages) => messages,
-                Err(_) => return conversation_context_read_error(conversation_id.as_deref()),
-            },
-            None => Vec::new(),
-        };
         let saved_thread = match conversation_id.as_deref() {
             Some(id) => {
                 match state
                     .memory
-                    .get_provider_thread_for_owner(&owner_key_id, id, &provider_name)
+                    .clone()
+                    .get_provider_thread_for_owner_blocking(
+                        owner_key_id.clone(),
+                        id.to_owned(),
+                        provider_name.clone(),
+                    )
+                    .await
                 {
                     Ok(thread) => thread.filter(|thread| {
                         is_reopenable_provider_thread_url(&provider_name, &thread.thread_url)
@@ -2231,14 +2247,14 @@ async fn chat_completions(
                     yield Ok(Event::default().data(error.to_string()));
                 } else {
                     provider_state::record_success(&provider_c);
-                    if let Err(_error) = state_c.memory.store_turn_for_owner_with_tab_id(
-                        &owner_key_id_c,
+                    if let Err(_error) = state_c.memory.clone().store_turn_for_owner_with_tab_id_blocking(
+                        owner_key_id_c.clone(),
                         conv_stream.clone(),
                         windowed_c.clone(),
                         ChatMessage { role: "assistant".to_string(), content: full.clone() },
                         provider_c.clone(),
                         None,
-                    ) {
+                    ).await {
                         tracing::error!(conversation_id = %conv_stream, "conversation persistence failed after stream");
                         let error = serde_json::json!({
                             "error": { "message": "conversation could not be persisted", "type": "server_error", "code": "memory_persistence_failed" }
@@ -2354,17 +2370,22 @@ async fn chat_completions(
             outcome = "success",
             "provider request completed"
         );
-        if let Err(_error) = state.memory.store_turn_for_owner_with_tab_id(
-            &owner_key_id,
-            new_conv_id.clone(),
-            windowed.clone(),
-            ChatMessage {
-                role: "assistant".to_string(),
-                content: full.clone(),
-            },
-            provider_name.clone(),
-            None,
-        ) {
+        if let Err(_error) = state
+            .memory
+            .clone()
+            .store_turn_for_owner_with_tab_id_blocking(
+                owner_key_id.clone(),
+                new_conv_id.clone(),
+                windowed.clone(),
+                ChatMessage {
+                    role: "assistant".to_string(),
+                    content: full.clone(),
+                },
+                provider_name.clone(),
+                None,
+            )
+            .await
+        {
             tracing::error!(conversation_id = %new_conv_id, "conversation persistence failed");
             return api_error(
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
