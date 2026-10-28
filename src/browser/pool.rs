@@ -204,7 +204,7 @@ impl ObscuraPool {
             shutting_down: shutting_down.clone(),
             worker_ready: worker_ready.clone(),
         });
-        browser_thread(cfg.clone(), cmd_rx, ready_tx);
+        browser_thread(cfg.clone(), cmd_rx, ready_tx, worker_ready.clone());
 
         // Recreate the thread-affine engine after a crash; never move Page values
         // between threads. The worker performs the same browser build and warm-up
@@ -230,7 +230,7 @@ impl ObscuraPool {
                 let (next_tx, next_rx) = mpsc::channel::<Command>(64);
                 *cmd_tx.write().await = next_tx;
                 let (next_ready_tx, next_ready_rx) = oneshot::channel::<Result<()>>();
-                browser_thread(cfg.clone(), next_rx, next_ready_tx);
+                browser_thread(cfg.clone(), next_rx, next_ready_tx, worker_ready.clone());
                 match tokio::time::timeout(Duration::from_secs(90), next_ready_rx).await {
                     Ok(Ok(Ok(()))) => {
                         worker_ready.store(true, Ordering::Release);
@@ -641,12 +641,22 @@ fn build_browser(cfg: &AppConfig) -> Result<obscura_core::Browser> {
     Ok(builder.build()?)
 }
 
+struct WorkerReadyGuard(Arc<AtomicBool>);
+
+impl Drop for WorkerReadyGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
 fn browser_thread(
     cfg: Arc<AppConfig>,
     mut cmd_rx: mpsc::Receiver<Command>,
     ready_tx: oneshot::Sender<Result<()>>,
+    worker_ready: Arc<AtomicBool>,
 ) {
     std::thread::spawn(move || {
+        let _ready_guard = WorkerReadyGuard(worker_ready.clone());
         let rt = match tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -722,6 +732,7 @@ fn browser_thread(
                     }
                 }
                 tracing::info!("ObscuraPool warmed: {} pages", pages.borrow().len());
+                worker_ready.store(true, Ordering::Release);
                 let _ = ready_tx.send(Ok(()));
 
                 while let Some(cmd) = cmd_rx.recv().await {
