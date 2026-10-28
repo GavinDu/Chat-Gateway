@@ -1677,7 +1677,14 @@ async fn export_conversation_markdown(
                     message.content
                 ));
             }
-            ([(axum::http::header::CONTENT_TYPE, "text/markdown; charset=utf-8")], markdown).into_response()
+            (
+                [(
+                    axum::http::header::CONTENT_TYPE,
+                    "text/markdown; charset=utf-8",
+                )],
+                markdown,
+            )
+                .into_response()
         }
         Ok(None) => api_error(
             StatusCode::NOT_FOUND,
