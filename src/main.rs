@@ -2036,7 +2036,10 @@ async fn chat_completions(
         let supports_reopen = providers::ADAPTERS
             .iter()
             .find(|spec| spec.id == provider_name)
-            .is_some_and(|spec| matches!(spec.threads, providers::ThreadSupport::UrlAddressable));
+            .is_some_and(|spec| matches!(spec.threads, providers::ThreadSupport::UrlAddressable))
+            && saved_thread
+                .as_ref()
+                .is_some_and(|thread| thread.model.as_deref() == Some(req.model.as_str()));
         let last_marker = transcript_marker(&stored_messages);
         let thread_state = saved_thread.as_ref().map(|thread| ThreadSyncState {
             provider: thread.provider.clone(),
@@ -2066,7 +2069,7 @@ async fn chat_completions(
                 &provider_name,
                 provider_prompt.clone(),
                 provider_model.clone(),
-                has_history,
+                has_history && thread_url.is_some(),
                 thread_url,
             )
             .await
