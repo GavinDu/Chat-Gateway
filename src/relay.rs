@@ -389,9 +389,19 @@ pub async fn import_session(
         return *response;
     }
     match crate::session::import_relay_session(&provider, &file) {
-        Ok(()) => {
-            Json(serde_json::json!({"ok":true,"provider":provider,"linked":true})).into_response()
-        }
+        Ok(()) => match app.pool.refresh_session(&provider).await {
+            Ok(()) => {
+                Json(serde_json::json!({"ok":true,"provider":provider,"linked":true,"active":true})).into_response()
+            }
+            Err(error) => {
+                tracing::warn!(provider, error = %error, "browser relay session was saved but could not be activated");
+                json_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "session_refresh_failed",
+                    "session was saved but could not be activated; retry or restart the gateway",
+                )
+            }
+        },
         Err(error) => {
             tracing::warn!(provider, error = %error, "browser relay session import rejected");
             json_error(
@@ -411,20 +421,23 @@ pub async fn unlink(
     if let Err(response) = authenticated_request(&app, &headers) {
         return *response;
     }
-    match crate::session::delete_session_snapshot(&provider) {
+    match app.pool.unlink_session(&provider).await {
         Ok(removed) => {
             tracing::info!(
                 provider,
-                "browser relay provider unlinked from persistent storage"
+                "browser relay provider unlinked from embedded browser and persistent storage"
             );
             Json(serde_json::json!({"ok":true,"provider":provider,"unlinked":removed}))
                 .into_response()
         }
-        Err(_) => json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "unlink_failed",
-            "provider session could not be removed",
-        ),
+        Err(error) => {
+            tracing::warn!(provider, error = %error, "browser relay provider unlink incomplete");
+            json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "unlink_failed",
+                "provider session could not be fully revoked; saved data was retained when cleanup failed",
+            )
+        }
     }
 }
 
