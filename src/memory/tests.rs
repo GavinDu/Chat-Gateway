@@ -1344,12 +1344,13 @@ async fn async_listing_and_retention_use_blocking_pool_and_preserve_owner_scope(
     let memory = Arc::new(fixture.open());
     store(&memory, "async-list-owner-a", "owner A");
     memory
-        .store_turn_for_owner(
+        .store_turn_for_owner_with_tab_id(
             "key:owner-b",
             "async-list-owner-b".into(),
             vec![m("user", "private to owner B")],
             m("assistant", "response"),
             "chatgpt".into(),
+            None,
         )
         .unwrap();
 
