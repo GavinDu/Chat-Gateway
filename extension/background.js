@@ -8,6 +8,7 @@ chrome.cookies.onChanged.addListener(({cookie}) => {
     if (!roots.some(root => host === root || host.endsWith("." + root))) continue;
     clearTimeout(debounceTimers.get(provider));
     const timer = setTimeout(() => {
+      if (debounceTimers.get(provider) !== timer) return;
       debounceTimers.delete(provider);
       syncProvider(provider).catch(() => {
         // Never log cookie material or relay credentials. The popup can surface status on demand.
