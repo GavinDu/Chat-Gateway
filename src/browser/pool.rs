@@ -658,6 +658,18 @@ fn touch_login_meta(login_meta: &Rc<RefCell<HashMap<Provider, LoginMeta>>>, prov
     }
 }
 
+/// Typed outcome for a probe that confirms the provider has redirected to login.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProviderSessionExpiredError;
+
+impl std::fmt::Display for ProviderSessionExpiredError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("provider session requires login")
+    }
+}
+
+impl std::error::Error for ProviderSessionExpiredError {}
+
 /// Verify that a warmed provider page still looks like an authenticated chat page.
 /// Call only while holding that provider page's lock so probes never race a send.
 fn verify_session_page(
@@ -671,9 +683,12 @@ fn verify_session_page(
         .input
         .iter()
         .any(|selector| page.query_selector(selector).is_some());
-    let (login_state, _) = login::login_state(is_login_page, input_found);
-    if login_state == "login_required" {
-        return Ok(false);
+    classify_session_probe(is_login_page, input_found)
+}
+
+fn classify_session_probe(is_login_page: bool, input_found: bool) -> Result<bool> {
+    if session_probe_requires_login(is_login_page, input_found) {
+        return Err(anyhow::Error::new(ProviderSessionExpiredError));
     }
     if !session_probe_page_healthy(is_login_page, input_found) {
         anyhow::bail!("session verification failed: chat input not found");
@@ -684,11 +699,28 @@ fn verify_session_page(
 #[cfg(test)]
 mod session_probe_tests {
     #[test]
+    fn probe_distinguishes_expired_login_page_from_unwarmed_page() {
+        let expired = super::classify_session_probe(true, true).unwrap_err();
+        assert!(expired
+            .downcast_ref::<super::ProviderSessionExpiredError>()
+            .is_some());
+        assert!(super::classify_session_probe(false, false).is_err());
+        assert!(matches!(
+            super::classify_session_probe(false, true),
+            Ok(true)
+        ));
+    }
+
+    #[test]
     fn probe_requires_chat_input_and_not_a_login_page() {
         assert!(super::session_probe_page_healthy(false, true));
         assert!(!super::session_probe_page_healthy(true, true));
         assert!(!super::session_probe_page_healthy(false, false));
     }
+}
+
+fn session_probe_requires_login(is_login_page: bool, input_found: bool) -> bool {
+    login::login_state(is_login_page, input_found).0 == "login_required"
 }
 
 fn session_probe_page_healthy(is_login_page: bool, input_found: bool) -> bool {

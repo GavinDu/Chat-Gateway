@@ -383,6 +383,17 @@ async fn main() -> anyhow::Result<()> {
                     Ok(false) => {}
                     Err(error)
                         if error
+                            .downcast_ref::<crate::browser::pool::ProviderSessionExpiredError>()
+                            .is_some() =>
+                    {
+                        provider_state::record_needs_login(&provider_name);
+                        tracing::warn!(
+                            provider = %provider_name,
+                            "periodic provider session verification found login required"
+                        );
+                    }
+                    Err(error)
+                        if error
                             .downcast_ref::<BrowserWorkerUnavailableError>()
                             .is_some_and(|error| error.is_retryable()) =>
                     {
