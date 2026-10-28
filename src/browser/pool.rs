@@ -406,7 +406,6 @@ impl ObscuraPool {
             .map_err(|_| anyhow::anyhow!("browser thread dropped session verification reply"))?
     }
 
-
     /// Live-send test-adapter run for one provider (Go RunAdapterTest
     /// phases, restored-tree form): session check → selector probe →
     /// dummy prompt send → up to 45s response-token wait.
