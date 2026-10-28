@@ -980,7 +980,10 @@ async fn metrics_endpoint(State(state): State<Arc<AppState>>) -> impl IntoRespon
         .map(|provider| {
             (
                 provider.name.clone(),
-                provider_state::status(&provider.name).state.as_str().to_owned(),
+                provider_state::status(&provider.name)
+                    .state
+                    .as_str()
+                    .to_owned(),
             )
         })
         .collect::<Vec<_>>();
