@@ -73,6 +73,24 @@ impl MemoryEgressPolicy {
         }
     }
 
+    /// Append only policy-authorized personal memory to the final provider prompt.
+    /// Keeping filtering and rendering in one function prevents callers from
+    /// accidentally appending the original unfiltered collection.
+    pub(crate) fn append_personal_memory_to_prompt(
+        &self,
+        provider: &str,
+        prompt: &mut String,
+        items: &[PersonalMemoryItem],
+    ) -> Result<(), EgressError> {
+        for item in self.filter_personal_memory(provider, items)? {
+            prompt.push_str("\nPERSONAL_MEMORY_ITEM ");
+            prompt.push_str(&item.id);
+            prompt.push_str(": ");
+            prompt.push_str(&item.content);
+        }
+        Ok(())
+    }
+
     /// Filter personal memory at the provider boundary. Denials log only stable
     /// item IDs and a reason; the sensitive memory value is never logged.
     pub(crate) fn filter_personal_memory<'a>(
@@ -151,6 +169,39 @@ mod tests {
             .filter_personal_memory("claude", &items)
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn denied_memory_sentinel_never_reaches_the_rendered_provider_prompt() {
+        let policy = policy(&[]);
+        let items = vec![PersonalMemoryItem {
+            id: "private-item-17".into(),
+            content: "PRIVATE_MEMORY_SENTINEL_7f1d".into(),
+        }];
+        let mut prompt = "user: what should I remember?".to_owned();
+
+        policy
+            .append_personal_memory_to_prompt("chatgpt", &mut prompt, &items)
+            .unwrap();
+
+        assert!(!prompt.contains("PRIVATE_MEMORY_SENTINEL_7f1d"));
+        assert!(!prompt.contains("private-item-17"));
+    }
+
+    #[test]
+    fn explicitly_allowed_memory_is_appended_to_the_rendered_provider_prompt() {
+        let policy = policy(&["chatgpt"]);
+        let items = vec![PersonalMemoryItem {
+            id: "allowed-item-1".into(),
+            content: "allowed memory fact".into(),
+        }];
+        let mut prompt = "user: question".to_owned();
+
+        policy
+            .append_personal_memory_to_prompt("chatgpt", &mut prompt, &items)
+            .unwrap();
+
+        assert!(prompt.contains("PERSONAL_MEMORY_ITEM allowed-item-1: allowed memory fact"));
     }
 
     #[test]
