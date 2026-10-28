@@ -391,7 +391,6 @@ mod tests {
         assert!(estimate_message_tokens("你好🙂") >= 3);
     }
 
-
     #[test]
     fn interleaved_conversations_keep_provider_thread_deltas_isolated() {
         let history_a = vec![
