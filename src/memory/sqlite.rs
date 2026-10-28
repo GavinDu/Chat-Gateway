@@ -3,7 +3,7 @@ use anyhow::{bail, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use std::{collections::HashMap, fs, path::Path, time::Duration};
 
-const VERSION: i64 = 6;
+const VERSION: i64 = 7;
 const APPLICATION_ID: i64 = 0x4347574d; // CGWM
 const PROVIDER_THREADS_SCHEMA: &str = "
     CREATE TABLE provider_threads (
@@ -51,7 +51,6 @@ const SCHEMA: &str = "
     CREATE TABLE conversations (
         id TEXT PRIMARY KEY NOT NULL,
         provider TEXT,
-        tab_id TEXT,
         last_activity_at INTEGER NOT NULL DEFAULT 0,
         owner_key_id TEXT NOT NULL DEFAULT 'local'
     );
@@ -196,6 +195,7 @@ fn initialize(connection: &mut Connection, legacy: Option<&Path>) -> Result<()> 
         )?;
         tx.execute_batch(ROLLING_SUMMARIES_SCHEMA)?;
         tx.execute_batch(MEMORY_SCHEMA)?;
+        tx.execute_batch("ALTER TABLE conversations DROP COLUMN tab_id;")?;
         tx.pragma_update(None, "user_version", VERSION)?;
     } else if version == 2 && app == APPLICATION_ID {
         tx.execute_batch(
@@ -205,6 +205,7 @@ fn initialize(connection: &mut Connection, legacy: Option<&Path>) -> Result<()> 
         )?;
         tx.execute_batch(ROLLING_SUMMARIES_SCHEMA)?;
         tx.execute_batch(MEMORY_SCHEMA)?;
+        tx.execute_batch("ALTER TABLE conversations DROP COLUMN tab_id;")?;
         tx.pragma_update(None, "user_version", VERSION)?;
     } else if version == 3 && app == APPLICATION_ID {
         tx.execute_batch(
@@ -212,13 +213,21 @@ fn initialize(connection: &mut Connection, legacy: Option<&Path>) -> Result<()> 
         )?;
         tx.execute_batch(ROLLING_SUMMARIES_SCHEMA)?;
         tx.execute_batch(MEMORY_SCHEMA)?;
+        tx.execute_batch("ALTER TABLE conversations DROP COLUMN tab_id;")?;
         tx.pragma_update(None, "user_version", VERSION)?;
     } else if version == 4 && app == APPLICATION_ID {
         tx.execute_batch(ROLLING_SUMMARIES_SCHEMA)?;
         tx.execute_batch(MEMORY_SCHEMA)?;
+        tx.execute_batch("ALTER TABLE conversations DROP COLUMN tab_id;")?;
         tx.pragma_update(None, "user_version", VERSION)?;
     } else if version == 5 && app == APPLICATION_ID {
         tx.execute_batch(MEMORY_SCHEMA)?;
+        tx.execute_batch("ALTER TABLE conversations DROP COLUMN tab_id;")?;
+        tx.pragma_update(None, "user_version", VERSION)?;
+    } else if version == 6 && app == APPLICATION_ID {
+        // Synthetic tab identifiers were never stable provider thread IDs. Remove
+        // the obsolete column transactionally; provider_threads is authoritative.
+        tx.execute_batch("ALTER TABLE conversations DROP COLUMN tab_id;")?;
         tx.pragma_update(None, "user_version", VERSION)?;
     } else if version != VERSION || app != APPLICATION_ID {
         bail!("unsupported conversation schema version {version} (expected {VERSION}) or application id {app}");
@@ -311,17 +320,14 @@ fn validate_schema(connection: &Connection) -> Result<()> {
 pub(super) fn load(connection: &Connection, id: &str) -> Result<Option<Conversation>> {
     let affinity = connection
         .query_row(
-            "SELECT provider, tab_id FROM conversations WHERE id=?1",
+            "SELECT provider FROM conversations WHERE id=?1",
             [id],
             |row| {
-                Ok((
-                    row.get::<_, Option<String>>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                ))
+                row.get::<_, Option<String>>(0)
             },
         )
         .optional()?;
-    let Some((provider, tab_id)) = affinity else {
+    let Some(provider) = affinity else {
         return Ok(None);
     };
     let mut statement = connection.prepare(
@@ -348,7 +354,7 @@ pub(super) fn load(connection: &Connection, id: &str) -> Result<Option<Conversat
         id: id.to_owned(),
         messages,
         provider,
-        tab_id,
+        tab_id: None,
     }))
 }
 
@@ -385,14 +391,13 @@ pub(super) fn append_owned(
         .as_secs()
         .min(i64::MAX as u64) as i64;
     connection.execute(
-        "INSERT INTO conversations(id,provider,tab_id,last_activity_at,owner_key_id)
-         VALUES(?1,?2,?3,?4,?5)
-         ON CONFLICT(id) DO UPDATE SET provider=excluded.provider, tab_id=excluded.tab_id,
+        "INSERT INTO conversations(id,provider,last_activity_at,owner_key_id)
+         VALUES(?1,?2,?3,?4)
+         ON CONFLICT(id) DO UPDATE SET provider=excluded.provider,
              last_activity_at=excluded.last_activity_at",
         params![
             conversation.id,
             conversation.provider,
-            conversation.tab_id,
             now,
             owner_key_id,
         ],
@@ -414,6 +419,46 @@ pub(super) fn append_owned(
 #[cfg(test)]
 #[allow(dead_code)] // This module is also compiled through the standalone SQLite benchmark.
 mod concurrency_configuration_tests {
+    #[test]
+    fn version_six_migration_removes_tab_id_and_preserves_history() -> super::Result<()> {
+        let path = std::env::temp_dir().join(format!(
+            "chat-gateway-tab-id-migration-{}.sqlite3",
+            uuid::Uuid::new_v4()
+        ));
+        {
+            let connection = rusqlite::Connection::open(&path)?;
+            let legacy_schema = super::SCHEMA.replace(
+                "provider TEXT,\n        last_activity_at",
+                "provider TEXT,\n        tab_id TEXT,\n        last_activity_at",
+            );
+            connection.execute_batch(&legacy_schema)?;
+            connection.execute_batch("PRAGMA application_id=1128742733; PRAGMA user_version=6;")?;
+            connection.execute(
+                "INSERT INTO conversations(id,provider,tab_id,last_activity_at,owner_key_id) VALUES('legacy','chatgpt','tab-123',1,'local')",
+                [],
+            )?;
+            connection.execute(
+                "INSERT INTO messages(conversation_id,position,role,content) VALUES('legacy',0,'user','preserve me')",
+                [],
+            )?;
+        }
+        let connection = super::open(Some(&path), None)?;
+        let columns = connection.prepare("PRAGMA table_info(conversations)")?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        assert!(!columns.iter().any(|column| column == "tab_id"));
+        let conversation = super::load(&connection, "legacy")?.expect("history must survive migration");
+        assert_eq!(conversation.messages, vec![super::ChatMessage { role: "user".into(), content: "preserve me".into() }]);
+        assert_eq!(conversation.tab_id, None);
+        let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        assert_eq!(version, super::VERSION);
+        drop(connection);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+        Ok(())
+    }
+
     #[test]
     fn file_backed_database_enforces_expected_concurrency_pragmas() -> super::Result<()> {
         let path = std::env::temp_dir().join(format!(
@@ -481,8 +526,8 @@ mod concurrency_configuration_tests {
         let transaction =
             writer.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         transaction.execute(
-            "INSERT INTO conversations(id,provider,tab_id,last_activity_at,owner_key_id)
-             VALUES (?1, NULL, NULL, 0, 'local')",
+            "INSERT INTO conversations(id,provider,last_activity_at,owner_key_id)
+             VALUES (?1, NULL, 0, 'local')",
             ["isolation-check"],
         )?;
 
