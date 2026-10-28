@@ -388,6 +388,13 @@ pub async fn import_session(
     if let Err(response) = authenticated_request(&app, &headers) {
         return *response;
     }
+    if !app.cfg.provider(&provider).is_some_and(|config| config.enabled) {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "provider_not_enabled",
+            "provider must be enabled before its browser session can be linked",
+        );
+    }
     match crate::session::import_relay_session(&provider, &file) {
         Ok(()) => match app.pool.refresh_session(&provider).await {
             Ok(()) => {
