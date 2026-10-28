@@ -4,7 +4,9 @@ const fs = require("node:fs");
 const vm = require("node:vm");
 const { webcrypto } = require("node:crypto");
 
-function loadShared(cookieFixtures = []) {
+function loadShared(cookieFixtures = [], permissionsGranted = true) {
+  let cookieReads = 0;
+  let requestedOrigins = [];
   const context = {
     URL,
     Headers,
@@ -14,14 +16,17 @@ function loadShared(cookieFixtures = []) {
       cookies: {
         // Return the full fixture set to simulate a permissive/misbehaving
         // browser API; providerCookieSnapshot must still enforce its own scope.
-        getAll: async () => cookieFixtures
+        getAll: async () => { cookieReads += 1; return cookieFixtures; }
       },
-            storage: { local: { get: async () => ({}) } }
+      permissions: {
+        contains: async ({origins}) => { requestedOrigins = origins; return permissionsGranted; }
+      },
+      storage: { local: { get: async () => ({}) } }
     }
   };
   vm.createContext(context);
   const source = fs.readFileSync(require.resolve("../shared.js"), "utf8");
-  vm.runInContext(source + "\nglobalThis.__testApi = { normalizeGateway, providerCookieSnapshot, PROVIDERS };", context);
+  vm.runInContext(source + "\nglobalThis.__testApi = { normalizeGateway, providerCookieSnapshot, PROVIDERS, cookieReads: () => cookieReads, requestedOrigins: () => requestedOrigins };", context);
   return context.__testApi;
 }
 
@@ -56,6 +61,17 @@ test("provider cookie snapshot excludes cookies outside that provider's domain r
   const snapshot = await api.providerCookieSnapshot("chatgpt");
   assert.deepEqual(JSON.parse(JSON.stringify(snapshot.cookies.map(cookie => cookie.name).sort())), ["auth", "session"]);
   assert.equal(snapshot.local_storage && Object.keys(snapshot.local_storage).length, 0);
+});
+
+test("provider cookie snapshot fails closed when host permissions are incomplete", async () => {
+  const api = loadShared([], false);
+  await assert.rejects(
+    () => api.providerCookieSnapshot("chatgpt"),
+    /Missing provider host permissions/
+  );
+  assert.equal(api.cookieReads(), 0, "permission rejection must happen before reading cookies");
+  assert.ok(api.requestedOrigins().includes("https://chatgpt.com/*"));
+  assert.ok(api.requestedOrigins().includes("https://*.chatgpt.com/*"));
 });
 
 test("unsupported provider cannot be used to collect a cookie snapshot", async () => {
