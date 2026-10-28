@@ -6,6 +6,7 @@ const { webcrypto } = require("node:crypto");
 
 function loadShared(cookieFixtures = [], permissionsGranted = true) {
   let cookieReads = 0;
+  let requestedOrigins = [];
   const context = {
     URL,
     Headers,
@@ -18,14 +19,14 @@ function loadShared(cookieFixtures = [], permissionsGranted = true) {
         getAll: async () => { cookieReads += 1; return cookieFixtures; }
       },
       permissions: {
-        contains: async () => permissionsGranted
+        contains: async ({origins}) => { requestedOrigins = origins; return permissionsGranted; }
       },
       storage: { local: { get: async () => ({}) } }
     }
   };
   vm.createContext(context);
   const source = fs.readFileSync(require.resolve("../shared.js"), "utf8");
-  vm.runInContext(source + "\nglobalThis.__testApi = { normalizeGateway, providerCookieSnapshot, PROVIDERS, cookieReads: () => cookieReads };", context);
+  vm.runInContext(source + "\nglobalThis.__testApi = { normalizeGateway, providerCookieSnapshot, PROVIDERS, cookieReads: () => cookieReads, requestedOrigins: () => requestedOrigins };", context);
   return context.__testApi;
 }
 
@@ -69,6 +70,8 @@ test("provider cookie snapshot fails closed when host permissions are incomplete
     /Missing provider host permissions/
   );
   assert.equal(api.cookieReads(), 0, "permission rejection must happen before reading cookies");
+  assert.ok(api.requestedOrigins().includes("https://chatgpt.com/*"));
+  assert.ok(api.requestedOrigins().includes("https://*.chatgpt.com/*"));
 });
 
 test("unsupported provider cannot be used to collect a cookie snapshot", async () => {
