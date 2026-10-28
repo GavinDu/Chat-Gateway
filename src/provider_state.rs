@@ -2,7 +2,7 @@
 use std::{
     collections::HashMap,
     sync::{Mutex, OnceLock},
-    time::{Duration, Instant, SystemTime},
+    time::{Duration, SystemTime},
 };
 
 /// Typed provider lifecycle state. Keep the string representation at the
