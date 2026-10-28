@@ -236,6 +236,20 @@ pub fn import_relay_session(provider: &str, file: &SessionFile) -> Result<()> {
     ensure_private_session_dir_sync(Path::new("sessions"))?;
     let encrypted = encrypt_session_snapshot(file, provider, &key)?;
     write_session_file_atomically(Path::new(&destination), &encrypted)?;
+
+    // Authenticate the durable write before deleting a legacy recovery copy.
+    let verified = (|| -> Result<()> {
+        let written = std::fs::read(&destination)?;
+        let restored = decrypt_session_snapshot(&written, provider, &key)?;
+        if session_state_hash(&restored)? != session_state_hash(file)? {
+            anyhow::bail!("session-vault read-back validation failed");
+        }
+        Ok(())
+    })();
+    if let Err(error) = verified {
+        let _ = std::fs::remove_file(&destination);
+        return Err(error);
+    }
     remove_legacy_session_snapshot(provider)?;
     record_session_write(provider);
     tracing::info!(
