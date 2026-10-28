@@ -732,6 +732,7 @@ pub fn load_session_file(provider: &str) -> Result<Option<SessionFile>> {
     }
 }
 
+#[cfg(test)]
 fn load_session_file_from_path(path: &Path) -> Result<Option<SessionFile>> {
     let data = match std::fs::read_to_string(path) {
         Ok(data) => data,
@@ -1461,6 +1462,10 @@ mod vault_tests {
             std::fs::read(&legacy_path).unwrap(),
             legacy_bytes,
             "failed vault decryption must not delete or silently load the plaintext source"
+        );
+        assert!(
+            vault_path.is_file(),
+            "failed decryption must preserve the corrupt vault record for diagnosis"
         );
         std::fs::remove_dir_all(root).unwrap();
     }
