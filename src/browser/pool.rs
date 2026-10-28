@@ -73,6 +73,14 @@ enum Command {
         provider: Provider,
         reply: oneshot::Sender<Result<TestAdapterReport>>,
     },
+    RefreshSession {
+        provider: Provider,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    UnlinkSession {
+        provider: Provider,
+        reply: oneshot::Sender<Result<bool>>,
+    },
     // Login delegate UI (see src/login.rs): dedicated pages on the
     // browser thread, separate from the warm provider pages. Login
     // pages are plain Rc<Page> (no &mut needed after creation — all
@@ -309,6 +317,28 @@ impl ObscuraPool {
             Some(p) if p.enabled => Ok(provider),
             _ => Err(anyhow::anyhow!("provider {name} not enabled")),
         }
+    }
+
+    /// Apply the latest encrypted relay snapshot to the live browser page.
+    /// This waits for any in-flight provider send before replacing its page.
+    pub async fn refresh_session(&self, name: &str) -> Result<()> {
+        let provider = self.login_provider(name)?;
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx.send(Command::RefreshSession { provider, reply: tx }).await
+            .map_err(|_| anyhow::anyhow!("browser thread gone"))?;
+        rx.await.map_err(|_| anyhow::anyhow!("browser thread dropped session refresh"))?
+    }
+
+    /// Revoke a provider session from the live cookie jar and persistent vault.
+    pub async fn unlink_session(&self, name: &str) -> Result<bool> {
+        // Unlink must remain available even when the provider is disabled or
+        // its vault cannot be decrypted during startup.
+        let provider = Provider::from_name(name)
+            .ok_or_else(|| anyhow::anyhow!("unknown provider {name}"))?;
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx.send(Command::UnlinkSession { provider, reply: tx }).await
+            .map_err(|_| anyhow::anyhow!("browser thread gone"))?;
+        rx.await.map_err(|_| anyhow::anyhow!("browser thread dropped session unlink"))?
     }
 
     /// Login UI: open a dedicated login page for a provider (fresh page,
@@ -567,26 +597,32 @@ fn browser_thread(
                         Ok(mut page) => {
                             let session_file = match session::load_session_file(&pcfg.name) {
                                 Ok(file) => file,
-                                Err(e) => {
-                                    tracing::warn!(provider = %pcfg.name, "session file could not be loaded; continuing without restored session: {e}");
-                                    None
+                                Err(_) => {
+                                    tracing::error!(provider = %pcfg.name, "provider disabled because its saved session could not be read or decrypted");
+                                    continue;
                                 }
                             };
                             if let Some(file) = &session_file {
-                                if let Err(e) = session::restore_cookies(&browser, file, &pcfg.name) {
-                                    tracing::warn!(provider = %pcfg.name, "cookie restore failed; provider may require login: {e}");
+                                if session::restore_cookies(&browser, file, &pcfg.name).is_err() {
+                                    let _ = session::clear_provider_cookies(&browser, &pcfg.name);
+                                    tracing::error!(provider = %pcfg.name, "provider disabled because saved cookies could not be restored");
+                                    continue;
                                 }
                             }
-                            if let Err(e) = page.goto(provider.login_url()).await {
-                                tracing::warn!(provider = %pcfg.name, "warm goto failed: {e}");
+                            if page.goto(provider.login_url()).await.is_err() {
+                                tracing::error!(provider = %pcfg.name, "provider page warm-up navigation failed");
+                                continue;
                             }
                             if let Some(file) = &session_file {
-                                if let Err(error) = session::restore_local_storage(&page, file) {
-                                    tracing::warn!(provider = %pcfg.name, "localStorage restore failed: {error}");
+                                if session::restore_local_storage(&page, file).is_err() {
+                                    let _ = session::clear_provider_cookies(&browser, &pcfg.name);
+                                    tracing::error!(provider = %pcfg.name, "provider disabled because saved browser storage could not be restored");
+                                    continue;
                                 }
-                                // Reload-equivalent so the app boots with the session applied
-                                if let Err(e) = page.goto(provider.login_url()).await {
-                                    tracing::warn!(provider = %pcfg.name, "warm re-goto failed: {e}");
+                                if page.goto(provider.login_url()).await.is_err() {
+                                    let _ = session::clear_provider_cookies(&browser, &pcfg.name);
+                                    tracing::error!(provider = %pcfg.name, "provider page could not reload with its saved session");
+                                    continue;
                                 }
                             }
                             pages.borrow_mut().insert(provider, Rc::new(page));
@@ -830,6 +866,68 @@ fn browser_thread(
                                     tracing::warn!(provider = provider.name(), %error, "probe session snapshot failed");
                                 }
                                 finish(report);
+                            });
+                        }
+                        Command::RefreshSession { provider, reply } => {
+                            let browser = browser.clone();
+                            let pages = pages.clone();
+                            let locks = locks.clone();
+                            tokio::task::spawn_local(async move {
+                                let res: Result<()> = async {
+                                    let lock = locks.borrow().get(&provider).cloned()
+                                        .ok_or_else(|| anyhow::anyhow!("provider page not warmed"))?;
+                                    let _guard = lock.lock().await;
+                                    let provider_name = provider.name();
+                                    let file = session::load_session_file(provider_name)?
+                                        .ok_or_else(|| anyhow::anyhow!("no saved session for provider"))?;
+                                    let mut page = browser.new_page().await?;
+                                    session::clear_provider_cookies(&browser, provider_name)?;
+                                    if let Err(error) = session::restore_cookies(&browser, &file, provider_name) {
+                                        let _ = session::clear_provider_cookies(&browser, provider_name);
+                                        return Err(error);
+                                    }
+                                    page.goto(provider.login_url()).await?;
+                                    session::restore_local_storage(&page, &file)?;
+                                    page.goto(provider.login_url()).await?;
+                                    pages.borrow_mut().insert(provider, Rc::new(page));
+                                    Ok(())
+                                }.await;
+                                let _ = reply.send(res);
+                            });
+                        }
+                        Command::UnlinkSession { provider, reply } => {
+                            let browser = browser.clone();
+                            let pages = pages.clone();
+                            let locks = locks.clone();
+                            tokio::task::spawn_local(async move {
+                                let res: Result<bool> = async {
+                                    let lock = locks.borrow().get(&provider).cloned()
+                                        .unwrap_or_else(|| Rc::new(tokio::sync::Mutex::new(())));
+                                    let _guard = lock.lock().await;
+                                    let provider_name = provider.name();
+                                    let had_page = pages.borrow().contains_key(&provider);
+                                    let mut replacement = if had_page {
+                                        Some(browser.new_page().await?)
+                                    } else {
+                                        None
+                                    };
+                                    session::clear_provider_cookies(&browser, provider_name)?;
+                                    if let Some(old_page) = pages.borrow().get(&provider).cloned() {
+                                        let _ = old_page.evaluate("try { localStorage.clear(); true } catch (_) { false }");
+                                    }
+                                    if let Some(page) = replacement.as_mut() {
+                                        page.goto(provider.login_url()).await?;
+                                    }
+                                    let removed = session::delete_session_snapshot(provider_name)?;
+                                    if let Some(page) = replacement {
+                                        pages.borrow_mut().insert(provider, Rc::new(page));
+                                    } else {
+                                        pages.borrow_mut().remove(&provider);
+                                    }
+                                    tracing::info!(provider = provider_name, "browser relay session revoked from live browser");
+                                    Ok(removed)
+                                }.await;
+                                let _ = reply.send(res);
                             });
                         }
                         Command::LoginStart { provider, reply } => {
