@@ -2299,7 +2299,7 @@ async fn chat_completions(
             &provider_name,
             thread_state.as_ref(),
             supports_reopen,
-            8000,
+            context_token_budget,
         );
         let (mut provider_prompt, thread_url) = match send_plan {
             ContextPlan::Delta { messages } => (
@@ -2330,7 +2330,6 @@ async fn chat_completions(
             last_err = Some("provider data-handling policy denied request".to_owned());
             continue;
         }
-        let personal_memory_items: Vec<memory_egress::PersonalMemoryItem> = Vec::new();
         if memory_egress_policy
             .append_personal_memory_to_prompt(
                 &provider_name,
