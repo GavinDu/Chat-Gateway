@@ -388,7 +388,11 @@ pub async fn import_session(
     if let Err(response) = authenticated_request(&app, &headers) {
         return *response;
     }
-    if !app.cfg.provider(&provider).is_some_and(|config| config.enabled) {
+    if !app
+        .cfg
+        .provider(&provider)
+        .is_some_and(|config| config.enabled)
+    {
         return json_error(
             StatusCode::BAD_REQUEST,
             "provider_not_enabled",
