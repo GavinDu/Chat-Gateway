@@ -4373,14 +4373,7 @@ mod long_term_memory_export_tests {
             .set_long_term_memory_enabled("owner-a", true)
             .unwrap();
         memory
-            .save_long_term_memory_item(
-                "owner-a",
-                "timezone",
-                "America/New_York",
-                None,
-                0.9,
-                None,
-            )
+            .save_long_term_memory_item("owner-a", "timezone", "America/New_York", None, 0.9, None)
             .unwrap();
         memory
             .set_long_term_memory_enabled("owner-b", true)
