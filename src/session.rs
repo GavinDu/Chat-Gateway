@@ -748,6 +748,39 @@ mod cookie_restore_result_tests {
 
 /// Restore step 1 (BEFORE goto): put the saved cookies into the browser's
 /// cookie store so the first navigation is already authenticated.
+/// Remove every cookie in this browser jar belonging to the selected provider's
+/// allowlisted domains. Expiring cookies through the same jar API removes the
+/// matching (name, domain, path) entries without touching other providers.
+pub fn clear_provider_cookies(browser: &Browser, provider: &str) -> Result<usize> {
+    let store = browser.cookies();
+    let cookies = store.get_all();
+    let mut cleared = 0usize;
+    for cookie in cookies {
+        if !cookie_domain_allowed(provider, &cookie.domain)
+            || cookie.name.is_empty()
+            || cookie.name.contains(['=', ';', '\\r', '\\n'])
+        {
+            continue;
+        }
+        let path = if cookie.path.starts_with('/') && !cookie.path.contains(['\\r', '\\n']) {
+            cookie.path.as_str()
+        } else {
+            "/"
+        };
+        let url = format!("https://{}{}", cookie.domain.trim_start_matches('.'), path);
+        let mut expired = format!("{}=; Path={}; Max-Age=0", cookie.name, path);
+        if cookie.secure {
+            expired.push_str("; Secure");
+        }
+        if cookie.http_only {
+            expired.push_str("; HttpOnly");
+        }
+        store.set(&expired, &url)?;
+        cleared += 1;
+    }
+    Ok(cleared)
+}
+
 pub fn restore_cookies(browser: &Browser, file: &SessionFile, provider: &str) -> Result<()> {
     let store = browser.cookies();
     let mut failed_writes = 0usize;
