@@ -72,7 +72,7 @@ const SCHEMA: &str = "
         updated_at INTEGER NOT NULL,
         expires_at INTEGER,
         CHECK(length(trim(memory_key)) > 0),
-        CHECK(length(trim(value)) > 0,
+        CHECK(length(trim(value)) > 0),
         UNIQUE(owner_key_id, memory_key)
     );
     CREATE INDEX memory_items_owner_updated_idx ON memory_items(owner_key_id, updated_at DESC);
