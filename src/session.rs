@@ -6,7 +6,6 @@ use ring::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use zeroize::Zeroizing;
 use std::{
     collections::{BTreeMap, HashMap},
     io::Write,
@@ -373,7 +372,7 @@ pub fn restore_vault_backup(backup_dir: &str) -> Result<usize> {
 /// old key. Runtime write failures trigger rollback of already-replaced files.
 pub fn rotate_vault_key(new_key: &[u8; 32]) -> Result<(usize, String)> {
     let old_key = vault_key_from_env()?;
-    if *old_key == *new_key {
+    if old_key == *new_key {
         anyhow::bail!("new vault key must differ from the current key");
     }
 
@@ -468,14 +467,13 @@ pub fn parse_vault_key(encoded: &str) -> Result<[u8; 32]> {
     Ok(key)
 }
 
-fn vault_key_from_env() -> Result<Zeroizing<[u8; 32]>> {
-    let encoded = Zeroizing::new(std::env::var("CHAT_GATEWAY_VAULT_KEY").map_err(|_| {
+fn vault_key_from_env() -> Result<[u8; 32]> {
+    let encoded = std::env::var("CHAT_GATEWAY_VAULT_KEY").map_err(|_| {
         anyhow::anyhow!("CHAT_GATEWAY_VAULT_KEY is required for encrypted session storage")
-    })?);
-    let key = parse_vault_key(&encoded).map_err(|_| {
-        anyhow::anyhow!("CHAT_GATEWAY_VAULT_KEY must be exactly 64 hexadecimal characters")
     })?;
-    Ok(Zeroizing::new(key))
+    parse_vault_key(&encoded).map_err(|_| {
+        anyhow::anyhow!("CHAT_GATEWAY_VAULT_KEY must be exactly 64 hexadecimal characters")
+    })
 }
 
 fn vault_aad(provider: &str) -> String {
