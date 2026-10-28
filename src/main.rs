@@ -1337,7 +1337,7 @@ fn export_conversation_response_for_owner(
 
 fn export_conversation_result_response(
     conversation_id: &str,
-    result: anyhow::Result<Option<crate::memory::Conversation>>,
+    result: anyhow::Result<Option<memory::Conversation>>,
 ) -> Response {
     match result {
         Ok(Some(conversation)) => Json(conversation).into_response(),
@@ -1398,6 +1398,218 @@ async fn list_conversations(
             )
         }
     }
+}
+
+async fn get_provider_thread(
+    State(state): State<Arc<AppState>>,
+    Path((conversation_id, provider)): Path<(String, String)>,
+    auth_context: Option<Extension<AuthKeyContext>>,
+) -> Response {
+    let owner_key_id = auth_context
+        .as_ref()
+        .map(|Extension(context)| context.key_id.as_str())
+        .unwrap_or("local");
+    if !valid_conversation_id(&conversation_id) || !valid_provider_name(&provider) {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            "invalid_provider_thread_key",
+            "conversation ID or provider is invalid",
+        );
+    }
+    match state
+        .memory
+        .clone()
+        .get_provider_thread_for_owner_blocking(
+            owner_key_id.to_owned(),
+            conversation_id.clone(),
+            provider.clone(),
+        )
+        .await
+    {
+        Ok(Some(thread)) => Json(thread).into_response(),
+        Ok(None) => api_error(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "provider_thread_not_found",
+            "no provider thread is stored for this conversation and provider",
+        ),
+        Err(error) => {
+            tracing::error!(%error, "provider thread lookup failed");
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                "memory_read_failed",
+                "provider thread could not be read safely",
+            )
+        }
+    }
+}
+
+async fn upsert_provider_thread(
+    State(state): State<Arc<AppState>>,
+    Path((conversation_id, provider)): Path<(String, String)>,
+    auth_context: Option<Extension<AuthKeyContext>>,
+    Json(mut thread): Json<ProviderThread>,
+) -> Response {
+    let owner_key_id = auth_context
+        .as_ref()
+        .map(|Extension(context)| context.key_id.as_str())
+        .unwrap_or("local");
+    if !valid_conversation_id(&conversation_id)
+        || !valid_provider_name(&provider)
+        || thread.conversation_id != conversation_id
+        || thread.provider != provider
+    {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            "provider_thread_path_mismatch",
+            "body conversation_id and provider must match the valid request path",
+        );
+    }
+    if !valid_provider_thread_url(&provider, &thread.thread_url) {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            "invalid_provider_thread_url",
+            "thread_url must be an HTTPS URL on the expected provider domain",
+        );
+    }
+    thread.updated_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        .min(i64::MAX as u64) as i64;
+    match state
+        .memory
+        .clone()
+        .upsert_provider_thread_for_owner_blocking(owner_key_id.to_owned(), thread.clone())
+        .await
+    {
+        Ok(()) => Json(thread).into_response(),
+        Err(error) => {
+            tracing::error!(%error, conversation_id, provider, "provider thread persistence failed");
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                "memory_persistence_failed",
+                "provider thread could not be stored safely",
+            )
+        }
+    }
+}
+
+fn transcript_marker(messages: &[ChatMessage]) -> String {
+    let encoded = serde_json::to_vec(messages).unwrap_or_default();
+    format!("{:x}", Sha256::digest(encoded))
+}
+
+async fn persist_provider_thread(
+    state: &AppState,
+    owner_key_id: &str,
+    conversation_id: &str,
+    provider: &str,
+    model: &str,
+) {
+    let thread_url = match state.pool.current_url(provider).await {
+        Ok(url) if is_reopenable_provider_thread_url(provider, &url) => url,
+        Ok(_) => return,
+        Err(error) => {
+            tracing::debug!(provider, %error, "provider thread URL unavailable after successful send");
+            return;
+        }
+    };
+    let messages = match state
+        .memory
+        .clone()
+        .conversation_messages_for_owner_blocking(
+            owner_key_id.to_owned(),
+            conversation_id.to_owned(),
+        )
+        .await
+    {
+        Ok(messages) => messages,
+        Err(error) => {
+            tracing::warn!(provider, %error, "provider thread sync marker could not be read");
+            return;
+        }
+    };
+    let thread = ProviderThread {
+        conversation_id: conversation_id.to_owned(),
+        provider: provider.to_owned(),
+        thread_url,
+        synced_through_message_id: Some(transcript_marker(&messages)),
+        model: Some(model.to_owned()),
+        updated_at: chrono::Utc::now().timestamp(),
+    };
+    if let Err(error) = state
+        .memory
+        .clone()
+        .upsert_provider_thread_for_owner_blocking(owner_key_id.to_owned(), thread)
+        .await
+    {
+        tracing::warn!(provider, %error, "provider thread mapping could not be persisted");
+    }
+}
+
+fn is_reopenable_provider_thread_url(provider: &str, value: &str) -> bool {
+    if !valid_provider_thread_url(provider, value) {
+        return false;
+    }
+    let Some((_, location)) = value["https://".len()..].split_once('/') else {
+        return false;
+    };
+    let location = format!("/{location}");
+    match provider {
+        "chatgpt" => {
+            location.starts_with("/c/") || (location.starts_with("/g/") && location.contains("/c/"))
+        }
+        "claude" => location.starts_with("/chat/") && location.len() > "/chat/".len(),
+        "gemini" => location.starts_with("/app/") && location.len() > "/app/".len(),
+        "grok" => {
+            location.starts_with("/c/")
+                || location.starts_with("/chat/")
+                || location.contains("?conversation=")
+        }
+        "qwen" => location.starts_with("/c/") && location.len() > "/c/".len(),
+        "mistral" => location.starts_with("/chat/") && location.len() > "/chat/".len(),
+        "perplexity" => location.starts_with("/search/") || location.starts_with("/page/"),
+        _ => false,
+    }
+}
+
+fn valid_provider_name(provider: &str) -> bool {
+    matches!(
+        provider,
+        "chatgpt" | "claude" | "gemini" | "grok" | "qwen" | "mistral" | "perplexity" | "metaai"
+    )
+}
+
+fn valid_provider_thread_url(provider: &str, value: &str) -> bool {
+    if value.len() > 4096 || !value.starts_with("https://") || value.contains('@') {
+        return false;
+    }
+    let authority = value["https://".len()..]
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if authority.is_empty() || authority.contains(':') {
+        return false;
+    }
+    let allowed_hosts: &[&str] = match provider {
+        "chatgpt" => &["chatgpt.com", "chat.openai.com"],
+        "claude" => &["claude.ai"],
+        "gemini" => &["gemini.google.com"],
+        "grok" => &["grok.com", "x.com"],
+        "qwen" => &["chat.qwen.ai", "qwen.ai"],
+        "mistral" => &["chat.mistral.ai", "lechat.mistral.ai"],
+        "perplexity" => &["perplexity.ai"],
+        "metaai" => &["meta.ai"],
+        _ => &[],
+    };
+    allowed_hosts.contains(&authority.as_str())
 }
 
 async fn export_conversation(
@@ -1464,7 +1676,7 @@ fn export_conversation_markdown_response_for_owner(
 
 fn export_conversation_markdown_result_response(
     conversation_id: &str,
-    result: anyhow::Result<Option<crate::memory::Conversation>>,
+    result: anyhow::Result<Option<memory::Conversation>>,
 ) -> Response {
     match result {
         Ok(Some(conversation)) => {
