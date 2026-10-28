@@ -1473,16 +1473,12 @@ mod vault_tests {
         let key = [0x37; 32];
         let provider_a = sample_session();
         let mut provider_b = sample_session();
-        provider_b.local_storage.insert(
-            "access_token".to_owned(),
-            "provider-b-token".to_owned(),
-        );
+        provider_b
+            .local_storage
+            .insert("access_token".to_owned(), "provider-b-token".to_owned());
         provider_b.cookies[0].value = "provider-b-cookie".to_owned();
 
-        for (provider, session) in [
-            ("provider-a", &provider_a),
-            ("provider-b", &provider_b),
-        ] {
+        for (provider, session) in [("provider-a", &provider_a), ("provider-b", &provider_b)] {
             let path = root.join(format!("{provider}.vault"));
             let encrypted = encrypt_session_snapshot(session, provider, &key).unwrap();
             write_session_file_atomically(&path, &encrypted).unwrap();
