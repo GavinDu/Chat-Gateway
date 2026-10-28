@@ -277,7 +277,14 @@ pub fn import_relay_session(provider: &str, file: &SessionFile) -> Result<()> {
 
 fn list_vaults_in(directory: &Path) -> Result<Vec<String>> {
     const PROVIDERS: &[&str] = &[
-        "qwen", "metaai", "claude", "chatgpt", "gemini", "grok", "mistral", "perplexity",
+        "qwen",
+        "metaai",
+        "claude",
+        "chatgpt",
+        "gemini",
+        "grok",
+        "mistral",
+        "perplexity",
     ];
     let mut found = Vec::new();
     for provider in PROVIDERS {
@@ -1102,10 +1109,8 @@ mod vault_listing_tests {
 
     #[test]
     fn lists_only_known_provider_vault_filenames_without_reading_contents() {
-        let dir = std::env::temp_dir().join(format!(
-            "chat-gateway-vault-list-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("chat-gateway-vault-list-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("chatgpt.vault"), b"not-read-by-list").unwrap();
         std::fs::write(dir.join("unknown.vault"), b"ignored").unwrap();
