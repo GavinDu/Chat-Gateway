@@ -2108,14 +2108,23 @@ async fn chat_completions(
         );
     }
 
-    let mut candidates = match state.router.resolve_for_owner(
-        &owner_key_id,
-        &req.model,
-        conversation_id.as_deref(),
-        &state.memory,
-    ) {
-        Ok(candidates) => candidates,
-        Err(_error) => {
+    let router = state.router.clone();
+    let routing_memory = state.memory.clone();
+    let routing_owner = owner_key_id.clone();
+    let routing_model = req.model.clone();
+    let routing_conversation_id = conversation_id.clone();
+    let mut candidates = match tokio::task::spawn_blocking(move || {
+        router.resolve_for_owner(
+            &routing_owner,
+            &routing_model,
+            routing_conversation_id.as_deref(),
+            &routing_memory,
+        )
+    })
+    .await
+    {
+        Ok(Ok(candidates)) => candidates,
+        Ok(Err(_error)) | Err(_error) => {
             tracing::error!(conversation_id = ?conversation_id, "provider affinity read failed");
             return api_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
