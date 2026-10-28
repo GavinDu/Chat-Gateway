@@ -252,7 +252,8 @@ pub fn clear_provider_cookies(browser: &Browser, provider: &str) -> Result<usize
     let store = browser.cookies();
     let cookies = store.get_all();
     let mut cleared = 0;
-    for cookie in cookies {
+    for browser_cookie in cookies {
+        let cookie = Cookie::from(browser_cookie);
         if !cookie_domain_allowed(provider, &cookie.domain)
             || !restored_cookie_fields_safe(&cookie)
         {
