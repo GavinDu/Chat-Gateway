@@ -1713,13 +1713,19 @@ fn read_conversation_context(
     memory.build_context_for_owner_with_history("local", conversation_id, messages)
 }
 
-fn read_conversation_context_with_transcript_for_owner(
-    memory: &UnifiedMemory,
-    owner_key_id: &str,
-    conversation_id: Option<&str>,
-    messages: &[ChatMessage],
+async fn read_conversation_context_with_transcript_for_owner(
+    memory: Arc<UnifiedMemory>,
+    owner_key_id: String,
+    conversation_id: Option<String>,
+    messages: Vec<ChatMessage>,
 ) -> anyhow::Result<(String, Vec<ChatMessage>, bool, Vec<ChatMessage>)> {
-    memory.build_context_for_owner_with_transcript(owner_key_id, conversation_id, messages)
+    memory
+        .build_context_for_owner_with_transcript_blocking(
+            owner_key_id,
+            conversation_id,
+            messages,
+        )
+        .await
 }
 
 fn usable_initial_stream_chunk(content: &str, done: bool) -> bool {
@@ -1862,11 +1868,13 @@ async fn chat_completions(
     // failure must not degrade into an empty prompt or an unauthenticated turn.
     let (context_prompt, windowed, has_history, stored_messages) =
         match read_conversation_context_with_transcript_for_owner(
-            &state.memory,
-            &owner_key_id,
-            conversation_id.as_deref(),
-            &req.messages,
-        ) {
+            state.memory.clone(),
+            owner_key_id.clone(),
+            conversation_id.clone(),
+            req.messages.clone(),
+        )
+        .await
+        {
             Ok(context) => context,
             Err(_error) => {
                 return conversation_context_read_error(conversation_id.as_deref());
