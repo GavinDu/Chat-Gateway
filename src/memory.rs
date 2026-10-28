@@ -1164,3 +1164,69 @@ pub struct ConversationSummary {
     pub provider: Option<String>,
     pub message_count: usize,
 }
+
+#[cfg(test)]
+mod retrieval_ranking_tests {
+    use super::{sqlite, UnifiedMemory};
+    use std::sync::Mutex;
+
+    fn memory() -> UnifiedMemory {
+        UnifiedMemory {
+            max_tokens: 8000,
+            connection: Mutex::new(
+                sqlite::open(None, None).expect("in-memory SQLite should initialize"),
+            ),
+        }
+    }
+
+    #[test]
+    fn long_term_memory_retrieval_uses_stable_confidence_time_and_id_ordering() {
+        let memory = memory();
+        memory
+            .set_long_term_memory_enabled("ranking-owner", true)
+            .unwrap();
+        let low = memory
+            .save_long_term_memory_item("ranking-owner", "low-confidence", "low", None, 0.1, None)
+            .unwrap();
+        let high_old = memory
+            .save_long_term_memory_item("ranking-owner", "high-old", "older", None, 0.9, None)
+            .unwrap();
+        let high_new = memory
+            .save_long_term_memory_item("ranking-owner", "high-new", "newer A", None, 0.9, None)
+            .unwrap();
+        let high_tie = memory
+            .save_long_term_memory_item("ranking-owner", "high-tie", "newer B", None, 0.9, None)
+            .unwrap();
+
+        {
+            let connection = memory.lock().unwrap();
+            for (key, timestamp) in [
+                ("low-confidence", 300_i64),
+                ("high-old", 100_i64),
+                ("high-new", 200_i64),
+                ("high-tie", 200_i64),
+            ] {
+                connection
+                    .execute(
+                        "UPDATE memory_items SET updated_at=?1 WHERE owner_key_id=?2 AND memory_key=?3",
+                        rusqlite::params![timestamp, "ranking-owner", key],
+                    )
+                    .unwrap();
+            }
+        }
+
+        let retrieved = memory
+            .retrieve_long_term_memory_items("ranking-owner", 20)
+            .unwrap();
+        let mut tied = [
+            (high_new.id.clone(), high_new.memory_key.clone()),
+            (high_tie.id.clone(), high_tie.memory_key.clone()),
+        ];
+        tied.sort_by(|left, right| left.0.cmp(&right.0));
+        assert_eq!(retrieved.len(), 4);
+        assert_eq!(retrieved[0].memory_key, tied[0].1);
+        assert_eq!(retrieved[1].memory_key, tied[1].1);
+        assert_eq!(retrieved[2].id, high_old.id);
+        assert_eq!(retrieved[3].id, low.id);
+    }
+}
