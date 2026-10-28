@@ -394,7 +394,10 @@ mod tests {
 
     #[test]
     fn interleaved_conversations_keep_provider_thread_deltas_isolated() {
-        let history_a = vec![m("user", "conversation A question"), m("assistant", "conversation A answer")];
+        let history_a = vec![
+            m("user", "conversation A question"),
+            m("assistant", "conversation A answer"),
+        ];
         let incoming_a = vec![
             m("user", "conversation A question"),
             m("assistant", "conversation A answer"),
