@@ -368,7 +368,8 @@ async fn main() -> anyhow::Result<()> {
 
     // Verify idle provider sessions on the browser worker. Each probe is
     // read-only and serialized by the provider page lock; stagger providers
-    // to avoid synchronized browser work after startup.
+    // to avoid synchronized browser work after startup. An unwarmed page is
+    // skipped without changing the provider's state.
     for provider in cfg.providers.iter().filter(|provider| provider.enabled) {
         let pool = state.pool.clone();
         let provider_name = provider.name.clone();
@@ -377,7 +378,8 @@ async fn main() -> anyhow::Result<()> {
             tokio::time::sleep(std::time::Duration::from_secs(jitter_seconds)).await;
             loop {
                 match pool.verify_session(&provider_name).await {
-                    Ok(()) => provider_state::record_success(&provider_name),
+                    Ok(true) => provider_state::record_success(&provider_name),
+                    Ok(false) => {}
                     Err(error) => {
                         // Do not log raw probe errors; provider engines may include
                         // page or upstream details in their error messages.
@@ -389,32 +391,6 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
                 tokio::time::sleep(std::time::Duration::from_secs(60 + jitter_seconds)).await;
-            }
-        });
-    }
-
-    // Re-check warmed provider pages periodically so sessions that expire while idle
-    // are removed from routing/readiness without waiting for user traffic.
-    {
-        let state = state.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_secs(15)).await;
-            loop {
-                for provider in state.cfg.providers.iter().filter(|provider| provider.enabled) {
-                    match state.pool.verify_session(&provider.name).await {
-                        Ok(true) => provider_state::record_success(&provider.name),
-                        Ok(false) => {}
-                        Err(error) => {
-                            provider_state::record_error(&provider.name, &error.to_string());
-                            tracing::warn!(
-                                provider = %provider.name,
-                                %error,
-                                "provider session verification failed"
-                            );
-                        }
-                    }
-                }
-                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
             }
         });
     }
