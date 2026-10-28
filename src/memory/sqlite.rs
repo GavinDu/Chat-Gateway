@@ -225,12 +225,15 @@ fn initialize(connection: &mut Connection, legacy: Option<&Path>) -> Result<()> 
     } else if version != VERSION || app != APPLICATION_ID {
         bail!("unsupported conversation schema version {version} (expected {VERSION}) or application id {app}");
     }
-    // Remove historical synthetic tab IDs on every upgrade path. Real browser
-    // metadata and the transcript remain untouched; the operation is idempotent.
-    tx.execute(
-        "UPDATE conversations SET tab_id = NULL WHERE tab_id LIKE 'tab-%'",
-        [],
-    )?;
+    // Remove historical synthetic tab IDs only while upgrading an older
+    // schema. Re-running this cleanup on every startup could erase new metadata
+    // written by a legacy client after the migration has already completed.
+    if version < VERSION {
+        tx.execute(
+            "UPDATE conversations SET tab_id = NULL WHERE tab_id LIKE 'tab-%'",
+            [],
+        )?;
+    }
     tx.execute_batch(
         "CREATE INDEX IF NOT EXISTS conversations_owner_key_id_idx ON conversations(owner_key_id, id);",
     )?;
