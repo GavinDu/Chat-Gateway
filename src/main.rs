@@ -33,7 +33,7 @@ mod router;
 mod session;
 
 use api::{add_gateway_headers, api_error, estimate_tokens, validate_chat_req, ChatReq};
-use browser::pool::ObscuraPool;
+use browser::pool::{BrowserWorkerUnavailableError, ObscuraPool};
 use config::AppConfig;
 use context::{ContextBuilder, ContextPlan, ThreadSyncState};
 use memory::{ChatMessage, ProviderThread, UnifiedMemory};
@@ -2333,6 +2333,14 @@ async fn chat_completions(
         {
             Ok(rx) => rx,
             Err(e) => {
+                let retryable_worker_error = e
+                    .downcast_ref::<BrowserWorkerUnavailableError>()
+                    .is_some_and(|error| error.is_retryable());
+                tracing::debug!(
+                    provider = %provider_name,
+                    retryable = retryable_worker_error,
+                    "provider send failed"
+                );
                 provider_state::record_error(&provider_name, &e.to_string());
                 last_err = Some(e.to_string());
                 continue;
