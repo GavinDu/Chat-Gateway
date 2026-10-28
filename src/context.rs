@@ -88,7 +88,10 @@ impl ContextBuilder {
         let mut windowed = Vec::new();
         for message in full.iter().rev() {
             let cost = estimate_message_tokens(&message.content).saturating_add(8);
-            if tokens.saturating_add(cost) > budget && !windowed.is_empty() {
+            // Never admit a single message that exceeds the budget. In
+            // particular, an oversized newest message must not bypass the
+            // budget merely because the window is still empty.
+            if tokens.saturating_add(cost) > budget {
                 break;
             }
             tokens = tokens.saturating_add(cost);
@@ -192,6 +195,13 @@ mod tests {
         let (prompt, messages) = ContextBuilder::build(&history, &incoming, 1000);
         assert_eq!(messages.len(), 3);
         assert!(prompt.ends_with("second\n</conversation_message>\n"));
+    }
+
+    #[test]
+    fn pure_builder_never_includes_a_message_that_exceeds_the_budget() {
+        let history = vec![m("user", "this message is intentionally much too large")];
+        let (_, messages) = ContextBuilder::build(&history, &[], 1);
+        assert!(messages.is_empty());
     }
 
     #[test]
