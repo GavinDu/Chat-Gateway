@@ -916,6 +916,89 @@ fn provider_thread_mapping_is_provider_scoped_and_survives_restart() {
 }
 
 #[test]
+fn interleaved_conversations_keep_distinct_provider_threads_across_restart() {
+    let fixture = Fixture::new();
+    {
+        let memory = fixture.open();
+        store(&memory, "interleaved-a", "conversation A");
+        store(&memory, "interleaved-b", "conversation B");
+
+        for (conversation_id, thread_url, marker) in [
+            (
+                "interleaved-a",
+                "https://chatgpt.com/c/thread-a",
+                "fingerprint-a",
+            ),
+            (
+                "interleaved-b",
+                "https://chatgpt.com/c/thread-b",
+                "fingerprint-b",
+            ),
+        ] {
+            memory
+                .upsert_provider_thread(&ProviderThread {
+                    conversation_id: conversation_id.into(),
+                    provider: "chatgpt".into(),
+                    thread_url: thread_url.into(),
+                    synced_through_message_id: Some(marker.into()),
+                    model: Some("gpt-4o".into()),
+                    updated_at: 200,
+                })
+                .unwrap();
+        }
+
+        // Interleave updates as requests from A and B would: neither
+        // conversation may overwrite the other one's provider-side thread.
+        memory
+            .upsert_provider_thread(&ProviderThread {
+                conversation_id: "interleaved-b".into(),
+                provider: "chatgpt".into(),
+                thread_url: "https://chatgpt.com/c/thread-b".into(),
+                synced_through_message_id: Some("fingerprint-b2".into()),
+                model: Some("gpt-4o".into()),
+                updated_at: 202,
+            })
+            .unwrap();
+
+        assert_eq!(
+            memory
+                .get_provider_thread("interleaved-a", "chatgpt")
+                .unwrap()
+                .unwrap()
+                .thread_url,
+            "https://chatgpt.com/c/thread-a"
+        );
+        assert_eq!(
+            memory
+                .get_provider_thread("interleaved-b", "chatgpt")
+                .unwrap()
+                .unwrap()
+                .synced_through_message_id
+                .as_deref(),
+            Some("fingerprint-b2")
+        );
+    }
+
+    let reopened = fixture.open();
+    assert_eq!(
+        reopened
+            .get_provider_thread("interleaved-a", "chatgpt")
+            .unwrap()
+            .unwrap()
+            .thread_url,
+        "https://chatgpt.com/c/thread-a"
+    );
+    assert_eq!(
+        reopened
+            .get_provider_thread("interleaved-b", "chatgpt")
+            .unwrap()
+            .unwrap()
+            .thread_url,
+        "https://chatgpt.com/c/thread-b"
+    );
+}
+
+#[test]
 fn retention_purge_removes_expired_conversations_and_cascades_threads() {
     let fixture = Fixture::new();
     let memory = fixture.open();
