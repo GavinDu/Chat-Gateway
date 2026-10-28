@@ -437,16 +437,12 @@ fn schema_v5_migrates_to_v6_with_long_term_memory_disabled_by_default() {
         .unwrap();
     assert_eq!(version, 6);
     assert!(!memory.long_term_memory_enabled("owner-a").unwrap());
-    memory
+    let item_count: i64 = memory
         .lock()
         .unwrap()
-        .query_row(
-            "SELECT id FROM memory_items LIMIT 1",
-            [],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()
+        .query_row("SELECT count(*) FROM memory_items", [], |row| row.get(0))
         .unwrap();
+    assert_eq!(item_count, 0);
 }
 
 #[test]
