@@ -147,7 +147,7 @@ mod tests {
             record_error(&provider, message);
             assert_eq!(
                 status(&provider).state,
-                ProviderSessionState::Unknown,
+                ProviderSessionState::Degraded,
                 "{message}"
             );
         }
