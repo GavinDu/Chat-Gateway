@@ -246,6 +246,43 @@ pub fn import_relay_session(provider: &str, file: &SessionFile) -> Result<()> {
     Ok(())
 }
 
+/// Remove cookies for one provider from the shared browser jar. The
+/// Obscura cookie API models deletion as a Set-Cookie with Max-Age=0.
+pub fn clear_provider_cookies(browser: &Browser, provider: &str) -> Result<usize> {
+    let store = browser.cookies();
+    let cookies = store.get_all();
+    let mut cleared = 0;
+    for cookie in cookies {
+        if !cookie_domain_allowed(provider, &cookie.domain)
+            || !restored_cookie_fields_safe(&cookie)
+        {
+            continue;
+        }
+        let path = if cookie.path.is_empty() { "/" } else { cookie.path.as_str() };
+        let host_prefix = cookie.name.starts_with("__Host-");
+        let mut expired = format!("{}=; Max-Age=0; Path={}", cookie.name, path);
+        if host_prefix {
+            expired.push_str("; Secure");
+        } else {
+            expired.push_str(&format!("; Domain={}", cookie.domain));
+            if cookie.secure {
+                expired.push_str("; Secure");
+            }
+        }
+        if cookie.http_only {
+            expired.push_str("; HttpOnly");
+        }
+        let url = format!(
+            "https://{}{}",
+            cookie.domain.trim_start_matches('.'),
+            if path.starts_with('/') { path } else { "/" }
+        );
+        store.set(&expired, &url)?;
+        cleared += 1;
+    }
+    Ok(cleared)
+}
+
 pub fn delete_session_snapshot(provider: &str) -> Result<bool> {
     let vault_path = session_vault_path(provider)?;
     let legacy_path = session_path(provider)?;
