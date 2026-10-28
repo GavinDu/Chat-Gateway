@@ -131,6 +131,8 @@ def main() -> int:
         parser.error("--models must contain at least one model alias")
     if args.rounds < 1:
         parser.error("--rounds must be >= 1")
+    if args.timeout <= 0:
+        parser.error("--timeout must be > 0")
     results = []
     previous_provider = None
     for round_index in range(args.rounds):
