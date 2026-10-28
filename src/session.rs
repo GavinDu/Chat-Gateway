@@ -265,6 +265,11 @@ pub fn clear_provider_cookies(browser: &Browser, provider: &str) -> Result<usize
         }
         let path = if cookie.path.is_empty() { "/" } else { cookie.path.as_str() };
         let host_prefix = cookie.name.starts_with("__Host-");
+        if (host_prefix && (path != "/" || !cookie.secure))
+            || (cookie.name.starts_with("__Secure-") && !cookie.secure)
+        {
+            anyhow::bail!("provider cookie prefix constraints prevent safe revocation");
+        }
         let mut expired = format!("{}=; Max-Age=0; Path={}", cookie.name, path);
         if host_prefix {
             expired.push_str("; Secure");
@@ -283,6 +288,13 @@ pub fn clear_provider_cookies(browser: &Browser, provider: &str) -> Result<usize
             if path.starts_with('/') { path } else { "/" }
         );
         store.set(&expired, &url)?;
+        if store.get_all().iter().any(|remaining| {
+            remaining.name == cookie.name
+                && remaining.domain.trim_start_matches('.') == cookie.domain.trim_start_matches('.')
+                && remaining.path == cookie.path
+        }) {
+            anyhow::bail!("provider cookie remained in the browser jar after revocation");
+        }
         cleared += 1;
     }
     Ok(cleared)
