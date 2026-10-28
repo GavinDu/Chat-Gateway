@@ -35,8 +35,13 @@ async function resyncLinkedProviders() {
   );
 }
 
-chrome.runtime.onStartup.addListener(() => {
+function scheduleLinkedProviderResync() {
   resyncLinkedProviders().catch(() => {
     // Do not log provider session material or relay credentials.
   });
-});
+}
+
+// MV3 service workers can be recreated independently of a browser startup.
+// Restore linked sessions after installation/update as well as browser startup.
+chrome.runtime.onInstalled.addListener(scheduleLinkedProviderResync);
+chrome.runtime.onStartup.addListener(scheduleLinkedProviderResync);
