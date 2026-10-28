@@ -69,6 +69,15 @@ struct Cli {
         help = "Create a random chat API key, print it once and exit"
     )]
     create_api_key: Option<String>,
+
+    #[arg(long, help = "List provider vault/plaintext session artifacts without printing secrets")]
+    vault_list: bool,
+
+    #[arg(long, value_name = "PROVIDER", help = "Delete a provider's encrypted vault and legacy plaintext snapshot")]
+    vault_delete_provider: Option<String>,
+
+    #[arg(long, help = "Rotate all vault records using CHAT_GATEWAY_VAULT_OLD_KEY and CHAT_GATEWAY_VAULT_KEY")]
+    vault_rotate_key: bool,
 }
 
 fn adapter_report_is_healthy(report: &browser::pool::TestAdapterReport) -> bool {
@@ -111,6 +120,43 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let cli = Cli::parse();
+    let vault_actions = usize::from(cli.vault_list)
+        + usize::from(cli.vault_delete_provider.is_some())
+        + usize::from(cli.vault_rotate_key);
+    if vault_actions > 1 {
+        anyhow::bail!("choose only one vault management action");
+    }
+    if vault_actions > 0 && (cli.all || cli.test_adapter.is_some() || cli.json || cli.create_api_key.is_some()) {
+        anyhow::bail!("vault management actions cannot be combined with adapter diagnostics or API-key creation");
+    }
+    if cli.vault_list {
+        for (provider, encrypted, legacy_plaintext) in session::list_session_records()? {
+            let state = match (encrypted, legacy_plaintext) {
+                (true, true) => "encrypted + legacy plaintext (migration/recovery review required)",
+                (true, false) => "encrypted",
+                (false, true) => "legacy plaintext",
+                (false, false) => "no saved session",
+            };
+            println!("{provider}: {state}");
+        }
+        return Ok(());
+    }
+    if let Some(provider) = cli.vault_delete_provider.as_deref() {
+        let removed = session::delete_session_snapshot(provider)?;
+        println!(
+            "{}: {}",
+            provider,
+            if removed { "session records deleted" } else { "no session records found" }
+        );
+        return Ok(());
+    }
+    if cli.vault_rotate_key {
+        let rotated = session::rotate_session_vault_from_env()?;
+        println!("Rotated {rotated} encrypted provider vault record(s).");
+        println!("Keep CHAT_GATEWAY_VAULT_OLD_KEY available until any .vault.rotate-backup files are removed.");
+        return Ok(());
+    }
+
     if let Some(name) = cli.create_api_key.as_deref() {
         if name.trim().is_empty()
             || !name
