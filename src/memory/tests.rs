@@ -435,7 +435,7 @@ fn schema_v5_migrates_to_v6_with_long_term_memory_disabled_by_default() {
         .unwrap()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 6);
+    assert_eq!(version, 7);
     assert!(!memory.long_term_memory_enabled("owner-a").unwrap());
     let item_count: i64 = memory
         .lock()
@@ -1788,6 +1788,45 @@ fn file_backed_database_uses_wal_and_configured_busy_timeout() {
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(path.with_extension("db-wal"));
     let _ = std::fs::remove_file(path.with_extension("db-shm"));
+}
+
+#[test]
+fn schema_v6_migration_clears_synthetic_tabs_and_preserves_real_metadata_and_history() {
+    let fixture = Fixture::new();
+    {
+        let memory = fixture.open();
+        store(&memory, "synthetic-migration", "keep synthetic history");
+        store(&memory, "real-tab-migration", "keep real-tab history");
+        let connection = memory.lock().unwrap();
+        connection
+            .execute(
+                "UPDATE conversations SET tab_id=?1 WHERE id=?2",
+                rusqlite::params!["https://chatgpt.com/c/real-thread", "real-tab-migration"],
+            )
+            .unwrap();
+        connection.pragma_update(None, "user_version", 6).unwrap();
+    }
+
+    let migrated = fixture.open();
+    assert_eq!(migrated.get_tab("synthetic-migration").unwrap(), None);
+    assert_eq!(
+        migrated.get_tab("real-tab-migration").unwrap().as_deref(),
+        Some("https://chatgpt.com/c/real-thread")
+    );
+    assert_eq!(
+        migrated.conversation("synthetic-migration").unwrap().unwrap().messages,
+        vec![m("user", "keep synthetic history"), m("assistant", "answer keep synthetic history")]
+    );
+    assert_eq!(
+        migrated.conversation("real-tab-migration").unwrap().unwrap().messages,
+        vec![m("user", "keep real-tab history"), m("assistant", "answer keep real-tab history")]
+    );
+    let version: i64 = migrated
+        .lock()
+        .unwrap()
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, 7);
 }
 
 #[test]
