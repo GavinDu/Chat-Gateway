@@ -413,7 +413,7 @@ fn repeated_prompt_with_a_different_answer_is_a_new_turn() {
 }
 
 #[test]
-fn schema_v5_migrates_to_v7_with_long_term_memory_disabled_by_default() {
+fn schema_v5_migrates_to_current_schema_with_long_term_memory_disabled_by_default() {
     let fixture = Fixture::new();
     {
         let memory = fixture.open();
