@@ -370,7 +370,9 @@ fn authenticated_request(app: &crate::AppState, headers: &HeaderMap) -> Result<(
 }
 
 pub async fn status(State(app): State<Arc<crate::AppState>>, headers: HeaderMap) -> Response {
-    if let Err(response) = authenticated_request(&app, &headers) { return *response; }
+    if let Err(response) = authenticated_request(&app, &headers) {
+        return *response;
+    }
     let providers: anyhow::Result<Vec<_>> = [
         "qwen", "metaai", "claude", "chatgpt", "gemini", "grok", "mistral", "perplexity",
     ].iter().map(|provider| {
@@ -396,16 +398,27 @@ pub async fn import_session(
     Path(provider): Path<String>,
     Json(file): Json<crate::session::SessionFile>,
 ) -> Response {
-    if let Err(response) = authenticated_request(&app, &headers) { return *response; }
+    if let Err(response) = authenticated_request(&app, &headers) {
+        return *response;
+    }
     match crate::session::import_relay_session(&provider, &file) {
         Ok(()) => {
             let applied = app.pool.refresh_session(&provider).await.is_ok();
-            if !applied { tracing::warn!(provider, "browser relay session stored; live page refresh is pending"); }
+            if !applied {
+                tracing::warn!(
+                    provider,
+                    "browser relay session stored; live page refresh is pending"
+                );
+            }
             Json(serde_json::json!({"ok":true,"provider":provider,"linked":true,"applied":applied,"restart_required":!applied})).into_response()
         }
         Err(error) => {
             tracing::warn!(provider, error = %error, "browser relay session import rejected");
-            json_error(StatusCode::BAD_REQUEST, "session_import_rejected", "session was rejected; check vault configuration and provider permissions")
+            json_error(
+                StatusCode::BAD_REQUEST,
+                "session_import_rejected",
+                "session was rejected; check vault configuration and provider permissions",
+            )
         }
     }
 }
@@ -415,13 +428,23 @@ pub async fn unlink(
     headers: HeaderMap,
     Path(provider): Path<String>,
 ) -> Response {
-    if let Err(response) = authenticated_request(&app, &headers) { return *response; }
+    if let Err(response) = authenticated_request(&app, &headers) {
+        return *response;
+    }
     match app.pool.unlink_session(&provider).await {
         Ok(removed) => {
-            tracing::info!(provider, "browser relay provider unlinked from live browser and persistent storage");
-            Json(serde_json::json!({"ok":true,"provider":provider,"unlinked":removed})).into_response()
+            tracing::info!(
+                provider,
+                "browser relay provider unlinked from live browser and persistent storage"
+            );
+            Json(serde_json::json!({"ok":true,"provider":provider,"unlinked":removed}))
+                .into_response()
         }
-        Err(_) => json_error(StatusCode::INTERNAL_SERVER_ERROR, "unlink_failed", "provider session could not be revoked")
+        Err(_) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "unlink_failed",
+            "provider session could not be revoked",
+        )
     }
 }
 
@@ -485,10 +508,19 @@ mod tests {
 
     #[test]
     fn relay_timestamp_must_be_present_and_within_skew_window() {
-        assert!(request_timestamp_is_fresh(Some(1_000), 1_000 + REQUEST_SKEW_SECONDS));
-        assert!(request_timestamp_is_fresh(Some(1_000), 1_000 - REQUEST_SKEW_SECONDS));
+        assert!(request_timestamp_is_fresh(
+            Some(1_000),
+            1_000 + REQUEST_SKEW_SECONDS
+        ));
+        assert!(request_timestamp_is_fresh(
+            Some(1_000),
+            1_000 - REQUEST_SKEW_SECONDS
+        ));
         assert!(!request_timestamp_is_fresh(None, 1_000));
-        assert!(!request_timestamp_is_fresh(Some(1_000), 1_001 + REQUEST_SKEW_SECONDS));
+        assert!(!request_timestamp_is_fresh(
+            Some(1_000),
+            1_001 + REQUEST_SKEW_SECONDS
+        ));
         assert!(!request_timestamp_is_fresh(Some(i64::MIN), 1_000));
         assert!(!request_timestamp_is_fresh(Some(i64::MAX), 1_000));
     }
