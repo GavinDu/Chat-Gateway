@@ -221,16 +221,16 @@ fn initialize(connection: &mut Connection, legacy: Option<&Path>) -> Result<()> 
         tx.execute_batch(MEMORY_SCHEMA)?;
         tx.pragma_update(None, "user_version", VERSION)?;
     } else if version == 6 && app == APPLICATION_ID {
-        // Version 7 removes legacy synthetic tab identifiers without touching
-        // real browser metadata or conversation history.
-        tx.execute(
-            "UPDATE conversations SET tab_id = NULL WHERE tab_id LIKE 'tab-%'",
-            [],
-        )?;
         tx.pragma_update(None, "user_version", VERSION)?;
     } else if version != VERSION || app != APPLICATION_ID {
         bail!("unsupported conversation schema version {version} (expected {VERSION}) or application id {app}");
     }
+    // Remove historical synthetic tab IDs on every upgrade path. Real browser
+    // metadata and the transcript remain untouched; the operation is idempotent.
+    tx.execute(
+        "UPDATE conversations SET tab_id = NULL WHERE tab_id LIKE 'tab-%'",
+        [],
+    )?;
     tx.execute_batch(
         "CREATE INDEX IF NOT EXISTS conversations_owner_key_id_idx ON conversations(owner_key_id, id);",
     )?;
