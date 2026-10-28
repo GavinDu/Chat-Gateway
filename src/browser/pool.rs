@@ -7,7 +7,7 @@ use dashmap::DashMap;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot, Notify, OwnedSemaphorePermit, Semaphore};
@@ -133,6 +133,7 @@ pub struct ObscuraPool {
     cfg: Arc<AppConfig>,
     shutting_down: Arc<AtomicBool>,
     worker_ready: Arc<AtomicBool>,
+    worker_generation: Arc<AtomicU64>,
 }
 
 enum Command {
@@ -276,6 +277,7 @@ impl ObscuraPool {
         let cmd_tx = Arc::new(tokio::sync::RwLock::new(cmd_tx));
         let shutting_down = Arc::new(AtomicBool::new(false));
         let worker_ready = Arc::new(AtomicBool::new(false));
+        let worker_generation = Arc::new(AtomicU64::new(0));
         let pool = Arc::new(Self {
             cmd_tx: cmd_tx.clone(),
             ready: tokio::sync::Mutex::new(Some(ready_rx)),
@@ -283,6 +285,7 @@ impl ObscuraPool {
             cfg: cfg.clone(),
             shutting_down: shutting_down.clone(),
             worker_ready: worker_ready.clone(),
+            worker_generation: worker_generation.clone(),
         });
         browser_thread(cfg.clone(), cmd_rx, ready_tx, worker_ready.clone());
 
@@ -314,6 +317,7 @@ impl ObscuraPool {
                 match tokio::time::timeout(Duration::from_secs(90), next_ready_rx).await {
                     Ok(Ok(Ok(()))) => {
                         worker_ready.store(true, Ordering::Release);
+                        worker_generation.fetch_add(1, Ordering::AcqRel);
                         crate::metrics::record_browser_worker_restart();
                         tracing::info!("browser worker restarted and warmed successfully");
                         backoff = Duration::from_secs(1);
@@ -348,6 +352,12 @@ impl ObscuraPool {
     /// providers as usable.
     pub fn worker_alive(&self) -> bool {
         self.worker_ready.load(Ordering::Acquire)
+    }
+
+    /// Monotonic count of successful worker generations after the initial worker.
+    /// The value changes only after a replacement worker has completed warm-up.
+    pub fn worker_generation(&self) -> u64 {
+        self.worker_generation.load(Ordering::Acquire)
     }
 
     /// Await browser build + per-provider warm-up (v2 ordering: session
