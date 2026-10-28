@@ -983,7 +983,6 @@ mod cookie_scope_tests {
     }
 
     #[test]
-    #[test]
     fn cookie_expiration_preserves_secure_cookie_prefix_requirements() {
         let mut host_cookie = cookie("__Host-session", "value", "/");
         host_cookie.domain = "chatgpt.com".to_string();
@@ -998,6 +997,7 @@ mod cookie_scope_tests {
         assert!(cookie_expiration_header(&secure_cookie).is_err());
     }
 
+    #[test]
     fn restored_cookie_fields_reject_injection_and_malformed_paths() {
         assert!(restored_cookie_fields_safe(&cookie(
             "__Secure-session",
