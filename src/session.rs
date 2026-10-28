@@ -1560,6 +1560,34 @@ mod vault_tests {
         assert!(decrypt_session_snapshot(&tampered, "provider-a", &key).is_err());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn vault_directory_and_atomic_snapshot_permissions_are_private() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = std::env::temp_dir().join(format!(
+            "chat-gateway-vault-permissions-{}",
+            uuid::Uuid::new_v4()
+        ));
+        ensure_private_session_dir_sync(&root).unwrap();
+        assert_eq!(
+            std::fs::metadata(&root).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+
+        let destination = root.join("chatgpt.vault");
+        write_session_file_atomically(&destination, b"encrypted-test-payload").unwrap();
+        assert_eq!(
+            std::fs::metadata(&destination)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn encrypted_vault_rejects_wrong_key_and_truncated_envelopes() {
         let encrypted =
