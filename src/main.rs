@@ -403,6 +403,9 @@ async fn main() -> anyhow::Result<()> {
         .route("/v1/models", get(models))
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/conversations", get(list_conversations))
+        .route("/v1/memory/settings", get(get_long_term_memory_settings).put(put_long_term_memory_settings))
+        .route("/v1/memory/items", get(list_long_term_memory_items).put(save_long_term_memory_item))
+        .route("/v1/memory/items/:item_id", axum::routing::delete(delete_long_term_memory_item))
         .route(
             "/v1/conversations/:conversation_id/provider-threads/:provider",
             get(get_provider_thread).put(upsert_provider_thread),
@@ -1220,6 +1223,7 @@ fn authorize_api_request(
         || path.starts_with("/relay/")
         || path == "/metrics"
         || path == "/v1/admin/memory-egress-policy"
+        || path.starts_with("/v1/memory/")
         || path == "/v1/conversations"
         || path.contains("/provider-threads/")
         || (path.starts_with("/v1/conversations/")
@@ -1337,6 +1341,116 @@ fn export_conversation_response_for_owner(
                 "conversation could not be exported safely",
             )
         }
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct LongTermMemorySettingsRequest {
+    enabled: bool,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct LongTermMemoryItemRequest {
+    memory_key: String,
+    value: String,
+    source_conversation_id: Option<String>,
+    confidence: Option<f64>,
+    expires_at: Option<i64>,
+}
+
+fn memory_owner(auth_context: &Option<Extension<AuthKeyContext>>) -> &str {
+    auth_context
+        .as_ref()
+        .map(|Extension(context)| context.key_id.as_str())
+        .unwrap_or("local")
+}
+
+async fn get_long_term_memory_settings(
+    State(state): State<Arc<AppState>>,
+    auth_context: Option<Extension<AuthKeyContext>>,
+) -> Response {
+    match state.memory.long_term_memory_enabled(memory_owner(&auth_context)) {
+        Ok(enabled) => Json(serde_json::json!({ "enabled": enabled })).into_response(),
+        Err(_) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "server_error", "memory_read_failed", "memory settings could not be read safely"),
+    }
+}
+
+async fn put_long_term_memory_settings(
+    State(state): State<Arc<AppState>>,
+    auth_context: Option<Extension<AuthKeyContext>>,
+    Json(request): Json<LongTermMemorySettingsRequest>,
+) -> Response {
+    match state.memory.set_long_term_memory_enabled(memory_owner(&auth_context), request.enabled) {
+        Ok(()) => Json(serde_json::json!({ "enabled": request.enabled })).into_response(),
+        Err(_) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "server_error", "memory_settings_write_failed", "memory settings could not be saved safely"),
+    }
+}
+
+async fn list_long_term_memory_items(
+    State(state): State<Arc<AppState>>,
+    auth_context: Option<Extension<AuthKeyContext>>,
+) -> Response {
+    let owner = memory_owner(&auth_context);
+    match state.memory.list_long_term_memory_items(owner) {
+        Ok(items) => Json(serde_json::json!({
+            "enabled": state.memory.long_term_memory_enabled(owner).unwrap_or(false),
+            "data": items,
+        })).into_response(),
+        Err(_) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "server_error", "memory_read_failed", "memory items could not be listed safely"),
+    }
+}
+
+async fn save_long_term_memory_item(
+    State(state): State<Arc<AppState>>,
+    auth_context: Option<Extension<AuthKeyContext>>,
+    Json(request): Json<LongTermMemoryItemRequest>,
+) -> Response {
+    match state.memory.save_long_term_memory_item(
+        memory_owner(&auth_context),
+        &request.memory_key,
+        &request.value,
+        request.source_conversation_id.as_deref(),
+        request.confidence.unwrap_or(1.0),
+        request.expires_at,
+    ) {
+        Ok(item) => (StatusCode::OK, Json(item)).into_response(),
+        Err(error) if error.to_string().contains("disabled") => api_error(
+            StatusCode::CONFLICT,
+            "invalid_request_error",
+            "long_term_memory_disabled",
+            "enable long-term memory before saving items",
+        ),
+        Err(error) if error.to_string().contains("invalid long-term memory item") => api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            "invalid_memory_item",
+            "memory key, value, or confidence is invalid",
+        ),
+        Err(error) if error.to_string().contains("source conversation") => api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            "invalid_memory_provenance",
+            "source conversation must belong to this API key",
+        ),
+        Err(error) => {
+            tracing::error!(%error, "long-term memory item save failed");
+            api_error(StatusCode::INTERNAL_SERVER_ERROR, "server_error", "memory_write_failed", "memory item could not be saved safely")
+        }
+    }
+}
+
+async fn delete_long_term_memory_item(
+    State(state): State<Arc<AppState>>,
+    Path(item_id): Path<String>,
+    auth_context: Option<Extension<AuthKeyContext>>,
+) -> Response {
+    if item_id.is_empty() || item_id.len() > 64 {
+        return api_error(StatusCode::BAD_REQUEST, "invalid_request_error", "invalid_memory_item_id", "memory item ID is invalid");
+    }
+    match state.memory.delete_long_term_memory_item(memory_owner(&auth_context), &item_id) {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => api_error(StatusCode::NOT_FOUND, "not_found", "memory_item_not_found", "memory item was not found"),
+        Err(_) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "server_error", "memory_delete_failed", "memory item could not be deleted safely"),
     }
 }
 
