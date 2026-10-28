@@ -981,6 +981,12 @@ fn conversations_and_provider_threads_are_isolated_by_api_key_owner() {
         .build_context_for_owner("bravo", Some("tenant-chat-1"), &[])
         .is_err());
     assert!(memory
+        .has_history_for_owner("alpha", "tenant-chat-1")
+        .unwrap());
+    assert!(!memory
+        .has_history_for_owner("bravo", "tenant-chat-1")
+        .unwrap());
+    assert!(memory
         .export_conversation_for_owner("bravo", "tenant-chat-1")
         .is_err());
     assert!(memory
