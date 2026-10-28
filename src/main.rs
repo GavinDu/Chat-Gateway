@@ -379,9 +379,10 @@ async fn main() -> anyhow::Result<()> {
                 match pool.verify_session(&provider_name).await {
                     Ok(()) => provider_state::record_success(&provider_name),
                     Err(error) => {
+                        // Do not log raw probe errors; provider engines may include
+                        // page or upstream details in their error messages.
                         tracing::warn!(
                             provider = %provider_name,
-                            error = %error,
                             "periodic provider session verification failed"
                         );
                         provider_state::record_error(&provider_name, &error.to_string());
