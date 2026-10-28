@@ -373,6 +373,11 @@ pub fn rotate_vault_key(new_key: &[u8; 32]) -> Result<(usize, String)> {
     const PROVIDERS: &[&str] = &[
         "qwen", "metaai", "claude", "chatgpt", "gemini", "grok", "mistral", "perplexity",
     ];
+    // Migrate any remaining legacy plaintext snapshots before rotation. The
+    // vault loader verifies the encrypted replacement before removing plaintext.
+    for provider in PROVIDERS {
+        let _ = VaultSessionStore.load(provider)?;
+    }
     let mut originals: Vec<(String, Vec<u8>, Vec<u8>)> = Vec::new();
     for provider in PROVIDERS {
         let path = session_vault_path(provider)?;
