@@ -765,7 +765,9 @@ fn cookie_expiration_header(
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte));
     let valid_domain = !domain.is_empty()
-        && domain.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-'));
+        && domain
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-'));
     let valid_path = path.starts_with('/')
         && !path.bytes().any(|byte| byte.is_ascii_control() || byte == b';');
     if !valid_name || !valid_domain || !valid_path {
@@ -1009,22 +1011,30 @@ mod cookie_scope_tests {
     }
 
     #[test]
-    #[test]
     fn cookie_expiration_preserves_domain_scope_and_prefix_rules() {
         let domain_cookie = cookie_expiration_header("session", ".chatgpt.com", "/", true, true)
             .unwrap();
         assert!(domain_cookie.contains("Domain=chatgpt.com"));
         assert!(domain_cookie.contains("Max-Age=0"));
 
-        let host_cookie = cookie_expiration_header("__Host-session", "chatgpt.com", "/", true, true)
-            .unwrap();
+        let host_cookie =
+            cookie_expiration_header("__Host-session", "chatgpt.com", "/", true, true).unwrap();
         assert!(!host_cookie.contains("Domain="));
         assert!(host_cookie.contains("Secure"));
-        assert!(cookie_expiration_header("__Host-session", "chatgpt.com", "/nested", true, true).is_err());
-        assert!(cookie_expiration_header("__Secure-session", "chatgpt.com", "/", false, true).is_err());
-        assert!(cookie_expiration_header("bad;name", "chatgpt.com", "/", true, true).is_err());
+        assert!(
+            cookie_expiration_header("__Host-session", "chatgpt.com", "/nested", true, true)
+                .is_err()
+        );
+        assert!(
+            cookie_expiration_header("__Secure-session", "chatgpt.com", "/", false, true)
+                .is_err()
+        );
+        assert!(
+            cookie_expiration_header("bad;name", "chatgpt.com", "/", true, true).is_err()
+        );
     }
 
+    #[test]
     fn restored_cookie_fields_reject_injection_and_malformed_paths() {
         assert!(restored_cookie_fields_safe(&cookie(
             "__Secure-session",
