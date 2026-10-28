@@ -2335,9 +2335,9 @@ async fn chat_completions(
             Err(e) => {
                 // A dead/restarting browser worker is infrastructure failure,
                 // not evidence that the provider's login session is invalid.
-                if e
+                if !e
                     .downcast_ref::<browser::pool::BrowserWorkerUnavailableError>()
-                    .is_none()
+                    .is_some_and(|worker_error| worker_error.is_retryable())
                 {
                     provider_state::record_error(&provider_name, &e.to_string());
                 }
