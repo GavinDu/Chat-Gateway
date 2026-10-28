@@ -335,25 +335,30 @@ pub fn list_vault_sessions() -> Result<Vec<VaultSessionInfo>> {
     const PROVIDERS: &[&str] = &[
         "qwen", "metaai", "claude", "chatgpt", "gemini", "grok", "mistral", "perplexity",
     ];
+    let encrypted_providers: std::collections::HashSet<String> =
+        list_encrypted_session_vaults()?.into_iter().collect();
     let mut entries = Vec::with_capacity(PROVIDERS.len());
     for provider in PROVIDERS {
         let path = session_vault_path(provider)?;
-        let status = match std::fs::read(&path) {
-            Ok(bytes) => {
-                if decrypt_session_snapshot(&bytes, provider, &key).is_ok() {
-                    "valid"
-                } else {
-                    "unreadable"
-                }
+        let status = if encrypted_providers.contains(*provider) {
+            let bytes = std::fs::read(&path)?;
+            if decrypt_session_snapshot(&bytes, provider, &key).is_ok() {
+                "valid"
+            } else {
+                "unreadable"
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                match std::fs::metadata(session_path(provider)?) {
-                    Ok(_) => "legacy-plaintext",
-                    Err(missing) if missing.kind() == std::io::ErrorKind::NotFound => "missing",
-                    Err(other) => return Err(other.into()),
+        } else {
+            match std::fs::metadata(&path) {
+                Ok(_) => "unreadable",
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    match std::fs::metadata(session_path(provider)?) {
+                        Ok(_) => "legacy-plaintext",
+                        Err(missing) if missing.kind() == std::io::ErrorKind::NotFound => "missing",
+                        Err(other) => return Err(other.into()),
+                    }
                 }
+                Err(error) => return Err(error.into()),
             }
-            Err(error) => return Err(error.into()),
         };
         entries.push(VaultSessionInfo { provider: (*provider).to_string(), status });
     }
