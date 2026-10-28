@@ -313,7 +313,9 @@ impl ObscuraPool {
         let provider =
             Provider::from_name(name).ok_or_else(|| anyhow::anyhow!("unknown provider {name}"))?;
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx.read().await
+        self.cmd_tx
+            .read()
+            .await
             .send(Command::Discover {
                 provider,
                 reply: tx,
@@ -346,7 +348,9 @@ impl ObscuraPool {
                 .unwrap_or(120),
         );
         let (tx, rx) = mpsc::channel(32);
-        self.cmd_tx.read().await
+        self.cmd_tx
+            .read()
+            .await
             .send(Command::Send {
                 provider,
                 prompt,
@@ -366,7 +370,9 @@ impl ObscuraPool {
         let provider =
             Provider::from_name(name).ok_or_else(|| anyhow::anyhow!("unknown provider {name}"))?;
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx.read().await
+        self.cmd_tx
+            .read()
+            .await
             .send(Command::CurrentUrl {
                 provider,
                 reply: tx,
@@ -384,7 +390,9 @@ impl ObscuraPool {
         let provider =
             Provider::from_name(name).ok_or_else(|| anyhow::anyhow!("unknown provider {name}"))?;
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx.read().await
+        self.cmd_tx
+            .read()
+            .await
             .send(Command::TestAdapter {
                 provider,
                 reply: tx,
@@ -398,7 +406,9 @@ impl ObscuraPool {
     pub async fn refresh_session(&self, name: &str) -> Result<()> {
         let provider = self.login_provider(name)?;
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx.read().await
+        self.cmd_tx
+            .read()
+            .await
             .send(Command::RefreshSession {
                 provider,
                 reply: tx,
@@ -414,7 +424,9 @@ impl ObscuraPool {
         let provider =
             Provider::from_name(name).ok_or_else(|| anyhow::anyhow!("unknown provider {name}"))?;
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx.read().await
+        self.cmd_tx
+            .read()
+            .await
             .send(Command::UnlinkSession {
                 provider,
                 reply: tx,
@@ -440,7 +452,9 @@ impl ObscuraPool {
     pub async fn login_start(&self, name: &str) -> Result<String> {
         let provider = self.login_provider(name)?;
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx.read().await
+        self.cmd_tx
+            .read()
+            .await
             .send(Command::LoginStart {
                 provider,
                 reply: tx,
@@ -455,7 +469,9 @@ impl ObscuraPool {
     pub async fn login_cancel(&self, name: &str) -> Result<()> {
         let provider = self.login_provider(name)?;
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx.read().await
+        self.cmd_tx
+            .read()
+            .await
             .send(Command::LoginCancel {
                 provider,
                 reply: tx,
@@ -473,7 +489,9 @@ impl ObscuraPool {
     pub async fn login_complete(&self, name: &str) -> Result<LoginCompleted> {
         let provider = self.login_provider(name)?;
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx.read().await
+        self.cmd_tx
+            .read()
+            .await
             .send(Command::LoginComplete {
                 provider,
                 reply: tx,
@@ -487,7 +505,9 @@ impl ObscuraPool {
     /// Login UI: live info for all providers with an active login page.
     pub async fn login_status_all(&self) -> Result<Vec<LoginActiveInfo>> {
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx.read().await
+        self.cmd_tx
+            .read()
+            .await
             .send(Command::LoginStatusAll { reply: tx })
             .await
             .map_err(|_| anyhow::anyhow!("browser thread gone"))?;
@@ -499,7 +519,9 @@ impl ObscuraPool {
     pub async fn login_view(&self, name: &str) -> Result<LoginView> {
         let provider = self.login_provider(name)?;
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx.read().await
+        self.cmd_tx
+            .read()
+            .await
             .send(Command::LoginView {
                 provider,
                 reply: tx,
@@ -519,7 +541,9 @@ impl ObscuraPool {
             login::validate_navigation_url_for_provider(name, url)?;
         }
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx.read().await
+        self.cmd_tx
+            .read()
+            .await
             .send(Command::LoginAct {
                 provider,
                 action,
@@ -536,7 +560,9 @@ impl ObscuraPool {
         self.shutting_down.store(true, Ordering::Release);
         self.worker_ready.store(false, Ordering::Release);
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx.read().await
+        self.cmd_tx
+            .read()
+            .await
             .send(Command::Shutdown { reply: tx })
             .await
             .map_err(|_| anyhow::anyhow!("browser thread gone during shutdown"))?;
