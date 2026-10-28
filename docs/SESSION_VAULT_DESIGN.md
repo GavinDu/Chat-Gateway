@@ -9,6 +9,24 @@ Status: design baseline; runtime vault is partially implemented and remains opt-
 - Avoid logging cookies, localStorage values, plaintext session JSON, keys, or decrypted payloads.
 - Preserve an explicit migration path and never silently discard sessions on decryption or migration failure.
 
+## Runtime vault-management commands
+
+The gateway exposes explicit CLI maintenance actions that do not start the browser or API listener:
+
+- `chat-gateway-rs --vault-list` lists registered providers and reports whether an encrypted vault and/or legacy plaintext snapshot exists. It never prints session contents.
+- `chat-gateway-rs --vault-delete-provider chatgpt` deletes that provider's encrypted and legacy snapshots. Treat this as credential revocation; it is destructive.
+- `chat-gateway-rs --vault-rotate-key` decrypts every existing encrypted vault record with `CHAT_GATEWAY_VAULT_OLD_KEY`, validates a newly encrypted record using `CHAT_GATEWAY_VAULT_KEY`, and atomically replaces records. Existing encrypted records are backed up as `*.vault.rotate-backup` while rotation is in progress. If an ordinary write fails, the command attempts to restore records already replaced; if rollback itself fails, retain the backups and both keys for recovery.
+
+### Headless/production key-management runbook
+
+1. Generate a random 32-byte key using an approved secret manager or OS credential store. Supply it as exactly 64 hexadecimal characters through `CHAT_GATEWAY_VAULT_KEY`; do not put it in source control, command-line arguments, application logs, or a checked-in `.env` file.
+2. Restrict access to the process environment and the `sessions/` directory. On Unix, vault and temporary records are owner-only. Keep encrypted backups separate from the active host where practical.
+3. To rotate, make the current key available as `CHAT_GATEWAY_VAULT_OLD_KEY`, set the newly generated key as `CHAT_GATEWAY_VAULT_KEY`, stop other gateway instances that could write sessions, and run `chat-gateway-rs --vault-rotate-key`. Restart the service using only the new key.
+4. Run `chat-gateway-rs --vault-list` and verify each expected provider is marked encrypted. Test restoration before destroying the old key. Remove any leftover `*.vault.rotate-backup` files only after successful validation; keep the old key until then.
+5. For a provider-specific credential revocation, run `chat-gateway-rs --vault-delete-provider <provider>` and confirm the output. The runtime relay unlink endpoint additionally clears live browser state before deleting persisted records.
+
+The CLI supports a protected environment/secret-manager workflow; it does **not** claim native OS-keychain integration. That remains a follow-up for deployments where the runtime can use a supported OS credential-store adapter. Rotation spans multiple files and cannot be crash-atomic as one filesystem transaction: if the process or host stops mid-rotation, inspect the `*.vault.rotate-backup` files and recover with the old and new keys before restarting the gateway.
+
 ## Threat boundary
 
 Encryption at rest helps against disclosure of copied files and backups when the key is stored separately. It does not protect a running gateway from a local process with the same user privileges, memory inspection, a compromised host, or an attacker who can read both the ciphertext and key. The login relay and provider session data remain highly sensitive; remote exposure is unsupported.
