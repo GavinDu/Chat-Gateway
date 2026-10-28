@@ -36,7 +36,7 @@ use api::{add_gateway_headers, api_error, estimate_tokens, validate_chat_req, Ch
 use browser::pool::{BrowserWorkerUnavailableError, ObscuraPool};
 use config::AppConfig;
 use context::{ContextBuilder, ContextPlan, ThreadSyncState};
-use memory::{ChatMessage, ProviderThread, UnifiedMemory};
+use memory::{ChatMessage, ConversationStore, ProviderThread, UnifiedMemory};
 use router::ProviderRouter;
 
 #[derive(Parser, Debug)]
@@ -1859,7 +1859,7 @@ async fn persist_provider_thread(
     let messages = match state
         .memory
         .clone()
-        .conversation_messages_for_owner_blocking(
+        .read_transcript(
             owner_key_id.to_owned(),
             conversation_id.to_owned(),
         )
@@ -2921,7 +2921,7 @@ async fn chat_completions(
                     yield Ok(Event::default().data(error.to_string()));
                 } else {
                     provider_state::record_success(&provider_c);
-                    if let Err(_error) = state_c.memory.clone().store_turn_for_owner_with_tab_id_blocking(
+                    if let Err(_error) = state_c.memory.clone().persist_turn(
                         owner_key_id_c.clone(),
                         conv_stream.clone(),
                         windowed_c.clone(),
