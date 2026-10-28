@@ -316,7 +316,13 @@ pub fn list_vault_sessions() -> Result<Vec<VaultSessionInfo>> {
                     "unreadable"
                 }
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => "missing",
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                match std::fs::metadata(session_path(provider)?) {
+                    Ok(_) => "legacy-plaintext",
+                    Err(missing) if missing.kind() == std::io::ErrorKind::NotFound => "missing",
+                    Err(other) => return Err(other.into()),
+                }
+            }
             Err(error) => return Err(error.into()),
         };
         entries.push(VaultSessionInfo { provider: (*provider).to_string(), status });
