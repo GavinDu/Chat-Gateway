@@ -618,6 +618,7 @@ dependencies = [
  "uuid",
  "sha2",
  "subtle",
+ "zeroize",
 ]
 
 [[package]]
