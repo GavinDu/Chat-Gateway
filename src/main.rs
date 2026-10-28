@@ -179,6 +179,29 @@ async fn main() -> anyhow::Result<()> {
         );
         return Ok(());
     }
+    if let Some(backup_dir) = cli.restore_session_vault_backup.as_deref() {
+        let restored = session::restore_vault_backup(backup_dir)?;
+        println!("Restored {restored} encrypted provider vault record(s) from {backup_dir}.");
+        println!("Keep CHAT_GATEWAY_VAULT_KEY set to the old key until a fresh rotation succeeds.");
+        return Ok(());
+    }
+    if cli.rotate_session_vault_key {
+        let encoded = std::env::var("CHAT_GATEWAY_VAULT_NEW_KEY").map_err(|_| {
+            anyhow::anyhow!("CHAT_GATEWAY_VAULT_NEW_KEY is required for vault key rotation")
+        })?;
+        let new_key = session::parse_vault_key(&encoded)
+            .map_err(|_| anyhow::anyhow!("CHAT_GATEWAY_VAULT_NEW_KEY must be exactly 64 hexadecimal characters"))?;
+        let (rotated, backup_dir) = session::rotate_vault_key(&new_key)?;
+        if rotated == 0 {
+            println!("No encrypted provider vault records found; nothing rotated.");
+        } else {
+            println!("Rotated {rotated} encrypted provider vault record(s).");
+            println!("Encrypted recovery copies retained at: {backup_dir}");
+            println!("Update CHAT_GATEWAY_VAULT_KEY to the new key before restarting Chat Gateway.");
+            println!("Keep the old key and recovery copies until restart restoration has been verified.");
+        }
+        return Ok(());
+    }
     if cli.json && !cli.all && cli.test_adapter.is_none() {
         anyhow::bail!("--json requires --all or --test-adapter <provider>");
     }
