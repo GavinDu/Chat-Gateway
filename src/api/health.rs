@@ -36,13 +36,18 @@ pub(crate) async fn health(State(state): State<Arc<AppState>>) -> impl IntoRespo
     }))
 }
 
-pub(crate) fn readiness_response(enabled: usize, worker_alive: bool) -> Response {
+pub(crate) fn readiness_response(
+    enabled: usize,
+    worker_alive: bool,
+    worker_generation: u64,
+) -> Response {
     if !worker_alive {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(serde_json::json!({
                 "status": "not_ready",
                 "reason": "browser_worker_unavailable",
+                "worker_generation": worker_generation,
             })),
         )
             .into_response();
@@ -53,6 +58,7 @@ pub(crate) fn readiness_response(enabled: usize, worker_alive: bool) -> Response
             Json(serde_json::json!({
                 "status": "not_ready",
                 "reason": "no_enabled_provider",
+                "worker_generation": worker_generation,
             })),
         )
             .into_response();
@@ -62,6 +68,7 @@ pub(crate) fn readiness_response(enabled: usize, worker_alive: bool) -> Response
         Json(serde_json::json!({
             "status": "ready",
             "enabled_providers": enabled,
+            "worker_generation": worker_generation,
         })),
     )
         .into_response()
@@ -69,7 +76,7 @@ pub(crate) fn readiness_response(enabled: usize, worker_alive: bool) -> Response
 
 pub(crate) async fn readiness(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     if !state.pool.worker_alive() {
-        return readiness_response(0, false);
+        return readiness_response(0, false, state.pool.worker_generation());
     }
     let routable = state
         .cfg
@@ -81,7 +88,7 @@ pub(crate) async fn readiness(State(state): State<Arc<AppState>>) -> impl IntoRe
                 && provider_guard::provider_disabled_reason(&p.name).is_none()
         })
         .count();
-    readiness_response(routable, true)
+    readiness_response(routable, true, state.pool.worker_generation())
 }
 
 #[cfg(test)]
@@ -90,13 +97,13 @@ mod readiness_contract_tests {
 
     #[test]
     fn readiness_requires_at_least_one_routable_provider() {
-        let not_ready = readiness_response(0, true);
+        let not_ready = readiness_response(0, true, 0);
         assert_eq!(not_ready.status(), StatusCode::SERVICE_UNAVAILABLE);
 
-        let ready = readiness_response(1, true);
+        let ready = readiness_response(1, true, 0);
         assert_eq!(ready.status(), StatusCode::OK);
 
-        let worker_dead = readiness_response(1, false);
+        let worker_dead = readiness_response(1, false, 0);
         assert_eq!(worker_dead.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 }
