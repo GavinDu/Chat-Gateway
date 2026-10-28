@@ -4654,6 +4654,37 @@ mod first_event_tests {
 }
 
 #[cfg(test)]
+mod long_term_memory_retrieval_tests {
+    use super::*;
+
+    #[test]
+    fn retrieval_honors_zero_limit_and_ranks_confidence_deterministically() {
+        let memory = UnifiedMemory::new(8000);
+        memory
+            .set_long_term_memory_enabled("owner-a", true)
+            .unwrap();
+        memory
+            .save_long_term_memory_item("owner-a", "low", "lower confidence", None, 0.2, None)
+            .unwrap();
+        memory
+            .save_long_term_memory_item("owner-a", "high", "higher confidence", None, 0.9, None)
+            .unwrap();
+
+        assert!(memory
+            .retrieve_long_term_memory_items("owner-a", 0)
+            .unwrap()
+            .is_empty());
+
+        let items = memory
+            .retrieve_long_term_memory_items("owner-a", 2)
+            .unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].memory_key, "high");
+        assert_eq!(items[1].memory_key, "low");
+    }
+}
+
+#[cfg(test)]
 mod long_term_memory_export_tests {
     use super::*;
     use axum::body::to_bytes;

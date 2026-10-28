@@ -920,7 +920,14 @@ impl UnifiedMemory {
             return Ok(Vec::new());
         }
 
-        let limit = limit.clamp(1, 20) as i64;
+        // A caller-supplied zero is an explicit request for no items, not the
+        // minimum non-zero page size. Keep positive limits bounded to avoid
+        // unbounded context growth.
+        if limit == 0 {
+            tx.commit()?;
+            return Ok(Vec::new());
+        }
+        let limit = limit.min(20) as i64;
         let now = unix_timestamp();
         let mut statement = tx.prepare(
             "SELECT id, memory_key, value, source_conversation_id, confidence,
