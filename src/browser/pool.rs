@@ -66,8 +66,13 @@ enum Command {
         prompt: String,
         model: String,
         has_history: bool,
-        timeout: Duration,
+        thread_url: Option<String>,
+        timeout: Duration, 
         chunks: mpsc::Sender<Result<ProviderChunk>>,
+    },
+    CurrentUrl {
+        provider: Provider,
+        reply: oneshot::Sender<Result<String>>,
     },
     TestAdapter {
         provider: Provider,
@@ -260,6 +265,7 @@ impl ObscuraPool {
         prompt: String,
         model: String,
         has_history: bool,
+        thread_url: Option<String>,
     ) -> Result<mpsc::Receiver<Result<ProviderChunk>>> {
         let provider =
             Provider::from_name(name).ok_or_else(|| anyhow::anyhow!("unknown provider {name}"))?;
@@ -276,12 +282,23 @@ impl ObscuraPool {
                 prompt,
                 model,
                 has_history,
+                thread_url,
                 timeout,
                 chunks: tx,
             })
             .await
             .map_err(|_| anyhow::anyhow!("browser thread gone"))?;
         Ok(rx)
+    }
+
+    /// Read the active provider page URL after a completed send.
+    pub async fn current_url(&self, name: &str) -> Result<String> {
+        let provider = Provider::from_name(name)
+            .ok_or_else(|| anyhow::anyhow!("unknown provider {name}"))?;
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx.send(Command::CurrentUrl { provider, reply: tx }).await
+            .map_err(|_| anyhow::anyhow!("browser thread gone"))?;
+        rx.await.map_err(|_| anyhow::anyhow!("browser thread dropped current URL reply"))?
     }
 
     /// Live-send test-adapter run for one provider (Go RunAdapterTest
@@ -618,7 +635,7 @@ fn browser_thread(
                                 let _ = reply.send(res);
                             });
                         }
-                        Command::Send { provider, prompt, model, has_history, timeout, chunks } => {
+                        Command::Send { provider, prompt, model, has_history, thread_url, timeout, chunks } => {
                             let Some(page) = pages.borrow().get(&provider).cloned() else {
                                 let _ = chunks.send(Err(anyhow::anyhow!("provider page not warmed"))).await;
                                 continue;
@@ -632,6 +649,15 @@ fn browser_thread(
                             let provider_name = provider.name().to_string();
                             tokio::task::spawn_local(async move {
                                 let _guard = lock.lock().await;
+                                // Reopen only a validated provider-owned thread. Otherwise start
+                                // from the provider's landing page to avoid cross-conversation reuse.
+                                let target_url = thread_url.as_deref().unwrap_or_else(|| provider.login_url());
+                                if page.url() != target_url {
+                                    if let Err(error) = page.goto(target_url).await {
+                                        let _ = chunks.send(Err(anyhow::anyhow!("provider thread navigation failed: {error}"))).await;
+                                        return;
+                                    }
+                                }
                                 // Login/session-expiry detection (Go concept,
                                 // Rust form — Rust v1 had none): fail with a
                                 // distinct session_expired error so the API
@@ -705,6 +731,12 @@ fn browser_thread(
                                     }
                                 }
                             });
+                        }
+                        Command::CurrentUrl { provider, reply } => {
+                            let result = pages.borrow().get(&provider)
+                                .map(|page| page.url())
+                                .ok_or_else(|| anyhow::anyhow!("provider page not warmed"));
+                            let _ = reply.send(result);
                         }
                         Command::TestAdapter { provider, reply } => {
                             let browser = browser.clone();
