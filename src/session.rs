@@ -6,6 +6,7 @@ use ring::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use zeroize::Zeroizing;
 use std::{
     collections::{BTreeMap, HashMap},
     io::Write,
@@ -139,7 +140,7 @@ pub struct VaultSessionStore;
 #[async_trait::async_trait(?Send)]
 impl SessionStore for VaultSessionStore {
     fn load(&self, provider: &str) -> Result<Option<SessionFile>> {
-        let key = vault_key_from_env()?;
+        let key = Zeroizing::new(vault_key_from_env()?);
         let vault_path = session_vault_path(provider)?;
         match std::fs::read(&vault_path) {
             Ok(bytes) => {
@@ -154,11 +155,12 @@ impl SessionStore for VaultSessionStore {
         // One-time migration: only remove the legacy plaintext snapshot after
         // the encrypted replacement has been durably written.
         let legacy_path = session_path(provider)?;
-        let legacy = match std::fs::read(&legacy_path) {
-            Ok(bytes) => serde_json::from_slice::<SessionFile>(&bytes)?,
+        let legacy_bytes = match std::fs::read(&legacy_path) {
+            Ok(bytes) => Zeroizing::new(bytes),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error.into()),
         };
+        let legacy = serde_json::from_slice::<SessionFile>(&legacy_bytes)?;
         ensure_private_session_dir_sync(Path::new("sessions"))?;
         let encrypted = encrypt_session_snapshot(&legacy, provider, &key)?;
         write_session_file_atomically(Path::new(&vault_path), &encrypted)?;
@@ -186,7 +188,7 @@ impl SessionStore for VaultSessionStore {
     }
 
     async fn save_if_changed(&self, browser: &Browser, page: &Page, provider: &str) -> Result<()> {
-        let key = vault_key_from_env()?;
+        let key = Zeroizing::new(vault_key_from_env()?);
         let file = capture_session(browser, page, provider).await?;
         let current_hash = session_state_hash(&file)?;
         let destination = session_vault_path(provider)?;
@@ -248,7 +250,7 @@ pub fn import_relay_session(provider: &str, file: &SessionFile) -> Result<()> {
             anyhow::bail!("relay session contains a cookie outside the provider allowlist or with invalid fields");
         }
     }
-    let key = vault_key_from_env()?;
+    let key = Zeroizing::new(vault_key_from_env()?);
     let destination = session_vault_path(provider)?;
     ensure_private_session_dir_sync(Path::new("sessions"))?;
     let encrypted = encrypt_session_snapshot(file, provider, &key)?;
