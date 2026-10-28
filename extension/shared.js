@@ -36,6 +36,17 @@ async function relayFetch(path, options = {}) {
 async function providerCookieSnapshot(provider) {
   const domains = PROVIDERS[provider];
   if (!domains) throw new Error("Unsupported provider.");
+  // A partial permission grant must never overwrite a valid gateway session
+  // with an incomplete cookie set. Check every declared root and subdomain
+  // pattern before reading or transmitting any session material.
+  const requiredOrigins = domains.flatMap(domain => [
+    "https://" + domain + "/*",
+    "https://*." + domain + "/*"
+  ]);
+  const hasAllPermissions = await chrome.permissions.contains({origins:requiredOrigins});
+  if (!hasAllPermissions) {
+    throw new Error("Missing provider host permissions. Refusing to send a partial cookie snapshot; re-link the provider and grant all requested domains.");
+  }
   const all = [];
   for (const domain of domains) {
     const cookies = await chrome.cookies.getAll({domain});
