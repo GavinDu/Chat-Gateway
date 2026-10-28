@@ -414,7 +414,6 @@ pub(super) fn append_owned(
 #[cfg(test)]
 mod concurrency_configuration_tests {
     use super::*;
-    use rusqlite::Connection;
 
     #[test]
     fn file_backed_database_enforces_expected_concurrency_pragmas() -> Result<()> {
