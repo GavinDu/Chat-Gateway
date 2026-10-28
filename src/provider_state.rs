@@ -85,7 +85,11 @@ pub fn record_error(provider: &str, error: &str) {
         map.insert(
             provider.to_owned(),
             ProviderSessionStatus {
-                state: if expired { ProviderSessionState::NeedsLogin } else { ProviderSessionState::Degraded },
+                state: if expired {
+                    ProviderSessionState::NeedsLogin
+                } else {
+                    ProviderSessionState::Degraded
+                },
                 // Never retain upstream error text: it may contain credentials or PII.
                 last_error: Some(if expired {
                     "provider session expired; re-login required".to_owned()
@@ -119,7 +123,11 @@ mod tests {
         {
             let provider = format!("test-expiry-wording-{index}");
             record_error(&provider, message);
-            assert_eq!(status(&provider).state, ProviderSessionState::NeedsLogin, "{message}");
+            assert_eq!(
+                status(&provider).state,
+                ProviderSessionState::NeedsLogin,
+                "{message}"
+            );
         }
     }
 
@@ -135,7 +143,11 @@ mod tests {
         {
             let provider = format!("test-non-expiry-{index}");
             record_error(&provider, message);
-            assert_eq!(status(&provider).state, ProviderSessionState::Degraded, "{message}");
+            assert_eq!(
+                status(&provider).state,
+                ProviderSessionState::Degraded,
+                "{message}"
+            );
             assert!(is_routable(&provider), "{message} should remain routable");
         }
     }
@@ -169,7 +181,10 @@ mod tests {
     #[test]
     fn unknown_provider_is_routable_until_checked() {
         assert!(is_routable("test-provider-unknown"));
-        assert_eq!(status("test-provider-unknown").state, ProviderSessionState::Unknown);
+        assert_eq!(
+            status("test-provider-unknown").state,
+            ProviderSessionState::Unknown
+        );
     }
 
     #[test]
