@@ -1275,6 +1275,35 @@ fn schema_v4_migration_adds_summary_table_without_losing_tenant_data() {
     );
 }
 
+#[test]
+fn context_snapshot_returns_stored_transcript_for_provider_retry_reuse() {
+    let fixture = Fixture::new();
+    let memory = fixture.open();
+    let stored = vec![m("user", "previous question"), m("assistant", "previous answer")];
+    memory
+        .store_turn_for_owner_with_tab_id(
+            "key:transcript",
+            "transcript-conversation".to_owned(),
+            vec![stored[0].clone()],
+            stored[1].clone(),
+            "chatgpt".to_owned(),
+            None,
+        )
+        .unwrap();
+
+    let (prompt, _windowed, has_history, transcript) = memory
+        .build_context_for_owner_with_transcript(
+            "key:transcript",
+            Some("transcript-conversation"),
+            &[m("user", "next question")],
+        )
+        .unwrap();
+
+    assert!(has_history);
+    assert!(prompt.contains("previous question"));
+    assert_eq!(transcript, stored);
+}
+
 #[tokio::test]
 async fn async_turn_persistence_runs_and_commits_transactionally() {
     let fixture = Fixture::new();
