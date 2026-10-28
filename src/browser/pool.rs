@@ -658,6 +658,18 @@ fn touch_login_meta(login_meta: &Rc<RefCell<HashMap<Provider, LoginMeta>>>, prov
     }
 }
 
+/// Typed outcome for a probe that confirms the provider has redirected to login.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProviderSessionExpiredError;
+
+impl std::fmt::Display for ProviderSessionExpiredError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("provider session requires login")
+    }
+}
+
+impl std::error::Error for ProviderSessionExpiredError {}
+
 /// Verify that a warmed provider page still looks like an authenticated chat page.
 /// Call only while holding that provider page's lock so probes never race a send.
 fn verify_session_page(
@@ -673,7 +685,7 @@ fn verify_session_page(
         .any(|selector| page.query_selector(selector).is_some());
     let (login_state, _) = login::login_state(is_login_page, input_found);
     if login_state == "login_required" {
-        return Ok(false);
+        return Err(anyhow::Error::new(ProviderSessionExpiredError));
     }
     if !session_probe_page_healthy(is_login_page, input_found) {
         anyhow::bail!("session verification failed: chat input not found");
