@@ -55,6 +55,27 @@ const SCHEMA: &str = "
         covered_through_position INTEGER NOT NULL CHECK(covered_through_position >= 0),
         updated_at INTEGER NOT NULL
     );
+
+    CREATE TABLE memory_settings (
+        owner_key_id TEXT PRIMARY KEY NOT NULL,
+        enabled INTEGER NOT NULL CHECK(enabled IN (0, 1)),
+        updated_at INTEGER NOT NULL
+    );
+    CREATE TABLE memory_items (
+        id TEXT PRIMARY KEY NOT NULL,
+        owner_key_id TEXT NOT NULL,
+        memory_key TEXT NOT NULL,
+        value TEXT NOT NULL,
+        source_conversation_id TEXT,
+        confidence REAL NOT NULL CHECK(confidence >= 0.0 AND confidence <= 1.0),
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        expires_at INTEGER,
+        CHECK(length(trim(memory_key)) > 0),
+        CHECK(length(trim(value)) > 0)
+    );
+    CREATE INDEX memory_items_owner_updated_idx ON memory_items(owner_key_id, updated_at DESC);
+    CREATE INDEX memory_items_owner_key_idx ON memory_items(owner_key_id, memory_key);
 ";
 
 pub(super) fn open(path: Option<&Path>, legacy: Option<&Path>) -> Result<Connection> {
@@ -241,6 +262,8 @@ fn validate_schema(connection: &Connection) -> Result<()> {
         "metadata",
         "provider_threads",
         "conversation_summaries",
+        "memory_settings",
+        "memory_items",
     ] {
         let sql = |database: &Connection| -> Result<String> {
             Ok(database.query_row(
