@@ -403,9 +403,20 @@ async fn main() -> anyhow::Result<()> {
         .route("/v1/models", get(models))
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/conversations", get(list_conversations))
-        .route("/v1/memory/settings", get(get_long_term_memory_settings).put(put_long_term_memory_settings))
-        .route("/v1/memory/items", get(list_long_term_memory_items).put(save_long_term_memory_item).delete(delete_all_long_term_memory_items))
-        .route("/v1/memory/items/:item_id", axum::routing::delete(delete_long_term_memory_item))
+        .route(
+            "/v1/memory/settings",
+            get(get_long_term_memory_settings).put(put_long_term_memory_settings),
+        )
+        .route(
+            "/v1/memory/items",
+            get(list_long_term_memory_items)
+                .put(save_long_term_memory_item)
+                .delete(delete_all_long_term_memory_items),
+        )
+        .route(
+            "/v1/memory/items/:item_id",
+            axum::routing::delete(delete_long_term_memory_item),
+        )
         .route(
             "/v1/conversations/:conversation_id/provider-threads/:provider",
             get(get_provider_thread).put(upsert_provider_thread),
@@ -1378,7 +1389,12 @@ async fn get_long_term_memory_settings(
     let owner = memory_owner(&auth_context).to_owned();
     match tokio::task::spawn_blocking(move || memory.long_term_memory_enabled(&owner)).await {
         Ok(Ok(enabled)) => Json(serde_json::json!({ "enabled": enabled })).into_response(),
-        _ => api_error(StatusCode::INTERNAL_SERVER_ERROR, "server_error", "memory_read_failed", "memory settings could not be read safely"),
+        _ => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "server_error",
+            "memory_read_failed",
+            "memory settings could not be read safely",
+        ),
     }
 }
 
@@ -1390,9 +1406,16 @@ async fn put_long_term_memory_settings(
     let memory = state.memory.clone();
     let owner = memory_owner(&auth_context).to_owned();
     let enabled = request.enabled;
-    match tokio::task::spawn_blocking(move || memory.set_long_term_memory_enabled(&owner, enabled)).await {
+    match tokio::task::spawn_blocking(move || memory.set_long_term_memory_enabled(&owner, enabled))
+        .await
+    {
         Ok(Ok(())) => Json(serde_json::json!({ "enabled": enabled })).into_response(),
-        _ => api_error(StatusCode::INTERNAL_SERVER_ERROR, "server_error", "memory_settings_write_failed", "memory settings could not be saved safely"),
+        _ => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "server_error",
+            "memory_settings_write_failed",
+            "memory settings could not be saved safely",
+        ),
     }
 }
 
@@ -1406,12 +1429,20 @@ async fn list_long_term_memory_items(
         let enabled = memory.long_term_memory_enabled(&owner)?;
         let items = memory.list_long_term_memory_items(&owner)?;
         Ok((enabled, items))
-    }).await {
+    })
+    .await
+    {
         Ok(Ok((enabled, items))) => Json(serde_json::json!({
             "enabled": enabled,
             "data": items,
-        })).into_response(),
-        _ => api_error(StatusCode::INTERNAL_SERVER_ERROR, "server_error", "memory_read_failed", "memory items could not be listed safely"),
+        }))
+        .into_response(),
+        _ => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "server_error",
+            "memory_read_failed",
+            "memory items could not be listed safely",
+        ),
     }
 }
 
@@ -1427,14 +1458,18 @@ async fn save_long_term_memory_item(
     let source_conversation_id = request.source_conversation_id;
     let confidence = request.confidence.unwrap_or(1.0);
     let expires_at = request.expires_at;
-    match tokio::task::spawn_blocking(move || memory.save_long_term_memory_item(
-        &owner,
-        &memory_key,
-        &value,
-        source_conversation_id.as_deref(),
-        confidence,
-        expires_at,
-    )).await {
+    match tokio::task::spawn_blocking(move || {
+        memory.save_long_term_memory_item(
+            &owner,
+            &memory_key,
+            &value,
+            source_conversation_id.as_deref(),
+            confidence,
+            expires_at,
+        )
+    })
+    .await
+    {
         Ok(Ok(item)) => (StatusCode::OK, Json(item)).into_response(),
         Ok(Err(error)) if error.to_string().contains("disabled") => api_error(
             StatusCode::CONFLICT,
@@ -1456,7 +1491,12 @@ async fn save_long_term_memory_item(
         ),
         Ok(Err(error)) => {
             tracing::error!(%error, "long-term memory item save failed");
-            api_error(StatusCode::INTERNAL_SERVER_ERROR, "server_error", "memory_write_failed", "memory item could not be saved safely")
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                "memory_write_failed",
+                "memory item could not be saved safely",
+            )
         }
         Err(error) => {
             tracing::error!(%error, "long-term memory item task failed");
@@ -1471,14 +1511,31 @@ async fn delete_long_term_memory_item(
     auth_context: Option<Extension<AuthKeyContext>>,
 ) -> Response {
     if item_id.is_empty() || item_id.len() > 64 {
-        return api_error(StatusCode::BAD_REQUEST, "invalid_request_error", "invalid_memory_item_id", "memory item ID is invalid");
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            "invalid_memory_item_id",
+            "memory item ID is invalid",
+        );
     }
     let memory = state.memory.clone();
     let owner = memory_owner(&auth_context).to_owned();
-    match tokio::task::spawn_blocking(move || memory.delete_long_term_memory_item(&owner, &item_id)).await {
+    match tokio::task::spawn_blocking(move || memory.delete_long_term_memory_item(&owner, &item_id))
+        .await
+    {
         Ok(Ok(true)) => StatusCode::NO_CONTENT.into_response(),
-        Ok(Ok(false)) => api_error(StatusCode::NOT_FOUND, "not_found", "memory_item_not_found", "memory item was not found"),
-        _ => api_error(StatusCode::INTERNAL_SERVER_ERROR, "server_error", "memory_delete_failed", "memory item could not be deleted safely"),
+        Ok(Ok(false)) => api_error(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "memory_item_not_found",
+            "memory item was not found",
+        ),
+        _ => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "server_error",
+            "memory_delete_failed",
+            "memory item could not be deleted safely",
+        ),
     }
 }
 
@@ -1497,7 +1554,9 @@ async fn delete_all_long_term_memory_items(
     }
     let memory = state.memory.clone();
     let owner = memory_owner(&auth_context).to_owned();
-    match tokio::task::spawn_blocking(move || memory.delete_all_long_term_memory_items(&owner)).await {
+    match tokio::task::spawn_blocking(move || memory.delete_all_long_term_memory_items(&owner))
+        .await
+    {
         Ok(Ok(deleted)) => Json(serde_json::json!({ "deleted": deleted })).into_response(),
         Ok(Err(error)) => {
             tracing::error!(%error, "long-term memory bulk deletion failed");
@@ -2146,8 +2205,9 @@ async fn chat_completions(
 
     // The default-deny policy should not reduce transcript context when no
     // provider is authorized to receive personal memory.
-    let personal_memory_egress_enabled =
-        !memory_egress_policy.allowed_personal_memory_providers().is_empty();
+    let personal_memory_egress_enabled = !memory_egress_policy
+        .allowed_personal_memory_providers()
+        .is_empty();
 
     // Retrieve personal memory only when the owner opted in. Read errors fail
     // closed rather than silently changing the prompt. Reserve a fixed portion
