@@ -25,6 +25,7 @@
     "https://openai.com/*",
     "https://*.openai.com/*",
     "https://gemini.google.com/*",
+    "https://*.gemini.google.com/*",
     "https://google.com/*",
     "https://*.google.com/*",
     "https://googleusercontent.com/*",
