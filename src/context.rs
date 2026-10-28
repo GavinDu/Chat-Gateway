@@ -238,10 +238,19 @@ mod tests {
         };
 
         assert!(matches!(
-            ContextBuilder::plan(&history, &incoming, "chatgpt", Some(&thread), true, 1000),
+            ContextBuilder::plan(
+                &history,
+                &incoming,
+                "chatgpt",
+                Some(&thread),
+                true,
+                1000
+            ),
             super::ContextPlan::Replay { preamble, messages }
                 if preamble.contains("CONVERSATION_CONTEXT_BEGIN")
-                    && messages.iter().any(|message| message.content == "different follow-up")
+                    && messages
+                        .iter()
+                        .any(|message| message.content == "different follow-up")
         ));
     }
 
