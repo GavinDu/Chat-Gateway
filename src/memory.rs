@@ -1042,7 +1042,6 @@ pub struct ConversationSummary {
     pub message_count: usize,
 }
 
-
 #[cfg(test)]
 mod retrieval_ranking_tests {
     use super::{sqlite, UnifiedMemory};
@@ -1051,14 +1050,18 @@ mod retrieval_ranking_tests {
     fn memory() -> UnifiedMemory {
         UnifiedMemory {
             max_tokens: 8000,
-            connection: Mutex::new(sqlite::open(None, None).expect("in-memory SQLite should initialize")),
+            connection: Mutex::new(
+                sqlite::open(None, None).expect("in-memory SQLite should initialize"),
+            ),
         }
     }
 
     #[test]
     fn long_term_memory_retrieval_uses_stable_confidence_time_and_id_ordering() {
         let memory = memory();
-        memory.set_long_term_memory_enabled("ranking-owner", true).unwrap();
+        memory
+            .set_long_term_memory_enabled("ranking-owner", true)
+            .unwrap();
         let low = memory
             .save_long_term_memory_item("ranking-owner", "low-confidence", "low", None, 0.1, None)
             .unwrap();
@@ -1089,7 +1092,9 @@ mod retrieval_ranking_tests {
             }
         }
 
-        let retrieved = memory.retrieve_long_term_memory_items("ranking-owner", 20).unwrap();
+        let retrieved = memory
+            .retrieve_long_term_memory_items("ranking-owner", 20)
+            .unwrap();
         let mut tied = [
             (high_new.id.clone(), high_new.memory_key.clone()),
             (high_tie.id.clone(), high_tie.memory_key.clone()),
