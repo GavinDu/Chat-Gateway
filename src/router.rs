@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 /// Provider priority + failover routing. Explicit model names must resolve;
 /// only "auto" opts into routing across all enabled providers.
+#[derive(Clone)]
 pub struct ProviderRouter {
     cfg: Arc<AppConfig>,
 }
@@ -24,6 +25,27 @@ impl ProviderRouter {
         memory: &UnifiedMemory,
     ) -> anyhow::Result<Vec<String>> {
         self.resolve_for_owner("local", model, conversation_id, memory)
+    }
+
+    /// Resolve provider affinity off Tokio workers because the lookup reads SQLite.
+    pub async fn resolve_for_owner_blocking(
+        &self,
+        owner_key_id: String,
+        model: String,
+        conversation_id: Option<String>,
+        memory: Arc<UnifiedMemory>,
+    ) -> anyhow::Result<Vec<String>> {
+        let router = self.clone();
+        tokio::task::spawn_blocking(move || {
+            router.resolve_for_owner(
+                &owner_key_id,
+                &model,
+                conversation_id.as_deref(),
+                &memory,
+            )
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("provider routing task failed: {error}"))?
     }
 
     pub fn resolve_for_owner(
