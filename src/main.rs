@@ -1012,7 +1012,7 @@ async fn metrics_endpoint(State(state): State<Arc<AppState>>) -> impl IntoRespon
         .map(|provider| {
             (
                 provider.name.clone(),
-                provider_state::status(&provider.name).state.to_owned(),
+                provider_state::status(&provider.name).state.as_str().to_owned(),
             )
         })
         .collect::<Vec<_>>();
@@ -3679,7 +3679,7 @@ mod first_event_tests {
             Instant::now(),
         );
 
-        assert_eq!(crate::provider_state::status(provider).state, "needs_login");
+        assert_eq!(crate::provider_state::status(provider).state, crate::provider_state::ProviderSessionState::NeedsLogin);
         let metrics = crate::metrics::render_with_provider_states(&[]);
         assert!(metrics.contains(&format!(
             "gateway_provider_requests_total{{provider=\"{provider}\",outcome=\"error\"}} 1"
