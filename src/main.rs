@@ -366,6 +366,49 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
+    // Verify idle provider sessions on the browser worker. Each probe is
+    // read-only and serialized by the provider page lock; stagger providers
+    // to avoid synchronized browser work after startup.
+    for provider in cfg.providers.iter().filter(|provider| provider.enabled) {
+        let pool = state.pool.clone();
+        let provider_name = provider.name.clone();
+        let jitter_seconds = provider_session_probe_jitter_seconds(&provider_name);
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(jitter_seconds)).await;
+            loop {
+                match pool.verify_session(&provider_name).await {
+                    Ok(true) => provider_state::record_success(&provider_name),
+                    // A false result means the page is not warmed yet, not that
+                    // the provider session is invalid. Leave routing state unchanged.
+                    Ok(false) => {}
+                    Err(error)
+                        if error
+                            .downcast_ref::<BrowserWorkerUnavailableError>()
+                            .is_some_and(|error| error.is_retryable()) =>
+                    {
+                        // A dead/restarting worker is not evidence of an expired provider
+                        // session. Leave provider eligibility unchanged until the worker recovers.
+                        tracing::debug!(
+                            provider = %provider_name,
+                            "browser worker unavailable during session verification"
+                        );
+                    }
+                    Err(_error) => {
+                        tracing::warn!(
+                            provider = %provider_name,
+                            "periodic provider session verification failed"
+                        );
+                        provider_state::record_error(
+                            &provider_name,
+                            "periodic session verification failed",
+                        );
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(60 + jitter_seconds)).await;
+            }
+        });
+    }
+
     // Retention is opt-in: a zero-day setting leaves conversation history untouched.
     let retention_days = cfg.memory.retention_days;
     if retention_days > 0 {
@@ -1379,6 +1422,27 @@ struct LongTermMemoryItemRequest {
 #[derive(Debug, serde::Deserialize)]
 struct DeleteAllLongTermMemoryRequest {
     confirm: bool,
+}
+
+fn provider_session_probe_jitter_seconds(provider_name: &str) -> u64 {
+    provider_name
+        .bytes()
+        .fold(0u64, |sum, byte| sum + u64::from(byte))
+        % 15
+}
+
+#[cfg(test)]
+mod session_probe_jitter_tests {
+    use super::provider_session_probe_jitter_seconds;
+
+    #[test]
+    fn provider_probe_jitter_is_deterministic_and_bounded() {
+        for provider in ["chatgpt", "claude", "qwen", "metaai"] {
+            let first = provider_session_probe_jitter_seconds(provider);
+            assert_eq!(first, provider_session_probe_jitter_seconds(provider));
+            assert!(first < 15);
+        }
+    }
 }
 
 fn memory_owner(auth_context: &Option<Extension<AuthKeyContext>>) -> &str {
