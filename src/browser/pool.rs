@@ -905,14 +905,25 @@ fn browser_thread(
                                         .unwrap_or_else(|| Rc::new(tokio::sync::Mutex::new(())));
                                     let _guard = lock.lock().await;
                                     let provider_name = provider.name();
-                                    let mut replacement = browser.new_page().await?;
+                                    let had_page = pages.borrow().contains_key(&provider);
+                                    let mut replacement = if had_page {
+                                        Some(browser.new_page().await?)
+                                    } else {
+                                        None
+                                    };
                                     session::clear_provider_cookies(&browser, provider_name)?;
                                     if let Some(old_page) = pages.borrow().get(&provider).cloned() {
                                         let _ = old_page.evaluate("try { localStorage.clear(); true } catch (_) { false }");
                                     }
-                                    replacement.goto(provider.login_url()).await?;
+                                    if let Some(page) = replacement.as_mut() {
+                                        page.goto(provider.login_url()).await?;
+                                    }
                                     let removed = session::delete_session_snapshot(provider_name)?;
-                                    pages.borrow_mut().insert(provider, Rc::new(replacement));
+                                    if let Some(page) = replacement {
+                                        pages.borrow_mut().insert(provider, Rc::new(page));
+                                    } else {
+                                        pages.borrow_mut().remove(&provider);
+                                    }
                                     tracing::info!(provider = provider_name, "browser relay session revoked from live browser");
                                     Ok(removed)
                                 }.await;
