@@ -372,10 +372,7 @@ async fn main() -> anyhow::Result<()> {
     for provider in cfg.providers.iter().filter(|provider| provider.enabled) {
         let pool = state.pool.clone();
         let provider_name = provider.name.clone();
-        let jitter_seconds = provider_name
-            .bytes()
-            .fold(0u64, |sum, byte| sum + u64::from(byte))
-            % 15;
+        let jitter_seconds = provider_session_probe_jitter_seconds(&provider_name);
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_secs(jitter_seconds)).await;
             loop {
@@ -1415,6 +1412,27 @@ struct LongTermMemoryItemRequest {
 #[derive(Debug, serde::Deserialize)]
 struct DeleteAllLongTermMemoryRequest {
     confirm: bool,
+}
+
+fn provider_session_probe_jitter_seconds(provider_name: &str) -> u64 {
+    provider_name
+        .bytes()
+        .fold(0u64, |sum, byte| sum + u64::from(byte))
+        % 15
+}
+
+#[cfg(test)]
+mod session_probe_jitter_tests {
+    use super::provider_session_probe_jitter_seconds;
+
+    #[test]
+    fn provider_probe_jitter_is_deterministic_and_bounded() {
+        for provider in ["chatgpt", "claude", "qwen", "metaai"] {
+            let first = provider_session_probe_jitter_seconds(provider);
+            assert_eq!(first, provider_session_probe_jitter_seconds(provider));
+            assert!(first < 15);
+        }
+    }
 }
 
 fn memory_owner(auth_context: &Option<Extension<AuthKeyContext>>) -> &str {
