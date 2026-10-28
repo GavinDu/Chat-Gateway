@@ -452,20 +452,6 @@ impl UnifiedMemory {
         self.list_conversations_for_owner("local", limit, offset)
     }
 
-    /// List conversation metadata on Tokio's blocking pool.
-    pub async fn list_conversations_for_owner_blocking(
-        self: Arc<Self>,
-        owner_key_id: String,
-        limit: usize,
-        offset: usize,
-    ) -> anyhow::Result<Vec<ConversationSummary>> {
-        tokio::task::spawn_blocking(move || {
-            self.list_conversations_for_owner(&owner_key_id, limit, offset)
-        })
-        .await
-        .map_err(|error| anyhow::anyhow!("conversation list task failed: {error}"))?
-    }
-
     pub fn list_conversations_for_owner(
         &self,
         owner_key_id: &str,
@@ -569,17 +555,6 @@ impl UnifiedMemory {
         )?;
         tx.commit()?;
         Ok(deleted != 0)
-    }
-
-    /// Delete conversations whose activity timestamp is older than the cutoff.
-    /// Run retention deletion on Tokio's blocking pool.
-    pub async fn purge_expired_conversations_blocking(
-        self: Arc<Self>,
-        cutoff_unix_seconds: i64,
-    ) -> anyhow::Result<usize> {
-        tokio::task::spawn_blocking(move || self.purge_expired_conversations(cutoff_unix_seconds))
-            .await
-            .map_err(|error| anyhow::anyhow!("conversation retention task failed: {error}"))?
     }
 
     pub fn purge_expired_conversations(&self, cutoff_unix_seconds: i64) -> anyhow::Result<usize> {
