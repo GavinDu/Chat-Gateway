@@ -228,6 +228,21 @@ impl UnifiedMemory {
         conversation_id: Option<&str>,
         new_messages: &[ChatMessage],
     ) -> anyhow::Result<(String, Vec<ChatMessage>, bool, Vec<ChatMessage>)> {
+        self.build_context_for_owner_with_transcript_budget(
+            owner_key_id,
+            conversation_id,
+            new_messages,
+            self.max_tokens,
+        )
+    }
+
+    pub fn build_context_for_owner_with_transcript_budget(
+        &self,
+        owner_key_id: &str,
+        conversation_id: Option<&str>,
+        new_messages: &[ChatMessage],
+        token_budget: usize,
+    ) -> anyhow::Result<(String, Vec<ChatMessage>, bool, Vec<ChatMessage>)> {
         let (history, saved_summary) = match conversation_id {
             Some(id) => match self.conversation_for_owner(owner_key_id, id)? {
                 Some(conversation) => (conversation.messages, self.rolling_summary(id)?),
@@ -256,6 +271,25 @@ impl UnifiedMemory {
             prompt = crate::context::render_prompt(&context);
         }
         Ok((prompt, context, has_history, history))
+    }
+
+    pub async fn build_context_for_owner_with_transcript_budget_blocking(
+        self: Arc<Self>,
+        owner_key_id: String,
+        conversation_id: Option<String>,
+        new_messages: Vec<ChatMessage>,
+        token_budget: usize,
+    ) -> anyhow::Result<(String, Vec<ChatMessage>, bool, Vec<ChatMessage>)> {
+        tokio::task::spawn_blocking(move || {
+            self.build_context_for_owner_with_transcript_budget(
+                &owner_key_id,
+                conversation_id.as_deref(),
+                &new_messages,
+                token_budget,
+            )
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("conversation context task failed: {error}"))?
     }
 
     fn rolling_summary(&self, conversation_id: &str) -> anyhow::Result<Option<(String, usize)>> {
