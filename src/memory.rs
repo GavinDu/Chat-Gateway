@@ -570,6 +570,20 @@ impl UnifiedMemory {
         self.get_provider_thread_for_owner("local", conversation_id, provider)
     }
 
+    /// Look up provider-thread metadata on Tokio's blocking pool.
+    pub async fn get_provider_thread_for_owner_blocking(
+        self: Arc<Self>,
+        owner_key_id: String,
+        conversation_id: String,
+        provider: String,
+    ) -> anyhow::Result<Option<ProviderThread>> {
+        tokio::task::spawn_blocking(move || {
+            self.get_provider_thread_for_owner(&owner_key_id, &conversation_id, &provider)
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("provider thread lookup task failed: {error}"))?
+    }
+
     pub fn get_provider_thread_for_owner(
         &self,
         owner_key_id: &str,
