@@ -398,7 +398,8 @@ pub async fn import_session(
     match crate::session::import_relay_session(&provider, &file) {
         Ok(()) => match app.pool.refresh_session(&provider).await {
             Ok(()) => {
-                Json(serde_json::json!({"ok":true,"provider":provider,"linked":true,"active":true})).into_response()
+                Json(serde_json::json!({"ok":true,"provider":provider,"linked":true,"active":true}))
+                    .into_response()
             }
             Err(error) => {
                 tracing::warn!(provider, error = %error, "browser relay session was saved but could not be activated");
