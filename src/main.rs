@@ -2640,7 +2640,10 @@ mod http_api_regression_tests {
 
     fn app(memory: Arc<UnifiedMemory>) -> Router {
         Router::new()
-            .route("/ready", get(|| async { api::health::readiness_response(1, true) }))
+            .route(
+                "/ready",
+                get(|| async { api::health::readiness_response(1, true) }),
+            )
             .route("/v1/conversations", get(list_endpoint))
             .route("/v1/chat/completions", post(validation_endpoint))
             .route(
