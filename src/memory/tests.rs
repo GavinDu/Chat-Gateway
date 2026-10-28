@@ -1930,10 +1930,7 @@ async fn async_conversation_store_reads_and_persists_on_blocking_pool() {
         .unwrap();
 
     let transcript = store
-        .read_transcript(
-            "owner-async".to_string(),
-            "conversation-async".to_string(),
-        )
+        .read_transcript("owner-async".to_string(), "conversation-async".to_string())
         .await
         .unwrap();
     assert_eq!(transcript, vec![m("user", "hello"), m("assistant", "hi")]);
