@@ -421,6 +421,19 @@ impl UnifiedMemory {
         self.export_conversation_for_owner("local", conversation_id)
     }
 
+    /// Export a conversation without blocking a Tokio runtime worker.
+    pub async fn export_conversation_for_owner_blocking(
+        self: Arc<Self>,
+        owner_key_id: String,
+        conversation_id: String,
+    ) -> anyhow::Result<Option<Conversation>> {
+        tokio::task::spawn_blocking(move || {
+            self.export_conversation_for_owner(&owner_key_id, &conversation_id)
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("conversation export task failed: {error}"))?
+    }
+
     pub fn export_conversation_for_owner(
         &self,
         owner_key_id: &str,
@@ -437,6 +450,20 @@ impl UnifiedMemory {
         offset: usize,
     ) -> anyhow::Result<Vec<ConversationSummary>> {
         self.list_conversations_for_owner("local", limit, offset)
+    }
+
+    /// List conversation metadata on Tokio's blocking pool.
+    pub async fn list_conversations_for_owner_blocking(
+        self: Arc<Self>,
+        owner_key_id: String,
+        limit: usize,
+        offset: usize,
+    ) -> anyhow::Result<Vec<ConversationSummary>> {
+        tokio::task::spawn_blocking(move || {
+            self.list_conversations_for_owner(&owner_key_id, limit, offset)
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("conversation list task failed: {error}"))?
     }
 
     pub fn list_conversations_for_owner(
@@ -492,6 +519,19 @@ impl UnifiedMemory {
     #[allow(dead_code)]
     pub fn delete_conversation(&self, conversation_id: &str) -> anyhow::Result<bool> {
         self.delete_conversation_for_owner("local", conversation_id)
+    }
+
+    /// Delete a conversation without blocking a Tokio runtime worker.
+    pub async fn delete_conversation_for_owner_blocking(
+        self: Arc<Self>,
+        owner_key_id: String,
+        conversation_id: String,
+    ) -> anyhow::Result<bool> {
+        tokio::task::spawn_blocking(move || {
+            self.delete_conversation_for_owner(&owner_key_id, &conversation_id)
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("conversation deletion task failed: {error}"))?
     }
 
     pub fn delete_conversation_for_owner(
