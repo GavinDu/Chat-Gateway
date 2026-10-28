@@ -157,30 +157,13 @@ impl SessionStore for VaultSessionStore {
     fn load(&self, provider: &str) -> Result<Option<SessionFile>> {
         let key = vault_key_from_env()?;
         let vault_path = session_vault_path(provider)?;
-        match std::fs::read(&vault_path) {
-            Ok(bytes) => {
-                let session = decrypt_session_snapshot(&bytes, provider, &key)?;
-                remove_legacy_session_snapshot(provider)?;
-                return Ok(Some(session));
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
-
-        // One-time migration: keep the plaintext source until the encrypted
-        // destination has been written, authenticated, and read back successfully.
         let legacy_path = session_path(provider)?;
-        match std::fs::metadata(&legacy_path) {
-            Ok(_) => migrate_legacy_snapshot(
-                Path::new(&legacy_path),
-                Path::new(&vault_path),
-                provider,
-                &key,
-            )
-            .map(Some),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(error.into()),
-        }
+        load_vault_session_from_paths(
+            provider,
+            Path::new(&vault_path),
+            Path::new(&legacy_path),
+            &key,
+        )
     }
 
     async fn save_if_changed(&self, browser: &Browser, page: &Page, provider: &str) -> Result<()> {
@@ -225,6 +208,36 @@ impl SessionStore for VaultSessionStore {
 /// Migrate one legacy plaintext snapshot into the encrypted vault. Isolated
 /// paths make migration failure handling testable without process-wide env or
 /// working-directory changes.
+/// Load a vault record or migrate a legacy snapshot using explicit paths.
+/// If a vault record exists but cannot be authenticated, return the error and
+/// leave the legacy source untouched; never fall back to plaintext on corruption.
+fn load_vault_session_from_paths(
+    provider: &str,
+    vault_path: &Path,
+    legacy_path: &Path,
+    key: &[u8; 32],
+) -> Result<Option<SessionFile>> {
+    match std::fs::read(vault_path) {
+        Ok(bytes) => {
+            let session = decrypt_session_snapshot(&bytes, provider, key)?;
+            match std::fs::remove_file(legacy_path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+            return Ok(Some(session));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+
+    match std::fs::metadata(legacy_path) {
+        Ok(_) => migrate_legacy_snapshot(legacy_path, vault_path, provider, key).map(Some),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
 fn migrate_legacy_snapshot(
     legacy_path: &Path,
     vault_path: &Path,
@@ -1420,6 +1433,36 @@ mod vault_tests {
             }],
             ts: "2026-10-27T00:00:00Z".to_owned(),
         }
+    }
+
+    #[test]
+    fn invalid_existing_vault_fails_closed_and_preserves_legacy_source() {
+        let root = std::env::temp_dir().join(format!(
+            "chat-gateway-vault-no-plaintext-fallback-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let legacy_path = root.join("chatgpt.json");
+        let vault_path = root.join("chatgpt.vault");
+        let legacy_bytes = serde_json::to_vec(&sample_session()).unwrap();
+        std::fs::write(&legacy_path, &legacy_bytes).unwrap();
+        let encrypted =
+            encrypt_session_snapshot(&sample_session(), "chatgpt", &[0x37; 32]).unwrap();
+        std::fs::write(&vault_path, encrypted).unwrap();
+
+        let result =
+            load_vault_session_from_paths("chatgpt", &vault_path, &legacy_path, &[0x5a; 32]);
+
+        assert!(
+            result.is_err(),
+            "an unreadable vault record must fail closed"
+        );
+        assert_eq!(
+            std::fs::read(&legacy_path).unwrap(),
+            legacy_bytes,
+            "failed vault decryption must not delete or silently load the plaintext source"
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
