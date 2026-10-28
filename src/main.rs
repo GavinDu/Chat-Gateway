@@ -472,7 +472,7 @@ async fn main() -> anyhow::Result<()> {
     }
     // HTTP requests have drained or the grace period expired; stop the browser worker before flushing storage.
     state.pool.shutdown().await?;
-    state.memory.checkpoint()?;
+    state.memory.clone().checkpoint_blocking().await?;
     drop(state);
     Ok(())
 }
