@@ -2,7 +2,7 @@
 use std::{
     collections::HashMap,
     sync::{Mutex, OnceLock},
-    time::{Duration, SystemTime},
+    time::{Duration, Instant, SystemTime},
 };
 
 /// Typed provider lifecycle state. Keep the string representation at the
@@ -39,6 +39,48 @@ pub struct ProviderSessionStatus {
 const DEGRADED_RETRY_COOLDOWN: Duration = Duration::from_secs(15);
 
 static STATES: OnceLock<Mutex<HashMap<String, ProviderSessionStatus>>> = OnceLock::new();
+static LAST_PROBES: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
+
+/// Minimum interval between verification attempts for the same provider.
+pub const VERIFY_PROBE_COOLDOWN: Duration = Duration::from_secs(30);
+
+fn last_probes() -> &'static Mutex<HashMap<String, Instant>> {
+    LAST_PROBES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Claim a provider verification attempt if its cooldown has elapsed.
+/// The first call is immediately eligible; browser checks run outside this module.
+pub fn claim_verify_probe(provider: &str, now: Instant) -> bool {
+    let Ok(mut probes) = last_probes().lock() else {
+        return false;
+    };
+    if probes
+        .get(provider)
+        .is_some_and(|last| now.saturating_duration_since(*last) < VERIFY_PROBE_COOLDOWN)
+    {
+        return false;
+    }
+    probes.insert(provider.to_owned(), now);
+    true
+}
+
+/// Record a browser verification result without retaining provider diagnostics.
+pub fn record_verify_probe(provider: &str, verified: bool) {
+    if verified {
+        record_success(provider);
+        return;
+    }
+    if let Ok(mut map) = states().lock() {
+        map.insert(
+            provider.to_owned(),
+            ProviderSessionStatus {
+                state: ProviderSessionState::NeedsLogin,
+                last_error: Some("provider session verification failed; re-login required".to_owned()),
+                retry_after: None,
+            },
+        );
+    }
+}
 
 fn states() -> &'static Mutex<HashMap<String, ProviderSessionStatus>> {
     STATES.get_or_init(|| Mutex::new(HashMap::new()))
@@ -250,6 +292,39 @@ mod tests {
         assert_eq!(status(provider).state, ProviderSessionState::Ready);
         assert!(is_routable(provider));
         assert_eq!(status(provider).retry_after, None);
+    }
+
+    #[test]
+    fn verify_probe_cooldown_is_per_provider_and_allows_retry_after_interval() {
+        let start = Instant::now();
+        let other = start + Duration::from_secs(1);
+        assert!(claim_verify_probe("probe-a", start));
+        assert!(!claim_verify_probe("probe-a", other));
+        assert!(claim_verify_probe("probe-b", other));
+        assert!(claim_verify_probe("probe-a", start + VERIFY_PROBE_COOLDOWN));
+    }
+
+    #[test]
+    fn successful_verify_probe_re_admits_expired_provider() {
+        let provider = "test-provider-probe-re-admission";
+        record_error(provider, "session expired");
+        assert!(!is_routable(provider));
+        record_verify_probe(provider, true);
+        assert!(is_routable(provider));
+        assert_eq!(status(provider).state, ProviderSessionState::Ready);
+        assert_eq!(status(provider).last_error, None);
+    }
+
+    #[test]
+    fn failed_verify_probe_fails_closed_without_exposing_diagnostics() {
+        let provider = "test-provider-probe-failure";
+        record_verify_probe(provider, false);
+        let current = status(provider);
+        assert_eq!(current.state, ProviderSessionState::NeedsLogin);
+        assert_eq!(
+            current.last_error.as_deref(),
+            Some("provider session verification failed; re-login required")
+        );
     }
 
     #[test]
