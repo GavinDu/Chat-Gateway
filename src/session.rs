@@ -157,30 +157,13 @@ impl SessionStore for VaultSessionStore {
     fn load(&self, provider: &str) -> Result<Option<SessionFile>> {
         let key = vault_key_from_env()?;
         let vault_path = session_vault_path(provider)?;
-        match std::fs::read(&vault_path) {
-            Ok(bytes) => {
-                let session = decrypt_session_snapshot(&bytes, provider, &key)?;
-                remove_legacy_session_snapshot(provider)?;
-                return Ok(Some(session));
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
-
-        // One-time migration: keep the plaintext source until the encrypted
-        // destination has been written, authenticated, and read back successfully.
         let legacy_path = session_path(provider)?;
-        match std::fs::metadata(&legacy_path) {
-            Ok(_) => migrate_legacy_snapshot(
-                Path::new(&legacy_path),
-                Path::new(&vault_path),
-                provider,
-                &key,
-            )
-            .map(Some),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(error.into()),
-        }
+        load_vault_session_from_paths(
+            provider,
+            Path::new(&vault_path),
+            Path::new(&legacy_path),
+            &key,
+        )
     }
 
     async fn save_if_changed(&self, browser: &Browser, page: &Page, provider: &str) -> Result<()> {
@@ -219,6 +202,36 @@ impl SessionStore for VaultSessionStore {
             "encrypted session saved"
         );
         Ok(())
+    }
+}
+
+/// Load a vault record or migrate a legacy snapshot using explicit paths.
+/// If a vault record exists but cannot be authenticated, return the error and
+/// leave the legacy source untouched; never fall back to plaintext on corruption.
+fn load_vault_session_from_paths(
+    provider: &str,
+    vault_path: &Path,
+    legacy_path: &Path,
+    key: &[u8; 32],
+) -> Result<Option<SessionFile>> {
+    match std::fs::read(vault_path) {
+        Ok(bytes) => {
+            let session = decrypt_session_snapshot(&bytes, provider, key)?;
+            match std::fs::remove_file(legacy_path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+            return Ok(Some(session));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+
+    match std::fs::metadata(legacy_path) {
+        Ok(_) => migrate_legacy_snapshot(legacy_path, vault_path, provider, key).map(Some),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
     }
 }
 
