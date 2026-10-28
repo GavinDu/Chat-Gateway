@@ -113,8 +113,8 @@ mod readiness_contract_tests {
         let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .expect("readiness body should be readable");
-        let body: serde_json::Value = serde_json::from_slice(&bytes)
-            .expect("readiness body should be JSON");
+        let body: serde_json::Value =
+            serde_json::from_slice(&bytes).expect("readiness body should be JSON");
         assert_eq!(body["worker_generation"], 7);
     }
 
@@ -124,8 +124,8 @@ mod readiness_contract_tests {
         let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .expect("readiness body should be readable");
-        let body: serde_json::Value = serde_json::from_slice(&bytes)
-            .expect("readiness body should be JSON");
+        let body: serde_json::Value =
+            serde_json::from_slice(&bytes).expect("readiness body should be JSON");
         assert_eq!(body["reason"], "browser_worker_unavailable");
         assert_eq!(body["worker_generation"], 4);
     }
