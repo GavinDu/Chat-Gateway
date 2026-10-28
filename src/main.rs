@@ -366,6 +366,39 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
+    // Verify idle provider sessions on the browser worker. Each probe is
+    // read-only and serialized by the provider page lock; stagger providers
+    // to avoid synchronized browser work after startup.
+    for provider in cfg.providers.iter().filter(|provider| provider.enabled) {
+        let pool = state.pool.clone();
+        let provider_name = provider.name.clone();
+        let jitter_seconds = provider_name
+            .bytes()
+            .fold(0u64, |sum, byte| sum + u64::from(byte))
+            % 15;
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(jitter_seconds)).await;
+            loop {
+                match pool.verify_session(&provider_name).await {
+                    Ok(true) => provider_state::record_success(&provider_name),
+                    Ok(false) => {
+                        provider_state::record_error(&provider_name, "provider page not warmed");
+                    }
+                    Err(error) => {
+                        // Do not log raw probe errors; browser engines may include page or
+                        // upstream details in their error messages.
+                        tracing::warn!(
+                            provider = %provider_name,
+                            "periodic provider session verification failed"
+                        );
+                        provider_state::record_error(&provider_name, &error.to_string());
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(60 + jitter_seconds)).await;
+            }
+        });
+    }
+
     // Retention is opt-in: a zero-day setting leaves conversation history untouched.
     let retention_days = cfg.memory.retention_days;
     if retention_days > 0 {
