@@ -67,7 +67,7 @@ enum Command {
         model: String,
         has_history: bool,
         thread_url: Option<String>,
-        timeout: Duration, 
+        timeout: Duration,
         chunks: mpsc::Sender<Result<ProviderChunk>>,
     },
     CurrentUrl {
@@ -293,12 +293,18 @@ impl ObscuraPool {
 
     /// Read the active provider page URL after a completed send.
     pub async fn current_url(&self, name: &str) -> Result<String> {
-        let provider = Provider::from_name(name)
-            .ok_or_else(|| anyhow::anyhow!("unknown provider {name}"))?;
+        let provider =
+            Provider::from_name(name).ok_or_else(|| anyhow::anyhow!("unknown provider {name}"))?;
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx.send(Command::CurrentUrl { provider, reply: tx }).await
+        self.cmd_tx
+            .send(Command::CurrentUrl {
+                provider,
+                reply: tx,
+            })
+            .await
             .map_err(|_| anyhow::anyhow!("browser thread gone"))?;
-        rx.await.map_err(|_| anyhow::anyhow!("browser thread dropped current URL reply"))?
+        rx.await
+            .map_err(|_| anyhow::anyhow!("browser thread dropped current URL reply"))?
     }
 
     /// Live-send test-adapter run for one provider (Go RunAdapterTest
