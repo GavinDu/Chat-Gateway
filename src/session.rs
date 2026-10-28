@@ -277,6 +277,114 @@ pub fn import_relay_session(provider: &str, file: &SessionFile) -> Result<()> {
     Ok(())
 }
 
+/// List provider session artifacts without reading or printing their contents.
+pub fn list_session_records() -> Result<Vec<(String, bool, bool)>> {
+    const PROVIDERS: &[&str] = &[
+        "qwen", "metaai", "claude", "chatgpt", "gemini", "grok", "mistral", "perplexity",
+    ];
+    PROVIDERS
+        .iter()
+        .map(|provider| {
+            let vault = session_vault_path(provider)?;
+            let legacy = session_path(provider)?;
+            Ok((
+                (*provider).to_string(),
+                Path::new(&vault).is_file(),
+                Path::new(&legacy).is_file(),
+            ))
+        })
+        .collect()
+}
+
+/// Rotate all existing encrypted vault records. Old ciphertext backups are
+/// retained until every new record has been written; on an ordinary error the
+/// operation rolls back already-replaced records before returning.
+pub fn rotate_session_vault_key(old_key: &[u8; 32], new_key: &[u8; 32]) -> Result<usize> {
+    if old_key == new_key {
+        anyhow::bail!("old and new vault keys must differ");
+    }
+    const PROVIDERS: &[&str] = &[
+        "qwen", "metaai", "claude", "chatgpt", "gemini", "grok", "mistral", "perplexity",
+    ];
+    let mut records: Vec<(String, std::path::PathBuf, Vec<u8>, Vec<u8>)> = Vec::new();
+    for provider in PROVIDERS {
+        let path = std::path::PathBuf::from(session_vault_path(provider)?);
+        let old_bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        let decoded = decrypt_session_snapshot(&old_bytes, provider, old_key)?;
+        let old_hash = session_state_hash(&decoded)?;
+        let new_bytes = encrypt_session_snapshot(&decoded, provider, new_key)?;
+        let verified = decrypt_session_snapshot(&new_bytes, provider, new_key)?;
+        if session_state_hash(&verified)? != old_hash {
+            anyhow::bail!("vault rotation validation failed for provider {provider}");
+        }
+        records.push(((*provider).to_string(), path, old_bytes, new_bytes));
+    }
+
+    // Preflight backup paths before changing any vault record.
+    for (provider, path, _, _) in &records {
+        let backup = path.with_extension("vault.rotate-backup");
+        if backup.exists() {
+            anyhow::bail!(
+                "vault rotation backup already exists for {provider}; resolve it before retrying"
+            );
+        }
+    }
+    let mut backups = Vec::new();
+    for (provider, path, old_bytes, _) in &records {
+        let backup = path.with_extension("vault.rotate-backup");
+        if let Err(error) = write_session_file_atomically(&backup, old_bytes) {
+            for created in &backups {
+                let _ = std::fs::remove_file(created);
+            }
+            return Err(anyhow::anyhow!(
+                "could not preserve rollback backup for {provider}: {error}"
+            ));
+        }
+        backups.push(backup);
+    }
+
+    let mut replaced = 0usize;
+    for (provider, path, _, new_bytes) in &records {
+        if let Err(error) = write_session_file_atomically(path, new_bytes) {
+            let mut rollback_errors = Vec::new();
+            for (done_provider, done_path, old_bytes, _) in records.iter().take(replaced) {
+                if let Err(rollback_error) = write_session_file_atomically(done_path, old_bytes) {
+                    rollback_errors.push(format!("{done_provider}: {rollback_error}"));
+                }
+            }
+            if rollback_errors.is_empty() {
+                for backup in &backups {
+                    let _ = std::fs::remove_file(backup);
+                }
+                anyhow::bail!("vault rotation failed for {provider}; previous records were restored: {error}");
+            }
+            anyhow::bail!(
+                "vault rotation failed for {provider}: {error}; rollback also failed for {}. Preserve .rotate-backup files and recover using the old key",
+                rollback_errors.join(", ")
+            );
+        }
+        replaced += 1;
+    }
+
+    let mut cleanup_failures = Vec::new();
+    for backup in &backups {
+        if let Err(error) = std::fs::remove_file(backup) {
+            cleanup_failures.push(format!("{}: {error}", backup.display()));
+        }
+    }
+    if !cleanup_failures.is_empty() {
+        tracing::warn!(
+            remaining_backups = %cleanup_failures.join(", "),
+            "vault key rotation completed but old encrypted backups remain; retain the old key until they are removed"
+        );
+    }
+    Ok(records.len())
+}
+
 pub fn delete_session_snapshot(provider: &str) -> Result<bool> {
     let vault_path = session_vault_path(provider)?;
     let legacy_path = session_path(provider)?;
@@ -312,16 +420,19 @@ fn remove_legacy_session_snapshot(provider: &str) -> Result<()> {
 }
 
 fn vault_key_from_env() -> Result<[u8; 32]> {
-    let encoded = std::env::var("CHAT_GATEWAY_VAULT_KEY").map_err(|_| {
-        anyhow::anyhow!("CHAT_GATEWAY_VAULT_KEY is required for encrypted session storage")
-    })?;
+    vault_key_from_env_named("CHAT_GATEWAY_VAULT_KEY")
+}
+
+fn vault_key_from_env_named(name: &str) -> Result<[u8; 32]> {
+    let encoded = std::env::var(name)
+        .map_err(|_| anyhow::anyhow!("{name} is required for this vault operation"))?;
     if encoded.len() != 64 || !encoded.as_bytes().iter().all(u8::is_ascii_hexdigit) {
-        anyhow::bail!("CHAT_GATEWAY_VAULT_KEY must be exactly 64 hexadecimal characters");
+        anyhow::bail!("{name} must be exactly 64 hexadecimal characters");
     }
     let mut key = [0_u8; 32];
     for (index, byte) in key.iter_mut().enumerate() {
         *byte = u8::from_str_radix(&encoded[index * 2..index * 2 + 2], 16)
-            .map_err(|_| anyhow::anyhow!("CHAT_GATEWAY_VAULT_KEY contains invalid hexadecimal"))?;
+            .map_err(|_| anyhow::anyhow!("{name} contains invalid hexadecimal"))?;
     }
     Ok(key)
 }
