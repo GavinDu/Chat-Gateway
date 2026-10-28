@@ -683,8 +683,7 @@ fn verify_session_page(
         .input
         .iter()
         .any(|selector| page.query_selector(selector).is_some());
-    let (login_state, _) = login::login_state(is_login_page, input_found);
-    if login_state == "login_required" {
+    if session_probe_requires_login(is_login_page, input_found) {
         return Err(anyhow::Error::new(ProviderSessionExpiredError));
     }
     if !session_probe_page_healthy(is_login_page, input_found) {
@@ -696,11 +695,23 @@ fn verify_session_page(
 #[cfg(test)]
 mod session_probe_tests {
     #[test]
+    fn probe_distinguishes_expired_login_page_from_unwarmed_page() {
+        assert!(super::session_probe_requires_login(true, true));
+        assert!(!super::session_probe_requires_login(false, false));
+        let error = anyhow::Error::new(super::ProviderSessionExpiredError);
+        assert!(error.downcast_ref::<super::ProviderSessionExpiredError>().is_some());
+    }
+
+    #[test]
     fn probe_requires_chat_input_and_not_a_login_page() {
         assert!(super::session_probe_page_healthy(false, true));
         assert!(!super::session_probe_page_healthy(true, true));
         assert!(!super::session_probe_page_healthy(false, false));
     }
+}
+
+fn session_probe_requires_login(is_login_page: bool, input_found: bool) -> bool {
+    login::login_state(is_login_page, input_found).0 == "login_required"
 }
 
 fn session_probe_page_healthy(is_login_page: bool, input_found: bool) -> bool {
