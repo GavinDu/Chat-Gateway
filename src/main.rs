@@ -298,8 +298,8 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let app = Router::new()
-        .route("/health", get(health))
-        .route("/ready", get(readiness))
+        .route("/health", get(api::health::health))
+        .route("/ready", get(api::health::readiness))
         .route("/metrics", get(metrics_endpoint))
         .route("/v1/models", get(models))
         .route("/v1/chat/completions", post(chat_completions))
@@ -972,71 +972,6 @@ mod login_action_payload_tests {
 /// Startup validates configuration and warms the browser pool before binding.
 /// Readiness requires at least one enabled provider whose session is not known
 /// to be expired; providers marked `needs_login` do not count as routable.
-fn readiness_response(enabled: usize, worker_alive: bool) -> Response {
-    if !worker_alive {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({
-                "status": "not_ready",
-                "reason": "browser_worker_unavailable",
-            })),
-        )
-            .into_response();
-    }
-    if enabled == 0 {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({
-                "status": "not_ready",
-                "reason": "no_enabled_provider",
-            })),
-        )
-            .into_response();
-    }
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({
-            "status": "ready",
-            "enabled_providers": enabled,
-        })),
-    )
-        .into_response()
-}
-
-async fn readiness(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    if !state.pool.worker_alive() {
-        return readiness_response(0, false);
-    }
-    let routable = state
-        .cfg
-        .providers
-        .iter()
-        .filter(|p| {
-            p.enabled
-                && provider_state::is_routable(&p.name)
-                && provider_guard::provider_disabled_reason(&p.name).is_none()
-        })
-        .count();
-    readiness_response(routable, true)
-}
-
-#[cfg(test)]
-mod readiness_contract_tests {
-    use super::*;
-
-    #[test]
-    fn readiness_requires_at_least_one_routable_provider() {
-        let not_ready = readiness_response(0, true);
-        assert_eq!(not_ready.status(), StatusCode::SERVICE_UNAVAILABLE);
-
-        let ready = readiness_response(1, true);
-        assert_eq!(ready.status(), StatusCode::OK);
-
-        let worker_dead = readiness_response(1, false);
-        assert_eq!(worker_dead.status(), StatusCode::SERVICE_UNAVAILABLE);
-    }
-}
-
 async fn metrics_endpoint(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let provider_states = state
         .cfg
@@ -1544,34 +1479,6 @@ async fn delete_conversation(
         .map(|Extension(context)| context.key_id.as_str())
         .unwrap_or("local");
     delete_conversation_response_for_owner(&state.memory, owner_key_id, &conversation_id)
-}
-
-async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let providers = state
-        .cfg
-        .providers
-        .iter()
-        .map(|p| {
-            let session = provider_state::status(&p.name);
-            let challenge_disabled_reason = provider_guard::provider_disabled_reason(&p.name);
-            serde_json::json!({
-                "name": p.name,
-                "enabled": p.enabled,
-                "priority": p.priority,
-                "models": p.models,
-                "session_state": session.state,
-                "last_session_error": session.last_error,
-                "challenge_disabled": challenge_disabled_reason.is_some(),
-                "challenge_disabled_reason": challenge_disabled_reason,
-            })
-        })
-        .collect::<Vec<_>>();
-    Json(serde_json::json!({
-        "status": "ok",
-        "engine": "obscura-native (embedded)",
-        "sessions_loaded": "sessions/<provider>.json (restored at warm-up)",
-        "providers": providers,
-    }))
 }
 
 fn build_model_list(cfg: &AppConfig, cache: &HashMap<String, Vec<String>>) -> serde_json::Value {
@@ -2733,7 +2640,10 @@ mod http_api_regression_tests {
 
     fn app(memory: Arc<UnifiedMemory>) -> Router {
         Router::new()
-            .route("/ready", get(|| async { readiness_response(1, true) }))
+            .route(
+                "/ready",
+                get(|| async { api::health::readiness_response(1, true) }),
+            )
             .route("/v1/conversations", get(list_endpoint))
             .route("/v1/chat/completions", post(validation_endpoint))
             .route(
