@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 /// Provider priority + failover routing. Explicit model names must resolve;
 /// only "auto" opts into routing across all enabled providers.
+#[derive(Clone)]
 pub struct ProviderRouter {
     cfg: Arc<AppConfig>,
 }
