@@ -1425,7 +1425,7 @@ async fn persist_provider_thread(
     model: &str,
 ) {
     let thread_url = match state.pool.current_url(provider).await {
-        Ok(url) if valid_provider_thread_url(provider, &url) => url,
+        Ok(url) if is_reopenable_provider_thread_url(provider, &url) => url,
         Ok(_) => return,
         Err(error) => {
             tracing::debug!(provider, %error, "provider thread URL unavailable after successful send");
@@ -1449,6 +1449,26 @@ async fn persist_provider_thread(
     };
     if let Err(error) = state.memory.upsert_provider_thread_for_owner(owner_key_id, &thread) {
         tracing::warn!(provider, %error, "provider thread mapping could not be persisted");
+    }
+}
+
+fn is_reopenable_provider_thread_url(provider: &str, value: &str) -> bool {
+    if !valid_provider_thread_url(provider, value) {
+        return false;
+    }
+    let Some((_, location)) = value["https://".len()..].split_once('/') else {
+        return false;
+    };
+    let location = format!("/{location}");
+    match provider {
+        "chatgpt" => location.starts_with("/c/") || (location.starts_with("/g/") && location.contains("/c/")),
+        "claude" => location.starts_with("/chat/") && location.len() > "/chat/".len(),
+        "gemini" => location.starts_with("/app/") && location.len() > "/app/".len(),
+        "grok" => location.starts_with("/c/") || location.starts_with("/chat/") || location.contains("?conversation="),
+        "qwen" => location.starts_with("/c/") && location.len() > "/c/".len(),
+        "mistral" => location.starts_with("/chat/") && location.len() > "/chat/".len(),
+        "perplexity" => location.starts_with("/search/") || location.starts_with("/page/"),
+        _ => false,
     }
 }
 
@@ -1979,7 +1999,7 @@ async fn chat_completions(
         };
         let saved_thread = match conversation_id.as_deref() {
             Some(id) => match state.memory.get_provider_thread_for_owner(&owner_key_id, id, &provider_name) {
-                Ok(thread) => thread.filter(|thread| valid_provider_thread_url(&provider_name, &thread.thread_url)),
+                Ok(thread) => thread.filter(|thread| is_reopenable_provider_thread_url(&provider_name, &thread.thread_url)),
                 Err(_) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "server_error", "memory_read_failed", "provider thread state could not be read safely"),
             },
             None => None,
@@ -3659,6 +3679,9 @@ mod provider_thread_url_tests {
             "claude",
             "https://claude.ai/chat/123"
         ));
+        assert!(is_reopenable_provider_thread_url("chatgpt", "https://chatgpt.com/c/123"));
+        assert!(!is_reopenable_provider_thread_url("chatgpt", "https://chatgpt.com/"));
+        assert!(!is_reopenable_provider_thread_url("claude", "https://claude.ai/"));
         assert!(!valid_provider_thread_url(
             "chatgpt",
             "http://chatgpt.com/c/123"
