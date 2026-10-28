@@ -89,8 +89,8 @@ def run_once(args: argparse.Namespace, model: str, previous_provider: str | None
                         first_token = time.perf_counter()
                     output_chars += len(content)
     except urllib.error.HTTPError as error:
-        detail = error.read(1024).decode("utf-8", errors="replace")
-        raise RuntimeError(f"HTTP {error.code} for model {model!r}: {detail}") from error
+        # Error bodies can echo prompt or provider data; report only status and alias.
+        raise RuntimeError(f"HTTP {error.code} for model {model!r}") from error
     ended = time.perf_counter()
     rss_after = rss_kib(args.server_pid)
     return {
