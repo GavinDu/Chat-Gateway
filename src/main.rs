@@ -2061,7 +2061,10 @@ async fn chat_completions(
         // memory. No long-term memory retrieval is currently wired into this
         // request path; keep the injection point typed and fail-closed.
         if memory_egress_policy
-            .authorize(&provider_name, memory_egress::ProviderDataClass::CurrentTurn)
+            .authorize(
+                &provider_name,
+                memory_egress::ProviderDataClass::CurrentTurn,
+            )
             .is_err()
             || memory_egress_policy
                 .authorize(
