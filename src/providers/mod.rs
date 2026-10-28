@@ -118,8 +118,8 @@ pub trait SiteAdapter: Send + Sync {
     fn response_text(&self, page: &Page) -> Option<String>;
 
     /// Fetch text, node count, and streaming state in one page evaluation.
-    fn response_probe(&self, page: &Page) -> common::ResponseProbe {
-        common::response_probe(page, self.selector_set())
+    fn response_probe(&self, page: &Page, check_body_challenge: bool) -> common::ResponseProbe {
+        common::response_probe(page, self.selector_set(), check_body_challenge)
     }
 
     /// Best-effort cancellation when the HTTP consumer disconnects.
