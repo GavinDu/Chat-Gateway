@@ -57,6 +57,9 @@ async function syncProvider(provider) {
   const {gateway, token, linkedProviders = []} = await chrome.storage.local.get(["gateway", "token", "linkedProviders"]);
   if (!gateway || !token || !linkedProviders.includes(provider)) return;
   const snapshot = await providerCookieSnapshot(provider);
+  // Missing permissions or an expired browser session must not overwrite a
+  // previously valid gateway session with an empty snapshot.
+  if (snapshot.cookies.length === 0) return;
   const response = await relayFetch("/relay/v1/session/" + encodeURIComponent(provider), {
     method:"POST", body:JSON.stringify(snapshot)
   });
