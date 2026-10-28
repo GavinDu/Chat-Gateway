@@ -53,7 +53,7 @@ $("link").addEventListener("click", async () => {
     const stored = await chrome.storage.local.get(["linkedProviders"]);
     const linkedProviders = Array.from(new Set([...(stored.linkedProviders || []),provider]));
     await chrome.storage.local.set({linkedProviders});
-    message("Linked " + provider + ". The gateway refreshed the embedded browser session; no restart is required.");
+    message("Linked " + provider + ". The gateway activated this session in its embedded browser; no restart is required, and cookie changes sync automatically.");
     await refreshStatus();
   } catch (error) { message(error.message); }
 });
@@ -70,7 +70,7 @@ $("unlink").addEventListener("click", async () => {
     if (!response.ok) throw new Error("Could not unlink " + provider + ".");
     const stored = await chrome.storage.local.get(["linkedProviders"]);
     await chrome.storage.local.set({linkedProviders:(stored.linkedProviders || []).filter(value => value !== provider)});
-    message("Unlinked " + provider + ". The gateway cleared its in-memory browser session and deleted the saved snapshot.");
+    message("Unlinked " + provider + ". The gateway cleared the persisted session, embedded-browser cookies, and origin localStorage.");
     await refreshStatus();
   } catch (error) { message(error.message); }
 });
