@@ -5,6 +5,7 @@ const vm = require("node:vm");
 const { webcrypto } = require("node:crypto");
 
 function loadShared(cookieFixtures = [], permissionsGranted = true) {
+  let cookieReads = 0;
   const context = {
     URL,
     Headers,
@@ -17,7 +18,10 @@ function loadShared(cookieFixtures = [], permissionsGranted = true) {
       cookies: {
         // Return the full fixture set to simulate a permissive/misbehaving
         // browser API; providerCookieSnapshot must still enforce its own scope.
-        getAll: async () => cookieFixtures
+        getAll: async () => {
+          cookieReads += 1;
+          return cookieFixtures;
+        }
       },
       storage: { local: { get: async () => ({}) } }
     }
@@ -25,7 +29,7 @@ function loadShared(cookieFixtures = [], permissionsGranted = true) {
   vm.createContext(context);
   const source = fs.readFileSync(require.resolve("../shared.js"), "utf8");
   vm.runInContext(source + "\nglobalThis.__testApi = { normalizeGateway, providerCookieSnapshot, PROVIDERS };", context);
-  return context.__testApi;
+  return { ...context.__testApi, cookieReadCount: () => cookieReads };
 }
 
 test("gateway normalization accepts only local HTTP origins", () => {
@@ -69,6 +73,7 @@ test("partial host permissions reject a provider cookie snapshot", async () => {
     () => api.providerCookieSnapshot("chatgpt"),
     /Missing provider host permissions/
   );
+  assert.equal(api.cookieReadCount(), 0, "cookie API must not be called without all host permissions");
 });
 
 test("unsupported provider cannot be used to collect a cookie snapshot", async () => {
