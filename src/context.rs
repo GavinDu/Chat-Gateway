@@ -4,6 +4,36 @@ use crate::memory::ChatMessage;
 /// provider, or async-runtime dependency so policy can be tested independently.
 pub(crate) struct ContextBuilder;
 
+/// Why a transcript message was or was not included in a bounded context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ContextMessageReason {
+    IncludedWithinBudget,
+    PreservedNewestOverBudget,
+    OmittedBudgetExceeded,
+}
+
+/// A deterministic explanation of the context builder's budget decision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ContextMessageDecision {
+    /// Zero-based index in the reconciled, chronological transcript.
+    pub index: usize,
+    pub role: String,
+    pub estimated_tokens: usize,
+    pub included: bool,
+    pub reason: ContextMessageReason,
+}
+
+/// Result of pure context construction, including auditable budget decisions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ContextBuildReport {
+    pub prompt: String,
+    pub messages: Vec<ChatMessage>,
+    pub estimated_tokens: usize,
+    pub budget: usize,
+    /// One decision per reconciled transcript message, in chronological order.
+    pub decisions: Vec<ContextMessageDecision>,
+}
+
 /// The durable provider-thread state used by the chat send path to decide
 /// whether provider-side history is still synchronized with the gateway transcript.
 /// The marker fields contain the transcript fingerprint, not a raw message ID.
@@ -81,25 +111,77 @@ impl ContextBuilder {
         incoming: &[ChatMessage],
         budget: usize,
     ) -> (String, Vec<ChatMessage>) {
+        let report = Self::build_with_report(history, incoming, budget);
+        (report.prompt, report.messages)
+    }
+
+    /// Build context and expose deterministic inclusion/omission reasons for
+    /// debugging, evaluation, and tests without performing any I/O.
+    pub(crate) fn build_with_report(
+        history: &[ChatMessage],
+        incoming: &[ChatMessage],
+        budget: usize,
+    ) -> ContextBuildReport {
         let mut full = history.to_vec();
         full.extend(messages_after_overlap(&full, incoming));
 
+        let costs: Vec<usize> = full
+            .iter()
+            .map(|message| estimate_message_tokens(&message.content).saturating_add(8))
+            .collect();
+        let mut included = vec![false; full.len()];
         let mut tokens = 0usize;
-        let mut windowed = Vec::new();
-        for message in full.iter().rev() {
-            let cost = estimate_message_tokens(&message.content).saturating_add(8);
-            // Preserve at least the newest message so a tiny context budget
-            // cannot silently discard the current user request. Older messages
-            // are only admitted when they fit the remaining budget.
-            if tokens.saturating_add(cost) > budget && !windowed.is_empty() {
+        let mut newest_over_budget = false;
+
+        for index in (0..full.len()).rev() {
+            let cost = costs[index];
+            if tokens.saturating_add(cost) > budget && index != full.len().saturating_sub(1) {
                 break;
             }
+            if tokens.saturating_add(cost) > budget && included.iter().any(|value| *value) {
+                break;
+            }
+            if tokens.saturating_add(cost) > budget {
+                newest_over_budget = true;
+            }
             tokens = tokens.saturating_add(cost);
-            windowed.push(message.clone());
+            included[index] = true;
         }
-        windowed.reverse();
-        let prompt = render_prompt(&windowed);
-        (prompt, windowed)
+
+        let messages: Vec<ChatMessage> = full
+            .iter()
+            .zip(&included)
+            .filter_map(|(message, included)| included.then_some(message.clone()))
+            .collect();
+        let decisions = full
+            .iter()
+            .enumerate()
+            .map(|(index, message)| {
+                let is_included = included[index];
+                let reason = if is_included && newest_over_budget && index == full.len() - 1 {
+                    ContextMessageReason::PreservedNewestOverBudget
+                } else if is_included {
+                    ContextMessageReason::IncludedWithinBudget
+                } else {
+                    ContextMessageReason::OmittedBudgetExceeded
+                };
+                ContextMessageDecision {
+                    index,
+                    role: message.role.clone(),
+                    estimated_tokens: costs[index],
+                    included: is_included,
+                    reason,
+                }
+            })
+            .collect();
+        let prompt = render_prompt(&messages);
+        ContextBuildReport {
+            prompt,
+            messages,
+            estimated_tokens: tokens,
+            budget,
+            decisions,
+        }
     }
 }
 
@@ -209,6 +291,42 @@ mod tests {
             messages,
             vec![m("user", "this message is intentionally much too large")]
         );
+    }
+
+    #[test]
+    fn build_report_explains_budget_inclusions_and_omissions_deterministically() {
+        let history = vec![
+            m("user", "older context"),
+            m("assistant", "older response"),
+            m("user", "latest"),
+        ];
+        let first = ContextBuilder::build_with_report(&history, &[], 12);
+        let second = ContextBuilder::build_with_report(&history, &[], 12);
+        assert_eq!(first, second);
+        assert_eq!(first.budget, 12);
+        assert_eq!(first.decisions.len(), 3);
+        assert!(first.decisions.last().unwrap().included);
+        assert!(first.decisions[..2]
+            .iter()
+            .any(|decision| decision.reason == super::ContextMessageReason::OmittedBudgetExceeded));
+    }
+
+    #[test]
+    fn build_report_marks_newest_message_preserved_over_budget() {
+        let history = vec![
+            m("user", "older"),
+            m("assistant", "older answer"),
+            m("user", "newest message is much too large for the budget"),
+        ];
+        let report = ContextBuilder::build_with_report(&history, &[], 1);
+        assert_eq!(report.messages, vec![m("user", "newest message is much too large for the budget")]);
+        assert_eq!(
+            report.decisions.last().unwrap().reason,
+            super::ContextMessageReason::PreservedNewestOverBudget
+        );
+        assert!(report.decisions[..2]
+            .iter()
+            .all(|decision| decision.reason == super::ContextMessageReason::OmittedBudgetExceeded));
     }
 
     #[test]
