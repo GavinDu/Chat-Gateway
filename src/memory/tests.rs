@@ -413,7 +413,7 @@ fn repeated_prompt_with_a_different_answer_is_a_new_turn() {
 }
 
 #[test]
-fn schema_v5_migrates_to_v6_with_long_term_memory_disabled_by_default() {
+fn schema_v5_migrates_to_v7_with_long_term_memory_disabled_by_default() {
     let fixture = Fixture::new();
     {
         let memory = fixture.open();
@@ -435,7 +435,7 @@ fn schema_v5_migrates_to_v6_with_long_term_memory_disabled_by_default() {
         .unwrap()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 6);
+    assert_eq!(version, 7);
     assert!(!memory.long_term_memory_enabled("owner-a").unwrap());
     let item_count: i64 = memory
         .lock()
@@ -1005,7 +1005,7 @@ fn schema_v1_database_migrates_provider_thread_map_without_losing_conversations(
         .unwrap()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 6);
+    assert_eq!(version, 7);
     let memory_tables: i64 = memory
         .lock()
         .unwrap()
@@ -1424,7 +1424,7 @@ fn schema_v3_migration_assigns_existing_conversations_to_local_owner() {
         .unwrap()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 6);
+    assert_eq!(version, 7);
     let memory_tables: i64 = memory
         .lock()
         .unwrap()
@@ -1572,7 +1572,7 @@ fn schema_v4_migration_adds_summary_table_without_losing_tenant_data() {
         .unwrap()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 6);
+    assert_eq!(version, 7);
     let memory_tables: i64 = memory
         .lock()
         .unwrap()
