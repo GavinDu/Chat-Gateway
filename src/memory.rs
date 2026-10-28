@@ -1090,7 +1090,7 @@ mod retrieval_ranking_tests {
         }
 
         let retrieved = memory.retrieve_long_term_memory_items("ranking-owner", 20).unwrap();
-        let mut tied = vec![
+        let mut tied = [
             (high_new.id.clone(), high_new.memory_key.clone()),
             (high_tie.id.clone(), high_tie.memory_key.clone()),
         ];
