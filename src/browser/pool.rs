@@ -923,23 +923,17 @@ fn browser_thread(
                                     let _guard = lock.lock().await;
                                     let provider_name = provider.name();
                                     let had_page = pages.borrow().contains_key(&provider);
-                                    let mut replacement = if had_page {
-                                        Some(browser.new_page().await?)
-                                    } else {
-                                        None
-                                    };
-
-                                    // Clear origin-scoped storage on a page at the provider
-                                    // origin before touching durable credentials. If this
-                                    // fails, leave the saved snapshot intact for retry.
-                                    if let Some(page) = replacement.as_mut() {
-                                        page.goto(provider.login_url()).await?;
-                                        let storage_cleared = page.evaluate(
-                                            "(()=>{try{localStorage.clear();return true;}catch(_){return false;}})()"
-                                        );
-                                        if !storage_cleared.as_bool().unwrap_or(false) {
-                                            anyhow::bail!("provider localStorage could not be cleared");
-                                        }
+                                    // Always create a cleanup page, even if warm-up failed or
+                                    // the provider currently has no warm page. localStorage is
+                                    // origin-persistent, so skipping this path would leave a
+                                    // saved credential behind on an otherwise unlinked provider.
+                                    let mut cleanup_page = browser.new_page().await?;
+                                    cleanup_page.goto(provider.login_url()).await?;
+                                    let storage_cleared = cleanup_page.evaluate(
+                                        "(()=>{try{localStorage.clear();return true;}catch(_){return false;}})()"
+                                    );
+                                    if !storage_cleared.as_bool().unwrap_or(false) {
+                                        anyhow::bail!("provider localStorage could not be cleared");
                                     }
 
                                     session::clear_provider_cookies(&browser, provider_name)?;
@@ -952,9 +946,9 @@ fn browser_thread(
                                     login_pages.borrow_mut().remove(&provider);
                                     login_meta.borrow_mut().remove(&provider);
 
-                                    if let Some(mut page) = replacement {
-                                        page.goto(provider.login_url()).await?;
-                                        pages.borrow_mut().insert(provider, Rc::new(page));
+                                    if had_page {
+                                        cleanup_page.goto(provider.login_url()).await?;
+                                        pages.borrow_mut().insert(provider, Rc::new(cleanup_page));
                                     }
 
                                     // Delete disk snapshots only after live cleanup and
