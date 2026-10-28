@@ -321,7 +321,8 @@ impl ObscuraPool {
 
     /// Clear provider cookies and page storage before deleting its saved session.
     pub async fn unlink_session(&self, name: &str) -> Result<bool> {
-        let provider = self.login_provider(name)?;
+        let provider =
+            Provider::from_name(name).ok_or_else(|| anyhow::anyhow!("unknown provider {name}"))?;
         let (tx, rx) = oneshot::channel();
         self.cmd_tx.send(Command::UnlinkSession { provider, reply: tx }).await
             .map_err(|_| anyhow::anyhow!("browser thread gone"))?;
@@ -865,7 +866,7 @@ fn browser_thread(
                             tokio::task::spawn_local(async move {
                                 let res: Result<()> = async {
                                     let lock = locks.borrow().get(&provider).cloned()
-                                        .ok_or_else(|| anyhow::anyhow!("provider page lock missing"))?;
+                                        .unwrap_or_else(|| Rc::new(tokio::sync::Mutex::new(())));
                                     let _guard = lock.lock().await;
                                     let mut page = browser.new_page().await?;
                                     page.goto(provider.login_url()).await?;
