@@ -414,15 +414,13 @@ pub(super) fn append_owned(
 #[cfg(test)]
 #[allow(dead_code)] // This module is also compiled through the standalone SQLite benchmark.
 mod concurrency_configuration_tests {
-    use super::*;
-
     #[test]
     fn file_backed_database_enforces_expected_concurrency_pragmas() -> Result<()> {
         let path = std::env::temp_dir().join(format!(
             "chat-gateway-sqlite-pragmas-{}.sqlite3",
             uuid::Uuid::new_v4()
         ));
-        let connection = open(Some(&path), None)?;
+        let connection = super::open(Some(&path), None)?;
 
         let journal_mode: String =
             connection.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
@@ -441,8 +439,8 @@ mod concurrency_configuration_tests {
         assert_eq!(busy_timeout_ms, 30_000);
         assert_eq!(foreign_keys, 1);
         assert_eq!(synchronous, 2, "durable writes require synchronous=FULL");
-        assert_eq!(schema_version, VERSION);
-        assert_eq!(application_id, APPLICATION_ID);
+        assert_eq!(schema_version, super::VERSION);
+        assert_eq!(application_id, super::APPLICATION_ID);
 
         drop(connection);
         let _ = std::fs::remove_file(&path);
@@ -457,8 +455,8 @@ mod concurrency_configuration_tests {
             "chat-gateway-sqlite-concurrent-open-{}.sqlite3",
             uuid::Uuid::new_v4()
         ));
-        let first = open(Some(&path), None)?;
-        let second = open(Some(&path), None)?;
+        let first = super::open(Some(&path), None)?;
+        let second = super::open(Some(&path), None)?;
 
         let first_mode: String =
             first.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
