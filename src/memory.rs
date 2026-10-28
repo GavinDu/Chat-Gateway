@@ -550,6 +550,16 @@ impl UnifiedMemory {
     }
 
     /// Delete conversations whose activity timestamp is older than the cutoff.
+    /// Run retention deletion on Tokio's blocking pool.
+    pub async fn purge_expired_conversations_blocking(
+        self: Arc<Self>,
+        cutoff_unix_seconds: i64,
+    ) -> anyhow::Result<usize> {
+        tokio::task::spawn_blocking(move || self.purge_expired_conversations(cutoff_unix_seconds))
+            .await
+            .map_err(|error| anyhow::anyhow!("conversation retention task failed: {error}"))?
+    }
+
     pub fn purge_expired_conversations(&self, cutoff_unix_seconds: i64) -> anyhow::Result<usize> {
         let mut connection = self.lock()?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
