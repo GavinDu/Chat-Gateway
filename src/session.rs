@@ -300,13 +300,11 @@ pub fn list_session_records() -> Result<Vec<(String, bool, bool)>> {
 /// retained until every new record has been written; on an ordinary error the
 /// operation rolls back already-replaced records before returning.
 pub fn rotate_session_vault_from_env() -> Result<usize> {
-    use zeroize::Zeroize;
-    let mut old_key = vault_key_from_env_named("CHAT_GATEWAY_VAULT_OLD_KEY")?;
-    let mut new_key = vault_key_from_env()?;
-    let result = rotate_session_vault_key(&old_key, &new_key);
-    old_key.zeroize();
-    new_key.zeroize();
-    result
+    let old_key = zeroize::Zeroizing::new(vault_key_from_env_named(
+        "CHAT_GATEWAY_VAULT_OLD_KEY",
+    )?);
+    let new_key = zeroize::Zeroizing::new(vault_key_from_env()?);
+    rotate_session_vault_key(&old_key, &new_key)
 }
 
 pub fn rotate_session_vault_key(old_key: &[u8; 32], new_key: &[u8; 32]) -> Result<usize> {
