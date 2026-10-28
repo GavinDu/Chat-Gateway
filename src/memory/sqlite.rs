@@ -3,7 +3,7 @@ use anyhow::{bail, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use std::{collections::HashMap, fs, path::Path, time::Duration};
 
-const VERSION: i64 = 5;
+const VERSION: i64 = 6;
 const APPLICATION_ID: i64 = 0x4347574d; // CGWM
 const PROVIDER_THREADS_SCHEMA: &str = "
     CREATE TABLE provider_threads (
@@ -168,6 +168,9 @@ fn initialize(connection: &mut Connection, legacy: Option<&Path>) -> Result<()> 
     } else if version == 4 && app == APPLICATION_ID {
         tx.execute_batch(ROLLING_SUMMARIES_SCHEMA)?;
         tx.pragma_update(None, "user_version", VERSION)?;
+    } else if version == 5 && app == APPLICATION_ID {
+        tx.execute_batch("    CREATE TABLE memory_settings (\n        owner_key_id TEXT PRIMARY KEY NOT NULL,\n        enabled INTEGER NOT NULL CHECK(enabled IN (0, 1)),\n        updated_at INTEGER NOT NULL\n    );\n    CREATE TABLE memory_items (\n        id TEXT PRIMARY KEY NOT NULL,\n        owner_key_id TEXT NOT NULL,\n        memory_key TEXT NOT NULL,\n        value TEXT NOT NULL,\n        source_conversation_id TEXT,\n        confidence REAL NOT NULL CHECK(confidence >= 0.0 AND confidence <= 1.0),\n        created_at INTEGER NOT NULL,\n        updated_at INTEGER NOT NULL,\n        expires_at INTEGER,\n        CHECK(length(trim(memory_key)) > 0),\n        CHECK(length(trim(value)) > 0)\n    );\n    CREATE INDEX memory_items_owner_updated_idx ON memory_items(owner_key_id, updated_at DESC);\n    CREATE INDEX memory_items_owner_key_idx ON memory_items(owner_key_id, memory_key);\n")?;
+        tx.pragma_update(None, "user_version", VERSION)?;
     } else if version != VERSION || app != APPLICATION_ID {
         bail!("unsupported conversation schema version {version} (expected {VERSION}) or application id {app}");
     }
@@ -228,7 +231,7 @@ fn initialize(connection: &mut Connection, legacy: Option<&Path>) -> Result<()> 
 }
 
 fn validate_schema(connection: &Connection) -> Result<()> {
-    // Version 5 is owned by this application. Fail closed if its definitions
+    // Version 6 is owned by this application. Fail closed if its definitions
     // were changed, including constraints that SELECT alone cannot validate.
     let expected = Connection::open_in_memory()?;
     expected.execute_batch(SCHEMA)?;
