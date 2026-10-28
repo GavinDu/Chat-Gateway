@@ -432,7 +432,7 @@ fn long_term_memory_is_opt_in_owner_scoped_and_deletable() {
     assert_eq!(memory.retrieve_long_term_memory_items("owner-b", 5).unwrap().len(), 0);
     assert_eq!(memory.retrieve_long_term_memory_items("owner-a", 5).unwrap(), vec![item.clone()]);
 
-    assert!(memory.delete_long_term_memory_item("owner-b", &item.id).unwrap() == false);
+    assert!(!memory.delete_long_term_memory_item("owner-b", &item.id).unwrap());
     assert!(memory.delete_long_term_memory_item("owner-a", &item.id).unwrap());
     assert!(memory.list_long_term_memory_items("owner-a").unwrap().is_empty());
 }
