@@ -1779,7 +1779,10 @@ fn file_backed_database_uses_wal_and_configured_busy_timeout() {
     let synchronous: i64 = connection
         .query_row("PRAGMA synchronous", [], |row| row.get(0))
         .expect("synchronous mode should be readable");
-    assert_eq!(synchronous, 2, "FULL synchronous durability must be enabled");
+    assert_eq!(
+        synchronous, 2,
+        "FULL synchronous durability must be enabled"
+    );
 
     drop(connection);
     let _ = std::fs::remove_file(&path);
