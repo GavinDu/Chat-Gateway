@@ -357,8 +357,6 @@ pub(super) fn append_owned(
     Ok(())
 }
 
-
-#[cfg(test)]
 #[cfg(test)]
 mod connection_policy_tests {
     use super::open;
