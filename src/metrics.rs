@@ -60,6 +60,7 @@ struct MetricData {
     poll_tick_ms: BTreeMap<String, Histogram>,
     poll_evaluations: BTreeMap<String, u64>,
     provider_outcomes: BTreeMap<(String, String), u64>,
+    browser_worker_restarts: u64,
 }
 
 static DATA: OnceLock<Mutex<MetricData>> = OnceLock::new();
@@ -93,6 +94,12 @@ pub fn record_browser_poll(provider: &str, evaluations: u64, duration_ms: u64) {
 }
 
 /// Record the completion tail: elapsed time from the most recent emitted delta to done.
+pub fn record_browser_worker_restart() {
+    if let Ok(mut data) = data().lock() {
+        data.browser_worker_restarts += 1;
+    }
+}
+
 pub fn record_provider_tail(provider: &str, duration_ms: u64) {
     if let Ok(mut data) = data().lock() {
         data.provider_tail_ms
@@ -221,6 +228,12 @@ pub fn render_with_provider_states(provider_states: &[(String, String)]) -> Stri
             escape_label(outcome)
         );
     }
+    let _ = writeln!(out, "# TYPE gateway_browser_worker_restarts_total counter");
+    let _ = writeln!(
+        out,
+        "gateway_browser_worker_restarts_total {}",
+        data.browser_worker_restarts
+    );
     let _ = writeln!(out, "# TYPE gateway_provider_session_state gauge");
     for (provider, state) in provider_states {
         for known_state in ["unknown", "ready", "needs_login", "degraded"] {
@@ -239,6 +252,20 @@ pub fn render_with_provider_states(provider_states: &[(String, String)]) -> Stri
 #[cfg(test)]
 mod tests {
     use super::{escape_label, normalize_route, render_with_provider_states, Histogram};
+
+    #[test]
+    fn browser_worker_restart_metric_counts_successful_restarts() {
+        super::record_browser_worker_restart();
+        let metrics = render_with_provider_states(&[]);
+        assert!(metrics.contains("# TYPE gateway_browser_worker_restarts_total counter"));
+        let value = metrics
+            .lines()
+            .find(|line| line.starts_with("gateway_browser_worker_restarts_total "))
+            .and_then(|line| line.split_whitespace().nth(1))
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap();
+        assert!(value >= 1);
+    }
 
     #[test]
     fn browser_poll_metrics_track_evaluations_and_tick_duration() {

@@ -7,6 +7,7 @@ use dashmap::DashMap;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot, Notify, OwnedSemaphorePermit, Semaphore};
@@ -50,10 +51,12 @@ impl std::error::Error for ProviderBusyError {}
 /// Provider switch is therefore a channel send + map lookup, not a
 /// process/tab spawn.
 pub struct ObscuraPool {
-    cmd_tx: mpsc::Sender<Command>,
+    cmd_tx: Arc<tokio::sync::RwLock<mpsc::Sender<Command>>>,
     ready: tokio::sync::Mutex<Option<oneshot::Receiver<Result<()>>>>,
     semaphores: DashMap<String, Arc<Semaphore>>,
     cfg: Arc<AppConfig>,
+    shutting_down: Arc<AtomicBool>,
+    worker_ready: Arc<AtomicBool>,
 }
 
 enum Command {
@@ -190,13 +193,71 @@ impl ObscuraPool {
                 );
             }
         }
+        let cmd_tx = Arc::new(tokio::sync::RwLock::new(cmd_tx));
+        let shutting_down = Arc::new(AtomicBool::new(false));
+        let worker_ready = Arc::new(AtomicBool::new(false));
         let pool = Arc::new(Self {
-            cmd_tx,
+            cmd_tx: cmd_tx.clone(),
             ready: tokio::sync::Mutex::new(Some(ready_rx)),
             semaphores,
             cfg: cfg.clone(),
+            shutting_down: shutting_down.clone(),
+            worker_ready: worker_ready.clone(),
         });
-        browser_thread(cfg, cmd_rx, ready_tx);
+        browser_thread(cfg.clone(), cmd_rx, ready_tx, worker_ready.clone());
+
+        // Recreate the thread-affine engine after a crash; never move Page values
+        // between threads. The worker performs the same browser build and warm-up
+        // sequence before it is advertised as ready again.
+        tokio::spawn(async move {
+            let mut backoff = Duration::from_secs(1);
+            loop {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                if shutting_down.load(Ordering::Acquire) {
+                    return;
+                }
+                if !cmd_tx.read().await.is_closed() {
+                    continue;
+                }
+                worker_ready.store(false, Ordering::Release);
+                tokio::time::sleep(backoff).await;
+                if shutting_down.load(Ordering::Acquire) {
+                    return;
+                }
+                if !cmd_tx.read().await.is_closed() {
+                    continue;
+                }
+                let (next_tx, next_rx) = mpsc::channel::<Command>(64);
+                *cmd_tx.write().await = next_tx;
+                let (next_ready_tx, next_ready_rx) = oneshot::channel::<Result<()>>();
+                browser_thread(cfg.clone(), next_rx, next_ready_tx, worker_ready.clone());
+                match tokio::time::timeout(Duration::from_secs(90), next_ready_rx).await {
+                    Ok(Ok(Ok(()))) => {
+                        worker_ready.store(true, Ordering::Release);
+                        crate::metrics::record_browser_worker_restart();
+                        tracing::info!("browser worker restarted and warmed successfully");
+                        backoff = Duration::from_secs(1);
+                    }
+                    Ok(Ok(Err(error))) => {
+                        tracing::warn!(error = %error, "browser worker restart failed during warm-up");
+                        backoff = (backoff * 2).min(Duration::from_secs(30));
+                    }
+                    Ok(Err(_)) => {
+                        tracing::warn!("browser worker exited before restart warm-up completed");
+                        backoff = (backoff * 2).min(Duration::from_secs(30));
+                    }
+                    Err(_) => {
+                        tracing::warn!("browser worker restart warm-up timed out");
+                        // Close the timed-out worker's channel so the next
+                        // supervisor pass can retry instead of remaining stuck.
+                        let (dead_tx, dead_rx) = mpsc::channel::<Command>(1);
+                        drop(dead_rx);
+                        *cmd_tx.write().await = dead_tx;
+                        backoff = (backoff * 2).min(Duration::from_secs(30));
+                    }
+                }
+            }
+        });
         Ok(pool)
     }
 
@@ -206,7 +267,7 @@ impl ObscuraPool {
     /// must fail closed in that state instead of advertising the configured
     /// providers as usable.
     pub fn worker_alive(&self) -> bool {
-        !self.cmd_tx.is_closed()
+        self.worker_ready.load(Ordering::Acquire)
     }
 
     /// Await browser build + per-provider warm-up (v2 ordering: session
@@ -217,6 +278,7 @@ impl ObscuraPool {
         if let Some(rx) = slot.take() {
             rx.await
                 .map_err(|_| anyhow::anyhow!("browser thread died during warm-up"))??;
+            self.worker_ready.store(true, Ordering::Release);
         }
         Ok(())
     }
@@ -252,6 +314,8 @@ impl ObscuraPool {
             Provider::from_name(name).ok_or_else(|| anyhow::anyhow!("unknown provider {name}"))?;
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
+            .read()
+            .await
             .send(Command::Discover {
                 provider,
                 reply: tx,
@@ -285,6 +349,8 @@ impl ObscuraPool {
         );
         let (tx, rx) = mpsc::channel(32);
         self.cmd_tx
+            .read()
+            .await
             .send(Command::Send {
                 provider,
                 prompt,
@@ -305,6 +371,8 @@ impl ObscuraPool {
             Provider::from_name(name).ok_or_else(|| anyhow::anyhow!("unknown provider {name}"))?;
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
+            .read()
+            .await
             .send(Command::CurrentUrl {
                 provider,
                 reply: tx,
@@ -323,6 +391,8 @@ impl ObscuraPool {
             Provider::from_name(name).ok_or_else(|| anyhow::anyhow!("unknown provider {name}"))?;
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
+            .read()
+            .await
             .send(Command::TestAdapter {
                 provider,
                 reply: tx,
@@ -337,6 +407,8 @@ impl ObscuraPool {
         let provider = self.login_provider(name)?;
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
+            .read()
+            .await
             .send(Command::RefreshSession {
                 provider,
                 reply: tx,
@@ -353,6 +425,8 @@ impl ObscuraPool {
             Provider::from_name(name).ok_or_else(|| anyhow::anyhow!("unknown provider {name}"))?;
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
+            .read()
+            .await
             .send(Command::UnlinkSession {
                 provider,
                 reply: tx,
@@ -379,6 +453,8 @@ impl ObscuraPool {
         let provider = self.login_provider(name)?;
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
+            .read()
+            .await
             .send(Command::LoginStart {
                 provider,
                 reply: tx,
@@ -394,6 +470,8 @@ impl ObscuraPool {
         let provider = self.login_provider(name)?;
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
+            .read()
+            .await
             .send(Command::LoginCancel {
                 provider,
                 reply: tx,
@@ -412,6 +490,8 @@ impl ObscuraPool {
         let provider = self.login_provider(name)?;
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
+            .read()
+            .await
             .send(Command::LoginComplete {
                 provider,
                 reply: tx,
@@ -426,6 +506,8 @@ impl ObscuraPool {
     pub async fn login_status_all(&self) -> Result<Vec<LoginActiveInfo>> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
+            .read()
+            .await
             .send(Command::LoginStatusAll { reply: tx })
             .await
             .map_err(|_| anyhow::anyhow!("browser thread gone"))?;
@@ -438,6 +520,8 @@ impl ObscuraPool {
         let provider = self.login_provider(name)?;
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
+            .read()
+            .await
             .send(Command::LoginView {
                 provider,
                 reply: tx,
@@ -458,6 +542,8 @@ impl ObscuraPool {
         }
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
+            .read()
+            .await
             .send(Command::LoginAct {
                 provider,
                 action,
@@ -471,8 +557,12 @@ impl ObscuraPool {
 
     /// Stop the browser worker after HTTP requests have drained.
     pub async fn shutdown(&self) -> Result<()> {
+        self.shutting_down.store(true, Ordering::Release);
+        self.worker_ready.store(false, Ordering::Release);
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
+            .read()
+            .await
             .send(Command::Shutdown { reply: tx })
             .await
             .map_err(|_| anyhow::anyhow!("browser thread gone during shutdown"))?;
@@ -577,12 +667,22 @@ fn build_browser(cfg: &AppConfig) -> Result<obscura_core::Browser> {
     Ok(builder.build()?)
 }
 
+struct WorkerReadyGuard(Arc<AtomicBool>);
+
+impl Drop for WorkerReadyGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
 fn browser_thread(
     cfg: Arc<AppConfig>,
     mut cmd_rx: mpsc::Receiver<Command>,
     ready_tx: oneshot::Sender<Result<()>>,
+    worker_ready: Arc<AtomicBool>,
 ) {
     std::thread::spawn(move || {
+        let _ready_guard = WorkerReadyGuard(worker_ready.clone());
         let rt = match tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -658,6 +758,7 @@ fn browser_thread(
                     }
                 }
                 tracing::info!("ObscuraPool warmed: {} pages", pages.borrow().len());
+                worker_ready.store(true, Ordering::Release);
                 let _ = ready_tx.send(Ok(()));
 
                 while let Some(cmd) = cmd_rx.recv().await {
