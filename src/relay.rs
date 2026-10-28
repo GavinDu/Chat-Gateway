@@ -358,33 +358,24 @@ fn authenticated_request(app: &crate::AppState, headers: &HeaderMap) -> Result<(
 }
 
 pub async fn status(State(app): State<Arc<crate::AppState>>, headers: HeaderMap) -> Response {
-    if let Err(response) = authenticated_request(&app, &headers) {
-        return *response;
+    if let Err(response) = authenticated_request(&app, &headers) { return *response; }
+    let providers: anyhow::Result<Vec<_>> = [
+        "qwen", "metaai", "claude", "chatgpt", "gemini", "grok", "mistral", "perplexity",
+    ].iter().map(|provider| {
+        crate::session::load_session_file(provider)
+            .map(|file| serde_json::json!({"provider":provider,"linked":file.is_some()}))
+    }).collect();
+    match providers {
+        Ok(providers) => Json(serde_json::json!({
+            "ok": true,
+            "providers": providers,
+            "vault_mode": std::env::var("CHAT_GATEWAY_SESSION_STORE").as_deref() == Ok("vault")
+        })).into_response(),
+        Err(_) => {
+            tracing::error!("browser relay session status read failed");
+            json_error(StatusCode::INTERNAL_SERVER_ERROR, "session_status_unavailable", "stored session status could not be read")
+        }
     }
-    let mut providers = Vec::new();
-    for provider in [
-        "qwen",
-        "metaai",
-        "claude",
-        "chatgpt",
-        "gemini",
-        "grok",
-        "mistral",
-        "perplexity",
-    ] {
-        let session_present = match crate::session::load_session_file(provider) {
-            Ok(session) => session.is_some(),
-            Err(_) => {
-                return json_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "session_status_unavailable",
-                    "provider session status could not be read; check vault configuration",
-                );
-            }
-        };
-        providers.push(serde_json::json!({"provider":provider,"linked":session_present}));
-    }
-    Json(serde_json::json!({"ok":true,"providers":providers,"vault_mode":std::env::var("CHAT_GATEWAY_SESSION_STORE").as_deref()==Ok("vault")})).into_response()
 }
 
 pub async fn import_session(
@@ -393,20 +384,16 @@ pub async fn import_session(
     Path(provider): Path<String>,
     Json(file): Json<crate::session::SessionFile>,
 ) -> Response {
-    if let Err(response) = authenticated_request(&app, &headers) {
-        return *response;
-    }
+    if let Err(response) = authenticated_request(&app, &headers) { return *response; }
     match crate::session::import_relay_session(&provider, &file) {
         Ok(()) => {
-            Json(serde_json::json!({"ok":true,"provider":provider,"linked":true})).into_response()
+            let applied = app.pool.refresh_session(&provider).await.is_ok();
+            if !applied { tracing::warn!(provider, "browser relay session stored; live page refresh is pending"); }
+            Json(serde_json::json!({"ok":true,"provider":provider,"linked":true,"applied":applied,"restart_required":!applied})).into_response()
         }
         Err(error) => {
             tracing::warn!(provider, error = %error, "browser relay session import rejected");
-            json_error(
-                StatusCode::BAD_REQUEST,
-                "session_import_rejected",
-                "session was rejected; check vault configuration and provider permissions",
-            )
+            json_error(StatusCode::BAD_REQUEST, "session_import_rejected", "session was rejected; check vault configuration and provider permissions")
         }
     }
 }
@@ -416,23 +403,13 @@ pub async fn unlink(
     headers: HeaderMap,
     Path(provider): Path<String>,
 ) -> Response {
-    if let Err(response) = authenticated_request(&app, &headers) {
-        return *response;
-    }
-    match crate::session::delete_session_snapshot(&provider) {
+    if let Err(response) = authenticated_request(&app, &headers) { return *response; }
+    match app.pool.unlink_session(&provider).await {
         Ok(removed) => {
-            tracing::info!(
-                provider,
-                "browser relay provider unlinked from persistent storage"
-            );
-            Json(serde_json::json!({"ok":true,"provider":provider,"unlinked":removed}))
-                .into_response()
+            tracing::info!(provider, "browser relay provider unlinked from live browser and persistent storage");
+            Json(serde_json::json!({"ok":true,"provider":provider,"unlinked":removed})).into_response()
         }
-        Err(_) => json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "unlink_failed",
-            "provider session could not be removed",
-        ),
+        Err(_) => json_error(StatusCode::INTERNAL_SERVER_ERROR, "unlink_failed", "provider session could not be revoked")
     }
 }
 
