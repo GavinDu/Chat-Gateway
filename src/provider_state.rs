@@ -2,6 +2,7 @@
 use std::{
     collections::HashMap,
     sync::{Mutex, OnceLock},
+    time::{Duration, SystemTime},
 };
 
 /// Typed provider lifecycle state. Keep the string representation at the
@@ -30,7 +31,12 @@ impl ProviderSessionState {
 pub struct ProviderSessionStatus {
     pub state: ProviderSessionState,
     pub last_error: Option<String>,
+    /// Earliest time a degraded provider may receive a half-open retry.
+    /// Expired sessions are never re-admitted by timeout alone.
+    pub retry_after: Option<SystemTime>,
 }
+
+const DEGRADED_RETRY_COOLDOWN: Duration = Duration::from_secs(15);
 
 static STATES: OnceLock<Mutex<HashMap<String, ProviderSessionStatus>>> = OnceLock::new();
 
@@ -46,6 +52,7 @@ pub fn status(provider: &str) -> ProviderSessionStatus {
         .unwrap_or(ProviderSessionStatus {
             state: ProviderSessionState::Unknown,
             last_error: None,
+            retry_after: None,
         })
 }
 
@@ -56,6 +63,7 @@ pub fn record_success(provider: &str) {
             ProviderSessionStatus {
                 state: ProviderSessionState::Ready,
                 last_error: None,
+                retry_after: None,
             },
         );
     }
@@ -83,6 +91,15 @@ fn indicates_expired_session(error: &str) -> bool {
 
 pub fn record_error(provider: &str, error: &str) {
     let expired = indicates_expired_session(error);
+    let retry_after = if expired {
+        None
+    } else {
+        SystemTime::now().checked_add(DEGRADED_RETRY_COOLDOWN)
+    };
+    record_error_state(provider, expired, retry_after);
+}
+
+fn record_error_state(provider: &str, expired: bool, retry_after: Option<SystemTime>) {
     if let Ok(mut map) = states().lock() {
         map.insert(
             provider.to_owned(),
@@ -98,13 +115,25 @@ pub fn record_error(provider: &str, error: &str) {
                 } else {
                     "provider request failed; retry may succeed".to_owned()
                 }),
+                retry_after,
             },
         );
     }
 }
 
+/// Degraded providers are excluded during cooldown, then re-admitted for a
+/// half-open retry. A failed retry starts a fresh cooldown. Expired sessions
+/// require successful re-authentication and are never re-admitted by timeout.
 pub fn is_routable(provider: &str) -> bool {
-    status(provider).state != ProviderSessionState::NeedsLogin
+    let current = status(provider);
+    match current.state {
+        ProviderSessionState::NeedsLogin => false,
+        ProviderSessionState::Degraded => current
+            .retry_after
+            .map(|retry_after| SystemTime::now() >= retry_after)
+            .unwrap_or(false),
+        ProviderSessionState::Unknown | ProviderSessionState::Ready => true,
+    }
 }
 
 #[cfg(test)]
@@ -150,7 +179,15 @@ mod tests {
                 ProviderSessionState::Degraded,
                 "{message}"
             );
-            assert!(is_routable(&provider), "{message} should remain routable");
+            assert!(
+                !is_routable(&provider),
+                "{message} should enter the degraded cooldown"
+            );
+            let retry_after = status(&provider).retry_after.unwrap();
+            record_error_state(&provider, false, Some(SystemTime::UNIX_EPOCH));
+            assert!(is_routable(&provider), "{message} should be half-open after cooldown");
+            assert_eq!(status(&provider).retry_after, Some(SystemTime::UNIX_EPOCH));
+            assert!(retry_after > SystemTime::now());
         }
     }
 
@@ -192,13 +229,14 @@ mod tests {
         let provider = "test-provider-session-state";
         record_error(provider, "temporary network timeout");
         assert_eq!(status(provider).state, ProviderSessionState::Degraded);
-        assert!(is_routable(provider));
+        assert!(!is_routable(provider));
         record_error(provider, "session_expired: login required");
         assert_eq!(status(provider).state, ProviderSessionState::NeedsLogin);
         assert!(!is_routable(provider));
         record_success(provider);
         assert_eq!(status(provider).state, ProviderSessionState::Ready);
         assert!(is_routable(provider));
+        assert_eq!(status(provider).retry_after, None);
     }
 
     #[test]
