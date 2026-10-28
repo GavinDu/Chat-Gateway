@@ -1897,12 +1897,12 @@ async fn chat_completions(
         );
     }
 
-    let mut candidates = match state.router.resolve_for_owner(
-        &owner_key_id,
-        &req.model,
-        conversation_id.as_deref(),
-        &state.memory,
-    ) {
+    let mut candidates = match state.router.resolve_for_owner_blocking(
+        owner_key_id.clone(),
+        req.model.clone(),
+        conversation_id.clone(),
+        state.memory.clone(),
+    ).await {
         Ok(candidates) => candidates,
         Err(_error) => {
             tracing::error!(conversation_id = ?conversation_id, "provider affinity read failed");
