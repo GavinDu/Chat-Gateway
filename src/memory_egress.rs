@@ -5,6 +5,15 @@
 //! default; linking a provider is not consent to disclose it.
 use std::collections::HashSet;
 
+fn escape_memory_field(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ProviderDataClass {
     CurrentTurn,
