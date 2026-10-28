@@ -196,7 +196,7 @@ fn initialize(connection: &mut Connection, legacy: Option<&Path>) -> Result<()> 
         )?;
         tx.execute_batch(ROLLING_SUMMARIES_SCHEMA)?;
         tx.execute_batch(MEMORY_SCHEMA)?;
-        tx.pragma_update(None, "user_version", 5)?;
+        tx.pragma_update(None, "user_version", VERSION)?;
     } else if version == 2 && app == APPLICATION_ID {
         tx.execute_batch(
             "ALTER TABLE conversations ADD COLUMN last_activity_at INTEGER NOT NULL DEFAULT 0;
@@ -205,14 +205,14 @@ fn initialize(connection: &mut Connection, legacy: Option<&Path>) -> Result<()> 
         )?;
         tx.execute_batch(ROLLING_SUMMARIES_SCHEMA)?;
         tx.execute_batch(MEMORY_SCHEMA)?;
-        tx.pragma_update(None, "user_version", 5)?;
+        tx.pragma_update(None, "user_version", VERSION)?;
     } else if version == 3 && app == APPLICATION_ID {
         tx.execute_batch(
             "ALTER TABLE conversations ADD COLUMN owner_key_id TEXT NOT NULL DEFAULT 'local';",
         )?;
         tx.execute_batch(ROLLING_SUMMARIES_SCHEMA)?;
         tx.execute_batch(MEMORY_SCHEMA)?;
-        tx.pragma_update(None, "user_version", 5)?;
+        tx.pragma_update(None, "user_version", VERSION)?;
     } else if version == 4 && app == APPLICATION_ID {
         tx.execute_batch(ROLLING_SUMMARIES_SCHEMA)?;
         tx.execute_batch(MEMORY_SCHEMA)?;
