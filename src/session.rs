@@ -222,7 +222,6 @@ impl SessionStore for VaultSessionStore {
     }
 }
 
-
 /// Migrate one legacy plaintext snapshot into the encrypted vault. Isolated
 /// paths make migration failure handling testable without process-wide env or
 /// working-directory changes.
