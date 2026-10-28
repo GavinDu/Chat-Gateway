@@ -592,14 +592,7 @@ fn long_term_memory_rejects_invalid_confidence_and_expired_items() {
         .save_long_term_memory_item("owner-a", "invalid", "value", None, f64::NAN, None)
         .is_err());
     memory
-        .save_long_term_memory_item(
-            "owner-a",
-            "expired",
-            "stale fact",
-            None,
-            1.0,
-            Some(1),
-        )
+        .save_long_term_memory_item("owner-a", "expired", "stale fact", None, 1.0, Some(1))
         .unwrap();
     assert!(memory.retrieve_long_term_memory_items("owner-a", 5).unwrap().is_empty());
     assert_eq!(memory.list_long_term_memory_items("owner-a").unwrap().len(), 1);
