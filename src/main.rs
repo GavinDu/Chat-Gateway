@@ -2030,7 +2030,7 @@ async fn chat_completions(
                         )
                     }
                 }
-            },
+            }
             None => None,
         };
         let supports_reopen = providers::ADAPTERS
