@@ -77,7 +77,7 @@ pub(crate) async fn readiness(State(state): State<Arc<AppState>>) -> impl IntoRe
         .iter()
         .filter(|p| {
             p.enabled
-                && provider_state::is_routable(&p.name)
+                && provider_state::is_available(&p.name)
                 && provider_guard::provider_disabled_reason(&p.name).is_none()
         })
         .count();
