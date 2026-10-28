@@ -324,21 +324,33 @@ impl ObscuraPool {
     pub async fn refresh_session(&self, name: &str) -> Result<()> {
         let provider = self.login_provider(name)?;
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx.send(Command::RefreshSession { provider, reply: tx }).await
+        self.cmd_tx
+            .send(Command::RefreshSession {
+                provider,
+                reply: tx,
+            })
+            .await
             .map_err(|_| anyhow::anyhow!("browser thread gone"))?;
-        rx.await.map_err(|_| anyhow::anyhow!("browser thread dropped session refresh"))?
+        rx.await
+            .map_err(|_| anyhow::anyhow!("browser thread dropped session refresh"))?
     }
 
     /// Revoke a provider session from the live cookie jar and persistent vault.
     pub async fn unlink_session(&self, name: &str) -> Result<bool> {
         // Unlink must remain available even when the provider is disabled or
         // its vault cannot be decrypted during startup.
-        let provider = Provider::from_name(name)
-            .ok_or_else(|| anyhow::anyhow!("unknown provider {name}"))?;
+        let provider =
+            Provider::from_name(name).ok_or_else(|| anyhow::anyhow!("unknown provider {name}"))?;
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx.send(Command::UnlinkSession { provider, reply: tx }).await
+        self.cmd_tx
+            .send(Command::UnlinkSession {
+                provider,
+                reply: tx,
+            })
+            .await
             .map_err(|_| anyhow::anyhow!("browser thread gone"))?;
-        rx.await.map_err(|_| anyhow::anyhow!("browser thread dropped session unlink"))?
+        rx.await
+            .map_err(|_| anyhow::anyhow!("browser thread dropped session unlink"))?
     }
 
     /// Login UI: open a dedicated login page for a provider (fresh page,
