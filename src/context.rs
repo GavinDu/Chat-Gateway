@@ -259,14 +259,7 @@ mod tests {
         };
 
         assert!(matches!(
-            ContextBuilder::plan(
-                &history,
-                &incoming,
-                "chatgpt",
-                Some(&thread),
-                true,
-                1000
-            ),
+            ContextBuilder::plan(&history, &incoming, "chatgpt", Some(&thread), true, 1000),
             super::ContextPlan::Replay { .. }
         ));
     }
