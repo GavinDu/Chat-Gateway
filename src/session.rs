@@ -478,7 +478,7 @@ pub fn restore_vault_backup(backup_dir: &str) -> Result<usize> {
 /// old key. Runtime write failures trigger rollback of already-replaced files.
 pub fn rotate_vault_key(new_key: &[u8; 32]) -> Result<(usize, String)> {
     let old_key = vault_key_from_env()?;
-    if old_key.as_ref() == new_key {
+    if old_key[..] == new_key[..] {
         anyhow::bail!("new vault key must differ from the current key");
     }
 
