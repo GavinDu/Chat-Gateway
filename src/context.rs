@@ -46,7 +46,21 @@ impl ContextBuilder {
         budget: usize,
     ) -> ContextPlan {
         let delta = messages_after_overlap(history, incoming);
-        let thread_is_current = thread.is_some_and(|state| {
+        // A request that shares only a prefix with the durable transcript and
+        // then branches cannot safely continue the provider-side thread: that
+        // thread still contains the abandoned suffix. Replay the gateway's
+        // canonical transcript instead of appending onto divergent history.
+        let has_divergent_branch = {
+            let common_prefix = history
+                .iter()
+                .zip(incoming)
+                .take_while(|(stored, incoming)| stored == incoming)
+                .count();
+            common_prefix > 0
+                && common_prefix < history.len()
+                && common_prefix < incoming.len()
+        };
+        let thread_is_current = !has_divergent_branch && thread.is_some_and(|state| {
             supports_reopen
                 && state.provider == current_provider
                 && !state.thread_url.is_empty()
@@ -202,6 +216,34 @@ mod tests {
                 messages: vec![m("user", "new question")]
             }
         );
+    }
+
+    #[test]
+    fn planner_replays_when_incoming_transcript_branches_from_stored_history() {
+        let history = vec![
+            m("user", "first question"),
+            m("assistant", "first answer"),
+            m("user", "abandoned follow-up"),
+            m("assistant", "abandoned answer"),
+        ];
+        let incoming = vec![
+            m("user", "first question"),
+            m("assistant", "first answer"),
+            m("user", "different follow-up"),
+        ];
+        let thread = super::ThreadSyncState {
+            provider: "chatgpt".to_string(),
+            thread_url: "https://chatgpt.com/c/thread-1".to_string(),
+            synced_through_message_id: Some("stored-transcript-hash".to_string()),
+            last_stored_message_id: Some("stored-transcript-hash".to_string()),
+        };
+
+        assert!(matches!(
+            ContextBuilder::plan(&history, &incoming, "chatgpt", Some(&thread), true, 1000),
+            super::ContextPlan::Replay { preamble, messages }
+                if preamble.contains("CONVERSATION_CONTEXT_BEGIN")
+                    && messages.iter().any(|message| message.content == "different follow-up")
+        ));
     }
 
     #[test]
