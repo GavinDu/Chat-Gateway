@@ -936,15 +936,16 @@ fn browser_thread(
                                         anyhow::bail!("provider localStorage could not be cleared");
                                     }
 
-                                    session::clear_provider_cookies(&browser, provider_name)?;
-
-                                    // Drop every page that might retain auth state in JS
-                                    // memory before the final navigation. If navigation
-                                    // fails, the provider has no warm page rather than
-                                    // retaining a stale authenticated page.
+                                    // Cookie deletion can fail partway through. Drop
+                                    // every existing page before returning that error so
+                                    // no stale JavaScript context remains usable; retain
+                                    // disk snapshots for recovery and retry.
+                                    let cookie_cleanup =
+                                        session::clear_provider_cookies(&browser, provider_name);
                                     pages.borrow_mut().remove(&provider);
                                     login_pages.borrow_mut().remove(&provider);
                                     login_meta.borrow_mut().remove(&provider);
+                                    cookie_cleanup?;
 
                                     if had_page {
                                         cleanup_page.goto(provider.login_url()).await?;
