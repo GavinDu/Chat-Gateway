@@ -24,6 +24,29 @@ const ROLLING_SUMMARIES_SCHEMA: &str = "
         updated_at INTEGER NOT NULL
     );
 ";
+const MEMORY_SCHEMA: &str = "
+    CREATE TABLE memory_settings (
+        owner_key_id TEXT PRIMARY KEY NOT NULL,
+        enabled INTEGER NOT NULL CHECK(enabled IN (0, 1)),
+        updated_at INTEGER NOT NULL
+    );
+    CREATE TABLE memory_items (
+        id TEXT PRIMARY KEY NOT NULL,
+        owner_key_id TEXT NOT NULL,
+        memory_key TEXT NOT NULL,
+        value TEXT NOT NULL,
+        source_conversation_id TEXT,
+        confidence REAL NOT NULL CHECK(confidence >= 0.0 AND confidence <= 1.0),
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        expires_at INTEGER,
+        CHECK(length(trim(memory_key)) > 0),
+        CHECK(length(trim(value)) > 0),
+        UNIQUE(owner_key_id, memory_key)
+    );
+    CREATE INDEX memory_items_owner_updated_idx ON memory_items(owner_key_id, updated_at DESC);
+    CREATE INDEX memory_items_owner_key_idx ON memory_items(owner_key_id, memory_key);
+";
 const SCHEMA: &str = "
     CREATE TABLE conversations (
         id TEXT PRIMARY KEY NOT NULL,
@@ -172,6 +195,7 @@ fn initialize(connection: &mut Connection, legacy: Option<&Path>) -> Result<()> 
              UPDATE conversations SET last_activity_at = unixepoch() WHERE last_activity_at = 0;",
         )?;
         tx.execute_batch(ROLLING_SUMMARIES_SCHEMA)?;
+        tx.execute_batch(MEMORY_SCHEMA)?;
         tx.pragma_update(None, "user_version", VERSION)?;
     } else if version == 2 && app == APPLICATION_ID {
         tx.execute_batch(
@@ -180,15 +204,18 @@ fn initialize(connection: &mut Connection, legacy: Option<&Path>) -> Result<()> 
              UPDATE conversations SET last_activity_at = unixepoch() WHERE last_activity_at = 0;",
         )?;
         tx.execute_batch(ROLLING_SUMMARIES_SCHEMA)?;
+        tx.execute_batch(MEMORY_SCHEMA)?;
         tx.pragma_update(None, "user_version", VERSION)?;
     } else if version == 3 && app == APPLICATION_ID {
         tx.execute_batch(
             "ALTER TABLE conversations ADD COLUMN owner_key_id TEXT NOT NULL DEFAULT 'local';",
         )?;
         tx.execute_batch(ROLLING_SUMMARIES_SCHEMA)?;
+        tx.execute_batch(MEMORY_SCHEMA)?;
         tx.pragma_update(None, "user_version", VERSION)?;
     } else if version == 4 && app == APPLICATION_ID {
         tx.execute_batch(ROLLING_SUMMARIES_SCHEMA)?;
+        tx.execute_batch(MEMORY_SCHEMA)?;
         tx.pragma_update(None, "user_version", VERSION)?;
     } else if version == 5 && app == APPLICATION_ID {
         tx.execute_batch("    CREATE TABLE memory_settings (\n        owner_key_id TEXT PRIMARY KEY NOT NULL,\n        enabled INTEGER NOT NULL CHECK(enabled IN (0, 1)),\n        updated_at INTEGER NOT NULL\n    );\n    CREATE TABLE memory_items (\n        id TEXT PRIMARY KEY NOT NULL,\n        owner_key_id TEXT NOT NULL,\n        memory_key TEXT NOT NULL,\n        value TEXT NOT NULL,\n        source_conversation_id TEXT,\n        confidence REAL NOT NULL CHECK(confidence >= 0.0 AND confidence <= 1.0),\n        created_at INTEGER NOT NULL,\n        updated_at INTEGER NOT NULL,\n        expires_at INTEGER,\n        CHECK(length(trim(memory_key)) > 0),\n        CHECK(length(trim(value)) > 0),\n        UNIQUE(owner_key_id, memory_key)\n    );\n    CREATE INDEX memory_items_owner_updated_idx ON memory_items(owner_key_id, updated_at DESC);\n    CREATE INDEX memory_items_owner_key_idx ON memory_items(owner_key_id, memory_key);\n")?;
