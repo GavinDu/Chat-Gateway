@@ -1269,6 +1269,7 @@ fn delete_conversation_response(memory: &UnifiedMemory, conversation_id: &str) -
     delete_conversation_response_for_owner(memory, "local", conversation_id)
 }
 
+#[cfg(test)]
 fn delete_conversation_response_for_owner(
     memory: &UnifiedMemory,
     owner_key_id: &str,
@@ -1307,6 +1308,7 @@ fn export_conversation_response(memory: &UnifiedMemory, conversation_id: &str) -
     export_conversation_response_for_owner(memory, "local", conversation_id)
 }
 
+#[cfg(test)]
 fn export_conversation_response_for_owner(
     memory: &UnifiedMemory,
     owner_key_id: &str,
@@ -1703,6 +1705,7 @@ fn export_conversation_markdown_response(
     export_conversation_markdown_response_for_owner(memory, "local", conversation_id)
 }
 
+#[cfg(test)]
 fn export_conversation_markdown_response_for_owner(
     memory: &UnifiedMemory,
     owner_key_id: &str,
