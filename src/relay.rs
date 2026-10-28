@@ -361,7 +361,7 @@ pub async fn status(State(app): State<Arc<crate::AppState>>, headers: HeaderMap)
     if let Err(response) = authenticated_request(&app, &headers) {
         return *response;
     }
-    let providers = [
+    let providers: anyhow::Result<Vec<_>> = [
         "qwen",
         "metaai",
         "claude",
@@ -373,14 +373,26 @@ pub async fn status(State(app): State<Arc<crate::AppState>>, headers: HeaderMap)
     ]
     .iter()
     .map(|provider| {
-        let session_present = crate::session::load_session_file(provider)
-            .ok()
-            .flatten()
-            .is_some();
-        serde_json::json!({"provider":provider,"linked":session_present})
+        crate::session::load_session_file(provider).map(|file| {
+            serde_json::json!({"provider":provider,"linked":file.is_some()})
+        })
     })
-    .collect::<Vec<_>>();
-    Json(serde_json::json!({"ok":true,"providers":providers,"vault_mode":std::env::var("CHAT_GATEWAY_SESSION_STORE").as_deref()==Ok("vault")})).into_response()
+    .collect();
+    match providers {
+        Ok(providers) => Json(serde_json::json!({
+            "ok": true,
+            "providers": providers,
+            "vault_mode": std::env::var("CHAT_GATEWAY_SESSION_STORE").as_deref() == Ok("vault")
+        })).into_response(),
+        Err(_) => {
+            tracing::error!("browser relay session status read failed");
+            json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "session_status_unavailable",
+                "stored session status could not be read",
+            )
+        }
+    }
 }
 
 pub async fn import_session(
@@ -394,7 +406,17 @@ pub async fn import_session(
     }
     match crate::session::import_relay_session(&provider, &file) {
         Ok(()) => {
-            Json(serde_json::json!({"ok":true,"provider":provider,"linked":true})).into_response()
+            let applied = app.pool.refresh_session(&provider).await.is_ok();
+            if !applied {
+                tracing::warn!(provider, "browser relay session stored; live page refresh is pending");
+            }
+            Json(serde_json::json!({
+                "ok": true,
+                "provider": provider,
+                "linked": true,
+                "applied": applied,
+                "restart_required": !applied
+            })).into_response()
         }
         Err(error) => {
             tracing::warn!(provider, error = %error, "browser relay session import rejected");
@@ -415,19 +437,15 @@ pub async fn unlink(
     if let Err(response) = authenticated_request(&app, &headers) {
         return *response;
     }
-    match crate::session::delete_session_snapshot(&provider) {
+    match app.pool.unlink_session(&provider).await {
         Ok(removed) => {
-            tracing::info!(
-                provider,
-                "browser relay provider unlinked from persistent storage"
-            );
-            Json(serde_json::json!({"ok":true,"provider":provider,"unlinked":removed}))
-                .into_response()
+            tracing::info!(provider, "browser relay provider unlinked from live browser and persistent storage");
+            Json(serde_json::json!({"ok":true,"provider":provider,"unlinked":removed})).into_response()
         }
         Err(_) => json_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "unlink_failed",
-            "provider session could not be removed",
+            "provider session could not be revoked",
         ),
     }
 }
