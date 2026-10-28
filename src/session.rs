@@ -275,6 +275,29 @@ pub fn import_relay_session(provider: &str, file: &SessionFile) -> Result<()> {
     Ok(())
 }
 
+fn list_vaults_in(directory: &Path) -> Result<Vec<String>> {
+    const PROVIDERS: &[&str] = &[
+        "qwen", "metaai", "claude", "chatgpt", "gemini", "grok", "mistral", "perplexity",
+    ];
+    let mut found = Vec::new();
+    for provider in PROVIDERS {
+        let path = directory.join(format!("{provider}.vault"));
+        match std::fs::metadata(&path) {
+            Ok(metadata) if metadata.is_file() => found.push((*provider).to_owned()),
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(found)
+}
+
+/// List provider names with encrypted vault records. Never reads or emits
+/// cookie values, localStorage, ciphertext, or key material.
+pub fn list_encrypted_session_vaults() -> Result<Vec<String>> {
+    list_vaults_in(Path::new("sessions"))
+}
+
 pub fn delete_session_snapshot(provider: &str) -> Result<bool> {
     let vault_path = session_vault_path(provider)?;
     let legacy_path = session_path(provider)?;
@@ -1069,6 +1092,26 @@ mod atomic_session_write_tests {
         std::fs::create_dir(&destination).unwrap();
         assert!(write_session_file_atomically(&destination, b"secret").is_err());
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod vault_listing_tests {
+    use super::*;
+
+    #[test]
+    fn lists_only_known_provider_vault_filenames_without_reading_contents() {
+        let dir = std::env::temp_dir().join(format!(
+            "chat-gateway-vault-list-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("chatgpt.vault"), b"not-read-by-list").unwrap();
+        std::fs::write(dir.join("unknown.vault"), b"ignored").unwrap();
+        std::fs::write(dir.join("claude.json"), b"legacy").unwrap();
+
+        assert_eq!(list_vaults_in(&dir).unwrap(), vec!["chatgpt".to_string()]);
         std::fs::remove_dir_all(dir).unwrap();
     }
 }
