@@ -396,6 +396,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/health", get(api::health::health))
         .route("/ready", get(api::health::readiness))
         .route("/metrics", get(metrics_endpoint))
+        .route(
+            "/v1/admin/memory-egress-policy",
+            get(memory_egress_policy_status),
+        )
         .route("/v1/models", get(models))
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/conversations", get(list_conversations))
@@ -1067,6 +1071,28 @@ mod login_action_payload_tests {
 /// Startup validates configuration and warms the browser pool before binding.
 /// Readiness requires at least one enabled provider whose session is not known
 /// to be expired; providers marked `needs_login` do not count as routable.
+/// Return the effective memory-egress policy without exposing memory values.
+async fn memory_egress_policy_status() -> Response {
+    match memory_egress::MemoryEgressPolicy::from_env() {
+        Ok(policy) => Json(serde_json::json!({
+            "personal_long_term_memory": {
+                "default": "deny",
+                "allowed_providers": policy.allowed_personal_memory_providers(),
+            },
+            "current_turn": "allowed",
+            "conversation_context": "allowed",
+            "personal_memory_retrieval_wired": false,
+        }))
+        .into_response(),
+        Err(_) => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "server_error",
+            "memory_egress_policy_invalid",
+            "provider memory egress policy is invalid",
+        ),
+    }
+}
+
 async fn metrics_endpoint(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let provider_states = state
         .cfg
@@ -1193,6 +1219,7 @@ fn authorize_api_request(
     let admin_route = path.starts_with("/login")
         || path.starts_with("/relay/")
         || path == "/metrics"
+        || path == "/v1/admin/memory-egress-policy"
         || path == "/v1/conversations"
         || path.contains("/provider-threads/")
         || (path.starts_with("/v1/conversations/")
