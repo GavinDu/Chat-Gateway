@@ -1774,3 +1774,36 @@ fn file_backed_database_uses_wal_and_configured_busy_timeout() {
     let _ = std::fs::remove_file(path.with_extension("db-wal"));
     let _ = std::fs::remove_file(path.with_extension("db-shm"));
 }
+
+#[test]
+fn legacy_synthetic_tab_id_is_cleared_on_next_persisted_turn() {
+    let fixture = Fixture::new();
+    let memory = fixture.open();
+    store(&memory, "legacy-tab", "first");
+    assert_eq!(
+        memory.get_tab("legacy-tab").unwrap().as_deref(),
+        Some("tab-first")
+    );
+
+    memory
+        .store_turn_for_owner_with_tab_id(
+            "local",
+            "legacy-tab".into(),
+            vec![m("user", "second")],
+            m("assistant", "answer second"),
+            "chatgpt".into(),
+            None,
+        )
+        .unwrap();
+
+    assert_eq!(memory.get_tab("legacy-tab").unwrap(), None);
+    assert_eq!(
+        memory
+            .conversation("legacy-tab")
+            .unwrap()
+            .unwrap()
+            .messages
+            .len(),
+        4
+    );
+}
