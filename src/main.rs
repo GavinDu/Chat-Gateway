@@ -50,6 +50,13 @@ struct Cli {
 
     #[arg(
         long,
+        conflicts_with_all = ["all", "test_adapter", "create_api_key", "vault_list", "vault_delete_provider", "vault_rotate_key", "vault_restore_backup"],
+        help = "Print effective personal-memory egress policy for every provider and exit"
+    )]
+    show_memory_egress_policy: bool,
+
+    #[arg(
+        long,
         conflicts_with = "all",
         help = "Test one adapter live: discover models + show selectors, then exit"
     )]
@@ -143,6 +150,22 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let cli = Cli::parse();
+    if cli.show_memory_egress_policy {
+        let policy = memory_egress::MemoryEgressPolicy::from_env()
+            .map_err(|_| anyhow::anyhow!("provider memory egress policy is invalid"))?;
+        let allowed = policy.allowed_provider_ids();
+        println!("personal_long_term_memory_default=deny");
+        for provider in providers::Provider::all() {
+            let provider_id = provider.name();
+            let decision = if allowed.iter().any(|entry| entry == provider_id) {
+                "allow"
+            } else {
+                "deny"
+            };
+            println!("{provider_id}={decision}");
+        }
+        return Ok(());
+    }
     if let Some(name) = cli.create_api_key.as_deref() {
         if name.trim().is_empty()
             || !name
