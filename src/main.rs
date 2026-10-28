@@ -1710,17 +1710,7 @@ fn read_conversation_context(
     conversation_id: Option<&str>,
     messages: &[ChatMessage],
 ) -> anyhow::Result<(String, Vec<ChatMessage>, bool)> {
-    read_conversation_context_for_owner(memory, "local", conversation_id, messages)
-}
-
-#[cfg(test)]
-fn read_conversation_context_for_owner(
-    memory: &UnifiedMemory,
-    owner_key_id: &str,
-    conversation_id: Option<&str>,
-    messages: &[ChatMessage],
-) -> anyhow::Result<(String, Vec<ChatMessage>, bool)> {
-    memory.build_context_for_owner_with_history(owner_key_id, conversation_id, messages)
+    memory.build_context_for_owner_with_history("local", conversation_id, messages)
 }
 
 fn read_conversation_context_with_transcript_for_owner(
