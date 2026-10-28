@@ -596,9 +596,9 @@ fn database_and_transaction_journal_are_owner_only() {
     let tx = connection.transaction().unwrap();
     tx.execute("INSERT INTO conversations(id) VALUES('private')", [])
         .unwrap();
-    let journal = fixture.db().with_extension("sqlite3-journal");
+    let wal = PathBuf::from(format!("{}-wal", fixture.db().display()));
     assert_eq!(
-        fs::metadata(journal).unwrap().permissions().mode() & 0o777,
+        fs::metadata(&wal).unwrap().permissions().mode() & 0o777,
         0o600
     );
     tx.rollback().unwrap();
@@ -1276,4 +1276,35 @@ fn completed_turn_without_real_tab_does_not_persist_synthetic_tab_id() {
         .unwrap()
         .unwrap();
     assert_eq!(conversation.tab_id, None);
+}
+
+#[test]
+fn file_backed_database_uses_wal_and_configured_busy_timeout() {
+    use super::sqlite::open;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock should be after UNIX epoch")
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!(
+        "chat-gateway-sqlite-settings-{}-{nonce}.db",
+        std::process::id()
+    ));
+    let connection = open(Some(&path), None).expect("database should initialize");
+
+    let journal_mode: String = connection
+        .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+        .expect("journal mode should be readable");
+    assert_eq!(journal_mode.to_ascii_lowercase(), "wal");
+
+    let busy_timeout_ms: i64 = connection
+        .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
+        .expect("busy timeout should be readable");
+    assert_eq!(busy_timeout_ms, 30_000);
+
+    drop(connection);
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(path.with_extension("db-wal"));
+    let _ = std::fs::remove_file(path.with_extension("db-shm"));
 }

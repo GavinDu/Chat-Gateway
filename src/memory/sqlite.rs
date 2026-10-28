@@ -58,6 +58,7 @@ const SCHEMA: &str = "
 ";
 
 pub(super) fn open(path: Option<&Path>, legacy: Option<&Path>) -> Result<Connection> {
+    let file_backed = path.is_some();
     let mut connection = match path {
         Some(path) => {
             let parent = path
@@ -100,6 +101,15 @@ pub(super) fn open(path: Option<&Path>, legacy: Option<&Path>) -> Result<Connect
                 .unwrap_or_else(|| ":memory:".into())
         )
     })?;
+    // Validate existing database bytes before changing journal mode. In particular,
+    // malformed files must fail closed with the migration context and stay intact.
+    if file_backed {
+        let journal_mode: String =
+            connection.query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))?;
+        if !journal_mode.eq_ignore_ascii_case("wal") {
+            bail!("expected file-backed conversation database to use WAL mode, got {journal_mode}");
+        }
+    }
     Ok(connection)
 }
 
