@@ -36,6 +36,8 @@ pub struct Conversation {
     pub id: String,
     pub messages: Vec<ChatMessage>,
     pub provider: Option<String>,
+    /// Deprecated compatibility field. Browser tab IDs are not durable conversation identity.
+    /// SQLite no longer persists this field; provider-specific threads live in provider_threads.
     pub tab_id: Option<String>,
 }
 
@@ -361,7 +363,7 @@ impl UnifiedMemory {
         user_msgs: Vec<ChatMessage>,
         assistant_msg: ChatMessage,
         provider: String,
-        tab_id: Option<String>,
+        _tab_id: Option<String>,
     ) -> anyhow::Result<()> {
         let mut connection = self.lock()?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -400,16 +402,10 @@ impl UnifiedMemory {
             conversation.messages.push(assistant_msg);
         }
         conversation.provider = Some(provider);
-        if let Some(tab_id) = tab_id {
-            conversation.tab_id = Some(tab_id);
-        } else if conversation
-            .tab_id
-            .as_deref()
-            .is_some_and(|tab_id| tab_id.starts_with("tab-"))
-        {
-            // Remove legacy synthetic identifiers without erasing real tab metadata.
-            conversation.tab_id = None;
-        }
+        // Compatibility callers may still supply a tab identifier, but it is not
+        // persisted or used for routing. Provider-specific thread URLs are stored
+        // separately in provider_threads. Keep the legacy field empty on writes.
+        conversation.tab_id = None;
         sqlite::append_owned(&tx, &conversation, first, owner_key_id)?;
         // Maintain a bounded deterministic summary in the same transaction as the turn.
         const RECENT_MESSAGES_TO_KEEP: usize = 8;
