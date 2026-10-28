@@ -59,3 +59,10 @@ Key absence, invalid key length, or failed authentication must produce an action
 ## Rollout
 
 Ship the encrypted reader/writer behind an explicit vault configuration first. Require a successful round-trip and migration test suite before recommending migration. Keep plaintext legacy import opt-in and emit a warning that identifies the provider/file path only, never the contents. A later change can decide whether encryption becomes mandatory for all persistent sessions.
+
+
+## Production key management (current supported model)
+
+The current runtime accepts one stable 32-byte key through `CHAT_GATEWAY_VAULT_KEY`; it does not yet provide OS-keychain lookup or an in-app key rotation command. Generate a key using an approved cryptographic random generator (for example, `openssl rand -hex 32`), inject it through the deployment platform's secret manager, and never place it in `.env` files committed to source control, logs, container layers, or extension storage. Back up the key separately from the encrypted session directory and restrict access to the gateway service identity. Losing the key makes existing vault records unreadable.
+
+**Do not rotate by simply replacing the environment value.** Existing records are authenticated with the old key and the gateway intentionally fails closed when the key is wrong. Until a supported rotation command is added, keep the current key stable and treat rotation as a planned maintenance migration requiring a verified encrypted backup, an offline decrypt/re-encrypt procedure, and a restore test. Listing/deleting vault entries and automated key rotation are not yet implemented.
