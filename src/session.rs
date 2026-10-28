@@ -162,10 +162,27 @@ impl SessionStore for VaultSessionStore {
         ensure_private_session_dir_sync(Path::new("sessions"))?;
         let encrypted = encrypt_session_snapshot(&legacy, provider, &key)?;
         write_session_file_atomically(Path::new(&vault_path), &encrypted)?;
+        let verified = (|| -> Result<SessionFile> {
+            let written = std::fs::read(&vault_path)?;
+            let restored = decrypt_session_snapshot(&written, provider, &key)?;
+            if session_state_hash(&restored)? != session_state_hash(&legacy)? {
+                anyhow::bail!("session-vault read-back validation failed");
+            }
+            Ok(restored)
+        })();
+        let verified = match verified {
+            Ok(session) => session,
+            Err(error) => {
+                let _ = std::fs::remove_file(&vault_path);
+                return Err(error);
+            }
+        };
+        // Keep the legacy source intact until the encrypted record has been read
+        // back and authenticated successfully.
         std::fs::remove_file(&legacy_path)?;
         record_session_write(provider);
         tracing::info!(provider, "migrated plaintext session into encrypted vault");
-        Ok(Some(legacy))
+        Ok(Some(verified))
     }
 
     async fn save_if_changed(&self, browser: &Browser, page: &Page, provider: &str) -> Result<()> {
@@ -205,6 +222,73 @@ impl SessionStore for VaultSessionStore {
         );
         Ok(())
     }
+}
+
+/// Import a browser-linked session directly into the encrypted vault. Arbitrary
+/// localStorage export is deliberately disabled until each provider has a
+/// reviewed key allowlist.
+pub fn import_relay_session(provider: &str, file: &SessionFile) -> Result<()> {
+    if !matches!(
+        std::env::var("CHAT_GATEWAY_SESSION_STORE").as_deref(),
+        Ok("vault")
+    ) {
+        anyhow::bail!("browser relay requires CHAT_GATEWAY_SESSION_STORE=vault");
+    }
+    if !file.local_storage.is_empty() {
+        anyhow::bail!(
+            "localStorage import is disabled until provider-specific key allowlists are configured"
+        );
+    }
+    if file.cookies.len() > 512 {
+        anyhow::bail!("too many cookies in relay session");
+    }
+    for cookie in &file.cookies {
+        if !cookie_domain_allowed(provider, &cookie.domain) || !restored_cookie_fields_safe(cookie)
+        {
+            anyhow::bail!("relay session contains a cookie outside the provider allowlist or with invalid fields");
+        }
+    }
+    let key = vault_key_from_env()?;
+    let destination = session_vault_path(provider)?;
+    ensure_private_session_dir_sync(Path::new("sessions"))?;
+    let encrypted = encrypt_session_snapshot(file, provider, &key)?;
+    write_session_file_atomically(Path::new(&destination), &encrypted)?;
+    let verified = (|| -> Result<()> {
+        let written = std::fs::read(&destination)?;
+        let restored = decrypt_session_snapshot(&written, provider, &key)?;
+        if session_state_hash(&restored)? != session_state_hash(file)? {
+            anyhow::bail!("session-vault read-back validation failed");
+        }
+        Ok(())
+    })();
+    if let Err(error) = verified {
+        let _ = std::fs::remove_file(&destination);
+        return Err(error);
+    }
+    remove_legacy_session_snapshot(provider)?;
+    record_session_write(provider);
+    tracing::info!(
+        provider,
+        cookies = file.cookies.len(),
+        "browser relay session imported into encrypted vault"
+    );
+    Ok(())
+}
+
+pub fn delete_session_snapshot(provider: &str) -> Result<bool> {
+    let vault_path = session_vault_path(provider)?;
+    let legacy_path = session_path(provider)?;
+    let mut removed = false;
+    // Remove plaintext first. If this fails, retain the encrypted vault rather than
+    // deleting the only usable copy and leaving a plaintext record behind.
+    for path in [legacy_path, vault_path] {
+        match std::fs::remove_file(path) {
+            Ok(()) => removed = true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(removed)
 }
 
 fn session_vault_path(provider: &str) -> Result<String> {
@@ -1037,5 +1121,16 @@ mod vault_tests {
         let last = tampered.len() - 1;
         tampered[last] ^= 0x80;
         assert!(decrypt_session_snapshot(&tampered, "provider-a", &key).is_err());
+    }
+
+    #[test]
+    fn encrypted_vault_rejects_wrong_key_and_truncated_envelopes() {
+        let encrypted =
+            encrypt_session_snapshot(&sample_session(), "provider-a", &[0x44; 32]).unwrap();
+        assert!(decrypt_session_snapshot(&encrypted, "provider-a", &[0x45; 32]).is_err());
+        assert!(decrypt_session_snapshot(&encrypted[..10], "provider-a", &[0x44; 32]).is_err());
+        let mut unknown_version = encrypted;
+        unknown_version[5] = b'2';
+        assert!(decrypt_session_snapshot(&unknown_version, "provider-a", &[0x44; 32]).is_err());
     }
 }

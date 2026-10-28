@@ -1,6 +1,6 @@
 # Encrypted provider session vault design
 
-Status: proposal for issue #127. This document does not claim that session files are encrypted; the current `sessions/<provider>.json` format contains reusable authentication material and remains plaintext. Keep the gateway loopback-only and protect the session directory until the vault implementation is merged.
+Status: design baseline; runtime vault is partially implemented and remains opt-in for issue #127. The default file store still writes reusable authentication material as plaintext in `sessions/<provider>.json`. With `CHAT_GATEWAY_SESSION_STORE=vault`, the runtime uses a versioned `CGSV1` AES-256-GCM envelope through `ring`, a fresh 12-byte nonce, provider-bound associated data, and a stable 32-byte key supplied as 64 hex characters through `CHAT_GATEWAY_VAULT_KEY`. Legacy JSON migration occurs on vault load. The browser-relay import path also requires vault mode. This implementation is not yet production-complete: OS-keychain integration, key rotation/list commands, full migration recovery tests, secret zeroization, and clearing the embedded browser's in-memory cookies on unlink remain open. Keep the gateway loopback-only and protect the session directory.
 
 ## Security goals
 

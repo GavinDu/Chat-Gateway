@@ -1,0 +1,54 @@
+{
+  "manifest_version": 3,
+  "name": "Chat Gateway Browser Relay",
+  "version": "0.1.0",
+  "description": "Explicitly link approved provider cookies to a paired local Chat Gateway. Never captures passwords or page content.",
+  "permissions": [
+    "cookies",
+    "storage"
+  ],
+  "optional_host_permissions": [
+    "https://qwen.ai/*",
+    "https://*.qwen.ai/*",
+    "https://aliyun.com/*",
+    "https://*.aliyun.com/*",
+    "https://meta.ai/*",
+    "https://*.meta.ai/*",
+    "https://facebook.com/*",
+    "https://*.facebook.com/*",
+    "https://claude.ai/*",
+    "https://*.claude.ai/*",
+    "https://anthropic.com/*",
+    "https://*.anthropic.com/*",
+    "https://chatgpt.com/*",
+    "https://*.chatgpt.com/*",
+    "https://openai.com/*",
+    "https://*.openai.com/*",
+    "https://gemini.google.com/*",
+    "https://google.com/*",
+    "https://*.google.com/*",
+    "https://googleusercontent.com/*",
+    "https://*.googleusercontent.com/*",
+    "https://grok.com/*",
+    "https://*.grok.com/*",
+    "https://x.com/*",
+    "https://*.x.com/*",
+    "https://twitter.com/*",
+    "https://*.twitter.com/*",
+    "https://x.ai/*",
+    "https://*.x.ai/*",
+    "https://mistral.ai/*",
+    "https://*.mistral.ai/*",
+    "https://perplexity.ai/*",
+    "https://*.perplexity.ai/*",
+    "https://fbcdn.net/*",
+    "https://*.fbcdn.net/*"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Chat Gateway Relay"
+  },
+  "background": {
+    "service_worker": "background.js"
+  }
+}
