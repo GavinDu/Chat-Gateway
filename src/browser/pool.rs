@@ -600,26 +600,33 @@ fn browser_thread(
                         Ok(mut page) => {
                             let session_file = match session::load_session_file(&pcfg.name) {
                                 Ok(file) => file,
-                                Err(e) => {
-                                    tracing::warn!(provider = %pcfg.name, "session file could not be loaded; continuing without restored session: {e}");
-                                    None
+                                Err(_) => {
+                                    tracing::error!(provider = %pcfg.name, "provider disabled because its saved session could not be read or decrypted");
+                                    continue;
                                 }
                             };
                             if let Some(file) = &session_file {
-                                if let Err(e) = session::restore_cookies(&browser, file, &pcfg.name) {
-                                    tracing::warn!(provider = %pcfg.name, "cookie restore failed; provider may require login: {e}");
+                                if session::restore_cookies(&browser, file, &pcfg.name).is_err() {
+                                    let _ = session::clear_provider_cookies(&browser, &pcfg.name);
+                                    tracing::error!(provider = %pcfg.name, "provider disabled because saved cookies could not be restored");
+                                    continue;
                                 }
                             }
-                            if let Err(e) = page.goto(provider.login_url()).await {
-                                tracing::warn!(provider = %pcfg.name, "warm goto failed: {e}");
+                            if page.goto(provider.login_url()).await.is_err() {
+                                tracing::error!(provider = %pcfg.name, "provider page warm-up navigation failed");
+                                continue;
                             }
                             if let Some(file) = &session_file {
-                                if let Err(error) = session::restore_local_storage(&page, file) {
-                                    tracing::warn!(provider = %pcfg.name, "localStorage restore failed: {error}");
+                                if session::restore_local_storage(&page, file).is_err() {
+                                    let _ = session::clear_provider_cookies(&browser, &pcfg.name);
+                                    tracing::error!(provider = %pcfg.name, "provider disabled because saved browser storage could not be restored");
+                                    continue;
                                 }
-                                // Reload-equivalent so the app boots with the session applied
-                                if let Err(e) = page.goto(provider.login_url()).await {
-                                    tracing::warn!(provider = %pcfg.name, "warm re-goto failed: {e}");
+                                // Reload-equivalent so the app boots with the session applied.
+                                if page.goto(provider.login_url()).await.is_err() {
+                                    let _ = session::clear_provider_cookies(&browser, &pcfg.name);
+                                    tracing::error!(provider = %pcfg.name, "provider page could not reload with its saved session");
+                                    continue;
                                 }
                             }
                             pages.borrow_mut().insert(provider, Rc::new(page));
