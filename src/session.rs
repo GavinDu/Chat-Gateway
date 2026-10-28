@@ -355,7 +355,14 @@ pub fn restore_vault_backup(backup_dir: &str) -> Result<usize> {
     }
     let key = vault_key_from_env()?;
     const PROVIDERS: &[&str] = &[
-        "qwen", "metaai", "claude", "chatgpt", "gemini", "grok", "mistral", "perplexity",
+        "qwen",
+        "metaai",
+        "claude",
+        "chatgpt",
+        "gemini",
+        "grok",
+        "mistral",
+        "perplexity",
     ];
     let mut backups = Vec::new();
     for provider in PROVIDERS {
