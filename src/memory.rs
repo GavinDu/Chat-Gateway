@@ -907,9 +907,7 @@ impl UnifiedMemory {
             [owner_key_id],
         )?)
     }
-
 }
-
 
 fn unix_timestamp() -> i64 {
     std::time::SystemTime::now()
