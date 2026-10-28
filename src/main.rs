@@ -380,7 +380,7 @@ async fn main() -> anyhow::Result<()> {
                     .as_secs()
                     .min(i64::MAX as u64) as i64;
                 let cutoff = now.saturating_sub(retention_seconds);
-                match memory.purge_expired_conversations(cutoff) {
+                match memory.clone().purge_expired_conversations_blocking(cutoff).await {
                     Ok(deleted) if deleted > 0 => {
                         tracing::info!(deleted, retention_days, "purged expired conversations");
                     }
