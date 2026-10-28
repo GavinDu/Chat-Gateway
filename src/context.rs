@@ -319,7 +319,10 @@ mod tests {
             m("user", "newest message is much too large for the budget"),
         ];
         let report = ContextBuilder::build_with_report(&history, &[], 1);
-        assert_eq!(report.messages, vec![m("user", "newest message is much too large for the budget")]);
+        assert_eq!(
+            report.messages,
+            vec![m("user", "newest message is much too large for the budget")]
+        );
         assert_eq!(
             report.decisions.last().unwrap().reason,
             super::ContextMessageReason::PreservedNewestOverBudget
