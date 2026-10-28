@@ -29,7 +29,7 @@ function loadBackground(linkedProviders, failingProviders = []) {
       clearedTimers.add(id);
     },
     importScripts() {},
-    PROVIDERS: { chatgpt: [], claude: [] },
+    PROVIDERS: { chatgpt: ["chatgpt.com"], claude: ["claude.ai"] },
     syncProvider: async provider => {
       calls.push(provider);
       if (failingProviders.includes(provider)) {
