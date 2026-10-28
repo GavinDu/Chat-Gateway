@@ -248,7 +248,15 @@ fn relay_rate_limit_allows(request_times: &mut VecDeque<Instant>, now: Instant) 
 }
 
 fn authenticated_request(app: &crate::AppState, headers: &HeaderMap) -> Result<(), Box<Response>> {
-    if !relay_origin_is_allowed(headers) {
+    authenticated_request_with_origin(&app.relay, headers, relay_origin_is_allowed(headers))
+}
+
+fn authenticated_request_with_origin(
+    relay: &RelayState,
+    headers: &HeaderMap,
+    origin_allowed: bool,
+) -> Result<(), Box<Response>> {
+    if !origin_allowed {
         return Err(Box::new(json_error(
             StatusCode::FORBIDDEN,
             "extension_origin_rejected",
@@ -267,7 +275,7 @@ fn authenticated_request(app: &crate::AppState, headers: &HeaderMap) -> Result<(
         )));
     };
     let candidate: [u8; 32] = Sha256::digest(token.as_bytes()).into();
-    let token_slot = app.relay.install_token_hash.lock().map_err(|_| {
+    let token_slot = relay.install_token_hash.lock().map_err(|_| {
         Box::new(json_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "relay_unavailable",
@@ -298,7 +306,7 @@ fn authenticated_request(app: &crate::AppState, headers: &HeaderMap) -> Result<(
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64;
-    if timestamp.is_none_or(|timestamp| (now - timestamp).abs() > REQUEST_SKEW_SECONDS) {
+    if timestamp.is_none_or(|timestamp| now.abs_diff(timestamp) > REQUEST_SKEW_SECONDS as u64) {
         return Err(Box::new(json_error(
             StatusCode::UNAUTHORIZED,
             "relay_request_expired",
@@ -316,7 +324,7 @@ fn authenticated_request(app: &crate::AppState, headers: &HeaderMap) -> Result<(
             "relay request nonce is invalid",
         )));
     }
-    let mut nonces = app.relay.used_nonces.lock().map_err(|_| {
+    let mut nonces = relay.used_nonces.lock().map_err(|_| {
         Box::new(json_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "relay_unavailable",
@@ -339,7 +347,7 @@ fn authenticated_request(app: &crate::AppState, headers: &HeaderMap) -> Result<(
         )));
     }
     let now = Instant::now();
-    let mut request_times = app.relay.request_times.lock().map_err(|_| {
+    let mut request_times = relay.request_times.lock().map_err(|_| {
         Box::new(json_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "relay_unavailable",
@@ -511,6 +519,79 @@ pub async fn preflight(headers: HeaderMap) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn relay_state_with_token(token: Option<&str>) -> RelayState {
+        let install_token_hash = token.map(|token| {
+            let hash: [u8; 32] = Sha256::digest(token.as_bytes()).into();
+            hash
+        });
+        RelayState {
+            pairing_hash: [0; 32],
+            pairing_expires: Instant::now() + PAIRING_LIFETIME,
+            pairing_attempts: Mutex::new(0),
+            install_token_hash: Mutex::new(install_token_hash),
+            used_nonces: Mutex::new(HashMap::new()),
+            request_times: Mutex::new(VecDeque::new()),
+        }
+    }
+
+    fn valid_auth_headers(token: &str, nonce: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        );
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        headers.insert(
+            "x-relay-timestamp",
+            HeaderValue::from_str(&now.to_string()).unwrap(),
+        );
+        headers.insert("x-relay-nonce", HeaderValue::from_str(nonce).unwrap());
+        headers
+    }
+
+    #[test]
+    fn unpaired_install_is_rejected_even_with_bearer_header() {
+        let state = relay_state_with_token(None);
+        let headers = valid_auth_headers("unpaired-token", "0123456789abcdef0123456789abcdef");
+        assert!(authenticated_request_with_origin(&state, &headers, true).is_err());
+    }
+
+    #[test]
+    fn revoked_install_token_is_rejected_immediately() {
+        let token = "paired-install-token";
+        let state = relay_state_with_token(Some(token));
+        let first = valid_auth_headers(token, "11111111111111111111111111111111");
+        assert!(authenticated_request_with_origin(&state, &first, true).is_ok());
+
+        *state.install_token_hash.lock().unwrap() = None;
+        let after_revoke = valid_auth_headers(token, "22222222222222222222222222222222");
+        assert!(authenticated_request_with_origin(&state, &after_revoke, true).is_err());
+    }
+
+    #[test]
+    fn extreme_timestamp_is_rejected_without_integer_overflow() {
+        let token = "paired-install-token";
+        let state = relay_state_with_token(Some(token));
+        let mut headers = valid_auth_headers(token, "33333333333333333333333333333333");
+        headers.insert(
+            "x-relay-timestamp",
+            HeaderValue::from_static("-9223372036854775808"),
+        );
+        assert!(authenticated_request_with_origin(&state, &headers, true).is_err());
+    }
+
+    #[test]
+    fn replayed_authenticated_nonce_is_rejected() {
+        let token = "paired-install-token";
+        let state = relay_state_with_token(Some(token));
+        let headers = valid_auth_headers(token, "abcdef0123456789abcdef0123456789");
+        assert!(authenticated_request_with_origin(&state, &headers, true).is_ok());
+        assert!(authenticated_request_with_origin(&state, &headers, true).is_err());
+    }
 
     #[test]
     fn pairing_code_is_numeric_and_state_has_a_short_expiry() {
