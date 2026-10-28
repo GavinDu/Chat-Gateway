@@ -478,7 +478,7 @@ pub fn restore_vault_backup(backup_dir: &str) -> Result<usize> {
 /// old key. Runtime write failures trigger rollback of already-replaced files.
 pub fn rotate_vault_key(new_key: &[u8; 32]) -> Result<(usize, String)> {
     let old_key = vault_key_from_env()?;
-    if old_key == *new_key {
+    if old_key.as_ref() == new_key {
         anyhow::bail!("new vault key must differ from the current key");
     }
 
@@ -1381,7 +1381,7 @@ mod vault_tests {
 
     #[test]
     fn vault_key_parser_accepts_only_32_byte_hex_keys() {
-        assert_eq!(parse_vault_key(&"ab".repeat(32)).unwrap(), [0xab; 32]);
+        assert_eq!(*parse_vault_key(&"ab".repeat(32)).unwrap(), [0xab; 32]);
         assert!(parse_vault_key("abcd").is_err());
         assert!(parse_vault_key(&"xz".repeat(32)).is_err());
         assert!(parse_vault_key(&"ab".repeat(31)).is_err());
