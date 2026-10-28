@@ -1,3 +1,5 @@
+pub(crate) mod health;
+
 use crate::{context, memory::ChatMessage};
 use axum::{response::IntoResponse, Json};
 use std::collections::HashMap;
