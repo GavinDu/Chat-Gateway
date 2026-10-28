@@ -250,6 +250,20 @@ mod tests {
     use super::{escape_label, normalize_route, render_with_provider_states, Histogram};
 
     #[test]
+    fn browser_worker_restart_metric_counts_successful_restarts() {
+        super::record_browser_worker_restart();
+        let metrics = render_with_provider_states(&[]);
+        assert!(metrics.contains("# TYPE gateway_browser_worker_restarts_total counter"));
+        let value = metrics
+            .lines()
+            .find(|line| line.starts_with("gateway_browser_worker_restarts_total "))
+            .and_then(|line| line.split_whitespace().nth(1))
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap();
+        assert!(value >= 1);
+    }
+
+    #[test]
     fn browser_poll_metrics_track_evaluations_and_tick_duration() {
         super::record_browser_poll("poll-test", 1, 7);
         let metrics = render_with_provider_states(&[]);
