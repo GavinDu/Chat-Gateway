@@ -135,7 +135,12 @@ fn median(values: &mut [f64]) -> Option<f64> {
         return None;
     }
     values.sort_by(f64::total_cmp);
-    Some(values[values.len() / 2])
+    let middle = values.len() / 2;
+    if values.len().is_multiple_of(2) {
+        Some((values[middle - 1] + values[middle]) / 2.0)
+    } else {
+        Some(values[middle])
+    }
 }
 
 #[tokio::main]
@@ -269,7 +274,23 @@ async fn main() -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::has_content_delta;
+    use super::{has_content_delta, median};
+
+    #[test]
+    fn median_returns_none_for_empty_samples() {
+        assert_eq!(median(&mut []), None);
+    }
+
+    #[test]
+    fn median_averages_the_middle_pair_for_even_samples() {
+        assert_eq!(median(&mut [9.0, 1.0]), Some(5.0));
+        assert_eq!(median(&mut [8.0, 2.0, 6.0, 4.0]), Some(5.0));
+    }
+
+    #[test]
+    fn median_returns_middle_value_for_odd_samples() {
+        assert_eq!(median(&mut [9.0, 1.0, 5.0]), Some(5.0));
+    }
 
     #[test]
     fn ttft_detection_accepts_arbitrary_live_provider_content() {
