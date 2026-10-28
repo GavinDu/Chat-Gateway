@@ -639,10 +639,10 @@ fn touch_login_meta(login_meta: &Rc<RefCell<HashMap<Provider, LoginMeta>>>, prov
 /// Verify that a warmed provider page still looks like an authenticated chat page.
 /// Call only while holding that provider page's lock so probes never race a send.
 fn verify_session_page(
-    provider: Provider,
+    _provider: Provider,
     page: &obscura_core::Page,
     adapter: &dyn providers::SiteAdapter,
-) -> Result<()> {
+) -> Result<bool> {
     let is_login_page = providers::common::is_login_page(page);
     let input_found = adapter
         .selector_set()
@@ -651,12 +651,12 @@ fn verify_session_page(
         .any(|selector| page.query_selector(selector).is_some());
     let (login_state, _) = login::login_state(is_login_page, input_found);
     if login_state == "login_required" {
-        providers::common::check_session(provider.name(), page)?;
+        return Ok(false);
     }
     if !session_probe_page_healthy(is_login_page, input_found) {
         anyhow::bail!("session verification failed: chat input not found");
     }
-    Ok(())
+    Ok(true)
 }
 
 #[cfg(test)]
@@ -849,11 +849,9 @@ fn browser_thread(
                             {
                                 let _guard = lock.lock().await;
                                 match verify_session_page(provider, &page, adapter.as_ref()) {
-                                    Ok(()) => crate::provider_state::record_success(provider.name()),
-                                    Err(error) => crate::provider_state::record_error(
-                                        provider.name(),
-                                        &error.to_string(),
-                                    ),
+                                    Ok(true) => crate::provider_state::record_success(provider.name()),
+                                    Ok(false) => crate::provider_state::record_needs_login(provider.name()),
+                                    Err(_) => crate::provider_state::record_probe_failure(provider.name()),
                                 }
                             }
                             tokio::time::sleep(Duration::from_secs(60 + jitter)).await;
