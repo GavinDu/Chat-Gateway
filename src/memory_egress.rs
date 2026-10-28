@@ -34,17 +34,22 @@ impl MemoryEgressPolicy {
     /// Invalid provider names make policy construction fail rather than silently
     /// broadening the set of destinations.
     pub(crate) fn from_env() -> anyhow::Result<Self> {
-        let configured = std::env::var("CHAT_GATEWAY_MEMORY_EGRESS_ALLOWLIST")
-            .unwrap_or_default();
+        let configured = std::env::var("CHAT_GATEWAY_MEMORY_EGRESS_ALLOWLIST").unwrap_or_default();
         let mut allowed_personal_memory_providers = HashSet::new();
-        for entry in configured.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        for entry in configured
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
             let provider = entry.to_ascii_lowercase();
             if crate::providers::Provider::from_name(&provider).is_none() {
                 anyhow::bail!("unknown provider in memory egress allowlist");
             }
             allowed_personal_memory_providers.insert(provider);
         }
-        Ok(Self { allowed_personal_memory_providers })
+        Ok(Self {
+            allowed_personal_memory_providers,
+        })
     }
 
     pub(crate) fn authorize(
@@ -102,7 +107,10 @@ mod tests {
 
     fn policy(allowed: &[&str]) -> MemoryEgressPolicy {
         MemoryEgressPolicy {
-            allowed_personal_memory_providers: allowed.iter().map(|p| (*p).to_owned()).collect::<HashSet<_>>(),
+            allowed_personal_memory_providers: allowed
+                .iter()
+                .map(|p| (*p).to_owned())
+                .collect::<HashSet<_>>(),
         }
     }
 
@@ -113,21 +121,36 @@ mod tests {
             policy.authorize("chatgpt", ProviderDataClass::PersonalLongTermMemory),
             Err(EgressError::PersonalMemoryDestinationDenied)
         );
-        assert_eq!(policy.authorize("chatgpt", ProviderDataClass::CurrentTurn), Ok(()));
-        assert_eq!(policy.authorize("chatgpt", ProviderDataClass::ConversationContext), Ok(()));
+        assert_eq!(
+            policy.authorize("chatgpt", ProviderDataClass::CurrentTurn),
+            Ok(())
+        );
+        assert_eq!(
+            policy.authorize("chatgpt", ProviderDataClass::ConversationContext),
+            Ok(())
+        );
     }
 
     #[test]
     fn explicitly_allowed_provider_receives_only_personal_memory_items_in_scope() {
         let policy = policy(&["chatgpt"]);
         let items = vec![
-            PersonalMemoryItem { id: "mem-1".into(), content: "permitted fact".into() },
-            PersonalMemoryItem { id: "mem-2".into(), content: "another permitted fact".into() },
+            PersonalMemoryItem {
+                id: "mem-1".into(),
+                content: "permitted fact".into(),
+            },
+            PersonalMemoryItem {
+                id: "mem-2".into(),
+                content: "another permitted fact".into(),
+            },
         ];
         let filtered = policy.filter_personal_memory("chatgpt", &items).unwrap();
         assert_eq!(filtered.len(), 2);
         assert_eq!(filtered[0].id, "mem-1");
-        assert!(policy.filter_personal_memory("claude", &items).unwrap().is_empty());
+        assert!(policy
+            .filter_personal_memory("claude", &items)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -136,7 +159,10 @@ mod tests {
         assert_eq!(
             policy.filter_personal_memory(
                 "unregistered-provider",
-                &[PersonalMemoryItem { id: "mem-secret".into(), content: "sensitive sentinel".into() }]
+                &[PersonalMemoryItem {
+                    id: "mem-secret".into(),
+                    content: "sensitive sentinel".into()
+                }]
             ),
             Err(EgressError::UnknownProvider)
         );
