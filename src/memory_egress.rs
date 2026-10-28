@@ -119,23 +119,6 @@ impl MemoryEgressPolicy {
         Ok(())
     }
 
-    /// Append only policy-authorized personal memory to the outbound prompt.
-    /// This is the single prompt-rendering boundary used by the send path.
-    pub(crate) fn append_personal_memory_to_prompt(
-        &self,
-        provider: &str,
-        prompt: &mut String,
-        items: &[PersonalMemoryItem],
-    ) -> Result<(), EgressError> {
-        for item in self.filter_personal_memory(provider, items)? {
-            prompt.push_str("\nPERSONAL_MEMORY_ITEM ");
-            prompt.push_str(&item.id);
-            prompt.push_str(": ");
-            prompt.push_str(&item.content);
-        }
-        Ok(())
-    }
-
     /// Filter personal memory at the provider boundary. Denials log only stable
     /// item IDs and a reason; the sensitive memory value is never logged.
     pub(crate) fn filter_personal_memory<'a>(
