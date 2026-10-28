@@ -7,11 +7,13 @@ chrome.cookies.onChanged.addListener(({cookie}) => {
   for (const [provider, roots] of domains) {
     if (!roots.some(root => host === root || host.endsWith("." + root))) continue;
     clearTimeout(debounceTimers.get(provider));
-    debounceTimers.set(provider, setTimeout(() => {
+    const timer = setTimeout(() => {
+      debounceTimers.delete(provider);
       syncProvider(provider).catch(() => {
         // Never log cookie material or relay credentials. The popup can surface status on demand.
       });
-    }, 750));
+    }, 750);
+    debounceTimers.set(provider, timer);
   }
 });
 
@@ -20,4 +22,20 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     syncProvider(message.provider).then(() => sendResponse({ok:true})).catch(error => sendResponse({ok:false,error:error.message}));
     return true;
   }
+});
+
+
+async function resyncLinkedProviders() {
+  const {linkedProviders = []} = await chrome.storage.local.get(["linkedProviders"]);
+  // Startup restoration is best-effort: providers remain independently usable
+  // if one domain is unavailable, and no session material is written to logs.
+  await Promise.allSettled(
+    [...new Set(linkedProviders)].filter(provider => PROVIDERS[provider]).map(syncProvider)
+  );
+}
+
+chrome.runtime.onStartup.addListener(() => {
+  resyncLinkedProviders().catch(() => {
+    // Do not log provider session material or relay credentials.
+  });
 });
