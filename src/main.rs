@@ -23,6 +23,7 @@ mod config;
 mod context;
 mod login;
 mod memory;
+mod memory_egress;
 mod metrics;
 mod provider_guard;
 mod provider_state;
