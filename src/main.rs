@@ -1407,9 +1407,9 @@ async fn upsert_provider_thread(
         .unwrap_or_default()
         .as_secs()
         .min(i64::MAX as u64) as i64;
-    match state
-        .memory
-        .upsert_provider_thread_for_owner(owner_key_id, &thread)
+    match state.memory.clone()
+        .upsert_provider_thread_for_owner_blocking(owner_key_id.to_owned(), thread.clone())
+        .await
     {
         Ok(()) => Json(thread).into_response(),
         Err(error) => {
