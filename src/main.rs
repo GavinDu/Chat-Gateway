@@ -381,9 +381,9 @@ async fn main() -> anyhow::Result<()> {
             loop {
                 match pool.verify_session(&provider_name).await {
                     Ok(true) => provider_state::record_success(&provider_name),
-                    Ok(false) => {
-                        provider_state::record_error(&provider_name, "provider page not warmed");
-                    }
+                    // A false result means the page is not warmed yet, not that
+                    // the provider session is invalid. Leave routing state unchanged.
+                    Ok(false) => {}
                     Err(error) => {
                         // Do not log raw probe errors; browser engines may include page or
                         // upstream details in their error messages.
