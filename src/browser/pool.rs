@@ -813,9 +813,11 @@ fn browser_thread(
                                 let _guard = lock.lock().await;
                                 match verify_session_page(provider, &page, adapter.as_ref()) {
                                     Ok(()) => crate::provider_state::record_success(provider.name()),
-                                    Err(error) => crate::provider_state::record_error(
+                                    // Keep browser-engine details out of persistent provider state.
+                                    // They may contain upstream page content or sensitive URLs.
+                                    Err(_) => crate::provider_state::record_error(
                                         provider.name(),
-                                        &error.to_string(),
+                                        "periodic session verification failed",
                                     ),
                                 }
                             }
