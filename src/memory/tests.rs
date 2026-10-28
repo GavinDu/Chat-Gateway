@@ -1935,4 +1935,3 @@ async fn async_conversation_store_reads_and_persists_on_blocking_pool() {
         .unwrap();
     assert_eq!(transcript, vec![m("user", "hello"), m("assistant", "hi")]);
 }
-
