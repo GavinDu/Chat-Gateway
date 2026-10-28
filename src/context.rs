@@ -63,7 +63,10 @@ impl ContextBuilder {
                     && state.synced_through_message_id == state.last_stored_message_id
             });
 
-        if thread_is_current && !delta.is_empty() {
+        let delta_fits_budget = delta.iter().fold(0usize, |tokens, message| {
+            tokens.saturating_add(estimate_message_tokens(&message.content).saturating_add(8))
+        }) <= budget;
+        if thread_is_current && !delta.is_empty() && delta_fits_budget {
             return ContextPlan::Delta { messages: delta };
         }
 
@@ -259,6 +262,27 @@ mod tests {
                 messages: vec![m("user", "new question")]
             }
         );
+    }
+
+    #[test]
+    fn planner_does_not_bypass_budget_for_synchronized_delta() {
+        let history = vec![m("user", "old question"), m("assistant", "old answer")];
+        let incoming = vec![
+            m("user", "old question"),
+            m("assistant", "old answer"),
+            m("user", "this new message is too large for the budget"),
+        ];
+        let thread = super::ThreadSyncState {
+            provider: "chatgpt".to_string(),
+            thread_url: "https://chatgpt.com/c/thread-1".to_string(),
+            synced_through_message_id: Some("message-2".to_string()),
+            last_stored_message_id: Some("message-2".to_string()),
+        };
+
+        assert!(matches!(
+            ContextBuilder::plan(&history, &incoming, "chatgpt", Some(&thread), true, 10),
+            super::ContextPlan::Replay { messages, .. } if messages.is_empty()
+        ));
     }
 
     #[test]
