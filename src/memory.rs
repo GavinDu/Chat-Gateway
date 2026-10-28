@@ -198,8 +198,8 @@ impl UnifiedMemory {
         conversation_id: Option<&str>,
         new_messages: &[ChatMessage],
     ) -> anyhow::Result<(String, Vec<ChatMessage>, bool)> {
-        let (prompt, context, has_history, _history) =
-            self.build_context_for_owner_with_transcript(owner_key_id, conversation_id, new_messages)?;
+        let (prompt, context, has_history, _history) = self
+            .build_context_for_owner_with_transcript(owner_key_id, conversation_id, new_messages)?;
         Ok((prompt, context, has_history))
     }
 
