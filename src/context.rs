@@ -255,6 +255,30 @@ mod tests {
     }
 
     #[test]
+    fn planner_replays_when_branch_has_no_common_prefix() {
+        let history = vec![m("user", "old question"), m("assistant", "old answer")];
+        let incoming = vec![m("user", "replacement question")];
+        let thread = super::ThreadSyncState {
+            provider: "chatgpt".to_string(),
+            thread_url: "https://chatgpt.com/c/thread-1".to_string(),
+            synced_through_message_id: Some("stored-transcript-hash".to_string()),
+            last_stored_message_id: Some("stored-transcript-hash".to_string()),
+        };
+
+        assert!(matches!(
+            ContextBuilder::plan(
+                &history,
+                &incoming,
+                "chatgpt",
+                Some(&thread),
+                true,
+                1000
+            ),
+            super::ContextPlan::Replay { .. }
+        ));
+    }
+
+    #[test]
     fn planner_replays_on_provider_switch_stale_sync_or_unsupported_thread() {
         let history = vec![m("user", "prior question"), m("assistant", "prior answer")];
         let incoming = vec![m("user", "next question")];
