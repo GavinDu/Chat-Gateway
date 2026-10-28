@@ -357,6 +357,11 @@ fn should_probe_response_count(response_node_detected: bool) -> bool {
     !response_node_detected
 }
 
+/// Challenge-page body extraction is slower than URL inspection; sample it every five polls.
+fn should_check_body_challenge(poll_count: u32) -> bool {
+    poll_count % 5 == 0
+}
+
 /// Generic send + stream-poll loop shared by all adapters. Poll response
 /// text every 350ms and finish only after a conservative idle grace period
 /// with no streaming indicator, or at the provider timeout. The grace period
@@ -459,7 +464,7 @@ pub async fn run_send(
         poll_count = poll_count.saturating_add(1);
         // Body text extraction is expensive on large pages; keep URL checks on every
         // tick, but inspect challenge text every five polls (~1.75 seconds).
-        let check_body_challenge = poll_count % 5 == 0;
+        let check_body_challenge = should_check_body_challenge(poll_count);
         let probe = adapter.response_probe(&page, check_body_challenge);
         crate::metrics::record_browser_poll(
             adapter.name(),
@@ -613,6 +618,15 @@ mod response_delta_tracker_tests {
     fn response_count_probe_stops_after_new_node_is_detected() {
         assert!(should_probe_response_count(false));
         assert!(!should_probe_response_count(true));
+    }
+
+    #[test]
+    fn challenge_body_scan_is_sampled_every_five_polls() {
+        assert!(!should_check_body_challenge(1));
+        assert!(!should_check_body_challenge(4));
+        assert!(should_check_body_challenge(5));
+        assert!(!should_check_body_challenge(6));
+        assert!(should_check_body_challenge(10));
     }
 
     #[test]
