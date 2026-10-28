@@ -1720,6 +1720,7 @@ fn read_conversation_context(
     read_conversation_context_for_owner(memory, "local", conversation_id, messages)
 }
 
+#[cfg(test)]
 fn read_conversation_context_for_owner(
     memory: &UnifiedMemory,
     owner_key_id: &str,
