@@ -232,39 +232,6 @@ mod tests {
     }
 
     #[test]
-    fn denied_memory_sentinel_never_reaches_the_rendered_provider_prompt() {
-        let policy = policy(&[]);
-        let items = vec![PersonalMemoryItem {
-            id: "private-item-17".into(),
-            content: "PRIVATE_MEMORY_SENTINEL_7f1d".into(),
-        }];
-        let mut prompt = "user: what should I remember?".to_owned();
-
-        policy
-            .append_personal_memory_to_prompt("chatgpt", &mut prompt, &items)
-            .unwrap();
-
-        assert!(!prompt.contains("PRIVATE_MEMORY_SENTINEL_7f1d"));
-        assert!(!prompt.contains("private-item-17"));
-    }
-
-    #[test]
-    fn explicitly_allowed_memory_is_appended_to_the_rendered_provider_prompt() {
-        let policy = policy(&["chatgpt"]);
-        let items = vec![PersonalMemoryItem {
-            id: "allowed-item-1".into(),
-            content: "allowed memory fact".into(),
-        }];
-        let mut prompt = "user: question".to_owned();
-
-        policy
-            .append_personal_memory_to_prompt("chatgpt", &mut prompt, &items)
-            .unwrap();
-
-        assert!(prompt.contains("PERSONAL_MEMORY_ITEM allowed-item-1: allowed memory fact"));
-    }
-
-    #[test]
     fn denied_personal_memory_sentinel_never_enters_outbound_prompt() {
         let policy = policy(&[]);
         let items = vec![PersonalMemoryItem {
