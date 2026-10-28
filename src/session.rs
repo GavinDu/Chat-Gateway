@@ -324,6 +324,41 @@ pub fn list_vault_sessions() -> Result<Vec<VaultSessionInfo>> {
     Ok(entries)
 }
 
+/// Restore an encrypted pre-rotation backup. Configure the old key in
+/// CHAT_GATEWAY_VAULT_KEY, then pass the printed backup directory.
+pub fn restore_vault_backup(backup_dir: &str) -> Result<usize> {
+    let path = Path::new(backup_dir);
+    if !path.is_dir()
+        || !path.file_name().and_then(|name| name.to_str()).is_some_and(|name| name.starts_with(".vault-rotation-"))
+        || path.parent() != Some(Path::new("sessions"))
+    {
+        anyhow::bail!("backup directory must be a sessions/.vault-rotation-* directory");
+    }
+    let key = vault_key_from_env()?;
+    const PROVIDERS: &[&str] = &[
+        "qwen", "metaai", "claude", "chatgpt", "gemini", "grok", "mistral", "perplexity",
+    ];
+    let mut backups = Vec::new();
+    for provider in PROVIDERS {
+        let backup_path = path.join(format!("{provider}.vault"));
+        let bytes = match std::fs::read(&backup_path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        decrypt_session_snapshot(&bytes, provider, &key)
+            .map_err(|_| anyhow::anyhow!("backup record for {provider} is not valid with the configured key"))?;
+        backups.push((session_vault_path(provider)?, bytes));
+    }
+    if backups.is_empty() {
+        anyhow::bail!("no valid provider vault backups found in the specified directory");
+    }
+    for (destination, bytes) in &backups {
+        write_session_file_atomically(Path::new(destination), bytes)?;
+    }
+    Ok(backups.len())
+}
+
 /// Rotate all encrypted vault records as one best-effort transaction.
 /// Every input is decrypted and every replacement authenticated before any
 /// live record is replaced. Encrypted old records are retained in a private
@@ -1202,6 +1237,13 @@ mod vault_tests {
     }
 
     #[test]
+    #[test]
+    fn vault_key_parser_accepts_only_32_byte_hex_keys() {
+        assert_eq!(parse_vault_key(&"ab".repeat(32)).unwrap(), [0xab; 32]);
+        assert!(parse_vault_key("abcd").is_err());
+        assert!(parse_vault_key(&"xz".repeat(32)).is_err());
+    }
+
     fn encrypted_vault_round_trips_without_storing_plaintext() {
         let session = sample_session();
         let key = [0x5a; 32];
