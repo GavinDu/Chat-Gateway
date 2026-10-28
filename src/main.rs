@@ -2687,7 +2687,11 @@ async fn chat_completions(
                     retryable = retryable_worker_error,
                     "provider send failed"
                 );
-                provider_state::record_error(&provider_name, &e.to_string());
+                // Worker loss is an infrastructure failure, not evidence that
+                // the provider's authentication session has expired.
+                if !retryable_worker_error {
+                    provider_state::record_error(&provider_name, &e.to_string());
+                }
                 last_err = Some(e.to_string());
                 continue;
             }
