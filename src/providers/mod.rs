@@ -118,8 +118,8 @@ pub trait SiteAdapter: Send + Sync {
     fn response_text(&self, page: &Page) -> Option<String>;
 
     /// Fetch text, node count, and streaming state in one page evaluation.
-    fn response_probe(&self, page: &Page) -> common::ResponseProbe {
-        common::response_probe(page, self.selector_set())
+    fn response_probe(&self, page: &Page, check_body_challenge: bool) -> common::ResponseProbe {
+        common::response_probe(page, self.selector_set(), check_body_challenge)
     }
 
     /// Best-effort cancellation when the HTTP consumer disconnects.
@@ -357,6 +357,11 @@ fn should_probe_response_count(response_node_detected: bool) -> bool {
     !response_node_detected
 }
 
+/// Challenge-page body extraction is slower than URL inspection; sample it every five polls.
+fn should_check_body_challenge(poll_count: u32) -> bool {
+    poll_count.is_multiple_of(5)
+}
+
 /// Generic send + stream-poll loop shared by all adapters. Poll response
 /// text every 350ms and finish only after a conservative idle grace period
 /// with no streaming indicator, or at the provider timeout. The grace period
@@ -394,7 +399,7 @@ pub async fn run_send(
     // is never emitted as new. Rust v1 had no baseline (last_len
     // started at 0); this fixes that stale-text bug while keeping
     // Rust v1's 350ms / stability / indicator completion.
-    let baseline_probe = adapter.response_probe(&page);
+    let baseline_probe = adapter.response_probe(&page, true);
     let baseline_response_count = baseline_probe.count;
     let baseline = baseline_probe.text.filter(|t| !t.is_empty());
     let identical_answer_fallback = baseline.clone();
@@ -429,6 +434,7 @@ pub async fn run_send(
     let mut stable_ticks = 0u32;
     let mut saw_streaming = false;
     let mut response_node_detected = false;
+    let mut poll_count = 0u32;
 
     loop {
         if chunks.is_closed() {
@@ -455,7 +461,11 @@ pub async fn run_send(
 
         tokio::time::sleep(Duration::from_millis(350)).await;
         let poll_started = Instant::now();
-        let probe = adapter.response_probe(&page);
+        poll_count = poll_count.saturating_add(1);
+        // Body text extraction is expensive on large pages; keep URL checks on every
+        // tick, but inspect challenge text every five polls (~1.75 seconds).
+        let check_body_challenge = should_check_body_challenge(poll_count);
+        let probe = adapter.response_probe(&page, check_body_challenge);
         crate::metrics::record_browser_poll(
             adapter.name(),
             1,
@@ -608,6 +618,15 @@ mod response_delta_tracker_tests {
     fn response_count_probe_stops_after_new_node_is_detected() {
         assert!(should_probe_response_count(false));
         assert!(!should_probe_response_count(true));
+    }
+
+    #[test]
+    fn challenge_body_scan_is_sampled_every_five_polls() {
+        assert!(!should_check_body_challenge(1));
+        assert!(!should_check_body_challenge(4));
+        assert!(should_check_body_challenge(5));
+        assert!(!should_check_body_challenge(6));
+        assert!(should_check_body_challenge(10));
     }
 
     #[test]
