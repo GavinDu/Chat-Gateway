@@ -37,6 +37,19 @@ Preferred order:
 
 Key absence, invalid key length, or failed authentication must produce an actionable error and leave the original file untouched. Do not silently disable encryption when vault mode has been configured.
 
+## Operator commands and key rotation
+
+The binary provides explicit maintenance commands that exit before starting the browser runtime:
+
+- `chat-gateway-rs --vault-list`: prints one row per supported provider with `valid`, `missing`, or `unreadable`. It requires the current `CHAT_GATEWAY_VAULT_KEY`; it never prints cookie or localStorage values.
+- `chat-gateway-rs --vault-delete-provider chatgpt`: deletes that provider's encrypted snapshot and any legacy plaintext snapshot. Treat this as destructive credential revocation.
+- `CHAT_GATEWAY_VAULT_NEW_KEY` plus `chat-gateway-rs --vault-rotate-key`: decrypts every present encrypted record with `CHAT_GATEWAY_VAULT_KEY`, validates all replacements with the new key, writes encrypted recovery copies under `sessions/.vault-rotation-*`, then replaces the live records. Runtime write errors trigger rollback of files already replaced.
+- `chat-gateway-rs --vault-restore-backup sessions/.vault-rotation-...`: restores a rotation backup. Set `CHAT_GATEWAY_VAULT_KEY` to the old key before running this command. The command validates every backup record before writing any of them.
+
+After a successful rotation, update the deployment's `CHAT_GATEWAY_VAULT_KEY` to the new value before restarting the gateway. Keep the old key and encrypted recovery directory until `--vault-list` reports expected records as valid and restart restoration has been verified. Store keys in a deployment secret manager or OS-backed secret store; do not put them in command-line arguments, source control, logs, or container images. The environment-variable interface is an operator-managed key-injection mechanism, not OS-keychain integration.
+
+The recovery directory makes interrupted rotations recoverable, but the multi-file replacement is not crash-atomic. If the process or host stops mid-rotation, restore the complete backup using the old key, then retry rotation. Do not switch the configured key until rotation has completed.
+
 ## Migration and recovery
 
 - Detect the legacy JSON format separately from the encrypted envelope.
