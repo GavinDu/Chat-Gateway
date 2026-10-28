@@ -543,6 +543,33 @@ impl UnifiedMemory {
         self.get_provider_thread_for_owner("local", conversation_id, provider)
     }
 
+    /// Read provider-thread metadata without blocking a Tokio worker on SQLite.
+    pub async fn get_provider_thread_for_owner_blocking(
+        self: Arc<Self>,
+        owner_key_id: String,
+        conversation_id: String,
+        provider: String,
+    ) -> anyhow::Result<Option<ProviderThread>> {
+        tokio::task::spawn_blocking(move || {
+            self.get_provider_thread_for_owner(&owner_key_id, &conversation_id, &provider)
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("provider thread read task failed: {error}"))?
+    }
+
+    /// Persist provider-thread metadata on Tokio's blocking pool.
+    pub async fn upsert_provider_thread_for_owner_blocking(
+        self: Arc<Self>,
+        owner_key_id: String,
+        thread: ProviderThread,
+    ) -> anyhow::Result<()> {
+        tokio::task::spawn_blocking(move || {
+            self.upsert_provider_thread_for_owner(&owner_key_id, &thread)
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("provider thread write task failed: {error}"))?
+    }
+
     pub fn get_provider_thread_for_owner(
         &self,
         owner_key_id: &str,
