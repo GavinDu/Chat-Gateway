@@ -471,6 +471,38 @@ fn long_term_memory_is_opt_in_owner_scoped_and_deletable() {
 }
 
 #[test]
+fn long_term_memory_provenance_cannot_reference_another_owners_conversation() {
+    let memory = UnifiedMemory::new(8000);
+    memory.set_long_term_memory_enabled("owner-a", true).unwrap();
+    memory.set_long_term_memory_enabled("owner-b", true).unwrap();
+    memory
+        .store_turn_for_owner(
+            "owner-a",
+            "source-conversation".into(),
+            vec![m("user", "private source")],
+            m("assistant", "private response"),
+            "chatgpt".into(),
+            "tab".into(),
+        )
+        .unwrap();
+
+    assert!(memory
+        .save_long_term_memory_item(
+            "owner-b",
+            "stolen-provenance",
+            "not allowed",
+            Some("source-conversation"),
+            0.9,
+            None,
+        )
+        .is_err());
+    assert!(memory
+        .list_long_term_memory_items("owner-b")
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
 fn long_term_memory_disable_stops_retrieval_without_erasing_inspectable_items() {
     let memory = UnifiedMemory::new(8000);
     memory.set_long_term_memory_enabled("owner-a", true).unwrap();
