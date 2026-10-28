@@ -6,7 +6,6 @@ use ring::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use zeroize::Zeroizing;
 use std::{
     collections::{BTreeMap, HashMap},
     io::Write,
@@ -14,6 +13,7 @@ use std::{
     sync::{Mutex, OnceLock},
     time::{Duration, Instant},
 };
+use zeroize::Zeroizing;
 
 #[derive(Serialize, Deserialize)]
 pub struct SessionFile {
@@ -760,19 +760,28 @@ pub fn clear_provider_cookies(browser: &Browser, provider: &str) -> Result<usize
     for cookie in cookies {
         if !cookie_domain_allowed(provider, &cookie.domain)
             || cookie.name.is_empty()
-            || cookie.name.chars().any(|ch| matches!(ch, '=' | ';' | '\r' | '\n'))
+            || cookie
+                .name
+                .chars()
+                .any(|ch| matches!(ch, '=' | ';' | '\r' | '\n'))
         {
             continue;
         }
-        let path = if cookie.path.starts_with('/') && !cookie.path.chars().any(|ch| matches!(ch, '\r' | '\n')) {
+        let path = if cookie.path.starts_with('/')
+            && !cookie.path.chars().any(|ch| matches!(ch, '\r' | '\n'))
+        {
             cookie.path.as_str()
         } else {
             "/"
         };
         let url = format!("https://{}{}", cookie.domain.trim_start_matches('.'), path);
         let mut expired = format!("{}=; Path={}; Max-Age=0", cookie.name, path);
-        if cookie.secure { expired.push_str("; Secure"); }
-        if cookie.http_only { expired.push_str("; HttpOnly"); }
+        if cookie.secure {
+            expired.push_str("; Secure");
+        }
+        if cookie.http_only {
+            expired.push_str("; HttpOnly");
+        }
         store.set(&expired, &url)?;
         cleared += 1;
     }
