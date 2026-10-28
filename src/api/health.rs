@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use crate::{provider_guard, provider_state, AppState};
 
-async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub(crate) async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let providers = state
         .cfg
         .providers
@@ -62,7 +62,7 @@ fn readiness_response(enabled: usize, worker_alive: bool) -> Response {
         .into_response()
 }
 
-async fn readiness(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub(crate) async fn readiness(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     if !state.pool.worker_alive() {
         return readiness_response(0, false);
     }
