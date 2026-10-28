@@ -14,6 +14,7 @@ use std::{
     time::{Duration, Instant},
 };
 use zeroize::{Zeroize, Zeroizing};
+use zeroize::{Zeroize, Zeroizing};
 
 #[derive(Serialize, Deserialize)]
 pub struct SessionFile {
