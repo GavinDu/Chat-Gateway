@@ -1348,7 +1348,7 @@ async fn get_provider_thread(
     match state
                 .memory
                 .clone()
-$1.get_provider_thread_for_owner_blocking(
+.get_provider_thread_for_owner_blocking(
             owner_key_id.to_owned(),
             conversation_id.clone(),
             provider.clone(),
@@ -1412,7 +1412,7 @@ async fn upsert_provider_thread(
     match state
                 .memory
                 .clone()
-$1.upsert_provider_thread_for_owner_blocking(owner_key_id.to_owned(), thread.clone())
+.upsert_provider_thread_for_owner_blocking(owner_key_id.to_owned(), thread.clone())
         .await
     {
         Ok(()) => Json(thread).into_response(),
@@ -1451,7 +1451,7 @@ async fn persist_provider_thread(
     let messages = match state
                 .memory
                 .clone()
-$1.conversation_messages_for_owner_blocking(
+.conversation_messages_for_owner_blocking(
             owner_key_id.to_owned(),
             conversation_id.to_owned(),
         )
@@ -1474,7 +1474,7 @@ $1.conversation_messages_for_owner_blocking(
     if let Err(error) = state
                 .memory
                 .clone()
-$1.upsert_provider_thread_for_owner_blocking(owner_key_id.to_owned(), thread)
+.upsert_provider_thread_for_owner_blocking(owner_key_id.to_owned(), thread)
         .await
     {
         tracing::warn!(provider, %error, "provider thread mapping could not be persisted");
@@ -2007,7 +2007,7 @@ async fn chat_completions(
                 match state
                 .memory
                 .clone()
-$1.get_provider_thread_for_owner_blocking(
+.get_provider_thread_for_owner_blocking(
                         owner_key_id.clone(),
                         id.to_owned(),
                         provider_name.clone(),
