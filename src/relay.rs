@@ -361,7 +361,8 @@ pub async fn status(State(app): State<Arc<crate::AppState>>, headers: HeaderMap)
     if let Err(response) = authenticated_request(&app, &headers) {
         return *response;
     }
-    let providers = [
+    let mut providers = Vec::new();
+    for provider in [
         "qwen",
         "metaai",
         "claude",
@@ -370,16 +371,19 @@ pub async fn status(State(app): State<Arc<crate::AppState>>, headers: HeaderMap)
         "grok",
         "mistral",
         "perplexity",
-    ]
-    .iter()
-    .map(|provider| {
-        let session_present = crate::session::load_session_file(provider)
-            .ok()
-            .flatten()
-            .is_some();
-        serde_json::json!({"provider":provider,"linked":session_present})
-    })
-    .collect::<Vec<_>>();
+    ] {
+        let session_present = match crate::session::load_session_file(provider) {
+            Ok(session) => session.is_some(),
+            Err(_) => {
+                return json_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "session_status_unavailable",
+                    "provider session status could not be read; check vault configuration",
+                );
+            }
+        };
+        providers.push(serde_json::json!({"provider":provider,"linked":session_present}));
+    }
     Json(serde_json::json!({"ok":true,"providers":providers,"vault_mode":std::env::var("CHAT_GATEWAY_SESSION_STORE").as_deref()==Ok("vault")})).into_response()
 }
 
