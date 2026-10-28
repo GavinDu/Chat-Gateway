@@ -356,4 +356,3 @@ pub(super) fn append_owned(
     }
     Ok(())
 }
-
