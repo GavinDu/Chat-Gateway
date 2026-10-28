@@ -16,7 +16,10 @@ function loadShared(cookieFixtures = []) {
         // browser API; providerCookieSnapshot must still enforce its own scope.
         getAll: async () => cookieFixtures
       },
-            storage: { local: { get: async () => ({}) } }
+      permissions: {
+        contains: async () => true
+      },
+      storage: { local: { get: async () => ({}) } }
     }
   };
   vm.createContext(context);
