@@ -987,6 +987,17 @@ fn conversations_and_provider_threads_are_isolated_by_api_key_owner() {
         .list_conversations_for_owner("bravo", 100, 0)
         .unwrap()
         .is_empty());
+    assert_eq!(
+        memory
+            .get_provider_for_owner("alpha", "tenant-chat-1")
+            .unwrap()
+            .as_deref(),
+        Some("chatgpt")
+    );
+    assert!(memory
+        .get_provider_for_owner("bravo", "tenant-chat-1")
+        .unwrap()
+        .is_none());
     assert!(!memory
         .delete_conversation_for_owner("bravo", "tenant-chat-1")
         .unwrap());
