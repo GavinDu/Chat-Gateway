@@ -3,7 +3,7 @@ use anyhow::{bail, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use std::{collections::HashMap, fs, path::Path, time::Duration};
 
-const VERSION: i64 = 6;
+const VERSION: i64 = 7;
 const APPLICATION_ID: i64 = 0x4347574d; // CGWM
 const PROVIDER_THREADS_SCHEMA: &str = "
     CREATE TABLE provider_threads (
@@ -220,8 +220,19 @@ fn initialize(connection: &mut Connection, legacy: Option<&Path>) -> Result<()> 
     } else if version == 5 && app == APPLICATION_ID {
         tx.execute_batch(MEMORY_SCHEMA)?;
         tx.pragma_update(None, "user_version", VERSION)?;
+    } else if version == 6 && app == APPLICATION_ID {
+        // Version 7 removes synthetic browser-tab identifiers written by older
+        // callers. Keep the column for compatibility, but never trust synthetic
+        // tab-* values as durable browser state.
     } else if version != VERSION || app != APPLICATION_ID {
         bail!("unsupported conversation schema version {version} (expected {VERSION}) or application id {app}");
+    }
+    if version > 0 && version < VERSION {
+        tx.execute(
+            "UPDATE conversations SET tab_id = NULL WHERE tab_id LIKE 'tab-%'",
+            [],
+        )?;
+        tx.pragma_update(None, "user_version", VERSION)?;
     }
     tx.execute_batch(
         "CREATE INDEX IF NOT EXISTS conversations_owner_key_id_idx ON conversations(owner_key_id, id);",
@@ -280,7 +291,7 @@ fn initialize(connection: &mut Connection, legacy: Option<&Path>) -> Result<()> 
 }
 
 fn validate_schema(connection: &Connection) -> Result<()> {
-    // Version 6 is owned by this application. Fail closed if its definitions
+    // Version 7 is owned by this application. Fail closed if its definitions
     // were changed, including constraints that SELECT alone cannot validate.
     let expected = Connection::open_in_memory()?;
     expected.execute_batch(SCHEMA)?;
