@@ -70,30 +70,6 @@ pub fn record_unlinked(provider: &str) {
     }
 }
 
-/// Forget in-memory session health when a provider is explicitly unlinked.
-/// The next login/send starts from Unknown rather than retaining stale state.
-pub fn clear(provider: &str) {
-    if let Ok(mut map) = states().lock() {
-        map.remove(provider);
-    }
-}
-
-/// Forget in-memory session health when a provider is explicitly unlinked.
-/// The next login/send starts from Unknown rather than retaining stale state.
-pub fn clear(provider: &str) {
-    if let Ok(mut map) = states().lock() {
-        map.remove(provider);
-    }
-}
-
-/// Forget in-memory session health when a provider is explicitly unlinked.
-/// A subsequent login/send starts from Unknown rather than stale state.
-pub fn clear(provider: &str) {
-    if let Ok(mut map) = states().lock() {
-        map.remove(provider);
-    }
-}
-
 pub fn record_success(provider: &str) {
     if let Ok(mut map) = states().lock() {
         map.insert(
@@ -282,48 +258,6 @@ mod tests {
             status("test-provider-unknown").state,
             ProviderSessionState::Unknown
         );
-    }
-
-    #[test]
-    fn unlink_clear_resets_provider_state_and_error() {
-        let provider = "test-provider-unlink-clears-state";
-        record_error(provider, "session expired");
-        assert_eq!(status(provider).state, ProviderSessionState::NeedsLogin);
-
-        clear(provider);
-
-        assert_eq!(status(provider).state, ProviderSessionState::Unknown);
-        assert_eq!(status(provider).last_error, None);
-        assert_eq!(status(provider).retry_after, None);
-        assert!(is_routable(provider));
-    }
-
-    #[test]
-    fn unlink_clear_resets_provider_state_and_error() {
-        let provider = "test-provider-unlink-clears-state";
-        record_error(provider, "session expired");
-        assert_eq!(status(provider).state, ProviderSessionState::NeedsLogin);
-
-        clear(provider);
-
-        assert_eq!(status(provider).state, ProviderSessionState::Unknown);
-        assert_eq!(status(provider).last_error, None);
-        assert_eq!(status(provider).retry_after, None);
-        assert!(is_routable(provider));
-    }
-
-    #[test]
-    fn unlink_clear_resets_provider_state_and_error() {
-        let provider = "test-provider-unlink-clears-state";
-        record_error(provider, "session expired");
-        assert_eq!(status(provider).state, ProviderSessionState::NeedsLogin);
-
-        clear(provider);
-
-        assert_eq!(status(provider).state, ProviderSessionState::Unknown);
-        assert_eq!(status(provider).last_error, None);
-        assert_eq!(status(provider).retry_after, None);
-        assert!(is_routable(provider));
     }
 
     #[test]
