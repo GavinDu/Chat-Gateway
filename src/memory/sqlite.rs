@@ -410,3 +410,102 @@ pub(super) fn append_owned(
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[allow(dead_code)] // This module is also compiled through the standalone SQLite benchmark.
+mod concurrency_configuration_tests {
+    #[test]
+    fn file_backed_database_enforces_expected_concurrency_pragmas() -> super::Result<()> {
+        let path = std::env::temp_dir().join(format!(
+            "chat-gateway-sqlite-pragmas-{}.sqlite3",
+            uuid::Uuid::new_v4()
+        ));
+        let connection = super::open(Some(&path), None)?;
+
+        let journal_mode: String =
+            connection.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
+        let busy_timeout_ms: i64 =
+            connection.query_row("PRAGMA busy_timeout", [], |row| row.get(0))?;
+        let foreign_keys: i64 =
+            connection.query_row("PRAGMA foreign_keys", [], |row| row.get(0))?;
+        let synchronous: i64 = connection.query_row("PRAGMA synchronous", [], |row| row.get(0))?;
+        let schema_version: i64 =
+            connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        let application_id: i64 =
+            connection.query_row("PRAGMA application_id", [], |row| row.get(0))?;
+
+        assert_eq!(journal_mode.to_ascii_lowercase(), "wal");
+        assert_eq!(busy_timeout_ms, 30_000);
+        assert_eq!(foreign_keys, 1);
+        assert_eq!(synchronous, 2, "durable writes require synchronous=FULL");
+        assert_eq!(schema_version, super::VERSION);
+        assert_eq!(application_id, super::APPLICATION_ID);
+
+        drop(connection);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+        Ok(())
+    }
+
+    #[test]
+    fn independent_connections_can_open_the_same_wal_database() -> super::Result<()> {
+        let path = std::env::temp_dir().join(format!(
+            "chat-gateway-sqlite-concurrent-open-{}.sqlite3",
+            uuid::Uuid::new_v4()
+        ));
+        let first = super::open(Some(&path), None)?;
+        let second = super::open(Some(&path), None)?;
+
+        let first_mode: String = first.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
+        let second_mode: String = second.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
+        assert_eq!(first_mode.to_ascii_lowercase(), "wal");
+        assert_eq!(second_mode.to_ascii_lowercase(), "wal");
+
+        drop(second);
+        drop(first);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+        Ok(())
+    }
+
+    #[test]
+    fn wal_reader_does_not_observe_uncommitted_writer_data() -> super::Result<()> {
+        let path = std::env::temp_dir().join(format!(
+            "chat-gateway-sqlite-isolation-{}.sqlite3",
+            uuid::Uuid::new_v4()
+        ));
+        let mut writer = super::open(Some(&path), None)?;
+        let reader = super::open(Some(&path), None)?;
+        let transaction =
+            writer.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        transaction.execute(
+            "INSERT INTO conversations(id,provider,tab_id,last_activity_at,owner_key_id)
+             VALUES (?1, NULL, NULL, 0, 'local')",
+            ["isolation-check"],
+        )?;
+
+        let before_commit: i64 = reader.query_row(
+            "SELECT COUNT(*) FROM conversations WHERE id=?1",
+            ["isolation-check"],
+            |row| row.get(0),
+        )?;
+        assert_eq!(before_commit, 0, "reader must not see uncommitted writes");
+
+        transaction.commit()?;
+        let after_commit: i64 = reader.query_row(
+            "SELECT COUNT(*) FROM conversations WHERE id=?1",
+            ["isolation-check"],
+            |row| row.get(0),
+        )?;
+        assert_eq!(after_commit, 1, "committed writes must become visible");
+
+        drop(reader);
+        drop(writer);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+        Ok(())
+    }
+}
