@@ -253,7 +253,7 @@ fn token_matches(token: &str, expected: &[u8; 32]) -> bool {
 }
 
 fn request_timestamp_is_fresh(timestamp: Option<i64>, now: i64) -> bool {
-    timestamp.is_some_and(|timestamp| (now - timestamp).abs() <= REQUEST_SKEW_SECONDS)
+    timestamp.is_some_and(|timestamp| timestamp.abs_diff(now) <= REQUEST_SKEW_SECONDS as u64)
 }
 
 fn relay_nonce_is_valid(nonce: &str) -> bool {
@@ -489,6 +489,8 @@ mod tests {
         assert!(request_timestamp_is_fresh(Some(1_000), 1_000 - REQUEST_SKEW_SECONDS));
         assert!(!request_timestamp_is_fresh(None, 1_000));
         assert!(!request_timestamp_is_fresh(Some(1_000), 1_001 + REQUEST_SKEW_SECONDS));
+        assert!(!request_timestamp_is_fresh(Some(i64::MIN), 1_000));
+        assert!(!request_timestamp_is_fresh(Some(i64::MAX), 1_000));
     }
 
     #[test]
