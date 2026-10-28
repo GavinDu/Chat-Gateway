@@ -30,7 +30,7 @@ mod providers;
 mod router;
 mod session;
 
-use api::{api_error, add_gateway_headers, estimate_tokens, validate_chat_req, ChatReq};
+use api::{add_gateway_headers, api_error, estimate_tokens, validate_chat_req, ChatReq};
 use browser::pool::ObscuraPool;
 use config::AppConfig;
 use memory::{ChatMessage, ProviderThread, UnifiedMemory};
