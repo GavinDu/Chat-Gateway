@@ -1589,6 +1589,16 @@ mod vault_tests {
     }
 
     #[test]
+    fn encrypted_vault_rejects_nonce_tampering() {
+        let key = [0x37; 32];
+        let encrypted = encrypt_session_snapshot(&sample_session(), "provider-a", &key).unwrap();
+        let mut tampered_nonce = encrypted;
+        // The six-byte magic header is followed by the 12-byte GCM nonce.
+        tampered_nonce[6] ^= 0x01;
+        assert!(decrypt_session_snapshot(&tampered_nonce, "provider-a", &key).is_err());
+    }
+
+    #[test]
     fn encrypted_vault_rejects_wrong_key_and_truncated_envelopes() {
         let encrypted =
             encrypt_session_snapshot(&sample_session(), "provider-a", &[0x44; 32]).unwrap();
