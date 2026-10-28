@@ -272,7 +272,8 @@ mod tests {
             .collect::<Vec<_>>();
         let admitted = workers
             .into_iter()
-            .filter(|worker| worker.join().expect("routing worker should finish"))
+            .map(|worker| worker.join().expect("routing worker should finish"))
+            .filter(|admitted| *admitted)
             .count();
 
         assert_eq!(admitted, 1, "only one concurrent request may claim the half-open slot");
