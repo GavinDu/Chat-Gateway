@@ -287,6 +287,23 @@ mod tests {
     }
 
     #[test]
+    fn typed_probe_outcomes_distinguish_expired_sessions_from_probe_failures() {
+        let expired = "test-provider-typed-probe-expired";
+        record_needs_login(expired);
+        assert_eq!(status(expired).state, ProviderSessionState::NeedsLogin);
+        assert!(!is_routable(expired));
+
+        let transient = "test-provider-typed-probe-failure";
+        record_probe_failure(transient);
+        assert_eq!(status(transient).state, ProviderSessionState::Degraded);
+        assert!(!is_routable(transient));
+        assert_eq!(
+            status(transient).last_error.as_deref(),
+            Some("provider request failed; retry may succeed")
+        );
+    }
+
+    #[test]
     fn unknown_provider_is_routable_until_checked() {
         assert!(is_routable("test-provider-unknown"));
         assert_eq!(
