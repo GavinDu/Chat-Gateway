@@ -2089,25 +2089,46 @@ async fn chat_completions(
         }
     };
 
-    // Retrieve personal memory only when the owner opted in. Read errors fail
-    // closed rather than silently changing the prompt. Reserve a fixed portion
-    // of the context budget before assembling transcript history.
-    let memory = state.memory.clone();
-    let memory_owner = owner_key_id.clone();
-    let retrieved_memory = match tokio::task::spawn_blocking(move || {
-        memory.retrieve_long_term_memory_items(&memory_owner, 20)
-    })
-    .await
-    {
-        Ok(Ok(items)) => items,
-        _ => {
+    let memory_egress_policy = match memory_egress::MemoryEgressPolicy::from_env() {
+        Ok(policy) => policy,
+        Err(_) => {
             return api_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "server_error",
-                "memory_read_failed",
-                "long-term memory could not be read safely",
-            );
+                "memory_egress_policy_invalid",
+                "provider memory egress policy is invalid",
+            )
         }
+    };
+
+    // The default-deny policy should not reduce transcript context when no
+    // provider is authorized to receive personal memory.
+    let personal_memory_egress_enabled =
+        !memory_egress_policy.allowed_personal_memory_providers().is_empty();
+
+    // Retrieve personal memory only when the owner opted in. Read errors fail
+    // closed rather than silently changing the prompt. Reserve a fixed portion
+    // of the context budget before assembling transcript history.
+    let retrieved_memory = if personal_memory_egress_enabled {
+        let memory = state.memory.clone();
+        let memory_owner = owner_key_id.clone();
+        match tokio::task::spawn_blocking(move || {
+            memory.retrieve_long_term_memory_items(&memory_owner, 20)
+        })
+        .await
+        {
+            Ok(Ok(items)) => items,
+            _ => {
+                return api_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "server_error",
+                    "memory_read_failed",
+                    "long-term memory could not be read safely",
+                );
+            }
+        }
+    } else {
+        Vec::new()
     };
     let (personal_memory_items, memory_tokens) =
         budget_personal_memory_items(retrieved_memory, 512);
@@ -2187,17 +2208,6 @@ async fn chat_completions(
         );
     }
 
-    let memory_egress_policy = match memory_egress::MemoryEgressPolicy::from_env() {
-        Ok(policy) => policy,
-        Err(_) => {
-            return api_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "server_error",
-                "memory_egress_policy_invalid",
-                "provider memory egress policy is invalid",
-            )
-        }
-    };
     let candidate_count = candidates.len();
     let mut busy_count = 0usize;
     let mut last_err: Option<String> = None;
