@@ -46,6 +46,19 @@ The gateway supports two non-secret maintenance commands that run before browser
 
 These commands make listing and deliberate deletion available, but **do not implement key rotation**. Rotation must remain an offline, recoverable operation until the implementation can guarantee all vault records are either on the old key or the new key after any failure or process interruption. Do not manually replace the configured key while existing records are still encrypted with it.
 
+## Operator commands and key rotation
+
+The binary provides explicit maintenance commands that exit before starting the browser runtime:
+
+- `chat-gateway-rs --list-session-vaults`: prints one row per supported provider with `valid`, `missing`, `unreadable`, or `legacy-plaintext`. It requires `CHAT_GATEWAY_VAULT_KEY` and never prints cookie or localStorage values.
+- `chat-gateway-rs --delete-session-vault chatgpt`: deletes that provider's encrypted snapshot and any legacy plaintext snapshot. Stop the gateway first to avoid racing session writes.
+- `CHAT_GATEWAY_VAULT_NEW_KEY` plus `chat-gateway-rs --rotate-session-vault-key`: migrates any remaining legacy records, decrypts every present vault with `CHAT_GATEWAY_VAULT_KEY`, validates every replacement under the new key, writes encrypted recovery copies under `sessions/.vault-rotation-*`, then replaces live records. Runtime write errors trigger rollback of files already replaced.
+- `chat-gateway-rs --restore-session-vault-backup sessions/.vault-rotation-...`: restores a rotation backup. Set `CHAT_GATEWAY_VAULT_KEY` to the old key before running this command. The command validates every backup record before writing any of them.
+
+After a successful rotation, update the deployment's `CHAT_GATEWAY_VAULT_KEY` to the new value before restarting the gateway. Keep the old key and encrypted recovery directory until `--list-session-vaults` reports expected records as valid and restart restoration has been verified. Store keys in a deployment secret manager or OS-backed secret store; do not put them in command-line arguments, source control, logs, or container images. The environment-variable interface is an operator-managed key-injection mechanism, not OS-keychain integration.
+
+The recovery directory makes interrupted rotations recoverable, but the multi-file replacement is not crash-atomic. If the process or host stops mid-rotation, restore the complete backup using the old key, then retry rotation. Do not switch the configured key until rotation has completed.
+
 ## Migration and recovery
 
 - Detect the legacy JSON format separately from the encrypted envelope.
