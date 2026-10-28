@@ -180,7 +180,10 @@ mod tests {
     #[test]
     fn unknown_provider_is_routable_until_checked() {
         assert!(is_routable("test-provider-unknown"));
-        assert_eq!(status("test-provider-unknown").state, ProviderSessionState::Unknown);
+        assert_eq!(
+            status("test-provider-unknown").state,
+            ProviderSessionState::Unknown
+        );
     }
 
     #[test]
