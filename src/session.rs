@@ -1462,6 +1462,10 @@ mod vault_tests {
             legacy_bytes,
             "failed vault decryption must not delete or silently load the plaintext source"
         );
+        assert!(
+            vault_path.is_file(),
+            "failed decryption must preserve the corrupt vault record for diagnosis"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
