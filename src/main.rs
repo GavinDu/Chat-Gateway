@@ -374,7 +374,7 @@ async fn main() -> anyhow::Result<()> {
         let provider_name = provider.name.clone();
         let jitter_seconds = provider_session_probe_jitter_seconds(&provider_name);
         tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_secs(jitter_seconds)).await;
+            // Probe once immediately at startup; subsequent checks remain staggered.
             loop {
                 match pool.verify_session(&provider_name).await {
                     Ok(true) => provider_state::record_success(&provider_name),
