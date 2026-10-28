@@ -1432,7 +1432,10 @@ async fn persist_provider_thread(
             return;
         }
     };
-    let messages = match state.memory.conversation_messages_for_owner(owner_key_id, conversation_id) {
+    let messages = match state
+        .memory
+        .conversation_messages_for_owner(owner_key_id, conversation_id)
+    {
         Ok(messages) => messages,
         Err(error) => {
             tracing::warn!(provider, %error, "provider thread sync marker could not be read");
@@ -1447,7 +1450,10 @@ async fn persist_provider_thread(
         model: Some(model.to_owned()),
         updated_at: chrono::Utc::now().timestamp(),
     };
-    if let Err(error) = state.memory.upsert_provider_thread_for_owner(owner_key_id, &thread) {
+    if let Err(error) = state
+        .memory
+        .upsert_provider_thread_for_owner(owner_key_id, &thread)
+    {
         tracing::warn!(provider, %error, "provider thread mapping could not be persisted");
     }
 }
@@ -1461,10 +1467,16 @@ fn is_reopenable_provider_thread_url(provider: &str, value: &str) -> bool {
     };
     let location = format!("/{location}");
     match provider {
-        "chatgpt" => location.starts_with("/c/") || (location.starts_with("/g/") && location.contains("/c/")),
+        "chatgpt" => {
+            location.starts_with("/c/") || (location.starts_with("/g/") && location.contains("/c/"))
+        }
         "claude" => location.starts_with("/chat/") && location.len() > "/chat/".len(),
         "gemini" => location.starts_with("/app/") && location.len() > "/app/".len(),
-        "grok" => location.starts_with("/c/") || location.starts_with("/chat/") || location.contains("?conversation="),
+        "grok" => {
+            location.starts_with("/c/")
+                || location.starts_with("/chat/")
+                || location.contains("?conversation=")
+        }
         "qwen" => location.starts_with("/c/") && location.len() > "/c/".len(),
         "mistral" => location.starts_with("/chat/") && location.len() > "/chat/".len(),
         "perplexity" => location.starts_with("/search/") || location.starts_with("/page/"),
@@ -1991,20 +2003,38 @@ async fn chat_completions(
         let queue_ms = permit.queue_ms.min(u64::MAX as u128) as u64;
 
         let stored_messages = match conversation_id.as_deref() {
-            Some(id) => match state.memory.conversation_messages_for_owner(&owner_key_id, id) {
+            Some(id) => match state
+                .memory
+                .conversation_messages_for_owner(&owner_key_id, id)
+            {
                 Ok(messages) => messages,
                 Err(_) => return conversation_context_read_error(conversation_id.as_deref()),
             },
             None => Vec::new(),
         };
         let saved_thread = match conversation_id.as_deref() {
-            Some(id) => match state.memory.get_provider_thread_for_owner(&owner_key_id, id, &provider_name) {
-                Ok(thread) => thread.filter(|thread| is_reopenable_provider_thread_url(&provider_name, &thread.thread_url)),
-                Err(_) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "server_error", "memory_read_failed", "provider thread state could not be read safely"),
+            Some(id) => {
+                match state
+                    .memory
+                    .get_provider_thread_for_owner(&owner_key_id, id, &provider_name)
+                {
+                    Ok(thread) => thread.filter(|thread| {
+                        is_reopenable_provider_thread_url(&provider_name, &thread.thread_url)
+                    }),
+                    Err(_) => {
+                        return api_error(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "server_error",
+                            "memory_read_failed",
+                            "provider thread state could not be read safely",
+                        )
+                    }
+                }
             },
             None => None,
         };
-        let supports_reopen = providers::ADAPTERS.iter()
+        let supports_reopen = providers::ADAPTERS
+            .iter()
             .find(|spec| spec.id == provider_name)
             .is_some_and(|spec| matches!(spec.threads, providers::ThreadSupport::UrlAddressable));
         let last_marker = transcript_marker(&stored_messages);
@@ -2361,7 +2391,14 @@ async fn chat_completions(
             );
         }
 
-        persist_provider_thread(&state, &owner_key_id, &new_conv_id, &provider_name, &req.model).await;
+        persist_provider_thread(
+            &state,
+            &owner_key_id,
+            &new_conv_id,
+            &provider_name,
+            &req.model,
+        )
+        .await;
         let prompt_tokens = estimate_tokens(&provider_prompt);
         let completion_tokens = estimate_tokens(&full);
         let body = serde_json::json!({
@@ -3679,9 +3716,18 @@ mod provider_thread_url_tests {
             "claude",
             "https://claude.ai/chat/123"
         ));
-        assert!(is_reopenable_provider_thread_url("chatgpt", "https://chatgpt.com/c/123"));
-        assert!(!is_reopenable_provider_thread_url("chatgpt", "https://chatgpt.com/"));
-        assert!(!is_reopenable_provider_thread_url("claude", "https://claude.ai/"));
+        assert!(is_reopenable_provider_thread_url(
+            "chatgpt",
+            "https://chatgpt.com/c/123"
+        ));
+        assert!(!is_reopenable_provider_thread_url(
+            "chatgpt",
+            "https://chatgpt.com/"
+        ));
+        assert!(!is_reopenable_provider_thread_url(
+            "claude",
+            "https://claude.ai/"
+        ));
         assert!(!valid_provider_thread_url(
             "chatgpt",
             "http://chatgpt.com/c/123"
