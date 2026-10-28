@@ -23,7 +23,7 @@ function loadShared(cookieFixtures = []) {
   };
   vm.createContext(context);
   const source = fs.readFileSync(require.resolve("../shared.js"), "utf8");
-  vm.runInContext(source + "\\nglobalThis.__testApi = { normalizeGateway, providerCookieSnapshot, PROVIDERS };", context);
+  vm.runInContext(source + "\nglobalThis.__testApi = { normalizeGateway, providerCookieSnapshot, PROVIDERS };", context);
   return context.__testApi;
 }
 
