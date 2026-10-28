@@ -180,9 +180,9 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
     if cli.vault_rotate_key {
-        let encoded = std::env::var("CHAT_GATEWAY_VAULT_NEW_KEY").map_err(|_| {
+        let encoded = zeroize::Zeroizing::new(std::env::var("CHAT_GATEWAY_VAULT_NEW_KEY").map_err(|_| {
             anyhow::anyhow!("CHAT_GATEWAY_VAULT_NEW_KEY is required for vault key rotation")
-        })?;
+        })?);
         let new_key =
             zeroize::Zeroizing::new(session::parse_vault_key(&encoded).map_err(|_| {
                 anyhow::anyhow!(
