@@ -20,8 +20,8 @@ The default popup gateway URL is `http://127.0.0.1:3000`; adjust it if the confi
 1. Sign into the provider normally in Chrome.
 2. Open the extension popup, enter the local gateway URL and one-time pairing code, then pair.
 3. Select a provider and choose **Review permissions & link**. Chrome asks for that provider's optional host permissions; granting them is an explicit consent step.
-4. The extension imports the provider-scoped cookie set into the encrypted vault and debounces later cookie-rotation updates. The current MVP does not hot-reload the embedded Obscura page, so restart Chat Gateway after the initial link (and after browser cookie rotations) for those changes to take effect in the execution engine.
-5. **Unlink selected provider** deletes both encrypted and legacy on-disk records. Because the embedded browser may still have cookies in memory, restart the gateway after unlinking before relying on revocation. This limitation is intentional and remains a follow-up before the relay can be considered production-complete.
+4. The extension imports the provider-scoped cookie set into the encrypted vault and debounces later cookie-rotation updates. The gateway attempts to hot-apply each imported snapshot to the embedded browser; if the response reports `restart_required`, restart Chat Gateway before relying on the updated session.
+5. **Unlink selected provider** deletes both encrypted and legacy on-disk records. The gateway clears cookies for the provider's allowlisted domains from the shared in-memory browser jar, clears the active page's localStorage where accessible, replaces the provider page, and deletes both encrypted and legacy on-disk records. If the gateway reports unlink failure, do not assume revocation completed.
 6. **Unpair this extension** revokes the installation token. It does not delete provider records; unlink providers first if you want their vault entries removed.
 
 The gateway binds the relay routes to loopback and checks the exact `chrome-extension://<id>` origin. Paired requests require a bearer install token, timestamp, and one-use nonce. The token is returned once and stored in Chrome extension-local storage; the gateway persists only its SHA-256 hash in the owner-only `sessions/relay-install-token.sha256` file so pairing survives restart. Unpair deletes the server-side hash and revokes the token. Protect the browser profile.
@@ -30,6 +30,6 @@ The gateway binds the relay routes to loopback and checks the exact `chrome-exte
 
 - Chrome only; Firefox and Safari are out of scope.
 - Cookies only. localStorage is rejected until each provider has a reviewed key allowlist.
-- The vault currently uses the `ring` AES-256-GCM AEAD implementation and an explicit environment key. OS-keychain integration, key rotation/list commands, clearing the embedded browser's in-memory cookie jar on unlink, and live provider restore verification remain open work.
+- The vault currently uses the `ring` AES-256-GCM AEAD implementation and an explicit environment key. OS-keychain integration, key rotation/list commands, comprehensive migration fault-injection tests, and live provider restore verification remain open work.
 - Provider automation must be permitted by the provider's terms and account policy. The extension must not be used to evade access restrictions. Keep unsupported providers disabled.
 - No live provider test is implied by this MVP. Use recorded fixtures and CI for routine verification; perform any live-provider check only with an account you control and where the provider permits it.
