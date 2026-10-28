@@ -4590,7 +4590,6 @@ mod first_event_tests {
 }
 
 #[cfg(test)]
-#[cfg(test)]
 mod long_term_memory_retrieval_tests {
     use super::*;
 
