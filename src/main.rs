@@ -3676,6 +3676,15 @@ mod api_key_auth_tests {
             ),
             Err(AuthFailure::InsufficientScope)
         );
+        assert_eq!(
+            authorize_api_request(
+                &config,
+                Some("Bearer test-secret"),
+                "/v1/admin/memory-egress-policy",
+                &axum::http::Method::GET
+            ),
+            Err(AuthFailure::InsufficientScope)
+        );
     }
 
     #[test]
@@ -3699,6 +3708,13 @@ mod api_key_auth_tests {
             &config,
             Some("Bearer test-secret"),
             "/v1/conversations",
+            &axum::http::Method::GET
+        )
+        .is_ok());
+        assert!(authorize_api_request(
+            &config,
+            Some("Bearer test-secret"),
+            "/v1/admin/memory-egress-policy",
             &axum::http::Method::GET
         )
         .is_ok());
