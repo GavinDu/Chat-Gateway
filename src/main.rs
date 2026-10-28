@@ -2,7 +2,7 @@ use axum::{
     body::Body,
     extract::{DefaultBodyLimit, Extension, Path, Query, State},
     http::HeaderMap,
-    http::{Request, StatusCode},
+    http::{header, HeaderValue, Request, StatusCode},
     middleware::{self, Next},
     response::Response,
     response::{
@@ -413,6 +413,7 @@ async fn main() -> anyhow::Result<()> {
                 .put(save_long_term_memory_item)
                 .delete(delete_all_long_term_memory_items),
         )
+        .route("/v1/memory/export", get(export_long_term_memory_items))
         .route(
             "/v1/memory/items/:item_id",
             axum::routing::delete(delete_long_term_memory_item),
@@ -1442,6 +1443,41 @@ async fn list_long_term_memory_items(
             "server_error",
             "memory_read_failed",
             "memory items could not be listed safely",
+        ),
+    }
+}
+
+async fn export_long_term_memory_items(
+    State(state): State<Arc<AppState>>,
+    auth_context: Option<Extension<AuthKeyContext>>,
+) -> Response {
+    let memory = state.memory.clone();
+    let owner = memory_owner(&auth_context).to_owned();
+    match tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+        let enabled = memory.long_term_memory_enabled(&owner)?;
+        let items = memory.list_long_term_memory_items(&owner)?;
+        Ok((enabled, items))
+    })
+    .await
+    {
+        Ok(Ok((enabled, items))) => {
+            let mut response = Json(serde_json::json!({
+                "format_version": 1,
+                "enabled": enabled,
+                "data": items,
+            }))
+            .into_response();
+            response.headers_mut().insert(
+                header::CONTENT_DISPOSITION,
+                HeaderValue::from_static("attachment; filename=\"long-term-memory.json\""),
+            );
+            response
+        }
+        _ => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "server_error",
+            "memory_export_failed",
+            "memory items could not be exported safely",
         ),
     }
 }
