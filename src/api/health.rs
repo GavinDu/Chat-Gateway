@@ -1,4 +1,4 @@
-use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
+use axum::{extract::State, http::StatusCode, response::{IntoResponse, Response}, Json};
 use std::sync::Arc;
 
 use crate::{provider_guard, provider_state, AppState};
@@ -31,7 +31,7 @@ pub(crate) async fn health(State(state): State<Arc<AppState>>) -> impl IntoRespo
     }))
 }
 
-fn readiness_response(enabled: usize, worker_alive: bool) -> Response {
+pub(crate) fn readiness_response(enabled: usize, worker_alive: bool) -> Response {
     if !worker_alive {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
