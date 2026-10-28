@@ -361,7 +361,7 @@ fn encrypt_session_snapshot(
     key.seal_in_place_append_tag(
         aead::Nonce::assume_unique_for_key(nonce_bytes),
         aead::Aad::from(vault_aad(provider).as_bytes()),
-        &mut ciphertext,
+        &mut *ciphertext,
     )
     .map_err(|_| anyhow::anyhow!("could not encrypt session snapshot"))?;
     let mut output = Vec::with_capacity(MAGIC.len() + nonce_bytes.len() + ciphertext.len());
