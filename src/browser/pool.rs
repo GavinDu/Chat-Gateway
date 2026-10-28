@@ -73,6 +73,10 @@ enum Command {
         provider: Provider,
         reply: oneshot::Sender<Result<TestAdapterReport>>,
     },
+    UnlinkSession {
+        provider: Provider,
+        reply: oneshot::Sender<Result<bool>>,
+    },
     // Login delegate UI (see src/login.rs): dedicated pages on the
     // browser thread, separate from the warm provider pages. Login
     // pages are plain Rc<Page> (no &mut needed after creation — all
@@ -300,6 +304,20 @@ impl ObscuraPool {
             .map_err(|_| anyhow::anyhow!("browser thread gone"))?;
         rx.await
             .map_err(|_| anyhow::anyhow!("browser thread dropped test-adapter"))?
+    }
+
+    /// Revoke a provider session from the live browser and persistent store.
+    /// Persistent deletion is attempted only after cookie and origin storage
+    /// clearing succeeds, so failures do not silently report a completed unlink.
+    pub async fn unlink_session(&self, name: &str) -> Result<bool> {
+        let provider = self.login_provider(name)?;
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(Command::UnlinkSession { provider, reply: tx })
+            .await
+            .map_err(|_| anyhow::anyhow!("browser thread gone"))?;
+        rx.await
+            .map_err(|_| anyhow::anyhow!("browser thread dropped session unlink"))?
     }
 
     fn login_provider(&self, name: &str) -> Result<Provider> {
@@ -830,6 +848,41 @@ fn browser_thread(
                                     tracing::warn!(provider = provider.name(), %error, "probe session snapshot failed");
                                 }
                                 finish(report);
+                            });
+                        }
+                        Command::UnlinkSession { provider, reply } => {
+                            let browser = browser.clone();
+                            let pages = pages.clone();
+                            let locks = locks.clone();
+                            let login_pages = login_pages.clone();
+                            let login_meta = login_meta.clone();
+                            tokio::task::spawn_local(async move {
+                                let res: Result<bool> = async {
+                                    let lock = locks.borrow().get(&provider).cloned()
+                                        .ok_or_else(|| anyhow::anyhow!("provider page lock missing"))?;
+                                    let _guard = lock.lock().await;
+
+                                    // Use a temporary page on the provider origin to clear
+                                    // origin-scoped storage. The browser cookie jar is shared.
+                                    let mut page = browser.new_page().await?;
+                                    page.goto(provider.login_url()).await?;
+                                    let storage_cleared = page.evaluate(
+                                        "(()=>{try{localStorage.clear();return true;}catch(_){return false;}})()"
+                                    );
+                                    if !storage_cleared.as_bool().unwrap_or(false) {
+                                        anyhow::bail!("provider localStorage could not be cleared");
+                                    }
+                                    session::clear_provider_cookies(&browser, provider.name())?;
+                                    page.goto(provider.login_url()).await?;
+
+                                    // Do not report unlink success unless disk cleanup succeeds.
+                                    let removed = session::delete_session_snapshot(provider.name())?;
+                                    pages.borrow_mut().insert(provider, Rc::new(page));
+                                    login_pages.borrow_mut().remove(&provider);
+                                    login_meta.borrow_mut().remove(&provider);
+                                    Ok(removed)
+                                }.await;
+                                let _ = reply.send(res);
                             });
                         }
                         Command::LoginStart { provider, reply } => {
