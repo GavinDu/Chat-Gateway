@@ -471,24 +471,46 @@ fn long_term_memory_is_opt_in_owner_scoped_and_deletable() {
         .unwrap()
         .is_empty());
 
-    memory.set_long_term_memory_enabled("owner-a", true).unwrap();
+    memory
+        .set_long_term_memory_enabled("owner-a", true)
+        .unwrap();
     let item = memory
         .save_long_term_memory_item("owner-a", "preference", "concise answers", None, 0.9, None)
         .unwrap();
     assert_eq!(item.memory_key, "preference");
-    assert_eq!(memory.retrieve_long_term_memory_items("owner-b", 5).unwrap().len(), 0);
-    assert_eq!(memory.retrieve_long_term_memory_items("owner-a", 5).unwrap(), vec![item.clone()]);
+    assert_eq!(
+        memory
+            .retrieve_long_term_memory_items("owner-b", 5)
+            .unwrap()
+            .len(),
+        0
+    );
+    assert_eq!(
+        memory
+            .retrieve_long_term_memory_items("owner-a", 5)
+            .unwrap(),
+        vec![item.clone()]
+    );
 
-    assert!(!memory.delete_long_term_memory_item("owner-b", &item.id).unwrap());
-    assert!(memory.delete_long_term_memory_item("owner-a", &item.id).unwrap());
-    assert!(memory.list_long_term_memory_items("owner-a").unwrap().is_empty());
+    assert!(!memory
+        .delete_long_term_memory_item("owner-b", &item.id)
+        .unwrap());
+    assert!(memory
+        .delete_long_term_memory_item("owner-a", &item.id)
+        .unwrap());
+    assert!(memory
+        .list_long_term_memory_items("owner-a")
+        .unwrap()
+        .is_empty());
 }
 
 #[test]
 fn bulk_memory_delete_is_scoped_to_owner_and_preserves_opt_in_setting() {
     let memory = UnifiedMemory::new(8000);
     memory.set_long_term_memory_enabled("owner-a", true).unwrap();
-    memory.set_long_term_memory_enabled("owner-b", true).unwrap();
+    memory
+        .set_long_term_memory_enabled("owner-b", true)
+        .unwrap();
     memory
         .save_long_term_memory_item("owner-a", "timezone", "America/New_York", None, 1.0, None)
         .unwrap();
@@ -496,9 +518,15 @@ fn bulk_memory_delete_is_scoped_to_owner_and_preserves_opt_in_setting() {
         .save_long_term_memory_item("owner-b", "timezone", "Europe/London", None, 1.0, None)
         .unwrap();
 
-    assert_eq!(memory.delete_all_long_term_memory_items("owner-a").unwrap(), 1);
+    assert_eq!(
+        memory.delete_all_long_term_memory_items("owner-a").unwrap(),
+        1
+    );
     assert!(memory.list_long_term_memory_items("owner-a").unwrap().is_empty());
-    assert_eq!(memory.list_long_term_memory_items("owner-b").unwrap().len(), 1);
+    assert_eq!(
+        memory.list_long_term_memory_items("owner-b").unwrap().len(),
+        1
+    );
     assert!(memory.long_term_memory_enabled("owner-a").unwrap());
     assert!(memory.long_term_memory_enabled("owner-b").unwrap());
 }
@@ -543,9 +571,17 @@ fn long_term_memory_disable_stops_retrieval_without_erasing_inspectable_items() 
         .save_long_term_memory_item("owner-a", "timezone", "America/New_York", None, 1.0, None)
         .unwrap();
 
-    memory.set_long_term_memory_enabled("owner-a", false).unwrap();
-    assert!(memory.retrieve_long_term_memory_items("owner-a", 5).unwrap().is_empty());
-    assert_eq!(memory.list_long_term_memory_items("owner-a").unwrap().len(), 1);
+    memory
+        .set_long_term_memory_enabled("owner-a", false)
+        .unwrap();
+    assert!(memory
+        .retrieve_long_term_memory_items("owner-a", 5)
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        memory.list_long_term_memory_items("owner-a").unwrap().len(),
+        1
+    );
 }
 
 #[test]
