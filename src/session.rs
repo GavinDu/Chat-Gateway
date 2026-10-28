@@ -253,7 +253,10 @@ pub fn clear_provider_cookies(browser: &Browser, provider: &str) -> Result<usize
     let cookies = store.get_all();
     let mut cleared = 0;
     for browser_cookie in cookies {
-        let cookie = Cookie::from(browser_cookie);
+        let mut cookie = Cookie::from(browser_cookie);
+        // The old value is never written back; ignore it when validating the
+        // deletion tuple so unusual but valid values do not leave stale cookies.
+        cookie.value.clear();
         if !cookie_domain_allowed(provider, &cookie.domain)
             || !restored_cookie_fields_safe(&cookie)
         {
