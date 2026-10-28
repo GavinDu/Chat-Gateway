@@ -895,6 +895,19 @@ impl UnifiedMemory {
         )? == 1)
     }
 
+    /// Delete all long-term memory items belonging to one owner. This does not
+    /// affect the owner's opt-in setting or any conversation transcript.
+    pub fn delete_all_long_term_memory_items(&self, owner_key_id: &str) -> anyhow::Result<usize> {
+        if owner_key_id.trim().is_empty() {
+            anyhow::bail!("owner key is required");
+        }
+        let connection = self.lock()?;
+        Ok(connection.execute(
+            "DELETE FROM memory_items WHERE owner_key_id=?1",
+            [owner_key_id],
+        )?)
+    }
+
 }
 
 
