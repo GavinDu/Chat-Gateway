@@ -167,38 +167,14 @@ impl SessionStore for VaultSessionStore {
             Err(error) => return Err(error.into()),
         }
 
-        // One-time migration: only remove the legacy plaintext snapshot after
-        // the encrypted replacement has been durably written.
+        // One-time migration: keep the plaintext source until the encrypted
+        // destination has been written, authenticated, and read back successfully.
         let legacy_path = session_path(provider)?;
-        let legacy = match std::fs::read(&legacy_path) {
-            Ok(bytes) => serde_json::from_slice::<SessionFile>(&bytes)?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(error.into()),
-        };
-        ensure_private_session_dir_sync(Path::new("sessions"))?;
-        let encrypted = encrypt_session_snapshot(&legacy, provider, &key)?;
-        write_session_file_atomically(Path::new(&vault_path), &encrypted)?;
-        let verified = (|| -> Result<SessionFile> {
-            let written = std::fs::read(&vault_path)?;
-            let restored = decrypt_session_snapshot(&written, provider, &key)?;
-            if session_state_hash(&restored)? != session_state_hash(&legacy)? {
-                anyhow::bail!("session-vault read-back validation failed");
-            }
-            Ok(restored)
-        })();
-        let verified = match verified {
-            Ok(session) => session,
-            Err(error) => {
-                let _ = std::fs::remove_file(&vault_path);
-                return Err(error);
-            }
-        };
-        // Keep the legacy source intact until the encrypted record has been read
-        // back and authenticated successfully.
-        std::fs::remove_file(&legacy_path)?;
-        record_session_write(provider);
-        tracing::info!(provider, "migrated plaintext session into encrypted vault");
-        Ok(Some(verified))
+        if !Path::new(&legacy_path).exists() {
+            return Ok(None);
+        }
+        migrate_legacy_snapshot(Path::new(&legacy_path), Path::new(&vault_path), provider, &key)
+            .map(Some)
     }
 
     async fn save_if_changed(&self, browser: &Browser, page: &Page, provider: &str) -> Result<()> {
@@ -238,6 +214,47 @@ impl SessionStore for VaultSessionStore {
         );
         Ok(())
     }
+}
+
+
+/// Migrate one legacy plaintext snapshot into the encrypted vault. Isolated
+/// paths make migration failure handling testable without process-wide env or
+/// working-directory changes.
+fn migrate_legacy_snapshot(
+    legacy_path: &Path,
+    vault_path: &Path,
+    provider: &str,
+    key: &[u8; 32],
+) -> Result<SessionFile> {
+    let legacy_bytes = std::fs::read(legacy_path)?;
+    let legacy = serde_json::from_slice::<SessionFile>(&legacy_bytes)?;
+    let parent = vault_path.parent().unwrap_or_else(|| Path::new("sessions"));
+    ensure_private_session_dir_sync(parent)?;
+    let encrypted = encrypt_session_snapshot(&legacy, provider, key)?;
+    write_session_file_atomically(vault_path, &encrypted)?;
+
+    let verified = (|| -> Result<SessionFile> {
+        let written = std::fs::read(vault_path)?;
+        let restored = decrypt_session_snapshot(&written, provider, key)?;
+        if session_state_hash(&restored)? != session_state_hash(&legacy)? {
+            anyhow::bail!("session-vault read-back validation failed");
+        }
+        Ok(restored)
+    })();
+    let verified = match verified {
+        Ok(session) => session,
+        Err(error) => {
+            let _ = std::fs::remove_file(vault_path);
+            return Err(error);
+        }
+    };
+
+    // A deletion failure leaves both copies intact and returns an error, rather
+    // than reporting a completed migration with a plaintext source still present.
+    std::fs::remove_file(legacy_path)?;
+    record_session_write(provider);
+    tracing::info!(provider, "migrated plaintext session into encrypted vault");
+    Ok(verified)
 }
 
 /// Import a browser-linked session directly into the encrypted vault. Arbitrary
@@ -1380,6 +1397,51 @@ mod vault_tests {
     }
 
     #[test]
+    #[test]
+    fn migration_preserves_plaintext_source_when_encrypted_write_fails() {
+        let root = std::env::temp_dir().join(format!("chat-gateway-vault-migration-write-failure-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let legacy_path = root.join("legacy.json");
+        let vault_path = root.join("vault.vault");
+        std::fs::write(&legacy_path, serde_json::to_vec(&sample_session()).unwrap()).unwrap();
+        std::fs::create_dir(&vault_path).unwrap();
+        assert!(migrate_legacy_snapshot(&legacy_path, &vault_path, "chatgpt", &[0x5a; 32]).is_err());
+        assert!(legacy_path.is_file());
+        assert!(vault_path.is_dir());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn migration_rejects_malformed_legacy_source_without_deleting_it() {
+        let root = std::env::temp_dir().join(format!("chat-gateway-vault-migration-malformed-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let legacy_path = root.join("legacy.json");
+        let vault_path = root.join("vault.vault");
+        let malformed = b"{not-json";
+        std::fs::write(&legacy_path, malformed).unwrap();
+        assert!(migrate_legacy_snapshot(&legacy_path, &vault_path, "chatgpt", &[0x5a; 32]).is_err());
+        assert_eq!(std::fs::read(&legacy_path).unwrap(), malformed);
+        assert!(!vault_path.exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn migration_deletes_plaintext_only_after_authenticated_readback() {
+        let root = std::env::temp_dir().join(format!("chat-gateway-vault-migration-success-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let legacy_path = root.join("legacy.json");
+        let vault_path = root.join("vault.vault");
+        let sample = sample_session();
+        std::fs::write(&legacy_path, serde_json::to_vec(&sample).unwrap()).unwrap();
+        let restored = migrate_legacy_snapshot(&legacy_path, &vault_path, "chatgpt", &[0x5a; 32]).unwrap();
+        assert!(!legacy_path.exists());
+        assert!(vault_path.is_file());
+        assert_eq!(session_state_hash(&restored).unwrap(), session_state_hash(&sample).unwrap());
+        let encrypted = std::fs::read(&vault_path).unwrap();
+        assert!(decrypt_session_snapshot(&encrypted, "chatgpt", &[0x5a; 32]).is_ok());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     fn vault_key_parser_accepts_only_32_byte_hex_keys() {
         assert_eq!(*parse_vault_key(&"ab".repeat(32)).unwrap(), [0xab; 32]);
         assert!(parse_vault_key("abcd").is_err());
