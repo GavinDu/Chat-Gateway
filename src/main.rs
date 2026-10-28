@@ -156,7 +156,11 @@ async fn main() -> anyhow::Result<()> {
         let removed = session::delete_session_snapshot(provider)?;
         println!(
             "session records for provider '{provider}' {}",
-            if removed { "deleted" } else { "were not present" }
+            if removed {
+                "deleted"
+            } else {
+                "were not present"
+            }
         );
         return Ok(());
     }
