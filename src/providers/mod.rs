@@ -394,7 +394,7 @@ pub async fn run_send(
     // is never emitted as new. Rust v1 had no baseline (last_len
     // started at 0); this fixes that stale-text bug while keeping
     // Rust v1's 350ms / stability / indicator completion.
-    let baseline_probe = adapter.response_probe(&page);
+    let baseline_probe = adapter.response_probe(&page, true);
     let baseline_response_count = baseline_probe.count;
     let baseline = baseline_probe.text.filter(|t| !t.is_empty());
     let identical_answer_fallback = baseline.clone();
@@ -429,6 +429,7 @@ pub async fn run_send(
     let mut stable_ticks = 0u32;
     let mut saw_streaming = false;
     let mut response_node_detected = false;
+    let mut poll_count = 0u32;
 
     loop {
         if chunks.is_closed() {
@@ -455,7 +456,11 @@ pub async fn run_send(
 
         tokio::time::sleep(Duration::from_millis(350)).await;
         let poll_started = Instant::now();
-        let probe = adapter.response_probe(&page);
+        poll_count = poll_count.saturating_add(1);
+        // Body text extraction is expensive on large pages; keep URL checks on every
+        // tick, but inspect challenge text every five polls (~1.75 seconds).
+        let check_body_challenge = poll_count % 5 == 0;
+        let probe = adapter.response_probe(&page, check_body_challenge);
         crate::metrics::record_browser_poll(
             adapter.name(),
             1,
