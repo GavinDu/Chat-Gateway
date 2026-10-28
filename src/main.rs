@@ -1397,7 +1397,7 @@ async fn list_long_term_memory_items(
 ) -> Response {
     let memory = state.memory.clone();
     let owner = memory_owner(&auth_context).to_owned();
-    match tokio::task::spawn_blocking(move || {
+    match tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
         let enabled = memory.long_term_memory_enabled(&owner)?;
         let items = memory.list_long_term_memory_items(&owner)?;
         Ok((enabled, items))
