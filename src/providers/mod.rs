@@ -781,18 +781,21 @@ mod response_completion_tests {
             false,
             DoneSignal::StableResponseText,
             true,
+            false,
         ));
         assert!(!completion_ready(
             COMPLETION_IDLE_TICKS - 1,
             false,
             DoneSignal::StableResponseText,
             true,
+            false,
         ));
         assert!(completion_ready(
             COMPLETION_IDLE_TICKS,
             false,
             DoneSignal::StableResponseText,
             true,
+            false,
         ));
     }
 
@@ -803,23 +806,30 @@ mod response_completion_tests {
             true,
             DoneSignal::StableResponseText,
             true,
+            false,
         ));
     }
 
     #[test]
     fn explicit_stop_disappearance_uses_short_grace_only_after_streaming_was_seen() {
         assert_eq!(
-            completion_idle_ticks(DoneSignal::StopControlDisappeared, true),
+            completion_idle_ticks(DoneSignal::StopControlDisappeared, true, true),
             EXPLICIT_DONE_IDLE_TICKS,
         );
         assert_eq!(
-            completion_idle_ticks(DoneSignal::StopControlDisappeared, false),
+            completion_idle_ticks(DoneSignal::StopControlDisappeared, false, true),
             COMPLETION_IDLE_TICKS,
+        );
+        assert_eq!(
+            completion_idle_ticks(DoneSignal::StopControlDisappeared, true, false),
+            COMPLETION_IDLE_TICKS,
+            "missing post-answer affordance must use the conservative fallback",
         );
         assert!(!completion_ready(
             EXPLICIT_DONE_IDLE_TICKS - 1,
             false,
             DoneSignal::StopControlDisappeared,
+            true,
             true,
         ));
         assert!(completion_ready(
@@ -827,11 +837,13 @@ mod response_completion_tests {
             false,
             DoneSignal::StopControlDisappeared,
             true,
+            true,
         ));
         assert!(!completion_ready(
             EXPLICIT_DONE_IDLE_TICKS,
             true,
             DoneSignal::StopControlDisappeared,
+            true,
             true,
         ));
     }
