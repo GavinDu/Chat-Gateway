@@ -137,8 +137,15 @@ pub struct FileSessionStore;
 #[async_trait::async_trait(?Send)]
 impl SessionStore for FileSessionStore {
     fn load(&self, provider: &str) -> Result<Option<SessionFile>> {
-        let path = session_path(provider)?;
-        load_session_file_from_path(Path::new(&path))
+        let key = vault_key_from_env()?;
+        let vault_path = session_vault_path(provider)?;
+        let legacy_path = session_path(provider)?;
+        load_vault_session_from_paths(
+            provider,
+            Path::new(&vault_path),
+            Path::new(&legacy_path),
+            &key,
+        )
     }
 
     async fn save_if_changed(&self, browser: &Browser, page: &Page, provider: &str) -> Result<()> {
@@ -732,6 +739,7 @@ pub fn load_session_file(provider: &str) -> Result<Option<SessionFile>> {
     }
 }
 
+#[cfg(test)]
 fn load_session_file_from_path(path: &Path) -> Result<Option<SessionFile>> {
     let data = match std::fs::read_to_string(path) {
         Ok(data) => data,
