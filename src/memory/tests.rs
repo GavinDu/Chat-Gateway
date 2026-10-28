@@ -1873,7 +1873,6 @@ fn concurrent_independent_connections_preserve_all_turns() {
     }
 }
 
-
 #[test]
 fn provider_thread_mapping_survives_gateway_restart() {
     let fixture = Fixture::new();
