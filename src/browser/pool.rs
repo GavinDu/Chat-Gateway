@@ -699,7 +699,9 @@ mod session_probe_tests {
         assert!(super::session_probe_requires_login(true, true));
         assert!(!super::session_probe_requires_login(false, false));
         let error = anyhow::Error::new(super::ProviderSessionExpiredError);
-        assert!(error.downcast_ref::<super::ProviderSessionExpiredError>().is_some());
+        assert!(error
+            .downcast_ref::<super::ProviderSessionExpiredError>()
+            .is_some());
     }
 
     #[test]
