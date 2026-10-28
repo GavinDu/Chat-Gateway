@@ -646,18 +646,34 @@ fn browser_thread(
                                 continue;
                             };
                             let browser_for_save = browser.clone();
+                            let browser_for_send = browser.clone();
+                            let pages_for_send = pages.clone();
                             let provider_name = provider.name().to_string();
                             tokio::task::spawn_local(async move {
                                 let _guard = lock.lock().await;
                                 // Reopen only a validated provider-owned thread. Otherwise start
                                 // from the provider's landing page to avoid cross-conversation reuse.
+                                // Page::goto requires mutable ownership, so navigate a fresh page
+                                // and atomically swap it into the provider slot under the send lock.
                                 let target_url = thread_url.as_deref().unwrap_or_else(|| provider.login_url());
-                                if page.url() != target_url {
-                                    if let Err(error) = page.goto(target_url).await {
+                                let page = if page.url() != target_url {
+                                    let mut replacement = match browser_for_send.new_page().await {
+                                        Ok(page) => page,
+                                        Err(error) => {
+                                            let _ = chunks.send(Err(anyhow::anyhow!("provider thread page creation failed: {error}"))).await;
+                                            return;
+                                        }
+                                    };
+                                    if let Err(error) = replacement.goto(target_url).await {
                                         let _ = chunks.send(Err(anyhow::anyhow!("provider thread navigation failed: {error}"))).await;
                                         return;
                                     }
-                                }
+                                    let replacement = Rc::new(replacement);
+                                    pages_for_send.borrow_mut().insert(provider, replacement.clone());
+                                    replacement
+                                } else {
+                                    page
+                                };
                                 // Login/session-expiry detection (Go concept,
                                 // Rust form — Rust v1 had none): fail with a
                                 // distinct session_expired error so the API
