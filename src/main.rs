@@ -577,7 +577,7 @@ async fn login_status(State(state): State<Arc<AppState>>) -> axum::response::Res
         let name = p.name();
         let enabled = state.cfg.provider(name).map(|c| c.enabled).unwrap_or(false);
         let (session_present, session_ts) = match session::load_session_file(name) {
-            Ok(Some(file)) => (true, Some(file.ts)),
+            Ok(Some(file)) => (true, Some(file.ts.clone())),
             Ok(None) => (false, None),
             Err(_error) => {
                 tracing::error!(provider = name, "persisted login session read failed");
