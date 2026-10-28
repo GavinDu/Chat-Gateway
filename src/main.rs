@@ -34,6 +34,7 @@ mod session;
 use api::{add_gateway_headers, api_error, estimate_tokens, validate_chat_req, ChatReq};
 use browser::pool::ObscuraPool;
 use config::AppConfig;
+use context::{ContextBuilder, ContextPlan, ThreadSyncState};
 use memory::{ChatMessage, ProviderThread, UnifiedMemory};
 use router::ProviderRouter;
 
@@ -1411,6 +1412,46 @@ async fn upsert_provider_thread(
     }
 }
 
+fn transcript_marker(messages: &[ChatMessage]) -> String {
+    let encoded = serde_json::to_vec(messages).unwrap_or_default();
+    format!("{:x}", Sha256::digest(encoded))
+}
+
+async fn persist_provider_thread(
+    state: &AppState,
+    owner_key_id: &str,
+    conversation_id: &str,
+    provider: &str,
+    model: &str,
+) {
+    let thread_url = match state.pool.current_url(provider).await {
+        Ok(url) if valid_provider_thread_url(provider, &url) => url,
+        Ok(_) => return,
+        Err(error) => {
+            tracing::debug!(provider, %error, "provider thread URL unavailable after successful send");
+            return;
+        }
+    };
+    let messages = match state.memory.conversation_messages_for_owner(owner_key_id, conversation_id) {
+        Ok(messages) => messages,
+        Err(error) => {
+            tracing::warn!(provider, %error, "provider thread sync marker could not be read");
+            return;
+        }
+    };
+    let thread = ProviderThread {
+        conversation_id: conversation_id.to_owned(),
+        provider: provider.to_owned(),
+        thread_url,
+        synced_through_message_id: Some(transcript_marker(&messages)),
+        model: Some(model.to_owned()),
+        updated_at: chrono::Utc::now().timestamp(),
+    };
+    if let Err(error) = state.memory.upsert_provider_thread_for_owner(owner_key_id, &thread) {
+        tracing::warn!(provider, %error, "provider thread mapping could not be persisted");
+    }
+}
+
 fn valid_provider_name(provider: &str) -> bool {
     matches!(
         provider,
@@ -1929,13 +1970,54 @@ async fn chat_completions(
         tracing::debug!(provider = %provider_name, queue_ms = permit.queue_ms, "acquired provider slot");
         let queue_ms = permit.queue_ms.min(u64::MAX as u128) as u64;
 
+        let stored_messages = match conversation_id.as_deref() {
+            Some(id) => match state.memory.conversation_messages_for_owner(&owner_key_id, id) {
+                Ok(messages) => messages,
+                Err(_) => return conversation_context_read_error(conversation_id.as_deref()),
+            },
+            None => Vec::new(),
+        };
+        let saved_thread = match conversation_id.as_deref() {
+            Some(id) => match state.memory.get_provider_thread_for_owner(&owner_key_id, id, &provider_name) {
+                Ok(thread) => thread.filter(|thread| valid_provider_thread_url(&provider_name, &thread.thread_url)),
+                Err(_) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "server_error", "memory_read_failed", "provider thread state could not be read safely"),
+            },
+            None => None,
+        };
+        let supports_reopen = providers::ADAPTERS.iter()
+            .find(|spec| spec.id == provider_name)
+            .is_some_and(|spec| matches!(spec.threads, providers::ThreadSupport::UrlAddressable));
+        let last_marker = transcript_marker(&stored_messages);
+        let thread_state = saved_thread.as_ref().map(|thread| ThreadSyncState {
+            provider: thread.provider.clone(),
+            thread_url: thread.thread_url.clone(),
+            synced_through_message_id: thread.synced_through_message_id.clone(),
+            last_stored_message_id: Some(last_marker),
+        });
+        let send_plan = ContextBuilder::plan(
+            &stored_messages,
+            &req.messages,
+            &provider_name,
+            thread_state.as_ref(),
+            supports_reopen,
+            8000,
+        );
+        let (provider_prompt, thread_url) = match send_plan {
+            ContextPlan::Delta { messages } => (
+                context::render_prompt(&messages),
+                saved_thread.map(|thread| thread.thread_url),
+            ),
+            ContextPlan::Replay { .. } => (prompt.clone(), None),
+        };
+
         let mut rx = match state
             .pool
             .send_stream(
                 &provider_name,
-                prompt.clone(),
+                provider_prompt.clone(),
                 provider_model.clone(),
                 has_history,
+                thread_url,
             )
             .await
         {
@@ -2029,7 +2111,7 @@ async fn chat_completions(
             let windowed_c = windowed.clone();
             let provider_c = provider_name.clone();
             let model_c = req.model.clone();
-            let prompt_tokens_c = estimate_tokens(&prompt);
+            let prompt_tokens_c = estimate_tokens(&provider_prompt);
             let provider_model_c = provider_model.clone();
             let conv_stream = new_conv_id.clone();
             let request_started_c = request_started;
@@ -2132,6 +2214,7 @@ async fn chat_completions(
                         yield Ok(Event::default().data("[DONE]"));
                         return;
                     }
+                    persist_provider_thread(&state_c, &owner_key_id_c, &conv_stream, &provider_c, &model_c).await;
                     let completion_tokens = estimate_tokens(&full);
                     let finish = serde_json::json!({
                         "id": format!("chatcmpl-{}", &conv_stream[..8]),
@@ -2258,7 +2341,8 @@ async fn chat_completions(
             );
         }
 
-        let prompt_tokens = estimate_tokens(&prompt);
+        persist_provider_thread(&state, &owner_key_id, &new_conv_id, &provider_name, &req.model).await;
+        let prompt_tokens = estimate_tokens(&provider_prompt);
         let completion_tokens = estimate_tokens(&full);
         let body = serde_json::json!({
             "id": format!("chatcmpl-{}", &new_conv_id[..8]),
