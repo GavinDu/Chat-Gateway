@@ -98,7 +98,11 @@ fn request(
     let mut ttft_ms = None;
     for line in BufReader::new(stdout).lines() {
         let line = line?;
-        if ttft_ms.is_none() && line.strip_prefix("data:").is_some_and(|data| has_content_delta(data.trim())) {
+        if ttft_ms.is_none()
+            && line
+                .strip_prefix("data:")
+                .is_some_and(|data| has_content_delta(data.trim()))
+        {
             ttft_ms = Some(started.elapsed().as_secs_f64() * 1000.0);
         }
     }
