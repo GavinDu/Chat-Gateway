@@ -35,6 +35,12 @@ impl MemoryEgressPolicy {
     /// broadening the set of destinations.
     pub(crate) fn from_env() -> anyhow::Result<Self> {
         let configured = std::env::var("CHAT_GATEWAY_MEMORY_EGRESS_ALLOWLIST").unwrap_or_default();
+        Self::from_allowlist(&configured)
+    }
+
+    /// Parse an explicit comma-separated allowlist. Keeping parsing pure makes
+    /// policy validation deterministic and testable without process-global env.
+    pub(crate) fn from_allowlist(configured: &str) -> anyhow::Result<Self> {
         let mut allowed_personal_memory_providers = HashSet::new();
         for entry in configured
             .split(',')
@@ -50,6 +56,18 @@ impl MemoryEgressPolicy {
         Ok(Self {
             allowed_personal_memory_providers,
         })
+    }
+
+    /// Sorted provider IDs for diagnostics and policy inspection. Never includes
+    /// memory contents or user data.
+    pub(crate) fn allowed_personal_memory_providers(&self) -> Vec<String> {
+        let mut providers = self
+            .allowed_personal_memory_providers
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        providers.sort();
+        providers
     }
 
     pub(crate) fn authorize(
@@ -130,6 +148,31 @@ mod tests {
                 .map(|p| (*p).to_owned())
                 .collect::<HashSet<_>>(),
         }
+    }
+
+    #[test]
+    fn allowlist_parser_defaults_to_deny_and_normalizes_provider_names() {
+        let empty = MemoryEgressPolicy::from_allowlist(" , ").unwrap();
+        assert!(empty.allowed_personal_memory_providers().is_empty());
+        assert_eq!(
+            empty.authorize("chatgpt", ProviderDataClass::PersonalLongTermMemory),
+            Err(EgressError::PersonalMemoryDestinationDenied)
+        );
+
+        let allowed = MemoryEgressPolicy::from_allowlist(" ChatGPT, claude,chatgpt ").unwrap();
+        assert_eq!(
+            allowed.allowed_personal_memory_providers(),
+            vec!["chatgpt".to_owned(), "claude".to_owned()]
+        );
+    }
+
+    #[test]
+    fn allowlist_parser_rejects_unknown_provider_without_echoing_input() {
+        let error = MemoryEgressPolicy::from_allowlist("chatgpt,secret-provider-name")
+            .unwrap_err()
+            .to_string();
+        assert_eq!(error, "unknown provider in memory egress allowlist");
+        assert!(!error.contains("secret-provider-name"));
     }
 
     #[test]
