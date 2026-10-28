@@ -1563,7 +1563,7 @@ mod vault_tests {
         // readable with the old key, and the corrupted record is unchanged.
         assert!(decrypt_session_snapshot(&valid, "chatgpt", &old_key).is_ok());
         assert!(decrypt_session_snapshot(&valid, "chatgpt", &new_key).is_err());
-        assert_eq!(corrupt, b"not-an-authenticated-vault-record");
+        assert_eq!(corrupt.as_slice(), b"not-an-authenticated-vault-record");
     }
 
     #[test]
