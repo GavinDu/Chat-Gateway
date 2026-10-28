@@ -450,7 +450,7 @@ mod concurrency_configuration_tests {
     }
 
     #[test]
-    fn independent_connections_can_open_the_same_wal_database() -> Result<()> {
+    fn independent_connections_can_open_the_same_wal_database() -> super::Result<()> {
         let path = std::env::temp_dir().join(format!(
             "chat-gateway-sqlite-concurrent-open-{}.sqlite3",
             uuid::Uuid::new_v4()
