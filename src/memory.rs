@@ -83,7 +83,8 @@ impl ConversationStore for UnifiedMemory {
         owner_key_id: String,
         conversation_id: String,
     ) -> anyhow::Result<Vec<ChatMessage>> {
-        self.conversation_messages_for_owner_blocking(owner_key_id, conversation_id).await
+        self.conversation_messages_for_owner_blocking(owner_key_id, conversation_id)
+            .await
     }
 
     async fn read_history(
@@ -113,8 +114,14 @@ impl ConversationStore for UnifiedMemory {
         tab_id: Option<String>,
     ) -> anyhow::Result<()> {
         self.store_turn_for_owner_with_tab_id_blocking(
-            owner_key_id, conversation_id, user_messages, assistant_message, provider, tab_id,
-        ).await
+            owner_key_id,
+            conversation_id,
+            user_messages,
+            assistant_message,
+            provider,
+            tab_id,
+        )
+        .await
     }
 }
 
@@ -250,11 +257,13 @@ impl UnifiedMemory {
         }
         let mut connection = self.lock()?;
         let tx = connection.transaction()?;
-        let owner: Option<String> = tx.query_row(
-            "SELECT owner_key_id FROM conversations WHERE id = ?1",
-            [conversation_id],
-            |row| row.get(0),
-        ).optional()?;
+        let owner: Option<String> = tx
+            .query_row(
+                "SELECT owner_key_id FROM conversations WHERE id = ?1",
+                [conversation_id],
+                |row| row.get(0),
+            )
+            .optional()?;
         match owner {
             Some(owner) if owner == owner_key_id => {}
             Some(_) => anyhow::bail!("conversation belongs to another API key"),
@@ -264,9 +273,14 @@ impl UnifiedMemory {
         let mut statement = tx.prepare(
             "SELECT role, content FROM messages WHERE conversation_id = ?1 ORDER BY position DESC LIMIT ?2",
         )?;
-        let mut messages = statement.query_map(rusqlite::params![conversation_id, limit], |row| {
-            Ok(ChatMessage { role: row.get(0)?, content: row.get(1)? })
-        })?.collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut messages = statement
+            .query_map(rusqlite::params![conversation_id, limit], |row| {
+                Ok(ChatMessage {
+                    role: row.get(0)?,
+                    content: row.get(1)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
         messages.reverse();
         drop(statement);
         tx.commit()?;
