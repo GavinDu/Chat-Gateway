@@ -55,6 +55,21 @@ pub fn status(provider: &str) -> ProviderSessionStatus {
         })
 }
 
+/// Mark a provider as requiring authentication after its session is explicitly unlinked.
+/// This prevents health/readiness from continuing to advertise stale Ready state.
+pub fn record_unlinked(provider: &str) {
+    if let Ok(mut map) = states().lock() {
+        map.insert(
+            provider.to_owned(),
+            ProviderSessionStatus {
+                state: ProviderSessionState::NeedsLogin,
+                last_error: Some("provider session unlinked; re-login required".to_owned()),
+                retry_after: None,
+            },
+        );
+    }
+}
+
 pub fn record_success(provider: &str) {
     if let Ok(mut map) = states().lock() {
         map.insert(
@@ -277,6 +292,22 @@ mod tests {
         assert_eq!(
             admitted, 1,
             "only one concurrent request may claim the half-open slot"
+        );
+    }
+
+    #[test]
+    fn unlinking_session_marks_provider_as_needing_login() {
+        let provider = "test-provider-unlinked";
+        record_success(provider);
+        assert!(is_routable(provider));
+
+        record_unlinked(provider);
+
+        assert_eq!(status(provider).state, ProviderSessionState::NeedsLogin);
+        assert!(!is_routable(provider));
+        assert_eq!(
+            status(provider).last_error.as_deref(),
+            Some("provider session unlinked; re-login required")
         );
     }
 
