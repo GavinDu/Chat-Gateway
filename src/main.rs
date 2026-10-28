@@ -3547,7 +3547,7 @@ mod http_api_regression_tests {
         Router::new()
             .route(
                 "/ready",
-                get(|| async { api::health::readiness_response(1, true) }),
+                get(|| async { api::health::readiness_response(1, true, 0) }),
             )
             .route("/v1/conversations", get(list_endpoint))
             .route("/v1/chat/completions", post(validation_endpoint))
