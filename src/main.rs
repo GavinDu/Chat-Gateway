@@ -1400,7 +1400,7 @@ async fn list_long_term_memory_items(
     match tokio::task::spawn_blocking(move || {
         let enabled = memory.long_term_memory_enabled(&owner)?;
         let items = memory.list_long_term_memory_items(&owner)?;
-        anyhow::Ok((enabled, items))
+        Ok((enabled, items))
     }).await {
         Ok(Ok((enabled, items))) => Json(serde_json::json!({
             "enabled": enabled,
