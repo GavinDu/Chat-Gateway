@@ -167,6 +167,19 @@ impl UnifiedMemory {
         conversation_id: Option<&str>,
         new_messages: &[ChatMessage],
     ) -> anyhow::Result<(String, Vec<ChatMessage>, bool)> {
+        let (prompt, context, has_history, _history) =
+            self.build_context_for_owner_with_transcript(owner_key_id, conversation_id, new_messages)?;
+        Ok((prompt, context, has_history))
+    }
+
+    /// Return the canonical stored transcript alongside the rendered context so
+    /// callers that need both can reuse one SQLite snapshot for the request.
+    pub fn build_context_for_owner_with_transcript(
+        &self,
+        owner_key_id: &str,
+        conversation_id: Option<&str>,
+        new_messages: &[ChatMessage],
+    ) -> anyhow::Result<(String, Vec<ChatMessage>, bool, Vec<ChatMessage>)> {
         let (history, saved_summary) = match conversation_id {
             Some(id) => match self.conversation_for_owner(owner_key_id, id)? {
                 Some(conversation) => (conversation.messages, self.rolling_summary(id)?),
@@ -194,7 +207,7 @@ impl UnifiedMemory {
             context.insert(0, summary);
             prompt = crate::context::render_prompt(&context);
         }
-        Ok((prompt, context, has_history))
+        Ok((prompt, context, has_history, history))
     }
 
     fn rolling_summary(&self, conversation_id: &str) -> anyhow::Result<Option<(String, usize)>> {
