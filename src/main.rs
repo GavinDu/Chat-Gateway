@@ -69,6 +69,20 @@ struct Cli {
         help = "Create a random chat API key, print it once and exit"
     )]
     create_api_key: Option<String>,
+    #[arg(
+        long,
+        conflicts_with_all = ["delete_session_vault", "create_api_key", "test_adapter", "all", "json"],
+        help = "List provider names with encrypted session-vault records, then exit"
+    )]
+    list_session_vaults: bool,
+
+    #[arg(
+        long,
+        value_name = "PROVIDER",
+        conflicts_with_all = ["list_session_vaults", "create_api_key", "test_adapter", "all", "json"],
+        help = "Delete one provider's saved vault and legacy session records, then exit"
+    )]
+    delete_session_vault: Option<String>,
 }
 
 fn adapter_report_is_healthy(report: &browser::pool::TestAdapterReport) -> bool {
@@ -130,6 +144,20 @@ async fn main() -> anyhow::Result<()> {
         println!("  - name: {name}");
         println!("    secret_hash: \"{hash}\"");
         println!("    scopes: [chat]");
+        return Ok(());
+    }
+    if cli.list_session_vaults {
+        for provider in session::list_encrypted_session_vaults()? {
+            println!("{provider}");
+        }
+        return Ok(());
+    }
+    if let Some(provider) = cli.delete_session_vault.as_deref() {
+        let removed = session::delete_session_snapshot(provider)?;
+        println!(
+            "session records for provider '{provider}' {}",
+            if removed { "deleted" } else { "were not present" }
+        );
         return Ok(());
     }
     if cli.json && !cli.all && cli.test_adapter.is_none() {
