@@ -845,13 +845,27 @@ impl UnifiedMemory {
         owner_key_id: &str,
         limit: usize,
     ) -> anyhow::Result<Vec<LongTermMemoryItem>> {
-        if !self.long_term_memory_enabled(owner_key_id)? {
+        // Keep the opt-in check and item read in one transaction. Separate
+        // statements without a transaction allow a concurrent disable to race
+        // between the setting check and retrieval, disclosing one last batch.
+        let mut connection = self.lock()?;
+        let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let enabled: bool = tx
+            .query_row(
+                "SELECT enabled FROM memory_settings WHERE owner_key_id=?1",
+                [owner_key_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .unwrap_or(false);
+        if !enabled {
+            tx.commit()?;
             return Ok(Vec::new());
         }
+
         let limit = limit.clamp(1, 20) as i64;
         let now = unix_timestamp();
-        let connection = self.lock()?;
-        let mut statement = connection.prepare(
+        let mut statement = tx.prepare(
             "SELECT id, memory_key, value, source_conversation_id, confidence,
                     created_at, updated_at, expires_at
              FROM memory_items
@@ -859,8 +873,14 @@ impl UnifiedMemory {
              ORDER BY confidence DESC, updated_at DESC, id
              LIMIT ?3",
         )?;
-        let rows = statement.query_map(rusqlite::params![owner_key_id, now, limit], memory_item_from_row)?;
-        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        let rows = statement.query_map(
+            rusqlite::params![owner_key_id, now, limit],
+            memory_item_from_row,
+        )?;
+        let items = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(statement);
+        tx.commit()?;
+        Ok(items)
     }
 
     pub fn delete_long_term_memory_item(
