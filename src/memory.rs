@@ -193,6 +193,24 @@ impl UnifiedMemory {
         .map_err(|error| anyhow::anyhow!("conversation context task failed: {error}"))?
     }
 
+    /// Build context and fetch its stored transcript without blocking a Tokio worker.
+    pub async fn build_context_for_owner_with_transcript_blocking(
+        self: Arc<Self>,
+        owner_key_id: String,
+        conversation_id: Option<String>,
+        new_messages: Vec<ChatMessage>,
+    ) -> anyhow::Result<(String, Vec<ChatMessage>, bool, Vec<ChatMessage>)> {
+        tokio::task::spawn_blocking(move || {
+            self.build_context_for_owner_with_transcript(
+                &owner_key_id,
+                conversation_id.as_deref(),
+                &new_messages,
+            )
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("conversation context task failed: {error}"))?
+    }
+
     /// Build context and report persisted transcript presence from the same scoped read.
     pub fn build_context_for_owner_with_history(
         &self,
