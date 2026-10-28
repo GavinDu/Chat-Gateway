@@ -41,7 +41,7 @@ Key absence, invalid key length, or failed authentication must produce an action
 
 The binary provides explicit maintenance commands that exit before starting the browser runtime:
 
-- `chat-gateway-rs --vault-list`: prints one row per supported provider with `valid`, `missing`, or `unreadable`. It requires the current `CHAT_GATEWAY_VAULT_KEY`; it never prints cookie or localStorage values.
+- `chat-gateway-rs --vault-list`: prints one row per supported provider with `valid`, `missing`, `unreadable`, or `legacy-plaintext`. It requires the current `CHAT_GATEWAY_VAULT_KEY`; it never prints cookie or localStorage values.
 - `chat-gateway-rs --vault-delete-provider chatgpt`: deletes that provider's encrypted snapshot and any legacy plaintext snapshot. Treat this as destructive credential revocation.
 - `CHAT_GATEWAY_VAULT_NEW_KEY` plus `chat-gateway-rs --vault-rotate-key`: decrypts every present encrypted record with `CHAT_GATEWAY_VAULT_KEY`, validates all replacements with the new key, writes encrypted recovery copies under `sessions/.vault-rotation-*`, then replaces the live records. Runtime write errors trigger rollback of files already replaced.
 - `chat-gateway-rs --vault-restore-backup sessions/.vault-rotation-...`: restores a rotation backup. Set `CHAT_GATEWAY_VAULT_KEY` to the old key before running this command. The command validates every backup record before writing any of them.
