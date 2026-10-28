@@ -541,11 +541,9 @@ impl UnifiedMemory {
         self: Arc<Self>,
         cutoff_unix_seconds: i64,
     ) -> anyhow::Result<usize> {
-        tokio::task::spawn_blocking(move || {
-            self.purge_expired_conversations(cutoff_unix_seconds)
-        })
-        .await
-        .map_err(|error| anyhow::anyhow!("conversation retention task failed: {error}"))?
+        tokio::task::spawn_blocking(move || self.purge_expired_conversations(cutoff_unix_seconds))
+            .await
+            .map_err(|error| anyhow::anyhow!("conversation retention task failed: {error}"))?
     }
 
     // Legacy read helpers remain scoped to the local tenant for tests and CLI tools.
