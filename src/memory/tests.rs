@@ -518,7 +518,9 @@ fn context_read_errors_are_returned_instead_of_panicking_or_dropping_history() {
 
     let result = memory.build_context(Some("read-failure"), &[m("user", "next turn")]);
     assert!(result.is_err());
-    assert!(memory.get_provider("read-failure").is_err());
+    // Provider affinity is metadata-only and should remain readable even when
+    // the transcript table is unavailable; history/context reads must fail closed.
+    assert!(memory.get_provider("read-failure").is_ok());
     assert!(memory.has_history("read-failure").is_err());
 }
 
@@ -987,6 +989,17 @@ fn conversations_and_provider_threads_are_isolated_by_api_key_owner() {
         .list_conversations_for_owner("bravo", 100, 0)
         .unwrap()
         .is_empty());
+    assert_eq!(
+        memory
+            .get_provider_for_owner("alpha", "tenant-chat-1")
+            .unwrap()
+            .as_deref(),
+        Some("chatgpt")
+    );
+    assert!(memory
+        .get_provider_for_owner("bravo", "tenant-chat-1")
+        .unwrap()
+        .is_none());
     assert!(!memory
         .delete_conversation_for_owner("bravo", "tenant-chat-1")
         .unwrap());
