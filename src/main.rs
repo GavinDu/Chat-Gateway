@@ -1345,8 +1345,10 @@ async fn get_provider_thread(
             "conversation ID or provider is invalid",
         );
     }
-    match state.memory.clone()
-        .get_provider_thread_for_owner_blocking(
+    match state
+                .memory
+                .clone()
+$1.get_provider_thread_for_owner_blocking(
             owner_key_id.to_owned(),
             conversation_id.clone(),
             provider.clone(),
@@ -1407,8 +1409,10 @@ async fn upsert_provider_thread(
         .unwrap_or_default()
         .as_secs()
         .min(i64::MAX as u64) as i64;
-    match state.memory.clone()
-        .upsert_provider_thread_for_owner_blocking(owner_key_id.to_owned(), thread.clone())
+    match state
+                .memory
+                .clone()
+$1.upsert_provider_thread_for_owner_blocking(owner_key_id.to_owned(), thread.clone())
         .await
     {
         Ok(()) => Json(thread).into_response(),
@@ -1444,8 +1448,10 @@ async fn persist_provider_thread(
             return;
         }
     };
-    let messages = match state.memory.clone()
-        .conversation_messages_for_owner_blocking(
+    let messages = match state
+                .memory
+                .clone()
+$1.conversation_messages_for_owner_blocking(
             owner_key_id.to_owned(),
             conversation_id.to_owned(),
         )
@@ -1465,8 +1471,10 @@ async fn persist_provider_thread(
         model: Some(model.to_owned()),
         updated_at: chrono::Utc::now().timestamp(),
     };
-    if let Err(error) = state.memory.clone()
-        .upsert_provider_thread_for_owner_blocking(owner_key_id.to_owned(), thread)
+    if let Err(error) = state
+                .memory
+                .clone()
+$1.upsert_provider_thread_for_owner_blocking(owner_key_id.to_owned(), thread)
         .await
     {
         tracing::warn!(provider, %error, "provider thread mapping could not be persisted");
@@ -1727,11 +1735,7 @@ async fn read_conversation_context_with_transcript_for_owner(
     messages: Vec<ChatMessage>,
 ) -> anyhow::Result<(String, Vec<ChatMessage>, bool, Vec<ChatMessage>)> {
     memory
-        .build_context_for_owner_with_transcript_blocking(
-            owner_key_id,
-            conversation_id,
-            messages,
-        )
+        .build_context_for_owner_with_transcript_blocking(owner_key_id, conversation_id, messages)
         .await
 }
 
@@ -2000,8 +2004,10 @@ async fn chat_completions(
 
         let saved_thread = match conversation_id.as_deref() {
             Some(id) => {
-                match state.memory.clone()
-                    .get_provider_thread_for_owner_blocking(
+                match state
+                .memory
+                .clone()
+$1.get_provider_thread_for_owner_blocking(
                         owner_key_id.clone(),
                         id.to_owned(),
                         provider_name.clone(),
