@@ -58,18 +58,6 @@ impl MemoryEgressPolicy {
         })
     }
 
-    /// Sorted provider IDs for diagnostics and policy inspection. Never includes
-    /// memory contents or user data.
-    pub(crate) fn allowed_personal_memory_providers(&self) -> Vec<String> {
-        let mut providers = self
-            .allowed_personal_memory_providers
-            .iter()
-            .cloned()
-            .collect::<Vec<_>>();
-        providers.sort();
-        providers
-    }
-
     pub(crate) fn authorize(
         &self,
         provider: &str,
@@ -153,7 +141,6 @@ mod tests {
     #[test]
     fn allowlist_parser_defaults_to_deny_and_normalizes_provider_names() {
         let empty = MemoryEgressPolicy::from_allowlist(" , ").unwrap();
-        assert!(empty.allowed_personal_memory_providers().is_empty());
         assert_eq!(
             empty.authorize("chatgpt", ProviderDataClass::PersonalLongTermMemory),
             Err(EgressError::PersonalMemoryDestinationDenied)
@@ -161,8 +148,12 @@ mod tests {
 
         let allowed = MemoryEgressPolicy::from_allowlist(" ChatGPT, claude,chatgpt ").unwrap();
         assert_eq!(
-            allowed.allowed_personal_memory_providers(),
-            vec!["chatgpt".to_owned(), "claude".to_owned()]
+            allowed.authorize("chatgpt", ProviderDataClass::PersonalLongTermMemory),
+            Ok(())
+        );
+        assert_eq!(
+            allowed.authorize("claude", ProviderDataClass::PersonalLongTermMemory),
+            Ok(())
         );
     }
 
