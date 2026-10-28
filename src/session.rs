@@ -753,35 +753,75 @@ mod cookie_restore_result_tests {
 /// Remove every cookie in this browser jar belonging to the selected provider's
 /// allowlisted domains. Expiring cookies through the same jar API removes the
 /// matching (name, domain, path) entries without touching other providers.
+fn cookie_expiration_header(
+    name: &str,
+    domain: &str,
+    path: &str,
+    secure: bool,
+    http_only: bool,
+) -> Result<String> {
+    let valid_name = !name.is_empty()
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte));
+    let valid_domain = !domain.is_empty()
+        && domain.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-'));
+    let valid_path = path.starts_with('/')
+        && !path.bytes().any(|byte| byte.is_ascii_control() || byte == b';');
+    if !valid_name || !valid_domain || !valid_path {
+        anyhow::bail!("provider cookie has invalid fields and cannot be safely revoked");
+    }
+
+    let host_prefix = name.starts_with("__Host-");
+    if host_prefix && (!secure || path != "/") {
+        anyhow::bail!("__Host- cookie violates required Secure/Path attributes");
+    }
+    if name.starts_with("__Secure-") && !secure {
+        anyhow::bail!("__Secure- cookie is not marked Secure");
+    }
+
+    let mut expired = format!("{name}=; Path={path}; Max-Age=0");
+    if !host_prefix {
+        // CookieJar keys cookies by canonical domain/name/path. Preserve the
+        // Domain attribute for domain cookies; without it the jar may create a
+        // host-only deletion entry and leave the credential cookie alive.
+        expired.push_str(&format!("; Domain={}", domain.trim_start_matches('.')));
+    }
+    if secure {
+        expired.push_str("; Secure");
+    }
+    if http_only {
+        expired.push_str("; HttpOnly");
+    }
+    Ok(expired)
+}
+
+/// Expire provider-scoped cookies from Obscura's shared browser jar. On any
+/// malformed cookie or deletion failure, abort unlink rather than claiming
+/// revocation while a credential may still be usable.
 pub fn clear_provider_cookies(browser: &Browser, provider: &str) -> Result<usize> {
     let store = browser.cookies();
     let cookies = store.get_all();
     let mut cleared = 0usize;
     for cookie in cookies {
-        if !cookie_domain_allowed(provider, &cookie.domain)
-            || cookie.name.is_empty()
-            || cookie
-                .name
-                .chars()
-                .any(|ch| matches!(ch, '=' | ';' | '\r' | '\n'))
-        {
+        if !cookie_domain_allowed(provider, &cookie.domain) {
             continue;
         }
         let path = if cookie.path.starts_with('/')
-            && !cookie.path.chars().any(|ch| matches!(ch, '\r' | '\n'))
+            && !cookie.path.chars().any(|ch| ch.is_ascii_control() || ch == ';')
         {
             cookie.path.as_str()
         } else {
             "/"
         };
+        let expired = cookie_expiration_header(
+            &cookie.name,
+            &cookie.domain,
+            path,
+            cookie.secure,
+            cookie.http_only,
+        )?;
         let url = format!("https://{}{}", cookie.domain.trim_start_matches('.'), path);
-        let mut expired = format!("{}=; Path={}; Max-Age=0", cookie.name, path);
-        if cookie.secure {
-            expired.push_str("; Secure");
-        }
-        if cookie.http_only {
-            expired.push_str("; HttpOnly");
-        }
         store.set(&expired, &url)?;
         cleared += 1;
     }
@@ -969,6 +1009,22 @@ mod cookie_scope_tests {
     }
 
     #[test]
+    #[test]
+    fn cookie_expiration_preserves_domain_scope_and_prefix_rules() {
+        let domain_cookie = cookie_expiration_header("session", ".chatgpt.com", "/", true, true)
+            .unwrap();
+        assert!(domain_cookie.contains("Domain=chatgpt.com"));
+        assert!(domain_cookie.contains("Max-Age=0"));
+
+        let host_cookie = cookie_expiration_header("__Host-session", "chatgpt.com", "/", true, true)
+            .unwrap();
+        assert!(!host_cookie.contains("Domain="));
+        assert!(host_cookie.contains("Secure"));
+        assert!(cookie_expiration_header("__Host-session", "chatgpt.com", "/nested", true, true).is_err());
+        assert!(cookie_expiration_header("__Secure-session", "chatgpt.com", "/", false, true).is_err());
+        assert!(cookie_expiration_header("bad;name", "chatgpt.com", "/", true, true).is_err());
+    }
+
     fn restored_cookie_fields_reject_injection_and_malformed_paths() {
         assert!(restored_cookie_fields_safe(&cookie(
             "__Secure-session",
