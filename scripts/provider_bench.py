@@ -49,7 +49,7 @@ def first_content(payload: dict[str, Any]) -> str:
     return ""
 
 
-def run_once(args: argparse.Namespace, model: str, previous_model: str | None) -> dict[str, Any]:
+def run_once(args: argparse.Namespace, model: str, previous_provider: str | None) -> dict[str, Any]:
     url = args.base_url.rstrip("/") + "/v1/chat/completions"
     body = json.dumps({
         "model": model,
@@ -101,7 +101,7 @@ def run_once(args: argparse.Namespace, model: str, previous_model: str | None) -
         "total_ms": round((ended - started) * 1000, 2),
         "post_ttft_ms": round((ended - first_token) * 1000, 2) if first_token else None,
         "output_chars": output_chars,
-        "provider_switch": previous_model is not None and previous_model != model,
+        "provider_switch": previous_provider is not None and previous_provider != (provider or model),
         "gateway_rss_before_kib": rss_before,
         "gateway_rss_after_kib": rss_after,
     }
@@ -132,11 +132,11 @@ def main() -> int:
     if args.rounds < 1:
         parser.error("--rounds must be >= 1")
     results = []
-    previous_model = None
+    previous_provider = None
     for round_index in range(args.rounds):
         for model in models:
             try:
-                result = run_once(args, model, previous_model)
+                result = run_once(args, model, previous_provider)
             except Exception as error:  # emit a useful failure record, then fail the run
                 print(json.dumps({"round": round_index + 1, "model": model,
                                   "error": str(error)}, sort_keys=True), flush=True)
@@ -144,7 +144,7 @@ def main() -> int:
             result["round"] = round_index + 1
             results.append(result)
             print(json.dumps(result, sort_keys=True), flush=True)
-            previous_model = model
+            previous_provider = result["provider"] or model
     ttft = [row["ttft_ms"] for row in results if row["ttft_ms"] is not None]
     total = [row["total_ms"] for row in results]
     switches = [row["ttft_ms"] for row in results
