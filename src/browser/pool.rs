@@ -248,6 +248,11 @@ impl ObscuraPool {
                     }
                     Err(_) => {
                         tracing::warn!("browser worker restart warm-up timed out");
+                        // Close the timed-out worker's channel so the next
+                        // supervisor pass can retry instead of remaining stuck.
+                        let (dead_tx, dead_rx) = mpsc::channel::<Command>(1);
+                        drop(dead_rx);
+                        *cmd_tx.write().await = dead_tx;
                         backoff = (backoff * 2).min(Duration::from_secs(30));
                     }
                 }
