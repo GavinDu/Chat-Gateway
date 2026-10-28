@@ -57,6 +57,7 @@ pub trait ConversationStore: Send + Sync {
         conversation_id: String,
     ) -> anyhow::Result<Vec<ChatMessage>>;
 
+    #[allow(dead_code)]
     async fn read_history(
         self: Arc<Self>,
         owner_key_id: String,
@@ -237,6 +238,7 @@ impl UnifiedMemory {
 
     /// Read a bounded recent history window without loading the full transcript.
     /// The owner check and row selection share a transaction.
+    #[allow(dead_code)]
     pub fn conversation_history_for_owner_with_limit(
         &self,
         owner_key_id: &str,
