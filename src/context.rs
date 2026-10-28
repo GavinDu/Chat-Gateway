@@ -400,7 +400,10 @@ mod tests {
             m("assistant", "conversation A answer"),
             m("user", "conversation A follow-up"),
         ];
-        let history_b = vec![m("user", "conversation B question"), m("assistant", "conversation B answer")];
+        let history_b = vec![
+            m("user", "conversation B question"),
+            m("assistant", "conversation B answer"),
+        ];
         let incoming_b = vec![
             m("user", "conversation B question"),
             m("assistant", "conversation B answer"),
@@ -419,11 +422,35 @@ mod tests {
             last_stored_message_id: Some("hash-b".to_string()),
         };
 
-        let plan_a = ContextBuilder::plan(&history_a, &incoming_a, "chatgpt", Some(&thread_a), true, 1000);
-        let plan_b = ContextBuilder::plan(&history_b, &incoming_b, "chatgpt", Some(&thread_b), true, 1000);
+        let plan_a = ContextBuilder::plan(
+            &history_a,
+            &incoming_a,
+            "chatgpt",
+            Some(&thread_a),
+            true,
+            1000,
+        );
+        let plan_b = ContextBuilder::plan(
+            &history_b,
+            &incoming_b,
+            "chatgpt",
+            Some(&thread_b),
+            true,
+            1000,
+        );
 
-        assert_eq!(plan_a, super::ContextPlan::Delta { messages: vec![m("user", "conversation A follow-up")] });
-        assert_eq!(plan_b, super::ContextPlan::Delta { messages: vec![m("user", "conversation B follow-up")] });
+        assert_eq!(
+            plan_a,
+            super::ContextPlan::Delta {
+                messages: vec![m("user", "conversation A follow-up")]
+            }
+        );
+        assert_eq!(
+            plan_b,
+            super::ContextPlan::Delta {
+                messages: vec![m("user", "conversation B follow-up")]
+            }
+        );
         let serialized_a = format!("{plan_a:?}");
         let serialized_b = format!("{plan_b:?}");
         assert!(!serialized_a.contains("conversation B"));
