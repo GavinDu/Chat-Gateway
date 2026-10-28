@@ -402,7 +402,12 @@ fn completion_idle_ticks(done_signal: DoneSignal, saw_streaming: bool) -> u32 {
     }
 }
 
-fn completion_ready(stable_ticks: u32, streaming: bool, done_signal: DoneSignal, saw_streaming: bool) -> bool {
+fn completion_ready(
+    stable_ticks: u32,
+    streaming: bool,
+    done_signal: DoneSignal,
+    saw_streaming: bool,
+) -> bool {
     stable_ticks >= completion_idle_ticks(done_signal, saw_streaming) && !streaming
 }
 
@@ -757,7 +762,12 @@ mod response_completion_tests {
 
     #[test]
     fn stable_text_requires_conservative_idle_grace() {
-        assert!(!completion_ready(28, false, DoneSignal::StableResponseText, true));
+        assert!(!completion_ready(
+            28,
+            false,
+            DoneSignal::StableResponseText,
+            true,
+        ));
         assert!(!completion_ready(
             COMPLETION_IDLE_TICKS - 1,
             false,
