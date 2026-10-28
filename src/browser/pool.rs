@@ -313,7 +313,10 @@ impl ObscuraPool {
         let provider = self.login_provider(name)?;
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
-            .send(Command::UnlinkSession { provider, reply: tx })
+            .send(Command::UnlinkSession {
+                provider,
+                reply: tx,
+            })
             .await
             .map_err(|_| anyhow::anyhow!("browser thread gone"))?;
         rx.await
