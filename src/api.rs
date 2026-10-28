@@ -87,7 +87,11 @@ pub(crate) fn estimate_tokens(text: &str) -> u64 {
     context::estimate_message_tokens(text) as u64
 }
 
-pub(crate) fn add_gateway_headers(headers: &mut axum::http::HeaderMap, provider: &str, model: &str) {
+pub(crate) fn add_gateway_headers(
+    headers: &mut axum::http::HeaderMap,
+    provider: &str,
+    model: &str,
+) {
     if let Ok(value) = axum::http::HeaderValue::from_bytes(provider.as_bytes()) {
         headers.insert("X-Gateway-Provider", value);
     }
