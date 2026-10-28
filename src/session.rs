@@ -1144,4 +1144,34 @@ mod vault_tests {
         unknown_version[5] = b'2';
         assert!(decrypt_session_snapshot(&unknown_version, "provider-a", &[0x44; 32]).is_err());
     }
+    #[tokio::test]
+    async fn provider_cookie_revocation_clears_only_the_selected_provider() {
+        let browser = Browser::new().expect("browser context");
+        let store = browser.cookies();
+        store
+            .set(
+                "sid=chatgpt-secret; Domain=chatgpt.com; Path=/; Secure; HttpOnly",
+                "https://chatgpt.com/",
+            )
+            .unwrap();
+        store
+            .set(
+                "sid=claude-secret; Domain=claude.ai; Path=/; Secure; HttpOnly",
+                "https://claude.ai/",
+            )
+            .unwrap();
+
+        assert_eq!(store.get_all().len(), 2);
+        assert_eq!(clear_provider_cookies(&browser, "chatgpt").unwrap(), 1);
+
+        let remaining = store.get_all();
+        assert!(!remaining
+            .iter()
+            .any(|cookie| cookie.domain == "chatgpt.com" && cookie.name == "sid"));
+        assert!(remaining
+            .iter()
+            .any(|cookie| cookie.domain == "claude.ai" && cookie.name == "sid"));
+    }
+
+
 }
