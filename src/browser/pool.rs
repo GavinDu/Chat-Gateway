@@ -683,6 +683,10 @@ fn verify_session_page(
         .input
         .iter()
         .any(|selector| page.query_selector(selector).is_some());
+    classify_session_probe(is_login_page, input_found)
+}
+
+fn classify_session_probe(is_login_page: bool, input_found: bool) -> Result<bool> {
     if session_probe_requires_login(is_login_page, input_found) {
         return Err(anyhow::Error::new(ProviderSessionExpiredError));
     }
@@ -696,12 +700,12 @@ fn verify_session_page(
 mod session_probe_tests {
     #[test]
     fn probe_distinguishes_expired_login_page_from_unwarmed_page() {
-        assert!(super::session_probe_requires_login(true, true));
-        assert!(!super::session_probe_requires_login(false, false));
-        let error = anyhow::Error::new(super::ProviderSessionExpiredError);
-        assert!(error
+        let expired = super::classify_session_probe(true, true).unwrap_err();
+        assert!(expired
             .downcast_ref::<super::ProviderSessionExpiredError>()
             .is_some());
+        assert!(super::classify_session_probe(false, false).is_err());
+        assert_eq!(super::classify_session_probe(false, true), Ok(true));
     }
 
     #[test]
