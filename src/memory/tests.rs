@@ -446,6 +446,20 @@ fn schema_v5_migrates_to_v6_with_long_term_memory_disabled_by_default() {
 }
 
 #[test]
+fn request_specific_context_budget_still_preserves_latest_user_message() {
+    let memory = UnifiedMemory::new(8000);
+    let (_, context, _, _) = memory
+        .build_context_for_owner_with_transcript_budget(
+            "owner-a",
+            None,
+            &[m("user", "latest request must remain")],
+            0,
+        )
+        .unwrap();
+    assert_eq!(context, vec![m("user", "latest request must remain")]);
+}
+
+#[test]
 fn long_term_memory_is_opt_in_owner_scoped_and_deletable() {
     let memory = UnifiedMemory::new(8000);
     assert!(!memory.long_term_memory_enabled("owner-a").unwrap());
