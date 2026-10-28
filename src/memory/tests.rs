@@ -1275,6 +1275,37 @@ fn schema_v4_migration_adds_summary_table_without_losing_tenant_data() {
     );
 }
 
+#[tokio::test]
+async fn async_turn_persistence_runs_and_commits_transactionally() {
+    let fixture = Fixture::new();
+    let memory = Arc::new(fixture.open());
+    memory
+        .clone()
+        .store_turn_for_owner_with_tab_id_blocking(
+            "key:async".to_owned(),
+            "async-persisted-conversation".to_owned(),
+            vec![m("user", "hello from async persistence")],
+            m("assistant", "persisted response"),
+            "chatgpt".to_owned(),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let conversation = memory
+        .conversation_for_owner("key:async", "async-persisted-conversation")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        conversation.messages,
+        vec![
+            m("user", "hello from async persistence"),
+            m("assistant", "persisted response"),
+        ]
+    );
+    assert_eq!(conversation.tab_id, None);
+}
+
 #[test]
 fn completed_turn_without_real_tab_does_not_persist_synthetic_tab_id() {
     let fixture = Fixture::new();
