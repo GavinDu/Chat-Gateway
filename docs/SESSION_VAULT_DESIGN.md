@@ -1,6 +1,6 @@
 # Encrypted provider session vault design
 
-Status: design baseline; runtime vault is partially implemented and remains opt-in for issue #127. The default file store still writes reusable authentication material as plaintext in `sessions/<provider>.json`. With `CHAT_GATEWAY_SESSION_STORE=vault`, the runtime uses a versioned `CGSV1` AES-256-GCM envelope through `ring`, a fresh 12-byte nonce, provider-bound associated data, and a stable 32-byte key supplied as 64 hex characters through `CHAT_GATEWAY_VAULT_KEY`. Legacy JSON migration occurs on vault load. The browser-relay import path also requires vault mode. This implementation is not yet production-complete: OS-keychain integration, key rotation/list commands, full migration recovery tests, secret zeroization, and clearing the embedded browser's in-memory cookies on unlink remain open. Keep the gateway loopback-only and protect the session directory.
+Status: design baseline; runtime vault is partially implemented and remains opt-in for issue #127. The default file store still writes reusable authentication material as plaintext in `sessions/<provider>.json`. With `CHAT_GATEWAY_SESSION_STORE=vault`, the runtime uses a versioned `CGSV1` AES-256-GCM envelope through `ring`, a fresh 12-byte nonce, provider-bound associated data, and a stable 32-byte key supplied as 64 hex characters through `CHAT_GATEWAY_VAULT_KEY`. Legacy JSON migration occurs on vault load. The browser-relay import path also requires vault mode. This implementation is not yet production-complete: OS-keychain integration, key rotation, full migration recovery tests, secret zeroization, and live provider restore verification remain open. Keep the gateway loopback-only and protect the session directory.
 
 ## Security goals
 
@@ -36,6 +36,15 @@ Preferred order:
 4. Never store the encryption key beside the encrypted session files, in the repository, in logs, or in a container image.
 
 Key absence, invalid key length, or failed authentication must produce an actionable error and leave the original file untouched. Do not silently disable encryption when vault mode has been configured.
+
+## Operational commands
+
+The gateway supports two non-secret maintenance commands that run before browser startup:
+
+- `chat-gateway-rs --list-session-vaults` lists provider names whose encrypted `.vault` files exist. It does not read or print ciphertext, cookies, localStorage, or keys.
+- `chat-gateway-rs --delete-session-vault <provider>` removes that provider's legacy JSON and encrypted vault records. The provider name must be one of the registered provider IDs; unknown names fail closed. Stop the gateway first so a concurrent session write cannot race deletion.
+
+These commands make listing and deliberate deletion available, but **do not implement key rotation**. Rotation must remain an offline, recoverable operation until the implementation can guarantee all vault records are either on the old key or the new key after any failure or process interruption. Do not manually replace the configured key while existing records are still encrypted with it.
 
 ## Migration and recovery
 
