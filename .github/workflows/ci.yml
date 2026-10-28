@@ -37,6 +37,7 @@ jobs:
           node --check extension/shared.js
           node --check extension/popup.js
           node --test extension/background.test.cjs
+          node --test extension/tests/*.test.cjs
           node -e "JSON.parse(require('fs').readFileSync('extension/manifest.json', 'utf8'))"
 
       - name: Cache Cargo dependencies and build artifacts
