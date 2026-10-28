@@ -88,6 +88,9 @@ impl ContextBuilder {
         let mut windowed = Vec::new();
         for message in full.iter().rev() {
             let cost = estimate_message_tokens(&message.content).saturating_add(8);
+            // Preserve at least the newest message so a tiny context budget
+            // cannot silently discard the current user request. Older messages
+            // are only admitted when they fit the remaining budget.
             if tokens.saturating_add(cost) > budget && !windowed.is_empty() {
                 break;
             }
@@ -192,6 +195,20 @@ mod tests {
         let (prompt, messages) = ContextBuilder::build(&history, &incoming, 1000);
         assert_eq!(messages.len(), 3);
         assert!(prompt.ends_with("second\n</conversation_message>\n"));
+    }
+
+    #[test]
+    fn pure_builder_preserves_newest_message_when_it_alone_exceeds_budget() {
+        let history = vec![
+            m("user", "older context"),
+            m("assistant", "older response"),
+            m("user", "this message is intentionally much too large"),
+        ];
+        let (_, messages) = ContextBuilder::build(&history, &[], 1);
+        assert_eq!(
+            messages,
+            vec![m("user", "this message is intentionally much too large")]
+        );
     }
 
     #[test]
