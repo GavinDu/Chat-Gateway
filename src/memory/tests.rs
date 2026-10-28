@@ -1934,4 +1934,10 @@ async fn async_conversation_store_reads_and_persists_on_blocking_pool() {
         .await
         .unwrap();
     assert_eq!(transcript, vec![m("user", "hello"), m("assistant", "hi")]);
+
+    let recent = store
+        .read_history("owner-async".to_string(), "conversation-async".to_string(), 1)
+        .await
+        .unwrap();
+    assert_eq!(recent, vec![m("assistant", "hi")]);
 }
