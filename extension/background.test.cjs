@@ -6,6 +6,9 @@ const vm = require("node:vm");
 
 function loadBackground(linkedProviders, failingProviders = []) {
   const calls = [];
+  const timers = new Map();
+  const clearedTimers = new Set();
+  let nextTimerId = 0;
   const listeners = {
     installed: [],
     startup: [],
@@ -17,8 +20,14 @@ function loadBackground(linkedProviders, failingProviders = []) {
     Set,
     Promise,
     Object,
-    setTimeout,
-    clearTimeout,
+    setTimeout(callback, delay) {
+      const id = ++nextTimerId;
+      timers.set(id, { callback, delay });
+      return id;
+    },
+    clearTimeout(id) {
+      clearedTimers.add(id);
+    },
     importScripts() {},
     PROVIDERS: { chatgpt: [], claude: [] },
     syncProvider: async provider => {
@@ -47,7 +56,7 @@ function loadBackground(linkedProviders, failingProviders = []) {
   };
   const source = fs.readFileSync(path.join(__dirname, "background.js"), "utf8");
   vm.runInNewContext(source, sandbox, { filename: "background.js" });
-  return { calls, listeners };
+  return { calls, listeners, timers, clearedTimers };
 }
 
 function flushAsyncWork() {
@@ -82,4 +91,26 @@ test("one provider refresh failure does not prevent other linked providers", asy
   await flushAsyncWork();
 
   assert.deepEqual(calls, ["chatgpt", "claude"]);
+});
+
+test("cookie rotation is debounced and rejects lookalike domains", async () => {
+  const { calls, listeners, timers, clearedTimers } = loadBackground([]);
+  const onCookieChanged = listeners.cookieChanged[0];
+
+  onCookieChanged({ cookie: { domain: ".evilchatgpt.com" } });
+  assert.equal(timers.size, 0, "lookalike domains must not trigger a provider sync");
+
+  onCookieChanged({ cookie: { domain: ".chatgpt.com" } });
+  onCookieChanged({ cookie: { domain: "chatgpt.com" } });
+  assert.equal(timers.size, 2);
+  assert.ok(clearedTimers.has(1), "the previous debounce timer should be cancelled");
+  assert.equal(timers.get(2).delay, 750);
+
+  timers.get(1).callback();
+  await flushAsyncWork();
+  assert.deepEqual(calls, [], "a stale debounce callback must not sync");
+
+  timers.get(2).callback();
+  await flushAsyncWork();
+  assert.deepEqual(calls, ["chatgpt"]);
 });
