@@ -1522,7 +1522,7 @@ async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
                 "enabled": p.enabled,
                 "priority": p.priority,
                 "models": p.models,
-                "session_state": session.state,
+                "session_state": session.state.as_str(),
                 "last_session_error": session.last_error,
                 "challenge_disabled": challenge_disabled_reason.is_some(),
                 "challenge_disabled_reason": challenge_disabled_reason,
