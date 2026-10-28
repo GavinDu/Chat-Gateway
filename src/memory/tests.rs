@@ -617,6 +617,49 @@ fn long_term_memory_disable_stops_retrieval_without_erasing_inspectable_items() 
 }
 
 #[test]
+fn long_term_memory_retrieval_has_deterministic_ties_and_hard_limit() {
+    let fixture = Fixture::new();
+    let memory = fixture.open();
+    memory.set_long_term_memory_enabled("owner-a", true).unwrap();
+    for index in 0..22 {
+        memory
+            .save_long_term_memory_item(
+                "owner-a",
+                &format!("key-{index:02}"),
+                &format!("value-{index:02}"),
+                None,
+                0.75,
+                None,
+            )
+            .unwrap();
+    }
+    {
+        let connection = memory.lock().unwrap();
+        connection
+            .execute(
+                "UPDATE memory_items SET updated_at=100 WHERE owner_key_id='owner-a'",
+                [],
+            )
+            .unwrap();
+    }
+
+    assert!(memory
+        .retrieve_long_term_memory_items("owner-a", 0)
+        .unwrap()
+        .is_empty());
+    let all = memory.list_long_term_memory_items("owner-a").unwrap();
+    let retrieved = memory
+        .retrieve_long_term_memory_items("owner-a", 100)
+        .unwrap();
+    assert_eq!(retrieved.len(), 20, "retrieval must cap caller-supplied limits");
+    assert_eq!(
+        retrieved.iter().map(|item| &item.id).collect::<Vec<_>>(),
+        all.iter().take(20).map(|item| &item.id).collect::<Vec<_>>(),
+        "equal-confidence, equal-timestamp items must use a stable ID tie-break"
+    );
+}
+
+#[test]
 fn long_term_memory_rejects_invalid_confidence_and_expired_items() {
     let memory = UnifiedMemory::new(8000);
     memory
