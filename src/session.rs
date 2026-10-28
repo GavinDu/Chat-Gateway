@@ -409,19 +409,25 @@ fn remove_legacy_session_snapshot(provider: &str) -> Result<()> {
     Ok(())
 }
 
-fn vault_key_from_env() -> Result<[u8; 32]> {
-    let encoded = std::env::var("CHAT_GATEWAY_VAULT_KEY").map_err(|_| {
-        anyhow::anyhow!("CHAT_GATEWAY_VAULT_KEY is required for encrypted session storage")
-    })?;
+pub fn parse_vault_key(encoded: &str) -> Result<[u8; 32]> {
     if encoded.len() != 64 || !encoded.as_bytes().iter().all(u8::is_ascii_hexdigit) {
-        anyhow::bail!("CHAT_GATEWAY_VAULT_KEY must be exactly 64 hexadecimal characters");
+        anyhow::bail!("vault key must be exactly 64 hexadecimal characters");
     }
     let mut key = [0_u8; 32];
     for (index, byte) in key.iter_mut().enumerate() {
         *byte = u8::from_str_radix(&encoded[index * 2..index * 2 + 2], 16)
-            .map_err(|_| anyhow::anyhow!("CHAT_GATEWAY_VAULT_KEY contains invalid hexadecimal"))?;
+            .map_err(|_| anyhow::anyhow!("vault key contains invalid hexadecimal"))?;
     }
     Ok(key)
+}
+
+fn vault_key_from_env() -> Result<[u8; 32]> {
+    let encoded = std::env::var("CHAT_GATEWAY_VAULT_KEY").map_err(|_| {
+        anyhow::anyhow!("CHAT_GATEWAY_VAULT_KEY is required for encrypted session storage")
+    })?;
+    parse_vault_key(&encoded).map_err(|_| {
+        anyhow::anyhow!("CHAT_GATEWAY_VAULT_KEY must be exactly 64 hexadecimal characters")
+    })
 }
 
 fn vault_aad(provider: &str) -> String {
