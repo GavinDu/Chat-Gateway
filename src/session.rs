@@ -211,17 +211,23 @@ impl SessionStore for VaultSessionStore {
 /// localStorage export is deliberately disabled until each provider has a
 /// reviewed key allowlist.
 pub fn import_relay_session(provider: &str, file: &SessionFile) -> Result<()> {
-    if !matches!(std::env::var("CHAT_GATEWAY_SESSION_STORE").as_deref(), Ok("vault")) {
+    if !matches!(
+        std::env::var("CHAT_GATEWAY_SESSION_STORE").as_deref(),
+        Ok("vault")
+    ) {
         anyhow::bail!("browser relay requires CHAT_GATEWAY_SESSION_STORE=vault");
     }
     if !file.local_storage.is_empty() {
-        anyhow::bail!("localStorage import is disabled until provider-specific key allowlists are configured");
+        anyhow::bail!(
+            "localStorage import is disabled until provider-specific key allowlists are configured"
+        );
     }
     if file.cookies.len() > 512 {
         anyhow::bail!("too many cookies in relay session");
     }
     for cookie in &file.cookies {
-        if !cookie_domain_allowed(provider, &cookie.domain) || !restored_cookie_fields_safe(cookie) {
+        if !cookie_domain_allowed(provider, &cookie.domain) || !restored_cookie_fields_safe(cookie)
+        {
             anyhow::bail!("relay session contains a cookie outside the provider allowlist or with invalid fields");
         }
     }
@@ -232,7 +238,11 @@ pub fn import_relay_session(provider: &str, file: &SessionFile) -> Result<()> {
     write_session_file_atomically(Path::new(&destination), &encrypted)?;
     remove_legacy_session_snapshot(provider)?;
     record_session_write(provider);
-    tracing::info!(provider, cookies = file.cookies.len(), "browser relay session imported into encrypted vault");
+    tracing::info!(
+        provider,
+        cookies = file.cookies.len(),
+        "browser relay session imported into encrypted vault"
+    );
     Ok(())
 }
 
@@ -1084,12 +1094,12 @@ mod vault_tests {
 
     #[test]
     fn encrypted_vault_rejects_wrong_key_and_truncated_envelopes() {
-        let encrypted = encrypt_session_snapshot(&sample_session(), "provider-a", &[0x44; 32]).unwrap();
+        let encrypted =
+            encrypt_session_snapshot(&sample_session(), "provider-a", &[0x44; 32]).unwrap();
         assert!(decrypt_session_snapshot(&encrypted, "provider-a", &[0x45; 32]).is_err());
         assert!(decrypt_session_snapshot(&encrypted[..10], "provider-a", &[0x44; 32]).is_err());
         let mut unknown_version = encrypted;
         unknown_version[5] = b'2';
         assert!(decrypt_session_snapshot(&unknown_version, "provider-a", &[0x44; 32]).is_err());
     }
-
 }
