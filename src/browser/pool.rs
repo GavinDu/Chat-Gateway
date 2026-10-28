@@ -705,7 +705,10 @@ mod session_probe_tests {
             .downcast_ref::<super::ProviderSessionExpiredError>()
             .is_some());
         assert!(super::classify_session_probe(false, false).is_err());
-        assert!(matches!(super::classify_session_probe(false, true), Ok(true)));
+        assert!(matches!(
+            super::classify_session_probe(false, true),
+            Ok(true)
+        ));
     }
 
     #[test]
