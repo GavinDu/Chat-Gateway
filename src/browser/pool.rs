@@ -324,7 +324,7 @@ impl ObscuraPool {
                     }
                     Ok(Err(_)) => {
                         tracing::warn!("browser worker exited before restart warm-up completed");
-                        backoff = (backoff * 2).min(Duration::from_secs(30));
+                        backoff = next_browser_worker_restart_backoff(backoff);
                     }
                     Err(_) => {
                         tracing::warn!("browser worker restart warm-up timed out");
