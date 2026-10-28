@@ -98,7 +98,7 @@ fn request(
     let mut ttft_ms = None;
     for line in BufReader::new(stdout).lines() {
         let line = line?;
-        if ttft_ms.is_none() && line.contains("\"content\"") && line.contains("benchmark-token") {
+        if ttft_ms.is_none() && line.strip_prefix("data:").is_some_and(|data| has_content_delta(data.trim())) {
             ttft_ms = Some(started.elapsed().as_secs_f64() * 1000.0);
         }
     }
@@ -112,6 +112,18 @@ fn request(
         ttft_ms,
         rss_kib: pid.and_then(rss_kib),
     })
+}
+
+/// Detect any non-empty OpenAI-compatible streamed content delta. Live providers
+/// never promise the synthetic token used by the fake upstream.
+fn has_content_delta(data: &str) -> bool {
+    let Ok(payload) = serde_json::from_str::<Value>(data) else {
+        return false;
+    };
+    payload
+        .pointer("/choices/0/delta/content")
+        .and_then(Value::as_str)
+        .is_some_and(|content| !content.is_empty())
 }
 
 fn median(values: &mut [f64]) -> Option<f64> {
@@ -249,4 +261,23 @@ async fn main() -> anyhow::Result<()> {
         anyhow::bail!("fake benchmark did not observe a streamed content token");
     }
     Ok(())
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::has_content_delta;
+
+    #[test]
+    fn ttft_detection_accepts_arbitrary_live_provider_content() {
+        assert!(has_content_delta(r#"{"choices":[{"delta":{"content":"hello"}}]}"#));
+        assert!(has_content_delta(r#"{"choices":[{"delta":{"content":"benchmark-token"}}]}"#));
+    }
+
+    #[test]
+    fn ttft_detection_ignores_role_only_and_empty_chunks() {
+        assert!(!has_content_delta(r#"{"choices":[{"delta":{"role":"assistant"}}]}"#));
+        assert!(!has_content_delta(r#"{"choices":[{"delta":{"content":""}}]}"#));
+        assert!(!has_content_delta("[DONE]"));
+    }
 }
