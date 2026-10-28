@@ -72,3 +72,14 @@ The recovery directory makes interrupted rotations recoverable, but the multi-fi
 ## Rollout
 
 Ship the encrypted reader/writer behind an explicit vault configuration first. Require a successful round-trip and migration test suite before recommending migration. Keep plaintext legacy import opt-in and emit a warning that identifies the provider/file path only, never the contents. A later change can decide whether encryption becomes mandatory for all persistent sessions.
+
+
+## Vault management commands
+
+Vault administration is explicit and runs before browser startup:
+
+- `CHAT_GATEWAY_SESSION_STORE=vault CHAT_GATEWAY_VAULT_KEY=<64 hex chars> cargo run -- --vault-list` lists each supported provider as `valid`, `missing`, or `unreadable`. It never prints session values.
+- `cargo run -- --vault-delete-provider chatgpt` removes the named provider's persisted vault and legacy snapshot. This does not itself clear a running browser's in-memory cookie jar; use the authenticated relay unlink endpoint for live revocation.
+- To rotate a key, set `CHAT_GATEWAY_VAULT_KEY` to the current key and `CHAT_GATEWAY_VAULT_NEW_KEY` to a different 64-character hex key, then run `cargo run -- --vault-rotate-key`. Rotation validates every existing vault record before replacing any, verifies replacement ciphertext, and retains encrypted recovery copies under `sessions/.vault-rotation-<id>/`. After success, update `CHAT_GATEWAY_VAULT_KEY` to the new key and verify restart restoration before removing backups or retiring the old key.
+
+The environment-key mechanism is a portable fallback, not an OS-keychain integration. In production, inject the key from a secret manager or OS-protected store; never commit it, print it, or place it in logs. Keep recovery copies owner-only and encrypted. A missing/wrong key must fail closed; do not fall back to plaintext when an encrypted record exists.
