@@ -247,6 +247,19 @@ fn relay_rate_limit_allows(request_times: &mut VecDeque<Instant>, now: Instant) 
     true
 }
 
+fn token_matches(token: &str, expected: &[u8; 32]) -> bool {
+    let candidate: [u8; 32] = Sha256::digest(token.as_bytes()).into();
+    bool::from(candidate.ct_eq(expected))
+}
+
+fn request_timestamp_is_fresh(timestamp: Option<i64>, now: i64) -> bool {
+    timestamp.is_some_and(|timestamp| (now - timestamp).abs() <= REQUEST_SKEW_SECONDS)
+}
+
+fn relay_nonce_is_valid(nonce: &str) -> bool {
+    (32..=128).contains(&nonce.len()) && nonce.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 fn authenticated_request(app: &crate::AppState, headers: &HeaderMap) -> Result<(), Box<Response>> {
     if !relay_origin_is_allowed(headers) {
         return Err(Box::new(json_error(
@@ -266,7 +279,6 @@ fn authenticated_request(app: &crate::AppState, headers: &HeaderMap) -> Result<(
             "a paired extension token is required",
         )));
     };
-    let candidate: [u8; 32] = Sha256::digest(token.as_bytes()).into();
     let token_slot = app.relay.install_token_hash.lock().map_err(|_| {
         Box::new(json_error(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -281,7 +293,7 @@ fn authenticated_request(app: &crate::AppState, headers: &HeaderMap) -> Result<(
             "the extension is not paired",
         )));
     };
-    if !bool::from(candidate.ct_eq(expected)) {
+    if !token_matches(token, expected) {
         return Err(Box::new(json_error(
             StatusCode::UNAUTHORIZED,
             "relay_auth_required",
@@ -298,7 +310,7 @@ fn authenticated_request(app: &crate::AppState, headers: &HeaderMap) -> Result<(
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64;
-    if timestamp.is_none_or(|timestamp| (now - timestamp).abs() > REQUEST_SKEW_SECONDS) {
+    if !request_timestamp_is_fresh(timestamp, now) {
         return Err(Box::new(json_error(
             StatusCode::UNAUTHORIZED,
             "relay_request_expired",
@@ -309,7 +321,7 @@ fn authenticated_request(app: &crate::AppState, headers: &HeaderMap) -> Result<(
         .get("x-relay-nonce")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    if nonce.len() < 32 || nonce.len() > 128 || !nonce.bytes().all(|b| b.is_ascii_hexdigit()) {
+    if !relay_nonce_is_valid(nonce) {
         return Err(Box::new(json_error(
             StatusCode::BAD_REQUEST,
             "relay_nonce_invalid",
@@ -463,6 +475,30 @@ pub async fn preflight(headers: HeaderMap) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn relay_token_comparison_accepts_only_the_expected_token() {
+        let expected: [u8; 32] = Sha256::digest(b"valid-install-token").into();
+        assert!(token_matches("valid-install-token", &expected));
+        assert!(!token_matches("different-install-token", &expected));
+    }
+
+    #[test]
+    fn relay_timestamp_must_be_present_and_within_skew_window() {
+        assert!(request_timestamp_is_fresh(Some(1_000), 1_000 + REQUEST_SKEW_SECONDS));
+        assert!(request_timestamp_is_fresh(Some(1_000), 1_000 - REQUEST_SKEW_SECONDS));
+        assert!(!request_timestamp_is_fresh(None, 1_000));
+        assert!(!request_timestamp_is_fresh(Some(1_000), 1_001 + REQUEST_SKEW_SECONDS));
+    }
+
+    #[test]
+    fn relay_nonce_requires_hex_and_bounded_length() {
+        assert!(relay_nonce_is_valid(&"a".repeat(32)));
+        assert!(relay_nonce_is_valid(&"F".repeat(128)));
+        assert!(!relay_nonce_is_valid(&"a".repeat(31)));
+        assert!(!relay_nonce_is_valid(&"g".repeat(32)));
+        assert!(!relay_nonce_is_valid(&"a".repeat(129)));
+    }
 
     #[test]
     fn pairing_code_is_numeric_and_state_has_a_short_expiry() {
