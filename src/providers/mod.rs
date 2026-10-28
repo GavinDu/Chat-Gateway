@@ -122,6 +122,15 @@ pub trait SiteAdapter: Send + Sync {
         common::response_probe(page, self.selector_set(), check_body_challenge)
     }
 
+    /// Completion strategy selected by this provider's adapter catalog row.
+    fn done_signal(&self) -> DoneSignal {
+        ADAPTERS
+            .iter()
+            .find(|spec| spec.id == self.name())
+            .map(|spec| spec.done)
+            .unwrap_or(DoneSignal::StableResponseText)
+    }
+
     /// Best-effort cancellation when the HTTP consumer disconnects.
     /// Providers with a Stop control use the shared selector; adapters may
     /// override this method when their UI needs a different action.
@@ -142,7 +151,11 @@ pub enum StreamSignal {
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DoneSignal {
+    /// Require the conservative idle grace after response text stabilizes.
     StableResponseText,
+    /// If a generation indicator was observed, a stable disappearance is an
+    /// explicit completion signal; otherwise use the conservative fallback.
+    StopControlDisappeared,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
@@ -178,6 +191,7 @@ const fn adapter_spec(
     id: &'static str,
     selectors: &'static common::SelectorSet,
     strip_citations: bool,
+    done: DoneSignal,
     threads: ThreadSupport,
     factory: AdapterFactory,
 ) -> AdapterSpec {
@@ -189,7 +203,7 @@ const fn adapter_spec(
         model_pairs: selectors.model_pairs,
         strip_citations,
         streaming: StreamSignal::SharedStopControl,
-        done: DoneSignal::StableResponseText,
+        done,
         threads,
         typing: TypingStrategy::SharedComposer,
         factory,
@@ -202,6 +216,7 @@ pub const ADAPTERS: &[AdapterSpec] = &[
         "qwen",
         &qwen::SELECTORS,
         false,
+        DoneSignal::StableResponseText,
         ThreadSupport::UrlAddressable,
         |cfg| Arc::new(qwen::QwenAdapter { cfg }),
     ),
@@ -210,6 +225,7 @@ pub const ADAPTERS: &[AdapterSpec] = &[
         "metaai",
         &metaai::SELECTORS,
         false,
+        DoneSignal::StableResponseText,
         ThreadSupport::SidebarClick,
         |cfg| Arc::new(metaai::MetaAIAdapter { cfg }),
     ),
@@ -218,6 +234,7 @@ pub const ADAPTERS: &[AdapterSpec] = &[
         "claude",
         &claude::SELECTORS,
         false,
+        DoneSignal::StopControlDisappeared,
         ThreadSupport::UrlAddressable,
         |cfg| Arc::new(claude::ClaudeAdapter { cfg }),
     ),
@@ -226,6 +243,7 @@ pub const ADAPTERS: &[AdapterSpec] = &[
         "chatgpt",
         &chatgpt::SELECTORS,
         false,
+        DoneSignal::StopControlDisappeared,
         ThreadSupport::UrlAddressable,
         |cfg| Arc::new(chatgpt::ChatGPTAdapter { cfg }),
     ),
@@ -234,6 +252,7 @@ pub const ADAPTERS: &[AdapterSpec] = &[
         "gemini",
         &gemini::SELECTORS,
         false,
+        DoneSignal::StableResponseText,
         ThreadSupport::UrlAddressable,
         |cfg| Arc::new(gemini::GeminiAdapter { cfg }),
     ),
@@ -242,6 +261,7 @@ pub const ADAPTERS: &[AdapterSpec] = &[
         "grok",
         &grok::SELECTORS,
         false,
+        DoneSignal::StableResponseText,
         ThreadSupport::UrlAddressable,
         |cfg| Arc::new(grok::GrokAdapter { cfg }),
     ),
@@ -250,6 +270,7 @@ pub const ADAPTERS: &[AdapterSpec] = &[
         "mistral",
         &mistral::SELECTORS,
         false,
+        DoneSignal::StableResponseText,
         ThreadSupport::UrlAddressable,
         |cfg| Arc::new(mistral::MistralAdapter { cfg }),
     ),
@@ -258,6 +279,7 @@ pub const ADAPTERS: &[AdapterSpec] = &[
         "perplexity",
         &perplexity::SELECTORS,
         true,
+        DoneSignal::StableResponseText,
         ThreadSupport::UrlAddressable,
         |cfg| Arc::new(perplexity::PerplexityAdapter { cfg }),
     ),
@@ -368,9 +390,20 @@ fn should_check_body_challenge(poll_count: u32) -> bool {
 /// tolerates long reasoning/search pauses that can occur between text deltas.
 /// Runs on the browser thread; chunks leave via the channel.
 const COMPLETION_IDLE_TICKS: u32 = 43; // ~15 seconds at 350ms per poll.
+const EXPLICIT_DONE_IDLE_TICKS: u32 = 3; // Confirm stop-control disappearance for ~1 second.
 
-fn completion_ready(stable_ticks: u32, streaming: bool) -> bool {
-    stable_ticks >= COMPLETION_IDLE_TICKS && !streaming
+fn completion_idle_ticks(done_signal: DoneSignal, saw_streaming: bool) -> u32 {
+    match done_signal {
+        DoneSignal::StableResponseText => COMPLETION_IDLE_TICKS,
+        DoneSignal::StopControlDisappeared if saw_streaming => EXPLICIT_DONE_IDLE_TICKS,
+        // Never infer completion from absence alone when this send never exposed
+        // a streaming indicator; fall back to the conservative grace period.
+        DoneSignal::StopControlDisappeared => COMPLETION_IDLE_TICKS,
+    }
+}
+
+fn completion_ready(stable_ticks: u32, streaming: bool, done_signal: DoneSignal, saw_streaming: bool) -> bool {
+    stable_ticks >= completion_idle_ticks(done_signal, saw_streaming) && !streaming
 }
 
 pub async fn run_send(
@@ -399,6 +432,7 @@ pub async fn run_send(
     // is never emitted as new. Rust v1 had no baseline (last_len
     // started at 0); this fixes that stale-text bug while keeping
     // Rust v1's 350ms / stability / indicator completion.
+    let done_signal = adapter.done_signal();
     let baseline_probe = adapter.response_probe(&page, true);
     let baseline_response_count = baseline_probe.count;
     let baseline = baseline_probe.text.filter(|t| !t.is_empty());
@@ -529,7 +563,7 @@ pub async fn run_send(
                         stable_ticks = 0;
                         continue;
                     }
-                    if stable_ticks >= COMPLETION_IDLE_TICKS {
+                    if stable_ticks >= completion_idle_ticks(done_signal, saw_streaming) {
                         if let Some(answer) = &identical_answer_fallback {
                             let answer = if let Some(re) = &citation_re {
                                 re.replace_all(answer, "").to_string()
@@ -598,7 +632,7 @@ pub async fn run_send(
             // Completion requires a conservative 15s idle grace plus no
             // active streaming indicator, avoiding truncation during long
             // reasoning or search pauses.
-            if completion_ready(stable_ticks, streaming) {
+            if completion_ready(stable_ticks, streaming, done_signal, saw_streaming) {
                 if let Some(last_delta_at) = last_delta_at {
                     crate::metrics::record_provider_tail(
                         adapter.name(),
@@ -716,7 +750,7 @@ mod response_delta_tracker_tests {
 
 #[cfg(test)]
 mod response_completion_tests {
-    use super::{completion_ready, COMPLETION_IDLE_TICKS};
+    use super::{completion_idle_ticks, completion_ready, DoneSignal, COMPLETION_IDLE_TICKS, EXPLICIT_DONE_IDLE_TICKS};
 
     #[test]
     fn requires_more_than_ten_seconds_of_idle_before_completion() {
