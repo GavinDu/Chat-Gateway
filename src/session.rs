@@ -6,7 +6,6 @@ use ring::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use zeroize::{Zeroize, Zeroizing};
 use std::{
     collections::{BTreeMap, HashMap},
     io::Write,
@@ -14,6 +13,7 @@ use std::{
     sync::{Mutex, OnceLock},
     time::{Duration, Instant},
 };
+use zeroize::{Zeroize, Zeroizing};
 
 #[derive(Serialize, Deserialize)]
 pub struct SessionFile {
