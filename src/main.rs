@@ -2077,20 +2077,16 @@ async fn chat_completions(
             continue;
         }
         let personal_memory_items: Vec<memory_egress::PersonalMemoryItem> = Vec::new();
-        let allowed_personal_memory = match memory_egress_policy
-            .filter_personal_memory(&provider_name, &personal_memory_items)
+        if memory_egress_policy
+            .append_personal_memory_to_prompt(
+                &provider_name,
+                &mut provider_prompt,
+                &personal_memory_items,
+            )
+            .is_err()
         {
-            Ok(items) => items,
-            Err(_) => {
-                last_err = Some("provider memory egress policy denied request".to_owned());
-                continue;
-            }
-        };
-        for item in allowed_personal_memory {
-            provider_prompt.push_str("\nPERSONAL_MEMORY_ITEM ");
-            provider_prompt.push_str(&item.id);
-            provider_prompt.push_str(": ");
-            provider_prompt.push_str(&item.content);
+            last_err = Some("provider memory egress policy denied request".to_owned());
+            continue;
         }
 
         let mut rx = match state
