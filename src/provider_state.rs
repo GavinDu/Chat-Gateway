@@ -82,15 +82,22 @@ fn indicates_expired_session(error: &str) -> bool {
 }
 
 pub fn record_error(provider: &str, error: &str) {
-    if !indicates_expired_session(error) {
-        return;
-    }
+    let expired = indicates_expired_session(error);
     if let Ok(mut map) = states().lock() {
         map.insert(
             provider.to_owned(),
             ProviderSessionStatus {
-                state: ProviderSessionState::NeedsLogin,
-                last_error: Some("provider session expired; re-login required".to_owned()),
+                state: if expired {
+                    ProviderSessionState::NeedsLogin
+                } else {
+                    ProviderSessionState::Degraded
+                },
+                // Never retain upstream error text: it can contain credentials or PII.
+                last_error: Some(if expired {
+                    "provider session expired; re-login required".to_owned()
+                } else {
+                    "provider request failed; retry may succeed".to_owned()
+                }),
             },
         );
     }
@@ -180,7 +187,8 @@ mod tests {
     fn only_expired_sessions_enter_needs_login() {
         let provider = "test-provider-session-state";
         record_error(provider, "temporary network timeout");
-        assert_eq!(status(provider).state, ProviderSessionState::Unknown);
+        assert_eq!(status(provider).state, ProviderSessionState::Degraded);
+        assert!(is_routable(provider));
         record_error(provider, "session_expired: login required");
         assert_eq!(status(provider).state, ProviderSessionState::NeedsLogin);
         assert!(!is_routable(provider));
