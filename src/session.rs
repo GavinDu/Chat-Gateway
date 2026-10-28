@@ -760,11 +760,11 @@ pub fn clear_provider_cookies(browser: &Browser, provider: &str) -> Result<usize
     for cookie in cookies {
         if !cookie_domain_allowed(provider, &cookie.domain)
             || cookie.name.is_empty()
-            || cookie.name.contains(['=', ';', '\r', '\n'])
+            || cookie.name.chars().any(|ch| matches!(ch, '=' | ';' | '\r' | '\n'))
         {
             continue;
         }
-        let path = if cookie.path.starts_with('/') && !cookie.path.contains(['\r', '\n']) {
+        let path = if cookie.path.starts_with('/') && !cookie.path.chars().any(|ch| matches!(ch, '\r' | '\n')) {
             cookie.path.as_str()
         } else {
             "/"
