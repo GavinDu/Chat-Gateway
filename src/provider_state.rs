@@ -4,9 +4,29 @@ use std::{
     sync::{Mutex, OnceLock},
 };
 
+/// Typed provider lifecycle state. Strings are only exposed at API/metrics boundaries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProviderSessionState {
+    Unknown,
+    Ready,
+    NeedsLogin,
+    Degraded,
+}
+
+impl ProviderSessionState {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unknown => "unknown",
+            Self::Ready => "ready",
+            Self::NeedsLogin => "needs_login",
+            Self::Degraded => "degraded",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProviderSessionStatus {
-    pub state: &'static str,
+    pub state: ProviderSessionState,
     pub last_error: Option<String>,
 }
 
@@ -22,7 +42,7 @@ pub fn status(provider: &str) -> ProviderSessionStatus {
         .ok()
         .and_then(|map| map.get(provider).cloned())
         .unwrap_or(ProviderSessionStatus {
-            state: "unknown",
+            state: ProviderSessionState::Unknown,
             last_error: None,
         })
 }
@@ -32,7 +52,7 @@ pub fn record_success(provider: &str) {
         map.insert(
             provider.to_owned(),
             ProviderSessionStatus {
-                state: "ready",
+                state: ProviderSessionState::Ready,
                 last_error: None,
             },
         );
@@ -60,22 +80,25 @@ fn indicates_expired_session(error: &str) -> bool {
 }
 
 pub fn record_error(provider: &str, error: &str) {
-    if !indicates_expired_session(error) {
-        return;
-    }
+    let expired = indicates_expired_session(error);
     if let Ok(mut map) = states().lock() {
         map.insert(
             provider.to_owned(),
             ProviderSessionStatus {
-                state: "needs_login",
-                last_error: Some("provider session expired; re-login required".to_owned()),
+                state: if expired { ProviderSessionState::NeedsLogin } else { ProviderSessionState::Degraded },
+                // Never retain upstream error text: it may contain credentials or PII.
+                last_error: Some(if expired {
+                    "provider session expired; re-login required".to_owned()
+                } else {
+                    "provider request failed; retry may succeed".to_owned()
+                }),
             },
         );
     }
 }
 
 pub fn is_routable(provider: &str) -> bool {
-    status(provider).state != "needs_login"
+    status(provider).state != ProviderSessionState::NeedsLogin
 }
 
 #[cfg(test)]
@@ -96,12 +119,12 @@ mod tests {
         {
             let provider = format!("test-expiry-wording-{index}");
             record_error(&provider, message);
-            assert_eq!(status(&provider).state, "needs_login", "{message}");
+            assert_eq!(status(&provider).state, ProviderSessionState::NeedsLogin, "{message}");
         }
     }
 
     #[test]
-    fn ignores_unrelated_authorization_and_network_errors() {
+    fn records_retryable_failures_as_degraded_without_blocking_routing() {
         for (index, message) in [
             "temporary network timeout",
             "request unauthorized by policy",
@@ -112,7 +135,8 @@ mod tests {
         {
             let provider = format!("test-non-expiry-{index}");
             record_error(&provider, message);
-            assert_eq!(status(&provider).state, "unknown", "{message}");
+            assert_eq!(status(&provider).state, ProviderSessionState::Degraded, "{message}");
+            assert!(is_routable(&provider), "{message} should remain routable");
         }
     }
 
@@ -127,7 +151,7 @@ mod tests {
         );
 
         let expired = status(provider);
-        assert_eq!(expired.state, "needs_login");
+        assert_eq!(expired.state, ProviderSessionState::NeedsLogin);
         let safe_error = expired
             .last_error
             .expect("expiry state should explain remediation");
@@ -138,26 +162,26 @@ mod tests {
 
         record_success(provider);
         let ready = status(provider);
-        assert_eq!(ready.state, "ready");
+        assert_eq!(ready.state, ProviderSessionState::Ready);
         assert_eq!(ready.last_error, None);
     }
 
     #[test]
     fn unknown_provider_is_routable_until_checked() {
         assert!(is_routable("test-provider-unknown"));
-        assert_eq!(status("test-provider-unknown").state, "unknown");
+        assert_eq!(status("test-provider-unknown").state, ProviderSessionState::Unknown);
     }
 
     #[test]
     fn only_expired_sessions_enter_needs_login() {
         let provider = "test-provider-session-state";
         record_error(provider, "temporary network timeout");
-        assert_eq!(status(provider).state, "unknown");
+        assert_eq!(status(provider).state, ProviderSessionState::Degraded);
         record_error(provider, "session_expired: login required");
-        assert_eq!(status(provider).state, "needs_login");
+        assert_eq!(status(provider).state, ProviderSessionState::NeedsLogin);
         assert!(!is_routable(provider));
         record_success(provider);
-        assert_eq!(status(provider).state, "ready");
+        assert_eq!(status(provider).state, ProviderSessionState::Ready);
         assert!(is_routable(provider));
     }
 }
