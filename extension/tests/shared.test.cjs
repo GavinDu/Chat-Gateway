@@ -77,4 +77,6 @@ test("provider cookie snapshot fails closed when host permissions are incomplete
 test("unsupported provider cannot be used to collect a cookie snapshot", async () => {
   const api = loadShared();
   await assert.rejects(() => api.providerCookieSnapshot("unknown"));
+  assert.equal(api.cookieReads(), 0, "unknown providers must not read browser cookies");
+  assert.equal(api.requestedOrigins().length, 0, "unknown providers must not request host permissions");
 });
