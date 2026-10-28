@@ -1391,9 +1391,13 @@ async fn list_long_term_memory_items(
     auth_context: Option<Extension<AuthKeyContext>>,
 ) -> Response {
     let owner = memory_owner(&auth_context);
+    let enabled = match state.memory.long_term_memory_enabled(owner) {
+        Ok(enabled) => enabled,
+        Err(_) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "server_error", "memory_read_failed", "memory settings could not be read safely"),
+    };
     match state.memory.list_long_term_memory_items(owner) {
         Ok(items) => Json(serde_json::json!({
-            "enabled": state.memory.long_term_memory_enabled(owner).unwrap_or(false),
+            "enabled": enabled,
             "data": items,
         })).into_response(),
         Err(_) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "server_error", "memory_read_failed", "memory items could not be listed safely"),
