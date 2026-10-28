@@ -1076,6 +1076,7 @@ fn browser_thread(
                                     pages.borrow_mut().insert(provider, Rc::new(page));
                                     login_pages.borrow_mut().remove(&provider);
                                     login_meta.borrow_mut().remove(&provider);
+                                    crate::provider_state::clear(provider.name());
                                     Ok(removed)
                                 }.await;
                                 let _ = reply.send(res);
