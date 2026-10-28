@@ -3872,6 +3872,54 @@ mod provider_thread_url_tests {
             "https://chatgpt.com:8443/c/123"
         ));
     }
+
+    #[test]
+    fn reopenable_thread_urls_match_the_supported_provider_paths() {
+        let supported = [
+            ("chatgpt", "https://chatgpt.com/c/123"),
+            ("claude", "https://claude.ai/chat/123"),
+            ("gemini", "https://gemini.google.com/app/123"),
+            ("grok", "https://grok.com/c/123"),
+            ("qwen", "https://chat.qwen.ai/c/123"),
+            ("mistral", "https://chat.mistral.ai/chat/123"),
+            ("perplexity", "https://perplexity.ai/search/123"),
+        ];
+        for (provider, url) in supported {
+            assert!(
+                is_reopenable_provider_thread_url(provider, url),
+                "expected {provider} thread URL to be reopenable: {url}"
+            );
+        }
+
+        // Meta AI currently requires sidebar-based thread selection. It must
+        // not be treated as URL-addressable until the adapter implements that
+        // navigation contract.
+        assert!(!is_reopenable_provider_thread_url(
+            "metaai",
+            "https://meta.ai/c/123"
+        ));
+    }
+
+    #[test]
+    fn reopenable_thread_urls_reject_landing_pages_and_foreign_hosts() {
+        let invalid = [
+            ("chatgpt", "https://chatgpt.com/"),
+            ("claude", "https://claude.ai/"),
+            ("gemini", "https://gemini.google.com/"),
+            ("grok", "https://grok.com/"),
+            ("qwen", "https://chat.qwen.ai/"),
+            ("mistral", "https://chat.mistral.ai/"),
+            ("perplexity", "https://perplexity.ai/"),
+            ("chatgpt", "https://chatgpt.com.attacker.invalid/c/123"),
+            ("claude", "https://attacker.invalid/chat/123"),
+        ];
+        for (provider, url) in invalid {
+            assert!(
+                !is_reopenable_provider_thread_url(provider, url),
+                "unexpectedly accepted {provider} thread URL: {url}"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
