@@ -1345,9 +1345,13 @@ async fn get_provider_thread(
             "conversation ID or provider is invalid",
         );
     }
-    match state
-        .memory
-        .get_provider_thread_for_owner(owner_key_id, &conversation_id, &provider)
+    match state.memory.clone()
+        .get_provider_thread_for_owner_blocking(
+            owner_key_id.to_owned(),
+            conversation_id.clone(),
+            provider.clone(),
+        )
+        .await
     {
         Ok(Some(thread)) => Json(thread).into_response(),
         Ok(None) => api_error(
@@ -1999,9 +2003,13 @@ async fn chat_completions(
         };
         let saved_thread = match conversation_id.as_deref() {
             Some(id) => {
-                match state
-                    .memory
-                    .get_provider_thread_for_owner(&owner_key_id, id, &provider_name)
+                match state.memory.clone()
+                    .get_provider_thread_for_owner_blocking(
+                        owner_key_id.clone(),
+                        id.to_owned(),
+                        provider_name.clone(),
+                    )
+                    .await
                 {
                     Ok(thread) => thread.filter(|thread| {
                         is_reopenable_provider_thread_url(&provider_name, &thread.thread_url)
