@@ -299,6 +299,16 @@ pub fn list_session_records() -> Result<Vec<(String, bool, bool)>> {
 /// Rotate all existing encrypted vault records. Old ciphertext backups are
 /// retained until every new record has been written; on an ordinary error the
 /// operation rolls back already-replaced records before returning.
+pub fn rotate_session_vault_from_env() -> Result<usize> {
+    use zeroize::Zeroize;
+    let mut old_key = vault_key_from_env_named("CHAT_GATEWAY_VAULT_OLD_KEY")?;
+    let mut new_key = vault_key_from_env()?;
+    let result = rotate_session_vault_key(&old_key, &new_key);
+    old_key.zeroize();
+    new_key.zeroize();
+    result
+}
+
 pub fn rotate_session_vault_key(old_key: &[u8; 32], new_key: &[u8; 32]) -> Result<usize> {
     if old_key == new_key {
         anyhow::bail!("old and new vault keys must differ");
