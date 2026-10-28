@@ -2243,14 +2243,14 @@ async fn chat_completions(
                     yield Ok(Event::default().data(error.to_string()));
                 } else {
                     provider_state::record_success(&provider_c);
-                    if let Err(_error) = state_c.memory.store_turn_for_owner_with_tab_id(
-                        &owner_key_id_c,
+                    if let Err(_error) = state_c.memory.clone().store_turn_for_owner_with_tab_id_blocking(
+                        owner_key_id_c.clone(),
                         conv_stream.clone(),
                         windowed_c.clone(),
                         ChatMessage { role: "assistant".to_string(), content: full.clone() },
                         provider_c.clone(),
                         None,
-                    ) {
+                    ).await {
                         tracing::error!(conversation_id = %conv_stream, "conversation persistence failed after stream");
                         let error = serde_json::json!({
                             "error": { "message": "conversation could not be persisted", "type": "server_error", "code": "memory_persistence_failed" }
@@ -2366,8 +2366,8 @@ async fn chat_completions(
             outcome = "success",
             "provider request completed"
         );
-        if let Err(_error) = state.memory.store_turn_for_owner_with_tab_id(
-            &owner_key_id,
+        if let Err(_error) = state.memory.clone().store_turn_for_owner_with_tab_id_blocking(
+            owner_key_id.clone(),
             new_conv_id.clone(),
             windowed.clone(),
             ChatMessage {
@@ -2376,7 +2376,7 @@ async fn chat_completions(
             },
             provider_name.clone(),
             None,
-        ) {
+        ).await {
             tracing::error!(conversation_id = %new_conv_id, "conversation persistence failed");
             return api_error(
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
