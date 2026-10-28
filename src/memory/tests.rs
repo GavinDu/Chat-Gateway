@@ -1841,6 +1841,23 @@ fn schema_v6_migration_clears_synthetic_tabs_and_preserves_real_metadata_and_his
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
     assert_eq!(version, 7);
+
+    // A legacy client may still write tab metadata after the one-time migration.
+    // Do not repeat the cleanup on subsequent database opens.
+    migrated
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE conversations SET tab_id=?1 WHERE id=?2",
+            rusqlite::params!["tab-new-client-metadata", "synthetic-migration"],
+        )
+        .unwrap();
+    drop(migrated);
+    let reopened = fixture.open();
+    assert_eq!(
+        reopened.get_tab("synthetic-migration").unwrap().as_deref(),
+        Some("tab-new-client-metadata")
+    );
 }
 
 #[test]
