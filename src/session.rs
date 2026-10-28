@@ -416,6 +416,60 @@ fn load_session_file_from_path(path: &Path) -> Result<Option<SessionFile>> {
     Ok(Some(serde_json::from_str(&data)?))
 }
 
+/// Build a deletion cookie without weakening cookie-prefix invariants.
+fn cookie_expiration_header(cookie: &Cookie) -> Result<String> {
+    if !restored_cookie_fields_safe(cookie) {
+        anyhow::bail!("provider cookie has invalid fields and cannot be safely revoked");
+    }
+    let host_prefix = cookie.name.starts_with("__Host-");
+    let secure_prefix = cookie.name.starts_with("__Secure-");
+    if host_prefix && (!cookie.secure || cookie.path != "/") {
+        anyhow::bail!("__Host- cookie violates required Secure/Path attributes");
+    }
+    if secure_prefix && !cookie.secure {
+        anyhow::bail!("__Secure- cookie is not marked Secure");
+    }
+
+    let mut expired = format!("{}=; Max-Age=0; Path={}", cookie.name, cookie.path);
+    if host_prefix {
+        expired.push_str("; Secure");
+    } else {
+        expired.push_str(&format!("; Domain={}", cookie.domain));
+        if cookie.secure {
+            expired.push_str("; Secure");
+        }
+    }
+    if cookie.http_only {
+        expired.push_str("; HttpOnly");
+    }
+    Ok(expired)
+}
+
+/// Expire all cookies for one provider in Obscura's shared browser jar.
+/// A failure aborts unlink so the caller does not delete durable session state
+/// while a live in-memory credential may still be present.
+pub fn clear_provider_cookies(browser: &Browser, provider: &str) -> Result<usize> {
+    let store = browser.cookies();
+    let cookies = store.get_all();
+    let mut cleared = 0;
+    for browser_cookie in cookies {
+        let cookie = Cookie::from(browser_cookie);
+        if !cookie_domain_allowed(provider, &cookie.domain) {
+            continue;
+        }
+        let expired = cookie_expiration_header(&cookie)?;
+        let path = cookie.path.as_str();
+        let url = format!(
+            "https://{}{}",
+            cookie.domain.trim_start_matches('.'),
+            if path.starts_with('/') { path } else { "/" }
+        );
+        store.set(&expired, &url)?;
+        cleared += 1;
+    }
+    Ok(cleared)
+}
+
 /// Conservative provider-domain allowlist for persisted authentication cookies.
 /// Keep these families narrow: session files contain reusable credentials.
 fn cookie_domain_allowed(provider: &str, domain: &str) -> bool {
@@ -929,6 +983,21 @@ mod cookie_scope_tests {
     }
 
     #[test]
+    #[test]
+    fn cookie_expiration_preserves_secure_cookie_prefix_requirements() {
+        let mut host_cookie = cookie("__Host-session", "value", "/");
+        host_cookie.domain = "chatgpt.com".to_string();
+        assert!(cookie_expiration_header(&host_cookie)
+            .unwrap()
+            .contains("Max-Age=0; Path=/; Secure"));
+        host_cookie.path = "/nested".to_string();
+        assert!(cookie_expiration_header(&host_cookie).is_err());
+
+        let mut secure_cookie = cookie("__Secure-session", "value", "/");
+        secure_cookie.secure = false;
+        assert!(cookie_expiration_header(&secure_cookie).is_err());
+    }
+
     fn restored_cookie_fields_reject_injection_and_malformed_paths() {
         assert!(restored_cookie_fields_safe(&cookie(
             "__Secure-session",
