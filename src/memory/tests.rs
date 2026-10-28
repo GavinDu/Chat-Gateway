@@ -1912,3 +1912,63 @@ fn provider_thread_mapping_survives_gateway_restart() {
         None
     );
 }
+
+#[tokio::test]
+async fn async_conversation_store_bounds_history_and_enforces_owner_scope() {
+    let fixture = Fixture::new();
+    let store = Arc::new(fixture.open());
+    store
+        .clone()
+        .persist_turn(
+            "owner-bounded".to_string(),
+            "conversation-bounded".to_string(),
+            vec![m("user", "first"), m("user", "second")],
+            m("assistant", "latest"),
+            "chatgpt".to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let tail = store
+        .clone()
+        .read_history(
+            "owner-bounded".to_string(),
+            "conversation-bounded".to_string(),
+            2,
+        )
+        .await
+        .unwrap();
+    assert_eq!(tail, vec![m("user", "second"), m("assistant", "latest")]);
+    assert!(store
+        .read_history(
+            "different-owner".to_string(),
+            "conversation-bounded".to_string(),
+            2,
+        )
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+async fn async_conversation_store_reads_and_persists_on_blocking_pool() {
+    let fixture = Fixture::new();
+    let store = Arc::new(fixture.open());
+    store
+        .clone()
+        .persist_turn(
+            "owner-async".to_string(),
+            "conversation-async".to_string(),
+            vec![m("user", "hello")],
+            m("assistant", "hi"),
+            "chatgpt".to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+    let transcript = store
+        .read_transcript("owner-async".to_string(), "conversation-async".to_string())
+        .await
+        .unwrap();
+    assert_eq!(transcript, vec![m("user", "hello"), m("assistant", "hi")]);
+}

@@ -47,6 +47,85 @@ pub struct UnifiedMemory {
     connection: Mutex<Connection>,
 }
 
+/// Async contract for bounded conversation history access and atomic turn persistence.
+/// Implementations keep synchronous SQLite work off Tokio request workers.
+#[async_trait::async_trait]
+pub trait ConversationStore: Send + Sync {
+    async fn read_transcript(
+        self: Arc<Self>,
+        owner_key_id: String,
+        conversation_id: String,
+    ) -> anyhow::Result<Vec<ChatMessage>>;
+
+    /// Kept for the staged call-site migration; callers will adopt this method next.
+    #[allow(dead_code)]
+    async fn read_history(
+        self: Arc<Self>,
+        owner_key_id: String,
+        conversation_id: String,
+        max_messages: usize,
+    ) -> anyhow::Result<Vec<ChatMessage>>;
+
+    async fn persist_turn(
+        self: Arc<Self>,
+        owner_key_id: String,
+        conversation_id: String,
+        user_messages: Vec<ChatMessage>,
+        assistant_message: ChatMessage,
+        provider: String,
+        tab_id: Option<String>,
+    ) -> anyhow::Result<()>;
+}
+
+#[async_trait::async_trait]
+impl ConversationStore for UnifiedMemory {
+    async fn read_transcript(
+        self: Arc<Self>,
+        owner_key_id: String,
+        conversation_id: String,
+    ) -> anyhow::Result<Vec<ChatMessage>> {
+        self.conversation_messages_for_owner_blocking(owner_key_id, conversation_id)
+            .await
+    }
+
+    async fn read_history(
+        self: Arc<Self>,
+        owner_key_id: String,
+        conversation_id: String,
+        max_messages: usize,
+    ) -> anyhow::Result<Vec<ChatMessage>> {
+        tokio::task::spawn_blocking(move || {
+            self.conversation_history_for_owner_with_limit(
+                &owner_key_id,
+                &conversation_id,
+                max_messages,
+            )
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("bounded conversation history task failed: {error}"))?
+    }
+
+    async fn persist_turn(
+        self: Arc<Self>,
+        owner_key_id: String,
+        conversation_id: String,
+        user_messages: Vec<ChatMessage>,
+        assistant_message: ChatMessage,
+        provider: String,
+        tab_id: Option<String>,
+    ) -> anyhow::Result<()> {
+        self.store_turn_for_owner_with_tab_id_blocking(
+            owner_key_id,
+            conversation_id,
+            user_messages,
+            assistant_message,
+            provider,
+            tab_id,
+        )
+        .await
+    }
+}
+
 impl UnifiedMemory {
     // Test-only helper is shared across test targets; some targets do not call it.
     #[cfg(test)]
@@ -163,6 +242,50 @@ impl UnifiedMemory {
         })
         .await
         .map_err(|error| anyhow::anyhow!("conversation transcript task failed: {error}"))?
+    }
+
+    /// Read a bounded recent history window without loading the full transcript.
+    /// The owner check and row selection share a transaction.
+    #[allow(dead_code)] // Used by ConversationStore when bounded-history call sites migrate.
+    pub fn conversation_history_for_owner_with_limit(
+        &self,
+        owner_key_id: &str,
+        conversation_id: &str,
+        max_messages: usize,
+    ) -> anyhow::Result<Vec<ChatMessage>> {
+        if max_messages == 0 {
+            return Ok(Vec::new());
+        }
+        let mut connection = self.lock()?;
+        let tx = connection.transaction()?;
+        let owner: Option<String> = tx
+            .query_row(
+                "SELECT owner_key_id FROM conversations WHERE id = ?1",
+                [conversation_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        match owner {
+            Some(owner) if owner == owner_key_id => {}
+            Some(_) => anyhow::bail!("conversation belongs to another API key"),
+            None => return Ok(Vec::new()),
+        }
+        let limit = max_messages.min(i64::MAX as usize) as i64;
+        let mut statement = tx.prepare(
+            "SELECT role, content FROM messages WHERE conversation_id = ?1 ORDER BY position DESC LIMIT ?2",
+        )?;
+        let mut messages = statement
+            .query_map(rusqlite::params![conversation_id, limit], |row| {
+                Ok(ChatMessage {
+                    role: row.get(0)?,
+                    content: row.get(1)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        messages.reverse();
+        drop(statement);
+        tx.commit()?;
+        Ok(messages)
     }
 
     pub fn conversation_messages_for_owner(
