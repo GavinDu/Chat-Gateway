@@ -1994,6 +1994,26 @@ async fn first_event(
     }
 }
 
+fn budget_personal_memory_items(
+    items: Vec<memory::LongTermMemoryItem>,
+    token_budget: usize,
+) -> (Vec<memory_egress::PersonalMemoryItem>, usize) {
+    let mut used = 0usize;
+    let mut selected = Vec::new();
+    for item in items {
+        let content = format!("{}: {}", item.memory_key, item.value);
+        let cost = context::estimate_message_tokens(&content).saturating_add(8);
+        if cost <= token_budget.saturating_sub(used) {
+            used = used.saturating_add(cost);
+            selected.push(memory_egress::PersonalMemoryItem {
+                id: item.id,
+                content,
+            });
+        }
+    }
+    (selected, used)
+}
+
 fn valid_conversation_id(value: &str) -> bool {
     (8..=128).contains(&value.len())
         && value.is_ascii()
@@ -2069,6 +2089,30 @@ async fn chat_completions(
         }
     };
 
+    // Retrieve personal memory only when the owner opted in. Read errors fail
+    // closed rather than silently changing the prompt. Reserve a fixed portion
+    // of the context budget before assembling transcript history.
+    let memory = state.memory.clone();
+    let memory_owner = owner_key_id.clone();
+    let retrieved_memory = match tokio::task::spawn_blocking(move || {
+        memory.retrieve_long_term_memory_items(&memory_owner, 20)
+    })
+    .await
+    {
+        Ok(Ok(items)) => items,
+        _ => {
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                "memory_read_failed",
+                "long-term memory could not be read safely",
+            );
+        }
+    };
+    let (personal_memory_items, memory_tokens) =
+        budget_personal_memory_items(retrieved_memory, 512);
+    let context_token_budget = 8000usize.saturating_sub(memory_tokens);
+
     // Read all context-dependent memory before any provider request. A read
     // failure must not degrade into an empty prompt or an unauthenticated turn.
     let (context_prompt, windowed, has_history, stored_messages) =
@@ -2077,6 +2121,7 @@ async fn chat_completions(
             owner_key_id.clone(),
             conversation_id.clone(),
             req.messages.clone(),
+            context_token_budget,
         )
         .await
         {
