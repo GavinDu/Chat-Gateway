@@ -238,14 +238,7 @@ mod tests {
         };
 
         assert!(matches!(
-            ContextBuilder::plan(
-                &history,
-                &incoming,
-                "chatgpt",
-                Some(&thread),
-                true,
-                1000
-            ),
+            ContextBuilder::plan(&history, &incoming, "chatgpt", Some(&thread), true, 1000),
             super::ContextPlan::Replay { preamble, messages }
                 if preamble.contains("CONVERSATION_CONTEXT_BEGIN")
                     && messages
