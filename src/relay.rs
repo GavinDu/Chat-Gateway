@@ -132,12 +132,17 @@ fn json_error(status: StatusCode, code: &'static str, message: &'static str) -> 
         .into_response()
 }
 
+fn extension_id_is_valid(id: &str) -> bool {
+    id.len() == 32 && id.bytes().all(|byte| (b'a'..=b'p').contains(&byte))
+}
+
 fn extension_id() -> Option<String> {
     let id = std::env::var("CHAT_GATEWAY_EXTENSION_ID").ok()?;
-    if id.len() != 32 || !id.bytes().all(|b| (b'a'..=b'p').contains(&b)) {
-        return None;
-    }
-    Some(id)
+    extension_id_is_valid(&id).then_some(id)
+}
+
+fn extension_origin_matches(id: &str, origin: &str) -> bool {
+    extension_id_is_valid(id) && origin == format!("chrome-extension://{id}")
 }
 
 /// The extension origin must match one configured Chrome extension ID exactly.
@@ -145,11 +150,10 @@ pub fn relay_origin_is_allowed(headers: &HeaderMap) -> bool {
     let Some(id) = extension_id() else {
         return false;
     };
-    let expected = format!("chrome-extension://{id}");
     headers
         .get(header::ORIGIN)
         .and_then(|value| value.to_str().ok())
-        .is_some_and(|origin| origin == expected)
+        .is_some_and(|origin| extension_origin_matches(&id, origin))
 }
 
 pub async fn pair(
@@ -504,6 +508,27 @@ mod tests {
         assert!(relay_rate_limit_allows(
             &mut times,
             now + Duration::from_secs(61)
+        ));
+    }
+
+    #[test]
+    fn extension_origin_requires_exact_valid_chrome_extension_origin() {
+        let id = "abcdefghijklmnopabcdefghijklmnop";
+        assert!(extension_origin_matches(
+            id,
+            "chrome-extension://abcdefghijklmnopabcdefghijklmnop"
+        ));
+        assert!(!extension_origin_matches(
+            id,
+            "chrome-extension://abcdefghijklmnopabcdefghijklmnop.attacker"
+        ));
+        assert!(!extension_origin_matches(
+            id,
+            "https://abcdefghijklmnopabcdefghijklmnop"
+        ));
+        assert!(!extension_origin_matches(
+            "invalid-extension-id",
+            "chrome-extension://invalid-extension-id"
         ));
     }
 
