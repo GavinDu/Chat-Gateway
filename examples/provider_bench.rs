@@ -267,21 +267,28 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::has_content_delta;
 
     #[test]
     fn ttft_detection_accepts_arbitrary_live_provider_content() {
-        assert!(has_content_delta(r#"{"choices":[{"delta":{"content":"hello"}}]}"#));
-        assert!(has_content_delta(r#"{"choices":[{"delta":{"content":"benchmark-token"}}]}"#));
+        assert!(has_content_delta(
+            r#"{"choices":[{"delta":{"content":"hello"}}]}"#
+        ));
+        assert!(has_content_delta(
+            r#"{"choices":[{"delta":{"content":"benchmark-token"}}]}"#
+        ));
     }
 
     #[test]
     fn ttft_detection_ignores_role_only_and_empty_chunks() {
-        assert!(!has_content_delta(r#"{"choices":[{"delta":{"role":"assistant"}}]}"#));
-        assert!(!has_content_delta(r#"{"choices":[{"delta":{"content":""}}]}"#));
+        assert!(!has_content_delta(
+            r#"{"choices":[{"delta":{"role":"assistant"}}]}"#
+        ));
+        assert!(!has_content_delta(
+            r#"{"choices":[{"delta":{"content":""}}]}"#
+        ));
         assert!(!has_content_delta("[DONE]"));
     }
 }
