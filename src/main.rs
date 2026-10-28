@@ -1445,7 +1445,6 @@ mod session_probe_jitter_tests {
     }
 }
 
-
 fn memory_owner(auth_context: &Option<Extension<AuthKeyContext>>) -> &str {
     auth_context
         .as_ref()
