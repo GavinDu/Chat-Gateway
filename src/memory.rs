@@ -8,7 +8,7 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use std::{
     path::PathBuf,
-    sync::{Mutex, MutexGuard},
+    sync::{Arc, Mutex, MutexGuard},
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -158,6 +158,24 @@ impl UnifiedMemory {
         let (prompt, context, _) =
             self.build_context_for_owner_with_history(owner_key_id, conversation_id, new_messages)?;
         Ok((prompt, context))
+    }
+
+    /// Run context construction and its SQLite reads on Tokio's blocking pool.
+    pub async fn build_context_for_owner_with_transcript_blocking(
+        self: Arc<Self>,
+        owner_key_id: String,
+        conversation_id: Option<String>,
+        new_messages: Vec<ChatMessage>,
+    ) -> anyhow::Result<(String, Vec<ChatMessage>, bool, Vec<ChatMessage>)> {
+        tokio::task::spawn_blocking(move || {
+            self.build_context_for_owner_with_transcript(
+                &owner_key_id,
+                conversation_id.as_deref(),
+                &new_messages,
+            )
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("conversation context task failed: {error}"))?
     }
 
     /// Build context and report persisted transcript presence from the same scoped read.
