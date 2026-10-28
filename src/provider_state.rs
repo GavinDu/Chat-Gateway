@@ -70,6 +70,21 @@ pub fn record_unlinked(provider: &str) {
     }
 }
 
+/// Record an authentication failure discovered by the read-only session probe.
+/// This transition is typed; it does not depend on matching browser error strings.
+pub fn record_needs_login(provider: &str) {
+    record_error_state(provider, true, None);
+}
+
+/// Record a probe failure that did not prove the session had expired.
+pub fn record_probe_failure(provider: &str) {
+    record_error_state(
+        provider,
+        false,
+        SystemTime::now().checked_add(DEGRADED_RETRY_COOLDOWN),
+    );
+}
+
 pub fn record_success(provider: &str) {
     if let Ok(mut map) = states().lock() {
         map.insert(
@@ -269,6 +284,23 @@ mod tests {
         let ready = status(provider);
         assert_eq!(ready.state, ProviderSessionState::Ready);
         assert_eq!(ready.last_error, None);
+    }
+
+    #[test]
+    fn typed_probe_outcomes_distinguish_expired_sessions_from_probe_failures() {
+        let expired = "test-provider-typed-probe-expired";
+        record_needs_login(expired);
+        assert_eq!(status(expired).state, ProviderSessionState::NeedsLogin);
+        assert!(!is_routable(expired));
+
+        let transient = "test-provider-typed-probe-failure";
+        record_probe_failure(transient);
+        assert_eq!(status(transient).state, ProviderSessionState::Degraded);
+        assert!(!is_routable(transient));
+        assert_eq!(
+            status(transient).last_error.as_deref(),
+            Some("provider request failed; retry may succeed")
+        );
     }
 
     #[test]
