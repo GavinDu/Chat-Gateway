@@ -17,6 +17,20 @@ pub struct ChatMessage {
     pub content: String,
 }
 
+/// A user-controlled, cross-conversation memory item. Items are never
+/// retrieved for prompts unless the owner has explicitly enabled memory.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LongTermMemoryItem {
+    pub id: String,
+    pub memory_key: String,
+    pub value: String,
+    pub source_conversation_id: Option<String>,
+    pub confidence: f64,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub expires_at: Option<i64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Conversation {
     pub id: String,
@@ -682,6 +696,193 @@ impl UnifiedMemory {
         )?;
         Ok(())
     }
+
+    /// Long-term memory is opt-in. Missing settings deliberately mean disabled.
+    pub fn long_term_memory_enabled(&self, owner_key_id: &str) -> anyhow::Result<bool> {
+        let connection = self.lock()?;
+        let enabled = connection
+            .query_row(
+                "SELECT enabled FROM memory_settings WHERE owner_key_id=?1",
+                [owner_key_id],
+                |row| row.get::<_, bool>(0),
+            )
+            .optional()?
+            .unwrap_or(false);
+        Ok(enabled)
+    }
+
+    pub fn set_long_term_memory_enabled(
+        &self,
+        owner_key_id: &str,
+        enabled: bool,
+    ) -> anyhow::Result<()> {
+        if owner_key_id.trim().is_empty() {
+            anyhow::bail!("owner key is required");
+        }
+        let now = unix_timestamp();
+        let connection = self.lock()?;
+        connection.execute(
+            "INSERT INTO memory_settings(owner_key_id, enabled, updated_at) VALUES(?1, ?2, ?3)
+             ON CONFLICT(owner_key_id) DO UPDATE SET enabled=excluded.enabled, updated_at=excluded.updated_at",
+            rusqlite::params![owner_key_id, enabled, now],
+        )?;
+        Ok(())
+    }
+
+    /// Save or replace one owner-scoped memory key. Writes are rejected while
+    /// disabled, and source conversation provenance is checked against ownership.
+    pub fn save_long_term_memory_item(
+        &self,
+        owner_key_id: &str,
+        memory_key: &str,
+        value: &str,
+        source_conversation_id: Option<&str>,
+        confidence: f64,
+        expires_at: Option<i64>,
+    ) -> anyhow::Result<LongTermMemoryItem> {
+        if owner_key_id.trim().is_empty()
+            || memory_key.trim().is_empty()
+            || memory_key.chars().count() > 128
+            || value.trim().is_empty()
+            || value.chars().count() > 16_384
+            || !confidence.is_finite()
+            || !(0.0..=1.0).contains(&confidence)
+        {
+            anyhow::bail!("invalid long-term memory item");
+        }
+        let now = unix_timestamp();
+        let mut connection = self.lock()?;
+        let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let enabled: bool = tx
+            .query_row(
+                "SELECT enabled FROM memory_settings WHERE owner_key_id=?1",
+                [owner_key_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .unwrap_or(false);
+        if !enabled {
+            anyhow::bail!("long-term memory is disabled");
+        }
+        if let Some(source_id) = source_conversation_id {
+            let source_owner: Option<String> = tx
+                .query_row(
+                    "SELECT owner_key_id FROM conversations WHERE id=?1",
+                    [source_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if source_owner.as_deref() != Some(owner_key_id) {
+                anyhow::bail!("source conversation is not owned by this API key");
+            }
+        }
+        tx.execute(
+            "INSERT INTO memory_items(
+                id, owner_key_id, memory_key, value, source_conversation_id,
+                confidence, created_at, updated_at, expires_at
+             ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, ?8)
+             ON CONFLICT(owner_key_id, memory_key) DO UPDATE SET
+                value=excluded.value,
+                source_conversation_id=excluded.source_conversation_id,
+                confidence=excluded.confidence,
+                updated_at=excluded.updated_at,
+                expires_at=excluded.expires_at",
+            rusqlite::params![
+                uuid::Uuid::new_v4().to_string(),
+                owner_key_id,
+                memory_key.trim(),
+                value.trim(),
+                source_conversation_id,
+                confidence,
+                now,
+                expires_at,
+            ],
+        )?;
+        let item = tx.query_row(
+            "SELECT id, memory_key, value, source_conversation_id, confidence,
+                    created_at, updated_at, expires_at
+             FROM memory_items WHERE owner_key_id=?1 AND memory_key=?2",
+            rusqlite::params![owner_key_id, memory_key.trim()],
+            memory_item_from_row,
+        )?;
+        tx.commit()?;
+        Ok(item)
+    }
+
+    /// List every stored item for inspection/export, including expired items.
+    /// This deliberately remains available when retrieval is disabled.
+    pub fn list_long_term_memory_items(
+        &self,
+        owner_key_id: &str,
+    ) -> anyhow::Result<Vec<LongTermMemoryItem>> {
+        let connection = self.lock()?;
+        let mut statement = connection.prepare(
+            "SELECT id, memory_key, value, source_conversation_id, confidence,
+                    created_at, updated_at, expires_at
+             FROM memory_items WHERE owner_key_id=?1 ORDER BY updated_at DESC, id",
+        )?;
+        let rows = statement.query_map([owner_key_id], memory_item_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Retrieval is empty unless explicitly enabled and always excludes expired items.
+    pub fn retrieve_long_term_memory_items(
+        &self,
+        owner_key_id: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<LongTermMemoryItem>> {
+        if !self.long_term_memory_enabled(owner_key_id)? {
+            return Ok(Vec::new());
+        }
+        let limit = limit.clamp(1, 20) as i64;
+        let now = unix_timestamp();
+        let connection = self.lock()?;
+        let mut statement = connection.prepare(
+            "SELECT id, memory_key, value, source_conversation_id, confidence,
+                    created_at, updated_at, expires_at
+             FROM memory_items
+             WHERE owner_key_id=?1 AND (expires_at IS NULL OR expires_at > ?2)
+             ORDER BY confidence DESC, updated_at DESC, id
+             LIMIT ?3",
+        )?;
+        let rows = statement.query_map(rusqlite::params![owner_key_id, now, limit], memory_item_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn delete_long_term_memory_item(
+        &self,
+        owner_key_id: &str,
+        item_id: &str,
+    ) -> anyhow::Result<bool> {
+        let connection = self.lock()?;
+        Ok(connection.execute(
+            "DELETE FROM memory_items WHERE owner_key_id=?1 AND id=?2",
+            rusqlite::params![owner_key_id, item_id],
+        )? == 1)
+    }
+
+}
+
+
+fn unix_timestamp() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        .min(i64::MAX as u64) as i64
+}
+
+fn memory_item_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<LongTermMemoryItem> {
+    Ok(LongTermMemoryItem {
+        id: row.get(0)?,
+        memory_key: row.get(1)?,
+        value: row.get(2)?,
+        source_conversation_id: row.get(3)?,
+        confidence: row.get(4)?,
+        created_at: row.get(5)?,
+        updated_at: row.get(6)?,
+        expires_at: row.get(7)?,
+    })
 }
 
 fn extractive_rolling_summary(messages: &[ChatMessage], max_chars: usize) -> String {
