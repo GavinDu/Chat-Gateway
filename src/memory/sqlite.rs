@@ -415,7 +415,7 @@ pub(super) fn append_owned(
 #[allow(dead_code)] // This module is also compiled through the standalone SQLite benchmark.
 mod concurrency_configuration_tests {
     #[test]
-    fn file_backed_database_enforces_expected_concurrency_pragmas() -> Result<()> {
+    fn file_backed_database_enforces_expected_concurrency_pragmas() -> super::Result<()> {
         let path = std::env::temp_dir().join(format!(
             "chat-gateway-sqlite-pragmas-{}.sqlite3",
             uuid::Uuid::new_v4()
