@@ -1359,7 +1359,9 @@ async fn list_conversations(
     let offset = query.offset.unwrap_or(0);
     match state
         .memory
-        .list_conversations_for_owner(owner_key_id, limit, offset)
+        .clone()
+        .list_conversations_for_owner_blocking(owner_key_id.to_owned(), limit, offset)
+        .await
     {
         Ok(conversations) => Json(serde_json::json!({
             "data": conversations,
