@@ -173,6 +173,7 @@ fn initialize(connection: &mut Connection, legacy: Option<&Path>) -> Result<()> 
     }
     let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let version: i64 = tx.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    let needs_synthetic_tab_cleanup = version > 0 && version < VERSION;
     let app: i64 = tx.query_row("PRAGMA application_id", [], |row| row.get(0))?;
     if version == 0 {
         let tables: i64 = tx.query_row(
@@ -225,12 +226,15 @@ fn initialize(connection: &mut Connection, legacy: Option<&Path>) -> Result<()> 
     } else if version != VERSION || app != APPLICATION_ID {
         bail!("unsupported conversation schema version {version} (expected {VERSION}) or application id {app}");
     }
-    // Remove historical synthetic tab IDs on every upgrade path. Real browser
-    // metadata and the transcript remain untouched; the operation is idempotent.
-    tx.execute(
-        "UPDATE conversations SET tab_id = NULL WHERE tab_id LIKE 'tab-%'",
-        [],
-    )?;
+    // Remove historical synthetic tab IDs only when migrating an existing schema.
+    // Running this on every startup would erase live conversation affinity written
+    // after the migration had already completed.
+    if needs_synthetic_tab_cleanup {
+        tx.execute(
+            "UPDATE conversations SET tab_id = NULL WHERE tab_id LIKE 'tab-%'",
+            [],
+        )?;
+    }
     tx.execute_batch(
         "CREATE INDEX IF NOT EXISTS conversations_owner_key_id_idx ON conversations(owner_key_id, id);",
     )?;
