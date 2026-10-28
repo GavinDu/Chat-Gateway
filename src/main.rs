@@ -4618,6 +4618,7 @@ mod long_term_memory_retrieval_tests {
     }
 }
 
+#[cfg(test)]
 mod long_term_memory_export_tests {
     use super::*;
     use axum::body::to_bytes;
