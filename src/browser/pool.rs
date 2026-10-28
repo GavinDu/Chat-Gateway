@@ -39,6 +39,43 @@ impl std::fmt::Display for ProviderBusyError {
 
 impl std::error::Error for ProviderBusyError {}
 
+/// A command could not be delivered because the browser worker is restarting.
+/// Callers may safely retry this error against another provider.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BrowserWorkerUnavailableError;
+
+impl BrowserWorkerUnavailableError {
+    pub fn is_retryable(&self) -> bool {
+        true
+    }
+}
+
+impl std::fmt::Display for BrowserWorkerUnavailableError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("browser worker unavailable; retry after recovery")
+    }
+}
+
+impl std::error::Error for BrowserWorkerUnavailableError {}
+
+fn browser_worker_unavailable() -> anyhow::Error {
+    anyhow::Error::new(BrowserWorkerUnavailableError)
+}
+
+#[cfg(test)]
+mod browser_worker_error_tests {
+    use super::{browser_worker_unavailable, BrowserWorkerUnavailableError};
+
+    #[test]
+    fn worker_loss_is_exposed_as_a_typed_retryable_error() {
+        let error = browser_worker_unavailable();
+        let typed = error
+            .downcast_ref::<BrowserWorkerUnavailableError>()
+            .expect("worker loss should preserve its error type");
+        assert!(typed.is_retryable());
+    }
+}
+
 /// ObscuraPool - one persistent, pre-warmed page per provider
 /// (DashMap-indexed by provider name on the API side).
 ///
@@ -321,7 +358,7 @@ impl ObscuraPool {
                 reply: tx,
             })
             .await
-            .map_err(|_| anyhow::anyhow!("browser thread gone"))?;
+            .map_err(|_| browser_worker_unavailable())?;
         rx.await
             .map_err(|_| anyhow::anyhow!("browser thread dropped discover"))?
     }
@@ -361,7 +398,7 @@ impl ObscuraPool {
                 chunks: tx,
             })
             .await
-            .map_err(|_| anyhow::anyhow!("browser thread gone"))?;
+            .map_err(|_| browser_worker_unavailable())?;
         Ok(rx)
     }
 
@@ -378,7 +415,7 @@ impl ObscuraPool {
                 reply: tx,
             })
             .await
-            .map_err(|_| anyhow::anyhow!("browser thread gone"))?;
+            .map_err(|_| browser_worker_unavailable())?;
         rx.await
             .map_err(|_| anyhow::anyhow!("browser thread dropped current URL reply"))?
     }
@@ -398,7 +435,7 @@ impl ObscuraPool {
                 reply: tx,
             })
             .await
-            .map_err(|_| anyhow::anyhow!("browser thread gone"))?;
+            .map_err(|_| browser_worker_unavailable())?;
         rx.await
             .map_err(|_| anyhow::anyhow!("browser thread dropped test-adapter"))?
     }
@@ -414,7 +451,7 @@ impl ObscuraPool {
                 reply: tx,
             })
             .await
-            .map_err(|_| anyhow::anyhow!("browser thread gone"))?;
+            .map_err(|_| browser_worker_unavailable())?;
         rx.await
             .map_err(|_| anyhow::anyhow!("browser thread dropped session refresh"))?
     }
@@ -432,7 +469,7 @@ impl ObscuraPool {
                 reply: tx,
             })
             .await
-            .map_err(|_| anyhow::anyhow!("browser thread gone"))?;
+            .map_err(|_| browser_worker_unavailable())?;
         rx.await
             .map_err(|_| anyhow::anyhow!("browser thread dropped session unlink"))?
     }
@@ -460,7 +497,7 @@ impl ObscuraPool {
                 reply: tx,
             })
             .await
-            .map_err(|_| anyhow::anyhow!("browser thread gone"))?;
+            .map_err(|_| browser_worker_unavailable())?;
         rx.await
             .map_err(|_| anyhow::anyhow!("browser thread dropped login start"))?
     }
@@ -477,7 +514,7 @@ impl ObscuraPool {
                 reply: tx,
             })
             .await
-            .map_err(|_| anyhow::anyhow!("browser thread gone"))?;
+            .map_err(|_| browser_worker_unavailable())?;
         rx.await
             .map_err(|_| anyhow::anyhow!("browser thread dropped login cancel"))?
     }
@@ -497,7 +534,7 @@ impl ObscuraPool {
                 reply: tx,
             })
             .await
-            .map_err(|_| anyhow::anyhow!("browser thread gone"))?;
+            .map_err(|_| browser_worker_unavailable())?;
         rx.await
             .map_err(|_| anyhow::anyhow!("browser thread dropped login complete"))?
     }
@@ -510,7 +547,7 @@ impl ObscuraPool {
             .await
             .send(Command::LoginStatusAll { reply: tx })
             .await
-            .map_err(|_| anyhow::anyhow!("browser thread gone"))?;
+            .map_err(|_| browser_worker_unavailable())?;
         rx.await
             .map_err(|_| anyhow::anyhow!("browser thread dropped login status"))
     }
@@ -527,7 +564,7 @@ impl ObscuraPool {
                 reply: tx,
             })
             .await
-            .map_err(|_| anyhow::anyhow!("browser thread gone"))?;
+            .map_err(|_| browser_worker_unavailable())?;
         rx.await
             .map_err(|_| anyhow::anyhow!("browser thread dropped login view"))?
     }
@@ -550,7 +587,7 @@ impl ObscuraPool {
                 reply: tx,
             })
             .await
-            .map_err(|_| anyhow::anyhow!("browser thread gone"))?;
+            .map_err(|_| browser_worker_unavailable())?;
         rx.await
             .map_err(|_| anyhow::anyhow!("browser thread dropped login act"))?
     }
