@@ -3,7 +3,7 @@ use anyhow::{bail, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use std::{collections::HashMap, fs, path::Path, time::Duration};
 
-const VERSION: i64 = 6;
+const VERSION: i64 = 7;
 const APPLICATION_ID: i64 = 0x4347574d; // CGWM
 const PROVIDER_THREADS_SCHEMA: &str = "
     CREATE TABLE provider_threads (
@@ -220,6 +220,12 @@ fn initialize(connection: &mut Connection, legacy: Option<&Path>) -> Result<()> 
     } else if version == 5 && app == APPLICATION_ID {
         tx.execute_batch(MEMORY_SCHEMA)?;
         tx.pragma_update(None, "user_version", VERSION)?;
+    } else if version == 6 && app == APPLICATION_ID {
+        // Older releases persisted synthetic tab IDs such as `tab-<id>`.
+        // Clear only that synthetic namespace; preserve real browser tab metadata
+        // and all conversation/message history in the same migration transaction.
+        tx.execute("UPDATE conversations SET tab_id = NULL WHERE tab_id LIKE 'tab-%'", [])?;
+        tx.pragma_update(None, "user_version", VERSION)?;
     } else if version != VERSION || app != APPLICATION_ID {
         bail!("unsupported conversation schema version {version} (expected {VERSION}) or application id {app}");
     }
@@ -280,7 +286,7 @@ fn initialize(connection: &mut Connection, legacy: Option<&Path>) -> Result<()> 
 }
 
 fn validate_schema(connection: &Connection) -> Result<()> {
-    // Version 6 is owned by this application. Fail closed if its definitions
+    // Versioned schemas are owned by this application. Fail closed if definitions
     // were changed, including constraints that SELECT alone cannot validate.
     let expected = Connection::open_in_memory()?;
     expected.execute_batch(SCHEMA)?;
@@ -414,6 +420,45 @@ pub(super) fn append_owned(
 #[cfg(test)]
 #[allow(dead_code)] // This module is also compiled through the standalone SQLite benchmark.
 mod concurrency_configuration_tests {
+    #[test]
+    fn v6_migration_removes_only_synthetic_tab_ids_and_preserves_history() -> super::Result<()> {
+        let mut connection = rusqlite::Connection::open_in_memory()?;
+        connection.execute_batch(super::SCHEMA)?;
+        connection.pragma_update(None, "application_id", super::APPLICATION_ID)?;
+        connection.pragma_update(None, "user_version", 6)?;
+        connection.execute(
+            "INSERT INTO conversations(id, provider, tab_id, last_activity_at, owner_key_id)
+             VALUES ('synthetic', 'chatgpt', 'tab-123', 1, 'local'),
+                    ('real', 'claude', 'browser-tab-123', 1, 'local')",
+            [],
+        )?;
+        connection.execute(
+            "INSERT INTO messages(conversation_id, position, role, content)
+             VALUES ('synthetic', 0, 'user', 'keep this transcript'),
+                    ('real', 0, 'user', 'keep this too')",
+            [],
+        )?;
+
+        super::initialize(&mut connection, None)?;
+
+        let synthetic_tab: Option<String> = connection.query_row(
+            "SELECT tab_id FROM conversations WHERE id='synthetic'", [], |row| row.get(0)
+        )?;
+        let real_tab: Option<String> = connection.query_row(
+            "SELECT tab_id FROM conversations WHERE id='real'", [], |row| row.get(0)
+        )?;
+        let message_count: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM messages", [], |row| row.get(0)
+        )?;
+        let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+
+        assert_eq!(synthetic_tab, None);
+        assert_eq!(real_tab.as_deref(), Some("browser-tab-123"));
+        assert_eq!(message_count, 2, "migration must preserve all messages");
+        assert_eq!(version, 7);
+        Ok(())
+    }
+
     #[test]
     fn file_backed_database_enforces_expected_concurrency_pragmas() -> super::Result<()> {
         let path = std::env::temp_dir().join(format!(
