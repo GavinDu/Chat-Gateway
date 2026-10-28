@@ -607,14 +607,15 @@ fn verify_session_page(
     adapter: &dyn providers::SiteAdapter,
 ) -> Result<()> {
     let is_login_page = providers::common::is_login_page(page);
-    if is_login_page {
-        providers::common::check_session(provider.name(), page)?;
-    }
     let input_found = adapter
         .selector_set()
         .input
         .iter()
         .any(|selector| page.query_selector(selector).is_some());
+    let (login_state, _) = login::login_state(is_login_page, input_found);
+    if login_state == "login_required" {
+        providers::common::check_session(provider.name(), page)?;
+    }
     if !session_probe_page_healthy(is_login_page, input_found) {
         anyhow::bail!("session verification failed: chat input not found");
     }
@@ -632,7 +633,8 @@ mod session_probe_tests {
 }
 
 fn session_probe_page_healthy(is_login_page: bool, input_found: bool) -> bool {
-    !is_login_page && input_found
+    let (_, logged_in) = login::login_state(is_login_page, input_found);
+    logged_in == Some(true)
 }
 
 fn build_login_view(
