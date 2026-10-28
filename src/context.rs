@@ -88,7 +88,10 @@ impl ContextBuilder {
         let mut windowed = Vec::new();
         for message in full.iter().rev() {
             let cost = estimate_message_tokens(&message.content).saturating_add(8);
-            if tokens.saturating_add(cost) > budget && !windowed.is_empty() {
+            // Never admit an oversized message, including the newest one.
+            // If it cannot fit, return the smaller suffix (possibly empty) rather
+            // than silently violating the caller's hard context budget.
+            if tokens.saturating_add(cost) > budget {
                 break;
             }
             tokens = tokens.saturating_add(cost);
@@ -219,6 +222,21 @@ mod tests {
         let (_, messages) = ContextBuilder::build(&history, &[], 10);
         assert!(messages.iter().any(|message| message.content == "latest"));
         assert!(messages.len() < history.len());
+    }
+
+    #[test]
+    fn pure_builder_returns_empty_context_when_budget_is_zero() {
+        let history = vec![m("user", "latest")];
+        let (prompt, messages) = ContextBuilder::build(&history, &[], 0);
+        assert!(messages.is_empty());
+        assert!(!prompt.contains("latest"));
+    }
+
+    #[test]
+    fn pure_builder_drops_a_newest_message_that_exceeds_the_budget() {
+        let history = vec![m("user", "this message cannot fit")];
+        let (_, messages) = ContextBuilder::build(&history, &[], 9);
+        assert!(messages.is_empty());
     }
 
     #[test]
