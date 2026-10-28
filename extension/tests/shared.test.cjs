@@ -5,9 +5,9 @@ const vm = require("node:vm");
 const { webcrypto } = require("node:crypto");
 
 function loadShared(cookieFixtures = [], permissionsGranted = true) {
-  let cookieReads = 0;
-  let requestedOrigins = [];
   const context = {
+    __cookieReads: 0,
+    __requestedOrigins: [],
     URL,
     Headers,
     crypto: webcrypto,
@@ -16,17 +16,17 @@ function loadShared(cookieFixtures = [], permissionsGranted = true) {
       cookies: {
         // Return the full fixture set to simulate a permissive/misbehaving
         // browser API; providerCookieSnapshot must still enforce its own scope.
-        getAll: async () => { cookieReads += 1; return cookieFixtures; }
+        getAll: async () => { context.__cookieReads += 1; return cookieFixtures; }
       },
       permissions: {
-        contains: async ({origins}) => { requestedOrigins = origins; return permissionsGranted; }
+        contains: async ({origins}) => { context.__requestedOrigins = origins; return permissionsGranted; }
       },
       storage: { local: { get: async () => ({}) } }
     }
   };
   vm.createContext(context);
   const source = fs.readFileSync(require.resolve("../shared.js"), "utf8");
-  vm.runInContext(source + "\nglobalThis.__testApi = { normalizeGateway, providerCookieSnapshot, PROVIDERS, cookieReads: () => cookieReads, requestedOrigins: () => requestedOrigins };", context);
+  vm.runInContext(source + "\nglobalThis.__testApi = { normalizeGateway, providerCookieSnapshot, PROVIDERS, cookieReads: () => globalThis.__cookieReads, requestedOrigins: () => globalThis.__requestedOrigins };", context);
   return context.__testApi;
 }
 
