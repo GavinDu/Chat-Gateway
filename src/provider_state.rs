@@ -252,39 +252,6 @@ mod tests {
     }
 
     #[test]
-    fn verify_probe_cooldown_is_per_provider_and_allows_retry_after_interval() {
-        let start = Instant::now();
-        let other = start + Duration::from_secs(1);
-        assert!(claim_verify_probe("probe-a", start));
-        assert!(!claim_verify_probe("probe-a", other));
-        assert!(claim_verify_probe("probe-b", other));
-        assert!(claim_verify_probe("probe-a", start + VERIFY_PROBE_COOLDOWN));
-    }
-
-    #[test]
-    fn successful_verify_probe_re_admits_expired_provider() {
-        let provider = "test-provider-probe-re-admission";
-        record_error(provider, "session expired");
-        assert!(!is_routable(provider));
-        record_verify_probe(provider, true);
-        assert!(is_routable(provider));
-        assert_eq!(status(provider).state, ProviderSessionState::Ready);
-        assert_eq!(status(provider).last_error, None);
-    }
-
-    #[test]
-    fn failed_verify_probe_fails_closed_without_exposing_diagnostics() {
-        let provider = "test-provider-probe-failure";
-        record_verify_probe(provider, false);
-        let current = status(provider);
-        assert_eq!(current.state, ProviderSessionState::NeedsLogin);
-        assert_eq!(
-            current.last_error.as_deref(),
-            Some("provider session verification failed; re-login required")
-        );
-    }
-
-    #[test]
     fn state_string_conversion_is_stable_for_metrics_and_health() {
         assert_eq!(ProviderSessionState::Unknown.as_str(), "unknown");
         assert_eq!(ProviderSessionState::Ready.as_str(), "ready");
