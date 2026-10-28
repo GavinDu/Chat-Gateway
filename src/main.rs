@@ -2324,7 +2324,14 @@ async fn chat_completions(
         {
             Ok(rx) => rx,
             Err(e) => {
-                provider_state::record_error(&provider_name, &e.to_string());
+                // A dead/restarting browser worker is infrastructure failure,
+                // not evidence that the provider's login session is invalid.
+                if e
+                    .downcast_ref::<browser::pool::BrowserWorkerUnavailableError>()
+                    .is_none()
+                {
+                    provider_state::record_error(&provider_name, &e.to_string());
+                }
                 last_err = Some(e.to_string());
                 continue;
             }
