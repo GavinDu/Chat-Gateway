@@ -47,6 +47,61 @@ pub struct UnifiedMemory {
     connection: Mutex<Connection>,
 }
 
+/// Async contract for bounded conversation history access and atomic turn persistence.
+///
+/// Implementations own the storage strategy; callers should use these async methods
+/// from Tokio request paths rather than invoking synchronous SQLite helpers directly.
+#[async_trait::async_trait]
+pub trait ConversationStore: Send + Sync {
+    async fn read_transcript(
+        self: Arc<Self>,
+        owner_key_id: String,
+        conversation_id: String,
+    ) -> anyhow::Result<Vec<ChatMessage>>;
+
+    async fn persist_turn(
+        self: Arc<Self>,
+        owner_key_id: String,
+        conversation_id: String,
+        user_messages: Vec<ChatMessage>,
+        assistant_message: ChatMessage,
+        provider: String,
+        tab_id: Option<String>,
+    ) -> anyhow::Result<()>;
+}
+
+#[async_trait::async_trait]
+impl ConversationStore for UnifiedMemory {
+    async fn read_transcript(
+        self: Arc<Self>,
+        owner_key_id: String,
+        conversation_id: String,
+    ) -> anyhow::Result<Vec<ChatMessage>> {
+        self.conversation_messages_for_owner_blocking(owner_key_id, conversation_id)
+            .await
+    }
+
+    async fn persist_turn(
+        self: Arc<Self>,
+        owner_key_id: String,
+        conversation_id: String,
+        user_messages: Vec<ChatMessage>,
+        assistant_message: ChatMessage,
+        provider: String,
+        tab_id: Option<String>,
+    ) -> anyhow::Result<()> {
+        self.store_turn_for_owner_with_tab_id_blocking(
+            owner_key_id,
+            conversation_id,
+            user_messages,
+            assistant_message,
+            provider,
+            tab_id,
+        )
+        .await
+    }
+}
+
 impl UnifiedMemory {
     // Test-only helper is shared across test targets; some targets do not call it.
     #[cfg(test)]
