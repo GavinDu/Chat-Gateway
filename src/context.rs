@@ -56,17 +56,16 @@ impl ContextBuilder {
                 .zip(incoming)
                 .take_while(|(stored, incoming)| stored == incoming)
                 .count();
-            common_prefix > 0
-                && common_prefix < history.len()
-                && common_prefix < incoming.len()
+            common_prefix > 0 && common_prefix < history.len() && common_prefix < incoming.len()
         };
-        let thread_is_current = !has_divergent_branch && thread.is_some_and(|state| {
-            supports_reopen
-                && state.provider == current_provider
-                && !state.thread_url.is_empty()
-                && state.synced_through_message_id.is_some()
-                && state.synced_through_message_id == state.last_stored_message_id
-        });
+        let thread_is_current = !has_divergent_branch
+            && thread.is_some_and(|state| {
+                supports_reopen
+                    && state.provider == current_provider
+                    && !state.thread_url.is_empty()
+                    && state.synced_through_message_id.is_some()
+                    && state.synced_through_message_id == state.last_stored_message_id
+            });
 
         if thread_is_current && !delta.is_empty() {
             return ContextPlan::Delta { messages: delta };
