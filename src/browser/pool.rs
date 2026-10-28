@@ -16,6 +16,45 @@ fn effective_session_pool_size(configured: usize) -> usize {
     configured.min(1)
 }
 
+const MAX_BROWSER_WORKER_RESTART_BACKOFF: Duration = Duration::from_secs(30);
+
+fn next_browser_worker_restart_backoff(current: Duration) -> Duration {
+    (current * 2).min(MAX_BROWSER_WORKER_RESTART_BACKOFF)
+}
+
+#[cfg(test)]
+mod worker_supervisor_tests {
+    use super::{next_browser_worker_restart_backoff, WorkerReadyGuard};
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+    use std::time::Duration;
+
+    #[test]
+    fn restart_backoff_doubles_and_is_capped() {
+        assert_eq!(
+            next_browser_worker_restart_backoff(Duration::from_secs(1)),
+            Duration::from_secs(2)
+        );
+        assert_eq!(
+            next_browser_worker_restart_backoff(Duration::from_secs(16)),
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            next_browser_worker_restart_backoff(Duration::from_secs(30)),
+            Duration::from_secs(30)
+        );
+    }
+
+    #[test]
+    fn worker_ready_guard_clears_liveness_when_worker_exits() {
+        let ready = Arc::new(AtomicBool::new(true));
+        drop(WorkerReadyGuard(ready.clone()));
+        assert!(!ready.load(Ordering::Acquire));
+    }
+}
+
 #[cfg(test)]
 mod queue_capacity_tests {
     use super::effective_session_pool_size;
@@ -281,7 +320,7 @@ impl ObscuraPool {
                     }
                     Ok(Ok(Err(error))) => {
                         tracing::warn!(error = %error, "browser worker restart failed during warm-up");
-                        backoff = (backoff * 2).min(Duration::from_secs(30));
+                        backoff = next_browser_worker_restart_backoff(backoff);
                     }
                     Ok(Err(_)) => {
                         tracing::warn!("browser worker exited before restart warm-up completed");
