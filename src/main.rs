@@ -2268,12 +2268,7 @@ async fn read_conversation_context_with_transcript_for_owner(
     token_budget: usize,
 ) -> anyhow::Result<(String, Vec<ChatMessage>, bool, Vec<ChatMessage>)> {
     memory
-        .build_context_for_owner_with_transcript_budget_blocking(
-            owner_key_id,
-            conversation_id,
-            messages,
-            token_budget,
-        )
+        .build_context_with_transcript(owner_key_id, conversation_id, messages, token_budget)
         .await
 }
 
