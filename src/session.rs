@@ -576,6 +576,23 @@ fn prepare_vault_rotation_records(
     Ok(prepared)
 }
 
+/// Validate all existing encrypted records before migration can mutate any
+/// legacy plaintext snapshots. This makes a corrupt later provider fail the
+/// rotation before an earlier provider's legacy file is migrated.
+fn preflight_existing_vault_records(
+    records: Vec<(String, Vec<u8>)>,
+    old_key: &[u8; 32],
+) -> Result<()> {
+    for (provider, bytes) in records {
+        decrypt_session_snapshot(&bytes, &provider, old_key).map_err(|_| {
+            anyhow::anyhow!(
+                "cannot rotate vault: {provider} record is unreadable with the current key"
+            )
+        })?;
+    }
+    Ok(())
+}
+
 /// Rotate all encrypted vault records as one best-effort transaction.
 /// Every input is decrypted and every replacement authenticated before any
 /// live record is replaced. Encrypted old records are retained in a private
@@ -597,8 +614,22 @@ pub fn rotate_vault_key(new_key: &[u8; 32]) -> Result<(usize, String)> {
         "mistral",
         "perplexity",
     ];
-    // Migrate any remaining legacy plaintext snapshots before rotation. The
-    // vault loader verifies the encrypted replacement before removing plaintext.
+    // A rotation preflight must not migrate any plaintext files before we know
+    // every already-encrypted provider record authenticates with the old key.
+    let mut existing_vault_records = Vec::new();
+    for provider in PROVIDERS {
+        let path = session_vault_path(provider)?;
+        match std::fs::read(path) {
+            Ok(bytes) => existing_vault_records.push(((*provider).to_owned(), bytes)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    preflight_existing_vault_records(existing_vault_records, &old_key)?;
+
+    // Migrate remaining legacy plaintext snapshots only after existing vault
+    // records have passed authentication. The loader verifies the replacement
+    // before removing the plaintext source.
     for provider in PROVIDERS {
         let _ = VaultSessionStore.load(provider)?;
     }
@@ -1632,6 +1663,25 @@ mod vault_tests {
         )
         .is_err());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rotation_preflights_existing_vaults_before_legacy_migration() {
+        let old_key = [0x5a; 32];
+        let valid = encrypt_session_snapshot(&sample_session(), "chatgpt", &old_key).unwrap();
+        let corrupt = b"not-an-authenticated-vault-record".to_vec();
+
+        let result = preflight_existing_vault_records(
+            vec![
+                ("chatgpt".into(), valid.clone()),
+                ("claude".into(), corrupt.clone()),
+            ],
+            &old_key,
+        );
+
+        assert!(result.unwrap_err().to_string().contains("claude"));
+        assert!(decrypt_session_snapshot(&valid, "chatgpt", &old_key).is_ok());
+        assert_eq!(corrupt.as_slice(), b"not-an-authenticated-vault-record");
     }
 
     #[test]
