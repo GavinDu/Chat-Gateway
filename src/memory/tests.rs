@@ -2225,3 +2225,49 @@ async fn async_conversation_store_contract_persists_bounded_owner_scoped_history
         .await;
     assert!(other_owner.is_err(), "cross-owner reads must fail closed");
 }
+
+#[tokio::test]
+async fn async_conversation_store_concurrent_turns_are_transactionally_preserved() {
+    let store: Arc<dyn ConversationStore> = Arc::new(UnifiedMemory::new(8000));
+
+    let (first, second) = tokio::join!(
+        store.clone().persist_turn(
+            "owner-a".to_owned(),
+            "conversation-a".to_owned(),
+            vec![m("user", "first request")],
+            m("assistant", "first answer"),
+            "provider-a".to_owned(),
+            None,
+        ),
+        store.clone().persist_turn(
+            "owner-a".to_owned(),
+            "conversation-a".to_owned(),
+            vec![m("user", "second request")],
+            m("assistant", "second answer"),
+            "provider-a".to_owned(),
+            None,
+        ),
+    );
+    first.expect("first concurrent turn should commit");
+    second.expect("second concurrent turn should commit");
+
+    let history = store
+        .clone()
+        .read_transcript("owner-a".to_owned(), "conversation-a".to_owned())
+        .await
+        .expect("committed transcript should be readable");
+
+    for expected in [
+        m("user", "first request"),
+        m("assistant", "first answer"),
+        m("user", "second request"),
+        m("assistant", "second answer"),
+    ] {
+        assert!(
+            history.contains(&expected),
+            "concurrent persistence lost message: {expected:?}; history={history:?}"
+        );
+    }
+    assert_eq!(history.len(), 4, "each turn must be committed exactly once");
+}
+
