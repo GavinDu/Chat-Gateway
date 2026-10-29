@@ -116,50 +116,28 @@ mod tests {
             providers: vec![
                 ProviderConfig {
                     name: "claude".into(),
-                    completion_idle_ms: 15_000,
-                    
                     enabled: true,
-                    completion_idle_ms: 15_000,
-                    
                     priority: 1,
-                    completion_idle_ms: 15_000,
-                    
                     timeout_seconds: 30,
-                    completion_idle_ms: 15_000,
-                    
                     queue_timeout_seconds: 30,
-                    completion_idle_ms: 15_000,
-                    
                     session_pool_size: 1,
                     min_request_interval_ms: 5_000,
                     daily_request_cap: 100,
-                    completion_idle_ms: 15_000,
-                    
                     models: vec!["sonnet".into()],
-                },
+                                    completion_idle_ms: 15_000,
+},
                 ProviderConfig {
                     name: "chatgpt".into(),
-                    completion_idle_ms: 15_000,
-                    
                     enabled: true,
-                    completion_idle_ms: 15_000,
-                    
                     priority: 2,
-                    completion_idle_ms: 15_000,
-                    
                     timeout_seconds: 30,
-                    completion_idle_ms: 15_000,
-                    
                     queue_timeout_seconds: 30,
-                    completion_idle_ms: 15_000,
-                    
                     session_pool_size: 1,
                     min_request_interval_ms: 5_000,
                     daily_request_cap: 100,
-                    completion_idle_ms: 15_000,
-                    
                     models: vec!["gpt-4o".into()],
-                },
+                                    completion_idle_ms: 15_000,
+},
             ],
         };
         ProviderRouter::new(Arc::new(cfg))
