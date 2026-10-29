@@ -2697,3 +2697,134 @@ fn provider_thread_mapping_survives_database_reopen_with_owner_and_provider_scop
         .expect("provider-scoped lookup should succeed")
         .is_none());
 }
+
+struct CountingStore {
+    inner: Arc<UnifiedMemory>,
+    context_build_calls: std::sync::atomic::AtomicUsize,
+    persist_turn_calls: std::sync::atomic::AtomicUsize,
+}
+
+impl CountingStore {
+    fn new(inner: Arc<UnifiedMemory>) -> Self {
+        Self {
+            inner,
+            context_build_calls: std::sync::atomic::AtomicUsize::new(0),
+            persist_turn_calls: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    fn counts(&self) -> (usize, usize) {
+        (
+            self.context_build_calls
+                .load(std::sync::atomic::Ordering::Relaxed),
+            self.persist_turn_calls
+                .load(std::sync::atomic::Ordering::Relaxed),
+        )
+    }
+}
+
+#[async_trait::async_trait]
+impl ConversationStore for CountingStore {
+    async fn read_transcript(
+        self: Arc<Self>,
+        owner_key_id: String,
+        conversation_id: String,
+    ) -> anyhow::Result<Vec<ChatMessage>> {
+        self.inner
+            .clone()
+            .read_transcript(owner_key_id, conversation_id)
+            .await
+    }
+
+    async fn read_history(
+        self: Arc<Self>,
+        owner_key_id: String,
+        conversation_id: String,
+        max_messages: usize,
+    ) -> anyhow::Result<Vec<ChatMessage>> {
+        self.inner
+            .clone()
+            .read_history(owner_key_id, conversation_id, max_messages)
+            .await
+    }
+
+    async fn build_context_with_transcript(
+        self: Arc<Self>,
+        owner_key_id: String,
+        conversation_id: Option<String>,
+        new_messages: Vec<ChatMessage>,
+        token_budget: usize,
+    ) -> anyhow::Result<(String, Vec<ChatMessage>, bool, Vec<ChatMessage>)> {
+        self.context_build_calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.inner
+            .clone()
+            .build_context_with_transcript(
+                owner_key_id,
+                conversation_id,
+                new_messages,
+                token_budget,
+            )
+            .await
+    }
+
+    async fn persist_turn(
+        self: Arc<Self>,
+        owner_key_id: String,
+        conversation_id: String,
+        user_messages: Vec<ChatMessage>,
+        assistant_message: ChatMessage,
+        provider: String,
+        tab_id: Option<String>,
+    ) -> anyhow::Result<String> {
+        self.persist_turn_calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.inner
+            .clone()
+            .persist_turn(
+                owner_key_id,
+                conversation_id,
+                user_messages,
+                assistant_message,
+                provider,
+                tab_id,
+            )
+            .await
+    }
+}
+
+#[tokio::test]
+async fn conversation_store_counts_one_context_build_and_one_persist_call() {
+    let memory = Arc::new(UnifiedMemory::new(8000));
+    let counting = Arc::new(CountingStore::new(memory));
+    let store: Arc<dyn ConversationStore> = counting.clone();
+
+    let _context = store
+        .clone()
+        .build_context_with_transcript(
+            "count-owner".to_owned(),
+            Some("count-conversation".to_owned()),
+            vec![m("user", "counted prompt")],
+            8000,
+        )
+        .await
+        .expect("context snapshot should succeed for a new conversation");
+
+    let marker = store
+        .persist_turn(
+            "count-owner".to_owned(),
+            "count-conversation".to_owned(),
+            vec![m("user", "counted prompt")],
+            m("assistant", "counted response"),
+            "chatgpt".to_owned(),
+            None,
+        )
+        .await
+        .expect("turn persistence should succeed");
+    assert!(!marker.is_empty());
+    assert_eq!(
+        counting.counts(),
+        (1, 1),
+        "one request-scoped store use should make one context build and one persist call"
+    );
+}
