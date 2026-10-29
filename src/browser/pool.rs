@@ -1130,7 +1130,13 @@ fn browser_thread(
                                         prompt,
                                         timeout,
                                         poll_tick,
-                                        Duration::from_millis(provider.completion_idle_ms),
+                                        Duration::from_millis(
+                                            cfg.providers
+                                                .iter()
+                                                .find(|configured| configured.name == provider.name())
+                                                .map(|configured| configured.completion_idle_ms)
+                                                .unwrap_or(15_000),
+                                        ),
                                         save_tx,
                                     ) => {}
                                 }
