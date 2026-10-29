@@ -3129,29 +3129,18 @@ mod model_list_tests {
 
     fn provider(name: &str, enabled: bool, models: &[&str]) -> config::ProviderConfig {
         config::ProviderConfig {
-            completion_idle_ms: 15_000,
-            
             name: name.to_owned(),
             enabled,
-            completion_idle_ms: 15_000,
-            
             priority: 1,
-            completion_idle_ms: 15_000,
-            
             timeout_seconds: 30,
-            completion_idle_ms: 15_000,
-            
             queue_timeout_seconds: 30,
-            completion_idle_ms: 15_000,
-            
             session_pool_size: 1,
             min_request_interval_ms: 5_000,
             daily_request_cap: 100,
-            completion_idle_ms: 15_000,
-            
             models: models.iter().map(|model| (*model).to_owned()).collect(),
         }
-    }
+            completion_idle_ms: 15_000,
+}
 
     #[test]
     fn excludes_configured_and_discovered_models_for_disabled_providers() {
