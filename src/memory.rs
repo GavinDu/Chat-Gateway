@@ -525,7 +525,12 @@ impl UnifiedMemory {
         tab_id: Option<String>,
     ) -> anyhow::Result<()> {
         self.store_turn_for_owner_with_tab_id_marker_blocking(
-            owner_key_id, conversation_id, user_msgs, assistant_msg, provider, tab_id,
+            owner_key_id,
+            conversation_id,
+            user_msgs,
+            assistant_msg,
+            provider,
+            tab_id,
         )
         .await
         .map(|_| ())
@@ -542,7 +547,12 @@ impl UnifiedMemory {
     ) -> anyhow::Result<String> {
         tokio::task::spawn_blocking(move || {
             self.store_turn_for_owner_with_tab_id_and_marker(
-                &owner_key_id, conversation_id, user_msgs, assistant_msg, provider, tab_id,
+                &owner_key_id,
+                conversation_id,
+                user_msgs,
+                assistant_msg,
+                provider,
+                tab_id,
             )
         })
         .await
@@ -560,7 +570,12 @@ impl UnifiedMemory {
         tab_id: Option<String>,
     ) -> anyhow::Result<()> {
         self.store_turn_for_owner_with_tab_id_and_marker(
-            owner_key_id, conversation_id, user_msgs, assistant_msg, provider, tab_id,
+            owner_key_id,
+            conversation_id,
+            user_msgs,
+            assistant_msg,
+            provider,
+            tab_id,
         )
         .map(|_| ())
     }
