@@ -60,6 +60,7 @@ pub struct UnifiedMemory {
 #[async_trait::async_trait]
 pub trait ConversationStore: Send + Sync {
     #[allow(dead_code)]
+    #[allow(dead_code)] // Kept as a compatibility seam while callers use atomic turn persistence.
     async fn read_transcript(
         self: Arc<Self>,
         owner_key_id: String,
@@ -268,6 +269,7 @@ impl UnifiedMemory {
     /// Used to verify whether a provider-side thread still matches the committed gateway state.
     /// Read a transcript on Tokio's blocking pool to avoid blocking an async worker.
     #[allow(dead_code)]
+    #[allow(dead_code)] // Compatibility API retained for tests and downstream adapters.
     pub async fn conversation_messages_for_owner_blocking(
         self: Arc<Self>,
         owner_key_id: String,
@@ -325,6 +327,7 @@ impl UnifiedMemory {
     }
 
     #[allow(dead_code)]
+    #[allow(dead_code)] // Compatibility API retained for tests and downstream adapters.
     pub fn conversation_messages_for_owner(
         &self,
         owner_key_id: &str,
@@ -511,6 +514,7 @@ impl UnifiedMemory {
     /// Persist a completed turn on Tokio's blocking pool so SQLite mutex waits,
     /// transactions, and disk I/O never block an async runtime worker.
     #[allow(dead_code)]
+    #[allow(dead_code)] // Compatibility wrapper for callers that do not need the committed marker.
     pub async fn store_turn_for_owner_with_tab_id_blocking(
         self: Arc<Self>,
         owner_key_id: String,
