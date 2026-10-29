@@ -2588,7 +2588,7 @@ async fn persist_turn_returns_marker_for_the_committed_canonical_transcript() {
 async fn cancelled_async_turn_persistence_commits_atomically() {
     let memory = Arc::new(UnifiedMemory::new(8000));
     let lock = memory.lock().unwrap();
-    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
     let task_memory = memory.clone();
     let task = tokio::spawn(async move {
         let _ = started_tx.send(());
@@ -2605,11 +2605,13 @@ async fn cancelled_async_turn_persistence_commits_atomically() {
             .await
     });
 
-    started_rx.await.unwrap();
-    // Let persist_turn enqueue its spawn_blocking closure, which must wait on
-    // the lock held by this test. Aborting the request future cannot cancel a
-    // blocking closure that has already been submitted.
-    tokio::task::yield_now().await;
+    started_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .expect("persistence task should start");
+    // The multithreaded runtime can enqueue the blocking closure while this
+    // test thread waits briefly without holding an async task across the lock.
+    // The closure must wait on the lock held by this test.
+    std::thread::sleep(std::time::Duration::from_millis(20));
     task.abort();
     drop(lock);
 
