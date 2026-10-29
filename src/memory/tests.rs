@@ -2267,6 +2267,14 @@ fn provider_thread_map_survives_restart_and_cascades_on_conversation_delete() {
         Some(expected.clone()),
         "provider thread state and sync marker must survive a database reopen"
     );
+
+    assert_eq!(
+        reopened
+            .read_transcript("owner-a", &expected.conversation_id)
+            .unwrap(),
+        vec![m("user", "persist me"), m("assistant", "persisted")],
+        "the transcript linked to a provider thread must survive the same restart"
+    );
     assert_eq!(
         reopened
             .get_provider_thread_for_owner(
