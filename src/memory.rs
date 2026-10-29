@@ -1253,6 +1253,7 @@ mod retrieval_ranking_tests {
 }
 
 #[cfg(test)]
+#[cfg(test)]
 mod conversation_store_contract_tests {
     use super::{ChatMessage, ConversationStore, UnifiedMemory};
     use std::sync::Arc;
