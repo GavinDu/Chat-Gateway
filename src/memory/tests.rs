@@ -99,7 +99,6 @@ fn json_import_restores_order_and_affinity_and_preserves_source() {
     assert!(fixture.open().has_history("legacy").unwrap());
 }
 
-
 #[test]
 fn json_import_clears_synthetic_tab_ids_but_preserves_real_thread_urls() {
     let fixture = Fixture::new();
