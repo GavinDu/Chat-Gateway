@@ -86,10 +86,7 @@ fn json_import_restores_order_and_affinity_and_preserves_source() {
             memory.get_provider("legacy").unwrap().as_deref(),
             Some("qwen")
         );
-        assert_eq!(
-            memory.get_tab("legacy").unwrap().as_deref(),
-            None
-        );
+        assert_eq!(memory.get_tab("legacy").unwrap().as_deref(), None);
         assert_eq!(
             memory.conversation("legacy").unwrap().unwrap().messages,
             vec![m("user", "hello"), m("assistant", "hi")]
@@ -126,10 +123,7 @@ fn json_import_clears_synthetic_tab_ids_but_preserves_real_thread_urls() {
 
     let memory = fixture.open();
     assert_eq!(memory.get_tab("synthetic").unwrap(), None);
-    assert_eq!(
-        memory.get_tab("real-thread").unwrap().as_deref(),
-        None
-    );
+    assert_eq!(memory.get_tab("real-thread").unwrap().as_deref(), None);
     assert_eq!(
         memory.conversation("synthetic").unwrap().unwrap().messages,
         vec![m("user", "preserve synthetic conversation history")]
@@ -213,10 +207,7 @@ fn restart_recovers_messages_provider_and_tab() {
         memory.get_provider("one").unwrap().as_deref(),
         Some("chatgpt")
     );
-    assert_eq!(
-        memory.get_tab("one").unwrap().as_deref(),
-        None
-    );
+    assert_eq!(memory.get_tab("one").unwrap().as_deref(), None);
     assert_eq!(
         memory.conversation("one").unwrap().unwrap().messages,
         vec![
@@ -1951,10 +1942,7 @@ fn legacy_synthetic_tab_id_is_cleared_on_next_persisted_turn() {
     let fixture = Fixture::new();
     let memory = fixture.open();
     store(&memory, "legacy-tab", "first");
-    assert_eq!(
-        memory.get_tab("legacy-tab").unwrap().as_deref(),
-        None
-    );
+    assert_eq!(memory.get_tab("legacy-tab").unwrap().as_deref(), None);
 
     memory
         .store_turn_for_owner_with_tab_id(
