@@ -2133,7 +2133,11 @@ fn version_seven_migration_clears_synthetic_tab_id_and_preserves_history() {
         let memory = fixture.open();
         store(&memory, "migration-tab", "preserve-this-history");
         store(&memory, "migration-real-tab", "preserve-real-tab-history");
-        store(&memory, "migration-uppercase-tab", "preserve-uppercase-tab-history");
+        store(
+            &memory,
+            "migration-uppercase-tab",
+            "preserve-uppercase-tab-history",
+        );
     }
 
     // Simulate a v6 database with one synthetic and one real tab identifier.
