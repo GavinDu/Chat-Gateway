@@ -2325,7 +2325,9 @@ fn record_provider_outcome(
 }
 
 async fn first_event(
-    rx: &mut tokio::sync::mpsc::Receiver<anyhow::Result<chat_backend::ChatEvent, chat_backend::GatewayError>>,
+    rx: &mut tokio::sync::mpsc::Receiver<
+        anyhow::Result<chat_backend::ChatEvent, chat_backend::GatewayError>,
+    >,
     timeout: std::time::Duration,
 ) -> FirstEvent {
     match tokio::time::timeout(timeout, async {
@@ -4608,8 +4610,8 @@ mod first_event_tests {
         tx.send(Err(crate::chat_backend::GatewayError::provider_failure(
             "session_expired: please sign in",
         )))
-            .await
-            .unwrap();
+        .await
+        .unwrap();
         drop(tx);
 
         let event = first_event(&mut rx, Duration::from_millis(100)).await;
