@@ -6,6 +6,7 @@ use crate::context::messages_after_overlap;
 use crate::context::ContextBuilder;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
     path::PathBuf,
     sync::{Arc, Mutex, MutexGuard},
@@ -40,6 +41,12 @@ pub struct Conversation {
     pub tab_id: Option<String>,
 }
 
+/// Stable fingerprint for the canonical, ordered transcript.
+pub fn transcript_marker(messages: &[ChatMessage]) -> String {
+    let encoded = serde_json::to_vec(messages).unwrap_or_default();
+    format!("{:x}", Sha256::digest(encoded))
+}
+
 /// SQLite is authoritative: there is no mutable conversation cache to diverge
 /// from disk. The mutex protects this connection; IMMEDIATE transactions protect
 /// read/reconcile/write across independent connections and gateway processes.
@@ -52,6 +59,7 @@ pub struct UnifiedMemory {
 /// Implementations keep synchronous SQLite work off Tokio request workers.
 #[async_trait::async_trait]
 pub trait ConversationStore: Send + Sync {
+    #[allow(dead_code)] // Kept as a compatibility seam while callers use atomic turn persistence.
     async fn read_transcript(
         self: Arc<Self>,
         owner_key_id: String,
@@ -85,7 +93,7 @@ pub trait ConversationStore: Send + Sync {
         assistant_message: ChatMessage,
         provider: String,
         tab_id: Option<String>,
-    ) -> anyhow::Result<()>;
+    ) -> anyhow::Result<String>;
 }
 
 #[async_trait::async_trait]
@@ -140,8 +148,8 @@ impl ConversationStore for UnifiedMemory {
         assistant_message: ChatMessage,
         provider: String,
         tab_id: Option<String>,
-    ) -> anyhow::Result<()> {
-        self.store_turn_for_owner_with_tab_id_blocking(
+    ) -> anyhow::Result<String> {
+        self.store_turn_for_owner_with_tab_id_marker_blocking(
             owner_key_id,
             conversation_id,
             user_messages,
@@ -259,6 +267,8 @@ impl UnifiedMemory {
     /// Read the complete durable transcript for a conversation owned by this API key.
     /// Used to verify whether a provider-side thread still matches the committed gateway state.
     /// Read a transcript on Tokio's blocking pool to avoid blocking an async worker.
+    #[allow(dead_code)]
+    #[allow(dead_code)] // Compatibility API retained for tests and downstream adapters.
     pub async fn conversation_messages_for_owner_blocking(
         self: Arc<Self>,
         owner_key_id: String,
@@ -315,6 +325,8 @@ impl UnifiedMemory {
         Ok(messages)
     }
 
+    #[allow(dead_code)]
+    #[allow(dead_code)] // Compatibility API retained for tests and downstream adapters.
     pub fn conversation_messages_for_owner(
         &self,
         owner_key_id: &str,
@@ -500,6 +512,8 @@ impl UnifiedMemory {
 
     /// Persist a completed turn on Tokio's blocking pool so SQLite mutex waits,
     /// transactions, and disk I/O never block an async runtime worker.
+    #[allow(dead_code)]
+    #[allow(dead_code)] // Compatibility wrapper for callers that do not need the committed marker.
     pub async fn store_turn_for_owner_with_tab_id_blocking(
         self: Arc<Self>,
         owner_key_id: String,
@@ -509,8 +523,29 @@ impl UnifiedMemory {
         provider: String,
         tab_id: Option<String>,
     ) -> anyhow::Result<()> {
-        let result = tokio::task::spawn_blocking(move || {
-            self.store_turn_for_owner_with_tab_id(
+        self.store_turn_for_owner_with_tab_id_marker_blocking(
+            owner_key_id,
+            conversation_id,
+            user_msgs,
+            assistant_msg,
+            provider,
+            tab_id,
+        )
+        .await
+        .map(|_| ())
+    }
+
+    pub async fn store_turn_for_owner_with_tab_id_marker_blocking(
+        self: Arc<Self>,
+        owner_key_id: String,
+        conversation_id: String,
+        user_msgs: Vec<ChatMessage>,
+        assistant_msg: ChatMessage,
+        provider: String,
+        tab_id: Option<String>,
+    ) -> anyhow::Result<String> {
+        tokio::task::spawn_blocking(move || {
+            self.store_turn_for_owner_with_tab_id_and_marker(
                 &owner_key_id,
                 conversation_id,
                 user_msgs,
@@ -520,8 +555,7 @@ impl UnifiedMemory {
             )
         })
         .await
-        .map_err(|error| anyhow::anyhow!("conversation persistence task failed: {error}"))?;
-        result
+        .map_err(|error| anyhow::anyhow!("conversation persistence task failed: {error}"))?
     }
 
     /// Persist a completed turn with optional real browser tab metadata.
@@ -534,6 +568,26 @@ impl UnifiedMemory {
         provider: String,
         tab_id: Option<String>,
     ) -> anyhow::Result<()> {
+        self.store_turn_for_owner_with_tab_id_and_marker(
+            owner_key_id,
+            conversation_id,
+            user_msgs,
+            assistant_msg,
+            provider,
+            tab_id,
+        )
+        .map(|_| ())
+    }
+
+    pub fn store_turn_for_owner_with_tab_id_and_marker(
+        &self,
+        owner_key_id: &str,
+        conversation_id: String,
+        user_msgs: Vec<ChatMessage>,
+        assistant_msg: ChatMessage,
+        provider: String,
+        tab_id: Option<String>,
+    ) -> anyhow::Result<String> {
         let mut connection = self.lock()?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let existing_owner: Option<String> = tx
@@ -605,8 +659,10 @@ impl UnifiedMemory {
                 )?;
             }
         }
+        let marker = transcript_marker(&conversation.messages);
         tx.commit()
-            .map_err(|error| anyhow::anyhow!("committing conversation turn: {error}"))
+            .map_err(|error| anyhow::anyhow!("committing conversation turn: {error}"))?;
+        Ok(marker)
     }
 
     /// Export one complete conversation without exposing database internals.
