@@ -20,7 +20,7 @@ impl ChatService {
     pub async fn stream(
         &self,
         request: BackendRequest,
-    ) -> Result<mpsc::Receiver<Result<ChatEvent, GatewayError>>> {
+    ) -> std::result::Result<mpsc::Receiver<Result<ChatEvent, GatewayError>>, GatewayError> {
         self.backend.send_stream(request).await
     }
 }
@@ -42,7 +42,7 @@ mod tests {
         async fn send_stream(
             &self,
             request: BackendRequest,
-        ) -> Result<mpsc::Receiver<Result<ChatEvent, GatewayError>>> {
+        ) -> std::result::Result<mpsc::Receiver<Result<ChatEvent, GatewayError>>, GatewayError> {
             let (tx, rx) = mpsc::channel(1);
             tx.send(Ok(ChatEvent {
                 content: format!("{}:{}", request.provider, request.prompt),
