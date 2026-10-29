@@ -2225,3 +2225,55 @@ async fn async_conversation_store_contract_persists_bounded_owner_scoped_history
         .await;
     assert!(other_owner.is_err(), "cross-owner reads must fail closed");
 }
+
+#[tokio::test]
+async fn conversation_store_bounded_history_is_ordered_and_owner_scoped() {
+    let memory = Arc::new(UnifiedMemory::new(8000));
+    memory
+        .store_turn_for_owner_with_tab_id(
+            "owner-a",
+            "bounded-history".into(),
+            vec![m("user", "first question")],
+            m("assistant", "first answer"),
+            "chatgpt".into(),
+            None,
+        )
+        .unwrap();
+    memory
+        .store_turn_for_owner_with_tab_id(
+            "owner-a",
+            "bounded-history".into(),
+            vec![m("user", "second question")],
+            m("assistant", "second answer"),
+            "chatgpt".into(),
+            None,
+        )
+        .unwrap();
+
+    let history = memory
+        .clone()
+        .read_history("owner-a".into(), "bounded-history".into(), 2)
+        .await
+        .expect("bounded history read should succeed");
+    assert_eq!(
+        history,
+        vec![m("user", "second question"), m("assistant", "second answer")],
+        "bounded history returns the most recent messages in chronological order"
+    );
+
+    let empty = memory
+        .clone()
+        .read_history("owner-a".into(), "bounded-history".into(), 0)
+        .await
+        .expect("zero-sized history reads should succeed without returning messages");
+    assert!(empty.is_empty());
+
+    let unauthorized = memory
+        .read_history("owner-b".into(), "bounded-history".into(), 2)
+        .await;
+    assert!(
+        unauthorized.is_err(),
+        "bounded history must fail closed for a conversation owned by another API key"
+    );
+}
+
