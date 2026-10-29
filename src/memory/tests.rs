@@ -1879,6 +1879,7 @@ fn version_seven_migration_clears_synthetic_tab_id_and_preserves_history() {
     {
         let memory = fixture.open();
         store(&memory, "migration-tab", "preserve-this-history");
+        store(&memory, "migration-real-tab", "preserve-real-tab-history");
     }
 
     // Recreate the relevant state of a version-6 database before opening it
@@ -1891,11 +1892,21 @@ fn version_seven_migration_clears_synthetic_tab_id_and_preserves_history() {
                 rusqlite::params!["tab-synthetic", "migration-tab"],
             )
             .unwrap();
+        connection
+            .execute(
+                "UPDATE conversations SET tab_id = ?1 WHERE id = ?2",
+                rusqlite::params!["real-browser-tab", "migration-real-tab"],
+            )
+            .unwrap();
         connection.pragma_update(None, "user_version", 6).unwrap();
     }
 
     let migrated = fixture.open();
     assert_eq!(migrated.get_tab("migration-tab").unwrap(), None);
+    assert_eq!(
+        migrated.get_tab("migration-real-tab").unwrap().as_deref(),
+        Some("real-browser-tab")
+    );
     assert_eq!(
         migrated
             .conversation("migration-tab")
