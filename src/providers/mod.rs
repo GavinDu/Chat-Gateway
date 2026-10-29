@@ -385,9 +385,9 @@ fn should_check_body_challenge(poll_count: u32) -> bool {
 }
 
 /// Generic send + stream-poll loop shared by all adapters. Poll response
-/// text every 350ms and finish only after a conservative idle grace period
-/// with no streaming indicator, or at the provider timeout. The grace period
-/// tolerates long reasoning/search pauses that can occur between text deltas.
+/// text at the configured interval and finish only after a conservative
+/// time-based idle grace period with no streaming indicator, or at timeout.
+/// The grace period tolerates long reasoning/search pauses between deltas.
 /// Runs on the browser thread; chunks leave via the channel.
 const COMPLETION_IDLE_TICKS: u32 = 43; // ~15 seconds at 350ms per poll.
 const EXPLICIT_DONE_IDLE_TICKS: u32 = 3; // Confirm stop-control disappearance for ~1 second.
@@ -396,20 +396,28 @@ fn confirm_consecutive_signal(previous: bool, current: bool) -> bool {
     previous && current
 }
 
+fn ticks_for_grace(grace: Duration, poll_tick: Duration) -> u32 {
+    let tick_ms = poll_tick.as_millis().max(1);
+    let grace_ms = grace.as_millis();
+    ((grace_ms + tick_ms - 1) / tick_ms).min(u32::MAX as u128) as u32
+}
+
 fn completion_idle_ticks(
     done_signal: DoneSignal,
     saw_streaming: bool,
     post_answer_affordance: bool,
+    poll_tick: Duration,
 ) -> u32 {
-    match done_signal {
-        DoneSignal::StableResponseText => COMPLETION_IDLE_TICKS,
+    let grace = match done_signal {
+        DoneSignal::StableResponseText => Duration::from_secs(15),
         DoneSignal::StopControlDisappeared if saw_streaming && post_answer_affordance => {
-            EXPLICIT_DONE_IDLE_TICKS
+            Duration::from_secs(1)
         }
         // Never infer completion from disappearance alone: require a known
         // post-answer affordance, otherwise retain the conservative fallback.
-        DoneSignal::StopControlDisappeared => COMPLETION_IDLE_TICKS,
-    }
+        DoneSignal::StopControlDisappeared => Duration::from_secs(15),
+    };
+    ticks_for_grace(grace, poll_tick)
 }
 
 fn completion_ready(
@@ -418,8 +426,10 @@ fn completion_ready(
     done_signal: DoneSignal,
     saw_streaming: bool,
     post_answer_affordance: bool,
+    poll_tick: Duration,
 ) -> bool {
-    stable_ticks >= completion_idle_ticks(done_signal, saw_streaming, post_answer_affordance)
+    stable_ticks
+        >= completion_idle_ticks(done_signal, saw_streaming, post_answer_affordance, poll_tick)
         && !streaming
 }
 
@@ -592,6 +602,7 @@ pub async fn run_send(
                             done_signal,
                             saw_streaming,
                             confirmed_post_answer_affordance,
+                            poll_tick,
                         )
                     {
                         if let Some(answer) = &identical_answer_fallback {
@@ -668,6 +679,7 @@ pub async fn run_send(
                 done_signal,
                 saw_streaming,
                 confirmed_post_answer_affordance,
+                poll_tick,
             ) {
                 if let Some(last_delta_at) = last_delta_at {
                     crate::metrics::record_provider_tail(
@@ -787,9 +799,12 @@ mod response_delta_tracker_tests {
 #[cfg(test)]
 mod response_completion_tests {
     use super::{
-        completion_idle_ticks, completion_ready, DoneSignal, COMPLETION_IDLE_TICKS,
-        EXPLICIT_DONE_IDLE_TICKS,
+        completion_idle_ticks, completion_ready, ticks_for_grace, DoneSignal,
+        COMPLETION_IDLE_TICKS, EXPLICIT_DONE_IDLE_TICKS,
     };
+    use std::time::Duration;
+
+    const DEFAULT_POLL_TICK: Duration = Duration::from_millis(350);
 
     #[test]
     fn stable_text_requires_conservative_idle_grace() {
@@ -799,6 +814,7 @@ mod response_completion_tests {
             DoneSignal::StableResponseText,
             true,
             false,
+            DEFAULT_POLL_TICK,
         ));
         assert!(!completion_ready(
             COMPLETION_IDLE_TICKS - 1,
@@ -806,6 +822,7 @@ mod response_completion_tests {
             DoneSignal::StableResponseText,
             true,
             false,
+            DEFAULT_POLL_TICK,
         ));
         assert!(completion_ready(
             COMPLETION_IDLE_TICKS,
@@ -813,6 +830,7 @@ mod response_completion_tests {
             DoneSignal::StableResponseText,
             true,
             false,
+            DEFAULT_POLL_TICK,
         ));
     }
 
@@ -824,6 +842,7 @@ mod response_completion_tests {
             DoneSignal::StableResponseText,
             true,
             false,
+            DEFAULT_POLL_TICK,
         ));
     }
 
@@ -840,15 +859,30 @@ mod response_completion_tests {
     #[test]
     fn explicit_stop_disappearance_uses_short_grace_only_after_streaming_was_seen() {
         assert_eq!(
-            completion_idle_ticks(DoneSignal::StopControlDisappeared, true, true),
+            completion_idle_ticks(
+                DoneSignal::StopControlDisappeared,
+                true,
+                true,
+                DEFAULT_POLL_TICK,
+            ),
             EXPLICIT_DONE_IDLE_TICKS,
         );
         assert_eq!(
-            completion_idle_ticks(DoneSignal::StopControlDisappeared, false, true),
+            completion_idle_ticks(
+                DoneSignal::StopControlDisappeared,
+                false,
+                true,
+                DEFAULT_POLL_TICK,
+            ),
             COMPLETION_IDLE_TICKS,
         );
         assert_eq!(
-            completion_idle_ticks(DoneSignal::StopControlDisappeared, true, false),
+            completion_idle_ticks(
+                DoneSignal::StopControlDisappeared,
+                true,
+                false,
+                DEFAULT_POLL_TICK,
+            ),
             COMPLETION_IDLE_TICKS,
             "missing post-answer affordance must use the conservative fallback",
         );
@@ -858,6 +892,7 @@ mod response_completion_tests {
             DoneSignal::StopControlDisappeared,
             true,
             true,
+            DEFAULT_POLL_TICK,
         ));
         assert!(completion_ready(
             EXPLICIT_DONE_IDLE_TICKS,
@@ -865,6 +900,7 @@ mod response_completion_tests {
             DoneSignal::StopControlDisappeared,
             true,
             true,
+            DEFAULT_POLL_TICK,
         ));
         assert!(!completion_ready(
             EXPLICIT_DONE_IDLE_TICKS,
@@ -872,7 +908,16 @@ mod response_completion_tests {
             DoneSignal::StopControlDisappeared,
             true,
             true,
+            DEFAULT_POLL_TICK,
         ));
+    }
+
+    #[test]
+    fn completion_grace_duration_is_independent_of_poll_interval() {
+        assert_eq!(ticks_for_grace(Duration::from_secs(15), DEFAULT_POLL_TICK), 43);
+        assert_eq!(ticks_for_grace(Duration::from_secs(1), DEFAULT_POLL_TICK), 3);
+        assert_eq!(ticks_for_grace(Duration::from_secs(15), Duration::from_millis(200)), 75);
+        assert_eq!(ticks_for_grace(Duration::from_secs(1), Duration::from_millis(200)), 5);
     }
 }
 
