@@ -492,7 +492,7 @@ mod concurrency_configuration_tests {
             uuid::Uuid::new_v4()
         ));
         let mut first = super::open(Some(&path), None)?;
-        let second = super::open(Some(&path), None)?;
+        let mut second = super::open(Some(&path), None)?;
         let first_tx =
             first.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         first_tx.execute(
