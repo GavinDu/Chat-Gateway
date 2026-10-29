@@ -1351,12 +1351,10 @@ mod retrieval_ranking_tests {
                 .is_err(),
             "saving personal memory must require explicit opt-in"
         );
-        assert!(
-            memory
-                .retrieve_long_term_memory_items("memory-owner", 20)
-                .unwrap()
-                .is_empty()
-        );
+        assert!(memory
+            .retrieve_long_term_memory_items("memory-owner", 20)
+            .unwrap()
+            .is_empty());
 
         memory
             .set_long_term_memory_enabled("memory-owner", true)
@@ -1409,17 +1407,13 @@ mod retrieval_ranking_tests {
         assert_eq!(retrieved[0].id, active.id);
         assert_ne!(retrieved[0].id, expired.id);
 
-        assert!(
-            memory
-                .delete_long_term_memory_item("memory-owner", &active.id)
-                .unwrap()
-        );
-        assert!(
-            memory
-                .retrieve_long_term_memory_items("memory-owner", 20)
-                .unwrap()
-                .is_empty()
-        );
+        assert!(memory
+            .delete_long_term_memory_item("memory-owner", &active.id)
+            .unwrap());
+        assert!(memory
+            .retrieve_long_term_memory_items("memory-owner", 20)
+            .unwrap()
+            .is_empty());
         assert!(
             !memory
                 .delete_long_term_memory_item("another-owner", &expired.id)
