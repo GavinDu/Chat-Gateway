@@ -2289,7 +2289,7 @@ async fn provider_thread_map_survives_restart_and_cascades_on_conversation_delet
         "provider thread state must remain isolated to its owner after restart"
     );
     assert!(reopened
-        .delete_conversation(&expected.conversation_id)
+        .delete_conversation_for_owner("owner-a", &expected.conversation_id)
         .unwrap());
     assert_eq!(
         reopened
