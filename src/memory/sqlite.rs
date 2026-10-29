@@ -484,6 +484,20 @@ mod concurrency_configuration_tests {
         assert_eq!(first_mode.to_ascii_lowercase(), "wal");
         assert_eq!(second_mode.to_ascii_lowercase(), "wal");
 
+        // SQLite connection-local settings must be applied to every connection,
+        // not just the connection that performed the initial schema setup.
+        for connection in [&first, &second] {
+            let busy_timeout_ms: i64 =
+                connection.query_row("PRAGMA busy_timeout", [], |row| row.get(0))?;
+            let foreign_keys: i64 =
+                connection.query_row("PRAGMA foreign_keys", [], |row| row.get(0))?;
+            let synchronous: i64 =
+                connection.query_row("PRAGMA synchronous", [], |row| row.get(0))?;
+            assert_eq!(busy_timeout_ms, 30_000);
+            assert_eq!(foreign_keys, 1);
+            assert_eq!(synchronous, 2, "each connection must use synchronous=FULL");
+        }
+
         drop(second);
         drop(first);
         let _ = std::fs::remove_file(&path);
