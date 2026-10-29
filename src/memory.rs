@@ -568,13 +568,14 @@ impl UnifiedMemory {
         provider: String,
         tab_id: Option<String>,
     ) -> anyhow::Result<()> {
-        self.store_turn_for_owner_with_tab_id_and_marker(
+        self.store_turn_for_owner_with_tab_id_internal(
             owner_key_id,
             conversation_id,
             user_msgs,
             assistant_msg,
             provider,
             tab_id,
+            false,
         )
         .map(|_| ())
     }
@@ -588,6 +589,28 @@ impl UnifiedMemory {
         provider: String,
         tab_id: Option<String>,
     ) -> anyhow::Result<String> {
+        self.store_turn_for_owner_with_tab_id_internal(
+            owner_key_id,
+            conversation_id,
+            user_msgs,
+            assistant_msg,
+            provider,
+            tab_id,
+            true,
+        )?
+        .ok_or_else(|| anyhow::anyhow!("transcript marker was not computed"))
+    }
+
+    fn store_turn_for_owner_with_tab_id_internal(
+        &self,
+        owner_key_id: &str,
+        conversation_id: String,
+        user_msgs: Vec<ChatMessage>,
+        assistant_msg: ChatMessage,
+        provider: String,
+        tab_id: Option<String>,
+        compute_marker: bool,
+    ) -> anyhow::Result<Option<String>> {
         let mut connection = self.lock()?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let existing_owner: Option<String> = tx
@@ -659,7 +682,7 @@ impl UnifiedMemory {
                 )?;
             }
         }
-        let marker = transcript_marker(&conversation.messages);
+        let marker = compute_marker.then(|| transcript_marker(&conversation.messages));
         tx.commit()
             .map_err(|error| anyhow::anyhow!("committing conversation turn: {error}"))?;
         Ok(marker)
