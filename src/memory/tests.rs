@@ -2269,4 +2269,11 @@ async fn async_conversation_store_concurrent_turns_are_transactionally_preserved
         );
     }
     assert_eq!(history.len(), 4, "each turn must be committed exactly once");
+    let first_pair = [m("user", "first request"), m("assistant", "first answer")];
+    let second_pair = [m("user", "second request"), m("assistant", "second answer")];
+    assert!(
+        history.windows(2).any(|window| window == first_pair)
+            && history.windows(2).any(|window| window == second_pair),
+        "concurrent turn writes must keep each user/assistant pair contiguous: {history:?}"
+    );
 }
