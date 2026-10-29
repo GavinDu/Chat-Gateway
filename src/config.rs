@@ -318,6 +318,20 @@ mod tests {
     }
 
     #[test]
+    fn obscura_user_agent_is_optional_and_deserializes_when_configured() {
+        let defaults = config("providers: []\n");
+        assert_eq!(defaults.obscura.user_agent, None);
+
+        let configured = config(
+            "obscura:\n  user_agent: 'Example Browser UA'\nproviders: []\n",
+        );
+        assert_eq!(
+            configured.obscura.user_agent.as_deref(),
+            Some("Example Browser UA")
+        );
+    }
+
+    #[test]
     fn accepts_supported_provider_configuration() {
         let cfg = config("memory:\n  max_tokens: 4000\nproviders:\n  - name: chatgpt\n    timeout_seconds: 30\n    session_pool_size: 1\n");
         assert!(cfg.validate().is_ok());
