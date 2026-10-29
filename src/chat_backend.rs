@@ -6,9 +6,51 @@
 //! fake without constructing the thread-affine browser engine.
 use crate::providers::ProviderChunk;
 use anyhow::Result;
+use std::{error::Error as StdError, fmt};
 use tokio::sync::mpsc;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Stable error contract for backend startup failures. Provider stream errors
+/// remain attached to individual chunks so an already-started stream can report
+/// failure without changing the transport contract.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GatewayError {
+    /// Infrastructure failure; callers may try another configured provider.
+    RetryableBackendUnavailable,
+    /// Backend rejected or could not start the prepared request.
+    BackendStartFailed(String),
+}
+
+impl GatewayError {
+    pub fn is_retryable(&self) -> bool {
+        matches!(self, Self::RetryableBackendUnavailable)
+    }
+
+    fn from_backend_error(error: &anyhow::Error) -> Self {
+        if error
+            .downcast_ref::<crate::browser::pool::BrowserWorkerUnavailableError>()
+            .is_some_and(|worker_error| worker_error.is_retryable())
+        {
+            Self::RetryableBackendUnavailable
+        } else {
+            Self::BackendStartFailed(error.to_string())
+        }
+    }
+}
+
+impl fmt::Display for GatewayError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::RetryableBackendUnavailable => {
+                f.write_str("browser backend temporarily unavailable")
+            }
+            Self::BackendStartFailed(message) => f.write_str(message),
+        }
+    }
+}
+
+impl StdError for GatewayError {}
+
 pub struct BackendRequest {
     pub provider: String,
     pub prompt: String,
@@ -22,7 +64,7 @@ pub trait ChatBackend: Send + Sync {
     async fn send_stream(
         &self,
         request: BackendRequest,
-    ) -> Result<mpsc::Receiver<Result<ProviderChunk>>>;
+    ) -> std::result::Result<mpsc::Receiver<Result<ProviderChunk>>, GatewayError>;
 }
 
 #[async_trait::async_trait]
@@ -30,7 +72,7 @@ impl ChatBackend for crate::browser::pool::ObscuraPool {
     async fn send_stream(
         &self,
         request: BackendRequest,
-    ) -> Result<mpsc::Receiver<Result<ProviderChunk>>> {
+    ) -> std::result::Result<mpsc::Receiver<Result<ProviderChunk>>, GatewayError> {
         crate::browser::pool::ObscuraPool::send_stream(
             self,
             &request.provider,
@@ -40,12 +82,13 @@ impl ChatBackend for crate::browser::pool::ObscuraPool {
             request.thread_url,
         )
         .await
+        .map_err(|error| GatewayError::from_backend_error(&error))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{BackendRequest, ChatBackend};
+    use super::{BackendRequest, ChatBackend, GatewayError};
     use crate::providers::ProviderChunk;
     use anyhow::Result;
     use std::sync::Arc;
@@ -58,7 +101,7 @@ mod tests {
         async fn send_stream(
             &self,
             request: BackendRequest,
-        ) -> Result<mpsc::Receiver<Result<ProviderChunk>>> {
+        ) -> std::result::Result<mpsc::Receiver<Result<ProviderChunk>>, super::GatewayError> {
             let (tx, rx) = mpsc::channel(2);
             tx.send(Ok(ProviderChunk {
                 content: format!("{}:{}", request.provider, request.prompt),
@@ -74,6 +117,12 @@ mod tests {
             .expect("receiver should be alive");
             Ok(rx)
         }
+    }
+
+    #[test]
+    fn only_worker_unavailability_is_retryable() {
+        assert!(GatewayError::RetryableBackendUnavailable.is_retryable());
+        assert!(!GatewayError::BackendStartFailed("invalid provider".to_owned()).is_retryable());
     }
 
     #[tokio::test]
