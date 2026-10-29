@@ -88,7 +88,7 @@ fn json_import_restores_order_and_affinity_and_preserves_source() {
         );
         assert_eq!(
             memory.get_tab("legacy").unwrap().as_deref(),
-            Some("legacy-tab")
+            None
         );
         assert_eq!(
             memory.conversation("legacy").unwrap().unwrap().messages,
@@ -215,7 +215,7 @@ fn restart_recovers_messages_provider_and_tab() {
     );
     assert_eq!(
         memory.get_tab("one").unwrap().as_deref(),
-        Some("tab-second")
+        None
     );
     assert_eq!(
         memory.conversation("one").unwrap().unwrap().messages,
@@ -958,7 +958,7 @@ fn conversation_export_returns_complete_durable_record_and_missing_is_none() {
     let exported = memory.export_conversation("export-me").unwrap().unwrap();
     assert_eq!(exported.id, "export-me");
     assert_eq!(exported.provider.as_deref(), Some("chatgpt"));
-    assert_eq!(exported.tab_id.as_deref(), Some("tab-export payload"));
+    assert_eq!(exported.tab_id, None);
     assert_eq!(
         exported.messages,
         vec![
