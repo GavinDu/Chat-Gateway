@@ -417,7 +417,7 @@ fn confirm_consecutive_signal(previous: bool, current: bool) -> bool {
 fn ticks_for_grace(grace: Duration, poll_tick: Duration) -> u32 {
     let tick_ms = poll_tick.as_millis().max(1);
     let grace_ms = grace.as_millis();
-    ((grace_ms + tick_ms - 1) / tick_ms).min(u32::MAX as u128) as u32
+    grace_ms.div_ceil(tick_ms).min(u32::MAX as u128) as u32
 }
 
 fn completion_idle_ticks(
