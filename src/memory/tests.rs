@@ -2171,3 +2171,57 @@ fn version_seven_migration_clears_synthetic_tab_id_and_preserves_history() {
         ]
     );
 }
+
+#[tokio::test]
+async fn async_conversation_store_contract_persists_bounded_owner_scoped_history() {
+    let store: Arc<dyn ConversationStore> = Arc::new(UnifiedMemory::new(8000));
+    store
+        .clone()
+        .persist_turn(
+            "owner-a".to_owned(),
+            "conversation-a".to_owned(),
+            vec![
+                ChatMessage {
+                    role: "user".to_owned(),
+                    content: "first".to_owned(),
+                },
+                ChatMessage {
+                    role: "user".to_owned(),
+                    content: "second".to_owned(),
+                },
+            ],
+            ChatMessage {
+                role: "assistant".to_owned(),
+                content: "answer".to_owned(),
+            },
+            "provider-a".to_owned(),
+            None,
+        )
+        .await
+        .expect("turn should persist through the async contract");
+
+    let bounded = store
+        .clone()
+        .read_history("owner-a".to_owned(), "conversation-a".to_owned(), 2)
+        .await
+        .expect("bounded history should be readable");
+    assert_eq!(
+        bounded,
+        vec![
+            ChatMessage {
+                role: "user".to_owned(),
+                content: "second".to_owned(),
+            },
+            ChatMessage {
+                role: "assistant".to_owned(),
+                content: "answer".to_owned(),
+            },
+        ]
+    );
+
+    let other_owner = store
+        .clone()
+        .read_history("owner-b".to_owned(), "conversation-a".to_owned(), 10)
+        .await;
+    assert!(other_owner.is_err(), "cross-owner reads must fail closed");
+}
