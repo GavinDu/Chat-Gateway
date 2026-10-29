@@ -227,7 +227,6 @@ fn restart_recovers_messages_provider_and_tab() {
         ]
     );
 }
-
 #[test]
 fn deletion_cascades_and_survives_restart() {
     let fixture = Fixture::new();
@@ -2257,7 +2256,10 @@ async fn conversation_store_bounded_history_is_ordered_and_owner_scoped() {
         .expect("bounded history read should succeed");
     assert_eq!(
         history,
-        vec![m("user", "second question"), m("assistant", "second answer")],
+        vec![
+            m("user", "second question"),
+            m("assistant", "second answer")
+        ],
         "bounded history returns the most recent messages in chronological order"
     );
 
