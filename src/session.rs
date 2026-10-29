@@ -1700,7 +1700,10 @@ mod vault_tests {
             result.is_err(),
             "rotation must fail closed if any provider record cannot authenticate"
         );
-        assert_eq!(valid, valid_before, "preflight must not mutate source bytes");
+        assert_eq!(
+            valid, valid_before,
+            "preflight must not mutate source bytes"
+        );
         assert!(
             decrypt_session_snapshot(&valid, "chatgpt", &old_key).is_ok(),
             "a later provider's corruption must not invalidate the original earlier record"
