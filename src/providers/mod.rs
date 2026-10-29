@@ -447,7 +447,12 @@ fn completion_ready(
     poll_tick: Duration,
 ) -> bool {
     stable_ticks
-        >= completion_idle_ticks(done_signal, saw_streaming, post_answer_affordance, poll_tick)
+        >= completion_idle_ticks(
+            done_signal,
+            saw_streaming,
+            post_answer_affordance,
+            poll_tick,
+        )
         && !streaming
 }
 
@@ -619,7 +624,10 @@ pub async fn run_send(
                         crate::metrics::record_browser_poll(
                             adapter.name(),
                             1,
-                            final_probe_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+                            final_probe_started
+                                .elapsed()
+                                .as_millis()
+                                .min(u64::MAX as u128) as u64,
                         );
                         if probe_has_challenge(&final_probe) {
                             crate::provider_guard::disable_provider(
@@ -717,7 +725,10 @@ pub async fn run_send(
                 crate::metrics::record_browser_poll(
                     adapter.name(),
                     1,
-                    final_probe_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+                    final_probe_started
+                        .elapsed()
+                        .as_millis()
+                        .min(u64::MAX as u128) as u64,
                 );
                 if probe_has_challenge(&final_probe) {
                     crate::provider_guard::disable_provider(
@@ -965,10 +976,22 @@ mod response_completion_tests {
 
     #[test]
     fn completion_grace_duration_is_independent_of_poll_interval() {
-        assert_eq!(ticks_for_grace(Duration::from_secs(15), DEFAULT_POLL_TICK), 43);
-        assert_eq!(ticks_for_grace(Duration::from_secs(1), DEFAULT_POLL_TICK), 3);
-        assert_eq!(ticks_for_grace(Duration::from_secs(15), Duration::from_millis(200)), 75);
-        assert_eq!(ticks_for_grace(Duration::from_secs(1), Duration::from_millis(200)), 5);
+        assert_eq!(
+            ticks_for_grace(Duration::from_secs(15), DEFAULT_POLL_TICK),
+            43
+        );
+        assert_eq!(
+            ticks_for_grace(Duration::from_secs(1), DEFAULT_POLL_TICK),
+            3
+        );
+        assert_eq!(
+            ticks_for_grace(Duration::from_secs(15), Duration::from_millis(200)),
+            75
+        );
+        assert_eq!(
+            ticks_for_grace(Duration::from_secs(1), Duration::from_millis(200)),
+            5
+        );
     }
 }
 
