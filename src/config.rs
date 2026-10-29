@@ -78,6 +78,10 @@ impl Default for MemoryConfig {
 pub struct ObscuraConfig {
     #[serde(default = "default_true")]
     pub stealth: bool,
+    /// Optional user-agent override for the embedded browser. Match a value
+    /// only when it is known and permitted; this does not replay locale/timezone.
+    #[serde(default)]
+    pub user_agent: Option<String>,
     /// Persistent cookie/storage directory for the embedded browser
     /// (falls back to server.chrome_profile_dir when unset).
     #[serde(default)]
@@ -88,6 +92,7 @@ impl Default for ObscuraConfig {
     fn default() -> Self {
         Self {
             stealth: true,
+            user_agent: None,
             storage_dir: None,
         }
     }
@@ -310,6 +315,18 @@ mod tests {
     fn rejects_port_zero() {
         let cfg = config("server:\n  port: 0\n");
         assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn obscura_user_agent_is_optional_and_deserializes_when_configured() {
+        let defaults = config("providers: []\n");
+        assert_eq!(defaults.obscura.user_agent, None);
+
+        let configured = config("obscura:\n  user_agent: 'Example Browser UA'\nproviders: []\n");
+        assert_eq!(
+            configured.obscura.user_agent.as_deref(),
+            Some("Example Browser UA")
+        );
     }
 
     #[test]

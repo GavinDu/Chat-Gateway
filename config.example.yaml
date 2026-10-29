@@ -13,6 +13,7 @@ memory:
 
 obscura:
   stealth: true
+  # user_agent: ""  # optional browser user-agent override; does not replay locale/timezone
   # storage_dir: ""  # persistent cookie/storage dir for the embedded browser
                      # (defaults to server.chrome_profile_dir when set)
 
