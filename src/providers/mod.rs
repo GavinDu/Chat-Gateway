@@ -577,7 +577,11 @@ pub async fn run_send(
                         continue;
                     }
                     if stable_ticks
-                        >= completion_idle_ticks(done_signal, saw_streaming, probe.post_answer_affordance)
+                        >= completion_idle_ticks(
+                            done_signal,
+                            saw_streaming,
+                            probe.post_answer_affordance,
+                        )
                     {
                         if let Some(answer) = &identical_answer_fallback {
                             let answer = if let Some(re) = &citation_re {
