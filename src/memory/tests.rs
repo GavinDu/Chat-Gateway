@@ -2642,7 +2642,6 @@ async fn cancelled_async_turn_persistence_commits_atomically() {
     );
 }
 
-
 #[tokio::test]
 async fn conversation_store_counts_one_context_snapshot_and_one_turn_transaction() {
     let memory = Arc::new(UnifiedMemory::new(8000));
@@ -2677,4 +2676,3 @@ async fn conversation_store_counts_one_context_snapshot_and_one_turn_transaction
         "one request-scoped context build should use one snapshot and one turn transaction"
     );
 }
-
