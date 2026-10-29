@@ -2312,7 +2312,6 @@ async fn async_conversation_store_concurrent_turns_are_transactionally_preserved
     );
 }
 
-
 #[tokio::test]
 async fn provider_thread_map_survives_restart_and_cascades_on_conversation_delete() {
     let fixture = Fixture::new();
