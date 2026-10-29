@@ -6,6 +6,7 @@ use crate::context::messages_after_overlap;
 use crate::context::ContextBuilder;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
     path::PathBuf,
     sync::{Arc, Mutex, MutexGuard},
@@ -48,6 +49,13 @@ pub struct UnifiedMemory {
     connection: Mutex<Connection>,
 }
 
+/// Stable fingerprint for the canonical, ordered transcript. It is computed
+/// from the same in-memory snapshot used by a successful persistence transaction.
+pub fn transcript_marker(messages: &[ChatMessage]) -> String {
+    let encoded = serde_json::to_vec(messages).unwrap_or_default();
+    format!("{:x}", Sha256::digest(encoded))
+}
+
 /// Async contract for bounded conversation history access and atomic turn persistence.
 /// Implementations keep synchronous SQLite work off Tokio request workers.
 #[async_trait::async_trait]
@@ -85,7 +93,7 @@ pub trait ConversationStore: Send + Sync {
         assistant_message: ChatMessage,
         provider: String,
         tab_id: Option<String>,
-    ) -> anyhow::Result<()>;
+    ) -> anyhow::Result<String>;
 }
 
 #[async_trait::async_trait]
@@ -140,8 +148,8 @@ impl ConversationStore for UnifiedMemory {
         assistant_message: ChatMessage,
         provider: String,
         tab_id: Option<String>,
-    ) -> anyhow::Result<()> {
-        self.store_turn_for_owner_with_tab_id_blocking(
+    ) -> anyhow::Result<String> {
+        self.store_turn_for_owner_with_tab_id_marker_blocking(
             owner_key_id,
             conversation_id,
             user_messages,
@@ -509,8 +517,31 @@ impl UnifiedMemory {
         provider: String,
         tab_id: Option<String>,
     ) -> anyhow::Result<()> {
-        let result = tokio::task::spawn_blocking(move || {
-            self.store_turn_for_owner_with_tab_id(
+        self.store_turn_for_owner_with_tab_id_marker_blocking(
+            owner_key_id,
+            conversation_id,
+            user_msgs,
+            assistant_msg,
+            provider,
+            tab_id,
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// Persist a turn and return the fingerprint of the resulting canonical
+    /// transcript from the exact transaction that committed it.
+    pub async fn store_turn_for_owner_with_tab_id_marker_blocking(
+        self: Arc<Self>,
+        owner_key_id: String,
+        conversation_id: String,
+        user_msgs: Vec<ChatMessage>,
+        assistant_msg: ChatMessage,
+        provider: String,
+        tab_id: Option<String>,
+    ) -> anyhow::Result<String> {
+        tokio::task::spawn_blocking(move || {
+            self.store_turn_for_owner_with_tab_id_and_marker(
                 &owner_key_id,
                 conversation_id,
                 user_msgs,
@@ -520,8 +551,7 @@ impl UnifiedMemory {
             )
         })
         .await
-        .map_err(|error| anyhow::anyhow!("conversation persistence task failed: {error}"))?;
-        result
+        .map_err(|error| anyhow::anyhow!("conversation persistence task failed: {error}"))?
     }
 
     /// Persist a completed turn with optional real browser tab metadata.
@@ -534,6 +564,26 @@ impl UnifiedMemory {
         provider: String,
         tab_id: Option<String>,
     ) -> anyhow::Result<()> {
+        self.store_turn_for_owner_with_tab_id_and_marker(
+            owner_key_id,
+            conversation_id,
+            user_msgs,
+            assistant_msg,
+            provider,
+            tab_id,
+        )
+        .map(|_| ())
+    }
+
+    pub fn store_turn_for_owner_with_tab_id_and_marker(
+        &self,
+        owner_key_id: &str,
+        conversation_id: String,
+        user_msgs: Vec<ChatMessage>,
+        assistant_msg: ChatMessage,
+        provider: String,
+        tab_id: Option<String>,
+    ) -> anyhow::Result<String> {
         let mut connection = self.lock()?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let existing_owner: Option<String> = tx
@@ -605,8 +655,10 @@ impl UnifiedMemory {
                 )?;
             }
         }
+        let marker = transcript_marker(&conversation.messages);
         tx.commit()
-            .map_err(|error| anyhow::anyhow!("committing conversation turn: {error}"))
+            .map_err(|error| anyhow::anyhow!("committing conversation turn: {error}"))?;
+        Ok(marker)
     }
 
     /// Export one complete conversation without exposing database internals.
