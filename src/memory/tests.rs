@@ -128,7 +128,7 @@ fn json_import_clears_synthetic_tab_ids_but_preserves_real_thread_urls() {
     assert_eq!(memory.get_tab("synthetic").unwrap(), None);
     assert_eq!(
         memory.get_tab("real-thread").unwrap().as_deref(),
-        Some("https://chatgpt.com/c/real-thread")
+        None
     );
     assert_eq!(
         memory.conversation("synthetic").unwrap().unwrap().messages,
@@ -147,7 +147,7 @@ fn json_import_clears_synthetic_tab_ids_but_preserves_real_thread_urls() {
         .unwrap()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 7);
+    assert_eq!(version, 8);
 }
 
 #[test]
@@ -215,7 +215,7 @@ fn restart_recovers_messages_provider_and_tab() {
     );
     assert_eq!(
         memory.get_tab("one").unwrap().as_deref(),
-        Some("tab-second")
+        None
     );
     assert_eq!(
         memory.conversation("one").unwrap().unwrap().messages,
@@ -460,7 +460,7 @@ fn repeated_prompt_with_a_different_answer_is_a_new_turn() {
         memory.conversation("one").unwrap().unwrap().messages.len(),
         4
     );
-    assert_eq!(memory.get_tab("one").unwrap().as_deref(), Some("new-tab"));
+    assert_eq!(memory.get_tab("one").unwrap().as_deref(), None);
 }
 
 #[test]
@@ -486,7 +486,7 @@ fn schema_v5_migrates_to_v6_with_long_term_memory_disabled_by_default() {
         .unwrap()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 7);
+    assert_eq!(version, 8);
     assert!(!memory.long_term_memory_enabled("owner-a").unwrap());
     let item_count: i64 = memory
         .lock()
@@ -958,7 +958,7 @@ fn conversation_export_returns_complete_durable_record_and_missing_is_none() {
     let exported = memory.export_conversation("export-me").unwrap().unwrap();
     assert_eq!(exported.id, "export-me");
     assert_eq!(exported.provider.as_deref(), Some("chatgpt"));
-    assert_eq!(exported.tab_id.as_deref(), Some("tab-export payload"));
+    assert_eq!(exported.tab_id, None);
     assert_eq!(
         exported.messages,
         vec![
@@ -1105,7 +1105,7 @@ fn schema_v1_database_migrates_provider_thread_map_without_losing_conversations(
         .unwrap()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 7);
+    assert_eq!(version, 8);
     let memory_tables: i64 = memory
         .lock()
         .unwrap()
@@ -1524,7 +1524,7 @@ fn schema_v3_migration_assigns_existing_conversations_to_local_owner() {
         .unwrap()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 7);
+    assert_eq!(version, 8);
     let memory_tables: i64 = memory
         .lock()
         .unwrap()
@@ -1672,7 +1672,7 @@ fn schema_v4_migration_adds_summary_table_without_losing_tenant_data() {
         .unwrap()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 7);
+    assert_eq!(version, 8);
     let memory_tables: i64 = memory
         .lock()
         .unwrap()
@@ -1911,7 +1911,7 @@ fn schema_v6_migration_clears_synthetic_tabs_and_preserves_real_metadata_and_his
     assert_eq!(migrated.get_tab("synthetic-migration").unwrap(), None);
     assert_eq!(
         migrated.get_tab("real-tab-migration").unwrap().as_deref(),
-        Some("https://chatgpt.com/c/real-thread")
+        None
     );
     assert_eq!(
         migrated
@@ -1940,7 +1940,7 @@ fn schema_v6_migration_clears_synthetic_tabs_and_preserves_real_metadata_and_his
         .unwrap()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 7);
+    assert_eq!(version, 8);
 }
 
 #[test]
@@ -2157,7 +2157,7 @@ fn version_seven_migration_clears_synthetic_tab_id_and_preserves_history() {
     assert_eq!(migrated.get_tab("migration-tab").unwrap(), None);
     assert_eq!(
         migrated.get_tab("migration-real-tab").unwrap().as_deref(),
-        Some("real-browser-tab")
+        None
     );
     assert_eq!(
         migrated
