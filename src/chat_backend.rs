@@ -53,6 +53,7 @@ impl GatewayError {
         }
     }
 
+    #[allow(dead_code)] // Used by the worker-recovery path as it moves behind ChatBackend.
     pub fn backend_unavailable(message: impl Into<String>) -> Self {
         Self {
             kind: GatewayErrorKind::BackendUnavailable,
