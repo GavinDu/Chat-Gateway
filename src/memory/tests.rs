@@ -2135,7 +2135,7 @@ fn version_seven_migration_clears_synthetic_tab_id_and_preserves_history() {
         store(&memory, "migration-real-tab", "preserve-real-tab-history");
     }
 
-    // Simulate a v6 database with one synthetic and one real tab identifier.
+    // Simulate a pre-v8 database with legacy tab identifiers.
     {
         let connection = rusqlite::Connection::open(fixture.db()).unwrap();
         connection
@@ -2150,7 +2150,7 @@ fn version_seven_migration_clears_synthetic_tab_id_and_preserves_history() {
                 rusqlite::params!["real-browser-tab", "migration-real-tab"],
             )
             .unwrap();
-        connection.pragma_update(None, "user_version", 6).unwrap();
+        connection.pragma_update(None, "user_version", 7).unwrap();
     }
 
     let migrated = fixture.open();
