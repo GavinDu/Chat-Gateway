@@ -2269,8 +2269,8 @@ fn provider_thread_map_survives_restart_and_cascades_on_conversation_delete() {
     );
 
     assert_eq!(
-        reopened
-            .read_transcript("owner-a", &expected.conversation_id)
+        Arc::new(reopened)
+            .read_transcript("owner-a".to_owned(), expected.conversation_id.clone())
             .unwrap(),
         vec![m("user", "persist me"), m("assistant", "persisted")],
         "the transcript linked to a provider thread must survive the same restart"
