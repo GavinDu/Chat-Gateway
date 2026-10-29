@@ -2181,10 +2181,19 @@ async fn async_conversation_store_contract_persists_bounded_owner_scoped_history
             "owner-a".to_owned(),
             "conversation-a".to_owned(),
             vec![
-                ChatMessage { role: "user".to_owned(), content: "first".to_owned() },
-                ChatMessage { role: "user".to_owned(), content: "second".to_owned() },
+                ChatMessage {
+                    role: "user".to_owned(),
+                    content: "first".to_owned(),
+                },
+                ChatMessage {
+                    role: "user".to_owned(),
+                    content: "second".to_owned(),
+                },
             ],
-            ChatMessage { role: "assistant".to_owned(), content: "answer".to_owned() },
+            ChatMessage {
+                role: "assistant".to_owned(),
+                content: "answer".to_owned(),
+            },
             "provider-a".to_owned(),
             None,
         )
@@ -2210,4 +2219,3 @@ async fn async_conversation_store_contract_persists_bounded_owner_scoped_history
         .await;
     assert!(other_owner.is_err(), "cross-owner reads must fail closed");
 }
-
