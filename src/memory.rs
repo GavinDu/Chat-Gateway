@@ -61,6 +61,7 @@ pub fn transcript_marker(messages: &[ChatMessage]) -> String {
 #[async_trait::async_trait]
 pub trait ConversationStore: Send + Sync {
     #[allow(dead_code)] // Retained for callers that need an explicit full transcript.
+    #[allow(dead_code)] // Retained for the ConversationStore migration/API compatibility surface.
     async fn read_transcript(
         self: Arc<Self>,
         owner_key_id: String,
@@ -269,6 +270,7 @@ impl UnifiedMemory {
     /// Used to verify whether a provider-side thread still matches the committed gateway state.
     /// Read a transcript on Tokio's blocking pool to avoid blocking an async worker.
     #[allow(dead_code)] // Compatibility wrapper; context reads use the snapshot API.
+    #[allow(dead_code)] // Compatibility wrapper; callers are migrating to ConversationStore.
     pub async fn conversation_messages_for_owner_blocking(
         self: Arc<Self>,
         owner_key_id: String,
@@ -326,6 +328,7 @@ impl UnifiedMemory {
     }
 
     #[allow(dead_code)] // Compatibility wrapper for non-request-path callers.
+    #[allow(dead_code)] // Synchronous primitive retained for tests and migration compatibility.
     pub fn conversation_messages_for_owner(
         &self,
         owner_key_id: &str,
@@ -512,6 +515,7 @@ impl UnifiedMemory {
     /// Persist a completed turn on Tokio's blocking pool so SQLite mutex waits,
     /// transactions, and disk I/O never block an async runtime worker.
     #[allow(dead_code)] // Compatibility wrapper; ConversationStore uses the marker-returning variant.
+    #[allow(dead_code)] // Legacy tab-id wrapper retained during schema/API migration.
     pub async fn store_turn_for_owner_with_tab_id_blocking(
         self: Arc<Self>,
         owner_key_id: String,
