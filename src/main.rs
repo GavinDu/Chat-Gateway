@@ -4607,7 +4607,9 @@ mod first_event_tests {
     async fn first_event_surfaces_session_expiry_before_any_chunk() {
         let provider = "test-first-event-session-expiry";
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
-        tx.send(Err(anyhow::anyhow!("session_expired: please sign in")))
+        tx.send(Err(crate::chat_backend::GatewayError::provider_failure(
+            "session_expired: please sign in",
+        )))
             .await
             .unwrap();
         drop(tx);
