@@ -542,7 +542,7 @@ fn restore_vault_backup_records(backups: Vec<(String, Vec<u8>)>) -> Result<usize
                     "vault backup restore failed and rollback was incomplete; re-run restore from the encrypted backup after fixing filesystem errors"
                 );
             }
-            return Err(error).context("vault backup restore failed; prior records were restored");
+            return Err(error.context("vault backup restore failed; prior records were restored"));
         }
     }
     Ok(backups.len())
