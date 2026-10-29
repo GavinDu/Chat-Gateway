@@ -347,10 +347,47 @@ impl UnifiedMemory {
         token_budget: usize,
     ) -> anyhow::Result<(String, Vec<ChatMessage>, bool, Vec<ChatMessage>)> {
         let (history, saved_summary) = match conversation_id {
-            Some(id) => match self.conversation_for_owner(owner_key_id, id)? {
-                Some(conversation) => (conversation.messages, self.rolling_summary(id)?),
-                None => (Vec::new(), None),
-            },
+            Some(id) => {
+                // Read ownership, transcript, and summary in one SQLite snapshot.
+                // Separate reads could otherwise combine history from one commit
+                // with a summary written by a concurrent request.
+                let mut connection = self.lock()?;
+                let tx = connection.transaction()?;
+                let owner: Option<String> = tx
+                    .query_row(
+                        "SELECT owner_key_id FROM conversations WHERE id = ?1",
+                        [id],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                let conversation = match owner {
+                    Some(owner) if owner == owner_key_id => sqlite::load(&tx, id)?,
+                    Some(_) => anyhow::bail!("conversation belongs to another API key"),
+                    None => None,
+                };
+                let summary = if conversation.is_some() {
+                    tx.query_row(
+                        "SELECT summary, covered_through_position
+                         FROM conversation_summaries WHERE conversation_id = ?1",
+                        [id],
+                        |row| {
+                            Ok((
+                                row.get::<_, String>(0)?,
+                                row.get::<_, i64>(1)?.max(0) as usize,
+                            ))
+                        },
+                    )
+                    .optional()?
+                } else {
+                    None
+                };
+                let history = conversation
+                    .map(|conversation| conversation.messages)
+                    .unwrap_or_default();
+                tx.commit()
+                    .map_err(|error| anyhow::anyhow!("completing context snapshot read: {error}"))?;
+                (history, summary)
+            }
             None => (Vec::new(), None),
         };
         let has_history = !history.is_empty();
