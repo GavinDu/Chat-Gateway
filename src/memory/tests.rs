@@ -2226,8 +2226,8 @@ async fn async_conversation_store_contract_persists_bounded_owner_scoped_history
     assert!(other_owner.is_err(), "cross-owner reads must fail closed");
 }
 
-#[test]
-fn provider_thread_map_survives_restart_and_cascades_on_conversation_delete() {
+#[tokio::test]
+async fn provider_thread_map_survives_restart_and_cascades_on_conversation_delete() {
     let fixture = Fixture::new();
     let expected = ProviderThread {
         conversation_id: "restart-conversation".to_owned(),
