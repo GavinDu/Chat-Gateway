@@ -22,6 +22,12 @@ fn next_browser_worker_restart_backoff(current: Duration) -> Duration {
     (current * 2).min(MAX_BROWSER_WORKER_RESTART_BACKOFF)
 }
 
+fn closed_command_channel() -> mpsc::Sender<Command> {
+    let (sender, receiver) = mpsc::channel::<Command>(1);
+    drop(receiver);
+    sender
+}
+
 #[cfg(test)]
 mod worker_supervisor_tests {
     use super::{next_browser_worker_restart_backoff, WorkerReadyGuard};
@@ -324,20 +330,26 @@ impl ObscuraPool {
                     }
                     Ok(Ok(Err(error))) => {
                         tracing::warn!(error = %error, "browser worker restart failed during warm-up");
+                        // Force the next supervisor pass to retry. The failed
+                        // worker may still own its receiver, so merely dropping
+                        // this sender would not make the channel appear closed.
+                        *cmd_tx.write().await = closed_command_channel();
+                        worker_ready.store(false, Ordering::Release);
                         backoff = next_browser_worker_restart_backoff(backoff);
                     }
                     Ok(Err(_)) => {
                         tracing::warn!("browser worker exited before restart warm-up completed");
+                        *cmd_tx.write().await = closed_command_channel();
+                        worker_ready.store(false, Ordering::Release);
                         backoff = next_browser_worker_restart_backoff(backoff);
                     }
                     Err(_) => {
                         tracing::warn!("browser worker restart warm-up timed out");
                         // Close the timed-out worker's channel so the next
                         // supervisor pass can retry instead of remaining stuck.
-                        let (dead_tx, dead_rx) = mpsc::channel::<Command>(1);
-                        drop(dead_rx);
-                        *cmd_tx.write().await = dead_tx;
-                        backoff = (backoff * 2).min(Duration::from_secs(30));
+                        *cmd_tx.write().await = closed_command_channel();
+                        worker_ready.store(false, Ordering::Release);
+                        backoff = next_browser_worker_restart_backoff(backoff);
                     }
                 }
             }
