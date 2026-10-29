@@ -1633,8 +1633,16 @@ mod vault_tests {
 
         let prepared = prepare_vault_rotation_records(
             vec![
-                ("chatgpt".into(), "sessions/chatgpt.vault".into(), chatgpt.clone()),
-                ("claude".into(), "sessions/claude.vault".into(), claude.clone()),
+                (
+                    "chatgpt".into(),
+                    "sessions/chatgpt.vault".into(),
+                    chatgpt.clone(),
+                ),
+                (
+                    "claude".into(),
+                    "sessions/claude.vault".into(),
+                    claude.clone(),
+                ),
             ],
             &old_key,
             &new_key,
