@@ -181,6 +181,7 @@ enum Command {
         has_history: bool,
         thread_url: Option<String>,
         timeout: Duration,
+        completion_idle: Duration,
         chunks: mpsc::Sender<Result<ProviderChunk>>,
     },
     CurrentUrl {
@@ -476,6 +477,12 @@ impl ObscuraPool {
                 .map(|p| p.timeout_seconds)
                 .unwrap_or(120),
         );
+        let completion_idle = Duration::from_millis(
+            self.cfg
+                .provider(name)
+                .map(|p| p.completion_idle_ms)
+                .unwrap_or(15_000),
+        );
         let (tx, rx) = mpsc::channel(32);
         self.cmd_tx
             .read()
@@ -487,6 +494,7 @@ impl ObscuraPool {
                 has_history,
                 thread_url,
                 timeout,
+                completion_idle,
                 chunks: tx,
             })
             .await
@@ -1030,7 +1038,7 @@ fn browser_thread(
                                 let _ = reply.send(res);
                             });
                         }
-                        Command::Send { provider, prompt, model, has_history, thread_url, timeout, chunks } => {
+                        Command::Send { provider, prompt, model, has_history, thread_url, timeout, completion_idle, chunks } => {
                             let Some(page) = pages.borrow().get(&provider).cloned() else {
                                 let _ = chunks.send(Err(anyhow::anyhow!("provider page not warmed"))).await;
                                 continue;
@@ -1043,10 +1051,6 @@ fn browser_thread(
                             let browser_for_save = browser.clone();
                             let provider_name = provider.name().to_string();
                             let poll_tick = gateway_poll_tick;
-                            let completion_idle = cfg.providers.iter()
-                                .find(|item| item.name == provider.name())
-                                .map(|item| Duration::from_millis(item.completion_idle_ms))
-                                .unwrap_or(Duration::from_secs(15));
                             tokio::task::spawn_local(async move {
                                 let _guard = lock.lock().await;
                                 // Reopen only a validated provider-owned thread. Otherwise return
