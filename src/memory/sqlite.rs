@@ -172,7 +172,7 @@ fn initialize(connection: &mut Connection, legacy: Option<&Path>) -> Result<()> 
     }
     let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let version: i64 = tx.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    let needs_synthetic_tab_cleanup = version > 0 && version < 7;
+    let needs_synthetic_tab_cleanup = version > 0 && version < VERSION;
     let app: i64 = tx.query_row("PRAGMA application_id", [], |row| row.get(0))?;
     if version == 0 {
         let tables: i64 = tx.query_row(
