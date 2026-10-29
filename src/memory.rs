@@ -1215,7 +1215,7 @@ pub struct ConversationSummary {
 
 #[cfg(test)]
 mod retrieval_ranking_tests {
-    use super::{sqlite, UnifiedMemory};
+    use super::{sqlite, ChatMessage, UnifiedMemory};
     use std::sync::Mutex;
 
     fn memory() -> UnifiedMemory {
