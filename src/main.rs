@@ -2255,7 +2255,7 @@ fn read_conversation_context(
 }
 
 async fn read_conversation_context_with_transcript_for_owner(
-    memory: Arc<UnifiedMemory>,
+    memory: Arc<dyn memory::ConversationStore>,
     owner_key_id: String,
     conversation_id: Option<String>,
     messages: Vec<ChatMessage>,
