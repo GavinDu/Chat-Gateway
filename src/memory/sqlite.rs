@@ -467,7 +467,7 @@ mod concurrency_configuration_tests {
             uuid::Uuid::new_v4()
         ));
         let first = super::open(Some(&path), None)?;
-        let second = super::open(Some(&path), None)?;
+        let mut second = super::open(Some(&path), None)?;
 
         let first_mode: String = first.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
         let second_mode: String = second.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
