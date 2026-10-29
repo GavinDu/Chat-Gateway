@@ -2358,3 +2358,51 @@ async fn async_conversation_store_concurrent_turns_are_transactionally_preserved
         "concurrent turn writes must keep each user/assistant pair contiguous: {history:?}"
     );
 }
+
+
+#[test]
+fn failed_v8_migration_rolls_back_schema_and_history() {
+    let fixture = Fixture::new();
+    {
+        let memory = fixture.open();
+        store(&memory, "rollback-migration", "preserve rollback history");
+    }
+    {
+        let connection = Connection::open(fixture.db()).unwrap();
+        connection
+            .execute_batch(
+                "ALTER TABLE conversations ADD COLUMN tab_id TEXT;
+                 CREATE INDEX conversations_tab_id_idx ON conversations(tab_id);
+                 UPDATE conversations SET tab_id='tab-legacy' WHERE id='rollback-migration';
+                 PRAGMA user_version=7;",
+            )
+            .unwrap();
+    }
+
+    assert!(
+        open(&fixture.db(), None).is_err(),
+        "an index depending on tab_id must make the migration fail rather than silently discard dependent schema"
+    );
+
+    let connection = Connection::open(fixture.db()).unwrap();
+    let version: i64 = connection
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, 7, "failed migration must not advance user_version");
+    let tab_id: Option<String> = connection
+        .query_row(
+            "SELECT tab_id FROM conversations WHERE id='rollback-migration'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(tab_id.as_deref(), Some("tab-legacy"));
+    let history: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM messages WHERE conversation_id='rollback-migration'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(history, 2, "failed migration must preserve conversation history");
+}
