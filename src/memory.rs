@@ -202,6 +202,8 @@ impl UnifiedMemory {
     pub fn new(max_tokens: usize) -> Self {
         Self {
             max_tokens,
+            #[cfg(test)]
+            operation_counts: Arc::new(OperationCounts::default()),
             connection: Mutex::new(
                 sqlite::open(None, None).expect("initializing in-memory conversation database"),
             ),
@@ -236,6 +238,8 @@ impl UnifiedMemory {
         };
         Ok(Self {
             max_tokens,
+            #[cfg(test)]
+            operation_counts: Arc::new(OperationCounts::default()),
             connection: Mutex::new(sqlite::open(Some(&database), Some(&legacy))?),
         })
     }
