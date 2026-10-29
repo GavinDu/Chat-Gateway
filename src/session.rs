@@ -500,8 +500,50 @@ pub fn restore_vault_backup(backup_dir: &str) -> Result<usize> {
     if backups.is_empty() {
         anyhow::bail!("no valid provider vault backups found in the specified directory");
     }
-    for (destination, bytes) in &backups {
-        write_session_file_atomically(Path::new(destination), bytes)?;
+    restore_vault_backup_records(backups)
+}
+
+/// Restore a preflighted set of vault records without leaving a mixed-key
+/// state if a later replacement fails. Existing records are captured before
+/// any write; newly-created destinations are removed during rollback.
+fn restore_vault_backup_records(backups: Vec<(String, Vec<u8>)>) -> Result<usize> {
+    let mut originals = Vec::with_capacity(backups.len());
+    for (destination, _) in &backups {
+        let original = match std::fs::read(destination) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
+        originals.push((destination.clone(), original));
+    }
+
+    for (index, (destination, bytes)) in backups.iter().enumerate() {
+        if let Err(error) = write_session_file_atomically(Path::new(destination), bytes) {
+            let mut rollback_failed = false;
+            for (rollback_path, original) in originals.iter().take(index).rev() {
+                let rollback = match original {
+                    Some(bytes) => write_session_file_atomically(Path::new(rollback_path), bytes),
+                    None => match std::fs::remove_file(rollback_path) {
+                        Ok(()) => Ok(()),
+                        Err(remove_error)
+                            if remove_error.kind() == std::io::ErrorKind::NotFound =>
+                        {
+                            Ok(())
+                        }
+                        Err(remove_error) => Err(remove_error.into()),
+                    },
+                };
+                if rollback.is_err() {
+                    rollback_failed = true;
+                }
+            }
+            if rollback_failed {
+                anyhow::bail!(
+                    "vault backup restore failed and rollback was incomplete; re-run restore from the encrypted backup after fixing filesystem errors"
+                );
+            }
+            return Err(error.context("vault backup restore failed; prior records were restored"));
+        }
     }
     Ok(backups.len())
 }
@@ -1786,6 +1828,34 @@ mod vault_tests {
         // The six-byte magic header is followed by the 12-byte GCM nonce.
         tampered_nonce[6] ^= 0x01;
         assert!(decrypt_session_snapshot(&tampered_nonce, "provider-a", &key).is_err());
+    }
+
+    #[test]
+    fn vault_backup_restore_rolls_back_earlier_replacements_on_write_failure() {
+        let root = std::env::temp_dir().join(format!(
+            "chat-gateway-vault-restore-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let first = root.join("first.vault");
+        std::fs::write(&first, b"original-first").unwrap();
+        let missing_parent_destination = root.join("missing").join("second.vault");
+
+        let result = restore_vault_backup_records(vec![
+            (
+                first.to_string_lossy().into_owned(),
+                b"restored-first".to_vec(),
+            ),
+            (
+                missing_parent_destination.to_string_lossy().into_owned(),
+                b"restored-second".to_vec(),
+            ),
+        ]);
+
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(&first).unwrap(), b"original-first");
+        assert!(!missing_parent_destination.exists());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
