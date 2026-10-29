@@ -4,13 +4,14 @@ const fs = require("node:fs");
 const vm = require("node:vm");
 const { webcrypto } = require("node:crypto");
 
-function loadShared(cookieFixtures = [], hasAllPermissions = true) {
+function loadShared(cookieFixtures = [], hasAllPermissions = true, storageValues = {}) {
   let cookieReads = 0;
+  const fetchCalls = [];
   const context = {
     URL,
     Headers,
     crypto: webcrypto,
-    fetch: async () => { throw new Error("fetch should not be called in these tests"); },
+    fetch: async (url, options) => { fetchCalls.push({url, options}); return {ok:true, status:200}; },
     chrome: {
       cookies: {
         // Return the full fixture set to simulate a permissive/misbehaving
@@ -20,13 +21,13 @@ function loadShared(cookieFixtures = [], hasAllPermissions = true) {
       permissions: {
         contains: async () => hasAllPermissions
       },
-      storage: { local: { get: async () => ({}) } }
+      storage: { local: { get: async () => storageValues } }
     }
   };
   vm.createContext(context);
   const source = fs.readFileSync(require.resolve("../shared.js"), "utf8");
-  vm.runInContext(source + "\nglobalThis.__testApi = { normalizeGateway, providerCookieSnapshot, PROVIDERS };", context);
-  return { ...context.__testApi, getCookieReads: () => cookieReads };
+  vm.runInContext(source + "\nglobalThis.__testApi = { normalizeGateway, providerCookieSnapshot, relayFetch, PROVIDERS };", context);
+  return { ...context.__testApi, getCookieReads: () => cookieReads, fetchCalls };
 }
 
 test("gateway normalization accepts only local HTTP origins", () => {
@@ -47,6 +48,19 @@ test("gateway normalization rejects remote, HTTPS, and lookalike hosts", () => {
   ]) {
     assert.throws(() => api.normalizeGateway(value), undefined, value);
   }
+});
+
+test("relayFetch rejects a remote gateway value restored from extension storage", async () => {
+  const api = loadShared([], true, {
+    gateway: "http://attacker.example",
+    token: "relay-secret"
+  });
+
+  await assert.rejects(
+    () => api.relayFetch("/relay/v1/session/chatgpt", {method:"POST", body:"{}"}),
+    /Gateway URL must be local HTTP/
+  );
+  assert.equal(api.fetchCalls.length, 0, "no request or relay token may reach a remote host");
 });
 
 test("provider cookie snapshot excludes cookies outside that provider's domain roots", async () => {
