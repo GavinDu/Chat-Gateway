@@ -6,10 +6,12 @@
 //! fake without constructing the thread-affine browser engine.
 use crate::providers::ProviderChunk;
 use anyhow::Result;
+use std::{error::Error, fmt};
 use tokio::sync::mpsc;
 
+/// Canonical request passed to an execution backend after gateway routing/context preparation.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BackendRequest {
+pub struct ChatRequest {
     pub provider: String,
     pub prompt: String,
     pub model: String,
@@ -17,20 +19,66 @@ pub struct BackendRequest {
     pub thread_url: Option<String>,
 }
 
+/// Backward-compatible name while call sites migrate to the canonical contract.
+pub type BackendRequest = ChatRequest;
+
+/// A provider-independent streamed event. The existing adapter chunk already has the
+/// canonical content/done shape, so this alias avoids a needless allocation/copy.
+pub type ChatEvent = ProviderChunk;
+
+/// Typed failure before a stream is established.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GatewayError {
+    /// Infrastructure is temporarily unavailable; routing may try another provider.
+    RetryableWorkerUnavailable,
+    /// A non-retryable backend setup failure.
+    Backend(String),
+}
+
+impl GatewayError {
+    pub fn is_retryable(&self) -> bool {
+        matches!(self, Self::RetryableWorkerUnavailable)
+    }
+
+    fn from_backend_error(error: anyhow::Error) -> Self {
+        if error
+            .downcast_ref::<crate::browser::pool::BrowserWorkerUnavailableError>()
+            .is_some_and(|typed| typed.is_retryable())
+        {
+            Self::RetryableWorkerUnavailable
+        } else {
+            Self::Backend(error.to_string())
+        }
+    }
+}
+
+impl fmt::Display for GatewayError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::RetryableWorkerUnavailable => {
+                f.write_str("browser worker unavailable; retry after recovery")
+            }
+            Self::Backend(message) => f.write_str(message),
+        }
+    }
+}
+
+impl Error for GatewayError {}
+
 #[async_trait::async_trait]
 pub trait ChatBackend: Send + Sync {
     async fn send_stream(
         &self,
-        request: BackendRequest,
-    ) -> Result<mpsc::Receiver<Result<ProviderChunk>>>;
+        request: ChatRequest,
+    ) -> std::result::Result<mpsc::Receiver<Result<ChatEvent>>, GatewayError>;
 }
 
 #[async_trait::async_trait]
 impl ChatBackend for crate::browser::pool::ObscuraPool {
     async fn send_stream(
         &self,
-        request: BackendRequest,
-    ) -> Result<mpsc::Receiver<Result<ProviderChunk>>> {
+        request: ChatRequest,
+    ) -> std::result::Result<mpsc::Receiver<Result<ChatEvent>>, GatewayError> {
         crate::browser::pool::ObscuraPool::send_stream(
             self,
             &request.provider,
@@ -40,12 +88,13 @@ impl ChatBackend for crate::browser::pool::ObscuraPool {
             request.thread_url,
         )
         .await
+        .map_err(GatewayError::from_backend_error)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{BackendRequest, ChatBackend};
+    use super::{BackendRequest, ChatBackend, GatewayError};
     use crate::providers::ProviderChunk;
     use anyhow::Result;
     use std::sync::Arc;
@@ -74,6 +123,17 @@ mod tests {
             .expect("receiver should be alive");
             Ok(rx)
         }
+    }
+
+    #[test]
+    fn retryable_worker_failure_is_explicit_in_the_canonical_contract() {
+        let error = GatewayError::RetryableWorkerUnavailable;
+        assert!(error.is_retryable());
+        assert_eq!(
+            error.to_string(),
+            "browser worker unavailable; retry after recovery"
+        );
+        assert!(!GatewayError::Backend("bad request".to_owned()).is_retryable());
     }
 
     #[tokio::test]
