@@ -877,7 +877,7 @@ mod response_completion_tests {
 
 #[cfg(test)]
 mod provider_catalog_contract_tests {
-    use super::{Provider, ADAPTERS};
+    use super::{DoneSignal, Provider, ADAPTERS};
     use std::collections::HashSet;
 
     #[test]
@@ -929,6 +929,23 @@ mod provider_catalog_contract_tests {
         }
     }
 
+    #[test]
+    fn only_validated_catalog_entries_use_explicit_done_signals() {
+        for spec in ADAPTERS {
+            let expected = match spec.id {
+                // These adapters have the explicit stop-control disappearance
+                // plus post-answer-affordance completion contract.
+                "claude" | "chatgpt" => DoneSignal::StopControlDisappeared,
+                // Keep unvalidated providers on the conservative idle fallback.
+                _ => DoneSignal::StableResponseText,
+            };
+            assert_eq!(
+                spec.done, expected,
+                "unexpected completion strategy for provider {}",
+                spec.id
+            );
+        }
+    }
     #[test]
     fn unknown_provider_names_do_not_silently_select_a_provider() {
         for name in ["", "unknown", "openai", "claude ", " Qwen"] {
