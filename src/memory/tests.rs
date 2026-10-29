@@ -227,6 +227,7 @@ fn restart_recovers_messages_provider_and_tab() {
         ]
     );
 }
+
 #[test]
 fn deletion_cascades_and_survives_restart() {
     let fixture = Fixture::new();
