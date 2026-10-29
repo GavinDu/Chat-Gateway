@@ -2555,7 +2555,10 @@ fn schema_v8_does_not_persist_tab_id_column() {
 #[tokio::test]
 async fn persist_turn_returns_marker_for_the_committed_canonical_transcript() {
     let memory = Arc::new(UnifiedMemory::new(8000));
-    let expected = vec![m("user", "marker question"), m("assistant", "marker answer")];
+    let expected = vec![
+        m("user", "marker question"),
+        m("assistant", "marker answer"),
+    ];
     let marker = memory
         .clone()
         .persist_turn(
@@ -2573,10 +2576,7 @@ async fn persist_turn_returns_marker_for_the_committed_canonical_transcript() {
     assert_eq!(
         memory
             .clone()
-            .read_transcript(
-                "owner-marker".to_owned(),
-                "marker-conversation".to_owned()
-            )
+            .read_transcript("owner-marker".to_owned(), "marker-conversation".to_owned())
             .await
             .unwrap(),
         expected,
