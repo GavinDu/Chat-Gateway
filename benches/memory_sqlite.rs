@@ -13,7 +13,7 @@ use std::{
 };
 
 const ITERATIONS: usize = 500;
-const SMOKE_ITERATIONS: usize = 10;
+const SMOKE_ITERATIONS: usize = 50;
 
 fn message(role: &str, content: impl Into<String>) -> ChatMessage {
     ChatMessage {
@@ -62,11 +62,15 @@ fn main() -> anyhow::Result<()> {
 
     let result = (|| -> anyhow::Result<()> {
         let memory = UnifiedMemory::from_env(8192)?;
+
+        // Keep write samples independent: appending every sample to the same
+        // conversation makes the measured cost depend on the smoke/full mode.
         let mut store_samples = Vec::with_capacity(iterations);
         for i in 0..iterations {
+            let conversation_id = format!("store-bench-{i}");
             let start = Instant::now();
             memory.store_turn(
-                "store-bench".to_owned(),
+                conversation_id,
                 vec![message("user", format!("store prompt {i}"))],
                 message("assistant", format!("store response {i}")),
                 "benchmark".to_owned(),
@@ -74,29 +78,48 @@ fn main() -> anyhow::Result<()> {
             )?;
             store_samples.push(start.elapsed());
         }
-        report("sqlite store_turn", store_samples);
+        report("sqlite store_turn (new conversation)", store_samples);
+
+        // Use a fixed 500-turn fixture for every benchmark mode, including
+        // --smoke, so context latency is measured against the same history size.
+        for i in 0..500 {
+            memory.store_turn(
+                "context-bench".to_owned(),
+                vec![message("user", format!("history prompt {i}"))],
+                message("assistant", format!("history response {i}")),
+                "benchmark".to_owned(),
+                "bench-tab".to_owned(),
+            )?;
+        }
 
         let mut context_samples = Vec::with_capacity(iterations);
         for i in 0..iterations {
             let incoming = [message("user", format!("context prompt {i}"))];
             let start = Instant::now();
             let (prompt, messages) = memory
-                .build_context(Some("store-bench"), &incoming)
+                .build_context(Some("context-bench"), &incoming)
                 .expect("benchmark context read");
             std::hint::black_box((prompt, messages));
             context_samples.push(start.elapsed());
         }
         report("build_context (500 turns)", context_samples);
 
+        memory.store_turn(
+            "affinity-bench".to_owned(),
+            vec![message("user", "affinity prompt")],
+            message("assistant", "affinity response"),
+            "benchmark".to_owned(),
+            "bench-tab".to_owned(),
+        )?;
         let mut affinity_samples = Vec::with_capacity(iterations);
         for _ in 0..iterations {
             let start = Instant::now();
             std::hint::black_box(
                 memory
-                    .get_provider("store-bench")
+                    .get_provider("affinity-bench")
                     .expect("benchmark provider lookup"),
             );
-            std::hint::black_box(memory.get_tab("store-bench").expect("benchmark tab lookup"));
+            std::hint::black_box(memory.get_tab("affinity-bench").expect("benchmark tab lookup"));
             affinity_samples.push(start.elapsed());
         }
         report("provider/tab lookup", affinity_samples);
