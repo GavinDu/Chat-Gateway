@@ -2640,3 +2640,60 @@ async fn cancelled_async_turn_persistence_commits_atomically() {
         "cancellation must leave either no turn or a complete atomic turn, never a partial pair"
     );
 }
+
+#[test]
+fn provider_thread_mapping_survives_database_reopen_with_owner_and_provider_scope() {
+    let fixture = Fixture::new();
+    let thread = ProviderThread {
+        conversation_id: "restart-conversation".to_owned(),
+        provider: "chatgpt".to_owned(),
+        thread_url: "https://chatgpt.com/c/restart-thread".to_owned(),
+        synced_through_message_id: Some("transcript-marker-v1".to_owned()),
+        model: Some("test-model".to_owned()),
+        updated_at: 123,
+    };
+
+    {
+        let memory = fixture.open();
+        memory
+            .store_turn_for_owner_with_tab_id(
+                "restart-owner",
+                "restart-conversation".to_owned(),
+                vec![ChatMessage {
+                    role: "user".to_owned(),
+                    content: "persist before restart".to_owned(),
+                }],
+                ChatMessage {
+                    role: "assistant".to_owned(),
+                    content: "persisted".to_owned(),
+                },
+                "chatgpt".to_owned(),
+                None,
+            )
+            .expect("conversation should be persisted before the provider mapping");
+        memory
+            .upsert_provider_thread_for_owner("restart-owner", &thread)
+            .expect("provider thread mapping should persist");
+    }
+
+    let restarted = fixture.open();
+    let restored = restarted
+        .get_provider_thread_for_owner("restart-owner", "restart-conversation", "chatgpt")
+        .expect("provider thread lookup should succeed")
+        .expect("provider thread mapping should survive reopening SQLite");
+
+    assert_eq!(restored.thread_url, thread.thread_url);
+    assert_eq!(
+        restored.synced_through_message_id.as_deref(),
+        Some("transcript-marker-v1")
+    );
+    assert_eq!(restored.model.as_deref(), Some("test-model"));
+    assert!(restarted
+        .get_provider_thread_for_owner("different-owner", "restart-conversation", "chatgpt")
+        .expect("owner-scoped lookup should succeed")
+        .is_none());
+    assert!(restarted
+        .get_provider_thread_for_owner("restart-owner", "restart-conversation", "claude")
+        .expect("provider-scoped lookup should succeed")
+        .is_none());
+}
