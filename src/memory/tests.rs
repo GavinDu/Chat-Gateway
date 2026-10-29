@@ -463,7 +463,8 @@ fn schema_v5_migrates_to_v6_with_long_term_memory_disabled_by_default() {
             .lock()
             .unwrap()
             .execute_batch(
-                "DROP INDEX memory_items_owner_updated_idx;
+                "ALTER TABLE conversations ADD COLUMN tab_id TEXT;
+                 DROP INDEX memory_items_owner_updated_idx;
                  DROP INDEX memory_items_owner_key_idx;
                  DROP TABLE memory_items;
                  DROP TABLE memory_settings;
