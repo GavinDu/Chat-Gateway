@@ -119,7 +119,11 @@ fn main() -> anyhow::Result<()> {
                     .get_provider("affinity-bench")
                     .expect("benchmark provider lookup"),
             );
-            std::hint::black_box(memory.get_tab("affinity-bench").expect("benchmark tab lookup"));
+            std::hint::black_box(
+                memory
+                    .get_tab("affinity-bench")
+                    .expect("benchmark tab lookup"),
+            );
             affinity_samples.push(start.elapsed());
         }
         report("provider/tab lookup", affinity_samples);
