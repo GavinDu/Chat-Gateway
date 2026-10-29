@@ -398,6 +398,10 @@ pub fn clear_provider_cookies(browser: &Browser, provider: &str) -> Result<usize
 pub fn delete_session_snapshot(provider: &str) -> Result<bool> {
     let vault_path = session_vault_path(provider)?;
     let legacy_path = session_path(provider)?;
+    delete_session_snapshot_from_paths(Path::new(&vault_path), Path::new(&legacy_path))
+}
+
+fn delete_session_snapshot_from_paths(vault_path: &Path, legacy_path: &Path) -> Result<bool> {
     let mut removed = false;
     // Remove plaintext first. If this fails, retain the encrypted vault rather than
     // deleting the only usable copy and leaving a plaintext record behind.
@@ -1917,5 +1921,55 @@ mod vault_tests {
         let mut unknown_version = encrypted;
         unknown_version[5] = b'2';
         assert!(decrypt_session_snapshot(&unknown_version, "provider-a", &[0x44; 32]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod session_snapshot_delete_tests {
+    use super::*;
+
+    fn fixture() -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
+        let root = std::env::temp_dir().join(format!(
+            "chat-gateway-session-delete-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let vault = root.join("provider.vault");
+        let legacy = root.join("provider.json");
+        (root, vault, legacy)
+    }
+
+    #[test]
+    fn delete_removes_legacy_and_encrypted_snapshots() {
+        let (root, vault, legacy) = fixture();
+        std::fs::write(&vault, b"encrypted").unwrap();
+        std::fs::write(&legacy, b"plaintext").unwrap();
+
+        assert!(delete_session_snapshot_from_paths(&vault, &legacy).unwrap());
+        assert!(!vault.exists());
+        assert!(!legacy.exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn delete_missing_snapshots_is_idempotent() {
+        let (root, vault, legacy) = fixture();
+
+        assert!(!delete_session_snapshot_from_paths(&vault, &legacy).unwrap());
+        assert!(!delete_session_snapshot_from_paths(&vault, &legacy).unwrap());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn legacy_delete_failure_preserves_encrypted_snapshot() {
+        let (root, vault, legacy) = fixture();
+        std::fs::write(&vault, b"encrypted").unwrap();
+        // A directory at the legacy path forces remove_file to fail before the
+        // encrypted record is touched.
+        std::fs::create_dir(&legacy).unwrap();
+
+        assert!(delete_session_snapshot_from_paths(&vault, &legacy).is_err());
+        assert!(vault.is_file(), "encrypted recovery copy must be retained");
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
