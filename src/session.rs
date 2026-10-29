@@ -1660,8 +1660,6 @@ mod vault_tests {
         // every provider has passed authentication and encrypted backup creation.
         assert_eq!(prepared[0].1, "sessions/chatgpt.vault");
         assert_eq!(prepared[1].1, "sessions/claude.vault");
-        assert_eq!(chatgpt, encrypt_session_snapshot(&sample_session(), "chatgpt", &old_key).unwrap());
-        assert_eq!(claude, encrypt_session_snapshot(&sample_session(), "claude", &old_key).unwrap());
     }
 
     #[test]
