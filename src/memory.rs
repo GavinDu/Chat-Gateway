@@ -55,6 +55,16 @@ pub struct UnifiedMemory {
     connection: Mutex<Connection>,
 }
 
+struct TurnWrite<'a> {
+    owner_key_id: &'a str,
+    conversation_id: String,
+    user_msgs: Vec<ChatMessage>,
+    assistant_msg: ChatMessage,
+    provider: String,
+    tab_id: Option<String>,
+    compute_marker: bool,
+}
+
 /// Async contract for bounded conversation history access and atomic turn persistence.
 /// Implementations keep synchronous SQLite work off Tokio request workers.
 #[async_trait::async_trait]
@@ -568,14 +578,15 @@ impl UnifiedMemory {
         provider: String,
         tab_id: Option<String>,
     ) -> anyhow::Result<()> {
-        self.store_turn_for_owner_with_tab_id_and_marker(
+        self.store_turn_for_owner_with_tab_id_internal(TurnWrite {
             owner_key_id,
             conversation_id,
             user_msgs,
             assistant_msg,
             provider,
             tab_id,
-        )
+            compute_marker: false,
+        })
         .map(|_| ())
     }
 
@@ -588,6 +599,31 @@ impl UnifiedMemory {
         provider: String,
         tab_id: Option<String>,
     ) -> anyhow::Result<String> {
+        self.store_turn_for_owner_with_tab_id_internal(TurnWrite {
+            owner_key_id,
+            conversation_id,
+            user_msgs,
+            assistant_msg,
+            provider,
+            tab_id,
+            compute_marker: true,
+        })?
+        .ok_or_else(|| anyhow::anyhow!("transcript marker was not computed"))
+    }
+
+    fn store_turn_for_owner_with_tab_id_internal(
+        &self,
+        write: TurnWrite<'_>,
+    ) -> anyhow::Result<Option<String>> {
+        let TurnWrite {
+            owner_key_id,
+            conversation_id,
+            user_msgs,
+            assistant_msg,
+            provider,
+            tab_id,
+            compute_marker,
+        } = write;
         let mut connection = self.lock()?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let existing_owner: Option<String> = tx
@@ -659,7 +695,7 @@ impl UnifiedMemory {
                 )?;
             }
         }
-        let marker = transcript_marker(&conversation.messages);
+        let marker = compute_marker.then(|| transcript_marker(&conversation.messages));
         tx.commit()
             .map_err(|error| anyhow::anyhow!("committing conversation turn: {error}"))?;
         Ok(marker)
