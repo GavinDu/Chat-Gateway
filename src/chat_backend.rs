@@ -100,7 +100,8 @@ mod tests {
         async fn send_stream(
             &self,
             request: BackendRequest,
-        ) -> std::result::Result<mpsc::Receiver<Result<ProviderChunk>>, super::GatewayError> {
+        ) -> std::result::Result<mpsc::Receiver<Result<ProviderChunk>>, super::GatewayError>
+        {
             let (tx, rx) = mpsc::channel(2);
             tx.send(Ok(ProviderChunk {
                 content: format!("{}:{}", request.provider, request.prompt),
