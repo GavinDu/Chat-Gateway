@@ -2026,9 +2026,6 @@ async fn export_conversation_markdown(
             if let Some(provider) = conversation.provider.as_deref() {
                 markdown.push_str(&format!("- Provider: {provider}\n"));
             }
-            if let Some(tab_id) = conversation.tab_id.as_deref() {
-                markdown.push_str(&format!("- Tab: {tab_id}\n"));
-            }
             markdown.push('\n');
             for (index, message) in conversation.messages.iter().enumerate() {
                 markdown.push_str(&format!(
@@ -2092,9 +2089,6 @@ fn export_conversation_markdown_response_for_owner(
             let mut markdown = format!("# Conversation {}\n\n", conversation.id);
             if let Some(provider) = conversation.provider.as_deref() {
                 markdown.push_str(&format!("- Provider: {provider}\n"));
-            }
-            if let Some(tab_id) = conversation.tab_id.as_deref() {
-                markdown.push_str(&format!("- Tab: {tab_id}\n"));
             }
             markdown.push('\n');
             for (index, message) in conversation.messages.iter().enumerate() {
