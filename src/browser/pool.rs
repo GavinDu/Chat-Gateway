@@ -1130,6 +1130,7 @@ fn browser_thread(
                                         prompt,
                                         timeout,
                                         poll_tick,
+                                        Duration::from_millis(provider.completion_idle_ms),
                                         save_tx,
                                     ) => {}
                                 }
