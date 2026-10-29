@@ -2225,3 +2225,58 @@ async fn async_conversation_store_contract_persists_bounded_owner_scoped_history
         .await;
     assert!(other_owner.is_err(), "cross-owner reads must fail closed");
 }
+
+#[test]
+fn provider_thread_map_survives_restart_and_cascades_on_conversation_delete() {
+    let fixture = Fixture::new();
+    let expected = ProviderThread {
+        conversation_id: "restart-conversation".to_owned(),
+        provider: "chatgpt".to_owned(),
+        thread_url: "https://chatgpt.com/c/restart-thread".to_owned(),
+        synced_through_message_id: Some("transcript-sha256:abc123".to_owned()),
+        model: Some("gpt-test".to_owned()),
+        updated_at: 123,
+    };
+
+    {
+        let memory = fixture.open();
+        memory
+            .store_turn_for_owner_with_tab_id(
+                "owner-a",
+                expected.conversation_id.clone(),
+                vec![m("user", "persist me")],
+                m("assistant", "persisted"),
+                "chatgpt".to_owned(),
+                None,
+            )
+            .unwrap();
+        memory
+            .upsert_provider_thread_for_owner("owner-a", &expected)
+            .unwrap();
+    }
+
+    let reopened = fixture.open();
+    assert_eq!(
+        reopened
+            .get_provider_thread_for_owner(
+                "owner-a",
+                &expected.conversation_id,
+                &expected.provider,
+            )
+            .unwrap(),
+        Some(expected.clone()),
+        "provider thread state and sync marker must survive a database reopen"
+    );
+    assert!(reopened.delete_conversation(&expected.conversation_id).unwrap());
+    assert_eq!(
+        reopened
+            .get_provider_thread_for_owner(
+                "owner-a",
+                &expected.conversation_id,
+                &expected.provider,
+            )
+            .unwrap(),
+        None,
+        "deleting a conversation must cascade-delete its provider thread state"
+    );
+}
