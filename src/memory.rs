@@ -1295,26 +1295,46 @@ mod provider_thread_map_isolation_tests {
         memory
             .upsert_provider_thread_for_owner(
                 "owner-a",
-                &thread("conversation-a", "chatgpt", "https://chatgpt.com/c/a", "marker-a1"),
+                &thread(
+                    "conversation-a",
+                    "chatgpt",
+                    "https://chatgpt.com/c/a",
+                    "marker-a1",
+                ),
             )
             .unwrap();
         memory
             .upsert_provider_thread_for_owner(
                 "owner-a",
-                &thread("conversation-b", "chatgpt", "https://chatgpt.com/c/b", "marker-b1"),
+                &thread(
+                    "conversation-b",
+                    "chatgpt",
+                    "https://chatgpt.com/c/b",
+                    "marker-b1",
+                ),
             )
             .unwrap();
         memory
             .upsert_provider_thread_for_owner(
                 "owner-a",
-                &thread("conversation-a", "claude", "https://claude.ai/chat/a", "marker-a-claude"),
+                &thread(
+                    "conversation-a",
+                    "claude",
+                    "https://claude.ai/chat/a",
+                    "marker-a-claude",
+                ),
             )
             .unwrap();
 
         memory
             .upsert_provider_thread_for_owner(
                 "owner-a",
-                &thread("conversation-a", "chatgpt", "https://chatgpt.com/c/a", "marker-a2"),
+                &thread(
+                    "conversation-a",
+                    "chatgpt",
+                    "https://chatgpt.com/c/a",
+                    "marker-a2",
+                ),
             )
             .unwrap();
 
@@ -1351,4 +1371,3 @@ mod provider_thread_map_isolation_tests {
             .is_none());
     }
 }
-
