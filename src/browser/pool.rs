@@ -844,6 +844,15 @@ fn login_active_info(
 
 fn build_browser(cfg: &AppConfig) -> Result<obscura_core::Browser> {
     let mut builder = obscura_core::Browser::builder().stealth(cfg.obscura.stealth);
+    if let Some(user_agent) = cfg
+        .obscura
+        .user_agent
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        builder = builder.user_agent(user_agent.to_owned());
+    }
     let storage = cfg
         .obscura
         .storage_dir
