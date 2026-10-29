@@ -2267,6 +2267,17 @@ fn provider_thread_map_survives_restart_and_cascades_on_conversation_delete() {
         Some(expected.clone()),
         "provider thread state and sync marker must survive a database reopen"
     );
+    assert_eq!(
+        reopened
+            .get_provider_thread_for_owner(
+                "owner-b",
+                &expected.conversation_id,
+                &expected.provider,
+            )
+            .unwrap(),
+        None,
+        "provider thread state must remain isolated to its owner after restart"
+    );
     assert!(reopened
         .delete_conversation(&expected.conversation_id)
         .unwrap());
