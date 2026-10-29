@@ -2200,6 +2200,21 @@ async fn async_conversation_store_contract_persists_bounded_owner_scoped_history
         .await
         .expect("turn should persist through the async contract");
 
+    let transcript = store
+        .clone()
+        .read_transcript("owner-a".to_owned(), "conversation-a".to_owned())
+        .await
+        .expect("full transcript should be readable");
+    assert_eq!(
+        transcript,
+        vec![
+            m("user", "first"),
+            m("user", "second"),
+            m("assistant", "answer"),
+        ],
+        "the full transcript must preserve message order and not inherit a prior bounded-read limit"
+    );
+
     let bounded = store
         .clone()
         .read_history("owner-a".to_owned(), "conversation-a".to_owned(), 2)
