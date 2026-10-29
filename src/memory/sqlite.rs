@@ -493,6 +493,71 @@ mod concurrency_configuration_tests {
     }
 
     #[test]
+    fn concurrent_writers_serialize_with_busy_timeout_without_losing_rows() -> super::Result<()> {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let path = std::env::temp_dir().join(format!(
+            "chat-gateway-sqlite-concurrent-writers-{}.sqlite3",
+            uuid::Uuid::new_v4()
+        ));
+        let mut first = super::open(Some(&path), None)?;
+        let mut second = super::open(Some(&path), None)?;
+        let first_tx = first.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        first_tx.execute(
+            "INSERT INTO conversations(id,provider,tab_id,last_activity_at,owner_key_id)
+             VALUES ('writer-first', NULL, NULL, 0, 'local')",
+            [],
+        )?;
+
+        let (started_tx, started_rx) = mpsc::channel();
+        let (finished_tx, finished_rx) = mpsc::channel();
+        let writer_path = path.clone();
+        let second_writer = std::thread::spawn(move || -> super::Result<()> {
+            started_tx.send(()).expect("test receiver stays connected");
+            let transaction =
+                second.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            transaction.execute(
+                "INSERT INTO conversations(id,provider,tab_id,last_activity_at,owner_key_id)
+                 VALUES ('writer-second', NULL, NULL, 0, 'local')",
+                [],
+            )?;
+            transaction.commit()?;
+            finished_tx.send(()).expect("test receiver stays connected");
+            Ok(())
+        });
+
+        started_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("second writer should start");
+        // The first transaction intentionally holds SQLite's writer lock. A
+        // correctly configured busy timeout keeps the second writer blocked
+        // until the first transaction releases that lock.
+        if finished_rx.recv_timeout(Duration::from_millis(100)).is_ok() {
+            anyhow::bail!("second writer finished while the first writer held the lock");
+        }
+        first_tx.commit()?;
+        second_writer
+            .join()
+            .expect("second writer thread must not panic")?;
+
+        let verifier = super::open(Some(&writer_path), None)?;
+        let rows: i64 = verifier.query_row(
+            "SELECT COUNT(*) FROM conversations WHERE id IN ('writer-first', 'writer-second')",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(rows, 2, "both concurrent writes must be durable");
+
+        drop(verifier);
+        drop(first);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+        Ok(())
+    }
+
+    #[test]
     fn wal_reader_does_not_observe_uncommitted_writer_data() -> super::Result<()> {
         let path = std::env::temp_dir().join(format!(
             "chat-gateway-sqlite-isolation-{}.sqlite3",
