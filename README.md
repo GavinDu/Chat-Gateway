@@ -109,9 +109,9 @@ database override, the import source is `data/conversations.json`.
 
 ### JSON import and schema migrations
 
-On first startup, the gateway creates the current schema (currently version 7,
+On first startup, the gateway creates the current schema (currently version 8,
 recorded in `PRAGMA user_version`) and imports the legacy JSON snapshot in the
-**same transaction**. Existing supported schema versions 1–6 are upgraded
+**same transaction**. Existing supported schema versions 1–7 are upgraded
 transactionally at startup. A completion
 marker prevents reimport on later starts, including after conversation deletion.
 The import clears legacy synthetic `tab-*` values while preserving real
