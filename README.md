@@ -185,10 +185,14 @@ provider mismatch fails closed. On first load, an existing plaintext
 `sessions/<provider>.json` is migrated to an encrypted vault; the plaintext
 file is removed only after the encrypted file is written successfully. Keep
 the key backed up securely: vault files cannot be recovered without it.
-Key rotation is not automatic; keep the existing key available until the
-vault contents have been deliberately re-encrypted with the replacement key.
-Without `CHAT_GATEWAY_SESSION_STORE=vault`, legacy plaintext storage remains
-enabled for compatibility.
+Key rotation is an explicit maintenance operation, not an automatic
+background task. Follow [Session Vault Operations](docs/SESSION_VAULT_OPERATIONS.md)
+for `--vault-list`, `--vault-delete-provider`, `--vault-rotate-key`, and
+`--vault-restore-backup`, including the required old-key retention and recovery
+steps. Do not switch the configured key until rotation completes and the
+encrypted records have been verified after restart. Without
+`CHAT_GATEWAY_SESSION_STORE=vault`, legacy plaintext storage remains enabled
+for compatibility.
 
 ## Providers
 
