@@ -2678,7 +2678,11 @@ fn provider_thread_mapping_survives_database_reopen_with_owner_and_provider_scop
 
     let restarted = fixture.open();
     let restored = restarted
-        .get_provider_thread_for_owner("restart-owner", "restart-conversation", "chatgpt")
+        .get_provider_thread_for_owner(
+            "restart-owner",
+            "restart-conversation",
+            "chatgpt",
+        )
         .expect("provider thread lookup should succeed")
         .expect("provider thread mapping should survive reopening SQLite");
 
