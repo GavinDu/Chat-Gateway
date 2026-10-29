@@ -1,15 +1,15 @@
-//! Narrow backend seam for canonical chat orchestration.
+//! Canonical chat execution contract independent of the browser engine.
 //!
-//! The HTTP layer owns request validation, context construction, provider routing,
-//! and response framing. A backend only executes a prepared provider request and
-//! returns a stream of provider chunks. This lets tests substitute a deterministic
-//! fake without constructing the thread-affine browser engine.
+//! The HTTP layer owns validation, context construction, routing, and framing.
+//! A backend executes a prepared request and streams canonical events. This lets
+//! conformance tests substitute a deterministic fake without constructing Obscura.
 use crate::providers::ProviderChunk;
 use anyhow::Result;
+use std::{error::Error, fmt};
 use tokio::sync::mpsc;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BackendRequest {
+pub struct ChatRequest {
     pub provider: String,
     pub prompt: String,
     pub model: String,
@@ -17,21 +17,70 @@ pub struct BackendRequest {
     pub thread_url: Option<String>,
 }
 
+/// Compatibility name for callers migrated in the first backend-seam change.
+pub type BackendRequest = ChatRequest;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatEvent {
+    pub content: String,
+    pub done: bool,
+}
+
+impl From<ProviderChunk> for ChatEvent {
+    fn from(chunk: ProviderChunk) -> Self {
+        Self {
+            content: chunk.content,
+            done: chunk.done,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GatewayErrorKind {
+    ProviderFailure,
+    BackendUnavailable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GatewayError {
+    pub kind: GatewayErrorKind,
+    pub message: String,
+    pub retryable: bool,
+}
+
+impl GatewayError {
+    pub fn provider_failure(message: impl Into<String>) -> Self {
+        Self { kind: GatewayErrorKind::ProviderFailure, message: message.into(), retryable: false }
+    }
+
+    pub fn backend_unavailable(message: impl Into<String>) -> Self {
+        Self { kind: GatewayErrorKind::BackendUnavailable, message: message.into(), retryable: true }
+    }
+}
+
+impl fmt::Display for GatewayError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl Error for GatewayError {}
+
 #[async_trait::async_trait]
 pub trait ChatBackend: Send + Sync {
     async fn send_stream(
         &self,
-        request: BackendRequest,
-    ) -> Result<mpsc::Receiver<Result<ProviderChunk>>>;
+        request: ChatRequest,
+    ) -> Result<mpsc::Receiver<Result<ChatEvent, GatewayError>>>;
 }
 
 #[async_trait::async_trait]
 impl ChatBackend for crate::browser::pool::ObscuraPool {
     async fn send_stream(
         &self,
-        request: BackendRequest,
-    ) -> Result<mpsc::Receiver<Result<ProviderChunk>>> {
-        crate::browser::pool::ObscuraPool::send_stream(
+        request: ChatRequest,
+    ) -> Result<mpsc::Receiver<Result<ChatEvent, GatewayError>>> {
+        let mut source = crate::browser::pool::ObscuraPool::send_stream(
             self,
             &request.provider,
             request.prompt,
@@ -39,14 +88,25 @@ impl ChatBackend for crate::browser::pool::ObscuraPool {
             request.has_history,
             request.thread_url,
         )
-        .await
+        .await?;
+        let (tx, rx) = mpsc::channel(32);
+        tokio::spawn(async move {
+            while let Some(chunk) = source.recv().await {
+                let event = chunk
+                    .map(ChatEvent::from)
+                    .map_err(|error| GatewayError::provider_failure(error.to_string()));
+                if tx.send(event).await.is_err() {
+                    break;
+                }
+            }
+        });
+        Ok(rx)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{BackendRequest, ChatBackend};
-    use crate::providers::ProviderChunk;
+    use super::{ChatBackend, ChatEvent, ChatRequest, GatewayError, GatewayErrorKind};
     use anyhow::Result;
     use std::sync::Arc;
     use tokio::sync::mpsc;
@@ -57,30 +117,27 @@ mod tests {
     impl ChatBackend for FakeBackend {
         async fn send_stream(
             &self,
-            request: BackendRequest,
-        ) -> Result<mpsc::Receiver<Result<ProviderChunk>>> {
+            request: ChatRequest,
+        ) -> Result<mpsc::Receiver<Result<ChatEvent, GatewayError>>> {
             let (tx, rx) = mpsc::channel(2);
-            tx.send(Ok(ProviderChunk {
+            tx.send(Ok(ChatEvent {
                 content: format!("{}:{}", request.provider, request.prompt),
                 done: false,
             }))
             .await
             .expect("receiver should be alive");
-            tx.send(Ok(ProviderChunk {
-                content: String::new(),
-                done: true,
-            }))
-            .await
-            .expect("receiver should be alive");
+            tx.send(Ok(ChatEvent { content: String::new(), done: true }))
+                .await
+                .expect("receiver should be alive");
             Ok(rx)
         }
     }
 
     #[tokio::test]
-    async fn fake_backend_streams_chunks_without_browser_runtime() {
+    async fn fake_backend_streams_canonical_events_without_browser_runtime() {
         let backend: Arc<dyn ChatBackend> = Arc::new(FakeBackend);
-        let mut chunks = backend
-            .send_stream(BackendRequest {
+        let mut events = backend
+            .send_stream(ChatRequest {
                 provider: "chatgpt".to_owned(),
                 prompt: "hello".to_owned(),
                 model: "test-model".to_owned(),
@@ -90,11 +147,24 @@ mod tests {
             .await
             .expect("fake backend should accept request");
 
-        let first = chunks.recv().await.unwrap().unwrap();
-        assert_eq!(first.content, "chatgpt:hello");
-        assert!(!first.done);
-        let done = chunks.recv().await.unwrap().unwrap();
-        assert!(done.done);
-        assert!(chunks.recv().await.is_none());
+        assert_eq!(events.recv().await.unwrap().unwrap(), ChatEvent {
+            content: "chatgpt:hello".to_owned(),
+            done: false,
+        });
+        assert_eq!(events.recv().await.unwrap().unwrap(), ChatEvent {
+            content: String::new(),
+            done: true,
+        });
+        assert!(events.recv().await.is_none());
+    }
+
+    #[test]
+    fn gateway_error_retryability_is_explicit_and_typed() {
+        let provider = GatewayError::provider_failure("provider rejected request");
+        assert_eq!(provider.kind, GatewayErrorKind::ProviderFailure);
+        assert!(!provider.retryable);
+        let unavailable = GatewayError::backend_unavailable("worker restarting");
+        assert_eq!(unavailable.kind, GatewayErrorKind::BackendUnavailable);
+        assert!(unavailable.retryable);
     }
 }
