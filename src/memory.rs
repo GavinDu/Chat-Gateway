@@ -1414,11 +1414,9 @@ mod retrieval_ranking_tests {
             .retrieve_long_term_memory_items("memory-owner", 20)
             .unwrap()
             .is_empty());
-        assert!(
-            !memory
-                .delete_long_term_memory_item("another-owner", &expired.id)
-                .unwrap()
-        );
+        assert!(!memory
+            .delete_long_term_memory_item("another-owner", &expired.id)
+            .unwrap());
     }
 }
 
