@@ -137,7 +137,8 @@ mod tests {
         async fn send_stream(
             &self,
             request: ChatRequest,
-        ) -> std::result::Result<mpsc::Receiver<Result<ChatEvent, GatewayError>>, GatewayError> {
+        ) -> std::result::Result<mpsc::Receiver<Result<ChatEvent, GatewayError>>, GatewayError>
+        {
             let (tx, rx) = mpsc::channel(2);
             tx.send(Ok(ChatEvent {
                 content: format!("{}:{}", request.provider, request.prompt),
