@@ -260,9 +260,19 @@ fn initialize(connection: &mut Connection, legacy: Option<&Path>) -> Result<()> 
                 Ok(bytes) => {
                     let snapshot: HashMap<String, Conversation> = serde_json::from_slice(&bytes)
                         .with_context(|| format!("importing legacy snapshot {}", path.display()))?;
-                    for (id, conversation) in snapshot {
+                    for (id, mut conversation) in snapshot {
                         if id != conversation.id {
                             bail!("legacy conversation key/id mismatch for '{id}'");
+                        }
+                        // Apply the same rule as the schema-v7 migration to JSON
+                        // imports into a brand-new database. There is no prior
+                        // schema version to trigger the migration cleanup here.
+                        if conversation
+                            .tab_id
+                            .as_deref()
+                            .is_some_and(|tab_id| tab_id.starts_with("tab-"))
+                        {
+                            conversation.tab_id = None;
                         }
                         append(&tx, &conversation, 0)?;
                     }
