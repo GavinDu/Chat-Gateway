@@ -2356,7 +2356,6 @@ async fn async_conversation_store_concurrent_turns_are_transactionally_preserved
     );
 }
 
-
 #[test]
 fn failed_v8_migration_rolls_back_schema_and_history() {
     let fixture = Fixture::new();
@@ -2401,7 +2400,10 @@ fn failed_v8_migration_rolls_back_schema_and_history() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(history, 2, "failed migration must preserve conversation history");
+    assert_eq!(
+        history, 2,
+        "failed migration must preserve conversation history"
+    );
 }
 
 #[tokio::test]
