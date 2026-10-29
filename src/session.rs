@@ -1658,8 +1658,8 @@ mod vault_tests {
         }
         // Preparation is side-effect free; callers only replace live records after
         // every provider has passed authentication and encrypted backup creation.
-        assert_eq!(prepared[0].1, "sessions/chatgpt.vault");
-        assert_eq!(prepared[1].1, "sessions/claude.vault");
+        assert_eq!(prepared[0].0, "sessions/chatgpt.vault");
+        assert_eq!(prepared[1].0, "sessions/claude.vault");
     }
 
     #[test]
