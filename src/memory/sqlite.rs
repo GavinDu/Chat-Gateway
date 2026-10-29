@@ -236,6 +236,12 @@ fn initialize(connection: &mut Connection, legacy: Option<&Path>) -> Result<()> 
             [],
         )?;
     }
+    // Remove the obsolete affinity column only after legacy synthetic values
+    // have been cleared. Versions 1–7 all contain this column; a new v8
+    // database is created without it by SCHEMA.
+    if version > 0 && version < VERSION {
+        tx.execute_batch("ALTER TABLE conversations DROP COLUMN tab_id;")?;
+    }
     tx.execute_batch(
         "CREATE INDEX IF NOT EXISTS conversations_owner_key_id_idx ON conversations(owner_key_id, id);",
     )?;
