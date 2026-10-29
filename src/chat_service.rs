@@ -1,10 +1,9 @@
 //! Request execution seam between the HTTP handler and provider backends.
 //!
 //! Context planning, routing and HTTP/SSE framing remain in the API layer for now;
-//! this service centralizes the prepared-request execution boundary so the handler
-//! can be reduced without coupling tests to Obscura's browser runtime.
-use crate::chat_backend::{BackendRequest, ChatBackend};
-use crate::providers::ProviderChunk;
+//! this service centralizes prepared-request execution without coupling tests to
+//! Obscura's browser runtime.
+use crate::chat_backend::{BackendRequest, ChatBackend, ChatEvent, GatewayError};
 use anyhow::Result;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -21,7 +20,7 @@ impl ChatService {
     pub async fn stream(
         &self,
         request: BackendRequest,
-    ) -> Result<mpsc::Receiver<Result<ProviderChunk>>> {
+    ) -> std::result::Result<mpsc::Receiver<Result<ChatEvent, GatewayError>>, GatewayError> {
         self.backend.send_stream(request).await
     }
 }
@@ -29,10 +28,7 @@ impl ChatService {
 #[cfg(test)]
 mod tests {
     use super::ChatService;
-    use crate::{
-        chat_backend::{BackendRequest, ChatBackend},
-        providers::ProviderChunk,
-    };
+    use crate::chat_backend::{BackendRequest, ChatBackend, ChatEvent, GatewayError};
     use anyhow::Result;
     use std::sync::Arc;
     use tokio::sync::mpsc;
@@ -44,9 +40,10 @@ mod tests {
         async fn send_stream(
             &self,
             request: BackendRequest,
-        ) -> Result<mpsc::Receiver<Result<ProviderChunk>>> {
+        ) -> std::result::Result<mpsc::Receiver<Result<ChatEvent, GatewayError>>, GatewayError>
+        {
             let (tx, rx) = mpsc::channel(1);
-            tx.send(Ok(ProviderChunk {
+            tx.send(Ok(ChatEvent {
                 content: format!("{}:{}", request.provider, request.prompt),
                 done: true,
             }))
@@ -59,7 +56,7 @@ mod tests {
     #[tokio::test]
     async fn service_forwards_prepared_request_to_injected_backend() {
         let service = ChatService::new(Arc::new(FakeBackend));
-        let mut chunks = service
+        let mut events = service
             .stream(BackendRequest {
                 provider: "claude".to_owned(),
                 prompt: "test prompt".to_owned(),
@@ -69,9 +66,9 @@ mod tests {
             })
             .await
             .expect("fake backend should accept the request");
-        let chunk = chunks.recv().await.unwrap().unwrap();
-        assert_eq!(chunk.content, "claude:test prompt");
-        assert!(chunk.done);
-        assert!(chunks.recv().await.is_none());
+        let event = events.recv().await.unwrap().unwrap();
+        assert_eq!(event.content, "claude:test prompt");
+        assert!(event.done);
+        assert!(events.recv().await.is_none());
     }
 }
