@@ -231,7 +231,7 @@ fn initialize(connection: &mut Connection, legacy: Option<&Path>) -> Result<()> 
     // after the migration had already completed.
     if needs_synthetic_tab_cleanup {
         tx.execute(
-            "UPDATE conversations SET tab_id = NULL WHERE tab_id LIKE 'tab-%'",
+            "UPDATE conversations SET tab_id = NULL WHERE substr(tab_id, 1, 4) = 'tab-'",
             [],
         )?;
     }
