@@ -122,11 +122,7 @@ fn json_import_clears_synthetic_tab_ids_but_preserves_real_thread_urls() {
             },
         ),
     ]);
-    fs::write(
-        fixture.json(),
-        serde_json::to_vec(&conversations).unwrap(),
-    )
-    .unwrap();
+    fs::write(fixture.json(), serde_json::to_vec(&conversations).unwrap()).unwrap();
 
     let memory = fixture.open();
     assert_eq!(memory.get_tab("synthetic").unwrap(), None);
@@ -139,7 +135,11 @@ fn json_import_clears_synthetic_tab_ids_but_preserves_real_thread_urls() {
         vec![m("user", "preserve synthetic conversation history")]
     );
     assert_eq!(
-        memory.conversation("real-thread").unwrap().unwrap().messages,
+        memory
+            .conversation("real-thread")
+            .unwrap()
+            .unwrap()
+            .messages,
         vec![m("user", "preserve real conversation history")]
     );
     let version: i64 = memory
