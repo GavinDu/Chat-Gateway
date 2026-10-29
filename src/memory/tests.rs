@@ -2125,3 +2125,49 @@ async fn async_conversation_store_reads_and_persists_on_blocking_pool() {
         .unwrap();
     assert_eq!(transcript, vec![m("user", "hello"), m("assistant", "hi")]);
 }
+
+#[test]
+fn version_seven_migration_clears_synthetic_tab_id_and_preserves_history() {
+    let fixture = Fixture::new();
+    {
+        let memory = fixture.open();
+        store(&memory, "migration-tab", "preserve-this-history");
+        store(&memory, "migration-real-tab", "preserve-real-tab-history");
+    }
+
+    // Simulate a v6 database with one synthetic and one real tab identifier.
+    {
+        let connection = rusqlite::Connection::open(fixture.db()).unwrap();
+        connection
+            .execute(
+                "UPDATE conversations SET tab_id = ?1 WHERE id = ?2",
+                rusqlite::params!["tab-synthetic", "migration-tab"],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE conversations SET tab_id = ?1 WHERE id = ?2",
+                rusqlite::params!["real-browser-tab", "migration-real-tab"],
+            )
+            .unwrap();
+        connection.pragma_update(None, "user_version", 6).unwrap();
+    }
+
+    let migrated = fixture.open();
+    assert_eq!(migrated.get_tab("migration-tab").unwrap(), None);
+    assert_eq!(
+        migrated.get_tab("migration-real-tab").unwrap().as_deref(),
+        Some("real-browser-tab")
+    );
+    assert_eq!(
+        migrated
+            .conversation("migration-tab")
+            .unwrap()
+            .unwrap()
+            .messages,
+        vec![
+            m("user", "preserve-this-history"),
+            m("assistant", "answer preserve-this-history")
+        ]
+    );
+}
