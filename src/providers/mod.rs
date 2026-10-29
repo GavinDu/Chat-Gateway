@@ -392,6 +392,10 @@ fn should_check_body_challenge(poll_count: u32) -> bool {
 const COMPLETION_IDLE_TICKS: u32 = 43; // ~15 seconds at 350ms per poll.
 const EXPLICIT_DONE_IDLE_TICKS: u32 = 3; // Confirm stop-control disappearance for ~1 second.
 
+fn confirm_consecutive_signal(previous: bool, current: bool) -> bool {
+    previous && current
+}
+
 fn completion_idle_ticks(
     done_signal: DoneSignal,
     saw_streaming: bool,
@@ -481,6 +485,7 @@ pub async fn run_send(
     let mut stable_ticks = 0u32;
     let mut last_delta_at: Option<Instant> = None;
     let mut saw_streaming = false;
+    let mut previous_post_answer_affordance = false;
     let mut response_node_detected = false;
     let mut poll_count = 0u32;
 
@@ -560,6 +565,11 @@ pub async fn run_send(
 
         let streaming = probe.streaming;
         saw_streaming |= streaming;
+        let confirmed_post_answer_affordance = confirm_consecutive_signal(
+            previous_post_answer_affordance,
+            probe.post_answer_affordance,
+        );
+        previous_post_answer_affordance = probe.post_answer_affordance;
 
         if let Some(txt) = probe.text {
             match tracker.observe(&txt) {
@@ -580,7 +590,7 @@ pub async fn run_send(
                         >= completion_idle_ticks(
                             done_signal,
                             saw_streaming,
-                            probe.post_answer_affordance,
+                            confirmed_post_answer_affordance,
                         )
                     {
                         if let Some(answer) = &identical_answer_fallback {
@@ -656,7 +666,7 @@ pub async fn run_send(
                 streaming,
                 done_signal,
                 saw_streaming,
-                probe.post_answer_affordance,
+                confirmed_post_answer_affordance,
             ) {
                 if let Some(last_delta_at) = last_delta_at {
                     crate::metrics::record_provider_tail(
@@ -814,6 +824,16 @@ mod response_completion_tests {
             true,
             false,
         ));
+    }
+
+    #[test]
+    fn post_answer_affordance_requires_two_consecutive_observations() {
+        use super::confirm_consecutive_signal;
+
+        assert!(!confirm_consecutive_signal(false, true));
+        assert!(!confirm_consecutive_signal(true, false));
+        assert!(!confirm_consecutive_signal(false, false));
+        assert!(confirm_consecutive_signal(true, true));
     }
 
     #[test]
