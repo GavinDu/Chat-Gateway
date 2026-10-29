@@ -384,6 +384,22 @@ fn should_check_body_challenge(poll_count: u32) -> bool {
     poll_count.is_multiple_of(5)
 }
 
+fn probe_has_challenge(probe: &common::ResponseProbe) -> bool {
+    if probe.challenge {
+        return true;
+    }
+    let lower_url = probe.url.to_ascii_lowercase();
+    [
+        "captcha",
+        "challenge",
+        "checkpoint",
+        "verify-human",
+        "verify_you_are_human",
+    ]
+    .iter()
+    .any(|marker| lower_url.contains(marker))
+}
+
 /// Generic send + stream-poll loop shared by all adapters. Poll response
 /// text at the configured interval and finish only after a conservative
 /// time-based idle grace period with no streaming indicator, or at timeout.
@@ -535,18 +551,7 @@ pub async fn run_send(
             1,
             poll_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
         );
-        let lower_url = probe.url.to_ascii_lowercase();
-        let url_challenge = [
-            "captcha",
-            "challenge",
-            "checkpoint",
-            "verify-human",
-            "verify_you_are_human",
-        ]
-        .iter()
-        .any(|marker| lower_url.contains(marker));
-
-        if probe.challenge || url_challenge {
+        if probe_has_challenge(&probe) {
             crate::provider_guard::disable_provider(
                 adapter.name(),
                 "challenge page detected; manual review required",
@@ -605,6 +610,28 @@ pub async fn run_send(
                             poll_tick,
                         )
                     {
+                        // Sample the full body immediately before completion, even
+                        // when this poll is not one of the periodic body checks.
+                        let final_probe_started = Instant::now();
+                        let final_probe = adapter.response_probe(&page, true);
+                        crate::metrics::record_browser_poll(
+                            adapter.name(),
+                            1,
+                            final_probe_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+                        );
+                        if probe_has_challenge(&final_probe) {
+                            crate::provider_guard::disable_provider(
+                                adapter.name(),
+                                "challenge page detected; manual review required",
+                            );
+                            let _ = chunks
+                                .send(Err(anyhow::anyhow!(
+                                    "provider '{}' disabled after challenge page detection; manual review required",
+                                    adapter.name()
+                                )))
+                                .await;
+                            return;
+                        }
                         if let Some(answer) = &identical_answer_fallback {
                             let answer = if let Some(re) = &citation_re {
                                 re.replace_all(answer, "").to_string()
@@ -681,6 +708,28 @@ pub async fn run_send(
                 confirmed_post_answer_affordance,
                 poll_tick,
             ) {
+                // A final full-body check closes the gap between periodic
+                // sampling and declaring the provider turn complete.
+                let final_probe_started = Instant::now();
+                let final_probe = adapter.response_probe(&page, true);
+                crate::metrics::record_browser_poll(
+                    adapter.name(),
+                    1,
+                    final_probe_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+                );
+                if probe_has_challenge(&final_probe) {
+                    crate::provider_guard::disable_provider(
+                        adapter.name(),
+                        "challenge page detected; manual review required",
+                    );
+                    let _ = chunks
+                        .send(Err(anyhow::anyhow!(
+                            "provider '{}' disabled after challenge page detection; manual review required",
+                            adapter.name()
+                        )))
+                        .await;
+                    return;
+                }
                 if let Some(last_delta_at) = last_delta_at {
                     crate::metrics::record_provider_tail(
                         adapter.name(),
