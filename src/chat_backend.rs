@@ -45,6 +45,10 @@ pub struct GatewayError {
 }
 
 impl GatewayError {
+    pub fn is_retryable(&self) -> bool {
+        self.retryable
+    }
+
     pub fn provider_failure(message: impl Into<String>) -> Self {
         Self {
             kind: GatewayErrorKind::ProviderFailure,
