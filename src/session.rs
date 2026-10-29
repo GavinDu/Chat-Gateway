@@ -1673,6 +1673,45 @@ mod vault_tests {
     }
 
     #[test]
+    fn rotation_preflight_rejects_corrupt_record_before_returning_replacements() {
+        let old_key = [0x5a; 32];
+        let new_key = [0x6b; 32];
+        let valid = encrypt_session_snapshot(&sample_session(), "chatgpt", &old_key).unwrap();
+        let valid_before = valid.clone();
+
+        let result = prepare_vault_rotation_records(
+            vec![
+                (
+                    "chatgpt".into(),
+                    "sessions/chatgpt.vault".into(),
+                    valid.clone(),
+                ),
+                (
+                    "claude".into(),
+                    "sessions/claude.vault".into(),
+                    b"corrupt encrypted record".to_vec(),
+                ),
+            ],
+            &old_key,
+            &new_key,
+        );
+
+        assert!(
+            result.is_err(),
+            "rotation must fail closed if any provider record cannot authenticate"
+        );
+        assert_eq!(valid, valid_before, "preflight must not mutate source bytes");
+        assert!(
+            decrypt_session_snapshot(&valid, "chatgpt", &old_key).is_ok(),
+            "a later provider's corruption must not invalidate the original earlier record"
+        );
+        assert!(
+            decrypt_session_snapshot(&valid, "chatgpt", &new_key).is_err(),
+            "preflight failure must not leave a partially rotated first record"
+        );
+    }
+
+    #[test]
     fn vault_key_parser_accepts_only_32_byte_hex_keys() {
         assert_eq!(*parse_vault_key(&"ab".repeat(32)).unwrap(), [0xab; 32]);
         assert!(parse_vault_key("abcd").is_err());
