@@ -88,7 +88,7 @@ fn json_import_restores_order_and_affinity_and_preserves_source() {
         );
         assert_eq!(
             memory.get_tab("legacy").unwrap().as_deref(),
-            Some("legacy-tab")
+            None
         );
         assert_eq!(
             memory.conversation("legacy").unwrap().unwrap().messages,
@@ -1950,7 +1950,7 @@ fn legacy_synthetic_tab_id_is_cleared_on_next_persisted_turn() {
     store(&memory, "legacy-tab", "first");
     assert_eq!(
         memory.get_tab("legacy-tab").unwrap().as_deref(),
-        Some("tab-first")
+        None
     );
 
     memory
@@ -2154,6 +2154,10 @@ fn version_seven_migration_clears_synthetic_tab_id_and_preserves_history() {
     }
 
     let migrated = fixture.open();
+    let version: i64 = migrated.lock().unwrap().query_row("PRAGMA user_version", [], |row| row.get(0)).unwrap();
+    assert_eq!(version, 8);
+    let columns: Vec<String> = migrated.lock().unwrap().prepare("PRAGMA table_info(conversations)").unwrap().query_map([], |row| row.get::<_, String>(1)).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+    assert!(!columns.iter().any(|column| column == "tab_id"), "schema v8 must remove the tab_id column");
     assert_eq!(migrated.get_tab("migration-tab").unwrap(), None);
     assert_eq!(
         migrated.get_tab("migration-real-tab").unwrap().as_deref(),
