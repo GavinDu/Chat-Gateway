@@ -2347,8 +2347,12 @@ fn provider_thread_map_keeps_interleaved_conversations_isolated() {
         updated_at: 101,
     };
 
-    memory.upsert_provider_thread_for_owner("owner-a", &first).unwrap();
-    memory.upsert_provider_thread_for_owner("owner-a", &second).unwrap();
+    memory
+        .upsert_provider_thread_for_owner("owner-a", &first)
+        .unwrap();
+    memory
+        .upsert_provider_thread_for_owner("owner-a", &second)
+        .unwrap();
 
     assert_eq!(
         memory
