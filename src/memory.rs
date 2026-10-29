@@ -1309,11 +1309,11 @@ mod retrieval_ranking_tests {
                 .store_turn_for_owner_with_tab_id(
                     "memory-owner",
                     source_id.to_owned(),
-                    vec![ChatMessage {
+                    vec![super::ChatMessage {
                         role: "user".to_owned(),
                         content: "source prompt".to_owned(),
                     }],
-                    ChatMessage {
+                    super::ChatMessage {
                         role: "assistant".to_owned(),
                         content: "source answer".to_owned(),
                     },
@@ -1376,7 +1376,7 @@ mod provider_thread_map_isolation_tests {
             .store_turn_for_owner_with_tab_id(
                 owner,
                 id.to_owned(),
-                vec![ChatMessage {
+                vec![super::ChatMessage {
                     role: "user".to_owned(),
                     content: format!("question for {id}"),
                 }],
