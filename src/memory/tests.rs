@@ -2175,15 +2175,48 @@ fn version_seven_migration_clears_synthetic_tab_id_and_preserves_history() {
     }
 
     let migrated = fixture.open();
-    let version: i64 = migrated.lock().unwrap().query_row("PRAGMA user_version", [], |row| row.get(0)).unwrap();
+    let version: i64 = migrated
+        .lock()
+        .unwrap()
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
     assert_eq!(version, 8);
-    let columns: Vec<String> = migrated.lock().unwrap().prepare("PRAGMA table_info(conversations)").unwrap().query_map([], |row| row.get::<_, String>(1)).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
-    assert!(!columns.iter().any(|column| column == "tab_id"), "schema v8 must remove the tab_id column");
+    let columns: Vec<String> = migrated
+        .lock()
+        .unwrap()
+        .prepare("PRAGMA table_info(conversations)")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(1))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert!(
+        !columns.iter().any(|column| column == "tab_id"),
+        "schema v8 must remove the tab_id column"
+    );
     let connection = migrated.lock().unwrap();
-    let thread_count: i64 = connection.query_row("SELECT count(*) FROM provider_threads WHERE conversation_id='migration-tab'", [], |row| row.get(0)).unwrap();
-    let summary: String = connection.query_row("SELECT summary FROM conversation_summaries WHERE conversation_id='migration-tab'", [], |row| row.get(0)).unwrap();
-    assert_eq!(thread_count, 1, "migration must preserve provider-thread rows and foreign keys");
-    assert_eq!(summary, "preserve this summary", "migration must preserve rolling summaries");
+    let thread_count: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM provider_threads WHERE conversation_id=?1",
+            ["migration-tab"],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let summary: String = connection
+        .query_row(
+            "SELECT summary FROM conversation_summaries WHERE conversation_id=?1",
+            ["migration-tab"],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        thread_count, 1,
+        "migration must preserve provider-thread rows and foreign keys"
+    );
+    assert_eq!(
+        summary, "preserve this summary",
+        "migration must preserve rolling summaries"
+    );
     drop(connection);
     assert_eq!(migrated.get_tab("migration-tab").unwrap(), None);
     assert_eq!(
