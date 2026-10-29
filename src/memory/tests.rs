@@ -2529,3 +2529,36 @@ async fn conversation_store_bounded_history_is_ordered_and_owner_scoped() {
         .await
         .is_err());
 }
+
+#[tokio::test]
+async fn persist_turn_returns_marker_for_the_committed_canonical_transcript() {
+    let memory = Arc::new(UnifiedMemory::new(8000));
+    let expected = vec![m("user", "marker question"), m("assistant", "marker answer")];
+    let marker = memory
+        .clone()
+        .persist_turn(
+            "owner-marker".to_owned(),
+            "marker-conversation".to_owned(),
+            vec![expected[0].clone()],
+            expected[1].clone(),
+            "chatgpt".to_owned(),
+            None,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(marker, transcript_marker(&expected));
+    assert_eq!(
+        memory
+            .clone()
+            .read_transcript(
+                "owner-marker".to_owned(),
+                "marker-conversation".to_owned()
+            )
+            .await
+            .unwrap(),
+        expected,
+        "the returned fingerprint must describe the durable canonical transcript"
+    );
+}
+
