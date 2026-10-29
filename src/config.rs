@@ -322,9 +322,7 @@ mod tests {
         let defaults = config("providers: []\n");
         assert_eq!(defaults.obscura.user_agent, None);
 
-        let configured = config(
-            "obscura:\n  user_agent: 'Example Browser UA'\nproviders: []\n",
-        );
+        let configured = config("obscura:\n  user_agent: 'Example Browser UA'\nproviders: []\n");
         assert_eq!(
             configured.obscura.user_agent.as_deref(),
             Some("Example Browser UA")
