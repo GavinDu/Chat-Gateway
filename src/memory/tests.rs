@@ -2133,6 +2133,7 @@ fn version_seven_migration_clears_synthetic_tab_id_and_preserves_history() {
         let memory = fixture.open();
         store(&memory, "migration-tab", "preserve-this-history");
         store(&memory, "migration-real-tab", "preserve-real-tab-history");
+        store(&memory, "migration-uppercase-tab", "preserve-uppercase-tab-history");
     }
 
     // Simulate a v6 database with one synthetic and one real tab identifier.
@@ -2150,6 +2151,12 @@ fn version_seven_migration_clears_synthetic_tab_id_and_preserves_history() {
                 rusqlite::params!["real-browser-tab", "migration-real-tab"],
             )
             .unwrap();
+        connection
+            .execute(
+                "UPDATE conversations SET tab_id = ?1 WHERE id = ?2",
+                rusqlite::params!["TAB-real-browser-tab", "migration-uppercase-tab"],
+            )
+            .unwrap();
         connection.pragma_update(None, "user_version", 6).unwrap();
     }
 
@@ -2158,6 +2165,14 @@ fn version_seven_migration_clears_synthetic_tab_id_and_preserves_history() {
     assert_eq!(
         migrated.get_tab("migration-real-tab").unwrap().as_deref(),
         Some("real-browser-tab")
+    );
+    assert_eq!(
+        migrated
+            .get_tab("migration-uppercase-tab")
+            .unwrap()
+            .as_deref(),
+        Some("TAB-real-browser-tab"),
+        "migration must only clear the exact synthetic prefix"
     );
     assert_eq!(
         migrated
