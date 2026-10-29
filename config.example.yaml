@@ -4,6 +4,7 @@ auth:
 
 server:
   port: 8080
+  gateway_poll_tick_ms: 350 # allowed range: 50-5000; default 350
   chrome_profile_dir: ""
 
 memory:
