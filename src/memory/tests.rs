@@ -2640,3 +2640,40 @@ async fn cancelled_async_turn_persistence_commits_atomically() {
         "cancellation must leave either no turn or a complete atomic turn, never a partial pair"
     );
 }
+
+
+#[tokio::test]
+async fn conversation_store_counts_one_context_snapshot_and_one_turn_transaction() {
+    let memory = Arc::new(UnifiedMemory::new(8000));
+    let store: Arc<dyn ConversationStore> = memory.clone();
+
+    let _context = store
+        .clone()
+        .build_context_with_transcript(
+            "count-owner".to_owned(),
+            Some("count-conversation".to_owned()),
+            vec![m("user", "counted prompt")],
+            8000,
+        )
+        .await
+        .expect("context snapshot should succeed for a new conversation");
+
+    let marker = store
+        .persist_turn(
+            "count-owner".to_owned(),
+            "count-conversation".to_owned(),
+            vec![m("user", "counted prompt")],
+            m("assistant", "counted response"),
+            "chatgpt".to_owned(),
+            None,
+        )
+        .await
+        .expect("turn persistence should succeed");
+    assert!(!marker.is_empty());
+    assert_eq!(
+        memory.logical_operation_counts_for_test(),
+        (1, 1),
+        "one request-scoped context build should use one snapshot and one turn transaction"
+    );
+}
+
