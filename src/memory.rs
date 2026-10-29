@@ -61,7 +61,6 @@ pub trait ConversationStore: Send + Sync {
 
     /// Read at most the newest `max_messages` in chronological order.
     /// Kept as part of the storage contract while request call sites migrate.
-    #[allow(dead_code)]
     /// Bounded reads are part of the migration contract; production call sites
     /// will adopt this path as transcript consumers move behind the trait.
     #[allow(dead_code)]
