@@ -2208,8 +2208,14 @@ async fn async_conversation_store_contract_persists_bounded_owner_scoped_history
     assert_eq!(
         bounded,
         vec![
-            ChatMessage { role: "user".to_owned(), content: "second".to_owned() },
-            ChatMessage { role: "assistant".to_owned(), content: "answer".to_owned() },
+            ChatMessage {
+                role: "user".to_owned(),
+                content: "second".to_owned(),
+            },
+            ChatMessage {
+                role: "assistant".to_owned(),
+                content: "answer".to_owned(),
+            },
         ]
     );
 
