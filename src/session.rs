@@ -1842,7 +1842,10 @@ mod vault_tests {
         let missing_parent_destination = root.join("missing").join("second.vault");
 
         let result = restore_vault_backup_records(vec![
-            (first.to_string_lossy().into_owned(), b"restored-first".to_vec()),
+            (
+                first.to_string_lossy().into_owned(),
+                b"restored-first".to_vec(),
+            ),
             (
                 missing_parent_destination.to_string_lossy().into_owned(),
                 b"restored-second".to_vec(),
