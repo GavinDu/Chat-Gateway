@@ -78,6 +78,10 @@ impl Default for MemoryConfig {
 pub struct ObscuraConfig {
     #[serde(default = "default_true")]
     pub stealth: bool,
+    /// Optional user-agent override for the embedded browser. Match a value
+    /// only when it is known and permitted; this does not replay locale/timezone.
+    #[serde(default)]
+    pub user_agent: Option<String>,
     /// Persistent cookie/storage directory for the embedded browser
     /// (falls back to server.chrome_profile_dir when unset).
     #[serde(default)]
@@ -88,6 +92,7 @@ impl Default for ObscuraConfig {
     fn default() -> Self {
         Self {
             stealth: true,
+            user_agent: None,
             storage_dir: None,
         }
     }
