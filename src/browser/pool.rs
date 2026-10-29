@@ -1122,7 +1122,14 @@ fn browser_thread(
                                 let page_for_save = page.clone();
                                 tokio::select! {
                                     _ = cancel_send.notified() => return,
-                                    _ = providers::run_send(adapter, page, prompt, timeout, save_tx) => {}
+                                    _ = providers::run_send(
+                                        adapter,
+                                        page,
+                                        prompt,
+                                        timeout,
+                                        Duration::from_millis(cfg.server.gateway_poll_tick_ms),
+                                        save_tx,
+                                    ) => {}
                                 }
                                 // Save only after the send loop has finished and while
                                 // this provider's page lock is still held. A cancelled send
