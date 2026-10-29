@@ -1240,7 +1240,7 @@ fn provider_thread_mapping_is_provider_scoped_and_survives_restart() {
             .is_none());
     }
 
-    let reopened = fixture.open();
+    let reopened = Arc::new(fixture.open());
     assert_eq!(
         reopened
             .get_provider_thread("thread-api", "claude")
