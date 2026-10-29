@@ -1369,6 +1369,93 @@ mod retrieval_ranking_tests {
         assert_eq!(retrieved[2].id, high_old.id);
         assert_eq!(retrieved[3].id, low.id);
     }
+
+    #[test]
+    fn long_term_memory_disabled_expired_and_deleted_items_never_retrieve() {
+        let memory = memory();
+
+        assert!(
+            memory
+                .save_long_term_memory_item(
+                    "memory-owner",
+                    "preference",
+                    "must not persist while disabled",
+                    None,
+                    0.9,
+                    None,
+                )
+                .is_err(),
+            "saving personal memory must require explicit opt-in"
+        );
+        assert!(memory
+            .retrieve_long_term_memory_items("memory-owner", 20)
+            .unwrap()
+            .is_empty());
+
+        memory
+            .set_long_term_memory_enabled("memory-owner", true)
+            .unwrap();
+        for source_id in ["source-old", "source-current"] {
+            memory
+                .store_turn_for_owner_with_tab_id(
+                    "memory-owner",
+                    source_id.to_owned(),
+                    vec![super::ChatMessage {
+                        role: "user".to_owned(),
+                        content: "source prompt".to_owned(),
+                    }],
+                    super::ChatMessage {
+                        role: "assistant".to_owned(),
+                        content: "source answer".to_owned(),
+                    },
+                    "chatgpt".to_owned(),
+                    None,
+                )
+                .unwrap();
+        }
+
+        let expired_at = super::unix_timestamp().saturating_sub(1);
+        let expired = memory
+            .save_long_term_memory_item(
+                "memory-owner",
+                "expired",
+                "stale value",
+                Some("source-old"),
+                1.0,
+                Some(expired_at),
+            )
+            .unwrap();
+        let active = memory
+            .save_long_term_memory_item(
+                "memory-owner",
+                "active",
+                "current value",
+                Some("source-current"),
+                0.8,
+                None,
+            )
+            .unwrap();
+
+        let retrieved = memory
+            .retrieve_long_term_memory_items("memory-owner", 20)
+            .unwrap();
+        assert_eq!(retrieved.len(), 1);
+        assert_eq!(retrieved[0].id, active.id);
+        assert_ne!(retrieved[0].id, expired.id);
+
+        assert!(memory
+            .delete_long_term_memory_item("memory-owner", &active.id)
+            .unwrap());
+        assert!(memory
+            .retrieve_long_term_memory_items("memory-owner", 20)
+            .unwrap()
+            .is_empty());
+        assert!(
+            !memory
+                .delete_long_term_memory_item("another-owner", &expired.id)
+                .unwrap()
+        );
+    }
 }
 
 #[cfg(test)]
