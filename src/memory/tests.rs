@@ -2327,21 +2327,62 @@ async fn provider_thread_map_survives_restart_and_cascades_on_conversation_delet
 
     {
         let memory = fixture.open();
-        memory.store_turn_for_owner_with_tab_id(
-            "owner-a", expected.conversation_id.clone(), vec![m("user", "persist me")],
-            m("assistant", "persisted"), "chatgpt".to_owned(), None,
-        ).unwrap();
-        memory.upsert_provider_thread_for_owner("owner-a", &expected).unwrap();
+        memory
+            .store_turn_for_owner_with_tab_id(
+                "owner-a",
+                expected.conversation_id.clone(),
+                vec![m("user", "persist me")],
+                m("assistant", "persisted"),
+                "chatgpt".to_owned(),
+                None,
+            )
+            .unwrap();
+        memory
+            .upsert_provider_thread_for_owner("owner-a", &expected)
+            .unwrap();
     }
 
     let reopened = Arc::new(fixture.open());
-    assert_eq!(reopened.get_provider_thread_for_owner("owner-a", &expected.conversation_id, &expected.provider).unwrap(), Some(expected.clone()));
     assert_eq!(
-        reopened.clone().read_transcript("owner-a".to_owned(), expected.conversation_id.clone()).await.unwrap(),
+        reopened
+            .get_provider_thread_for_owner(
+                "owner-a",
+                &expected.conversation_id,
+                &expected.provider,
+            )
+            .unwrap(),
+        Some(expected.clone())
+    );
+    assert_eq!(
+        reopened
+            .clone()
+            .read_transcript("owner-a".to_owned(), expected.conversation_id.clone())
+            .await
+            .unwrap(),
         vec![m("user", "persist me"), m("assistant", "persisted")],
         "transcript must survive reopening the SQLite database"
     );
-    assert_eq!(reopened.get_provider_thread_for_owner("owner-b", &expected.conversation_id, &expected.provider).unwrap(), None);
-    assert!(reopened.delete_conversation_for_owner("owner-a", &expected.conversation_id).unwrap());
-    assert_eq!(reopened.get_provider_thread_for_owner("owner-a", &expected.conversation_id, &expected.provider).unwrap(), None);
+    assert_eq!(
+        reopened
+            .get_provider_thread_for_owner(
+                "owner-b",
+                &expected.conversation_id,
+                &expected.provider,
+            )
+            .unwrap(),
+        None
+    );
+    assert!(reopened
+        .delete_conversation_for_owner("owner-a", &expected.conversation_id)
+        .unwrap());
+    assert_eq!(
+        reopened
+            .get_provider_thread_for_owner(
+                "owner-a",
+                &expected.conversation_id,
+                &expected.provider,
+            )
+            .unwrap(),
+        None
+    );
 }
