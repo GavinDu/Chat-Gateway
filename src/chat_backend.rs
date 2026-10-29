@@ -76,7 +76,7 @@ pub trait ChatBackend: Send + Sync {
     async fn send_stream(
         &self,
         request: ChatRequest,
-    ) -> Result<mpsc::Receiver<Result<ChatEvent, GatewayError>>>;
+    ) -> std::result::Result<mpsc::Receiver<Result<ChatEvent, GatewayError>>, GatewayError>;
 }
 
 #[async_trait::async_trait]
@@ -84,7 +84,7 @@ impl ChatBackend for crate::browser::pool::ObscuraPool {
     async fn send_stream(
         &self,
         request: ChatRequest,
-    ) -> Result<mpsc::Receiver<Result<ChatEvent, GatewayError>>> {
+    ) -> std::result::Result<mpsc::Receiver<Result<ChatEvent, GatewayError>>, GatewayError> {
         let mut source = crate::browser::pool::ObscuraPool::send_stream(
             self,
             &request.provider,
@@ -93,7 +93,17 @@ impl ChatBackend for crate::browser::pool::ObscuraPool {
             request.has_history,
             request.thread_url,
         )
-        .await?;
+        .await
+        .map_err(|error| {
+            if error
+                .downcast_ref::<crate::browser::pool::BrowserWorkerUnavailableError>()
+                .is_some_and(|worker_error| worker_error.is_retryable())
+            {
+                GatewayError::backend_unavailable(error.to_string())
+            } else {
+                GatewayError::provider_failure(error.to_string())
+            }
+        })?;
         let (tx, rx) = mpsc::channel(32);
         tokio::spawn(async move {
             while let Some(chunk) = source.recv().await {
@@ -123,7 +133,7 @@ mod tests {
         async fn send_stream(
             &self,
             request: ChatRequest,
-        ) -> Result<mpsc::Receiver<Result<ChatEvent, GatewayError>>> {
+        ) -> std::result::Result<mpsc::Receiver<Result<ChatEvent, GatewayError>>, GatewayError> {
             let (tx, rx) = mpsc::channel(2);
             tx.send(Ok(ChatEvent {
                 content: format!("{}:{}", request.provider, request.prompt),
