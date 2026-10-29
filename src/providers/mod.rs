@@ -446,6 +446,7 @@ fn completion_ready(
     saw_streaming: bool,
     post_answer_affordance: bool,
     poll_tick: Duration,
+    completion_idle: Duration,
 ) -> bool {
     stable_ticks
         >= completion_idle_ticks(
@@ -453,6 +454,7 @@ fn completion_ready(
             saw_streaming,
             post_answer_affordance,
             poll_tick,
+            completion_idle,
         )
         && !streaming
 }
