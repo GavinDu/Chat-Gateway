@@ -2583,3 +2583,60 @@ async fn persist_turn_returns_marker_for_the_committed_canonical_transcript() {
         "the returned fingerprint must describe the durable canonical transcript"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancelled_async_turn_persistence_commits_atomically() {
+    let memory = Arc::new(UnifiedMemory::new(8000));
+    let lock = memory.lock().unwrap();
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let task_memory = memory.clone();
+    let task = tokio::spawn(async move {
+        let _ = started_tx.send(());
+        task_memory
+            .clone()
+            .persist_turn(
+                "owner-cancel".to_owned(),
+                "cancelled-turn".to_owned(),
+                vec![m("user", "atomic user message")],
+                m("assistant", "atomic assistant message"),
+                "chatgpt".to_owned(),
+                None,
+            )
+            .await
+    });
+
+    started_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .expect("persistence task should start");
+    // The multithreaded runtime can enqueue the blocking closure while this
+    // test thread waits briefly without holding an async task across the lock.
+    // The closure must wait on the lock held by this test.
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    task.abort();
+    drop(lock);
+
+    let expected = vec![
+        m("user", "atomic user message"),
+        m("assistant", "atomic assistant message"),
+    ];
+    let transcript = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            let messages = memory
+                .clone()
+                .read_transcript("owner-cancel".to_owned(), "cancelled-turn".to_owned())
+                .await
+                .unwrap();
+            if !messages.is_empty() {
+                break messages;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("submitted blocking persistence should finish after lock release");
+
+    assert_eq!(
+        transcript, expected,
+        "cancellation must leave either no turn or a complete atomic turn, never a partial pair"
+    );
+}
