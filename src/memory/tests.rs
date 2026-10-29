@@ -2640,4 +2640,3 @@ async fn cancelled_async_turn_persistence_commits_atomically() {
         "cancellation must leave either no turn or a complete atomic turn, never a partial pair"
     );
 }
-
