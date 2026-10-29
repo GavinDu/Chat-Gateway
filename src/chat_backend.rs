@@ -50,11 +50,19 @@ pub struct GatewayError {
 
 impl GatewayError {
     pub fn provider_failure(message: impl Into<String>) -> Self {
-        Self { kind: GatewayErrorKind::ProviderFailure, message: message.into(), retryable: false }
+        Self {
+            kind: GatewayErrorKind::ProviderFailure,
+            message: message.into(),
+            retryable: false,
+        }
     }
 
     pub fn backend_unavailable(message: impl Into<String>) -> Self {
-        Self { kind: GatewayErrorKind::BackendUnavailable, message: message.into(), retryable: true }
+        Self {
+            kind: GatewayErrorKind::BackendUnavailable,
+            message: message.into(),
+            retryable: true,
+        }
     }
 }
 
@@ -126,7 +134,10 @@ mod tests {
             }))
             .await
             .expect("receiver should be alive");
-            tx.send(Ok(ChatEvent { content: String::new(), done: true }))
+            tx.send(Ok(ChatEvent {
+                content: String::new(),
+                done: true,
+            }))
                 .await
                 .expect("receiver should be alive");
             Ok(rx)
@@ -147,14 +158,20 @@ mod tests {
             .await
             .expect("fake backend should accept request");
 
-        assert_eq!(events.recv().await.unwrap().unwrap(), ChatEvent {
-            content: "chatgpt:hello".to_owned(),
-            done: false,
-        });
-        assert_eq!(events.recv().await.unwrap().unwrap(), ChatEvent {
-            content: String::new(),
-            done: true,
-        });
+        assert_eq!(
+            events.recv().await.unwrap().unwrap(),
+            ChatEvent {
+                content: "chatgpt:hello".to_owned(),
+                done: false,
+            }
+        );
+        assert_eq!(
+            events.recv().await.unwrap().unwrap(),
+            ChatEvent {
+                content: String::new(),
+                done: true,
+            }
+        );
         assert!(events.recv().await.is_none());
     }
 
