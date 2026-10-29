@@ -2311,3 +2311,57 @@ async fn async_conversation_store_concurrent_turns_are_transactionally_preserved
         "concurrent turn writes must keep each user/assistant pair contiguous: {history:?}"
     );
 }
+
+#[test]
+fn provider_thread_map_keeps_interleaved_conversations_isolated() {
+    let fixture = Fixture::new();
+    let memory = fixture.open();
+
+    for conversation_id in ["conversation-a", "conversation-b"] {
+        memory
+            .store_turn_for_owner_with_tab_id(
+                "owner-a",
+                conversation_id.to_owned(),
+                vec![m("user", &format!("message for {conversation_id}"))],
+                m("assistant", &format!("answer for {conversation_id}")),
+                "chatgpt".to_owned(),
+                None,
+            )
+            .unwrap();
+    }
+
+    let first = ProviderThread {
+        conversation_id: "conversation-a".to_owned(),
+        provider: "chatgpt".to_owned(),
+        thread_url: "https://chatgpt.com/c/thread-a".to_owned(),
+        synced_through_message_id: Some("hash-a".to_owned()),
+        model: Some("gpt-test".to_owned()),
+        updated_at: 100,
+    };
+    let second = ProviderThread {
+        conversation_id: "conversation-b".to_owned(),
+        provider: "chatgpt".to_owned(),
+        thread_url: "https://chatgpt.com/c/thread-b".to_owned(),
+        synced_through_message_id: Some("hash-b".to_owned()),
+        model: Some("gpt-test".to_owned()),
+        updated_at: 101,
+    };
+
+    memory.upsert_provider_thread_for_owner("owner-a", &first).unwrap();
+    memory.upsert_provider_thread_for_owner("owner-a", &second).unwrap();
+
+    assert_eq!(
+        memory
+            .get_provider_thread_for_owner("owner-a", "conversation-a", "chatgpt")
+            .unwrap(),
+        Some(first),
+        "interleaving conversation B must not replace conversation A's thread"
+    );
+    assert_eq!(
+        memory
+            .get_provider_thread_for_owner("owner-a", "conversation-b", "chatgpt")
+            .unwrap(),
+        Some(second),
+        "conversation B must retain its own thread and sync marker"
+    );
+}
