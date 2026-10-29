@@ -231,7 +231,7 @@ fn initialize(connection: &mut Connection, legacy: Option<&Path>) -> Result<()> 
     // after the migration had already completed.
     if needs_synthetic_tab_cleanup {
         tx.execute(
-            "UPDATE conversations SET tab_id = NULL WHERE tab_id LIKE 'tab-%'",
+            "UPDATE conversations SET tab_id = NULL WHERE substr(tab_id, 1, 4) = 'tab-'",
             [],
         )?;
     }
@@ -483,6 +483,20 @@ mod concurrency_configuration_tests {
         let second_mode: String = second.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
         assert_eq!(first_mode.to_ascii_lowercase(), "wal");
         assert_eq!(second_mode.to_ascii_lowercase(), "wal");
+
+        // SQLite connection-local settings must be applied to every connection,
+        // not just the connection that performed the initial schema setup.
+        for connection in [&first, &second] {
+            let busy_timeout_ms: i64 =
+                connection.query_row("PRAGMA busy_timeout", [], |row| row.get(0))?;
+            let foreign_keys: i64 =
+                connection.query_row("PRAGMA foreign_keys", [], |row| row.get(0))?;
+            let synchronous: i64 =
+                connection.query_row("PRAGMA synchronous", [], |row| row.get(0))?;
+            assert_eq!(busy_timeout_ms, 30_000);
+            assert_eq!(foreign_keys, 1);
+            assert_eq!(synchronous, 2, "each connection must use synchronous=FULL");
+        }
 
         drop(second);
         drop(first);
