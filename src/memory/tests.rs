@@ -2269,6 +2269,7 @@ async fn conversation_store_bounded_history_is_ordered_and_owner_scoped() {
         .await
         .expect("zero-sized history reads should succeed without returning messages");
     assert!(empty.is_empty());
+    assert_eq!(empty.len(), 0, "zero limit must not leak older messages");
 
     let unauthorized = memory
         .read_history("owner-b".into(), "bounded-history".into(), 2)
