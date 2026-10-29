@@ -42,6 +42,7 @@ fn open(path: &Path, legacy: Option<&Path>) -> anyhow::Result<UnifiedMemory> {
     Ok(UnifiedMemory {
         max_tokens: 8000,
         connection: Mutex::new(sqlite::open(Some(path), legacy)?),
+        operation_counts: Arc::new(OperationCounts::default()),
     })
 }
 
