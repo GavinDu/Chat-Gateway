@@ -1625,6 +1625,54 @@ mod vault_tests {
     }
 
     #[test]
+    fn rotation_prepares_each_provider_for_new_key_without_mutating_originals() {
+        let old_key = [0x5a; 32];
+        let new_key = [0x6b; 32];
+        let chatgpt = encrypt_session_snapshot(&sample_session(), "chatgpt", &old_key).unwrap();
+        let claude = encrypt_session_snapshot(&sample_session(), "claude", &old_key).unwrap();
+
+        let prepared = prepare_vault_rotation_records(
+            vec![
+                (
+                    "chatgpt".into(),
+                    "sessions/chatgpt.vault".into(),
+                    chatgpt.clone(),
+                ),
+                (
+                    "claude".into(),
+                    "sessions/claude.vault".into(),
+                    claude.clone(),
+                ),
+            ],
+            &old_key,
+            &new_key,
+        )
+        .expect("all valid records should be prepared for rotation");
+
+        assert_eq!(prepared.len(), 2);
+        for (provider, original, replacement) in [
+            ("chatgpt", &chatgpt, &prepared[0].2),
+            ("claude", &claude, &prepared[1].2),
+        ] {
+            assert!(decrypt_session_snapshot(original, provider, &old_key).is_ok());
+            assert!(
+                decrypt_session_snapshot(replacement, provider, &new_key).is_ok(),
+                "replacement for {provider} must authenticate with the new key"
+            );
+            assert!(
+                decrypt_session_snapshot(replacement, provider, &old_key).is_err(),
+                "replacement for {provider} must no longer authenticate with the old key"
+            );
+        }
+        // Preparation is side-effect free; callers only replace live records after
+        // every provider has passed authentication and encrypted backup creation.
+        assert_eq!(prepared[0].0, "sessions/chatgpt.vault");
+        assert_eq!(prepared[1].0, "sessions/claude.vault");
+        assert_ne!(prepared[0].1, prepared[0].2);
+        assert_ne!(prepared[1].1, prepared[1].2);
+    }
+
+    #[test]
     fn vault_key_parser_accepts_only_32_byte_hex_keys() {
         assert_eq!(*parse_vault_key(&"ab".repeat(32)).unwrap(), [0xab; 32]);
         assert!(parse_vault_key("abcd").is_err());
