@@ -2312,7 +2312,6 @@ async fn async_conversation_store_concurrent_turns_are_transactionally_preserved
     );
 }
 
-
 #[tokio::test]
 async fn conversation_store_bounded_history_is_ordered_and_owner_scoped() {
     let memory = Arc::new(UnifiedMemory::new(8000));
