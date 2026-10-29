@@ -3,7 +3,7 @@ use anyhow::{bail, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use std::{collections::HashMap, fs, path::Path, time::Duration};
 
-const VERSION: i64 = 7;
+const VERSION: i64 = 8;
 const APPLICATION_ID: i64 = 0x4347574d; // CGWM
 const PROVIDER_THREADS_SCHEMA: &str = "
     CREATE TABLE provider_threads (
@@ -51,7 +51,6 @@ const SCHEMA: &str = "
     CREATE TABLE conversations (
         id TEXT PRIMARY KEY NOT NULL,
         provider TEXT,
-        tab_id TEXT,
         last_activity_at INTEGER NOT NULL DEFAULT 0,
         owner_key_id TEXT NOT NULL DEFAULT 'local'
     );
@@ -173,7 +172,7 @@ fn initialize(connection: &mut Connection, legacy: Option<&Path>) -> Result<()> 
     }
     let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let version: i64 = tx.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    let needs_synthetic_tab_cleanup = version > 0 && version < VERSION;
+    let needs_synthetic_tab_cleanup = version > 0 && version < 7;
     let app: i64 = tx.query_row("PRAGMA application_id", [], |row| row.get(0))?;
     if version == 0 {
         let tables: i64 = tx.query_row(
@@ -223,6 +222,8 @@ fn initialize(connection: &mut Connection, legacy: Option<&Path>) -> Result<()> 
         tx.pragma_update(None, "user_version", VERSION)?;
     } else if version == 6 && app == APPLICATION_ID {
         tx.pragma_update(None, "user_version", VERSION)?;
+    } else if version == 7 && app == APPLICATION_ID {
+        // The v8 column removal is performed after legacy synthetic values are cleaned.
     } else if version != VERSION || app != APPLICATION_ID {
         bail!("unsupported conversation schema version {version} (expected {VERSION}) or application id {app}");
     }
@@ -234,6 +235,12 @@ fn initialize(connection: &mut Connection, legacy: Option<&Path>) -> Result<()> 
             "UPDATE conversations SET tab_id = NULL WHERE substr(tab_id, 1, 4) = 'tab-'",
             [],
         )?;
+    }
+    // Remove the obsolete affinity column only after legacy synthetic values
+    // have been cleared. Versions 1–7 all contain this column; a new v8
+    // database is created without it by SCHEMA.
+    if version > 0 && version < VERSION {
+        tx.execute_batch("ALTER TABLE conversations DROP COLUMN tab_id;")?;
     }
     tx.execute_batch(
         "CREATE INDEX IF NOT EXISTS conversations_owner_key_id_idx ON conversations(owner_key_id, id);",
@@ -302,7 +309,7 @@ fn initialize(connection: &mut Connection, legacy: Option<&Path>) -> Result<()> 
 }
 
 fn validate_schema(connection: &Connection) -> Result<()> {
-    // Version 7 is owned by this application. Fail closed if its definitions
+    // Version 8 is owned by this application. Fail closed if its definitions
     // were changed, including constraints that SELECT alone cannot validate.
     let expected = Connection::open_in_memory()?;
     expected.execute_batch(SCHEMA)?;
@@ -331,19 +338,14 @@ fn validate_schema(connection: &Connection) -> Result<()> {
 }
 
 pub(super) fn load(connection: &Connection, id: &str) -> Result<Option<Conversation>> {
-    let affinity = connection
+    let provider = connection
         .query_row(
-            "SELECT provider, tab_id FROM conversations WHERE id=?1",
+            "SELECT provider FROM conversations WHERE id=?1",
             [id],
-            |row| {
-                Ok((
-                    row.get::<_, Option<String>>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                ))
-            },
+            |row| row.get::<_, Option<String>>(0),
         )
         .optional()?;
-    let Some((provider, tab_id)) = affinity else {
+    let Some(provider) = provider else {
         return Ok(None);
     };
     let mut statement = connection.prepare(
@@ -370,7 +372,8 @@ pub(super) fn load(connection: &Connection, id: &str) -> Result<Option<Conversat
         id: id.to_owned(),
         messages,
         provider,
-        tab_id,
+        // Compatibility field only; browser tab identifiers are no longer persisted.
+        tab_id: None,
     }))
 }
 
@@ -407,17 +410,11 @@ pub(super) fn append_owned(
         .as_secs()
         .min(i64::MAX as u64) as i64;
     connection.execute(
-        "INSERT INTO conversations(id,provider,tab_id,last_activity_at,owner_key_id)
-         VALUES(?1,?2,?3,?4,?5)
-         ON CONFLICT(id) DO UPDATE SET provider=excluded.provider, tab_id=excluded.tab_id,
+        "INSERT INTO conversations(id,provider,last_activity_at,owner_key_id)
+         VALUES(?1,?2,?3,?4)
+         ON CONFLICT(id) DO UPDATE SET provider=excluded.provider,
              last_activity_at=excluded.last_activity_at",
-        params![
-            conversation.id,
-            conversation.provider,
-            conversation.tab_id,
-            now,
-            owner_key_id,
-        ],
+        params![conversation.id, conversation.provider, now, owner_key_id],
     )?;
     let mut insert = connection.prepare(
         "INSERT INTO messages(conversation_id,position,role,content) VALUES(?1,?2,?3,?4)",
@@ -519,8 +516,8 @@ mod concurrency_configuration_tests {
         let mut second = super::open(Some(&path), None)?;
         let first_tx = first.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         first_tx.execute(
-            "INSERT INTO conversations(id,provider,tab_id,last_activity_at,owner_key_id)
-             VALUES ('writer-first', NULL, NULL, 0, 'local')",
+            "INSERT INTO conversations(id,provider,last_activity_at,owner_key_id)
+             VALUES ('writer-first', NULL, 0, 'local')",
             [],
         )?;
 
@@ -532,8 +529,8 @@ mod concurrency_configuration_tests {
             let transaction =
                 second.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             transaction.execute(
-                "INSERT INTO conversations(id,provider,tab_id,last_activity_at,owner_key_id)
-                 VALUES ('writer-second', NULL, NULL, 0, 'local')",
+                "INSERT INTO conversations(id,provider,last_activity_at,owner_key_id)
+                 VALUES ('writer-second', NULL, 0, 'local')",
                 [],
             )?;
             transaction.commit()?;
@@ -582,8 +579,8 @@ mod concurrency_configuration_tests {
         let transaction =
             writer.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         transaction.execute(
-            "INSERT INTO conversations(id,provider,tab_id,last_activity_at,owner_key_id)
-             VALUES (?1, NULL, NULL, 0, 'local')",
+            "INSERT INTO conversations(id,provider,last_activity_at,owner_key_id)
+             VALUES (?1, NULL, 0, 'local')",
             ["isolation-check"],
         )?;
 
