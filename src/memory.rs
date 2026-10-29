@@ -66,6 +66,16 @@ pub trait ConversationStore: Send + Sync {
         max_messages: usize,
     ) -> anyhow::Result<Vec<ChatMessage>>;
 
+    /// Read the canonical transcript and rolling summary in one SQLite snapshot,
+    /// then build provider context on Tokio's blocking pool.
+    async fn build_context_with_transcript(
+        self: Arc<Self>,
+        owner_key_id: String,
+        conversation_id: Option<String>,
+        new_messages: Vec<ChatMessage>,
+        token_budget: usize,
+    ) -> anyhow::Result<(String, Vec<ChatMessage>, bool, Vec<ChatMessage>)>;
+
     async fn persist_turn(
         self: Arc<Self>,
         owner_key_id: String,
@@ -103,6 +113,22 @@ impl ConversationStore for UnifiedMemory {
         })
         .await
         .map_err(|error| anyhow::anyhow!("bounded conversation history task failed: {error}"))?
+    }
+
+    async fn build_context_with_transcript(
+        self: Arc<Self>,
+        owner_key_id: String,
+        conversation_id: Option<String>,
+        new_messages: Vec<ChatMessage>,
+        token_budget: usize,
+    ) -> anyhow::Result<(String, Vec<ChatMessage>, bool, Vec<ChatMessage>)> {
+        self.build_context_for_owner_with_transcript_budget_blocking(
+            owner_key_id,
+            conversation_id,
+            new_messages,
+            token_budget,
+        )
+        .await
     }
 
     async fn persist_turn(
