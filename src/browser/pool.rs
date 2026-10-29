@@ -922,6 +922,7 @@ fn browser_thread(
         rt.block_on(async move {
             let local = tokio::task::LocalSet::new();
             local.run_until(async move {
+                let gateway_poll_tick = Duration::from_millis(cfg.server.gateway_poll_tick_ms);
                 let browser = match build_browser(&cfg) {
                     Ok(b) => b,
                     Err(e) => {
@@ -1041,6 +1042,7 @@ fn browser_thread(
                             };
                             let browser_for_save = browser.clone();
                             let provider_name = provider.name().to_string();
+                            let poll_tick = gateway_poll_tick;
                             tokio::task::spawn_local(async move {
                                 let _guard = lock.lock().await;
                                 // Reopen only a validated provider-owned thread. Otherwise return
@@ -1122,7 +1124,14 @@ fn browser_thread(
                                 let page_for_save = page.clone();
                                 tokio::select! {
                                     _ = cancel_send.notified() => return,
-                                    _ = providers::run_send(adapter, page, prompt, timeout, save_tx) => {}
+                                    _ = providers::run_send(
+                                        adapter,
+                                        page,
+                                        prompt,
+                                        timeout,
+                                        poll_tick,
+                                        save_tx,
+                                    ) => {}
                                 }
                                 // Save only after the send loop has finished and while
                                 // this provider's page lock is still held. A cancelled send

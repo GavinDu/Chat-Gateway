@@ -40,6 +40,9 @@ pub struct ApiKeyConfig {
 pub struct ServerConfig {
     #[serde(default = "default_port")]
     pub port: u16,
+    /// Browser response polling interval in milliseconds (50-5000).
+    #[serde(default = "default_gateway_poll_tick_ms")]
+    pub gateway_poll_tick_ms: u64,
     #[serde(default)]
     pub chrome_profile_dir: String,
 }
@@ -48,6 +51,7 @@ impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             port: default_port(),
+            gateway_poll_tick_ms: default_gateway_poll_tick_ms(),
             chrome_profile_dir: String::new(),
         }
     }
@@ -143,6 +147,9 @@ impl AppConfig {
     pub fn validate(&self) -> anyhow::Result<()> {
         if self.server.port == 0 {
             anyhow::bail!("server.port must be between 1 and 65535");
+        }
+        if !(50..=5_000).contains(&self.server.gateway_poll_tick_ms) {
+            anyhow::bail!("server.gateway_poll_tick_ms must be between 50 and 5000 milliseconds");
         }
         if self.memory.max_tokens == 0 {
             anyhow::bail!("memory.max_tokens must be greater than zero");
@@ -271,6 +278,9 @@ fn default_true() -> bool {
 fn default_port() -> u16 {
     8080
 }
+fn default_gateway_poll_tick_ms() -> u64 {
+    350
+}
 fn default_priority() -> u32 {
     99
 }
@@ -309,6 +319,21 @@ mod tests {
         assert!(parse_port_override("not-a-port").is_err());
         assert!(parse_port_override("65536").is_err());
         assert_eq!(parse_port_override("8081").unwrap(), 8081);
+    }
+
+    #[test]
+    fn gateway_poll_tick_has_safe_default_and_validates_bounds() {
+        let defaults = config("providers: []\n");
+        assert_eq!(defaults.server.gateway_poll_tick_ms, 350);
+        assert!(defaults.validate().is_ok());
+
+        let too_fast = config("server:\n  gateway_poll_tick_ms: 49\nproviders: []\n");
+        assert!(too_fast.validate().is_err());
+        let too_slow = config("server:\n  gateway_poll_tick_ms: 5001\nproviders: []\n");
+        assert!(too_slow.validate().is_err());
+        let configured = config("server:\n  gateway_poll_tick_ms: 200\nproviders: []\n");
+        assert_eq!(configured.server.gateway_poll_tick_ms, 200);
+        assert!(configured.validate().is_ok());
     }
 
     #[test]
