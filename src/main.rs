@@ -34,8 +34,8 @@ mod router;
 mod session;
 
 use api::{add_gateway_headers, api_error, estimate_tokens, validate_chat_req, ChatReq};
-use browser::pool::{BrowserWorkerUnavailableError, ObscuraPool};
-use chat_backend::{BackendRequest, ChatBackend};
+use browser::pool::ObscuraPool;
+use chat_backend::{ChatBackend, ChatRequest};
 use config::AppConfig;
 use context::{ContextBuilder, ContextPlan, ThreadSyncState};
 use memory::{ChatMessage, ConversationStore, ProviderThread, UnifiedMemory};
@@ -2721,7 +2721,7 @@ async fn chat_completions(
 
         let mut rx = match state
             .backend
-            .send_stream(BackendRequest {
+            .send_stream(ChatRequest {
                 provider: provider_name.clone(),
                 prompt: provider_prompt.clone(),
                 model: provider_model.clone(),
@@ -2732,9 +2732,7 @@ async fn chat_completions(
         {
             Ok(rx) => rx,
             Err(e) => {
-                let retryable_worker_error = e
-                    .downcast_ref::<BrowserWorkerUnavailableError>()
-                    .is_some_and(|error| error.is_retryable());
+                let retryable_worker_error = e.is_retryable();
                 tracing::debug!(
                     provider = %provider_name,
                     retryable = retryable_worker_error,
