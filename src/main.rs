@@ -2734,9 +2734,7 @@ async fn chat_completions(
         {
             Ok(rx) => rx,
             Err(e) => {
-                let retryable_worker_error = e
-                    .downcast_ref::<BrowserWorkerUnavailableError>()
-                    .is_some_and(|error| error.is_retryable());
+                let retryable_worker_error = e.is_retryable();
                 tracing::debug!(
                     provider = %provider_name,
                     retryable = retryable_worker_error,
