@@ -1353,6 +1353,7 @@ mod retrieval_ranking_tests {
             connection: Mutex::new(
                 sqlite::open(None, None).expect("in-memory SQLite should initialize"),
             ),
+            operation_counts: std::sync::Arc::new(super::OperationCounts::default()),
         }
     }
 
