@@ -20,6 +20,7 @@ use tokio::sync::RwLock;
 mod api;
 mod browser;
 mod chat_backend;
+mod chat_service;
 mod config;
 mod context;
 mod login;
@@ -35,7 +36,8 @@ mod session;
 
 use api::{add_gateway_headers, api_error, estimate_tokens, validate_chat_req, ChatReq};
 use browser::pool::{BrowserWorkerUnavailableError, ObscuraPool};
-use chat_backend::{BackendRequest, ChatBackend};
+use chat_backend::BackendRequest;
+use chat_service::ChatService;
 use config::AppConfig;
 use context::{ContextBuilder, ContextPlan, ThreadSyncState};
 use memory::{ChatMessage, ConversationStore, ProviderThread, UnifiedMemory};
@@ -137,7 +139,7 @@ struct AuthKeyContext {
 struct AppState {
     cfg: Arc<AppConfig>,
     pool: Arc<ObscuraPool>,
-    backend: Arc<dyn ChatBackend>,
+    chat_service: ChatService,
     memory: Arc<UnifiedMemory>,
     router: ProviderRouter,
     models_cache: Arc<RwLock<HashMap<String, Vec<String>>>>,
@@ -355,7 +357,7 @@ async fn main() -> anyhow::Result<()> {
     let state = Arc::new(AppState {
         cfg: cfg.clone(),
         pool: pool.clone(),
-        backend: pool.clone(),
+        chat_service: ChatService::new(pool.clone()),
         memory: Arc::new(UnifiedMemory::from_env(cfg.memory.max_tokens)?),
         router: ProviderRouter::new(cfg.clone()),
         models_cache: Arc::new(RwLock::new(HashMap::new())),
@@ -2720,8 +2722,8 @@ async fn chat_completions(
         }
 
         let mut rx = match state
-            .backend
-            .send_stream(BackendRequest {
+            .chat_service
+            .stream(BackendRequest {
                 provider: provider_name.clone(),
                 prompt: provider_prompt.clone(),
                 model: provider_model.clone(),
