@@ -2529,3 +2529,25 @@ async fn conversation_store_bounded_history_is_ordered_and_owner_scoped() {
         .await
         .is_err());
 }
+
+#[test]
+fn schema_v8_does_not_persist_tab_id_column() {
+    let fixture = Fixture::new();
+    let memory = fixture.open();
+    let columns = {
+        let connection = memory.lock().unwrap();
+        let mut statement = connection
+            .prepare("PRAGMA table_info(conversations)")
+            .unwrap();
+        statement
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+    };
+
+    assert!(
+        !columns.iter().any(|column| column == "tab_id"),
+        "schema v8 must not persist browser tab identifiers: {columns:?}"
+    );
+}
