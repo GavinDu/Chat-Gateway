@@ -25,12 +25,15 @@ function randomHex(bytes = 16) {
 async function relayFetch(path, options = {}) {
   const {gateway, token} = await chrome.storage.local.get(["gateway", "token"]);
   if (!gateway) throw new Error("Set the local gateway URL first.");
+  // Treat browser storage as untrusted: a stale or tampered gateway value must
+  // never redirect provider cookies or the relay token to a remote origin.
+  const localGateway = normalizeGateway(gateway);
   const headers = new Headers(options.headers || {});
   headers.set("X-Relay-Timestamp", String(Math.floor(Date.now() / 1000)));
   headers.set("X-Relay-Nonce", randomHex());
   if (token) headers.set("Authorization", "Bearer " + token);
   if (options.body) headers.set("Content-Type", "application/json");
-  return fetch(gateway + path, {...options, headers, cache:"no-store"});
+  return fetch(localGateway + path, {...options, headers, cache:"no-store"});
 }
 
 async function providerCookieSnapshot(provider) {
