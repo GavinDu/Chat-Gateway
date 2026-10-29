@@ -2161,6 +2161,16 @@ fn version_seven_migration_clears_synthetic_tab_id_and_preserves_history() {
                 rusqlite::params!["TAB-real-browser-tab", "migration-uppercase-tab"],
             )
             .unwrap();
+        connection.execute(
+            "INSERT INTO provider_threads(conversation_id,provider,thread_url,synced_through_message_id,model,updated_at)
+             VALUES('migration-tab','chatgpt','https://chatgpt.com/c/migration','message-1','gpt-test',123)",
+            [],
+        ).unwrap();
+        connection.execute(
+            "INSERT INTO conversation_summaries(conversation_id,summary,covered_through_position,updated_at)
+             VALUES('migration-tab','preserve this summary',1,123)",
+            [],
+        ).unwrap();
         connection.pragma_update(None, "user_version", 7).unwrap();
     }
 
@@ -2169,6 +2179,12 @@ fn version_seven_migration_clears_synthetic_tab_id_and_preserves_history() {
     assert_eq!(version, 8);
     let columns: Vec<String> = migrated.lock().unwrap().prepare("PRAGMA table_info(conversations)").unwrap().query_map([], |row| row.get::<_, String>(1)).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
     assert!(!columns.iter().any(|column| column == "tab_id"), "schema v8 must remove the tab_id column");
+    let connection = migrated.lock().unwrap();
+    let thread_count: i64 = connection.query_row("SELECT count(*) FROM provider_threads WHERE conversation_id='migration-tab'", [], |row| row.get(0)).unwrap();
+    let summary: String = connection.query_row("SELECT summary FROM conversation_summaries WHERE conversation_id='migration-tab'", [], |row| row.get(0)).unwrap();
+    assert_eq!(thread_count, 1, "migration must preserve provider-thread rows and foreign keys");
+    assert_eq!(summary, "preserve this summary", "migration must preserve rolling summaries");
+    drop(connection);
     assert_eq!(migrated.get_tab("migration-tab").unwrap(), None);
     assert_eq!(
         migrated.get_tab("migration-real-tab").unwrap().as_deref(),
