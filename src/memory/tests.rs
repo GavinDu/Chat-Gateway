@@ -2316,17 +2316,48 @@ async fn async_conversation_store_concurrent_turns_are_transactionally_preserved
 #[tokio::test]
 async fn conversation_store_bounded_history_is_ordered_and_owner_scoped() {
     let memory = Arc::new(UnifiedMemory::new(8000));
-    memory.store_turn_for_owner_with_tab_id(
-        "owner-a", "bounded-history".into(), vec![m("user", "first question")],
-        m("assistant", "first answer"), "chatgpt".into(), None,
-    ).unwrap();
-    memory.store_turn_for_owner_with_tab_id(
-        "owner-a", "bounded-history".into(), vec![m("user", "second question")],
-        m("assistant", "second answer"), "chatgpt".into(), None,
-    ).unwrap();
-    let history = memory.clone().read_history("owner-a".into(), "bounded-history".into(), 2).await.unwrap();
-    assert_eq!(history, vec![m("user", "second question"), m("assistant", "second answer")]);
-    let empty = memory.clone().read_history("owner-a".into(), "bounded-history".into(), 0).await.unwrap();
+    memory
+        .store_turn_for_owner_with_tab_id(
+            "owner-a",
+            "bounded-history".into(),
+            vec![m("user", "first question")],
+            m("assistant", "first answer"),
+            "chatgpt".into(),
+            None,
+        )
+        .unwrap();
+    memory
+        .store_turn_for_owner_with_tab_id(
+            "owner-a",
+            "bounded-history".into(),
+            vec![m("user", "second question")],
+            m("assistant", "second answer"),
+            "chatgpt".into(),
+            None,
+        )
+        .unwrap();
+
+    let history = memory
+        .clone()
+        .read_history("owner-a".into(), "bounded-history".into(), 2)
+        .await
+        .unwrap();
+    assert_eq!(
+        history,
+        vec![
+            m("user", "second question"),
+            m("assistant", "second answer")
+        ]
+    );
+
+    let empty = memory
+        .clone()
+        .read_history("owner-a".into(), "bounded-history".into(), 0)
+        .await
+        .unwrap();
     assert!(empty.is_empty());
-    assert!(memory.read_history("owner-b".into(), "bounded-history".into(), 2).await.is_err());
+    assert!(memory
+        .read_history("owner-b".into(), "bounded-history".into(), 2)
+        .await
+        .is_err());
 }
