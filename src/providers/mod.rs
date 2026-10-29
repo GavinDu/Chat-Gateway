@@ -405,8 +405,10 @@ fn probe_has_challenge(probe: &common::ResponseProbe) -> bool {
 /// time-based idle grace period with no streaming indicator, or at timeout.
 /// The grace period tolerates long reasoning/search pauses between deltas.
 /// Runs on the browser thread; chunks leave via the channel.
-const COMPLETION_IDLE_TICKS: u32 = 43; // ~15 seconds at 350ms per poll.
-const EXPLICIT_DONE_IDLE_TICKS: u32 = 3; // Confirm stop-control disappearance for ~1 second.
+#[cfg(test)]
+const COMPLETION_IDLE_TICKS: u32 = 43; // 15-second grace at the default 350ms poll tick.
+#[cfg(test)]
+const EXPLICIT_DONE_IDLE_TICKS: u32 = 3; // One-second grace at the default poll tick.
 
 fn confirm_consecutive_signal(previous: bool, current: bool) -> bool {
     previous && current
