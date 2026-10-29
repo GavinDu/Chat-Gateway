@@ -2270,4 +2270,3 @@ async fn async_conversation_store_concurrent_turns_are_transactionally_preserved
     }
     assert_eq!(history.len(), 4, "each turn must be committed exactly once");
 }
-
