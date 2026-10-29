@@ -2218,12 +2218,9 @@ fn version_seven_migration_clears_synthetic_tab_id_and_preserves_history() {
         None
     );
     assert_eq!(
-        migrated
-            .get_tab("migration-uppercase-tab")
-            .unwrap()
-            .as_deref(),
-        Some("TAB-real-browser-tab"),
-        "migration must only clear the exact synthetic prefix"
+        migrated.get_tab("migration-uppercase-tab").unwrap(),
+        None,
+        "schema v8 must remove all persisted tab metadata, including real tab IDs"
     );
     assert_eq!(
         migrated
