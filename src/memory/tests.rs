@@ -99,6 +99,58 @@ fn json_import_restores_order_and_affinity_and_preserves_source() {
     assert!(fixture.open().has_history("legacy").unwrap());
 }
 
+
+#[test]
+fn json_import_clears_synthetic_tab_ids_but_preserves_real_thread_urls() {
+    let fixture = Fixture::new();
+    let conversations = HashMap::from([
+        (
+            "synthetic".to_owned(),
+            Conversation {
+                id: "synthetic".into(),
+                messages: vec![m("user", "preserve synthetic conversation history")],
+                provider: Some("chatgpt".into()),
+                tab_id: Some("tab-old-generated".into()),
+            },
+        ),
+        (
+            "real-thread".to_owned(),
+            Conversation {
+                id: "real-thread".into(),
+                messages: vec![m("user", "preserve real conversation history")],
+                provider: Some("chatgpt".into()),
+                tab_id: Some("https://chatgpt.com/c/real-thread".into()),
+            },
+        ),
+    ]);
+    fs::write(
+        fixture.json(),
+        serde_json::to_vec(&conversations).unwrap(),
+    )
+    .unwrap();
+
+    let memory = fixture.open();
+    assert_eq!(memory.get_tab("synthetic").unwrap(), None);
+    assert_eq!(
+        memory.get_tab("real-thread").unwrap().as_deref(),
+        Some("https://chatgpt.com/c/real-thread")
+    );
+    assert_eq!(
+        memory.conversation("synthetic").unwrap().unwrap().messages,
+        vec![m("user", "preserve synthetic conversation history")]
+    );
+    assert_eq!(
+        memory.conversation("real-thread").unwrap().unwrap().messages,
+        vec![m("user", "preserve real conversation history")]
+    );
+    let version: i64 = memory
+        .lock()
+        .unwrap()
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, 7);
+}
+
 #[test]
 fn failed_import_rolls_back_schema_and_can_be_retried_without_source_loss() {
     let fixture = Fixture::new();
