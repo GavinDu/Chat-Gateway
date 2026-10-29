@@ -1303,6 +1303,19 @@ mod retrieval_ranking_tests {
         memory
             .set_long_term_memory_enabled("memory-owner", true)
             .unwrap();
+        // Provenance IDs must reference conversations owned by this key.
+        for source_id in ["source-old", "source-current"] {
+            memory
+                .store_turn_for_owner_with_tab_id(
+                    "memory-owner",
+                    source_id.to_owned(),
+                    vec![m("user", "source prompt")],
+                    m("assistant", "source answer"),
+                    "chatgpt".to_owned(),
+                    None,
+                )
+                .unwrap();
+        }
         let expired_at = super::unix_timestamp().saturating_sub(1);
         let expired = memory
             .save_long_term_memory_item(
