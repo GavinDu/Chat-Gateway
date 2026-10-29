@@ -502,6 +502,7 @@ mod concurrency_configuration_tests {
         )?;
 
         let (started_tx, started_rx) = mpsc::channel();
+        let (finished_tx, finished_rx) = mpsc::channel();
         let writer_path = path.clone();
         let second_writer = std::thread::spawn(move || -> super::Result<()> {
             started_tx.send(()).expect("test receiver stays connected");
@@ -513,15 +514,19 @@ mod concurrency_configuration_tests {
                 [],
             )?;
             transaction.commit()?;
+            finished_tx.send(()).expect("test receiver stays connected");
             Ok(())
         });
 
         started_rx
             .recv_timeout(Duration::from_secs(2))
             .expect("second writer should start");
-        // The first transaction intentionally holds SQLite's writer lock. The
-        // second writer must wait for the configured busy timeout, then commit
-        // successfully after this transaction releases the lock.
+        // The first transaction intentionally holds SQLite's writer lock. A
+        // correctly configured busy timeout keeps the second writer blocked
+        // until the first transaction releases that lock.
+        if finished_rx.recv_timeout(Duration::from_millis(100)).is_ok() {
+            anyhow::bail!("second writer finished while the first writer held the lock");
+        }
         first_tx.commit()?;
         second_writer
             .join()
