@@ -64,6 +64,28 @@ mod worker_supervisor_tests {
         drop(WorkerReadyGuard(ready.clone()));
         assert!(!ready.load(Ordering::Acquire));
     }
+
+    #[test]
+    fn injected_worker_panic_closes_command_channel_and_clears_readiness() {
+        let ready = Arc::new(AtomicBool::new(true));
+        let (command_tx, command_rx) = tokio::sync::mpsc::channel::<()>(1);
+        let worker_ready = ready.clone();
+        let worker = std::thread::spawn(move || {
+            let _ready_guard = WorkerReadyGuard(worker_ready);
+            let _commands = command_rx;
+            panic!("injected browser-worker panic for supervisor regression test");
+        });
+
+        assert!(worker.join().is_err(), "the test worker should panic");
+        assert!(
+            command_tx.is_closed(),
+            "a panicked worker must close its command receiver so the supervisor can detect death"
+        );
+        assert!(
+            !ready.load(Ordering::Acquire),
+            "worker readiness must be cleared during panic unwinding"
+        );
+    }
 }
 
 #[cfg(test)]
