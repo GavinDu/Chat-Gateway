@@ -35,7 +35,7 @@ mod router;
 mod session;
 
 use api::{add_gateway_headers, api_error, estimate_tokens, validate_chat_req, ChatReq};
-use browser::pool::ObscuraPool;
+use browser::pool::{BrowserWorkerUnavailableError, ObscuraPool};
 use chat_backend::BackendRequest;
 use chat_service::ChatService;
 use config::AppConfig;
