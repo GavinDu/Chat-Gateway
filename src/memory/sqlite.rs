@@ -241,6 +241,9 @@ fn initialize(connection: &mut Connection, legacy: Option<&Path>) -> Result<()> 
     // database is created without it by SCHEMA.
     if version > 0 && version < VERSION {
         tx.execute_batch("ALTER TABLE conversations DROP COLUMN tab_id;")?;
+        // Version 7 does not run one of the earlier migration branches that
+        // already advances user_version. Commit the schema and version together.
+        tx.pragma_update(None, "user_version", VERSION)?;
     }
     tx.execute_batch(
         "CREATE INDEX IF NOT EXISTS conversations_owner_key_id_idx ON conversations(owner_key_id, id);",
