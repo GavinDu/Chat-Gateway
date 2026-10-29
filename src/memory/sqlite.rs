@@ -493,8 +493,7 @@ mod concurrency_configuration_tests {
         ));
         let mut first = super::open(Some(&path), None)?;
         let mut second = super::open(Some(&path), None)?;
-        let first_tx =
-            first.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let first_tx = first.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         first_tx.execute(
             "INSERT INTO conversations(id,provider,tab_id,last_activity_at,owner_key_id)
              VALUES ('writer-first', NULL, NULL, 0, 'local')",
