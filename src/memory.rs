@@ -1334,14 +1334,7 @@ mod retrieval_ranking_tests {
             )
             .unwrap();
         let active = memory
-            .save_long_term_memory_item(
-                "memory-owner",
-                "active",
-                "current value",
-                None,
-                0.8,
-                None,
-            )
+            .save_long_term_memory_item("memory-owner", "active", "current value", None, 0.8, None)
             .unwrap();
 
         let retrieved = memory
