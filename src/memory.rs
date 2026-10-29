@@ -1309,8 +1309,14 @@ mod retrieval_ranking_tests {
                 .store_turn_for_owner_with_tab_id(
                     "memory-owner",
                     source_id.to_owned(),
-                    vec![m("user", "source prompt")],
-                    m("assistant", "source answer"),
+                    vec![ChatMessage {
+                        role: "user".to_owned(),
+                        content: "source prompt".to_owned(),
+                    }],
+                    ChatMessage {
+                        role: "assistant".to_owned(),
+                        content: "source answer".to_owned(),
+                    },
                     "chatgpt".to_owned(),
                     None,
                 )
