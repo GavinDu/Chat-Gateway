@@ -2386,7 +2386,6 @@ async fn provider_thread_map_survives_restart_and_cascades_on_conversation_delet
     );
 }
 
-
 #[tokio::test]
 async fn conversation_store_bounded_history_is_ordered_and_owner_scoped() {
     let memory = Arc::new(UnifiedMemory::new(8000));
