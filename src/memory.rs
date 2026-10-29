@@ -36,6 +36,7 @@ pub struct Conversation {
     pub id: String,
     pub messages: Vec<ChatMessage>,
     pub provider: Option<String>,
+    #[serde(skip_serializing)]
     pub tab_id: Option<String>,
 }
 
