@@ -1251,3 +1251,123 @@ mod retrieval_ranking_tests {
         assert_eq!(retrieved[3].id, low.id);
     }
 }
+
+#[cfg(test)]
+mod provider_thread_map_isolation_tests {
+    use super::{ChatMessage, ProviderThread, UnifiedMemory};
+
+    fn persist_conversation(memory: &UnifiedMemory, id: &str, owner: &str) {
+        memory
+            .store_turn_for_owner_with_tab_id(
+                owner,
+                id.to_owned(),
+                vec![ChatMessage {
+                    role: "user".to_owned(),
+                    content: format!("question for {id}"),
+                }],
+                ChatMessage {
+                    role: "assistant".to_owned(),
+                    content: format!("answer for {id}"),
+                },
+                "chatgpt".to_owned(),
+                None,
+            )
+            .expect("conversation turn should persist");
+    }
+
+    fn thread(conversation_id: &str, provider: &str, url: &str, marker: &str) -> ProviderThread {
+        ProviderThread {
+            conversation_id: conversation_id.to_owned(),
+            provider: provider.to_owned(),
+            thread_url: url.to_owned(),
+            synced_through_message_id: Some(marker.to_owned()),
+            model: Some("test-model".to_owned()),
+            updated_at: 1,
+        }
+    }
+
+    #[test]
+    fn interleaved_conversations_and_provider_switch_keep_independent_thread_markers() {
+        let memory = UnifiedMemory::new(8000);
+        persist_conversation(&memory, "conversation-a", "owner-a");
+        persist_conversation(&memory, "conversation-b", "owner-a");
+
+        memory
+            .upsert_provider_thread_for_owner(
+                "owner-a",
+                &thread(
+                    "conversation-a",
+                    "chatgpt",
+                    "https://chatgpt.com/c/a",
+                    "marker-a1",
+                ),
+            )
+            .unwrap();
+        memory
+            .upsert_provider_thread_for_owner(
+                "owner-a",
+                &thread(
+                    "conversation-b",
+                    "chatgpt",
+                    "https://chatgpt.com/c/b",
+                    "marker-b1",
+                ),
+            )
+            .unwrap();
+        memory
+            .upsert_provider_thread_for_owner(
+                "owner-a",
+                &thread(
+                    "conversation-a",
+                    "claude",
+                    "https://claude.ai/chat/a",
+                    "marker-a-claude",
+                ),
+            )
+            .unwrap();
+
+        memory
+            .upsert_provider_thread_for_owner(
+                "owner-a",
+                &thread(
+                    "conversation-a",
+                    "chatgpt",
+                    "https://chatgpt.com/c/a",
+                    "marker-a2",
+                ),
+            )
+            .unwrap();
+
+        assert_eq!(
+            memory
+                .get_provider_thread_for_owner("owner-a", "conversation-a", "chatgpt")
+                .unwrap()
+                .unwrap()
+                .synced_through_message_id
+                .as_deref(),
+            Some("marker-a2")
+        );
+        assert_eq!(
+            memory
+                .get_provider_thread_for_owner("owner-a", "conversation-b", "chatgpt")
+                .unwrap()
+                .unwrap()
+                .synced_through_message_id
+                .as_deref(),
+            Some("marker-b1")
+        );
+        assert_eq!(
+            memory
+                .get_provider_thread_for_owner("owner-a", "conversation-a", "claude")
+                .unwrap()
+                .unwrap()
+                .synced_through_message_id
+                .as_deref(),
+            Some("marker-a-claude")
+        );
+        assert!(memory
+            .get_provider_thread_for_owner("owner-b", "conversation-a", "chatgpt")
+            .unwrap()
+            .is_none());
+    }
+}
