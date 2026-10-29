@@ -1899,6 +1899,9 @@ fn schema_v6_migration_clears_synthetic_tabs_and_preserves_real_metadata_and_his
         store(&memory, "real-tab-migration", "keep real-tab history");
         let connection = memory.lock().unwrap();
         connection
+            .execute_batch("ALTER TABLE conversations ADD COLUMN tab_id TEXT;")
+            .unwrap();
+        connection
             .execute(
                 "UPDATE conversations SET tab_id=?1 WHERE id=?2",
                 rusqlite::params!["https://chatgpt.com/c/real-thread", "real-tab-migration"],
@@ -2143,6 +2146,9 @@ fn version_seven_migration_clears_synthetic_tab_id_and_preserves_history() {
     // Simulate a pre-v8 database with legacy tab identifiers.
     {
         let connection = rusqlite::Connection::open(fixture.db()).unwrap();
+        connection
+            .execute_batch("ALTER TABLE conversations ADD COLUMN tab_id TEXT;")
+            .unwrap();
         connection
             .execute(
                 "UPDATE conversations SET tab_id = ?1 WHERE id = ?2",
