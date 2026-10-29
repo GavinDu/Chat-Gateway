@@ -53,6 +53,15 @@ pub fn transcript_marker(messages: &[ChatMessage]) -> String {
 pub struct UnifiedMemory {
     max_tokens: usize,
     connection: Mutex<Connection>,
+    #[cfg(test)]
+    operation_counts: Arc<OperationCounts>,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct OperationCounts {
+    context_snapshots: std::sync::atomic::AtomicUsize,
+    turn_transactions: std::sync::atomic::AtomicUsize,
 }
 
 struct TurnWrite<'a> {
@@ -182,6 +191,8 @@ impl UnifiedMemory {
     ) -> anyhow::Result<Self> {
         Ok(Self {
             max_tokens,
+            #[cfg(test)]
+            operation_counts: Arc::new(OperationCounts::default()),
             connection: Mutex::new(sqlite::open(Some(path), legacy)?),
         })
     }
@@ -195,6 +206,18 @@ impl UnifiedMemory {
                 sqlite::open(None, None).expect("initializing in-memory conversation database"),
             ),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn logical_operation_counts_for_test(&self) -> (usize, usize) {
+        (
+            self.operation_counts
+                .context_snapshots
+                .load(std::sync::atomic::Ordering::Relaxed),
+            self.operation_counts
+                .turn_transactions
+                .load(std::sync::atomic::Ordering::Relaxed),
+        )
     }
 
     /// Existing JSON path overrides keep working: `custom.json` imports into
@@ -395,6 +418,12 @@ impl UnifiedMemory {
         new_messages: &[ChatMessage],
         token_budget: usize,
     ) -> anyhow::Result<(String, Vec<ChatMessage>, bool, Vec<ChatMessage>)> {
+        #[cfg(test)]
+        if conversation_id.is_some() {
+            self.operation_counts
+                .context_snapshots
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         let (history, saved_summary) = match conversation_id {
             Some(id) => {
                 // Read ownership, transcript, and summary in one SQLite snapshot.
@@ -626,6 +655,10 @@ impl UnifiedMemory {
         } = write;
         let mut connection = self.lock()?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        #[cfg(test)]
+        self.operation_counts
+            .turn_transactions
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let existing_owner: Option<String> = tx
             .query_row(
                 "SELECT owner_key_id FROM conversations WHERE id = ?1",
