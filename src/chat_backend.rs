@@ -9,7 +9,6 @@ use anyhow::Result;
 use std::{error::Error as StdError, fmt};
 use tokio::sync::mpsc;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
 /// Stable error contract for backend startup failures. Provider stream errors
 /// remain attached to individual chunks so an already-started stream can report
 /// failure without changing the transport contract.
