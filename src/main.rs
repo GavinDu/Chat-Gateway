@@ -3832,7 +3832,7 @@ mod http_api_regression_tests {
         let body = json_body(response).await;
         assert_eq!(body["id"], "conversation_export_1");
         assert_eq!(body["provider"], "chatgpt");
-        assert_eq!(body["tab_id"], "tab-export");
+        assert!(body.get("tab_id").is_none());
         assert_eq!(body["messages"][0]["content"], "export prompt");
         assert_eq!(body["messages"][1]["content"], "export answer");
 
