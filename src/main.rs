@@ -2263,9 +2263,9 @@ fn usable_initial_stream_chunk(content: &str, done: bool) -> bool {
 }
 
 enum FirstEvent {
-    Chunk(providers::ProviderChunk),
+    Chunk(chat_backend::ChatEvent),
     EmptyCompletion,
-    Error(anyhow::Error),
+    Error(chat_backend::GatewayError),
     Closed,
     Timeout,
 }
@@ -2323,7 +2323,7 @@ fn record_provider_outcome(
 }
 
 async fn first_event(
-    rx: &mut tokio::sync::mpsc::Receiver<anyhow::Result<providers::ProviderChunk>>,
+    rx: &mut tokio::sync::mpsc::Receiver<anyhow::Result<chat_backend::ChatEvent, chat_backend::GatewayError>>,
     timeout: std::time::Duration,
 ) -> FirstEvent {
     match tokio::time::timeout(timeout, async {
@@ -2751,7 +2751,7 @@ async fn chat_completions(
         };
         let provider_started = Instant::now();
 
-        let mut first_stream_chunk: Option<providers::ProviderChunk> = None;
+        let mut first_stream_chunk: Option<chat_backend::ChatEvent> = None;
         if req.stream {
             let first_chunk_timeout = std::time::Duration::from_secs(
                 state
@@ -2857,7 +2857,7 @@ async fn chat_completions(
                 // Keep the raw detail only for internal session-state classification;
                 // client-facing stream errors remain generic and never expose it.
                 let mut provider_error_detail: Option<String> = None;
-                let mut pending: Option<Result<providers::ProviderChunk, anyhow::Error>> = Some(Ok(first_chunk));
+                let mut pending: Option<Result<chat_backend::ChatEvent, chat_backend::GatewayError>> = Some(Ok(first_chunk));
                 while let Some(item) = match pending.take() {
                     Some(item) => Some(item),
                     None => rx.recv().await,
