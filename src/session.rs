@@ -1924,7 +1924,6 @@ mod vault_tests {
     }
 }
 
-
 #[cfg(test)]
 mod session_snapshot_delete_tests {
     use super::*;
