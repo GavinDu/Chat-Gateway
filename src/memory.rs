@@ -1271,7 +1271,7 @@ pub struct ConversationSummary {
 
 #[cfg(test)]
 mod retrieval_ranking_tests {
-    use super::{sqlite, ChatMessage, UnifiedMemory};
+    use super::{sqlite, UnifiedMemory};
     use std::sync::Mutex;
 
     fn memory() -> UnifiedMemory {
@@ -1366,11 +1366,11 @@ mod retrieval_ranking_tests {
                 .store_turn_for_owner_with_tab_id(
                     "memory-owner",
                     source_id.to_owned(),
-                    vec![ChatMessage {
+                    vec![super::ChatMessage {
                         role: "user".to_owned(),
                         content: "source prompt".to_owned(),
                     }],
-                    ChatMessage {
+                    super::ChatMessage {
                         role: "assistant".to_owned(),
                         content: "source answer".to_owned(),
                     },
