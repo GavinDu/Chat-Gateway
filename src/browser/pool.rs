@@ -30,7 +30,7 @@ fn closed_command_channel() -> mpsc::Sender<Command> {
 
 #[cfg(test)]
 mod worker_supervisor_tests {
-    use super::{next_browser_worker_restart_backoff, WorkerReadyGuard};
+    use super::{closed_command_channel, next_browser_worker_restart_backoff, WorkerReadyGuard};
     use std::sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -51,6 +51,11 @@ mod worker_supervisor_tests {
             next_browser_worker_restart_backoff(Duration::from_secs(30)),
             Duration::from_secs(30)
         );
+    }
+
+    #[test]
+    fn closed_command_channel_is_observed_as_closed_by_supervisor() {
+        assert!(closed_command_channel().is_closed());
     }
 
     #[test]
