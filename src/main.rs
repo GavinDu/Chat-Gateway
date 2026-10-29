@@ -3133,13 +3133,13 @@ mod model_list_tests {
             enabled,
             priority: 1,
             timeout_seconds: 30,
+            completion_idle_ms: 15_000,
             queue_timeout_seconds: 30,
             session_pool_size: 1,
             min_request_interval_ms: 5_000,
             daily_request_cap: 100,
             models: models.iter().map(|model| (*model).to_owned()).collect(),
         }
-            completion_idle_ms: 15_000,
 }
 
     #[test]
