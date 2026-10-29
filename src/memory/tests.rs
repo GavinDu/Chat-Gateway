@@ -2075,7 +2075,6 @@ async fn async_conversation_store_reads_and_persists_on_blocking_pool() {
     assert_eq!(transcript, vec![m("user", "hello"), m("assistant", "hi")]);
 }
 
-
 #[test]
 fn version_seven_migration_clears_synthetic_tab_id_and_preserves_history() {
     let fixture = Fixture::new();
