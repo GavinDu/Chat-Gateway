@@ -223,9 +223,7 @@ fn initialize(connection: &mut Connection, legacy: Option<&Path>) -> Result<()> 
     } else if version == 6 && app == APPLICATION_ID {
         tx.pragma_update(None, "user_version", VERSION)?;
     } else if version == 7 && app == APPLICATION_ID {
-        // DROP COLUMN is transactional and preserves child tables and their foreign keys.
-        tx.execute_batch("ALTER TABLE conversations DROP COLUMN tab_id;")?;
-        tx.pragma_update(None, "user_version", VERSION)?;
+        // The v8 column removal is performed after legacy synthetic values are cleaned.
     } else if version != VERSION || app != APPLICATION_ID {
         bail!("unsupported conversation schema version {version} (expected {VERSION}) or application id {app}");
     }
@@ -237,6 +235,12 @@ fn initialize(connection: &mut Connection, legacy: Option<&Path>) -> Result<()> 
             "UPDATE conversations SET tab_id = NULL WHERE tab_id LIKE 'tab-%'",
             [],
         )?;
+    }
+    // All supported pre-v8 schemas include tab_id. Drop it inside the same
+    // transaction after legacy cleanup; SQLite preserves child foreign keys.
+    if version > 0 && version < VERSION {
+        tx.execute_batch("ALTER TABLE conversations DROP COLUMN tab_id;")?;
+        tx.pragma_update(None, "user_version", VERSION)?;
     }
     tx.execute_batch(
         "CREATE INDEX IF NOT EXISTS conversations_owner_key_id_idx ON conversations(owner_key_id, id);",
