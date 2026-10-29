@@ -1309,7 +1309,7 @@ mod retrieval_ranking_tests {
                 "memory-owner",
                 "expired",
                 "stale value",
-                Some("source-old".to_owned()),
+                Some("source-old"),
                 1.0,
                 Some(expired_at),
             )
@@ -1319,7 +1319,7 @@ mod retrieval_ranking_tests {
                 "memory-owner",
                 "active",
                 "current value",
-                Some("source-current".to_owned()),
+                Some("source-current"),
                 0.8,
                 None,
             )
