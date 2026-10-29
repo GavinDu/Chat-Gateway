@@ -86,10 +86,7 @@ fn json_import_restores_order_and_affinity_and_preserves_source() {
             memory.get_provider("legacy").unwrap().as_deref(),
             Some("qwen")
         );
-        assert_eq!(
-            memory.get_tab("legacy").unwrap().as_deref(),
-            Some("legacy-tab")
-        );
+        assert_eq!(memory.get_tab("legacy").unwrap().as_deref(), None);
         assert_eq!(
             memory.conversation("legacy").unwrap().unwrap().messages,
             vec![m("user", "hello"), m("assistant", "hi")]
@@ -126,10 +123,7 @@ fn json_import_clears_synthetic_tab_ids_but_preserves_real_thread_urls() {
 
     let memory = fixture.open();
     assert_eq!(memory.get_tab("synthetic").unwrap(), None);
-    assert_eq!(
-        memory.get_tab("real-thread").unwrap().as_deref(),
-        Some("https://chatgpt.com/c/real-thread")
-    );
+    assert_eq!(memory.get_tab("real-thread").unwrap().as_deref(), None);
     assert_eq!(
         memory.conversation("synthetic").unwrap().unwrap().messages,
         vec![m("user", "preserve synthetic conversation history")]
@@ -147,7 +141,7 @@ fn json_import_clears_synthetic_tab_ids_but_preserves_real_thread_urls() {
         .unwrap()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 7);
+    assert_eq!(version, 8);
 }
 
 #[test]
@@ -213,10 +207,7 @@ fn restart_recovers_messages_provider_and_tab() {
         memory.get_provider("one").unwrap().as_deref(),
         Some("chatgpt")
     );
-    assert_eq!(
-        memory.get_tab("one").unwrap().as_deref(),
-        Some("tab-second")
-    );
+    assert_eq!(memory.get_tab("one").unwrap().as_deref(), None);
     assert_eq!(
         memory.conversation("one").unwrap().unwrap().messages,
         vec![
@@ -460,7 +451,7 @@ fn repeated_prompt_with_a_different_answer_is_a_new_turn() {
         memory.conversation("one").unwrap().unwrap().messages.len(),
         4
     );
-    assert_eq!(memory.get_tab("one").unwrap().as_deref(), Some("new-tab"));
+    assert_eq!(memory.get_tab("one").unwrap().as_deref(), None);
 }
 
 #[test]
@@ -486,7 +477,7 @@ fn schema_v5_migrates_to_v6_with_long_term_memory_disabled_by_default() {
         .unwrap()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 7);
+    assert_eq!(version, 8);
     assert!(!memory.long_term_memory_enabled("owner-a").unwrap());
     let item_count: i64 = memory
         .lock()
@@ -958,7 +949,7 @@ fn conversation_export_returns_complete_durable_record_and_missing_is_none() {
     let exported = memory.export_conversation("export-me").unwrap().unwrap();
     assert_eq!(exported.id, "export-me");
     assert_eq!(exported.provider.as_deref(), Some("chatgpt"));
-    assert_eq!(exported.tab_id.as_deref(), Some("tab-export payload"));
+    assert_eq!(exported.tab_id, None);
     assert_eq!(
         exported.messages,
         vec![
@@ -1105,7 +1096,7 @@ fn schema_v1_database_migrates_provider_thread_map_without_losing_conversations(
         .unwrap()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 7);
+    assert_eq!(version, 8);
     let memory_tables: i64 = memory
         .lock()
         .unwrap()
@@ -1524,7 +1515,7 @@ fn schema_v3_migration_assigns_existing_conversations_to_local_owner() {
         .unwrap()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 7);
+    assert_eq!(version, 8);
     let memory_tables: i64 = memory
         .lock()
         .unwrap()
@@ -1672,7 +1663,7 @@ fn schema_v4_migration_adds_summary_table_without_losing_tenant_data() {
         .unwrap()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 7);
+    assert_eq!(version, 8);
     let memory_tables: i64 = memory
         .lock()
         .unwrap()
@@ -1899,6 +1890,9 @@ fn schema_v6_migration_clears_synthetic_tabs_and_preserves_real_metadata_and_his
         store(&memory, "real-tab-migration", "keep real-tab history");
         let connection = memory.lock().unwrap();
         connection
+            .execute_batch("ALTER TABLE conversations ADD COLUMN tab_id TEXT;")
+            .unwrap();
+        connection
             .execute(
                 "UPDATE conversations SET tab_id=?1 WHERE id=?2",
                 rusqlite::params!["https://chatgpt.com/c/real-thread", "real-tab-migration"],
@@ -1911,7 +1905,7 @@ fn schema_v6_migration_clears_synthetic_tabs_and_preserves_real_metadata_and_his
     assert_eq!(migrated.get_tab("synthetic-migration").unwrap(), None);
     assert_eq!(
         migrated.get_tab("real-tab-migration").unwrap().as_deref(),
-        Some("https://chatgpt.com/c/real-thread")
+        None
     );
     assert_eq!(
         migrated
@@ -1940,7 +1934,7 @@ fn schema_v6_migration_clears_synthetic_tabs_and_preserves_real_metadata_and_his
         .unwrap()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 7);
+    assert_eq!(version, 8);
 }
 
 #[test]
@@ -1948,10 +1942,7 @@ fn legacy_synthetic_tab_id_is_cleared_on_next_persisted_turn() {
     let fixture = Fixture::new();
     let memory = fixture.open();
     store(&memory, "legacy-tab", "first");
-    assert_eq!(
-        memory.get_tab("legacy-tab").unwrap().as_deref(),
-        Some("tab-first")
-    );
+    assert_eq!(memory.get_tab("legacy-tab").unwrap().as_deref(), None);
 
     memory
         .store_turn_for_owner_with_tab_id(
@@ -2140,9 +2131,12 @@ fn version_seven_migration_clears_synthetic_tab_id_and_preserves_history() {
         );
     }
 
-    // Simulate a v6 database with one synthetic and one real tab identifier.
+    // Simulate a pre-v8 database with legacy tab identifiers.
     {
         let connection = rusqlite::Connection::open(fixture.db()).unwrap();
+        connection
+            .execute_batch("ALTER TABLE conversations ADD COLUMN tab_id TEXT;")
+            .unwrap();
         connection
             .execute(
                 "UPDATE conversations SET tab_id = ?1 WHERE id = ?2",
@@ -2161,14 +2155,67 @@ fn version_seven_migration_clears_synthetic_tab_id_and_preserves_history() {
                 rusqlite::params!["TAB-real-browser-tab", "migration-uppercase-tab"],
             )
             .unwrap();
-        connection.pragma_update(None, "user_version", 6).unwrap();
+        connection.execute(
+            "INSERT INTO provider_threads(conversation_id,provider,thread_url,synced_through_message_id,model,updated_at)
+             VALUES('migration-tab','chatgpt','https://chatgpt.com/c/migration','message-1','gpt-test',123)",
+            [],
+        ).unwrap();
+        connection.execute(
+            "INSERT INTO conversation_summaries(conversation_id,summary,covered_through_position,updated_at)
+             VALUES('migration-tab','preserve this summary',1,123)",
+            [],
+        ).unwrap();
+        connection.pragma_update(None, "user_version", 7).unwrap();
     }
 
     let migrated = fixture.open();
+    let version: i64 = migrated
+        .lock()
+        .unwrap()
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, 8);
+    let columns: Vec<String> = migrated
+        .lock()
+        .unwrap()
+        .prepare("PRAGMA table_info(conversations)")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(1))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert!(
+        !columns.iter().any(|column| column == "tab_id"),
+        "schema v8 must remove the tab_id column"
+    );
+    let connection = migrated.lock().unwrap();
+    let thread_count: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM provider_threads WHERE conversation_id=?1",
+            ["migration-tab"],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let summary: String = connection
+        .query_row(
+            "SELECT summary FROM conversation_summaries WHERE conversation_id=?1",
+            ["migration-tab"],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        thread_count, 1,
+        "migration must preserve provider-thread rows and foreign keys"
+    );
+    assert_eq!(
+        summary, "preserve this summary",
+        "migration must preserve rolling summaries"
+    );
+    drop(connection);
     assert_eq!(migrated.get_tab("migration-tab").unwrap(), None);
     assert_eq!(
         migrated.get_tab("migration-real-tab").unwrap().as_deref(),
-        Some("real-browser-tab")
+        None
     );
     assert_eq!(
         migrated
@@ -2310,6 +2357,54 @@ async fn async_conversation_store_concurrent_turns_are_transactionally_preserved
             && history.windows(2).any(|window| window == second_pair),
         "concurrent turn writes must keep each user/assistant pair contiguous: {history:?}"
     );
+}
+
+
+#[test]
+fn failed_v8_migration_rolls_back_schema_and_history() {
+    let fixture = Fixture::new();
+    {
+        let memory = fixture.open();
+        store(&memory, "rollback-migration", "preserve rollback history");
+    }
+    {
+        let connection = Connection::open(fixture.db()).unwrap();
+        connection
+            .execute_batch(
+                "ALTER TABLE conversations ADD COLUMN tab_id TEXT;
+                 CREATE INDEX conversations_tab_id_idx ON conversations(tab_id);
+                 UPDATE conversations SET tab_id='tab-legacy' WHERE id='rollback-migration';
+                 PRAGMA user_version=7;",
+            )
+            .unwrap();
+    }
+
+    assert!(
+        open(&fixture.db(), None).is_err(),
+        "an index depending on tab_id must make the migration fail rather than silently discard dependent schema"
+    );
+
+    let connection = Connection::open(fixture.db()).unwrap();
+    let version: i64 = connection
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, 7, "failed migration must not advance user_version");
+    let tab_id: Option<String> = connection
+        .query_row(
+            "SELECT tab_id FROM conversations WHERE id='rollback-migration'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(tab_id.as_deref(), Some("tab-legacy"));
+    let history: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM messages WHERE conversation_id='rollback-migration'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(history, 2, "failed migration must preserve conversation history");
 }
 
 #[tokio::test]
