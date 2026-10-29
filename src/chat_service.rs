@@ -28,9 +28,7 @@ impl ChatService {
 #[cfg(test)]
 mod tests {
     use super::ChatService;
-    use crate::chat_backend::{
-        BackendRequest, ChatBackend, ChatEvent, GatewayError,
-    };
+    use crate::chat_backend::{BackendRequest, ChatBackend, ChatEvent, GatewayError};
     use anyhow::Result;
     use std::sync::Arc;
     use tokio::sync::mpsc;
@@ -42,7 +40,8 @@ mod tests {
         async fn send_stream(
             &self,
             request: BackendRequest,
-        ) -> std::result::Result<mpsc::Receiver<Result<ChatEvent, GatewayError>>, GatewayError> {
+        ) -> std::result::Result<mpsc::Receiver<Result<ChatEvent, GatewayError>>, GatewayError>
+        {
             let (tx, rx) = mpsc::channel(1);
             tx.send(Ok(ChatEvent {
                 content: format!("{}:{}", request.provider, request.prompt),
