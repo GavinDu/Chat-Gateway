@@ -41,15 +41,15 @@ pub struct Conversation {
     pub tab_id: Option<String>,
 }
 
-/// SQLite is authoritative: there is no mutable conversation cache to diverge
-/// from disk. The mutex protects this connection; IMMEDIATE transactions protect
-/// read/reconcile/write across independent connections and gateway processes.
 /// Stable fingerprint for the canonical, ordered transcript.
 pub fn transcript_marker(messages: &[ChatMessage]) -> String {
     let encoded = serde_json::to_vec(messages).unwrap_or_default();
     format!("{:x}", Sha256::digest(encoded))
 }
 
+/// SQLite is authoritative: there is no mutable conversation cache to diverge
+/// from disk. The mutex protects this connection; IMMEDIATE transactions protect
+/// read/reconcile/write across independent connections and gateway processes.
 pub struct UnifiedMemory {
     max_tokens: usize,
     connection: Mutex<Connection>,
@@ -59,7 +59,6 @@ pub struct UnifiedMemory {
 /// Implementations keep synchronous SQLite work off Tokio request workers.
 #[async_trait::async_trait]
 pub trait ConversationStore: Send + Sync {
-    #[allow(dead_code)]
     #[allow(dead_code)] // Kept as a compatibility seam while callers use atomic turn persistence.
     async fn read_transcript(
         self: Arc<Self>,
