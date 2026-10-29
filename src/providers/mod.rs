@@ -428,6 +428,7 @@ pub async fn run_send(
     page: Rc<Page>,
     prompt: String,
     timeout: Duration,
+    poll_tick: Duration,
     chunks: mpsc::Sender<Result<ProviderChunk>>,
 ) {
     if crate::provider_guard::is_challenge_page(&page) {
@@ -512,7 +513,7 @@ pub async fn run_send(
             break;
         }
 
-        tokio::time::sleep(Duration::from_millis(350)).await;
+        tokio::time::sleep(poll_tick).await;
         let poll_started = Instant::now();
         poll_count = poll_count.saturating_add(1);
         // Body text extraction is expensive on large pages; keep URL checks on every
