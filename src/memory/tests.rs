@@ -2730,7 +2730,10 @@ impl ConversationStore for CountingStore {
         owner_key_id: String,
         conversation_id: String,
     ) -> anyhow::Result<Vec<ChatMessage>> {
-        self.inner.clone().read_transcript(owner_key_id, conversation_id).await
+        self.inner
+            .clone()
+            .read_transcript(owner_key_id, conversation_id)
+            .await
     }
 
     async fn read_history(
@@ -2739,7 +2742,10 @@ impl ConversationStore for CountingStore {
         conversation_id: String,
         max_messages: usize,
     ) -> anyhow::Result<Vec<ChatMessage>> {
-        self.inner.clone().read_history(owner_key_id, conversation_id, max_messages).await
+        self.inner
+            .clone()
+            .read_history(owner_key_id, conversation_id, max_messages)
+            .await
     }
 
     async fn build_context_with_transcript(
@@ -2753,7 +2759,12 @@ impl ConversationStore for CountingStore {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.inner
             .clone()
-            .build_context_with_transcript(owner_key_id, conversation_id, new_messages, token_budget)
+            .build_context_with_transcript(
+                owner_key_id,
+                conversation_id,
+                new_messages,
+                token_budget,
+            )
             .await
     }
 
@@ -2770,7 +2781,14 @@ impl ConversationStore for CountingStore {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.inner
             .clone()
-            .persist_turn(owner_key_id, conversation_id, user_messages, assistant_message, provider, tab_id)
+            .persist_turn(
+                owner_key_id,
+                conversation_id,
+                user_messages,
+                assistant_message,
+                provider,
+                tab_id,
+            )
             .await
     }
 }
