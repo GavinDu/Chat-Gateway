@@ -384,8 +384,9 @@ impl UnifiedMemory {
                 let history = conversation
                     .map(|conversation| conversation.messages)
                     .unwrap_or_default();
-                tx.commit()
-                    .map_err(|error| anyhow::anyhow!("completing context snapshot read: {error}"))?;
+                tx.commit().map_err(|error| {
+                    anyhow::anyhow!("completing context snapshot read: {error}")
+                })?;
                 (history, summary)
             }
             None => (Vec::new(), None),
