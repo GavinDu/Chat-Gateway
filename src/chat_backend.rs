@@ -19,9 +19,6 @@ pub struct ChatRequest {
     pub thread_url: Option<String>,
 }
 
-/// Backward-compatible name while call sites migrate to the canonical contract.
-pub type BackendRequest = ChatRequest;
-
 /// A provider-independent streamed event. The existing adapter chunk already has the
 /// canonical content/done shape, so this alias avoids a needless allocation/copy.
 pub type ChatEvent = ProviderChunk;
@@ -94,7 +91,7 @@ impl ChatBackend for crate::browser::pool::ObscuraPool {
 
 #[cfg(test)]
 mod tests {
-    use super::{BackendRequest, ChatBackend, GatewayError};
+    use super::{ChatBackend, ChatRequest, GatewayError};
     use crate::providers::ProviderChunk;
     use anyhow::Result;
     use std::sync::Arc;
@@ -140,7 +137,7 @@ mod tests {
     async fn fake_backend_streams_chunks_without_browser_runtime() {
         let backend: Arc<dyn ChatBackend> = Arc::new(FakeBackend);
         let mut chunks = backend
-            .send_stream(BackendRequest {
+            .send_stream(ChatRequest {
                 provider: "chatgpt".to_owned(),
                 prompt: "hello".to_owned(),
                 model: "test-model".to_owned(),
