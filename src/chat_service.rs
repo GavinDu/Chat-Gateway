@@ -3,7 +3,7 @@
 //! Context planning, routing and HTTP/SSE framing remain in the API layer for now;
 //! this service centralizes the prepared-request execution boundary so the handler
 //! can be reduced without coupling tests to Obscura's browser runtime.
-use crate::chat_backend::{BackendRequest, ChatBackend};
+use crate::chat_backend::{BackendRequest, ChatBackend, GatewayError};
 use crate::providers::ProviderChunk;
 use anyhow::Result;
 use std::sync::Arc;
@@ -21,7 +21,7 @@ impl ChatService {
     pub async fn stream(
         &self,
         request: BackendRequest,
-    ) -> Result<mpsc::Receiver<Result<ProviderChunk>>> {
+    ) -> std::result::Result<mpsc::Receiver<Result<ProviderChunk>>, GatewayError> {
         self.backend.send_stream(request).await
     }
 }
@@ -44,7 +44,7 @@ mod tests {
         async fn send_stream(
             &self,
             request: BackendRequest,
-        ) -> Result<mpsc::Receiver<Result<ProviderChunk>>> {
+        ) -> std::result::Result<mpsc::Receiver<Result<ProviderChunk>>, super::GatewayError> {
             let (tx, rx) = mpsc::channel(1);
             tx.send(Ok(ProviderChunk {
                 content: format!("{}:{}", request.provider, request.prompt),
