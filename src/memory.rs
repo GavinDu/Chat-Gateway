@@ -432,23 +432,6 @@ impl UnifiedMemory {
         .map_err(|error| anyhow::anyhow!("conversation context task failed: {error}"))?
     }
 
-    fn rolling_summary(&self, conversation_id: &str) -> anyhow::Result<Option<(String, usize)>> {
-        let connection = self.lock()?;
-        connection
-            .query_row(
-                "SELECT summary, covered_through_position FROM conversation_summaries WHERE conversation_id=?1",
-                [conversation_id],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, i64>(1)?.max(0) as usize,
-                    ))
-                },
-            )
-            .optional()
-            .map_err(Into::into)
-    }
-
     #[allow(dead_code)]
     pub fn store_turn(
         &self,
