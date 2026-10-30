@@ -130,6 +130,15 @@ fn has_content_delta(data: &str) -> bool {
         .is_some_and(|content| !content.is_empty())
 }
 
+fn percentile(values: &mut [f64], percentile: usize) -> Option<f64> {
+    if values.is_empty() {
+        return None;
+    }
+    values.sort_by(f64::total_cmp);
+    let rank = (values.len() * percentile.min(100)).div_ceil(100).max(1);
+    Some(values[rank - 1])
+}
+
 fn median(values: &mut [f64]) -> Option<f64> {
     if values.is_empty() {
         return None;
@@ -266,6 +275,41 @@ async fn main() -> anyhow::Result<()> {
         median(&mut switch_ttft),
         median(&mut rss_samples)
     );
+
+    // Keep provider-specific latency visible; a single aggregate median can
+    // hide a slow provider when the sequence alternates across adapters.
+    let mut by_provider = std::collections::BTreeMap::<&str, Vec<&Sample>>::new();
+    for sample in &samples {
+        by_provider
+            .entry(sample.provider.as_str())
+            .or_default()
+            .push(sample);
+    }
+    for (provider, provider_samples) in by_provider {
+        let mut provider_totals = provider_samples
+            .iter()
+            .map(|sample| sample.total_ms)
+            .collect::<Vec<_>>();
+        let mut provider_ttfts = provider_samples
+            .iter()
+            .filter_map(|sample| sample.ttft_ms)
+            .collect::<Vec<_>>();
+        let mut provider_rss = provider_samples
+            .iter()
+            .filter_map(|sample| sample.rss_kib)
+            .map(|value| value as f64)
+            .collect::<Vec<_>>();
+        println!(
+            "provider_summary provider={} samples={} total_ms_median={:?} total_ms_p95={:?} ttft_ms_median={:?} ttft_ms_p95={:?} rss_kib_median={:?}",
+            provider,
+            provider_samples.len(),
+            median(&mut provider_totals),
+            percentile(&mut provider_totals, 95),
+            median(&mut provider_ttfts),
+            percentile(&mut provider_ttfts, 95),
+            median(&mut provider_rss),
+        );
+    }
     if fake && !samples.iter().any(|sample| sample.ttft_ms.is_some()) {
         anyhow::bail!("fake benchmark did not observe a streamed content token");
     }
@@ -274,7 +318,7 @@ async fn main() -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{has_content_delta, median};
+    use super::{has_content_delta, median, percentile};
 
     #[test]
     fn median_returns_none_for_empty_samples() {
@@ -290,6 +334,13 @@ mod tests {
     #[test]
     fn median_returns_middle_value_for_odd_samples() {
         assert_eq!(median(&mut [9.0, 1.0, 5.0]), Some(5.0));
+    }
+
+    #[test]
+    fn percentile_uses_nearest_rank_and_handles_empty_samples() {
+        assert_eq!(percentile(&mut [], 95), None);
+        assert_eq!(percentile(&mut [1.0, 2.0, 3.0, 4.0], 95), Some(4.0));
+        assert_eq!(percentile(&mut [4.0, 1.0, 3.0, 2.0], 50), Some(2.0));
     }
 
     #[test]

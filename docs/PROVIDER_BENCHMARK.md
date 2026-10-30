@@ -26,7 +26,9 @@ cargo run --locked --example provider_bench -- \
 ```
 
 Live mode sends requests to the supplied gateway URL and reports total request
-time and time to the first non-empty streamed content delta. Pin the model to a
+time and time to the first non-empty streamed content delta. The Rust harness
+also prints per-provider median and p95 total/TTFT summaries so alternating
+provider samples are not hidden by a single aggregate statistic. Pin the model to a
 provider using `<provider>/<model>`; the example alternates the provider list.
 `provider_switch_ttft_ms_median` is the TTFT of a request immediately after the
 provider name changes. It includes provider startup/queue/network/upstream work
