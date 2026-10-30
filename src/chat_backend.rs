@@ -261,7 +261,7 @@ mod tests {
         {
             let (tx, rx) = mpsc::channel(2);
             tx.send(Ok(ChatEvent {
-                content: format!("{}:{}", request.provider, request.prompt),
+                content: format!("{}:{}", request.provider.as_str(), request.prompt),
                 done: false,
             }))
             .await
