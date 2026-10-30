@@ -26,7 +26,7 @@ function loadShared(cookieFixtures = [], hasAllPermissions = true, storageValues
   };
   vm.createContext(context);
   const source = fs.readFileSync(require.resolve("../shared.js"), "utf8");
-  vm.runInContext(source + "\nglobalThis.__testApi = { normalizeGateway, providerCookieSnapshot, relayFetch, syncProvider, PROVIDERS };", context);
+  vm.runInContext(source + "\nglobalThis.__testApi = { normalizeGateway, providerCookieSnapshot, relayFetch, syncProvider, sanitizeLocalStorageSnapshot, PROVIDERS };", context);
   return { ...context.__testApi, getCookieReads: () => cookieReads, fetchCalls };
 }
 
@@ -71,9 +71,9 @@ test("provider cookie snapshot excludes cookies outside that provider's domain r
     { name: "spoof", value: "drop", domain: ".openai.com.attacker.example", path: "/", secure: true, httpOnly: true }
   ];
   const api = loadShared(fixtures);
-  const snapshot = await api.providerCookieSnapshot("chatgpt");
+  const snapshot = await api.providerCookieSnapshot("chatgpt", { access_token: "local-token", ignored: 42 });
   assert.deepEqual(JSON.parse(JSON.stringify(snapshot.cookies.map(cookie => cookie.name).sort())), ["auth", "session"]);
-  assert.equal(snapshot.local_storage && Object.keys(snapshot.local_storage).length, 0);
+  assert.deepEqual(JSON.parse(JSON.stringify(snapshot.local_storage)), { access_token: "local-token" });
 });
 
 test("partial provider host permissions reject cookie snapshot before reading cookies", async () => {
@@ -136,4 +136,33 @@ test("unlinked provider sync does not read or transmit cookies", async () => {
 
   assert.equal(api.getCookieReads(), 0);
   assert.equal(api.fetchCalls.length, 0);
+});
+
+
+test("local storage snapshots accept only bounded string entries", () => {
+  const api = loadShared();
+  const snapshot = api.sanitizeLocalStorageSnapshot({
+    access_token: "token",
+    invalid_number: 42,
+    "x".repeat(513): "oversized-key",
+    oversized_value: "v".repeat(70000)
+  });
+  assert.deepEqual(JSON.parse(JSON.stringify(snapshot)), { access_token: "token" });
+});
+
+test("provider cookie sync preserves explicitly linked local storage", async () => {
+  const api = loadShared([
+    { name: "session", value: "session-secret", domain: ".chatgpt.com", path: "/", secure: true, httpOnly: true }
+  ], true, {
+    gateway: "http://127.0.0.1:8080",
+    token: "relay-secret",
+    linkedProviders: ["chatgpt"],
+    providerLocalStorage: { chatgpt: { access_token: "local-token" } }
+  });
+
+  await api.syncProvider("chatgpt");
+
+  assert.equal(api.fetchCalls.length, 1);
+  const body = JSON.parse(api.fetchCalls[0].options.body);
+  assert.deepEqual(body.local_storage, { access_token: "local-token" });
 });
