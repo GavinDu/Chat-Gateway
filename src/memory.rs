@@ -123,6 +123,19 @@ pub trait ConversationStore: Send + Sync {
         owner_key_id: String,
         conversation_id: String,
     ) -> anyhow::Result<bool>;
+
+    async fn get_provider_thread_async(
+        self: Arc<Self>,
+        owner_key_id: String,
+        conversation_id: String,
+        provider: String,
+    ) -> anyhow::Result<Option<ProviderThread>>;
+
+    async fn upsert_provider_thread_async(
+        self: Arc<Self>,
+        owner_key_id: String,
+        thread: ProviderThread,
+    ) -> anyhow::Result<()>;
 }
 
 #[async_trait::async_trait]
@@ -224,6 +237,31 @@ impl ConversationStore for UnifiedMemory {
         })
         .await
         .map_err(|error| anyhow::anyhow!("conversation deletion task failed: {error}"))?
+    }
+
+    async fn get_provider_thread_async(
+        self: Arc<Self>,
+        owner_key_id: String,
+        conversation_id: String,
+        provider: String,
+    ) -> anyhow::Result<Option<ProviderThread>> {
+        tokio::task::spawn_blocking(move || {
+            self.get_provider_thread_for_owner(&owner_key_id, &conversation_id, &provider)
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("provider thread lookup task failed: {error}"))?
+    }
+
+    async fn upsert_provider_thread_async(
+        self: Arc<Self>,
+        owner_key_id: String,
+        thread: ProviderThread,
+    ) -> anyhow::Result<()> {
+        tokio::task::spawn_blocking(move || {
+            self.upsert_provider_thread_for_owner(&owner_key_id, &thread)
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("provider thread persistence task failed: {error}"))?
     }
 }
 
