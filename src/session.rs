@@ -946,8 +946,8 @@ fn session_state_hash(file: &SessionFile) -> Result<String> {
             &right.value,
         ))
     });
-    let serialized = serde_json::to_vec(&(local_storage, cookies))?;
-    let digest = Sha256::digest(serialized);
+    let serialized = Zeroizing::new(serde_json::to_vec(&(local_storage, cookies))?);
+    let digest = Sha256::digest(&*serialized);
     Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
@@ -1025,7 +1025,7 @@ async fn save_session_if_changed_file(
 async fn write_session_snapshot(file: SessionFile, provider: &str) -> Result<()> {
     ensure_private_session_dir(Path::new("sessions")).await?;
     let destination = session_path(provider)?;
-    let serialized = serde_json::to_vec_pretty(&file)?;
+    let serialized = Zeroizing::new(serde_json::to_vec_pretty(&file)?);
 
     // Session files contain reusable authentication cookies. Create them
     // privately on Unix and replace the destination atomically.
