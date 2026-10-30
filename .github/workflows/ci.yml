@@ -111,3 +111,6 @@ jobs:
 
       - name: Run provider benchmark harness smoke test
         run: cargo run --locked --example provider_bench -- --fake --smoke
+
+      - name: Test Python provider benchmark parser
+        run: python3 -m unittest discover -s scripts -p 'test_*.py'
