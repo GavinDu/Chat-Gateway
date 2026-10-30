@@ -10,6 +10,7 @@ function loadShared(cookieFixtures = [], hasAllPermissions = true, storageValues
   const context = {
     URL,
     Headers,
+    TextEncoder,
     crypto: webcrypto,
     fetch: async (url, options) => { fetchCalls.push({url, options}); return {ok:true, status:200}; },
     chrome: {
