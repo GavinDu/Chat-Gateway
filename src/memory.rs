@@ -895,6 +895,14 @@ impl UnifiedMemory {
     ) -> anyhow::Result<bool> {
         let mut connection = self.lock()?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        // Long-term memory is independently user-owned and survives source
+        // conversation deletion. Clear only its provenance pointer atomically,
+        // so exports never advertise a source conversation that no longer exists.
+        tx.execute(
+            "UPDATE memory_items SET source_conversation_id = NULL
+             WHERE source_conversation_id = ?1 AND owner_key_id = ?2",
+            rusqlite::params![conversation_id, owner_key_id],
+        )?;
         let deleted = tx.execute(
             "DELETE FROM conversations WHERE id = ?1 AND owner_key_id = ?2",
             rusqlite::params![conversation_id, owner_key_id],
@@ -906,6 +914,16 @@ impl UnifiedMemory {
     pub fn purge_expired_conversations(&self, cutoff_unix_seconds: i64) -> anyhow::Result<usize> {
         let mut connection = self.lock()?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        // Retention removes transcript provenance, not independently managed
+        // memory items. Null the source reference in the same transaction.
+        tx.execute(
+            "UPDATE memory_items SET source_conversation_id = NULL
+             WHERE source_conversation_id IN (
+                 SELECT id FROM conversations
+                 WHERE last_activity_at > 0 AND last_activity_at < ?1
+             )",
+            [cutoff_unix_seconds],
+        )?;
         let deleted = tx.execute(
             "DELETE FROM conversations WHERE last_activity_at > 0 AND last_activity_at < ?1",
             [cutoff_unix_seconds],
