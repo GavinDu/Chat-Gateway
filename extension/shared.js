@@ -42,7 +42,7 @@ function sanitizeLocalStorageSnapshot(snapshot) {
   let totalBytes = 0;
   for (const [key, value] of Object.entries(snapshot)) {
     if (typeof key !== "string" || typeof value !== "string" || !key || key.length > 512) continue;
-    const entryBytes = new TextEncoder().encode(key).length + new TextEncoder().encode(value).length;
+    const entryBytes = key.length + value.length;
     if (Object.keys(safe).length >= 128 || entryBytes > 65536 || totalBytes + entryBytes > 262144) continue;
     safe[key] = value;
     totalBytes += entryBytes;
