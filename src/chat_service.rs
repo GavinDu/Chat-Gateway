@@ -124,7 +124,7 @@ mod tests {
     #[tokio::test]
     async fn collect_aggregates_until_done_and_records_first_event_latency() {
         let service = ChatService::new(Arc::new(FakeBackend));
-        let mut events = service.stream(BackendRequest {
+        let events = service.stream(BackendRequest {
             provider: ProviderId::new("claude").unwrap(),
             prompt: "hello".to_owned(),
             model: "test-model".to_owned(),
