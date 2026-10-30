@@ -68,7 +68,7 @@ mod tests {
         let service = ChatService::new(Arc::new(FakeBackend));
         let mut events = service
             .stream(BackendRequest {
-                provider: "claude".to_owned(),
+                provider: crate::chat_backend::ProviderId::new("claude").unwrap(),
                 prompt: "test prompt".to_owned(),
                 model: "test-model".to_owned(),
                 has_history: true,
