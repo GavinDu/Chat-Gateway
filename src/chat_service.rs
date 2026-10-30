@@ -58,10 +58,14 @@ impl ChatService {
             match item {
                 Ok(event) if event.done => break,
                 Ok(event) => {
-                    if collected.first_event_elapsed.is_none() {
-                        collected.first_event_elapsed = Some(attempt_started.elapsed());
+                    // TTFT is the time to the first actual content, not an
+                    // empty heartbeat or metadata-only event.
+                    if !event.content.is_empty() {
+                        if collected.first_event_elapsed.is_none() {
+                            collected.first_event_elapsed = Some(attempt_started.elapsed());
+                        }
+                        collected.content.push_str(&event.content);
                     }
-                    collected.content.push_str(&event.content);
                 }
                 Err(error) => {
                     collected.error = Some(error);
@@ -151,6 +155,62 @@ mod tests {
         assert_eq!(collected.content, "claude:hello");
         assert!(collected.error.is_none());
         assert!(collected.first_event_elapsed.is_some());
+    }
+
+    #[tokio::test]
+    async fn collect_does_not_count_empty_chunks_as_first_content() {
+        let service = ChatService::new(Arc::new(FakeBackend));
+        let (tx, rx) = mpsc::channel(2);
+        tx.send(Ok(ChatEvent {
+            content: String::new(),
+            done: false,
+        }))
+        .await
+        .unwrap();
+        tx.send(Ok(ChatEvent {
+            content: String::new(),
+            done: true,
+        }))
+        .await
+        .unwrap();
+
+        let collected = service.collect(rx, Instant::now()).await;
+        assert!(collected.content.is_empty());
+        assert!(
+            collected.first_event_elapsed.is_none(),
+            "empty heartbeat events must not be reported as TTFT"
+        );
+    }
+
+    #[tokio::test]
+    async fn collect_starts_ttft_at_first_non_empty_content_after_heartbeats() {
+        let service = ChatService::new(Arc::new(FakeBackend));
+        let (tx, rx) = mpsc::channel(3);
+        tx.send(Ok(ChatEvent {
+            content: String::new(),
+            done: false,
+        }))
+        .await
+        .unwrap();
+        tx.send(Ok(ChatEvent {
+            content: "answer".to_owned(),
+            done: false,
+        }))
+        .await
+        .unwrap();
+        tx.send(Ok(ChatEvent {
+            content: String::new(),
+            done: true,
+        }))
+        .await
+        .unwrap();
+
+        let collected = service.collect(rx, Instant::now()).await;
+        assert_eq!(collected.content, "answer");
+        assert!(
+            collected.first_event_elapsed.is_some(),
+            "the first non-empty content event must establish TTFT"
+        );
     }
 
     #[tokio::test]
