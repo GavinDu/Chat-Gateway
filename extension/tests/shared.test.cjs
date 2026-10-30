@@ -123,6 +123,35 @@ test("linked provider sync sends its cookie snapshot only to the configured loca
   assert.equal(api.fetchCalls[0].options.cache, "no-store");
 });
 
+test("two linked providers sync only their own cookie domains", async () => {
+  const api = loadShared([
+    { name: "chatgpt-session", value: "chatgpt-secret", domain: ".chatgpt.com", path: "/", secure: true, httpOnly: true },
+    { name: "claude-session", value: "claude-secret", domain: ".claude.ai", path: "/", secure: true, httpOnly: true },
+    { name: "lookalike", value: "attacker-secret", domain: ".evilchatgpt.com", path: "/", secure: true, httpOnly: true }
+  ], true, {
+    gateway: "http://127.0.0.1:8080",
+    token: "relay-secret",
+    linkedProviders: ["chatgpt", "claude"]
+  });
+
+  await api.syncProvider("chatgpt");
+  await api.syncProvider("claude");
+
+  assert.equal(api.fetchCalls.length, 2);
+  const chatgpt = JSON.parse(api.fetchCalls[0].options.body);
+  const claude = JSON.parse(api.fetchCalls[1].options.body);
+  assert.equal(api.fetchCalls[0].url, "http://127.0.0.1:8080/relay/v1/session/chatgpt");
+  assert.equal(api.fetchCalls[1].url, "http://127.0.0.1:8080/relay/v1/session/claude");
+  assert.equal(chatgpt.cookies.length, 1);
+  assert.equal(chatgpt.cookies[0].value, "chatgpt-secret");
+  assert.equal(claude.cookies.length, 1);
+  assert.equal(claude.cookies[0].value, "claude-secret");
+  assert.ok(!JSON.stringify(chatgpt).includes("claude-secret"));
+  assert.ok(!JSON.stringify(claude).includes("chatgpt-secret"));
+  assert.ok(!JSON.stringify(chatgpt).includes("attacker-secret"));
+  assert.ok(!JSON.stringify(claude).includes("attacker-secret"));
+});
+
 test("unlinked provider sync does not read or transmit cookies", async () => {
   const api = loadShared([
     { name: "session", value: "session-secret", domain: ".chatgpt.com", path: "/", secure: true, httpOnly: true }
