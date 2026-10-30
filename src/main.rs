@@ -4407,11 +4407,6 @@ mod provider_thread_url_tests {
         let supported = [
             ("chatgpt", "https://chatgpt.com/c/123"),
             ("claude", "https://claude.ai/chat/123"),
-            ("gemini", "https://gemini.google.com/app/123"),
-            ("grok", "https://grok.com/c/123"),
-            ("qwen", "https://chat.qwen.ai/c/123"),
-            ("mistral", "https://chat.mistral.ai/chat/123"),
-            ("perplexity", "https://perplexity.ai/search/123"),
         ];
         for (provider, url) in supported {
             assert!(
@@ -4420,9 +4415,9 @@ mod provider_thread_url_tests {
             );
         }
 
-        // Meta AI currently requires sidebar-based thread selection. It must
-        // not be treated as URL-addressable until the adapter implements that
-        // navigation contract.
+        // Only ChatGPT and Claude have a reviewed URL-resume contract so far.
+        // A URL shape alone does not prove a provider can reopen the right thread;
+        // all other adapters remain on bounded transcript replay until verified.
         assert!(!is_reopenable_provider_thread_url(
             "metaai",
             "https://meta.ai/c/123"
