@@ -253,14 +253,24 @@ mod first_event_tests {
     use super::{first_event, FirstEvent};
     use crate::chat_backend::{ChatEvent, GatewayError};
     use anyhow::Result;
-    use tokio::sync::mpsc;
     use std::time::Duration;
+    use tokio::sync::mpsc;
 
     #[tokio::test]
     async fn first_event_skips_empty_chunks_and_returns_first_content() {
         let (tx, mut rx) = mpsc::channel(3);
-        tx.send(Ok(ChatEvent { content: String::new(), done: false })).await.unwrap();
-        tx.send(Ok(ChatEvent { content: "answer".into(), done: false })).await.unwrap();
+        tx.send(Ok(ChatEvent {
+            content: String::new(),
+            done: false,
+        }))
+        .await
+        .unwrap();
+        tx.send(Ok(ChatEvent {
+            content: "answer".into(),
+            done: false,
+        }))
+        .await
+        .unwrap();
         let event = first_event(&mut rx, Duration::from_secs(1)).await;
         assert!(matches!(event, FirstEvent::Chunk(chunk) if chunk.content == "answer"));
     }
@@ -268,22 +278,40 @@ mod first_event_tests {
     #[tokio::test]
     async fn first_event_distinguishes_empty_completion_from_closed_stream() {
         let (tx, mut rx) = mpsc::channel(1);
-        tx.send(Ok(ChatEvent { content: String::new(), done: true })).await.unwrap();
-        assert!(matches!(first_event(&mut rx, Duration::from_secs(1)).await, FirstEvent::EmptyCompletion));
+        tx.send(Ok(ChatEvent {
+            content: String::new(),
+            done: true,
+        }))
+        .await
+        .unwrap();
+        assert!(matches!(
+            first_event(&mut rx, Duration::from_secs(1)).await,
+            FirstEvent::EmptyCompletion
+        ));
         drop(tx);
-        assert!(matches!(first_event(&mut rx, Duration::from_secs(1)).await, FirstEvent::Closed));
+        assert!(matches!(
+            first_event(&mut rx, Duration::from_secs(1)).await,
+            FirstEvent::Closed
+        ));
     }
 
     #[tokio::test]
     async fn first_event_preserves_backend_error() {
         let (tx, mut rx) = mpsc::channel(1);
-        tx.send(Err(GatewayError::provider_failure("upstream failed"))).await.unwrap();
-        assert!(matches!(first_event(&mut rx, Duration::from_secs(1)).await, FirstEvent::Error(error) if error.message == "upstream failed"));
+        tx.send(Err(GatewayError::provider_failure("upstream failed")))
+            .await
+            .unwrap();
+        assert!(
+            matches!(first_event(&mut rx, Duration::from_secs(1)).await, FirstEvent::Error(error) if error.message == "upstream failed")
+        );
     }
 
     #[tokio::test]
     async fn first_event_times_out_when_provider_never_emits() {
         let (_tx, mut rx) = mpsc::channel::<Result<ChatEvent, GatewayError>>(1);
-        assert!(matches!(first_event(&mut rx, Duration::from_millis(1)).await, FirstEvent::Timeout));
+        assert!(matches!(
+            first_event(&mut rx, Duration::from_millis(1)).await,
+            FirstEvent::Timeout
+        ));
     }
 }
