@@ -2907,4 +2907,19 @@ fn concurrent_conversations_keep_provider_thread_mappings_isolated() {
         .get_provider_thread_for_owner("different-owner", "parallel-a", "chatgpt")
         .expect("owner-scoped lookup should succeed")
         .is_none());
+
+    // Reopening the database simulates a gateway restart: provider thread
+    // mappings must remain available for the next request.
+    drop(memory);
+    let reopened = fixture.open();
+    for (conversation_id, expected_url) in [
+        ("parallel-a", "https://chatgpt.com/c/parallel-thread-a"),
+        ("parallel-b", "https://chatgpt.com/c/parallel-thread-b"),
+    ] {
+        let restored = reopened
+            .get_provider_thread_for_owner("parallel-owner", conversation_id, "chatgpt")
+            .expect("provider thread lookup should succeed after reopening")
+            .expect("provider thread mapping should survive database reopen");
+        assert_eq!(restored.thread_url, expected_url);
+    }
 }
