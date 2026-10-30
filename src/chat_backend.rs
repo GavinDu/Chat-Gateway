@@ -17,7 +17,6 @@ pub struct ChatRequest {
 pub type BackendRequest = ChatRequest;
 
 /// Stable provider identity used by routing, metrics, and backend diagnostics.
-#[allow(dead_code)] // Public identity contract is consumed during backend/router migration.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ProviderId(String);
 
@@ -172,14 +171,12 @@ impl Error for GatewayError {}
 
 #[async_trait::async_trait]
 pub trait ChatBackend: Send + Sync {
-    /// Identifier for this backend. Legacy adapters default to the browser tier.
-    #[allow(dead_code)]
-    fn id(&self) -> ProviderId {
-        ProviderId::new("browser").expect("static provider id is valid")
+    /// Identifier for this execution backend (not the selected provider).
+    fn id(&self) -> BackendId {
+        BackendId::new("browser").expect("static backend id is valid")
     }
 
     /// Capabilities are explicit and conservative by default.
-    #[allow(dead_code)]
     fn capabilities(&self) -> BackendCapabilities {
         BackendCapabilities::default()
     }
@@ -315,6 +312,8 @@ mod tests {
         assert_eq!(ProviderId::new("chat-gpt").unwrap().as_str(), "chat-gpt");
         assert!(ProviderId::new("../chatgpt").is_none());
         assert!(ProviderId::new("").is_none());
+        assert_eq!(BackendId::new("browser").unwrap().as_str(), "browser");
+        assert!(BackendId::new("../browser").is_none());
         assert_eq!(
             BackendCapabilities::default(),
             BackendCapabilities {
