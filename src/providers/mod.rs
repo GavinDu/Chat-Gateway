@@ -1093,3 +1093,69 @@ mod provider_catalog_contract_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod completion_pause_regression_tests {
+    use super::{
+        completion_ready, DeltaObservation, DoneSignal, ResponseDeltaTracker, COMPLETION_IDLE_TICKS,
+    };
+    use std::time::Duration;
+
+    const POLL: Duration = Duration::from_millis(350);
+
+    #[test]
+    fn ten_second_mid_stream_pause_does_not_complete_a_response() {
+        // 10 seconds is 29 polling intervals at the production cadence;
+        // the conservative fallback must remain incomplete until ~15 seconds.
+        let mut tracker = ResponseDeltaTracker::new(None);
+        assert_eq!(
+            tracker.observe("partial answer"),
+            DeltaObservation::Delta("partial answer".into())
+        );
+        let stable_ticks_during_pause = 29;
+        assert_eq!(tracker.observe("partial answer"), DeltaObservation::Stable);
+        assert!(!completion_ready(
+            stable_ticks_during_pause,
+            false,
+            DoneSignal::StableResponseText,
+            true,
+            false,
+            POLL,
+        ));
+        assert!(completion_ready(
+            COMPLETION_IDLE_TICKS,
+            false,
+            DoneSignal::StableResponseText,
+            true,
+            false,
+            POLL,
+        ));
+    }
+
+    #[test]
+    fn identical_consecutive_answers_wait_for_a_new_turn_idle_grace() {
+        let mut tracker = ResponseDeltaTracker::new(Some("same answer".into()));
+        assert_eq!(
+            tracker.observe("same answer"),
+            DeltaObservation::WaitingForNewResponse
+        );
+        // The reused DOM node may retain identical text; only the full
+        // conservative idle window may release the previous answer as fallback.
+        assert!(!completion_ready(
+            COMPLETION_IDLE_TICKS - 1,
+            false,
+            DoneSignal::StableResponseText,
+            true,
+            false,
+            POLL,
+        ));
+        assert!(completion_ready(
+            COMPLETION_IDLE_TICKS,
+            false,
+            DoneSignal::StableResponseText,
+            true,
+            false,
+            POLL,
+        ));
+    }
+}
