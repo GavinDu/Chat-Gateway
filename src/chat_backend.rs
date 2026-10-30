@@ -6,7 +6,7 @@ use tokio::sync::mpsc;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChatRequest {
-    pub provider: String,
+    pub provider: ProviderId,
     pub prompt: String,
     pub model: String,
     pub has_history: bool,
@@ -35,7 +35,29 @@ impl ProviderId {
         Some(Self(value))
     }
 
-    #[allow(dead_code)] // Consumed when routing and diagnostics migrate to ProviderId.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Identity of an execution backend (for example, the browser relay).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct BackendId(String);
+
+impl BackendId {
+    pub fn new(value: impl Into<String>) -> Option<Self> {
+        let value = value.into();
+        if value.is_empty()
+            || value.len() > 64
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        {
+            return None;
+        }
+        Some(Self(value))
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -170,8 +192,8 @@ pub trait ChatBackend: Send + Sync {
 
 #[async_trait::async_trait]
 impl ChatBackend for crate::browser::pool::ObscuraPool {
-    fn id(&self) -> ProviderId {
-        ProviderId::new("browser").expect("static backend id is valid")
+    fn id(&self) -> BackendId {
+        BackendId::new("browser").expect("static backend id is valid")
     }
 
     fn capabilities(&self) -> BackendCapabilities {
@@ -189,7 +211,7 @@ impl ChatBackend for crate::browser::pool::ObscuraPool {
     ) -> std::result::Result<mpsc::Receiver<Result<ChatEvent, GatewayError>>, GatewayError> {
         let mut source = crate::browser::pool::ObscuraPool::send_stream(
             self,
-            &request.provider,
+            request.provider.as_str(),
             request.prompt,
             request.model,
             request.has_history,
@@ -224,8 +246,8 @@ impl ChatBackend for crate::browser::pool::ObscuraPool {
 #[cfg(test)]
 mod tests {
     use super::{
-        BackendCapabilities, ChatBackend, ChatEvent, ChatRequest, GatewayError, GatewayErrorKind,
-        ProviderId,
+        BackendCapabilities, BackendId, ChatBackend, ChatEvent, ChatRequest, GatewayError,
+        GatewayErrorKind, ProviderId,
     };
     use anyhow::Result;
     use std::sync::Arc;
@@ -262,7 +284,7 @@ mod tests {
         let backend: Arc<dyn ChatBackend> = Arc::new(FakeBackend);
         let mut events = backend
             .send_stream(ChatRequest {
-                provider: "chatgpt".to_owned(),
+                provider: ProviderId::new("chatgpt").unwrap(),
                 prompt: "hello".to_owned(),
                 model: "test-model".to_owned(),
                 has_history: false,
