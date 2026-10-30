@@ -22,12 +22,40 @@ pub struct SessionFile {
     pub ts: String,
 }
 
+fn zeroize_session_file_fields(session: &mut SessionFile) {
+    for (mut key, mut value) in session.local_storage.drain() {
+        key.zeroize();
+        value.zeroize();
+    }
+    session.ts.zeroize();
+}
+
 impl Drop for SessionFile {
     fn drop(&mut self) {
-        for value in self.local_storage.values_mut() {
-            value.zeroize();
-        }
+        zeroize_session_file_fields(self);
         // Cookie::drop zeroizes each reusable credential value.
+    }
+}
+
+#[cfg(test)]
+mod session_zeroization_tests {
+    use super::*;
+
+    #[test]
+    fn session_drop_zeroizes_local_storage_keys_values_and_timestamp() {
+        let mut session = SessionFile {
+            local_storage: HashMap::from([(
+                "access_token".to_owned(),
+                "sensitive-value".to_owned(),
+            )]),
+            cookies: Vec::new(),
+            ts: "sensitive-timestamp".to_owned(),
+        };
+
+        zeroize_session_file_fields(&mut session);
+
+        assert!(session.local_storage.is_empty());
+        assert!(session.ts.is_empty());
     }
 }
 
