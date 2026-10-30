@@ -104,6 +104,25 @@ pub trait ConversationStore: Send + Sync {
         provider: String,
         tab_id: Option<String>,
     ) -> anyhow::Result<String>;
+
+    async fn list_conversations(
+        self: Arc<Self>,
+        owner_key_id: String,
+        limit: usize,
+        offset: usize,
+    ) -> anyhow::Result<Vec<ConversationSummary>>;
+
+    async fn export_conversation(
+        self: Arc<Self>,
+        owner_key_id: String,
+        conversation_id: String,
+    ) -> anyhow::Result<Option<Conversation>>;
+
+    async fn delete_conversation(
+        self: Arc<Self>,
+        owner_key_id: String,
+        conversation_id: String,
+    ) -> anyhow::Result<bool>;
 }
 
 #[async_trait::async_trait]
@@ -168,6 +187,43 @@ impl ConversationStore for UnifiedMemory {
             tab_id,
         )
         .await
+    }
+
+    async fn list_conversations(
+        self: Arc<Self>,
+        owner_key_id: String,
+        limit: usize,
+        offset: usize,
+    ) -> anyhow::Result<Vec<ConversationSummary>> {
+        tokio::task::spawn_blocking(move || {
+            self.list_conversations_for_owner(&owner_key_id, limit, offset)
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("conversation list task failed: {error}"))?
+    }
+
+    async fn export_conversation(
+        self: Arc<Self>,
+        owner_key_id: String,
+        conversation_id: String,
+    ) -> anyhow::Result<Option<Conversation>> {
+        tokio::task::spawn_blocking(move || {
+            self.export_conversation_for_owner(&owner_key_id, &conversation_id)
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("conversation export task failed: {error}"))?
+    }
+
+    async fn delete_conversation(
+        self: Arc<Self>,
+        owner_key_id: String,
+        conversation_id: String,
+    ) -> anyhow::Result<bool> {
+        tokio::task::spawn_blocking(move || {
+            self.delete_conversation_for_owner(&owner_key_id, &conversation_id)
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("conversation deletion task failed: {error}"))?
     }
 }
 
