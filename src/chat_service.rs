@@ -213,7 +213,7 @@ pub enum FirstEvent {
     Timeout,
 }
 
-fn usable_initial_stream_chunk(content: &str, done: bool) -> bool {
+pub(crate) fn usable_initial_stream_chunk(content: &str, done: bool) -> bool {
     !done && !content.is_empty()
 }
 
