@@ -689,7 +689,9 @@ fn long_term_memory_provenance_cannot_reference_another_owners_conversation() {
 #[test]
 fn deleting_source_conversation_preserves_memory_and_clears_provenance() {
     let memory = UnifiedMemory::new(8000);
-    memory.set_long_term_memory_enabled("owner-a", true).unwrap();
+    memory
+        .set_long_term_memory_enabled("owner-a", true)
+        .unwrap();
     memory
         .store_turn_for_owner(
             "owner-a",
@@ -716,12 +718,19 @@ fn deleting_source_conversation_preserves_memory_and_clears_provenance() {
         .unwrap());
 
     let items = memory.list_long_term_memory_items("owner-a").unwrap();
-    assert_eq!(items.len(), 1, "manual memory is independent of its source transcript");
+    assert_eq!(
+        items.len(),
+        1,
+        "manual memory is independent of its source transcript"
+    );
     assert_eq!(items[0].id, saved.id);
     assert_eq!(items[0].source_conversation_id, None);
     assert_eq!(items[0].value, "America/New_York");
     assert_eq!(
-        memory.retrieve_long_term_memory_items("owner-a", 5).unwrap()[0].id,
+        memory
+            .retrieve_long_term_memory_items("owner-a", 5)
+            .unwrap()[0]
+            .id,
         saved.id
     );
 }
