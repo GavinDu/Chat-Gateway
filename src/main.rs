@@ -1732,7 +1732,7 @@ async fn list_conversations(
     match state
         .memory
         .clone()
-        .list_conversations_for_owner_blocking(owner_key_id.to_owned(), limit, offset)
+        .list_conversations(owner_key_id.to_owned(), limit, offset)
         .await
     {
         Ok(conversations) => Json(serde_json::json!({
@@ -1970,7 +1970,7 @@ async fn export_conversation(
     match state
         .memory
         .clone()
-        .export_conversation_for_owner_blocking(owner_key_id.to_owned(), conversation_id.clone())
+        .export_conversation(owner_key_id.to_owned(), conversation_id.clone())
         .await
     {
         Ok(Some(conversation)) => Json(conversation).into_response(),
@@ -2012,7 +2012,7 @@ async fn export_conversation_markdown(
     match state
         .memory
         .clone()
-        .export_conversation_for_owner_blocking(owner_key_id.to_owned(), conversation_id.clone())
+        .export_conversation(owner_key_id.to_owned(), conversation_id.clone())
         .await
     {
         Ok(Some(conversation)) => {
@@ -2140,7 +2140,7 @@ async fn delete_conversation(
     match state
         .memory
         .clone()
-        .delete_conversation_for_owner_blocking(owner_key_id.to_owned(), conversation_id.clone())
+        .delete_conversation(owner_key_id.to_owned(), conversation_id.clone())
         .await
     {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
