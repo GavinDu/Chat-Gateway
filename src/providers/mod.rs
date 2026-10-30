@@ -217,7 +217,7 @@ pub const ADAPTERS: &[AdapterSpec] = &[
         &qwen::SELECTORS,
         false,
         DoneSignal::StableResponseText,
-        ThreadSupport::UrlAddressable,
+        ThreadSupport::None,
         |cfg| Arc::new(qwen::QwenAdapter { cfg }),
     ),
     adapter_spec(
@@ -253,7 +253,7 @@ pub const ADAPTERS: &[AdapterSpec] = &[
         &gemini::SELECTORS,
         false,
         DoneSignal::StableResponseText,
-        ThreadSupport::UrlAddressable,
+        ThreadSupport::None,
         |cfg| Arc::new(gemini::GeminiAdapter { cfg }),
     ),
     adapter_spec(
@@ -262,7 +262,7 @@ pub const ADAPTERS: &[AdapterSpec] = &[
         &grok::SELECTORS,
         false,
         DoneSignal::StableResponseText,
-        ThreadSupport::UrlAddressable,
+        ThreadSupport::None,
         |cfg| Arc::new(grok::GrokAdapter { cfg }),
     ),
     adapter_spec(
@@ -271,7 +271,7 @@ pub const ADAPTERS: &[AdapterSpec] = &[
         &mistral::SELECTORS,
         false,
         DoneSignal::StableResponseText,
-        ThreadSupport::UrlAddressable,
+        ThreadSupport::None,
         |cfg| Arc::new(mistral::MistralAdapter { cfg }),
     ),
     adapter_spec(
@@ -280,7 +280,7 @@ pub const ADAPTERS: &[AdapterSpec] = &[
         &perplexity::SELECTORS,
         true,
         DoneSignal::StableResponseText,
-        ThreadSupport::UrlAddressable,
+        ThreadSupport::None,
         |cfg| Arc::new(perplexity::PerplexityAdapter { cfg }),
     ),
 ];
@@ -1027,18 +1027,22 @@ mod thread_support_tests {
 
     #[test]
     fn url_reopen_capability_comes_from_adapter_catalog() {
+        for provider in [Provider::ChatGPT, Provider::Claude] {
+            assert!(supports_url_addressable_threads(provider), "{provider:?}");
+        }
         for provider in [
-            Provider::ChatGPT,
-            Provider::Claude,
             Provider::Gemini,
             Provider::Grok,
             Provider::Qwen,
             Provider::Mistral,
             Provider::Perplexity,
+            Provider::MetaAI,
         ] {
-            assert!(supports_url_addressable_threads(provider), "{provider:?}");
+            assert!(
+                !supports_url_addressable_threads(provider),
+                "unverified thread navigation must use replay: {provider:?}"
+            );
         }
-        assert!(!supports_url_addressable_threads(Provider::MetaAI));
     }
 }
 
