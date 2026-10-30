@@ -70,7 +70,6 @@ fn attach_provider_network_tap(page: &mut obscura_core::Page, provider: Provider
     }));
 }
 
-
 fn next_browser_worker_restart_backoff(current: Duration) -> Duration {
     (current * 2).min(MAX_BROWSER_WORKER_RESTART_BACKOFF)
 }
