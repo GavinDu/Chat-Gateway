@@ -297,7 +297,8 @@ mod worker_supervisor_tests {
                 1,
                 pool.worker_alive(),
                 pool.worker_generation(),
-            ).status(),
+            )
+            .status(),
             axum::http::StatusCode::OK,
             "readiness should be healthy before the injected worker failure"
         );
@@ -322,7 +323,8 @@ mod worker_supervisor_tests {
                 0,
                 false,
                 pool.worker_generation().saturating_sub(1),
-            ).status(),
+            )
+            .status(),
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
             "readiness must fail while the browser worker is down"
         );
@@ -331,7 +333,8 @@ mod worker_supervisor_tests {
                 1,
                 pool.worker_alive(),
                 pool.worker_generation(),
-            ).status(),
+            )
+            .status(),
             axum::http::StatusCode::OK,
             "readiness must recover after replacement warm-up"
         );
