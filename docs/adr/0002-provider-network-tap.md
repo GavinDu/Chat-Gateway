@@ -1,6 +1,6 @@
 # Spike 0002: Provider response network tap
 
-- **Status:** Feasibility confirmed; implementation plan proposed
+- **Status:** Metadata-only prototype implemented behind an opt-in environment flag; incremental streaming remains unproven
 - **Date:** 2026-10-25
 - **Related issue:** [#137](https://github.com/GavinDu/Chat-Gateway/issues/137)
 - **Pinned engine revision:** `09790944a405ba81a7df27bc2577c6b0db283900`
@@ -36,6 +36,12 @@ This confirms that a network-observation spike is feasible without adding Chromi
 - Diagnostics expose only provider name, event type, timing, and bounded byte counts.
 - Fixture tests cover chunk boundaries, malformed frames, empty frames, cancellation, and duplicate terminal events.
 
+## Prototype status (2026-10-30)
+
+The gateway now has an opt-in metadata-only observer on the warmed ChatGPT and Claude pages. Set `CHAT_GATEWAY_PROVIDER_NETWORK_TAP=1` to enable it. It records only provider, response host, resource type, HTTP status, and bounded response byte count at debug level. It never records URL paths/query strings, headers, cookies, prompt text, or response bodies. The callback is page-scoped and is automatically released with its page.
+
+The pinned API's passive callback receives a complete buffered `Response`; this prototype therefore does not claim incremental SSE deltas or a terminal signal. The existing DOM polling path remains authoritative. A sanitized trace from real provider sessions is still required before selecting stable provider endpoints or attempting a stream parser.
+
 ## Decision
 
-Proceed with the prototype, but keep it separate from the existing DOM-based completion path until the pinned API is compiled against directly and a real provider trace demonstrates incremental delivery. If only buffered bodies are available, use the tap for metadata/response correlation and retain DOM polling for streaming.
+Proceed with the metadata-only prototype behind the environment flag, but keep it separate from the existing DOM-based completion path until a real provider trace demonstrates incremental delivery. If only buffered bodies are available, use the tap for metadata/response correlation and retain DOM polling for streaming.
