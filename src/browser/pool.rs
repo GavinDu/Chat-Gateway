@@ -31,8 +31,10 @@ fn provider_network_tap_flag_enabled(value: &str) -> bool {
     )
 }
 
+const MAX_PROVIDER_NETWORK_TAP_REPORTED_BYTES: usize = 1_048_576;
+
 fn provider_network_tap_reported_bytes(body_len: usize) -> usize {
-    body_len.min(1_048_576)
+    body_len.min(MAX_PROVIDER_NETWORK_TAP_REPORTED_BYTES)
 }
 
 fn provider_network_tap_enabled(provider: Provider) -> bool {
@@ -63,7 +65,8 @@ fn attach_provider_network_tap(page: &mut obscura_core::Page, provider: Provider
             host,
             resource_type = ?info.resource_type,
             status = response.status,
-            response_bytes = provider_network_tap_reported_bytes(response.body.len()),
+            response_bytes_observed = provider_network_tap_reported_bytes(response.body.len()),
+            response_bytes_truncated = response.body.len() > MAX_PROVIDER_NETWORK_TAP_REPORTED_BYTES,
             "provider network response observed (metadata only)"
         );
     }));
@@ -156,7 +159,7 @@ mod worker_supervisor_tests {
         assert_eq!(super::provider_network_tap_reported_bytes(4096), 4096);
         assert_eq!(
             super::provider_network_tap_reported_bytes(usize::MAX),
-            1_048_576
+            super::MAX_PROVIDER_NETWORK_TAP_REPORTED_BYTES
         );
     }
 
