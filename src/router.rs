@@ -124,8 +124,8 @@ mod tests {
                     min_request_interval_ms: 5_000,
                     daily_request_cap: 100,
                     models: vec!["sonnet".into()],
-                                    completion_idle_ms: 15_000,
-},
+                    completion_idle_ms: 15_000,
+                },
                 ProviderConfig {
                     name: "chatgpt".into(),
                     enabled: true,
