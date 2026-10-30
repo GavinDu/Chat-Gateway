@@ -108,8 +108,8 @@ fn closed_command_channel() -> mpsc::Sender<Command> {
 #[cfg(test)]
 mod worker_supervisor_tests {
     use super::{
-        closed_command_channel, join_finished_worker, join_worker_on_shutdown,
-        next_browser_worker_restart_backoff, WorkerReadyGuard,
+        closed_command_channel, join_finished_worker, next_browser_worker_restart_backoff,
+        WorkerReadyGuard,
     };
     use std::sync::{
         atomic::{AtomicBool, Ordering},
