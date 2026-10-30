@@ -838,12 +838,12 @@ pub fn load_session_file(provider: &str) -> Result<Option<SessionFile>> {
 }
 
 fn load_session_file_from_path(path: &Path) -> Result<Option<SessionFile>> {
-    let data = match std::fs::read_to_string(path) {
-        Ok(data) => data,
+    let data = match std::fs::read(path) {
+        Ok(data) => Zeroizing::new(data),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error.into()),
     };
-    Ok(Some(serde_json::from_str(&data)?))
+    Ok(Some(serde_json::from_slice(&data)?))
 }
 
 /// Conservative provider-domain allowlist for persisted authentication cookies.
@@ -1006,6 +1006,7 @@ async fn save_session_if_changed_file(
     let destination = session_path(provider)?;
     let previous_hash = std::fs::read(&destination)
         .ok()
+        .map(Zeroizing::new)
         .and_then(|bytes| serde_json::from_slice::<SessionFile>(&bytes).ok())
         .and_then(|previous| session_state_hash(&previous).ok());
 
