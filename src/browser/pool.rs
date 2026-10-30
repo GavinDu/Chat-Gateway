@@ -143,7 +143,10 @@ mod worker_supervisor_tests {
             assert!(super::provider_network_tap_flag_enabled(value), "{value:?}");
         }
         for value in ["", "0", "false", "no", "enabled", "true please"] {
-            assert!(!super::provider_network_tap_flag_enabled(value), "{value:?}");
+            assert!(
+                !super::provider_network_tap_flag_enabled(value),
+                "{value:?}"
+            );
         }
     }
 
