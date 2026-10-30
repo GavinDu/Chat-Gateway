@@ -19,7 +19,7 @@ use tokio::sync::RwLock;
 
 mod api;
 mod browser;
-mod chat_backend;
+pub mod chat_backend;
 mod chat_service;
 mod config;
 mod context;
