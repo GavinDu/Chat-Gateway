@@ -266,9 +266,14 @@ mod worker_supervisor_tests {
         })
         .await
         .expect("replacement worker should complete warm-up");
-        assert!(pool.worker_alive(), "replacement should be ready after warm-up");
+        assert!(
+            pool.worker_alive(),
+            "replacement should be ready after warm-up"
+        );
         assert_eq!(
-            pool.discover("chatgpt").await.expect("recovered request should succeed"),
+            pool.discover("chatgpt")
+                .await
+                .expect("recovered request should succeed"),
             vec!["recovered-model"]
         );
         pool.shutdown()
