@@ -17,6 +17,7 @@ pub struct ChatRequest {
 pub type BackendRequest = ChatRequest;
 
 /// Stable provider identity used by routing, metrics, and backend diagnostics.
+#[allow(dead_code)] // Public identity contract is consumed during backend/router migration.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ProviderId(String);
 
@@ -40,18 +41,13 @@ impl ProviderId {
 }
 
 /// Explicit feature contract; callers must not infer support from provider names.
+#[allow(dead_code)] // Capability contract is consumed as provider adapters migrate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct BackendCapabilities {
     pub streaming: bool,
     pub model_selection: bool,
     pub system_role: bool,
     pub addressable_threads: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ChatEventKind {
-    Delta,
-    Completed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,6 +65,7 @@ impl From<ProviderChunk> for ChatEvent {
     }
 }
 
+#[allow(dead_code)] // Typed variants are introduced ahead of handler conversion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GatewayErrorKind {
     InvalidRequest,
@@ -89,6 +86,7 @@ pub struct GatewayError {
     pub retryable: bool,
 }
 
+#[allow(dead_code)] // Constructors are consumed incrementally by adapter and handler migrations.
 impl GatewayError {
     pub fn is_retryable(&self) -> bool {
         self.retryable
@@ -147,11 +145,13 @@ impl Error for GatewayError {}
 #[async_trait::async_trait]
 pub trait ChatBackend: Send + Sync {
     /// Identifier for this backend. Legacy adapters default to the browser tier.
+    #[allow(dead_code)]
     fn id(&self) -> ProviderId {
         ProviderId::new("browser").expect("static provider id is valid")
     }
 
     /// Capabilities are explicit and conservative by default.
+    #[allow(dead_code)]
     fn capabilities(&self) -> BackendCapabilities {
         BackendCapabilities::default()
     }
@@ -204,7 +204,10 @@ impl ChatBackend for crate::browser::pool::ObscuraPool {
 
 #[cfg(test)]
 mod tests {
-    use super::{ChatBackend, ChatEvent, ChatRequest, GatewayError, GatewayErrorKind};
+    use super::{
+        BackendCapabilities, ChatBackend, ChatEvent, ChatRequest, GatewayError, GatewayErrorKind,
+        ProviderId,
+    };
     use anyhow::Result;
     use std::sync::Arc;
     use tokio::sync::mpsc;
