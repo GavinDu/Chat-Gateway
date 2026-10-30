@@ -19,7 +19,7 @@ use tokio::sync::RwLock;
 
 mod api;
 mod browser;
-mod chat_backend;
+pub mod chat_backend;
 mod chat_service;
 mod cli;
 mod config;
@@ -37,7 +37,7 @@ mod session;
 
 use api::{add_gateway_headers, api_error, estimate_tokens, validate_chat_req, ChatReq};
 use browser::pool::{BrowserWorkerUnavailableError, ObscuraPool};
-use chat_backend::BackendRequest;
+use chat_backend::{BackendRequest, ProviderId};
 use chat_service::ChatService;
 use cli::Cli;
 use config::AppConfig;
@@ -2662,7 +2662,15 @@ async fn chat_completions(
         let mut rx = match state
             .chat_service
             .stream(BackendRequest {
-                provider: provider_name.clone(),
+                provider: match ProviderId::new(provider_name.clone()) {
+                    Some(provider) => provider,
+                    None => {
+                        last_err = Some(
+                            "provider router returned an invalid provider identifier".to_owned(),
+                        );
+                        continue;
+                    }
+                },
                 prompt: provider_prompt.clone(),
                 model: provider_model.clone(),
                 has_history: has_history && thread_url.is_some(),
