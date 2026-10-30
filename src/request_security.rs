@@ -86,6 +86,12 @@ mod tests {
     }
 
     #[test]
+    fn rejects_non_loopback_host_authority() {
+        assert!(!is_loopback_authority("attacker.example:8080"));
+        assert!(!is_loopback_authority("localhost.attacker.example:8080"));
+    }
+
+    #[test]
     fn rejects_dns_rebinding_hostname_even_when_origin_matches_host() {
         let mut headers = HeaderMap::new();
         headers.insert("origin", "http://attacker.example:8080".parse().unwrap());
@@ -94,12 +100,22 @@ mod tests {
     }
 
     #[test]
+    fn accepts_only_explicit_loopback_authorities() {
+        assert!(is_loopback_authority("127.0.0.1:8080"));
+        assert!(is_loopback_authority("localhost:8080"));
+        assert!(is_loopback_authority("[::1]:8080"));
+        assert!(!is_loopback_authority("localhost.attacker.example:8080"));
+        assert!(!is_loopback_authority("127.0.0.2:8080"));
+        assert!(!is_loopback_authority("localhost:0"));
+    }
+
+    #[test]
     fn allows_originless_local_automation_clients() {
         assert!(login_origin_is_same_authority(&HeaderMap::new()));
     }
 
     #[test]
-    fn accepts_only_explicit_loopback_authorities() {
+    fn accepts_only_valid_loopback_authorities_and_ports() {
         for authority in [
             "localhost",
             "localhost:8080",
@@ -108,8 +124,12 @@ mod tests {
             "[::1]",
             "[::1]:8080",
         ] {
-            assert!(is_loopback_authority(authority), "expected safe authority: {authority}");
+            assert!(
+                is_loopback_authority(authority),
+                "expected loopback authority to be accepted: {authority}"
+            );
         }
+
         for authority in [
             "localhost:",
             "localhost:0",
@@ -124,9 +144,11 @@ mod tests {
             "[::1]:65536",
             "127.0.0.2:8080",
             "localhost.attacker.example:8080",
-            "attacker.example:8080",
         ] {
-            assert!(!is_loopback_authority(authority), "expected unsafe authority: {authority}");
+            assert!(
+                !is_loopback_authority(authority),
+                "expected unsafe authority to be rejected: {authority}"
+            );
         }
     }
 }
