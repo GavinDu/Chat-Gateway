@@ -31,15 +31,17 @@ fn provider_network_tap_provider_supported(provider: Provider) -> bool {
     matches!(provider, Provider::ChatGPT | Provider::Claude)
 }
 
+fn provider_network_tap_value_enabled(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes"
+    )
+}
+
 fn provider_network_tap_enabled(provider: Provider) -> bool {
     provider_network_tap_provider_supported(provider)
         && std::env::var("CHAT_GATEWAY_PROVIDER_NETWORK_TAP")
-            .map(|value| {
-                matches!(
-                    value.trim().to_ascii_lowercase().as_str(),
-                    "1" | "true" | "yes"
-                )
-            })
+            .map(|value| provider_network_tap_value_enabled(&value))
             .unwrap_or(false)
 }
 
@@ -88,6 +90,16 @@ mod worker_supervisor_tests {
         Arc,
     };
     use std::time::Duration;
+
+    #[test]
+    fn metadata_tap_flag_accepts_explicit_truthy_values_only() {
+        for value in ["1", "true", "TRUE", " yes ", "Yes"] {
+            assert!(super::provider_network_tap_value_enabled(value), "{value:?}");
+        }
+        for value in ["", "0", "false", "no", "enabled", "true please"] {
+            assert!(!super::provider_network_tap_value_enabled(value), "{value:?}");
+        }
+    }
 
     #[test]
     fn metadata_tap_is_scoped_to_two_supported_providers() {
