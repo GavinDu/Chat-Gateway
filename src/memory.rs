@@ -105,20 +105,20 @@ pub trait ConversationStore: Send + Sync {
         tab_id: Option<String>,
     ) -> anyhow::Result<String>;
 
-    async fn list_conversations(
+    async fn list_conversations_async(
         self: Arc<Self>,
         owner_key_id: String,
         limit: usize,
         offset: usize,
     ) -> anyhow::Result<Vec<ConversationSummary>>;
 
-    async fn export_conversation(
+    async fn export_conversation_async(
         self: Arc<Self>,
         owner_key_id: String,
         conversation_id: String,
     ) -> anyhow::Result<Option<Conversation>>;
 
-    async fn delete_conversation(
+    async fn delete_conversation_async(
         self: Arc<Self>,
         owner_key_id: String,
         conversation_id: String,
@@ -189,7 +189,7 @@ impl ConversationStore for UnifiedMemory {
         .await
     }
 
-    async fn list_conversations(
+    async fn list_conversations_async(
         self: Arc<Self>,
         owner_key_id: String,
         limit: usize,
@@ -202,7 +202,7 @@ impl ConversationStore for UnifiedMemory {
         .map_err(|error| anyhow::anyhow!("conversation list task failed: {error}"))?
     }
 
-    async fn export_conversation(
+    async fn export_conversation_async(
         self: Arc<Self>,
         owner_key_id: String,
         conversation_id: String,
@@ -214,7 +214,7 @@ impl ConversationStore for UnifiedMemory {
         .map_err(|error| anyhow::anyhow!("conversation export task failed: {error}"))?
     }
 
-    async fn delete_conversation(
+    async fn delete_conversation_async(
         self: Arc<Self>,
         owner_key_id: String,
         conversation_id: String,
@@ -761,7 +761,7 @@ impl UnifiedMemory {
     /// Callers must apply authorization before returning this record to clients.
     /// Export one complete conversation for the legacy local tenant.
     #[allow(dead_code)]
-    pub fn export_conversation(
+    pub fn export_conversation_async(
         &self,
         conversation_id: &str,
     ) -> anyhow::Result<Option<Conversation>> {
@@ -791,7 +791,7 @@ impl UnifiedMemory {
 
     /// List conversation metadata for the legacy local tenant.
     #[allow(dead_code)]
-    pub fn list_conversations(
+    pub fn list_conversations_async(
         &self,
         limit: usize,
         offset: usize,
@@ -872,7 +872,7 @@ impl UnifiedMemory {
     }
 
     #[allow(dead_code)]
-    pub fn delete_conversation(&self, conversation_id: &str) -> anyhow::Result<bool> {
+    pub fn delete_conversation_async(&self, conversation_id: &str) -> anyhow::Result<bool> {
         self.delete_conversation_for_owner("local", conversation_id)
     }
 
