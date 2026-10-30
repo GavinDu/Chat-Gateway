@@ -274,6 +274,12 @@ mod worker_supervisor_tests {
     #[tokio::test]
     async fn request_after_worker_panic_succeeds_only_after_replacement_warmup() {
         RESTART_TEST_SPAWNS.store(0, Ordering::SeqCst);
+        let restart_metric_before = crate::metrics::render_with_provider_states(&[])
+            .lines()
+            .find(|line| line.starts_with("gateway_browser_worker_restarts_total "))
+            .and_then(|line| line.split_whitespace().nth(1))
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or_default();
         let config: crate::config::AppConfig =
             serde_yaml::from_str("providers: []").expect("empty test config should parse");
         let pool = super::ObscuraPool::new_with_worker_spawner(
@@ -286,6 +292,18 @@ mod worker_supervisor_tests {
         pool.warm_all()
             .await
             .expect("initial worker should report ready");
+        // The /ready route delegates to this response helper; exercise its
+        // healthy contract with the injected worker before inducing a panic.
+        assert_eq!(
+            crate::api::health::readiness_response(
+                1,
+                pool.worker_alive(),
+                pool.worker_generation(),
+            )
+            .status(),
+            axum::http::StatusCode::OK,
+            "readiness should be healthy before the injected worker failure"
+        );
         assert!(
             pool.discover("chatgpt").await.is_err(),
             "the request in flight during the injected crash must fail closed"
@@ -301,6 +319,36 @@ mod worker_supervisor_tests {
         assert!(
             pool.worker_alive(),
             "replacement should be ready after warm-up"
+        );
+        assert_eq!(
+            crate::api::health::readiness_response(
+                0,
+                false,
+                pool.worker_generation().saturating_sub(1),
+            )
+            .status(),
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "readiness must fail while the browser worker is down"
+        );
+        assert_eq!(
+            crate::api::health::readiness_response(
+                1,
+                pool.worker_alive(),
+                pool.worker_generation(),
+            )
+            .status(),
+            axum::http::StatusCode::OK,
+            "readiness must recover after replacement warm-up"
+        );
+        let restart_metric_after = crate::metrics::render_with_provider_states(&[])
+            .lines()
+            .find(|line| line.starts_with("gateway_browser_worker_restarts_total "))
+            .and_then(|line| line.split_whitespace().nth(1))
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or_default();
+        assert!(
+            restart_metric_after >= restart_metric_before.saturating_add(1),
+            "successful worker replacement must increment restart metric"
         );
         assert_eq!(
             pool.discover("chatgpt")
