@@ -70,3 +70,50 @@ pub struct Cli {
     )]
     pub vault_restore_backup: Option<String>,
 }
+
+
+#[cfg(test)]
+mod tests {
+    use super::Cli;
+    use clap::Parser;
+
+    #[test]
+    fn defaults_preserve_the_config_file_contract() {
+        let cli = Cli::try_parse_from(["chat-gateway-rs"]).expect("default CLI parses");
+        assert_eq!(cli.config, std::path::PathBuf::from("config.yaml"));
+        assert!(!cli.all);
+        assert!(!cli.show_memory_egress_policy);
+        assert!(cli.test_adapter.is_none());
+    }
+
+    #[test]
+    fn diagnostics_modes_remain_mutually_exclusive() {
+        assert!(Cli::try_parse_from([
+            "chat-gateway-rs",
+            "--test-adapter",
+            "chatgpt",
+            "--all"
+        ])
+        .is_err());
+        assert!(Cli::try_parse_from([
+            "chat-gateway-rs",
+            "--vault-list",
+            "--vault-rotate-key"
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn vault_restore_accepts_a_backup_directory() {
+        let cli = Cli::try_parse_from([
+            "chat-gateway-rs",
+            "--vault-restore-backup",
+            "sessions/.vault-rotation-test",
+        ])
+        .expect("vault restore arguments parse");
+        assert_eq!(
+            cli.vault_restore_backup.as_deref(),
+            Some("sessions/.vault-rotation-test")
+        );
+    }
+}
