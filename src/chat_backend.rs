@@ -101,6 +101,7 @@ impl GatewayError {
         }
     }
 
+    #[allow(dead_code)] // Consumed as provider and HTTP boundaries migrate to typed errors.
     pub fn typed(kind: GatewayErrorKind, message: impl Into<String>, retryable: bool) -> Self {
         Self {
             kind,
@@ -109,18 +110,22 @@ impl GatewayError {
         }
     }
 
+    #[allow(dead_code)] // Used by the provider-slot error mapping migration.
     pub fn provider_busy(message: impl Into<String>) -> Self {
         Self::typed(GatewayErrorKind::ProviderBusy, message, true)
     }
 
+    #[allow(dead_code)] // Used by the provider auth-state mapping migration.
     pub fn session_expired(message: impl Into<String>) -> Self {
         Self::typed(GatewayErrorKind::SessionExpired, message, false)
     }
 
+    #[allow(dead_code)] // Used by the provider challenge-state mapping migration.
     pub fn challenge(message: impl Into<String>) -> Self {
         Self::typed(GatewayErrorKind::Challenge, message, false)
     }
 
+    #[allow(dead_code)] // Used by the provider timeout mapping migration.
     pub fn timeout(message: impl Into<String>) -> Self {
         Self::typed(GatewayErrorKind::Timeout, message, true)
     }
@@ -165,6 +170,19 @@ pub trait ChatBackend: Send + Sync {
 
 #[async_trait::async_trait]
 impl ChatBackend for crate::browser::pool::ObscuraPool {
+    fn id(&self) -> ProviderId {
+        ProviderId::new("browser").expect("static backend id is valid")
+    }
+
+    fn capabilities(&self) -> BackendCapabilities {
+        BackendCapabilities {
+            streaming: true,
+            model_selection: true,
+            system_role: false,
+            addressable_threads: false,
+        }
+    }
+
     async fn send_stream(
         &self,
         request: ChatRequest,
