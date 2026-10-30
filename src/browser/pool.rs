@@ -78,6 +78,23 @@ fn join_finished_worker(worker: &mut Option<std::thread::JoinHandle<()>>) -> boo
     true
 }
 
+async fn join_worker_on_shutdown(worker: Option<std::thread::JoinHandle<()>>) {
+    let Some(worker) = worker else {
+        return;
+    };
+    match tokio::task::spawn_blocking(move || worker.join()).await {
+        Ok(Ok(())) => {}
+        Ok(Err(_)) => tracing::debug!("browser worker joined after panic during shutdown"),
+        Err(error) => tracing::warn!(%error, "browser worker join task failed during shutdown"),
+    }
+}
+
+async fn wait_for_worker_shutdown(shutting_down: &AtomicBool) {
+    while !shutting_down.load(Ordering::Acquire) {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 fn next_browser_worker_restart_backoff(current: Duration) -> Duration {
     (current * 2).min(MAX_BROWSER_WORKER_RESTART_BACKOFF)
 }
@@ -91,8 +108,8 @@ fn closed_command_channel() -> mpsc::Sender<Command> {
 #[cfg(test)]
 mod worker_supervisor_tests {
     use super::{
-        closed_command_channel, join_finished_worker, next_browser_worker_restart_backoff,
-        WorkerReadyGuard,
+        closed_command_channel, join_finished_worker, join_worker_on_shutdown,
+        next_browser_worker_restart_backoff, WorkerReadyGuard,
     };
     use std::sync::{
         atomic::{AtomicBool, Ordering},
@@ -127,6 +144,23 @@ mod worker_supervisor_tests {
         assert!(!super::provider_network_tap_provider_supported(
             Provider::Gemini
         ));
+    }
+
+    #[tokio::test]
+    async fn graceful_shutdown_waits_for_worker_thread_to_exit() {
+        let exited = Arc::new(AtomicBool::new(false));
+        let worker_exited = exited.clone();
+        let worker = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(10));
+            worker_exited.store(true, Ordering::Release);
+        });
+
+        super::join_worker_on_shutdown(Some(worker)).await;
+
+        assert!(
+            exited.load(Ordering::Acquire),
+            "shutdown must join the worker before returning"
+        );
     }
 
     #[test]
@@ -428,14 +462,22 @@ impl ObscuraPool {
             loop {
                 tokio::time::sleep(Duration::from_millis(250)).await;
                 if shutting_down.load(Ordering::Acquire) {
+                    join_worker_on_shutdown(worker_handle.take()).await;
                     return;
                 }
                 if !cmd_tx.read().await.is_closed() {
                     continue;
                 }
                 worker_ready.store(false, Ordering::Release);
-                tokio::time::sleep(backoff).await;
+                tokio::select! {
+                    _ = tokio::time::sleep(backoff) => {}
+                    _ = wait_for_worker_shutdown(&shutting_down) => {
+                        join_worker_on_shutdown(worker_handle.take()).await;
+                        return;
+                    }
+                }
                 if shutting_down.load(Ordering::Acquire) {
+                    join_worker_on_shutdown(worker_handle.take()).await;
                     return;
                 }
                 if !cmd_tx.read().await.is_closed() {
