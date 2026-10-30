@@ -400,6 +400,6 @@ Each provider has a configurable `min_request_interval_ms` (default `5000`) and 
 
 ## Provider session health
 
-`GET /health` reports each configured provider's runtime `session_state`: `unknown` until a successful send, `ready` after a successful response, or `needs_login` after an explicit `session_expired` provider error. `needs_login` providers are skipped by routing and do not count toward `/ready`. After completing login, restart the gateway to clear the in-memory session state.
+`GET /health` reports each configured provider's runtime `session_state`: `unknown` until a successful send, `ready` after a successful response, or `needs_login` after an explicit `session_expired` provider error. `needs_login` providers are skipped by routing and do not count toward `/ready`. After a successful `/login` completion, the gateway clears the expired state immediately and makes the provider routable again; no restart is required. A successful send or session verification then reports the provider as `ready`.
 
 Provider send selectors avoid generic submit buttons and icon-only guesses when possible. If a provider's specific send selector is unavailable, the adapter's bounded Enter-key fallback is used instead of clicking an unrelated control.
