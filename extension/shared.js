@@ -36,7 +36,21 @@ async function relayFetch(path, options = {}) {
   return fetch(localGateway + path, {...options, headers, cache:"no-store"});
 }
 
-async function providerCookieSnapshot(provider) {
+function sanitizeLocalStorageSnapshot(snapshot) {
+  if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) return {};
+  const safe = {};
+  let totalBytes = 0;
+  for (const [key, value] of Object.entries(snapshot)) {
+    if (typeof key !== "string" || typeof value !== "string" || !key || key.length > 512) continue;
+    const entryBytes = new TextEncoder().encode(key).length + new TextEncoder().encode(value).length;
+    if (Object.keys(safe).length >= 128 || entryBytes > 65536 || totalBytes + entryBytes > 262144) continue;
+    safe[key] = value;
+    totalBytes += entryBytes;
+  }
+  return safe;
+}
+
+async function providerCookieSnapshot(provider, localStorageSnapshot = {}) {
   const domains = PROVIDERS[provider];
   if (!domains) throw new Error("Unsupported provider.");
   // A partial permission grant must never overwrite a valid gateway session
@@ -64,13 +78,13 @@ async function providerCookieSnapshot(provider) {
     }
   }
   const deduped = new Map(all.map(cookie => [cookie.domain + "\n" + cookie.path + "\n" + cookie.name, cookie]));
-  return {cookies:Array.from(deduped.values()), local_storage:{}, ts:new Date().toISOString()};
+  return {cookies:Array.from(deduped.values()), local_storage:sanitizeLocalStorageSnapshot(localStorageSnapshot), ts:new Date().toISOString()};
 }
 
 async function syncProvider(provider) {
-  const {gateway, token, linkedProviders = []} = await chrome.storage.local.get(["gateway", "token", "linkedProviders"]);
+  const {gateway, token, linkedProviders = [], providerLocalStorage = {}} = await chrome.storage.local.get(["gateway", "token", "linkedProviders", "providerLocalStorage"]);
   if (!gateway || !token || !linkedProviders.includes(provider)) return;
-  const snapshot = await providerCookieSnapshot(provider);
+  const snapshot = await providerCookieSnapshot(provider, providerLocalStorage[provider] || {});
   // Missing permissions or an expired browser session must not overwrite a
   // previously valid gateway session with an empty snapshot.
   if (snapshot.cookies.length === 0) return;
