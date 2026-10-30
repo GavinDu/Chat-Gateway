@@ -63,7 +63,10 @@ mod worker_supervisor_tests {
         }
         let mut worker = Some(worker);
         assert!(join_finished_worker(&mut worker));
-        assert!(worker.is_none(), "the finished worker handle must be consumed");
+        assert!(
+            worker.is_none(),
+            "the finished worker handle must be consumed"
+        );
     }
 
     #[test]
@@ -350,8 +353,12 @@ impl ObscuraPool {
             worker_ready: worker_ready.clone(),
             worker_generation: worker_generation.clone(),
         });
-        let mut worker_handle =
-            Some(browser_thread(cfg.clone(), cmd_rx, ready_tx, worker_ready.clone()));
+        let mut worker_handle = Some(browser_thread(
+            cfg.clone(),
+            cmd_rx,
+            ready_tx,
+            worker_ready.clone(),
+        ));
 
         // Recreate the thread-affine engine after a crash; never move Page values
         // between threads. The worker performs the same browser build and warm-up
