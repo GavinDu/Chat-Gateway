@@ -71,7 +71,6 @@ pub struct Cli {
     pub vault_restore_backup: Option<String>,
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::Cli;
@@ -88,19 +87,14 @@ mod tests {
 
     #[test]
     fn diagnostics_modes_remain_mutually_exclusive() {
-        assert!(Cli::try_parse_from([
-            "chat-gateway-rs",
-            "--test-adapter",
-            "chatgpt",
-            "--all"
-        ])
-        .is_err());
-        assert!(Cli::try_parse_from([
-            "chat-gateway-rs",
-            "--vault-list",
-            "--vault-rotate-key"
-        ])
-        .is_err());
+        assert!(
+            Cli::try_parse_from(["chat-gateway-rs", "--test-adapter", "chatgpt", "--all"])
+                .is_err()
+        );
+        assert!(
+            Cli::try_parse_from(["chat-gateway-rs", "--vault-list", "--vault-rotate-key"])
+                .is_err()
+        );
     }
 
     #[test]
