@@ -2873,7 +2873,10 @@ impl ConversationStore for CountingStore {
         limit: usize,
         offset: usize,
     ) -> anyhow::Result<Vec<ConversationSummary>> {
-        self.inner.clone().list_conversations_async(owner_key_id, limit, offset).await
+        self.inner
+            .clone()
+            .list_conversations_async(owner_key_id, limit, offset)
+            .await
     }
 
     async fn export_conversation_async(
@@ -2881,7 +2884,10 @@ impl ConversationStore for CountingStore {
         owner_key_id: String,
         conversation_id: String,
     ) -> anyhow::Result<Option<Conversation>> {
-        self.inner.clone().export_conversation_async(owner_key_id, conversation_id).await
+        self.inner
+            .clone()
+            .export_conversation_async(owner_key_id, conversation_id)
+            .await
     }
 
     async fn delete_conversation_async(
@@ -2889,7 +2895,10 @@ impl ConversationStore for CountingStore {
         owner_key_id: String,
         conversation_id: String,
     ) -> anyhow::Result<bool> {
-        self.inner.clone().delete_conversation_async(owner_key_id, conversation_id).await
+        self.inner
+            .clone()
+            .delete_conversation_async(owner_key_id, conversation_id)
+            .await
     }
 
     async fn get_provider_thread_async(
@@ -2898,7 +2907,10 @@ impl ConversationStore for CountingStore {
         conversation_id: String,
         provider: String,
     ) -> anyhow::Result<Option<ProviderThread>> {
-        self.inner.clone().get_provider_thread_async(owner_key_id, conversation_id, provider).await
+        self.inner
+            .clone()
+            .get_provider_thread_async(owner_key_id, conversation_id, provider)
+            .await
     }
 
     async fn upsert_provider_thread_async(
@@ -2906,7 +2918,10 @@ impl ConversationStore for CountingStore {
         owner_key_id: String,
         thread: ProviderThread,
     ) -> anyhow::Result<()> {
-        self.inner.clone().upsert_provider_thread_async(owner_key_id, thread).await
+        self.inner
+            .clone()
+            .upsert_provider_thread_async(owner_key_id, thread)
+            .await
     }
 }
 
