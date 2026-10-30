@@ -185,6 +185,12 @@ pub trait ChatBackend: Send + Sync {
         &self,
         request: ChatRequest,
     ) -> std::result::Result<mpsc::Receiver<Result<ChatEvent, GatewayError>>, GatewayError>;
+
+    /// Discover models through the selected provider adapter.
+    async fn models(
+        &self,
+        provider: ProviderId,
+    ) -> std::result::Result<Vec<String>, GatewayError>;
 }
 
 #[async_trait::async_trait]
@@ -200,6 +206,24 @@ impl ChatBackend for crate::browser::pool::ObscuraPool {
             system_role: false,
             addressable_threads: false,
         }
+    }
+
+    async fn models(
+        &self,
+        provider: ProviderId,
+    ) -> std::result::Result<Vec<String>, GatewayError> {
+        crate::browser::pool::ObscuraPool::discover(self, provider.as_str())
+            .await
+            .map_err(|error| {
+                if error
+                    .downcast_ref::<crate::browser::pool::BrowserWorkerUnavailableError>()
+                    .is_some_and(|worker_error| worker_error.is_retryable())
+                {
+                    GatewayError::backend_unavailable(error.to_string())
+                } else {
+                    GatewayError::provider_failure(error.to_string())
+                }
+            })
     }
 
     async fn send_stream(
@@ -254,6 +278,13 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ChatBackend for FakeBackend {
+        async fn models(
+            &self,
+            provider: ProviderId,
+        ) -> std::result::Result<Vec<String>, GatewayError> {
+            Ok(vec![format!("{}-test-model", provider.as_str())])
+        }
+
         async fn send_stream(
             &self,
             request: ChatRequest,
@@ -274,6 +305,16 @@ mod tests {
             .expect("receiver should be alive");
             Ok(rx)
         }
+    }
+
+    #[tokio::test]
+    async fn fake_backend_exposes_provider_model_discovery_without_browser_runtime() {
+        let backend = FakeBackend;
+        let models = backend
+            .models(ProviderId::new("chatgpt").unwrap())
+            .await
+            .expect("fake backend model discovery should succeed");
+        assert_eq!(models, vec!["chatgpt-test-model"]);
     }
 
     #[tokio::test]
