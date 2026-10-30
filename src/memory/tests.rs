@@ -45,6 +45,58 @@ fn open(path: &Path, legacy: Option<&Path>) -> anyhow::Result<UnifiedMemory> {
     })
 }
 
+// Test-only compatibility helpers keep older fixture assertions readable while
+// the production ConversationStore contract exposes one canonical snapshot API.
+#[async_trait::async_trait]
+trait LegacyConversationReadTestExt {
+    async fn read_transcript(
+        self: Arc<Self>,
+        owner_key_id: String,
+        conversation_id: String,
+    ) -> anyhow::Result<Vec<ChatMessage>>;
+
+    async fn read_history(
+        self: Arc<Self>,
+        owner_key_id: String,
+        conversation_id: String,
+        max_messages: usize,
+    ) -> anyhow::Result<Vec<ChatMessage>>;
+}
+
+#[async_trait::async_trait]
+impl<T: ConversationStore + ?Sized> LegacyConversationReadTestExt for T {
+    async fn read_transcript(
+        self: Arc<Self>,
+        owner_key_id: String,
+        conversation_id: String,
+    ) -> anyhow::Result<Vec<ChatMessage>> {
+        let (_, _, _, transcript) = self
+            .build_context_with_transcript(
+                owner_key_id,
+                Some(conversation_id),
+                Vec::new(),
+                usize::MAX,
+            )
+            .await?;
+        Ok(transcript)
+    }
+
+    async fn read_history(
+        self: Arc<Self>,
+        owner_key_id: String,
+        conversation_id: String,
+        max_messages: usize,
+    ) -> anyhow::Result<Vec<ChatMessage>> {
+        let mut transcript = self
+            .read_transcript(owner_key_id, conversation_id)
+            .await?;
+        if transcript.len() > max_messages {
+            transcript.drain(..transcript.len() - max_messages);
+        }
+        Ok(transcript)
+    }
+}
+
 fn m(role: &str, content: &str) -> ChatMessage {
     ChatMessage {
         role: role.into(),
@@ -2808,33 +2860,6 @@ impl CountingStore {
 
 #[async_trait::async_trait]
 impl ConversationStore for CountingStore {
-    async fn read_transcript(
-        self: Arc<Self>,
-        owner_key_id: String,
-        conversation_id: String,
-    ) -> anyhow::Result<Vec<ChatMessage>> {
-        self.transcript_read_calls
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.inner
-            .clone()
-            .read_transcript(owner_key_id, conversation_id)
-            .await
-    }
-
-    async fn read_history(
-        self: Arc<Self>,
-        owner_key_id: String,
-        conversation_id: String,
-        max_messages: usize,
-    ) -> anyhow::Result<Vec<ChatMessage>> {
-        self.bounded_history_read_calls
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.inner
-            .clone()
-            .read_history(owner_key_id, conversation_id, max_messages)
-            .await
-    }
-
     async fn build_context_with_transcript(
         self: Arc<Self>,
         owner_key_id: String,
