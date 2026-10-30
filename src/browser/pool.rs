@@ -18,6 +18,51 @@ fn effective_session_pool_size(configured: usize) -> usize {
 
 const MAX_BROWSER_WORKER_RESTART_BACKOFF: Duration = Duration::from_secs(30);
 
+/// Metadata-only response observation. Obscura currently exposes buffered
+/// response bodies, so this deliberately does not claim incremental SSE data.
+fn provider_network_tap_provider_supported(provider: Provider) -> bool {
+    matches!(provider, Provider::ChatGPT | Provider::Claude)
+}
+
+fn provider_network_tap_enabled(provider: Provider) -> bool {
+    provider_network_tap_provider_supported(provider)
+        && std::env::var("CHAT_GATEWAY_PROVIDER_NETWORK_TAP")
+            .map(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes"
+                )
+            })
+            .unwrap_or(false)
+}
+
+fn attach_provider_network_tap(page: &mut obscura_core::Page, provider: Provider) {
+    if !provider_network_tap_enabled(provider) {
+        return;
+    }
+
+    let provider_name = provider.name();
+    page.on_response(Arc::new(move |info, response| {
+        if !matches!(
+            info.resource_type,
+            obscura_core::ResourceType::Fetch | obscura_core::ResourceType::Xhr
+        ) {
+            return;
+        }
+        // Host-only correlation avoids leaking paths, query strings, cookies,
+        // authorization headers, prompts, or response body content.
+        let host = response.url.host_str().unwrap_or("unknown");
+        tracing::debug!(
+            provider = provider_name,
+            host,
+            resource_type = ?info.resource_type,
+            status = response.status,
+            response_bytes = response.body.len(),
+            "provider network response observed (metadata only)"
+        );
+    }));
+}
+
 fn join_finished_worker(worker: &mut Option<std::thread::JoinHandle<()>>) -> bool {
     let Some(handle) = worker.as_ref() else {
         return true;
@@ -67,6 +112,21 @@ mod worker_supervisor_tests {
             worker.is_none(),
             "the finished worker handle must be consumed"
         );
+    }
+
+    #[test]
+    fn metadata_tap_is_scoped_to_supported_providers() {
+        use crate::providers::Provider;
+
+        assert!(super::provider_network_tap_provider_supported(
+            Provider::ChatGPT
+        ));
+        assert!(super::provider_network_tap_provider_supported(
+            Provider::Claude
+        ));
+        assert!(!super::provider_network_tap_provider_supported(
+            Provider::Gemini
+        ));
     }
 
     #[test]
@@ -1009,6 +1069,7 @@ fn browser_thread(
                     let Some(provider) = Provider::from_name(&pcfg.name) else { continue };
                     match browser.new_page().await {
                         Ok(mut page) => {
+                            attach_provider_network_tap(&mut page, provider);
                             let session_file = match session::load_session_file(&pcfg.name) {
                                 Ok(file) => file,
                                 Err(e) => {
