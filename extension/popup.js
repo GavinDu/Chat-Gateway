@@ -25,9 +25,16 @@ async function captureActiveTabLocalStorage(provider) {
     target:{tabId:tab.id},
     func:() => {
       const snapshot = {};
+      let totalBytes = 0;
       for (let index = 0; index < localStorage.length; index += 1) {
+        if (Object.keys(snapshot).length >= 128) break;
         const key = localStorage.key(index);
-        if (key !== null) snapshot[key] = localStorage.getItem(key) || "";
+        if (key === null || !key || key.length > 512) continue;
+        const value = localStorage.getItem(key) || "";
+        const entryBytes = new TextEncoder().encode(key).length + new TextEncoder().encode(value).length;
+        if (entryBytes > 65536 || totalBytes + entryBytes > 262144) continue;
+        snapshot[key] = value;
+        totalBytes += entryBytes;
       }
       return snapshot;
     }
