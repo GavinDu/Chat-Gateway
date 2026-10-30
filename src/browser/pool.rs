@@ -1199,46 +1199,136 @@ fn browser_thread(
                             super::network_tap::attach_provider_network_tap(&mut page, provider);
                             let session_file = match session::load_session_file(&pcfg.name) {
                                 Ok(file) => file,
-                                Err(e) => {
-                                    tracing::warn!(provider = %pcfg.name, "session file could not be loaded; continuing without restored session: {e}");
+                                Err(error) => {
+                                    // Preserve unreadable/corrupt vault material for diagnosis.
+                                    // The page starts without restored credentials and must
+                                    // pass the same interactive-login health check as a fresh page.
+                                    tracing::warn!(
+                                        provider = %pcfg.name,
+                                        %error,
+                                        "provider session snapshot could not be loaded; interactive login may be required"
+                                    );
                                     None
                                 }
                             };
+                            let mut restore_failed = false;
                             if let Some(file) = &session_file {
-                                if let Err(e) = session::restore_cookies(&browser, file, &pcfg.name) {
-                                    tracing::warn!(provider = %pcfg.name, "cookie restore failed; provider may require login: {e}");
+                                if let Err(error) = session::restore_cookies(&browser, file, &pcfg.name) {
+                                    restore_failed = true;
+                                    tracing::warn!(
+                                        provider = %pcfg.name,
+                                        %error,
+                                        "provider cookie restoration failed"
+                                    );
                                 }
                             }
-                            if let Err(e) = page.goto(provider.login_url()).await {
-                                tracing::warn!(provider = %pcfg.name, "warm goto failed: {e}");
+                            if let Err(error) = page.goto(provider.login_url()).await {
+                                tracing::warn!(provider = %pcfg.name, %error, "warm navigation failed");
                             }
                             if let Some(file) = &session_file {
-                                if let Err(error) = session::restore_local_storage(&page, file) {
-                                    tracing::warn!(provider = %pcfg.name, "localStorage restore failed: {error}");
+                                if !restore_failed {
+                                    if let Err(error) = session::restore_local_storage(&page, file) {
+                                        restore_failed = true;
+                                        tracing::warn!(
+                                            provider = %pcfg.name,
+                                            %error,
+                                            "provider localStorage restoration failed"
+                                        );
+                                    }
                                 }
-                                // Reload-equivalent so the app boots with the session applied
-                                if let Err(e) = page.goto(provider.login_url()).await {
-                                    tracing::warn!(provider = %pcfg.name, "warm re-goto failed: {e}");
+                                if !restore_failed {
+                                    // Reload so the provider application initializes with the
+                                    // restored cookie and localStorage state.
+                                    if let Err(error) = page.goto(provider.login_url()).await {
+                                        restore_failed = true;
+                                        tracing::warn!(
+                                            provider = %pcfg.name,
+                                            %error,
+                                            "provider navigation after session restoration failed"
+                                        );
+                                    }
                                 }
                             }
-                            // Verify the restored session before publishing this page as a
-                            // usable provider page. The worker itself may be ready while an
-                            // individual provider still requires interactive reauthentication.
-                            // Do not leave the provider in an unknown/implicitly-healthy state
-                            // for the first 30-second periodic probe interval.
-                            match registry.get(&provider) {
-                                Some(adapter) => match verify_session_page(provider, &page, adapter.as_ref()) {
-                                    Ok(true) => {
-                                        crate::provider_state::record_success(provider.name());
+                            if restore_failed {
+                                // A partially restored session is never usable. Clear both
+                                // persistence layers and invalidate the snapshot before allowing
+                                // an interactive re-login. If cleanup fails, do not publish the
+                                // page into the provider pool.
+                                let cleanup = (|| -> Result<()> {
+                                    session::clear_provider_cookies(&browser, provider.name())?;
+                                    let cleared = page.evaluate(
+                                        "(() => { try { localStorage.clear(); return true; } catch (_) { return false; } })()"
+                                    );
+                                    if cleared != serde_json::Value::Bool(true) {
+                                        anyhow::bail!("provider localStorage cleanup failed");
                                     }
-                                    Ok(false) => {
-                                        crate::provider_state::record_needs_login(provider.name());
-                                    }
+                                    session::delete_session_snapshot(provider.name())?;
+                                    Ok(())
+                                })();
+                                if let Err(error) = cleanup {
+                                    crate::provider_state::record_probe_failure(provider.name());
+                                    tracing::error!(
+                                        provider = %pcfg.name,
+                                        %error,
+                                        "could not clear a partially restored provider session; page withheld"
+                                    );
+                                    continue;
+                                }
+                                if let Err(error) = page.goto(provider.login_url()).await {
+                                    crate::provider_state::record_probe_failure(provider.name());
+                                    tracing::error!(
+                                        provider = %pcfg.name,
+                                        %error,
+                                        "could not reload provider after clearing partial session; page withheld"
+                                    );
+                                    continue;
+                                }
+                                crate::provider_state::record_needs_login(provider.name());
+                            } else {
+                                // Verify the restored session before publishing this page as
+                                // usable. Expired credentials are revoked from disk and from
+                                // the embedded browser before interactive login is requested.
+                                let verification = match registry.get(&provider) {
+                                    Some(adapter) => verify_session_page(provider, &page, adapter.as_ref()),
+                                    None => Err(anyhow::anyhow!("provider adapter is not registered")),
+                                };
+                                match verification {
+                                    Ok(true) => crate::provider_state::record_success(provider.name()),
+                                    Ok(false) => crate::provider_state::record_needs_login(provider.name()),
                                     Err(error) if error.downcast_ref::<ProviderSessionExpiredError>().is_some() => {
+                                        let cleanup = (|| -> Result<()> {
+                                            session::clear_provider_cookies(&browser, provider.name())?;
+                                            let cleared = page.evaluate(
+                                                "(() => { try { localStorage.clear(); return true; } catch (_) { return false; } })()"
+                                            );
+                                            if cleared != serde_json::Value::Bool(true) {
+                                                anyhow::bail!("provider localStorage cleanup failed");
+                                            }
+                                            session::delete_session_snapshot(provider.name())?;
+                                            Ok(())
+                                        })();
+                                        if let Err(cleanup_error) = cleanup {
+                                            crate::provider_state::record_probe_failure(provider.name());
+                                            tracing::error!(
+                                                provider = %pcfg.name,
+                                                %cleanup_error,
+                                                "expired provider session cleanup failed; page withheld"
+                                            );
+                                            continue;
+                                        }
+                                        if let Err(navigation_error) = page.goto(provider.login_url()).await {
+                                            crate::provider_state::record_probe_failure(provider.name());
+                                            tracing::error!(
+                                                provider = %pcfg.name,
+                                                %navigation_error,
+                                                "provider navigation after expired-session cleanup failed; page withheld"
+                                            );
+                                            continue;
+                                        }
                                         crate::provider_state::record_needs_login(provider.name());
                                         tracing::warn!(
                                             provider = %pcfg.name,
-                                            "restored provider session is expired; interactive login required"
+                                            "expired provider session was invalidated; interactive login required"
                                         );
                                     }
                                     Err(error) => {
@@ -1249,9 +1339,6 @@ fn browser_thread(
                                             "provider session could not be verified during warm-up"
                                         );
                                     }
-                                },
-                                None => {
-                                    crate::provider_state::record_probe_failure(provider.name());
                                 }
                             }
                             pages.borrow_mut().insert(provider, Rc::new(page));
