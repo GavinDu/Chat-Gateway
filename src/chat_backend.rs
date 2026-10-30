@@ -67,6 +67,7 @@ impl From<ProviderChunk> for ChatEvent {
 }
 
 #[allow(dead_code)] // Typed variants are introduced ahead of handler conversion.
+#[allow(dead_code)] // Variants are consumed incrementally as provider/HTTP mapping migrates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GatewayErrorKind {
     InvalidRequest,
