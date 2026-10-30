@@ -18,6 +18,49 @@ fn effective_session_pool_size(configured: usize) -> usize {
 
 const MAX_BROWSER_WORKER_RESTART_BACKOFF: Duration = Duration::from_secs(30);
 
+/// Metadata-only provider response observation. The pinned Obscura callback
+/// exposes a buffered body, not incremental SSE frames, so this deliberately
+/// records only bounded metadata and never reads/logs body contents or headers.
+fn provider_network_tap_provider_supported(provider: Provider) -> bool {
+    matches!(provider, Provider::ChatGPT | Provider::Claude)
+}
+
+fn provider_network_tap_enabled(provider: Provider) -> bool {
+    provider_network_tap_provider_supported(provider)
+        && std::env::var("CHAT_GATEWAY_PROVIDER_NETWORK_TAP")
+            .map(|value| matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+            .unwrap_or(false)
+}
+
+fn attach_provider_network_tap(page: &mut obscura_core::Page, provider: Provider) {
+    if !provider_network_tap_enabled(provider) {
+        return;
+    }
+
+    let provider_name = provider.name();
+    page.on_response(Arc::new(move |info, response| {
+        if !matches!(
+            info.resource_type,
+            obscura_core::ResourceType::Fetch | obscura_core::ResourceType::Xhr
+        ) {
+            return;
+        }
+        // Host-only correlation avoids leaking query strings, path identifiers,
+        // cookies, authorization headers, prompts, or response bodies.
+        let host = response.url.host_str().unwrap_or("unknown");
+        tracing::debug!(
+            provider = provider_name,
+            host,
+            resource_type = ?info.resource_type,
+            status = response.status,
+            response_bytes = response.body.len().min(usize::MAX / 2),
+            "provider network response observed (metadata only)"
+        );
+    }));
+}
+
+
+
 fn next_browser_worker_restart_backoff(current: Duration) -> Duration {
     (current * 2).min(MAX_BROWSER_WORKER_RESTART_BACKOFF)
 }
@@ -36,6 +79,14 @@ mod worker_supervisor_tests {
         Arc,
     };
     use std::time::Duration;
+
+    #[test]
+    fn metadata_tap_is_scoped_to_two_supported_providers() {
+        use crate::providers::Provider;
+        assert!(super::provider_network_tap_provider_supported(Provider::ChatGPT));
+        assert!(super::provider_network_tap_provider_supported(Provider::Claude));
+        assert!(!super::provider_network_tap_provider_supported(Provider::Gemini));
+    }
 
     #[test]
     fn restart_backoff_doubles_and_is_capped() {
@@ -965,6 +1016,7 @@ fn browser_thread(
                                     tracing::warn!(provider = %pcfg.name, "cookie restore failed; provider may require login: {e}");
                                 }
                             }
+                            attach_provider_network_tap(&mut page, provider);
                             if let Err(e) = page.goto(provider.login_url()).await {
                                 tracing::warn!(provider = %pcfg.name, "warm goto failed: {e}");
                             }
