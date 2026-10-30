@@ -111,6 +111,24 @@ mod worker_supervisor_tests {
     }
 
     #[test]
+    fn metadata_tap_flag_accepts_explicit_truthy_values_only() {
+        for value in ["1", "true", "TRUE", " yes ", "Yes"] {
+            assert!(super::provider_network_tap_value_enabled(value), "{value:?}");
+        }
+        for value in ["", "0", "false", "no", "enabled", "true please"] {
+            assert!(!super::provider_network_tap_value_enabled(value), "{value:?}");
+        }
+    }
+
+    #[test]
+    fn metadata_tap_is_scoped_to_supported_providers() {
+        use crate::providers::Provider;
+        assert!(super::provider_network_tap_provider_supported(Provider::ChatGPT));
+        assert!(super::provider_network_tap_provider_supported(Provider::Claude));
+        assert!(!super::provider_network_tap_provider_supported(Provider::Gemini));
+    }
+
+    #[test]
     fn restart_backoff_doubles_and_is_capped() {
         assert_eq!(
             next_browser_worker_restart_backoff(Duration::from_secs(1)),
