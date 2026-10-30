@@ -3178,7 +3178,7 @@ async fn async_store_keeps_interleaved_conversation_thread_maps_isolated() {
                 ProviderThread {
                     conversation_id: "conversation-b".to_owned(),
                     provider: "chatgpt".to_owned(),
-                    thread_url: "https://chatgpt.ai/chat/thread-b".to_owned(),
+                    thread_url: "https://chatgpt.com/c/thread-b".to_owned(),
                     synced_through_message_id: Some("marker-b".to_owned()),
                     model: Some("gpt-4o".to_owned()),
                     updated_at: 401,
@@ -3217,7 +3217,7 @@ async fn async_store_keeps_interleaved_conversation_thread_maps_isolated() {
         thread_a.synced_through_message_id.as_deref(),
         Some("marker-a")
     );
-    assert_eq!(thread_b.thread_url, "https://chatgpt.ai/chat/thread-b");
+    assert_eq!(thread_b.thread_url, "https://chatgpt.com/c/thread-b");
     assert_eq!(
         thread_b.synced_through_message_id.as_deref(),
         Some("marker-b")
