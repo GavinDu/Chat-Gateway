@@ -33,6 +33,7 @@ mod provider_guard;
 mod provider_state;
 mod providers;
 mod relay;
+mod request_security;
 mod router;
 mod session;
 
@@ -45,6 +46,7 @@ use config::AppConfig;
 use context::{ContextBuilder, ContextPlan, ThreadSyncState};
 use memory::{ChatMessage, ConversationStore, ProviderThread, UnifiedMemory};
 use router::ProviderRouter;
+use request_security::{is_loopback_authority, login_origin_is_same_authority};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct AuthKeyContext {
@@ -580,69 +582,6 @@ async fn protect_login_api(req: Request<Body>, next: Next) -> Response {
         );
     }
     response
-}
-
-fn login_origin_is_same_authority(headers: &HeaderMap) -> bool {
-    let Some(origin) = headers.get(axum::http::header::ORIGIN) else {
-        // CLI and local automation clients commonly omit Origin. The
-        // Sec-Fetch-Site check above still rejects explicitly cross-site calls.
-        return true;
-    };
-    let Ok(origin) = origin.to_str() else {
-        return false;
-    };
-    let Some((scheme, authority)) = origin.split_once("://") else {
-        return false;
-    };
-    if scheme != "http" && scheme != "https" {
-        return false;
-    }
-    let Some(host) = headers
-        .get(axum::http::header::HOST)
-        .and_then(|v| v.to_str().ok())
-    else {
-        return false;
-    };
-
-    // Comparing Origin only to the request Host is insufficient: DNS rebinding
-    // can make an attacker's hostname resolve to loopback, causing both values
-    // to match. The login relay is local-only, so accept only explicit loopback
-    // authorities and reject arbitrary DNS names even when they match Origin.
-    authority.eq_ignore_ascii_case(host) && is_loopback_authority(host)
-}
-
-fn is_loopback_authority(authority: &str) -> bool {
-    if authority.contains('@') || authority.contains('/') || authority.contains('\\') {
-        return false;
-    }
-    let (host, port) = if authority.starts_with('[') {
-        let Some((host, rest)) = authority.split_once(']') else {
-            return false;
-        };
-        let port = if rest.is_empty() {
-            None
-        } else if let Some(port) = rest.strip_prefix(':') {
-            Some(port)
-        } else {
-            return false;
-        };
-        (host, port)
-    } else {
-        match authority.rsplit_once(':') {
-            Some((host, port)) if !host.contains(':') => (host, Some(port)),
-            Some(_) => return false,
-            None => (authority, None),
-        }
-    };
-    if let Some(port) = port {
-        if port.parse::<u16>().ok().filter(|p| *p != 0).is_none() {
-            return false;
-        }
-    }
-    matches!(
-        host.to_ascii_lowercase().as_str(),
-        "localhost" | "127.0.0.1" | "[::1" | "[::1]"
-    )
 }
 
 async fn login_page() -> impl IntoResponse {
