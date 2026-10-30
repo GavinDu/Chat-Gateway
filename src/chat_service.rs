@@ -4,7 +4,10 @@
 //! streaming and non-streaming handlers share the same provider event contract.
 use crate::chat_backend::{BackendRequest, ChatBackend, ChatEvent, GatewayError};
 use anyhow::Result;
-use std::{sync::Arc, time::{Duration, Instant}};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use tokio::sync::mpsc;
 
 pub struct ChatService {
@@ -94,9 +97,12 @@ mod tests {
             }))
             .await
             .expect("test receiver remains open");
-            tx.send(Ok(ChatEvent { content: String::new(), done: true }))
-                .await
-                .expect("test receiver remains open");
+            tx.send(Ok(ChatEvent {
+                content: String::new(),
+                done: true,
+            }))
+            .await
+            .expect("test receiver remains open");
             Ok(rx)
         }
     }
@@ -124,13 +130,16 @@ mod tests {
     #[tokio::test]
     async fn collect_aggregates_until_done_and_records_first_event_latency() {
         let service = ChatService::new(Arc::new(FakeBackend));
-        let events = service.stream(BackendRequest {
-            provider: ProviderId::new("claude").unwrap(),
-            prompt: "hello".to_owned(),
-            model: "test-model".to_owned(),
-            has_history: false,
-            thread_url: None,
-        }).await.unwrap();
+        let events = service
+            .stream(BackendRequest {
+                provider: ProviderId::new("claude").unwrap(),
+                prompt: "hello".to_owned(),
+                model: "test-model".to_owned(),
+                has_history: false,
+                thread_url: None,
+            })
+            .await
+            .unwrap();
         let collected = service.collect(events, std::time::Instant::now()).await;
         assert_eq!(collected.content, "claude:hello");
         assert!(collected.error.is_none());
@@ -141,8 +150,15 @@ mod tests {
     async fn collect_preserves_partial_content_but_reports_terminal_error() {
         let service = ChatService::new(Arc::new(FakeBackend));
         let (tx, rx) = mpsc::channel(2);
-        tx.send(Ok(ChatEvent { content: "partial".into(), done: false })).await.unwrap();
-        tx.send(Err(GatewayError::provider_failure("upstream failed"))).await.unwrap();
+        tx.send(Ok(ChatEvent {
+            content: "partial".into(),
+            done: false,
+        }))
+        .await
+        .unwrap();
+        tx.send(Err(GatewayError::provider_failure("upstream failed")))
+            .await
+            .unwrap();
         let collected = service.collect(rx, std::time::Instant::now()).await;
         assert_eq!(collected.content, "partial");
         assert_eq!(collected.error.unwrap().message, "upstream failed");
@@ -152,9 +168,24 @@ mod tests {
     async fn collect_treats_done_as_terminal_and_ignores_later_events() {
         let service = ChatService::new(Arc::new(FakeBackend));
         let (tx, rx) = mpsc::channel(3);
-        tx.send(Ok(ChatEvent { content: "answer".into(), done: false })).await.unwrap();
-        tx.send(Ok(ChatEvent { content: String::new(), done: true })).await.unwrap();
-        tx.send(Ok(ChatEvent { content: "must-not-append".into(), done: false })).await.unwrap();
+        tx.send(Ok(ChatEvent {
+            content: "answer".into(),
+            done: false,
+        }))
+        .await
+        .unwrap();
+        tx.send(Ok(ChatEvent {
+            content: String::new(),
+            done: true,
+        }))
+        .await
+        .unwrap();
+        tx.send(Ok(ChatEvent {
+            content: "must-not-append".into(),
+            done: false,
+        }))
+        .await
+        .unwrap();
         let collected = service.collect(rx, std::time::Instant::now()).await;
         assert_eq!(collected.content, "answer");
         assert!(collected.error.is_none());
