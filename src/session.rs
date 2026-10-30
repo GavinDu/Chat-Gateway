@@ -1198,23 +1198,25 @@ pub fn restore_cookies(browser: &Browser, file: &SessionFile, provider: &str) ->
             );
             continue;
         }
-        let mut s = format!("{}={}", c.name, c.value);
+        // Cookie headers contain reusable bearer credentials. Keep the
+        // temporary header in zeroizing memory rather than an ordinary String.
+        let mut s = Zeroizing::new(format!("{}={}", c.name, c.value));
         if !c.domain.is_empty() {
-            s += &format!("; Domain={}", c.domain);
+            s.push_str(&format!("; Domain={}", c.domain));
         }
-        s += &format!(
+        s.push_str(&format!(
             "; Path={}",
             if c.path.is_empty() {
                 "/".to_string()
             } else {
                 c.path.clone()
             }
-        );
+        ));
         if c.secure {
-            s += "; Secure";
+            s.push_str("; Secure");
         }
         if c.http_only {
-            s += "; HttpOnly";
+            s.push_str("; HttpOnly");
         }
         let url = if c.domain.is_empty() {
             "https://localhost/".to_string()
@@ -1243,10 +1245,16 @@ pub fn restore_cookies(browser: &Browser, file: &SessionFile, provider: &str) ->
 
 /// Restore step 2 (AFTER goto): localStorage is origin-scoped, so it can
 /// only be injected once the page sits on the provider origin.
-fn local_storage_restore_script(key: &str, value: &str) -> Option<String> {
-    let key = serde_json::to_string(key).ok()?;
-    let value = serde_json::to_string(value).ok()?;
-    Some(format!("(() => {{ try {{ localStorage.setItem({key}, {value}); return true; }} catch (_error) {{ return false; }} }})()"))
+fn local_storage_restore_script(key: &str, value: &str) -> Option<Zeroizing<String>> {
+    // Serialized localStorage values may contain access tokens. Zeroize both
+    // intermediate JSON literals and the final script after page evaluation.
+    let key = Zeroizing::new(serde_json::to_string(key).ok()?);
+    let value = Zeroizing::new(serde_json::to_string(value).ok()?);
+    Some(Zeroizing::new(format!(
+        "(() => {{ try {{ localStorage.setItem({}, {}); return true; }} catch (_error) {{ return false; }} }})()",
+        key.as_str(),
+        value.as_str()
+    )))
 }
 
 pub fn restore_local_storage(page: &Page, file: &SessionFile) -> Result<()> {
