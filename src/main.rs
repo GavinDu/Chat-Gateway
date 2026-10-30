@@ -12,6 +12,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use clap::Parser;
 use sha2::{Digest, Sha256};
 use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Instant};
 use tokio::sync::RwLock;
