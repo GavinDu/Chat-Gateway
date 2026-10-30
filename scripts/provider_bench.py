@@ -30,12 +30,31 @@ def fake_trial():
     return ttft, switch_ms
 
 
+def has_content_delta(sse_line):
+    """Return true only for a non-empty OpenAI-compatible streamed content delta."""
+    if isinstance(sse_line, bytes):
+        sse_line = sse_line.decode("utf-8", errors="replace")
+    line = sse_line.strip()
+    if not line.startswith("data:"):
+        return False
+    data = line[5:].strip()
+    if not data or data == "[DONE]":
+        return False
+    try:
+        event = json.loads(data)
+    except json.JSONDecodeError:
+        return False
+    content = (event.get("choices") or [{}])[0].get("delta", {}).get("content")
+    return isinstance(content, str) and bool(content)
+
+
 def live_trial(args):
+    # Keep this payload within the gateway's implemented OpenAI-compatible
+    # request schema. max_tokens is not currently supported and is rejected.
     payload = json.dumps({
         "model": args.model,
         "stream": True,
         "messages": [{"role": "user", "content": args.prompt}],
-        "max_tokens": args.max_tokens,
     }).encode()
     req = urllib.request.Request(
         args.endpoint.rstrip("/") + "/chat/completions",
@@ -45,14 +64,15 @@ def live_trial(args):
         method="POST",
     )
     started = time.perf_counter()
+    first_content_delta = None
     with urllib.request.urlopen(req, timeout=args.timeout) as response:
-        first_byte = None
-        while response.read(1):
-            if first_byte is None:
-                first_byte = time.perf_counter()
-    if first_byte is None:
-        raise RuntimeError("endpoint returned an empty response")
-    return (first_byte - started) * 1000, None
+        for line in response:
+            if has_content_delta(line):
+                first_content_delta = time.perf_counter()
+                break
+    if first_content_delta is None:
+        raise RuntimeError("endpoint completed without a streamed content delta")
+    return (first_content_delta - started) * 1000, None
 
 
 def summary(values):
@@ -68,7 +88,6 @@ def main():
     p.add_argument("--api-key", default=os.getenv("CHAT_GATEWAY_BENCH_API_KEY", ""))
     p.add_argument("--model", default=os.getenv("CHAT_GATEWAY_BENCH_MODEL", ""))
     p.add_argument("--prompt", default="Reply with one short sentence.")
-    p.add_argument("--max-tokens", type=int, default=32)
     p.add_argument("--timeout", type=float, default=60)
     args = p.parse_args()
     if args.iterations < 1:
@@ -93,7 +112,7 @@ def main():
         "metrics": {"ttft": summary(ttft),
                     "switch_latency": summary(switches) if switches else None},
         "notes": ("synthetic timings; not provider/browser performance" if args.mode == "fake"
-                  else "TTFT is time to first response byte; endpoint/network included"),
+                  else "TTFT is time to first non-empty streamed content delta; endpoint/network included"),
     }
     print(json.dumps(result, indent=2))
 
