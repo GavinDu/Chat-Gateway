@@ -1121,6 +1121,7 @@ mod completion_pause_regression_tests {
             true,
             false,
             POLL,
+            Duration::from_millis(15_000),
         ));
         assert!(completion_ready(
             COMPLETION_IDLE_TICKS,
@@ -1129,6 +1130,7 @@ mod completion_pause_regression_tests {
             true,
             false,
             POLL,
+            Duration::from_millis(15_000),
         ));
     }
 
@@ -1148,6 +1150,7 @@ mod completion_pause_regression_tests {
             true,
             false,
             POLL,
+            Duration::from_millis(15_000),
         ));
         assert!(completion_ready(
             COMPLETION_IDLE_TICKS,
@@ -1156,6 +1159,7 @@ mod completion_pause_regression_tests {
             true,
             false,
             POLL,
+            Duration::from_millis(15_000),
         ));
     }
 }
