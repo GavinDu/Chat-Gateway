@@ -118,7 +118,7 @@ test("linked provider sync sends its cookie snapshot only to the configured loca
   assert.equal(api.fetchCalls[0].url, "http://127.0.0.1:8080/relay/v1/session/chatgpt");
   assert.equal(api.fetchCalls[0].options.headers.get("Authorization"), "Bearer relay-secret");
   const body = JSON.parse(api.fetchCalls[0].options.body);
-  assert.equal(body.cookies.length, 2);
+  assert.equal(body.cookies.length, 1);
   assert.ok(body.cookies.some(cookie => cookie.value === "session-secret"));
   assert.equal(api.fetchCalls[0].options.cache, "no-store");
 });
