@@ -144,7 +144,7 @@ test("local storage snapshots accept only bounded string entries", () => {
   const snapshot = api.sanitizeLocalStorageSnapshot({
     access_token: "token",
     invalid_number: 42,
-    "x".repeat(513): "oversized-key",
+    ["x".repeat(513)]: "oversized-key",
     oversized_value: "v".repeat(70000)
   });
   assert.deepEqual(JSON.parse(JSON.stringify(snapshot)), { access_token: "token" });
