@@ -1221,6 +1221,39 @@ fn browser_thread(
                                     tracing::warn!(provider = %pcfg.name, "warm re-goto failed: {e}");
                                 }
                             }
+                            // Verify the restored session before publishing this page as a
+                            // usable provider page. The worker itself may be ready while an
+                            // individual provider still requires interactive reauthentication.
+                            // Do not leave the provider in an unknown/implicitly-healthy state
+                            // for the first 30-second periodic probe interval.
+                            match registry.get(&provider) {
+                                Some(adapter) => match verify_session_page(provider, &page, adapter.as_ref()) {
+                                    Ok(true) => {
+                                        crate::provider_state::record_success(provider.name());
+                                    }
+                                    Ok(false) => {
+                                        crate::provider_state::record_needs_login(provider.name());
+                                    }
+                                    Err(error) if error.downcast_ref::<ProviderSessionExpiredError>().is_some() => {
+                                        crate::provider_state::record_needs_login(provider.name());
+                                        tracing::warn!(
+                                            provider = %pcfg.name,
+                                            "restored provider session is expired; interactive login required"
+                                        );
+                                    }
+                                    Err(error) => {
+                                        crate::provider_state::record_probe_failure(provider.name());
+                                        tracing::warn!(
+                                            provider = %pcfg.name,
+                                            %error,
+                                            "provider session could not be verified during warm-up"
+                                        );
+                                    }
+                                },
+                                None => {
+                                    crate::provider_state::record_probe_failure(provider.name());
+                                }
+                            }
                             pages.borrow_mut().insert(provider, Rc::new(page));
                             locks.borrow_mut().insert(provider, Rc::new(tokio::sync::Mutex::new(())));
                             tracing::info!(provider = %pcfg.name, url = provider.login_url(), "page warmed");
