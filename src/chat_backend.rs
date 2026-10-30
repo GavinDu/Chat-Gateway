@@ -187,10 +187,7 @@ pub trait ChatBackend: Send + Sync {
     ) -> std::result::Result<mpsc::Receiver<Result<ChatEvent, GatewayError>>, GatewayError>;
 
     /// Discover models through the selected provider adapter.
-    async fn models(
-        &self,
-        provider: ProviderId,
-    ) -> std::result::Result<Vec<String>, GatewayError>;
+    async fn models(&self, provider: ProviderId) -> std::result::Result<Vec<String>, GatewayError>;
 }
 
 #[async_trait::async_trait]
@@ -208,10 +205,7 @@ impl ChatBackend for crate::browser::pool::ObscuraPool {
         }
     }
 
-    async fn models(
-        &self,
-        provider: ProviderId,
-    ) -> std::result::Result<Vec<String>, GatewayError> {
+    async fn models(&self, provider: ProviderId) -> std::result::Result<Vec<String>, GatewayError> {
         crate::browser::pool::ObscuraPool::discover(self, provider.as_str())
             .await
             .map_err(|error| {
