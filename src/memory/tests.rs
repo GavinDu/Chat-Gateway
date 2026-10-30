@@ -3123,7 +3123,6 @@ fn provider_thread_mappings_survive_memory_store_reopen() {
     );
 }
 
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn async_store_keeps_interleaved_conversation_thread_maps_isolated() {
     let fixture = Fixture::new();
