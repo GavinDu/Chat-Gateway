@@ -78,7 +78,7 @@ $("link").addEventListener("click", async () => {
     const currentStorage = await chrome.storage.local.get(["providerLocalStorage"]);
     const providerLocalStorage = {...(currentStorage.providerLocalStorage || {}), [provider]:localStorageSnapshot};
     await chrome.storage.local.set({linkedProviders, providerLocalStorage});
-    message("Linked " + provider + ". The gateway activated this session in its embedded browser; no restart is required, and cookie changes sync automatically.");
+    message("Linked " + provider + ". Cookies and bounded localStorage from the active provider tab are stored for refresh; cookie changes sync automatically.");
     await refreshStatus();
   } catch (error) { message(error.message); }
 });
