@@ -21,6 +21,16 @@ impl ChatService {
         &self,
         request: BackendRequest,
     ) -> std::result::Result<mpsc::Receiver<Result<ChatEvent, GatewayError>>, GatewayError> {
+        let backend_id = self.backend.id();
+        let capabilities = self.backend.capabilities();
+        tracing::debug!(
+            backend = backend_id.as_str(),
+            streaming = capabilities.streaming,
+            model_selection = capabilities.model_selection,
+            system_role = capabilities.system_role,
+            addressable_threads = capabilities.addressable_threads,
+            "executing request through chat backend"
+        );
         self.backend.send_stream(request).await
     }
 }
@@ -44,7 +54,7 @@ mod tests {
         {
             let (tx, rx) = mpsc::channel(1);
             tx.send(Ok(ChatEvent {
-                content: format!("{}:{}", request.provider, request.prompt),
+                content: format!("{}:{}", request.provider.as_str(), request.prompt),
                 done: true,
             }))
             .await
@@ -58,7 +68,7 @@ mod tests {
         let service = ChatService::new(Arc::new(FakeBackend));
         let mut events = service
             .stream(BackendRequest {
-                provider: "claude".to_owned(),
+                provider: crate::chat_backend::ProviderId::new("claude").unwrap(),
                 prompt: "test prompt".to_owned(),
                 model: "test-model".to_owned(),
                 has_history: true,
