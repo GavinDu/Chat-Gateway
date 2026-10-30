@@ -292,6 +292,8 @@ mod worker_supervisor_tests {
         pool.warm_all()
             .await
             .expect("initial worker should report ready");
+        // The /ready route delegates to this response helper; exercise its
+        // healthy contract with the injected worker before inducing a panic.
         assert_eq!(
             crate::api::health::readiness_response(
                 1,
