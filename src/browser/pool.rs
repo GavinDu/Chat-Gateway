@@ -34,7 +34,12 @@ fn provider_network_tap_provider_supported(provider: Provider) -> bool {
 fn provider_network_tap_enabled(provider: Provider) -> bool {
     provider_network_tap_provider_supported(provider)
         && std::env::var("CHAT_GATEWAY_PROVIDER_NETWORK_TAP")
-            .map(|value| matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+            .map(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes"
+                )
+            })
             .unwrap_or(false)
 }
 
@@ -66,7 +71,6 @@ fn attach_provider_network_tap(page: &mut obscura_core::Page, provider: Provider
 }
 
 
-
 fn next_browser_worker_restart_backoff(current: Duration) -> Duration {
     (current * 2).min(MAX_BROWSER_WORKER_RESTART_BACKOFF)
 }
@@ -89,9 +93,15 @@ mod worker_supervisor_tests {
     #[test]
     fn metadata_tap_is_scoped_to_two_supported_providers() {
         use crate::providers::Provider;
-        assert!(super::provider_network_tap_provider_supported(Provider::ChatGPT));
-        assert!(super::provider_network_tap_provider_supported(Provider::Claude));
-        assert!(!super::provider_network_tap_provider_supported(Provider::Gemini));
+        assert!(super::provider_network_tap_provider_supported(
+            Provider::ChatGPT
+        ));
+        assert!(super::provider_network_tap_provider_supported(
+            Provider::Claude
+        ));
+        assert!(!super::provider_network_tap_provider_supported(
+            Provider::Gemini
+        ));
         assert_eq!(super::bounded_provider_response_bytes(512), 512);
         assert_eq!(
             super::bounded_provider_response_bytes(2_000_000),
