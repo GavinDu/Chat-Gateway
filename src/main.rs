@@ -3140,7 +3140,7 @@ mod model_list_tests {
             daily_request_cap: 100,
             models: models.iter().map(|model| (*model).to_owned()).collect(),
         }
-}
+    }
 
     #[test]
     fn excludes_configured_and_discovered_models_for_disabled_providers() {
