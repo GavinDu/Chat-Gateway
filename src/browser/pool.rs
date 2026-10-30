@@ -27,7 +27,10 @@ fn provider_network_tap_provider_supported(provider: Provider) -> bool {
 }
 
 fn provider_network_tap_value_enabled(value: &str) -> bool {
-    matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes")
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes"
+    )
 }
 
 fn provider_network_tap_enabled(provider: Provider) -> bool {
@@ -43,7 +46,10 @@ fn attach_provider_network_tap(page: &mut obscura_core::Page, provider: Provider
     }
     let provider_name = provider.name();
     page.on_response(Arc::new(move |info, response| {
-        if !matches!(info.resource_type, obscura_core::ResourceType::Fetch | obscura_core::ResourceType::Xhr) {
+        if !matches!(
+            info.resource_type,
+            obscura_core::ResourceType::Fetch | obscura_core::ResourceType::Xhr
+        ) {
             return;
         }
         let host = response.url.host_str().unwrap_or("unknown");
