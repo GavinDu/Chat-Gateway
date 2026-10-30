@@ -1081,8 +1081,7 @@ mod provider_catalog_contract_tests {
 #[cfg(test)]
 mod completion_pause_regression_tests {
     use super::{
-        completion_ready, DeltaObservation, DoneSignal, ResponseDeltaTracker,
-        COMPLETION_IDLE_TICKS,
+        completion_ready, DeltaObservation, DoneSignal, ResponseDeltaTracker, COMPLETION_IDLE_TICKS,
     };
     use std::time::Duration;
 
