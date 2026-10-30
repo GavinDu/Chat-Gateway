@@ -23,6 +23,7 @@ pub mod chat_backend;
 mod chat_service;
 mod cli;
 mod config;
+mod diagnostics;
 mod context;
 mod login;
 mod memory;
@@ -44,21 +45,6 @@ use config::AppConfig;
 use context::{ContextBuilder, ContextPlan, ThreadSyncState};
 use memory::{ChatMessage, ConversationStore, ProviderThread, UnifiedMemory};
 use router::ProviderRouter;
-
-fn adapter_report_is_healthy(report: &browser::pool::TestAdapterReport) -> bool {
-    report.errors.is_empty() && report.session_ok && report.input_found && report.response_token
-}
-
-#[derive(serde::Serialize)]
-struct AdapterDiagnostic {
-    provider: String,
-    queue_ms: Option<u128>,
-    report: Option<browser::pool::TestAdapterReport>,
-    models: Option<Vec<String>>,
-    selectors: Option<String>,
-    errors: Vec<String>,
-    healthy: bool,
-}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct AuthKeyContext {
@@ -225,9 +211,9 @@ async fn main() -> anyhow::Result<()> {
                 .and_then(|provider_id| registry.get(&provider_id))
                 .map(|adapter| format!("{:?}", adapter.selectors()));
             let healthy =
-                errors.is_empty() && report.as_ref().is_some_and(adapter_report_is_healthy);
+                errors.is_empty() && report.as_ref().is_some_and(diagnostics::adapter_report_is_healthy);
 
-            results.push(AdapterDiagnostic {
+            results.push(diagnostics::AdapterDiagnostic {
                 provider,
                 queue_ms,
                 report,
@@ -4024,46 +4010,6 @@ mod loopback_authority_edge_tests {
                 "expected unsafe authority to be rejected: {authority}"
             );
         }
-    }
-}
-
-#[cfg(test)]
-mod adapter_diagnostic_tests {
-    use super::*;
-
-    fn passing_report() -> browser::pool::TestAdapterReport {
-        browser::pool::TestAdapterReport {
-            session_ok: true,
-            probe: vec![("input".to_string(), Some("#prompt".to_string()))],
-            input_found: true,
-            send_clicked: true,
-            response_token: true,
-            errors: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn healthy_report_requires_all_critical_phases() {
-        assert!(adapter_report_is_healthy(&passing_report()));
-
-        let mut report = passing_report();
-        report.session_ok = false;
-        assert!(!adapter_report_is_healthy(&report));
-
-        let mut report = passing_report();
-        report.input_found = false;
-        assert!(!adapter_report_is_healthy(&report));
-
-        let mut report = passing_report();
-        report.response_token = false;
-        assert!(!adapter_report_is_healthy(&report));
-    }
-
-    #[test]
-    fn any_report_error_marks_adapter_unhealthy() {
-        let mut report = passing_report();
-        report.errors.push("send failed".to_string());
-        assert!(!adapter_report_is_healthy(&report));
     }
 }
 
