@@ -1250,7 +1250,11 @@ fn local_storage_restore_script(key: &str, value: &str) -> Option<Zeroizing<Stri
     // intermediate JSON literals and the final script after page evaluation.
     let key = Zeroizing::new(serde_json::to_string(key).ok()?);
     let value = Zeroizing::new(serde_json::to_string(value).ok()?);
-    Some(Zeroizing::new(format!("(() => {{ try {{ localStorage.setItem({key}, {value}); return true; }} catch (_error) {{ return false; }} }})()")))
+    Some(Zeroizing::new(format!(
+        "(() => {{ try {{ localStorage.setItem({}, {}); return true; }} catch (_error) {{ return false; }} }})()",
+        key.as_str(),
+        value.as_str()
+    )))
 }
 
 pub fn restore_local_storage(page: &Page, file: &SessionFile) -> Result<()> {
