@@ -1867,7 +1867,8 @@ mod vault_tests {
         let first = root.join("first.vault");
         let second = root.join("missing").join("second.vault");
         let original = encrypt_session_snapshot(&sample_session(), "chatgpt", &[0x5a; 32]).unwrap();
-        let replacement = encrypt_session_snapshot(&sample_session(), "chatgpt", &[0x6b; 32]).unwrap();
+        let replacement =
+            encrypt_session_snapshot(&sample_session(), "chatgpt", &[0x6b; 32]).unwrap();
         std::fs::write(&first, &original).unwrap();
 
         let records = vec![
