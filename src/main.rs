@@ -2908,9 +2908,9 @@ async fn chat_completions(
         let collected = state.chat_service.collect(rx, provider_started).await;
         let full = collected.content;
         let failed = collected.error.map(|error| error.to_string());
-        let ttft_ms = collected.first_event_elapsed.map(|elapsed| {
-            elapsed.as_millis().min(u64::MAX as u128) as u64
-        });
+        let ttft_ms = collected
+            .first_event_elapsed
+            .map(|elapsed| elapsed.as_millis().min(u64::MAX as u128) as u64);
         let provider_work_ms = provider_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
         let total_ms = request_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
         if let Some(e) = failed {
