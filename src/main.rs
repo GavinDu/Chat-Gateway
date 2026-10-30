@@ -23,6 +23,7 @@ pub mod chat_backend;
 mod chat_service;
 mod cli;
 mod config;
+mod diagnostics;
 mod context;
 mod login;
 mod memory;
@@ -42,23 +43,9 @@ use chat_service::ChatService;
 use cli::Cli;
 use config::AppConfig;
 use context::{ContextBuilder, ContextPlan, ThreadSyncState};
+use diagnostics::{adapter_report_is_healthy, AdapterDiagnostic};
 use memory::{ChatMessage, ConversationStore, ProviderThread, UnifiedMemory};
 use router::ProviderRouter;
-
-fn adapter_report_is_healthy(report: &browser::pool::TestAdapterReport) -> bool {
-    report.errors.is_empty() && report.session_ok && report.input_found && report.response_token
-}
-
-#[derive(serde::Serialize)]
-struct AdapterDiagnostic {
-    provider: String,
-    queue_ms: Option<u128>,
-    report: Option<browser::pool::TestAdapterReport>,
-    models: Option<Vec<String>>,
-    selectors: Option<String>,
-    errors: Vec<String>,
-    healthy: bool,
-}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct AuthKeyContext {
