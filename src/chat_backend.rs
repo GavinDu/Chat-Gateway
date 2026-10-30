@@ -16,6 +16,44 @@ pub struct ChatRequest {
 /// Compatibility alias retained while the HTTP handler migrates.
 pub type BackendRequest = ChatRequest;
 
+/// Stable provider identity used by routing, metrics, and backend diagnostics.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ProviderId(String);
+
+impl ProviderId {
+    pub fn new(value: impl Into<String>) -> Option<Self> {
+        let value = value.into();
+        if value.is_empty()
+            || value.len() > 64
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        {
+            return None;
+        }
+        Some(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Explicit feature contract; callers must not infer support from provider names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct BackendCapabilities {
+    pub streaming: bool,
+    pub model_selection: bool,
+    pub system_role: bool,
+    pub addressable_threads: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChatEventKind {
+    Delta,
+    Completed,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChatEvent {
     pub content: String,
@@ -33,6 +71,13 @@ impl From<ProviderChunk> for ChatEvent {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GatewayErrorKind {
+    InvalidRequest,
+    ModelNotFound,
+    ProviderBusy,
+    SessionExpired,
+    Challenge,
+    Timeout,
+    Memory,
     ProviderFailure,
     BackendUnavailable,
 }
@@ -57,6 +102,30 @@ impl GatewayError {
         }
     }
 
+    pub fn typed(kind: GatewayErrorKind, message: impl Into<String>, retryable: bool) -> Self {
+        Self {
+            kind,
+            message: message.into(),
+            retryable,
+        }
+    }
+
+    pub fn provider_busy(message: impl Into<String>) -> Self {
+        Self::typed(GatewayErrorKind::ProviderBusy, message, true)
+    }
+
+    pub fn session_expired(message: impl Into<String>) -> Self {
+        Self::typed(GatewayErrorKind::SessionExpired, message, false)
+    }
+
+    pub fn challenge(message: impl Into<String>) -> Self {
+        Self::typed(GatewayErrorKind::Challenge, message, false)
+    }
+
+    pub fn timeout(message: impl Into<String>) -> Self {
+        Self::typed(GatewayErrorKind::Timeout, message, true)
+    }
+
     #[allow(dead_code)] // Used by the worker-recovery path as it moves behind ChatBackend.
     pub fn backend_unavailable(message: impl Into<String>) -> Self {
         Self {
@@ -77,6 +146,16 @@ impl Error for GatewayError {}
 
 #[async_trait::async_trait]
 pub trait ChatBackend: Send + Sync {
+    /// Identifier for this backend. Legacy adapters default to the browser tier.
+    fn id(&self) -> ProviderId {
+        ProviderId::new("browser").expect("static provider id is valid")
+    }
+
+    /// Capabilities are explicit and conservative by default.
+    fn capabilities(&self) -> BackendCapabilities {
+        BackendCapabilities::default()
+    }
+
     async fn send_stream(
         &self,
         request: ChatRequest,
@@ -188,7 +267,30 @@ mod tests {
     }
 
     #[test]
+    fn provider_ids_and_capabilities_are_explicit() {
+        assert_eq!(ProviderId::new("chat-gpt").unwrap().as_str(), "chat-gpt");
+        assert!(ProviderId::new("../chatgpt").is_none());
+        assert!(ProviderId::new("").is_none());
+        assert_eq!(BackendCapabilities::default(), BackendCapabilities {
+            streaming: false,
+            model_selection: false,
+            system_role: false,
+            addressable_threads: false,
+        });
+    }
+
+    #[test]
     fn gateway_error_retryability_is_explicit_and_typed() {
+        let busy = GatewayError::provider_busy("provider slot is occupied");
+        assert_eq!(busy.kind, GatewayErrorKind::ProviderBusy);
+        assert!(busy.is_retryable());
+        let timeout = GatewayError::timeout("provider timed out");
+        assert_eq!(timeout.kind, GatewayErrorKind::Timeout);
+        assert!(timeout.is_retryable());
+        let expired = GatewayError::session_expired("login required");
+        assert_eq!(expired.kind, GatewayErrorKind::SessionExpired);
+        assert!(!expired.is_retryable());
+
         let provider = GatewayError::provider_failure("provider rejected request");
         assert_eq!(provider.kind, GatewayErrorKind::ProviderFailure);
         assert!(!provider.retryable);
