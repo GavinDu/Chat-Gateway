@@ -13,6 +13,28 @@ async function refreshStatus() {
   if (!data.vault_mode) message("Vault mode is off. Set CHAT_GATEWAY_SESSION_STORE=vault and CHAT_GATEWAY_VAULT_KEY, then restart the gateway.");
 }
 
+async function captureActiveTabLocalStorage(provider) {
+  const [tab] = await chrome.tabs.query({active:true, lastFocusedWindow:true});
+  if (!tab?.id || !tab.url) throw new Error("Open the signed-in provider tab before linking.");
+  const hostname = new URL(tab.url).hostname.toLowerCase();
+  const roots = PROVIDERS[provider] || [];
+  if (!roots.some(root => hostname === root || hostname.endsWith("." + root))) {
+    throw new Error("The active tab must be on the selected provider before local storage can be linked.");
+  }
+  const results = await chrome.scripting.executeScript({
+    target:{tabId:tab.id},
+    func:() => {
+      const snapshot = {};
+      for (let index = 0; index < localStorage.length; index += 1) {
+        const key = localStorage.key(index);
+        if (key !== null) snapshot[key] = localStorage.getItem(key) || "";
+      }
+      return snapshot;
+    }
+  });
+  return sanitizeLocalStorageSnapshot(results?.[0]?.result || {});
+}
+
 async function initialize() {
   const stored = await chrome.storage.local.get(["gateway","token"]);
   if (stored.gateway) $("gateway").value = stored.gateway;
@@ -46,13 +68,16 @@ $("link").addEventListener("click", async () => {
     const patterns = PROVIDERS[provider].flatMap(domain => ["https://" + domain + "/*", "https://*." + domain + "/*"]);
     const granted = await chrome.permissions.request({origins:patterns});
     if (!granted) throw new Error("Provider permissions were not granted.");
-    const snapshot = await providerCookieSnapshot(provider);
+    const localStorageSnapshot = await captureActiveTabLocalStorage(provider);
+    const snapshot = await providerCookieSnapshot(provider, localStorageSnapshot);
     if (snapshot.cookies.length === 0) throw new Error("No cookies found for this provider. Sign in normally in Chrome first.");
     const response = await relayFetch("/relay/v1/session/" + encodeURIComponent(provider), {method:"POST",body:JSON.stringify(snapshot)});
     if (!response.ok) throw new Error("Gateway rejected session import (" + response.status + "). Ensure vault mode is enabled and provider domains are allowed.");
     const stored = await chrome.storage.local.get(["linkedProviders"]);
     const linkedProviders = Array.from(new Set([...(stored.linkedProviders || []),provider]));
-    await chrome.storage.local.set({linkedProviders});
+    const currentStorage = await chrome.storage.local.get(["providerLocalStorage"]);
+    const providerLocalStorage = {...(currentStorage.providerLocalStorage || {}), [provider]:localStorageSnapshot};
+    await chrome.storage.local.set({linkedProviders, providerLocalStorage});
     message("Linked " + provider + ". The gateway activated this session in its embedded browser; no restart is required, and cookie changes sync automatically.");
     await refreshStatus();
   } catch (error) { message(error.message); }
@@ -69,7 +94,10 @@ $("unlink").addEventListener("click", async () => {
     const response = await relayFetch("/relay/v1/session/" + encodeURIComponent(provider), {method:"DELETE",body:"{}"});
     if (!response.ok) throw new Error("Could not unlink " + provider + ".");
     const stored = await chrome.storage.local.get(["linkedProviders"]);
-    await chrome.storage.local.set({linkedProviders:(stored.linkedProviders || []).filter(value => value !== provider)});
+    const currentStorage = await chrome.storage.local.get(["providerLocalStorage"]);
+    const providerLocalStorage = {...(currentStorage.providerLocalStorage || {})};
+    delete providerLocalStorage[provider];
+    await chrome.storage.local.set({linkedProviders:(stored.linkedProviders || []).filter(value => value !== provider), providerLocalStorage});
     message("Unlinked " + provider + ". The gateway cleared the persisted session, embedded-browser cookies, and origin localStorage.");
     await refreshStatus();
   } catch (error) { message(error.message); }
@@ -79,7 +107,7 @@ $("unpair").addEventListener("click", async () => {
   try {
     const response = await relayFetch("/relay/v1/unpair",{method:"POST",body:"{}"});
     if (!response.ok) throw new Error("Could not revoke the install token.");
-    await chrome.storage.local.remove(["token","linkedProviders"]);
+    await chrome.storage.local.remove(["token","linkedProviders","providerLocalStorage"]);
     $("pairing").hidden = false; $("linked").hidden = true;
     message("Extension unpaired. Provider vault entries remain; unlink them individually before unpairing if you want them deleted.");
   } catch (error) { message(error.message); }
