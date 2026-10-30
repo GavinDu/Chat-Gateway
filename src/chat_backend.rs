@@ -35,6 +35,7 @@ impl ProviderId {
         Some(Self(value))
     }
 
+    #[allow(dead_code)] // Consumed when routing and diagnostics migrate to ProviderId.
     pub fn as_str(&self) -> &str {
         &self.0
     }
