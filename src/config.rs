@@ -401,7 +401,10 @@ mod tests {
     #[test]
     fn provider_completion_idle_grace_defaults_and_validates_bounds() {
         let defaults = config("providers:\n  - name: chatgpt\n");
-        assert_eq!(defaults.provider("chatgpt").unwrap().completion_idle_ms, 15_000);
+        assert_eq!(
+            defaults.provider("chatgpt").unwrap().completion_idle_ms,
+            15_000
+        );
         assert!(defaults.validate().is_ok());
 
         let too_short = config("providers:\n  - name: chatgpt\n    completion_idle_ms: 999\n");
@@ -409,7 +412,10 @@ mod tests {
         let too_long = config("providers:\n  - name: chatgpt\n    completion_idle_ms: 60001\n");
         assert!(too_long.validate().is_err());
         let configured = config("providers:\n  - name: chatgpt\n    completion_idle_ms: 12000\n");
-        assert_eq!(configured.provider("chatgpt").unwrap().completion_idle_ms, 12_000);
+        assert_eq!(
+            configured.provider("chatgpt").unwrap().completion_idle_ms,
+            12_000
+        );
         assert!(configured.validate().is_ok());
     }
 
