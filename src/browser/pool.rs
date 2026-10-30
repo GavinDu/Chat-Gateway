@@ -78,6 +78,21 @@ fn join_finished_worker(worker: &mut Option<std::thread::JoinHandle<()>>) -> boo
     true
 }
 
+async fn start_replacement_worker<F>(
+    cmd_tx: &Arc<tokio::sync::RwLock<mpsc::Sender<Command>>>,
+    worker_handle: &mut Option<std::thread::JoinHandle<()>>,
+    spawn: F,
+) -> oneshot::Receiver<Result<()>>
+where
+    F: FnOnce(mpsc::Receiver<Command>, oneshot::Sender<Result<()>>) -> std::thread::JoinHandle<()>,
+{
+    let (next_tx, next_rx) = mpsc::channel::<Command>(64);
+    *cmd_tx.write().await = next_tx;
+    let (next_ready_tx, next_ready_rx) = oneshot::channel::<Result<()>>();
+    *worker_handle = Some(spawn(next_rx, next_ready_tx));
+    next_ready_rx
+}
+
 async fn join_worker_on_shutdown(worker: Option<std::thread::JoinHandle<()>>) {
     let Some(worker) = worker else {
         return;
@@ -109,7 +124,7 @@ fn closed_command_channel() -> mpsc::Sender<Command> {
 mod worker_supervisor_tests {
     use super::{
         closed_command_channel, join_finished_worker, next_browser_worker_restart_backoff,
-        WorkerReadyGuard,
+        start_replacement_worker, WorkerReadyGuard, Command, LoginActiveInfo,
     };
     use std::sync::{
         atomic::{AtomicBool, Ordering},
@@ -161,6 +176,65 @@ mod worker_supervisor_tests {
             exited.load(Ordering::Acquire),
             "shutdown must join the worker before returning"
         );
+    }
+
+    #[tokio::test]
+    async fn injected_worker_panic_is_recovered_and_next_command_is_served() {
+        let ready = Arc::new(AtomicBool::new(true));
+        let (failed_tx, failed_rx) = tokio::sync::mpsc::channel::<Command>(1);
+        let failed_ready = ready.clone();
+        let failed_worker = std::thread::spawn(move || {
+            let _ready_guard = WorkerReadyGuard(failed_ready);
+            drop(failed_rx);
+            panic!("injected first-generation browser worker panic");
+        });
+        assert!(failed_worker.join().is_err());
+        assert!(failed_tx.is_closed());
+        assert!(!ready.load(Ordering::Acquire));
+
+        let command_tx = Arc::new(tokio::sync::RwLock::new(failed_tx));
+        let mut worker_handle = None;
+        let ready_for_replacement = ready.clone();
+        let ready_rx = start_replacement_worker(
+            &command_tx,
+            &mut worker_handle,
+            move |mut command_rx, ready_tx| {
+                std::thread::spawn(move || {
+                    ready_for_replacement.store(true, Ordering::Release);
+                    let _ = ready_tx.send(Ok(()));
+                    if let Some(Command::LoginStatusAll { reply }) = command_rx.blocking_recv() {
+                        let _ = reply.send(Vec::<LoginActiveInfo>::new());
+                    }
+                })
+            },
+        )
+        .await;
+
+        ready_rx
+            .await
+            .expect("replacement worker must report warm-up")
+            .expect("replacement worker warm-up must succeed");
+        assert!(ready.load(Ordering::Acquire));
+
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        command_tx
+            .read()
+            .await
+            .send(Command::LoginStatusAll { reply: reply_tx })
+            .await
+            .expect("recovered worker must accept the next browser command");
+        let result = tokio::time::timeout(Duration::from_secs(1), reply_rx)
+            .await
+            .expect("recovered worker must answer the next command")
+            .expect("worker reply channel must remain open");
+        assert!(result.is_empty());
+
+        if let Some(worker) = worker_handle {
+            tokio::task::spawn_blocking(move || worker.join())
+                .await
+                .expect("worker join task must complete")
+                .expect("replacement worker must exit cleanly");
+        }
     }
 
     #[test]
@@ -489,15 +563,19 @@ impl ObscuraPool {
                 if !join_finished_worker(&mut worker_handle) {
                     continue;
                 }
-                let (next_tx, next_rx) = mpsc::channel::<Command>(64);
-                *cmd_tx.write().await = next_tx;
-                let (next_ready_tx, next_ready_rx) = oneshot::channel::<Result<()>>();
-                worker_handle = Some(browser_thread(
-                    cfg.clone(),
-                    next_rx,
-                    next_ready_tx,
-                    worker_ready.clone(),
-                ));
+                let next_ready_rx = start_replacement_worker(
+                    &cmd_tx,
+                    &mut worker_handle,
+                    |next_rx, next_ready_tx| {
+                        browser_thread(
+                            cfg.clone(),
+                            next_rx,
+                            next_ready_tx,
+                            worker_ready.clone(),
+                        )
+                    },
+                )
+                .await;
                 match tokio::time::timeout(Duration::from_secs(90), next_ready_rx).await {
                     Ok(Ok(Ok(()))) => {
                         worker_ready.store(true, Ordering::Release);
