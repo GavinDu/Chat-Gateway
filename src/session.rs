@@ -625,6 +625,35 @@ fn preflight_existing_vault_records(
     Ok(())
 }
 
+/// Replace preflighted rotation records and roll back every completed write
+/// if a later destination fails. Records are restored in reverse commit order.
+fn apply_vault_rotation_records(
+    records: &[PreparedVaultRotationRecord],
+    backup_dir: &str,
+) -> Result<usize> {
+    let mut replaced = 0usize;
+    for (path, _, replacement) in records {
+        if let Err(error) = write_session_file_atomically(Path::new(path), replacement) {
+            let mut rollback_failed = false;
+            for (rollback_path, original, _) in records.iter().take(replaced).rev() {
+                if write_session_file_atomically(Path::new(rollback_path), original).is_err() {
+                    rollback_failed = true;
+                }
+            }
+            if rollback_failed {
+                anyhow::bail!(
+                    "vault key rotation failed and automatic rollback was incomplete; encrypted recovery copies are in {backup_dir}"
+                );
+            }
+            anyhow::bail!(
+                "vault key rotation failed; prior records were restored and encrypted recovery copies remain in {backup_dir}: {error}"
+            );
+        }
+        replaced += 1;
+    }
+    Ok(replaced)
+}
+
 /// Rotate all encrypted vault records as one best-effort transaction.
 /// Every input is decrypted and every replacement authenticated before any
 /// live record is replaced. Encrypted old records are retained in a private
@@ -692,26 +721,7 @@ pub fn rotate_vault_key(new_key: &[u8; 32]) -> Result<(usize, String)> {
         write_session_file_atomically(&Path::new(&backup_dir).join(name), original)?;
     }
 
-    let mut replaced = 0usize;
-    for (path, _, replacement) in &originals {
-        if let Err(error) = write_session_file_atomically(Path::new(path), replacement) {
-            let mut rollback_failed = false;
-            for (rollback_path, original, _) in originals.iter().take(replaced) {
-                if write_session_file_atomically(Path::new(rollback_path), original).is_err() {
-                    rollback_failed = true;
-                }
-            }
-            if rollback_failed {
-                anyhow::bail!(
-                    "vault key rotation failed and automatic rollback was incomplete; encrypted recovery copies are in {backup_dir}"
-                );
-            }
-            anyhow::bail!(
-                "vault key rotation failed; prior records were restored and encrypted recovery copies remain in {backup_dir}: {error}"
-            );
-        }
-        replaced += 1;
-    }
+    let replaced = apply_vault_rotation_records(&originals, &backup_dir)?;
     Ok((replaced, backup_dir))
 }
 
@@ -1845,6 +1855,46 @@ mod vault_tests {
             decrypt_session_snapshot(&valid, "chatgpt", &new_key).is_err(),
             "preflight failure must not leave a partially rotated first record"
         );
+    }
+
+    #[test]
+    fn rotation_write_failure_restores_every_previously_replaced_record() {
+        let root = std::env::temp_dir().join(format!(
+            "chat-gateway-vault-rotation-rollback-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let first = root.join("first.vault");
+        let second = root.join("missing").join("second.vault");
+        let original = encrypt_session_snapshot(&sample_session(), "chatgpt", &[0x5a; 32]).unwrap();
+        let replacement =
+            encrypt_session_snapshot(&sample_session(), "chatgpt", &[0x6b; 32]).unwrap();
+        std::fs::write(&first, &original).unwrap();
+
+        let records = vec![
+            (
+                first.to_string_lossy().into_owned(),
+                original.clone(),
+                replacement,
+            ),
+            (
+                second.to_string_lossy().into_owned(),
+                b"unused-original".to_vec(),
+                b"replacement".to_vec(),
+            ),
+        ];
+
+        let error = apply_vault_rotation_records(&records, "sessions/.vault-rotation-test")
+            .expect_err("the missing second parent must fail the second write");
+
+        assert!(error.to_string().contains("prior records were restored"));
+        assert_eq!(
+            std::fs::read(&first).unwrap(),
+            original,
+            "the first provider must be restored to its original encrypted bytes"
+        );
+        assert!(!second.exists());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
