@@ -36,7 +36,7 @@ mod session;
 
 use api::{add_gateway_headers, api_error, estimate_tokens, validate_chat_req, ChatReq};
 use browser::pool::{BrowserWorkerUnavailableError, ObscuraPool};
-use chat_backend::BackendRequest;
+use chat_backend::{BackendRequest, ProviderId};
 use chat_service::ChatService;
 use config::AppConfig;
 use context::{ContextBuilder, ContextPlan, ThreadSyncState};
@@ -2731,7 +2731,13 @@ async fn chat_completions(
         let mut rx = match state
             .chat_service
             .stream(BackendRequest {
-                provider: provider_name.clone(),
+                provider: match ProviderId::new(provider_name.clone()) {
+                    Some(provider) => provider,
+                    None => {
+                        last_err = Some("provider router returned an invalid provider identifier".to_owned());
+                        continue;
+                    }
+                },
                 prompt: provider_prompt.clone(),
                 model: provider_model.clone(),
                 has_history: has_history && thread_url.is_some(),
