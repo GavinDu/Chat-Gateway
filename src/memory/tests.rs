@@ -687,6 +687,100 @@ fn long_term_memory_provenance_cannot_reference_another_owners_conversation() {
 }
 
 #[test]
+fn deleting_source_conversation_preserves_memory_and_clears_provenance() {
+    let memory = UnifiedMemory::new(8000);
+    memory
+        .set_long_term_memory_enabled("owner-a", true)
+        .unwrap();
+    memory
+        .store_turn_for_owner(
+            "owner-a",
+            "memory-source-delete".into(),
+            vec![m("user", "my timezone is New York")],
+            m("assistant", "noted"),
+            "chatgpt".into(),
+            "tab".into(),
+        )
+        .unwrap();
+    let saved = memory
+        .save_long_term_memory_item(
+            "owner-a",
+            "timezone",
+            "America/New_York",
+            Some("memory-source-delete"),
+            0.95,
+            None,
+        )
+        .unwrap();
+
+    assert!(memory
+        .delete_conversation_for_owner("owner-a", "memory-source-delete")
+        .unwrap());
+
+    let items = memory.list_long_term_memory_items("owner-a").unwrap();
+    assert_eq!(
+        items.len(),
+        1,
+        "manual memory is independent of its source transcript"
+    );
+    assert_eq!(items[0].id, saved.id);
+    assert_eq!(items[0].source_conversation_id, None);
+    assert_eq!(items[0].value, "America/New_York");
+    assert_eq!(
+        memory
+            .retrieve_long_term_memory_items("owner-a", 5)
+            .unwrap()[0]
+            .id,
+        saved.id
+    );
+}
+
+#[test]
+fn retention_purge_clears_memory_provenance_without_deleting_memory() {
+    let fixture = Fixture::new();
+    let memory = fixture.open();
+    memory
+        .set_long_term_memory_enabled("owner-a", true)
+        .unwrap();
+    memory
+        .store_turn_for_owner(
+            "owner-a",
+            "memory-source-retention".into(),
+            vec![m("user", "keep independent preference")],
+            m("assistant", "noted"),
+            "chatgpt".into(),
+            "tab".into(),
+        )
+        .unwrap();
+    let saved = memory
+        .save_long_term_memory_item(
+            "owner-a",
+            "preference",
+            "concise answers",
+            Some("memory-source-retention"),
+            0.9,
+            None,
+        )
+        .unwrap();
+    {
+        let connection = memory.lock().unwrap();
+        connection
+            .execute(
+                "UPDATE conversations SET last_activity_at=100 WHERE id=?1",
+                ["memory-source-retention"],
+            )
+            .unwrap();
+    }
+
+    assert_eq!(memory.purge_expired_conversations(101).unwrap(), 1);
+    let items = memory.list_long_term_memory_items("owner-a").unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].id, saved.id);
+    assert_eq!(items[0].source_conversation_id, None);
+    assert_eq!(items[0].value, "concise answers");
+}
+
+#[test]
 fn long_term_memory_disable_stops_retrieval_without_erasing_inspectable_items() {
     let memory = UnifiedMemory::new(8000);
     memory
