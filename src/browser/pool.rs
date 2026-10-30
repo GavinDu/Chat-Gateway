@@ -21,6 +21,12 @@ const MAX_BROWSER_WORKER_RESTART_BACKOFF: Duration = Duration::from_secs(30);
 /// Metadata-only provider response observation. The pinned Obscura callback
 /// exposes a buffered body, not incremental SSE frames, so this deliberately
 /// records only bounded metadata and never reads/logs body contents or headers.
+const PROVIDER_TAP_MAX_REPORTED_RESPONSE_BYTES: usize = 1_048_576;
+
+fn bounded_provider_response_bytes(bytes: usize) -> usize {
+    bytes.min(PROVIDER_TAP_MAX_REPORTED_RESPONSE_BYTES)
+}
+
 fn provider_network_tap_provider_supported(provider: Provider) -> bool {
     matches!(provider, Provider::ChatGPT | Provider::Claude)
 }
@@ -53,7 +59,7 @@ fn attach_provider_network_tap(page: &mut obscura_core::Page, provider: Provider
             host,
             resource_type = ?info.resource_type,
             status = response.status,
-            response_bytes = response.body.len().min(usize::MAX / 2),
+            response_bytes = bounded_provider_response_bytes(response.body.len()),
             "provider network response observed (metadata only)"
         );
     }));
@@ -86,6 +92,11 @@ mod worker_supervisor_tests {
         assert!(super::provider_network_tap_provider_supported(Provider::ChatGPT));
         assert!(super::provider_network_tap_provider_supported(Provider::Claude));
         assert!(!super::provider_network_tap_provider_supported(Provider::Gemini));
+        assert_eq!(super::bounded_provider_response_bytes(512), 512);
+        assert_eq!(
+            super::bounded_provider_response_bytes(2_000_000),
+            super::PROVIDER_TAP_MAX_REPORTED_RESPONSE_BYTES
+        );
     }
 
     #[test]
