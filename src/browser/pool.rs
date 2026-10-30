@@ -64,7 +64,6 @@ fn attach_provider_network_tap(page: &mut obscura_core::Page, provider: Provider
     }));
 }
 
-
 fn join_finished_worker(worker: &mut Option<std::thread::JoinHandle<()>>) -> bool {
     let Some(handle) = worker.as_ref() else {
         return true;
@@ -119,19 +118,31 @@ mod worker_supervisor_tests {
     #[test]
     fn metadata_tap_flag_accepts_explicit_truthy_values_only() {
         for value in ["1", "true", "TRUE", " yes ", "Yes"] {
-            assert!(super::provider_network_tap_value_enabled(value), "{value:?}");
+            assert!(
+                super::provider_network_tap_value_enabled(value),
+                "{value:?}"
+            );
         }
         for value in ["", "0", "false", "no", "enabled", "true please"] {
-            assert!(!super::provider_network_tap_value_enabled(value), "{value:?}");
+            assert!(
+                !super::provider_network_tap_value_enabled(value),
+                "{value:?}"
+            );
         }
     }
 
     #[test]
     fn metadata_tap_is_scoped_to_supported_providers() {
         use crate::providers::Provider;
-        assert!(super::provider_network_tap_provider_supported(Provider::ChatGPT));
-        assert!(super::provider_network_tap_provider_supported(Provider::Claude));
-        assert!(!super::provider_network_tap_provider_supported(Provider::Gemini));
+        assert!(super::provider_network_tap_provider_supported(
+            Provider::ChatGPT
+        ));
+        assert!(super::provider_network_tap_provider_supported(
+            Provider::Claude
+        ));
+        assert!(!super::provider_network_tap_provider_supported(
+            Provider::Gemini
+        ));
     }
 
     #[test]
