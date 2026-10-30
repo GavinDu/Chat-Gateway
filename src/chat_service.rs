@@ -47,6 +47,13 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ChatBackend for FakeBackend {
+        async fn models(
+            &self,
+            _provider: crate::chat_backend::ProviderId,
+        ) -> std::result::Result<Vec<String>, GatewayError> {
+            Ok(vec!["test-model".to_owned()])
+        }
+
         async fn send_stream(
             &self,
             request: BackendRequest,
