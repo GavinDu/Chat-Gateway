@@ -142,8 +142,10 @@ test("two linked providers sync only their own cookie domains", async () => {
   const claude = JSON.parse(api.fetchCalls[1].options.body);
   assert.equal(api.fetchCalls[0].url, "http://127.0.0.1:8080/relay/v1/session/chatgpt");
   assert.equal(api.fetchCalls[1].url, "http://127.0.0.1:8080/relay/v1/session/claude");
-  assert.deepEqual(chatgpt.cookies.map(cookie => cookie.value), ["chatgpt-secret"]);
-  assert.deepEqual(claude.cookies.map(cookie => cookie.value), ["claude-secret"]);
+  assert.equal(chatgpt.cookies.length, 1);
+  assert.equal(chatgpt.cookies[0].value, "chatgpt-secret");
+  assert.equal(claude.cookies.length, 1);
+  assert.equal(claude.cookies[0].value, "claude-secret");
   assert.ok(!JSON.stringify(chatgpt).includes("claude-secret"));
   assert.ok(!JSON.stringify(claude).includes("chatgpt-secret"));
   assert.ok(!JSON.stringify(chatgpt).includes("attacker-secret"));
