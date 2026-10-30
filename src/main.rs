@@ -45,7 +45,6 @@ use context::{ContextBuilder, ContextPlan, ThreadSyncState};
 use memory::{ChatMessage, ConversationStore, ProviderThread, UnifiedMemory};
 use router::ProviderRouter;
 
-
 fn adapter_report_is_healthy(report: &browser::pool::TestAdapterReport) -> bool {
     report.errors.is_empty() && report.session_ok && report.input_found && report.response_token
 }
