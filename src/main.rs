@@ -2905,28 +2905,12 @@ async fn chat_completions(
 
         // Non-streaming: retry another provider only if no response bytes were
         // emitted. A partial response is an error, never a successful turn.
-        let mut full = String::new();
-        let mut failed: Option<String> = None;
-        let mut ttft_ms: Option<u64> = None;
-        while let Some(item) = rx.recv().await {
-            match item {
-                Ok(c) => {
-                    if c.done {
-                        break;
-                    }
-                    if ttft_ms.is_none() {
-                        ttft_ms = Some(
-                            provider_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
-                        );
-                    }
-                    full.push_str(&c.content);
-                }
-                Err(e) => {
-                    failed = Some(e.to_string());
-                    break;
-                }
-            }
-        }
+        let collected = state.chat_service.collect(rx, provider_started).await;
+        let full = collected.content;
+        let failed = collected.error.map(|error| error.to_string());
+        let ttft_ms = collected.first_event_elapsed.map(|elapsed| {
+            elapsed.as_millis().min(u64::MAX as u128) as u64
+        });
         let provider_work_ms = provider_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
         let total_ms = request_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
         if let Some(e) = failed {
