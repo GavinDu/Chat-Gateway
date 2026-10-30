@@ -761,7 +761,7 @@ impl UnifiedMemory {
     /// Callers must apply authorization before returning this record to clients.
     /// Export one complete conversation for the legacy local tenant.
     #[allow(dead_code)]
-    pub fn export_conversation_async(
+    pub fn export_conversation(
         &self,
         conversation_id: &str,
     ) -> anyhow::Result<Option<Conversation>> {
@@ -791,7 +791,7 @@ impl UnifiedMemory {
 
     /// List conversation metadata for the legacy local tenant.
     #[allow(dead_code)]
-    pub fn list_conversations_async(
+    pub fn list_conversations(
         &self,
         limit: usize,
         offset: usize,
@@ -872,7 +872,7 @@ impl UnifiedMemory {
     }
 
     #[allow(dead_code)]
-    pub fn delete_conversation_async(&self, conversation_id: &str) -> anyhow::Result<bool> {
+    pub fn delete_conversation(&self, conversation_id: &str) -> anyhow::Result<bool> {
         self.delete_conversation_for_owner("local", conversation_id)
     }
 
