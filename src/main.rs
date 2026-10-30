@@ -45,8 +45,8 @@ use cli::Cli;
 use config::AppConfig;
 use context::{ContextBuilder, ContextPlan, ThreadSyncState};
 use memory::{ChatMessage, ConversationStore, ProviderThread, UnifiedMemory};
-use request_security::{is_loopback_authority, login_origin_is_same_authority};
 use router::ProviderRouter;
+use request_security::{is_loopback_authority, login_origin_is_same_authority};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct AuthKeyContext {
