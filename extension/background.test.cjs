@@ -114,3 +114,41 @@ test("cookie rotation is debounced and rejects lookalike domains", async () => {
   await flushAsyncWork();
   assert.deepEqual(calls, ["chatgpt"]);
 });
+
+test("two linked providers rotate independently without cross-provider sync", async () => {
+  const { calls, listeners, timers } = loadBackground(["chatgpt", "claude"]);
+  const onCookieChanged = listeners.cookieChanged[0];
+
+  onCookieChanged({ cookie: { domain: ".chatgpt.com" } });
+  onCookieChanged({ cookie: { domain: ".claude.ai" } });
+  assert.equal(timers.size, 2, "each provider should own an independent debounce timer");
+
+  timers.get(1).callback();
+  await flushAsyncWork();
+  assert.deepEqual(calls, ["chatgpt"]);
+
+  timers.get(2).callback();
+  await flushAsyncWork();
+  assert.deepEqual(calls, ["chatgpt", "claude"]);
+});
+
+test("rapid cookie rotations coalesce per provider while preserving the other provider", async () => {
+  const { calls, listeners, timers, clearedTimers } = loadBackground(["chatgpt", "claude"]);
+  const onCookieChanged = listeners.cookieChanged[0];
+
+  onCookieChanged({ cookie: { domain: ".chatgpt.com" } });
+  onCookieChanged({ cookie: { domain: ".claude.ai" } });
+  onCookieChanged({ cookie: { domain: ".chatgpt.com" } });
+
+  assert.equal(timers.size, 3);
+  assert.ok(clearedTimers.has(1), "only the previous ChatGPT timer should be cancelled");
+
+  timers.get(1).callback();
+  timers.get(2).callback();
+  await flushAsyncWork();
+  assert.deepEqual(calls, ["claude"], "Claude's independent timer should still fire");
+
+  timers.get(3).callback();
+  await flushAsyncWork();
+  assert.deepEqual(calls, ["claude", "chatgpt"]);
+});
