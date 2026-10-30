@@ -2698,6 +2698,81 @@ fn provider_thread_mapping_survives_database_reopen_with_owner_and_provider_scop
         .is_none());
 }
 
+#[tokio::test]
+async fn async_store_contract_covers_conversation_and_provider_thread_operations() {
+    let store: Arc<dyn ConversationStore> = Arc::new(UnifiedMemory::new(8000));
+    let owner = "async-store-owner".to_owned();
+    let conversation_id = "async-store-conversation".to_owned();
+
+    store
+        .clone()
+        .persist_turn(
+            owner.clone(),
+            conversation_id.clone(),
+            vec![ChatMessage {
+                role: "user".to_owned(),
+                content: "hello".to_owned(),
+            }],
+            ChatMessage {
+                role: "assistant".to_owned(),
+                content: "hi".to_owned(),
+            },
+            "chatgpt".to_owned(),
+            None,
+        )
+        .await
+        .expect("conversation turn should persist through the store contract");
+
+    let listed = store
+        .clone()
+        .list_conversations_async(owner.clone(), 10, 0)
+        .await
+        .expect("conversation list should use the store contract");
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].id, conversation_id);
+
+    let exported = store
+        .clone()
+        .export_conversation_async(owner.clone(), conversation_id.clone())
+        .await
+        .expect("conversation export should use the store contract")
+        .expect("persisted conversation should be exportable");
+    assert_eq!(exported.messages.len(), 2);
+
+    let thread = ProviderThread {
+        conversation_id: conversation_id.clone(),
+        provider: "chatgpt".to_owned(),
+        thread_url: "https://chatgpt.com/c/async-store-thread".to_owned(),
+        synced_through_message_id: Some("async-store-marker".to_owned()),
+        model: Some("test-model".to_owned()),
+        updated_at: 400,
+    };
+    store
+        .clone()
+        .upsert_provider_thread_async(owner.clone(), thread.clone())
+        .await
+        .expect("provider thread should persist through the store contract");
+    let restored = store
+        .clone()
+        .get_provider_thread_async(owner.clone(), conversation_id.clone(), "chatgpt".to_owned())
+        .await
+        .expect("provider thread lookup should use the store contract")
+        .expect("provider thread should be present");
+    assert_eq!(restored, thread);
+
+    assert!(store
+        .clone()
+        .delete_conversation_async(owner.clone(), conversation_id.clone())
+        .await
+        .expect("conversation delete should use the store contract"));
+    assert!(store
+        .clone()
+        .export_conversation_async(owner, conversation_id)
+        .await
+        .expect("missing conversation export should succeed")
+        .is_none());
+}
+
 struct CountingStore {
     inner: Arc<UnifiedMemory>,
     context_build_calls: std::sync::atomic::AtomicUsize,
