@@ -18,6 +18,21 @@ fn effective_session_pool_size(configured: usize) -> usize {
 
 const MAX_BROWSER_WORKER_RESTART_BACKOFF: Duration = Duration::from_secs(30);
 
+fn join_finished_worker(worker: &mut Option<std::thread::JoinHandle<()>>) -> bool {
+    let Some(handle) = worker.as_ref() else {
+        return true;
+    };
+    if !handle.is_finished() {
+        return false;
+    }
+    if let Some(handle) = worker.take() {
+        if handle.join().is_err() {
+            tracing::debug!("browser worker thread joined after panic");
+        }
+    }
+    true
+}
+
 fn next_browser_worker_restart_backoff(current: Duration) -> Duration {
     (current * 2).min(MAX_BROWSER_WORKER_RESTART_BACKOFF)
 }
@@ -30,12 +45,26 @@ fn closed_command_channel() -> mpsc::Sender<Command> {
 
 #[cfg(test)]
 mod worker_supervisor_tests {
-    use super::{closed_command_channel, next_browser_worker_restart_backoff, WorkerReadyGuard};
+    use super::{
+        closed_command_channel, join_finished_worker, next_browser_worker_restart_backoff,
+        WorkerReadyGuard,
+    };
     use std::sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
     };
     use std::time::Duration;
+
+    #[test]
+    fn finished_panicked_worker_is_joined_before_replacement() {
+        let worker = std::thread::spawn(|| panic!("injected worker panic"));
+        while !worker.is_finished() {
+            std::thread::yield_now();
+        }
+        let mut worker = Some(worker);
+        assert!(join_finished_worker(&mut worker));
+        assert!(worker.is_none(), "the finished worker handle must be consumed");
+    }
 
     #[test]
     fn restart_backoff_doubles_and_is_capped() {
@@ -321,7 +350,8 @@ impl ObscuraPool {
             worker_ready: worker_ready.clone(),
             worker_generation: worker_generation.clone(),
         });
-        browser_thread(cfg.clone(), cmd_rx, ready_tx, worker_ready.clone());
+        let mut worker_handle =
+            Some(browser_thread(cfg.clone(), cmd_rx, ready_tx, worker_ready.clone()));
 
         // Recreate the thread-affine engine after a crash; never move Page values
         // between threads. The worker performs the same browser build and warm-up
@@ -344,10 +374,21 @@ impl ObscuraPool {
                 if !cmd_tx.read().await.is_closed() {
                     continue;
                 }
+                // The receiver closes as the worker exits. Retain and join the
+                // thread handle before creating a replacement so a slow or
+                // stuck worker cannot be silently orphaned on every retry.
+                if !join_finished_worker(&mut worker_handle) {
+                    continue;
+                }
                 let (next_tx, next_rx) = mpsc::channel::<Command>(64);
                 *cmd_tx.write().await = next_tx;
                 let (next_ready_tx, next_ready_rx) = oneshot::channel::<Result<()>>();
-                browser_thread(cfg.clone(), next_rx, next_ready_tx, worker_ready.clone());
+                worker_handle = Some(browser_thread(
+                    cfg.clone(),
+                    next_rx,
+                    next_ready_tx,
+                    worker_ready.clone(),
+                ));
                 match tokio::time::timeout(Duration::from_secs(90), next_ready_rx).await {
                     Ok(Ok(Ok(()))) => {
                         worker_ready.store(true, Ordering::Release);
@@ -914,7 +955,7 @@ fn browser_thread(
     mut cmd_rx: mpsc::Receiver<Command>,
     ready_tx: oneshot::Sender<Result<()>>,
     worker_ready: Arc<AtomicBool>,
-) {
+) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let _ready_guard = WorkerReadyGuard(worker_ready.clone());
         let rt = match tokio::runtime::Builder::new_current_thread()
@@ -1550,5 +1591,5 @@ fn browser_thread(
                 }
             }).await;
         });
-    });
+    })
 }
