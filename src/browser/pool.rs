@@ -1051,13 +1051,6 @@ fn browser_thread(
                             let browser_for_save = browser.clone();
                             let provider_name = provider.name().to_string();
                             let poll_tick = gateway_poll_tick;
-                            let completion_idle = Duration::from_millis(
-                                cfg.providers
-                                    .iter()
-                                    .find(|configured| configured.name == provider.name())
-                                    .map(|configured| configured.completion_idle_ms)
-                                    .unwrap_or(15_000),
-                            );
                             tokio::task::spawn_local(async move {
                                 let _guard = lock.lock().await;
                                 // Reopen only a validated provider-owned thread. Otherwise return
