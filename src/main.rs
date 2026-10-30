@@ -1892,7 +1892,12 @@ async fn persist_provider_thread(
 }
 
 fn is_reopenable_provider_thread_url(provider: &str, value: &str) -> bool {
-    if !valid_provider_thread_url(provider, value) {
+    let Some(provider_kind) = providers::Provider::from_name(provider) else {
+        return false;
+    };
+    if !providers::supports_url_addressable_threads(provider_kind)
+        || !valid_provider_thread_url(provider, value)
+    {
         return false;
     }
     let Some((_, location)) = value["https://".len()..].split_once('/') else {

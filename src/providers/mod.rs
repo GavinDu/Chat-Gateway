@@ -157,8 +157,8 @@ pub enum DoneSignal {
     /// explicit completion signal; otherwise use the conservative fallback.
     StopControlDisappeared,
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThreadSupport {
     UrlAddressable,
     SidebarClick,
@@ -284,6 +284,16 @@ pub const ADAPTERS: &[AdapterSpec] = &[
         |cfg| Arc::new(perplexity::PerplexityAdapter { cfg }),
     ),
 ];
+
+/// Whether an adapter can safely resume a conversation by navigating to a
+/// provider-owned thread URL. Sidebar-driven adapters must use replay until
+/// their thread-selection behavior is implemented and fixture-tested.
+pub fn supports_url_addressable_threads(provider: Provider) -> bool {
+    ADAPTERS
+        .iter()
+        .find(|spec| spec.provider == provider)
+        .is_some_and(|spec| spec.threads == ThreadSupport::UrlAddressable)
+}
 
 fn adapter_for(provider: Provider, cfg: ProviderConfig) -> Arc<dyn SiteAdapter> {
     let spec = ADAPTERS
@@ -1008,6 +1018,27 @@ mod response_completion_tests {
             ticks_for_grace(Duration::from_secs(1), Duration::from_millis(200)),
             5
         );
+    }
+}
+
+#[cfg(test)]
+mod thread_support_tests {
+    use super::{supports_url_addressable_threads, Provider};
+
+    #[test]
+    fn url_reopen_capability_comes_from_adapter_catalog() {
+        for provider in [
+            Provider::ChatGPT,
+            Provider::Claude,
+            Provider::Gemini,
+            Provider::Grok,
+            Provider::Qwen,
+            Provider::Mistral,
+            Provider::Perplexity,
+        ] {
+            assert!(supports_url_addressable_threads(provider), "{provider:?}");
+        }
+        assert!(!supports_url_addressable_threads(Provider::MetaAI));
     }
 }
 
