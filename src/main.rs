@@ -18,6 +18,7 @@ use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Instant};
 use tokio::sync::RwLock;
 
 mod api;
+mod app_state;
 mod browser;
 pub mod chat_backend;
 mod chat_service;
@@ -37,6 +38,7 @@ mod router;
 mod session;
 
 use api::{add_gateway_headers, api_error, estimate_tokens, validate_chat_req, ChatReq};
+use app_state::{AppState, AuthKeyContext};
 use browser::pool::{BrowserWorkerUnavailableError, ObscuraPool};
 use chat_backend::{BackendRequest, ProviderId};
 use chat_service::{first_event, ChatService, FirstEvent};
@@ -45,23 +47,6 @@ use config::AppConfig;
 use context::{ContextBuilder, ContextPlan, ThreadSyncState};
 use memory::{ChatMessage, ConversationStore, ProviderThread, UnifiedMemory};
 use router::ProviderRouter;
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct AuthKeyContext {
-    /// Stable configured key name; never the raw bearer secret.
-    key_id: String,
-    provider_allowlist: Option<Vec<String>>,
-}
-
-struct AppState {
-    cfg: Arc<AppConfig>,
-    pool: Arc<ObscuraPool>,
-    chat_service: ChatService,
-    memory: Arc<UnifiedMemory>,
-    router: ProviderRouter,
-    models_cache: Arc<RwLock<HashMap<String, Vec<String>>>>,
-    relay: Arc<relay::RelayState>,
-}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
