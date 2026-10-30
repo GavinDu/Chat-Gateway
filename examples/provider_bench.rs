@@ -135,8 +135,8 @@ fn percentile(values: &mut [f64], percentile: usize) -> Option<f64> {
         return None;
     }
     values.sort_by(f64::total_cmp);
-    let index = ((values.len() - 1) * percentile.min(100)).div_ceil(100);
-    Some(values[index])
+    let rank = (values.len() * percentile.min(100)).div_ceil(100).max(1);
+    Some(values[rank - 1])
 }
 
 fn median(values: &mut [f64]) -> Option<f64> {
