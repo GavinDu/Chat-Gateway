@@ -2734,7 +2734,9 @@ async fn chat_completions(
                 provider: match ProviderId::new(provider_name.clone()) {
                     Some(provider) => provider,
                     None => {
-                        last_err = Some("provider router returned an invalid provider identifier".to_owned());
+                        last_err = Some(
+                            "provider router returned an invalid provider identifier".to_owned(),
+                        );
                         continue;
                     }
                 },
