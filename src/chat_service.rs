@@ -174,7 +174,7 @@ mod tests {
         .await
         .unwrap();
 
-        let collected = service.collect(rx, Instant::now()).await;
+        let collected = service.collect(rx, std::time::Instant::now()).await;
         assert!(collected.content.is_empty());
         assert!(
             collected.first_event_elapsed.is_none(),
@@ -205,7 +205,7 @@ mod tests {
         .await
         .unwrap();
 
-        let collected = service.collect(rx, Instant::now()).await;
+        let collected = service.collect(rx, std::time::Instant::now()).await;
         assert_eq!(collected.content, "answer");
         assert!(
             collected.first_event_elapsed.is_some(),
