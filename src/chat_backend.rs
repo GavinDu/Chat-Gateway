@@ -293,12 +293,15 @@ mod tests {
         assert_eq!(ProviderId::new("chat-gpt").unwrap().as_str(), "chat-gpt");
         assert!(ProviderId::new("../chatgpt").is_none());
         assert!(ProviderId::new("").is_none());
-        assert_eq!(BackendCapabilities::default(), BackendCapabilities {
-            streaming: false,
-            model_selection: false,
-            system_role: false,
-            addressable_threads: false,
-        });
+        assert_eq!(
+            BackendCapabilities::default(),
+            BackendCapabilities {
+                streaming: false,
+                model_selection: false,
+                system_role: false,
+                addressable_threads: false,
+            }
+        );
     }
 
     #[test]
