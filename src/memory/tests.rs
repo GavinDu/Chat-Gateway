@@ -87,9 +87,7 @@ impl<T: ConversationStore + ?Sized> LegacyConversationReadTestExt for T {
         conversation_id: String,
         max_messages: usize,
     ) -> anyhow::Result<Vec<ChatMessage>> {
-        let mut transcript = self
-            .read_transcript(owner_key_id, conversation_id)
-            .await?;
+        let mut transcript = self.read_transcript(owner_key_id, conversation_id).await?;
         if transcript.len() > max_messages {
             transcript.drain(..transcript.len() - max_messages);
         }
