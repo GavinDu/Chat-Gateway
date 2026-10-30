@@ -2777,6 +2777,8 @@ struct CountingStore {
     inner: Arc<UnifiedMemory>,
     context_build_calls: std::sync::atomic::AtomicUsize,
     persist_turn_calls: std::sync::atomic::AtomicUsize,
+    transcript_read_calls: std::sync::atomic::AtomicUsize,
+    bounded_history_read_calls: std::sync::atomic::AtomicUsize,
 }
 
 impl CountingStore {
@@ -2785,14 +2787,20 @@ impl CountingStore {
             inner,
             context_build_calls: std::sync::atomic::AtomicUsize::new(0),
             persist_turn_calls: std::sync::atomic::AtomicUsize::new(0),
+            transcript_read_calls: std::sync::atomic::AtomicUsize::new(0),
+            bounded_history_read_calls: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
-    fn counts(&self) -> (usize, usize) {
+    fn counts(&self) -> (usize, usize, usize, usize) {
         (
             self.context_build_calls
                 .load(std::sync::atomic::Ordering::Relaxed),
             self.persist_turn_calls
+                .load(std::sync::atomic::Ordering::Relaxed),
+            self.transcript_read_calls
+                .load(std::sync::atomic::Ordering::Relaxed),
+            self.bounded_history_read_calls
                 .load(std::sync::atomic::Ordering::Relaxed),
         )
     }
@@ -2805,6 +2813,8 @@ impl ConversationStore for CountingStore {
         owner_key_id: String,
         conversation_id: String,
     ) -> anyhow::Result<Vec<ChatMessage>> {
+        self.transcript_read_calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.inner
             .clone()
             .read_transcript(owner_key_id, conversation_id)
@@ -2817,6 +2827,8 @@ impl ConversationStore for CountingStore {
         conversation_id: String,
         max_messages: usize,
     ) -> anyhow::Result<Vec<ChatMessage>> {
+        self.bounded_history_read_calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.inner
             .clone()
             .read_history(owner_key_id, conversation_id, max_messages)
@@ -2956,8 +2968,8 @@ async fn conversation_store_counts_one_context_build_and_one_persist_call() {
     assert!(!marker.is_empty());
     assert_eq!(
         counting.counts(),
-        (1, 1),
-        "one request-scoped store use should make one context build and one persist call"
+        (1, 1, 0, 0),
+        "one request-scoped store use should build context and persist once without a second transcript/history read"
     );
 }
 
