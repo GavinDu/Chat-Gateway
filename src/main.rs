@@ -4397,7 +4397,7 @@ mod provider_thread_url_tests {
 
 #[cfg(test)]
 mod initial_stream_chunk_tests {
-    use super::usable_initial_stream_chunk;
+    use crate::chat_service::usable_initial_stream_chunk;
 
     #[test]
     fn only_nonempty_content_can_start_a_stream() {
