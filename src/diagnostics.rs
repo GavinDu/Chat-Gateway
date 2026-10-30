@@ -1,6 +1,7 @@
 use crate::browser::pool::TestAdapterReport;
 
 /// A provider's live adapter diagnostic result, independent of HTTP startup wiring.
+#[derive(serde::Serialize)]
 pub(crate) struct AdapterDiagnostic {
     pub(crate) provider: String,
     pub(crate) queue_ms: Option<u128>,
