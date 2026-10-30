@@ -38,7 +38,7 @@ mod session;
 use api::{add_gateway_headers, api_error, estimate_tokens, validate_chat_req, ChatReq};
 use browser::pool::{BrowserWorkerUnavailableError, ObscuraPool};
 use chat_backend::{BackendRequest, ProviderId};
-use chat_service::ChatService;
+use chat_service::{first_event, ChatService, FirstEvent};
 use cli::Cli;
 use config::AppConfig;
 use context::{ContextBuilder, ContextPlan, ThreadSyncState};
@@ -2196,18 +2196,6 @@ async fn read_conversation_context_with_transcript_for_owner(
         .await
 }
 
-fn usable_initial_stream_chunk(content: &str, done: bool) -> bool {
-    !done && !content.is_empty()
-}
-
-enum FirstEvent {
-    Chunk(chat_backend::ChatEvent),
-    EmptyCompletion,
-    Error(chat_backend::GatewayError),
-    Closed,
-    Timeout,
-}
-
 fn record_attempt_error(
     provider: &str,
     error: &str,
@@ -2258,37 +2246,6 @@ fn record_provider_outcome(
         outcome,
         "provider request completed"
     );
-}
-
-async fn first_event(
-    rx: &mut tokio::sync::mpsc::Receiver<
-        anyhow::Result<chat_backend::ChatEvent, chat_backend::GatewayError>,
-    >,
-    timeout: std::time::Duration,
-) -> FirstEvent {
-    match tokio::time::timeout(timeout, async {
-        loop {
-            match rx.recv().await {
-                Some(Ok(chunk)) if usable_initial_stream_chunk(&chunk.content, chunk.done) => {
-                    break Some(Ok(chunk));
-                }
-                Some(Ok(chunk)) if chunk.done => break Some(Ok(chunk)),
-                Some(Ok(_empty_chunk)) => continue,
-                Some(Err(error)) => break Some(Err(error)),
-                None => break None,
-            }
-        }
-    })
-    .await
-    {
-        Ok(Some(Ok(chunk))) if usable_initial_stream_chunk(&chunk.content, chunk.done) => {
-            FirstEvent::Chunk(chunk)
-        }
-        Ok(Some(Ok(_))) => FirstEvent::EmptyCompletion,
-        Ok(Some(Err(error))) => FirstEvent::Error(error),
-        Ok(None) => FirstEvent::Closed,
-        Err(_) => FirstEvent::Timeout,
-    }
 }
 
 fn budget_personal_memory_items(
@@ -4440,7 +4397,7 @@ mod provider_thread_url_tests {
 
 #[cfg(test)]
 mod initial_stream_chunk_tests {
-    use super::usable_initial_stream_chunk;
+    use crate::chat_service::usable_initial_stream_chunk;
 
     #[test]
     fn only_nonempty_content_can_start_a_stream() {

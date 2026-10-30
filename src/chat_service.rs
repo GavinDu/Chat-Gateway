@@ -198,3 +198,120 @@ mod tests {
         assert!(collected.error.is_none());
     }
 }
+
+/// First meaningful event observed while starting a provider stream.
+///
+/// Empty non-terminal chunks are ignored; a terminal event without content is
+/// distinct from a closed channel and from an upstream error so the router can
+/// preserve its existing pre-output failover behavior.
+#[derive(Debug)]
+pub enum FirstEvent {
+    Chunk(ChatEvent),
+    EmptyCompletion,
+    Error(GatewayError),
+    Closed,
+    Timeout,
+}
+
+pub(crate) fn usable_initial_stream_chunk(content: &str, done: bool) -> bool {
+    !done && !content.is_empty()
+}
+
+/// Wait for the first meaningful event without allowing an empty stream to
+/// stall provider failover indefinitely.
+pub async fn first_event(
+    rx: &mut mpsc::Receiver<Result<ChatEvent, GatewayError>>,
+    timeout: Duration,
+) -> FirstEvent {
+    match tokio::time::timeout(timeout, async {
+        loop {
+            match rx.recv().await {
+                Some(Ok(chunk)) if usable_initial_stream_chunk(&chunk.content, chunk.done) => {
+                    break Some(Ok(chunk));
+                }
+                Some(Ok(chunk)) if chunk.done => break Some(Ok(chunk)),
+                Some(Ok(_empty_chunk)) => continue,
+                Some(Err(error)) => break Some(Err(error)),
+                None => break None,
+            }
+        }
+    })
+    .await
+    {
+        Ok(Some(Ok(chunk))) if usable_initial_stream_chunk(&chunk.content, chunk.done) => {
+            FirstEvent::Chunk(chunk)
+        }
+        Ok(Some(Ok(_))) => FirstEvent::EmptyCompletion,
+        Ok(Some(Err(error))) => FirstEvent::Error(error),
+        Ok(None) => FirstEvent::Closed,
+        Err(_) => FirstEvent::Timeout,
+    }
+}
+
+#[cfg(test)]
+mod first_event_tests {
+    use super::{first_event, FirstEvent};
+    use crate::chat_backend::{ChatEvent, GatewayError};
+    use anyhow::Result;
+    use std::time::Duration;
+    use tokio::sync::mpsc;
+
+    #[tokio::test]
+    async fn first_event_skips_empty_chunks_and_returns_first_content() {
+        let (tx, mut rx) = mpsc::channel(3);
+        tx.send(Ok(ChatEvent {
+            content: String::new(),
+            done: false,
+        }))
+        .await
+        .unwrap();
+        tx.send(Ok(ChatEvent {
+            content: "answer".into(),
+            done: false,
+        }))
+        .await
+        .unwrap();
+        let event = first_event(&mut rx, Duration::from_secs(1)).await;
+        assert!(matches!(event, FirstEvent::Chunk(chunk) if chunk.content == "answer"));
+    }
+
+    #[tokio::test]
+    async fn first_event_distinguishes_empty_completion_from_closed_stream() {
+        let (tx, mut rx) = mpsc::channel(1);
+        tx.send(Ok(ChatEvent {
+            content: String::new(),
+            done: true,
+        }))
+        .await
+        .unwrap();
+        assert!(matches!(
+            first_event(&mut rx, Duration::from_secs(1)).await,
+            FirstEvent::EmptyCompletion
+        ));
+        drop(tx);
+        assert!(matches!(
+            first_event(&mut rx, Duration::from_secs(1)).await,
+            FirstEvent::Closed
+        ));
+    }
+
+    #[tokio::test]
+    async fn first_event_preserves_backend_error() {
+        let (tx, mut rx) = mpsc::channel(1);
+        tx.send(Err(GatewayError::provider_failure("upstream failed")))
+            .await
+            .unwrap();
+        assert!(
+            matches!(first_event(&mut rx, Duration::from_secs(1)).await, FirstEvent::Error(error) if error.message == "upstream failed")
+        );
+    }
+
+    #[tokio::test]
+    async fn first_event_times_out_when_provider_never_emits() {
+        let (_tx, mut rx) = mpsc::channel::<Result<ChatEvent, GatewayError>>(1);
+        assert!(matches!(
+            first_event(&mut rx, Duration::from_millis(1)).await,
+            FirstEvent::Timeout
+        ));
+    }
+}
