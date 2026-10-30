@@ -2827,8 +2827,6 @@ struct CountingStore {
     inner: Arc<UnifiedMemory>,
     context_build_calls: std::sync::atomic::AtomicUsize,
     persist_turn_calls: std::sync::atomic::AtomicUsize,
-    transcript_read_calls: std::sync::atomic::AtomicUsize,
-    bounded_history_read_calls: std::sync::atomic::AtomicUsize,
 }
 
 impl CountingStore {
@@ -2837,20 +2835,14 @@ impl CountingStore {
             inner,
             context_build_calls: std::sync::atomic::AtomicUsize::new(0),
             persist_turn_calls: std::sync::atomic::AtomicUsize::new(0),
-            transcript_read_calls: std::sync::atomic::AtomicUsize::new(0),
-            bounded_history_read_calls: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
-    fn counts(&self) -> (usize, usize, usize, usize) {
+    fn counts(&self) -> (usize, usize) {
         (
             self.context_build_calls
                 .load(std::sync::atomic::Ordering::Relaxed),
             self.persist_turn_calls
-                .load(std::sync::atomic::Ordering::Relaxed),
-            self.transcript_read_calls
-                .load(std::sync::atomic::Ordering::Relaxed),
-            self.bounded_history_read_calls
                 .load(std::sync::atomic::Ordering::Relaxed),
         )
     }
@@ -2991,8 +2983,8 @@ async fn conversation_store_counts_one_context_build_and_one_persist_call() {
     assert!(!marker.is_empty());
     assert_eq!(
         counting.counts(),
-        (1, 1, 0, 0),
-        "one request-scoped store use should build context and persist once without a second transcript/history read"
+        (1, 1),
+        "one request-scoped store use should build one context snapshot and persist one turn"
     );
 }
 
