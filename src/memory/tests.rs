@@ -3075,3 +3075,63 @@ fn concurrent_conversations_keep_provider_thread_mappings_isolated() {
         .expect("owner-scoped lookup should succeed")
         .is_none());
 }
+
+
+#[test]
+fn provider_thread_mappings_survive_memory_store_reopen() {
+    let fixture = Fixture::new();
+    {
+        let memory = fixture.open();
+        memory
+            .store_turn_for_owner(
+                "restart-owner",
+                "restart-conversation".to_owned(),
+                vec![m("user", "question before restart")],
+                m("assistant", "answer before restart"),
+                "chatgpt".to_owned(),
+                "legacy-tab".to_owned(),
+            )
+            .expect("conversation should persist before restart");
+        memory
+            .upsert_provider_thread_for_owner(
+                "restart-owner",
+                &ProviderThread {
+                    conversation_id: "restart-conversation".to_owned(),
+                    provider: "chatgpt".to_owned(),
+                    thread_url: "https://chatgpt.com/c/restart-thread".to_owned(),
+                    synced_through_message_id: Some("restart-marker".to_owned()),
+                    model: Some("gpt-4o".to_owned()),
+                    updated_at: 301,
+                },
+            )
+            .expect("provider thread mapping should persist before restart");
+    }
+
+    // Reopening the file-backed SQLite store simulates a gateway process restart.
+    let reopened = fixture.open();
+    let restored = reopened
+        .get_provider_thread_for_owner(
+            "restart-owner",
+            "restart-conversation",
+            "chatgpt",
+        )
+        .expect("provider thread lookup should succeed after restart")
+        .expect("provider thread mapping should survive restart");
+    assert_eq!(restored.thread_url, "https://chatgpt.com/c/restart-thread");
+    assert_eq!(
+        restored.synced_through_message_id.as_deref(),
+        Some("restart-marker")
+    );
+    assert_eq!(restored.model.as_deref(), Some("gpt-4o"));
+    assert_eq!(
+        reopened
+            .conversation_for_owner("restart-owner", "restart-conversation")
+            .expect("conversation lookup should succeed")
+            .expect("conversation should survive restart")
+            .messages,
+        vec![
+            m("user", "question before restart"),
+            m("assistant", "answer before restart")
+        ]
+    );
+}
