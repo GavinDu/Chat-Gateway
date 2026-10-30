@@ -1732,7 +1732,7 @@ async fn list_conversations(
     match state
         .memory
         .clone()
-        .list_conversations_for_owner_blocking(owner_key_id.to_owned(), limit, offset)
+        .list_conversations_async(owner_key_id.to_owned(), limit, offset)
         .await
     {
         Ok(conversations) => Json(serde_json::json!({
@@ -1773,7 +1773,7 @@ async fn get_provider_thread(
     match state
         .memory
         .clone()
-        .get_provider_thread_for_owner_blocking(
+        .get_provider_thread_async(
             owner_key_id.to_owned(),
             conversation_id.clone(),
             provider.clone(),
@@ -1837,7 +1837,7 @@ async fn upsert_provider_thread(
     match state
         .memory
         .clone()
-        .upsert_provider_thread_for_owner_blocking(owner_key_id.to_owned(), thread.clone())
+        .upsert_provider_thread_async(owner_key_id.to_owned(), thread.clone())
         .await
     {
         Ok(()) => Json(thread).into_response(),
@@ -1884,7 +1884,7 @@ async fn persist_provider_thread(
     if let Err(error) = state
         .memory
         .clone()
-        .upsert_provider_thread_for_owner_blocking(owner_key_id.to_owned(), thread)
+        .upsert_provider_thread_async(owner_key_id.to_owned(), thread)
         .await
     {
         tracing::warn!(provider, %error, "provider thread mapping could not be persisted");
@@ -1975,7 +1975,7 @@ async fn export_conversation(
     match state
         .memory
         .clone()
-        .export_conversation_for_owner_blocking(owner_key_id.to_owned(), conversation_id.clone())
+        .export_conversation_async(owner_key_id.to_owned(), conversation_id.clone())
         .await
     {
         Ok(Some(conversation)) => Json(conversation).into_response(),
@@ -2017,7 +2017,7 @@ async fn export_conversation_markdown(
     match state
         .memory
         .clone()
-        .export_conversation_for_owner_blocking(owner_key_id.to_owned(), conversation_id.clone())
+        .export_conversation_async(owner_key_id.to_owned(), conversation_id.clone())
         .await
     {
         Ok(Some(conversation)) => {
@@ -2145,7 +2145,7 @@ async fn delete_conversation(
     match state
         .memory
         .clone()
-        .delete_conversation_for_owner_blocking(owner_key_id.to_owned(), conversation_id.clone())
+        .delete_conversation_async(owner_key_id.to_owned(), conversation_id.clone())
         .await
     {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
@@ -2643,7 +2643,7 @@ async fn chat_completions(
                 match state
                     .memory
                     .clone()
-                    .get_provider_thread_for_owner_blocking(
+                    .get_provider_thread_async(
                         owner_key_id.clone(),
                         id.to_owned(),
                         provider_name.clone(),
@@ -3506,7 +3506,11 @@ mod http_api_regression_tests {
     ) -> Response {
         let limit = query.limit.unwrap_or(50).clamp(1, 100);
         let offset = query.offset.unwrap_or(0);
-        match memory.list_conversations(limit, offset) {
+        match memory
+            .clone()
+            .list_conversations_async("local".to_owned(), limit, offset)
+            .await
+        {
             Ok(conversations) => Json(serde_json::json!({
                 "data": conversations,
                 "limit": limit,

@@ -104,6 +104,38 @@ pub trait ConversationStore: Send + Sync {
         provider: String,
         tab_id: Option<String>,
     ) -> anyhow::Result<String>;
+
+    async fn list_conversations_async(
+        self: Arc<Self>,
+        owner_key_id: String,
+        limit: usize,
+        offset: usize,
+    ) -> anyhow::Result<Vec<ConversationSummary>>;
+
+    async fn export_conversation_async(
+        self: Arc<Self>,
+        owner_key_id: String,
+        conversation_id: String,
+    ) -> anyhow::Result<Option<Conversation>>;
+
+    async fn delete_conversation_async(
+        self: Arc<Self>,
+        owner_key_id: String,
+        conversation_id: String,
+    ) -> anyhow::Result<bool>;
+
+    async fn get_provider_thread_async(
+        self: Arc<Self>,
+        owner_key_id: String,
+        conversation_id: String,
+        provider: String,
+    ) -> anyhow::Result<Option<ProviderThread>>;
+
+    async fn upsert_provider_thread_async(
+        self: Arc<Self>,
+        owner_key_id: String,
+        thread: ProviderThread,
+    ) -> anyhow::Result<()>;
 }
 
 #[async_trait::async_trait]
@@ -168,6 +200,68 @@ impl ConversationStore for UnifiedMemory {
             tab_id,
         )
         .await
+    }
+
+    async fn list_conversations_async(
+        self: Arc<Self>,
+        owner_key_id: String,
+        limit: usize,
+        offset: usize,
+    ) -> anyhow::Result<Vec<ConversationSummary>> {
+        tokio::task::spawn_blocking(move || {
+            self.list_conversations_for_owner(&owner_key_id, limit, offset)
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("conversation list task failed: {error}"))?
+    }
+
+    async fn export_conversation_async(
+        self: Arc<Self>,
+        owner_key_id: String,
+        conversation_id: String,
+    ) -> anyhow::Result<Option<Conversation>> {
+        tokio::task::spawn_blocking(move || {
+            self.export_conversation_for_owner(&owner_key_id, &conversation_id)
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("conversation export task failed: {error}"))?
+    }
+
+    async fn delete_conversation_async(
+        self: Arc<Self>,
+        owner_key_id: String,
+        conversation_id: String,
+    ) -> anyhow::Result<bool> {
+        tokio::task::spawn_blocking(move || {
+            self.delete_conversation_for_owner(&owner_key_id, &conversation_id)
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("conversation deletion task failed: {error}"))?
+    }
+
+    async fn get_provider_thread_async(
+        self: Arc<Self>,
+        owner_key_id: String,
+        conversation_id: String,
+        provider: String,
+    ) -> anyhow::Result<Option<ProviderThread>> {
+        tokio::task::spawn_blocking(move || {
+            self.get_provider_thread_for_owner(&owner_key_id, &conversation_id, &provider)
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("provider thread lookup task failed: {error}"))?
+    }
+
+    async fn upsert_provider_thread_async(
+        self: Arc<Self>,
+        owner_key_id: String,
+        thread: ProviderThread,
+    ) -> anyhow::Result<()> {
+        tokio::task::spawn_blocking(move || {
+            self.upsert_provider_thread_for_owner(&owner_key_id, &thread)
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("provider thread persistence task failed: {error}"))?
     }
 }
 
@@ -713,6 +807,7 @@ impl UnifiedMemory {
     }
 
     /// Export a conversation without blocking a Tokio runtime worker.
+    #[allow(dead_code)] // Retained compatibility wrapper while async-store callers migrate.
     pub async fn export_conversation_for_owner_blocking(
         self: Arc<Self>,
         owner_key_id: String,
@@ -779,6 +874,7 @@ impl UnifiedMemory {
 
     /// List conversation metadata on Tokio's blocking pool. SQLite lock waits and
     /// row decoding must not occupy an async runtime worker.
+    #[allow(dead_code)] // Retained compatibility wrapper while async-store callers migrate.
     pub async fn list_conversations_for_owner_blocking(
         self: Arc<Self>,
         owner_key_id: String,
@@ -821,6 +917,7 @@ impl UnifiedMemory {
     }
 
     /// Delete a conversation without blocking a Tokio runtime worker.
+    #[allow(dead_code)] // Retained compatibility wrapper while async-store callers migrate.
     pub async fn delete_conversation_for_owner_blocking(
         self: Arc<Self>,
         owner_key_id: String,
@@ -934,6 +1031,7 @@ impl UnifiedMemory {
     }
 
     /// Look up provider-thread metadata on Tokio's blocking pool.
+    #[allow(dead_code)] // Retained compatibility wrapper while async-store callers migrate.
     pub async fn get_provider_thread_for_owner_blocking(
         self: Arc<Self>,
         owner_key_id: String,
@@ -982,6 +1080,7 @@ impl UnifiedMemory {
     }
 
     /// Persist provider-thread metadata on Tokio's blocking pool.
+    #[allow(dead_code)] // Retained compatibility wrapper while async-store callers migrate.
     pub async fn upsert_provider_thread_for_owner_blocking(
         self: Arc<Self>,
         owner_key_id: String,
