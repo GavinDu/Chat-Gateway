@@ -198,6 +198,84 @@ mod worker_supervisor_tests {
         assert!(!ready.load(Ordering::Acquire));
     }
 
+    static RESTART_TEST_SPAWNS: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+
+    fn restart_test_worker_spawner(
+        _cfg: Arc<crate::config::AppConfig>,
+        mut commands: tokio::sync::mpsc::Receiver<super::Command>,
+        ready: tokio::sync::oneshot::Sender<anyhow::Result<()>>,
+        worker_ready: Arc<AtomicBool>,
+    ) -> std::thread::JoinHandle<()> {
+        let generation = RESTART_TEST_SPAWNS.fetch_add(1, Ordering::SeqCst);
+        std::thread::spawn(move || {
+            let _ready_guard = super::WorkerReadyGuard(worker_ready);
+            let _ = ready.send(Ok(()));
+            if generation == 0 {
+                if let Some(super::Command::Discover { reply, .. }) = commands.blocking_recv() {
+                    drop(reply);
+                }
+                panic!("injected browser worker failure after accepting a request");
+            }
+
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("restart test runtime should build");
+            runtime.block_on(async move {
+                while let Some(command) = commands.recv().await {
+                    match command {
+                        super::Command::Discover { reply, .. } => {
+                            let _ = reply.send(Ok(vec!["recovered-model".to_owned()]));
+                        }
+                        super::Command::Shutdown { reply } => {
+                            let _ = reply.send(());
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+            });
+        })
+    }
+
+    #[tokio::test]
+    async fn request_after_worker_panic_succeeds_only_after_replacement_warmup() {
+        RESTART_TEST_SPAWNS.store(0, Ordering::SeqCst);
+        let config: crate::config::AppConfig =
+            serde_yaml::from_str("providers: []").expect("empty test config should parse");
+        let pool = super::ObscuraPool::new_with_worker_spawner(
+            Arc::new(config),
+            restart_test_worker_spawner,
+        )
+        .await
+        .expect("pool should start with injected worker");
+
+        pool.warm_all()
+            .await
+            .expect("initial worker should report ready");
+        assert!(
+            pool.discover("chatgpt").await.is_err(),
+            "the request in flight during the injected crash must fail closed"
+        );
+
+        tokio::time::timeout(Duration::from_secs(6), async {
+            while pool.worker_generation() == 0 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("replacement worker should complete warm-up");
+        assert!(pool.worker_alive(), "replacement should be ready after warm-up");
+        assert_eq!(
+            pool.discover("chatgpt").await.expect("recovered request should succeed"),
+            vec!["recovered-model"]
+        );
+        pool.shutdown()
+            .await
+            .expect("replacement worker should shut down cleanly");
+    }
+
     #[test]
     fn injected_worker_panic_closes_command_channel_and_clears_readiness() {
         let ready = Arc::new(AtomicBool::new(true));
