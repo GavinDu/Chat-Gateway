@@ -3076,7 +3076,6 @@ fn concurrent_conversations_keep_provider_thread_mappings_isolated() {
         .is_none());
 }
 
-
 #[test]
 fn provider_thread_mappings_survive_memory_store_reopen() {
     let fixture = Fixture::new();
@@ -3110,11 +3109,7 @@ fn provider_thread_mappings_survive_memory_store_reopen() {
     // Reopening the file-backed SQLite store simulates a gateway process restart.
     let reopened = fixture.open();
     let restored = reopened
-        .get_provider_thread_for_owner(
-            "restart-owner",
-            "restart-conversation",
-            "chatgpt",
-        )
+        .get_provider_thread_for_owner("restart-owner", "restart-conversation", "chatgpt")
         .expect("provider thread lookup should succeed after restart")
         .expect("provider thread mapping should survive restart");
     assert_eq!(restored.thread_url, "https://chatgpt.com/c/restart-thread");
