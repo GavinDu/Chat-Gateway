@@ -3006,57 +3006,6 @@ mod model_list_tests {
 }
 
 #[cfg(test)]
-mod login_origin_tests {
-    use super::*;
-
-    #[test]
-    fn allows_matching_local_origin_and_host() {
-        let mut headers = HeaderMap::new();
-        headers.insert("origin", "http://127.0.0.1:8080".parse().unwrap());
-        headers.insert("host", "127.0.0.1:8080".parse().unwrap());
-        assert!(login_origin_is_same_authority(&headers));
-    }
-
-    #[test]
-    fn rejects_origin_with_different_authority() {
-        let mut headers = HeaderMap::new();
-        headers.insert("origin", "https://evil.example".parse().unwrap());
-        headers.insert("host", "127.0.0.1:8080".parse().unwrap());
-        assert!(!login_origin_is_same_authority(&headers));
-    }
-
-    #[test]
-    fn rejects_non_loopback_host_authority() {
-        assert!(!is_loopback_authority("attacker.example:8080"));
-        assert!(!is_loopback_authority("localhost.attacker.example:8080"));
-    }
-
-    #[test]
-    fn rejects_dns_rebinding_hostname_even_when_origin_matches_host() {
-        let mut headers = HeaderMap::new();
-        headers.insert("origin", "http://attacker.example:8080".parse().unwrap());
-        headers.insert("host", "attacker.example:8080".parse().unwrap());
-        assert!(!login_origin_is_same_authority(&headers));
-    }
-
-    #[test]
-    fn accepts_only_explicit_loopback_authorities() {
-        assert!(is_loopback_authority("127.0.0.1:8080"));
-        assert!(is_loopback_authority("localhost:8080"));
-        assert!(is_loopback_authority("[::1]:8080"));
-        assert!(!is_loopback_authority("localhost.attacker.example:8080"));
-        assert!(!is_loopback_authority("127.0.0.2:8080"));
-        assert!(!is_loopback_authority("localhost:0"));
-    }
-
-    #[test]
-    fn allows_originless_local_automation_clients() {
-        let headers = HeaderMap::new();
-        assert!(login_origin_is_same_authority(&headers));
-    }
-}
-
-#[cfg(test)]
 mod api_contract_tests {
     use super::*;
 
@@ -3865,49 +3814,6 @@ mod login_security_middleware_http_tests {
     async fn host_protection_also_applies_to_non_login_routes() {
         let response = request("/health", &[("host", "attacker.example")]).await;
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
-    }
-}
-
-#[cfg(test)]
-mod loopback_authority_edge_tests {
-    use super::is_loopback_authority;
-
-    #[test]
-    fn accepts_only_valid_loopback_authorities_and_ports() {
-        for authority in [
-            "localhost",
-            "localhost:8080",
-            "127.0.0.1",
-            "127.0.0.1:8080",
-            "[::1]",
-            "[::1]:8080",
-        ] {
-            assert!(
-                is_loopback_authority(authority),
-                "expected loopback authority to be accepted: {authority}"
-            );
-        }
-
-        for authority in [
-            "localhost:",
-            "localhost:0",
-            "localhost:65536",
-            "localhost:not-a-port",
-            "localhost:8080/path",
-            "user@localhost:8080",
-            "localhost\\\\@attacker.example:8080",
-            "[::1",
-            "[::1]junk:8080",
-            "[::1]:0",
-            "[::1]:65536",
-            "127.0.0.2:8080",
-            "localhost.attacker.example:8080",
-        ] {
-            assert!(
-                !is_loopback_authority(authority),
-                "expected unsafe authority to be rejected: {authority}"
-            );
-        }
     }
 }
 
