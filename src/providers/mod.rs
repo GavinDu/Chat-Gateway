@@ -157,6 +157,7 @@ pub enum DoneSignal {
     /// explicit completion signal; otherwise use the conservative fallback.
     StopControlDisappeared,
 }
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThreadSupport {
     UrlAddressable,
@@ -170,6 +171,7 @@ pub enum TypingStrategy {
 
 type AdapterFactory = fn(ProviderConfig) -> Arc<dyn SiteAdapter>;
 
+#[allow(dead_code)]
 pub struct AdapterSpec {
     pub provider: Provider,
     pub id: &'static str,
