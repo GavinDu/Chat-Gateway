@@ -18,6 +18,13 @@ fn effective_session_pool_size(configured: usize) -> usize {
 
 const MAX_BROWSER_WORKER_RESTART_BACKOFF: Duration = Duration::from_secs(30);
 
+type BrowserWorkerSpawner = fn(
+    Arc<AppConfig>,
+    mpsc::Receiver<Command>,
+    oneshot::Sender<Result<()>>,
+    Arc<AtomicBool>,
+) -> std::thread::JoinHandle<()>;
+
 /// Metadata-only response observation. Obscura currently exposes buffered
 /// response bodies, so this deliberately does not claim incremental SSE data.
 fn provider_network_tap_provider_supported(provider: Provider) -> bool {
@@ -414,6 +421,13 @@ impl ObscuraPool {
     /// Spawn the browser thread (browser build + page warm-up happen
     /// there; call warm_all() to await readiness).
     pub async fn new(cfg: Arc<AppConfig>) -> Result<Arc<Self>> {
+        Self::new_with_worker_spawner(cfg, browser_thread).await
+    }
+
+    async fn new_with_worker_spawner(
+        cfg: Arc<AppConfig>,
+        worker_spawner: BrowserWorkerSpawner,
+    ) -> Result<Arc<Self>> {
         let (cmd_tx, cmd_rx) = mpsc::channel::<Command>(64);
         let (ready_tx, ready_rx) = oneshot::channel::<Result<()>>();
         let semaphores = DashMap::new();
@@ -447,7 +461,7 @@ impl ObscuraPool {
             worker_ready: worker_ready.clone(),
             worker_generation: worker_generation.clone(),
         });
-        let mut worker_handle = Some(browser_thread(
+        let mut worker_handle = Some(worker_spawner(
             cfg.clone(),
             cmd_rx,
             ready_tx,
@@ -492,7 +506,7 @@ impl ObscuraPool {
                 let (next_tx, next_rx) = mpsc::channel::<Command>(64);
                 *cmd_tx.write().await = next_tx;
                 let (next_ready_tx, next_ready_rx) = oneshot::channel::<Result<()>>();
-                worker_handle = Some(browser_thread(
+                worker_handle = Some(worker_spawner(
                     cfg.clone(),
                     next_rx,
                     next_ready_tx,
