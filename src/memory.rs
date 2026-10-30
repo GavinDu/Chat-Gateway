@@ -76,7 +76,9 @@ pub trait ConversationStore: Send + Sync {
         self: Arc<Self>,
         owner_key_id: String,
         conversation_id: String,
-    ) -> anyhow::Result<Vec<ChatMessage>>;
+    ) -> anyhow::Result<Vec<ChatMessage>> {
+        Err(anyhow::anyhow!("test store does not support direct transcript reads"))
+    }
 
     #[cfg(test)]
     async fn read_history(
@@ -84,7 +86,9 @@ pub trait ConversationStore: Send + Sync {
         owner_key_id: String,
         conversation_id: String,
         max_messages: usize,
-    ) -> anyhow::Result<Vec<ChatMessage>>;
+    ) -> anyhow::Result<Vec<ChatMessage>> {
+        Err(anyhow::anyhow!("test store does not support direct history reads"))
+    }
 
     /// Read the canonical transcript and rolling summary in one SQLite snapshot,
     /// then build provider context on Tokio's blocking pool.
