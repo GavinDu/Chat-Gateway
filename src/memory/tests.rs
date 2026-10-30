@@ -739,7 +739,9 @@ fn deleting_source_conversation_preserves_memory_and_clears_provenance() {
 fn retention_purge_clears_memory_provenance_without_deleting_memory() {
     let fixture = Fixture::new();
     let memory = fixture.open();
-    memory.set_long_term_memory_enabled("owner-a", true).unwrap();
+    memory
+        .set_long_term_memory_enabled("owner-a", true)
+        .unwrap();
     memory
         .store_turn_for_owner(
             "owner-a",
