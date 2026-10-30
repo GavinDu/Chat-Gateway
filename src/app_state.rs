@@ -3,12 +3,8 @@ use std::{collections::HashMap, sync::Arc};
 use tokio::sync::RwLock;
 
 use crate::{
-    browser::pool::ObscuraPool,
-    chat_service::ChatService,
-    config::AppConfig,
-    memory::UnifiedMemory,
-    relay::RelayState,
-    router::ProviderRouter,
+    browser::pool::ObscuraPool, chat_service::ChatService, config::AppConfig,
+    memory::UnifiedMemory, relay::RelayState, router::ProviderRouter,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
