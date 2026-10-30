@@ -26,7 +26,7 @@ function loadShared(cookieFixtures = [], hasAllPermissions = true, storageValues
   };
   vm.createContext(context);
   const source = fs.readFileSync(require.resolve("../shared.js"), "utf8");
-  vm.runInContext(source + "\nglobalThis.__testApi = { normalizeGateway, providerCookieSnapshot, relayFetch, PROVIDERS };", context);
+  vm.runInContext(source + "\nglobalThis.__testApi = { normalizeGateway, providerCookieSnapshot, relayFetch, syncProvider, PROVIDERS };", context);
   return { ...context.__testApi, getCookieReads: () => cookieReads, fetchCalls };
 }
 
@@ -88,4 +88,52 @@ test("partial provider host permissions reject cookie snapshot before reading co
 test("unsupported provider cannot be used to collect a cookie snapshot", async () => {
   const api = loadShared();
   await assert.rejects(() => api.providerCookieSnapshot("unknown"));
+});
+
+
+test("empty cookie snapshot never overwrites an existing linked gateway session", async () => {
+  const api = loadShared([], true, {
+    gateway: "http://127.0.0.1:8080",
+    token: "relay-secret",
+    linkedProviders: ["chatgpt"]
+  });
+
+  await api.syncProvider("chatgpt");
+
+  assert.equal(api.fetchCalls.length, 0, "an empty browser snapshot must not revoke a valid gateway session");
+});
+
+test("linked provider sync sends its cookie snapshot only to the configured local gateway", async () => {
+  const api = loadShared([
+    { name: "session", value: "session-secret", domain: ".chatgpt.com", path: "/", secure: true, httpOnly: true }
+  ], true, {
+    gateway: "http://127.0.0.1:8080",
+    token: "relay-secret",
+    linkedProviders: ["chatgpt"]
+  });
+
+  await api.syncProvider("chatgpt");
+
+  assert.equal(api.fetchCalls.length, 1);
+  assert.equal(api.fetchCalls[0].url, "http://127.0.0.1:8080/relay/v1/session/chatgpt");
+  assert.equal(api.fetchCalls[0].options.headers.get("Authorization"), "Bearer relay-secret");
+  const body = JSON.parse(api.fetchCalls[0].options.body);
+  assert.equal(body.cookies.length, 2);
+  assert.ok(body.cookies.some(cookie => cookie.value === "session-secret"));
+  assert.equal(api.fetchCalls[0].options.cache, "no-store");
+});
+
+test("unlinked provider sync does not read or transmit cookies", async () => {
+  const api = loadShared([
+    { name: "session", value: "session-secret", domain: ".chatgpt.com", path: "/", secure: true, httpOnly: true }
+  ], true, {
+    gateway: "http://127.0.0.1:8080",
+    token: "relay-secret",
+    linkedProviders: []
+  });
+
+  await api.syncProvider("chatgpt");
+
+  assert.equal(api.getCookieReads(), 0);
+  assert.equal(api.fetchCalls.length, 0);
 });
