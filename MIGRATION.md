@@ -9,6 +9,11 @@ SQLite memory microbenchmark can be run with `cargo bench --locked --bench
 memory_sqlite`; it measures memory-layer operations only, not browser startup,
 per-provider resident memory, provider switching, or provider TTFT.
 
+A reproducible provider benchmark harness is available in
+[docs/PROVIDER_BENCHMARK.md](docs/PROVIDER_BENCHMARK.md). Fake mode validates the
+measurement/reporting path without claiming real provider performance; live mode
+measures request-to-first-byte latency against an OpenAI-compatible endpoint.
+
 ## Changes
 1. Removed chromiumoxide
 2. Embedded obscura-core with render,stealth features
