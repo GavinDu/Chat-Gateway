@@ -21,6 +21,16 @@ impl ChatService {
         &self,
         request: BackendRequest,
     ) -> std::result::Result<mpsc::Receiver<Result<ChatEvent, GatewayError>>, GatewayError> {
+        let backend_id = self.backend.id();
+        let capabilities = self.backend.capabilities();
+        tracing::debug!(
+            backend = backend_id.as_str(),
+            streaming = capabilities.streaming,
+            model_selection = capabilities.model_selection,
+            system_role = capabilities.system_role,
+            addressable_threads = capabilities.addressable_threads,
+            "executing request through chat backend"
+        );
         self.backend.send_stream(request).await
     }
 }
