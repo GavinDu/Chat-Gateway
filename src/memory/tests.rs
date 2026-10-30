@@ -3122,3 +3122,134 @@ fn provider_thread_mappings_survive_memory_store_reopen() {
         ]
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn async_store_keeps_interleaved_conversation_thread_maps_isolated() {
+    let fixture = Fixture::new();
+    let store = Arc::new(fixture.open());
+
+    let store_a = store.clone();
+    let task_a = tokio::spawn(async move {
+        store_a
+            .clone()
+            .persist_turn(
+                "owner-a".to_owned(),
+                "conversation-a".to_owned(),
+                vec![m("user", "question A")],
+                m("assistant", "answer A"),
+                "chatgpt".to_owned(),
+                None,
+            )
+            .await
+            .expect("conversation A turn should persist");
+        store_a
+            .upsert_provider_thread_async(
+                "owner-a".to_owned(),
+                ProviderThread {
+                    conversation_id: "conversation-a".to_owned(),
+                    provider: "chatgpt".to_owned(),
+                    thread_url: "https://chatgpt.com/c/thread-a".to_owned(),
+                    synced_through_message_id: Some("marker-a".to_owned()),
+                    model: Some("gpt-4o".to_owned()),
+                    updated_at: 400,
+                },
+            )
+            .await
+            .expect("conversation A thread should persist");
+    });
+
+    let store_b = store.clone();
+    let task_b = tokio::spawn(async move {
+        store_b
+            .clone()
+            .persist_turn(
+                "owner-a".to_owned(),
+                "conversation-b".to_owned(),
+                vec![m("user", "question B")],
+                m("assistant", "answer B"),
+                "chatgpt".to_owned(),
+                None,
+            )
+            .await
+            .expect("conversation B turn should persist");
+        store_b
+            .upsert_provider_thread_async(
+                "owner-a".to_owned(),
+                ProviderThread {
+                    conversation_id: "conversation-b".to_owned(),
+                    provider: "chatgpt".to_owned(),
+                    thread_url: "https://chatgpt.ai/chat/thread-b".to_owned(),
+                    synced_through_message_id: Some("marker-b".to_owned()),
+                    model: Some("gpt-4o".to_owned()),
+                    updated_at: 401,
+                },
+            )
+            .await
+            .expect("conversation B thread should persist");
+    });
+
+    task_a.await.expect("conversation A task should not panic");
+    task_b.await.expect("conversation B task should not panic");
+
+    let thread_a = store
+        .clone()
+        .get_provider_thread_async(
+            "owner-a".to_owned(),
+            "conversation-a".to_owned(),
+            "chatgpt".to_owned(),
+        )
+        .await
+        .expect("conversation A thread lookup should succeed")
+        .expect("conversation A thread should exist");
+    let thread_b = store
+        .clone()
+        .get_provider_thread_async(
+            "owner-a".to_owned(),
+            "conversation-b".to_owned(),
+            "chatgpt".to_owned(),
+        )
+        .await
+        .expect("conversation B thread lookup should succeed")
+        .expect("conversation B thread should exist");
+
+    assert_eq!(thread_a.thread_url, "https://chatgpt.com/c/thread-a");
+    assert_eq!(
+        thread_a.synced_through_message_id.as_deref(),
+        Some("marker-a")
+    );
+    assert_eq!(thread_b.thread_url, "https://chatgpt.ai/chat/thread-b");
+    assert_eq!(
+        thread_b.synced_through_message_id.as_deref(),
+        Some("marker-b")
+    );
+
+    let (_, _, _, transcript_a) = store
+        .clone()
+        .build_context_with_transcript(
+            "owner-a".to_owned(),
+            Some("conversation-a".to_owned()),
+            vec![m("user", "follow-up A")],
+            8000,
+        )
+        .await
+        .expect("conversation A context should load");
+    let (_, _, _, transcript_b) = store
+        .clone()
+        .build_context_with_transcript(
+            "owner-a".to_owned(),
+            Some("conversation-b".to_owned()),
+            vec![m("user", "follow-up B")],
+            8000,
+        )
+        .await
+        .expect("conversation B context should load");
+
+    assert_eq!(
+        transcript_a,
+        vec![m("user", "question A"), m("assistant", "answer A")]
+    );
+    assert_eq!(
+        transcript_b,
+        vec![m("user", "question B"), m("assistant", "answer B")]
+    );
+}
