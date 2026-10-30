@@ -18,6 +18,13 @@ fn effective_session_pool_size(configured: usize) -> usize {
 
 const MAX_BROWSER_WORKER_RESTART_BACKOFF: Duration = Duration::from_secs(30);
 
+type BrowserWorkerSpawner = fn(
+    Arc<AppConfig>,
+    mpsc::Receiver<Command>,
+    oneshot::Sender<Result<()>>,
+    Arc<AtomicBool>,
+) -> std::thread::JoinHandle<()>;
+
 /// Metadata-only response observation. Obscura currently exposes buffered
 /// response bodies, so this deliberately does not claim incremental SSE data.
 fn provider_network_tap_provider_supported(provider: Provider) -> bool {
@@ -189,6 +196,89 @@ mod worker_supervisor_tests {
         let ready = Arc::new(AtomicBool::new(true));
         drop(WorkerReadyGuard(ready.clone()));
         assert!(!ready.load(Ordering::Acquire));
+    }
+
+    static RESTART_TEST_SPAWNS: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+
+    fn restart_test_worker_spawner(
+        _cfg: Arc<crate::config::AppConfig>,
+        mut commands: tokio::sync::mpsc::Receiver<super::Command>,
+        ready: tokio::sync::oneshot::Sender<anyhow::Result<()>>,
+        worker_ready: Arc<AtomicBool>,
+    ) -> std::thread::JoinHandle<()> {
+        let generation = RESTART_TEST_SPAWNS.fetch_add(1, Ordering::SeqCst);
+        std::thread::spawn(move || {
+            let _ready_guard = super::WorkerReadyGuard(worker_ready);
+            let _ = ready.send(Ok(()));
+            if generation == 0 {
+                if let Some(super::Command::Discover { reply, .. }) = commands.blocking_recv() {
+                    drop(reply);
+                }
+                panic!("injected browser worker failure after accepting a request");
+            }
+
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("restart test runtime should build");
+            runtime.block_on(async move {
+                while let Some(command) = commands.recv().await {
+                    match command {
+                        super::Command::Discover { reply, .. } => {
+                            let _ = reply.send(Ok(vec!["recovered-model".to_owned()]));
+                        }
+                        super::Command::Shutdown { reply } => {
+                            let _ = reply.send(());
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+            });
+        })
+    }
+
+    #[tokio::test]
+    async fn request_after_worker_panic_succeeds_only_after_replacement_warmup() {
+        RESTART_TEST_SPAWNS.store(0, Ordering::SeqCst);
+        let config: crate::config::AppConfig =
+            serde_yaml::from_str("providers: []").expect("empty test config should parse");
+        let pool = super::ObscuraPool::new_with_worker_spawner(
+            Arc::new(config),
+            restart_test_worker_spawner,
+        )
+        .await
+        .expect("pool should start with injected worker");
+
+        pool.warm_all()
+            .await
+            .expect("initial worker should report ready");
+        assert!(
+            pool.discover("chatgpt").await.is_err(),
+            "the request in flight during the injected crash must fail closed"
+        );
+
+        tokio::time::timeout(Duration::from_secs(6), async {
+            while pool.worker_generation() == 0 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("replacement worker should complete warm-up");
+        assert!(
+            pool.worker_alive(),
+            "replacement should be ready after warm-up"
+        );
+        assert_eq!(
+            pool.discover("chatgpt")
+                .await
+                .expect("recovered request should succeed"),
+            vec!["recovered-model"]
+        );
+        pool.shutdown()
+            .await
+            .expect("replacement worker should shut down cleanly");
     }
 
     #[test]
@@ -414,6 +504,13 @@ impl ObscuraPool {
     /// Spawn the browser thread (browser build + page warm-up happen
     /// there; call warm_all() to await readiness).
     pub async fn new(cfg: Arc<AppConfig>) -> Result<Arc<Self>> {
+        Self::new_with_worker_spawner(cfg, browser_thread).await
+    }
+
+    async fn new_with_worker_spawner(
+        cfg: Arc<AppConfig>,
+        worker_spawner: BrowserWorkerSpawner,
+    ) -> Result<Arc<Self>> {
         let (cmd_tx, cmd_rx) = mpsc::channel::<Command>(64);
         let (ready_tx, ready_rx) = oneshot::channel::<Result<()>>();
         let semaphores = DashMap::new();
@@ -447,7 +544,7 @@ impl ObscuraPool {
             worker_ready: worker_ready.clone(),
             worker_generation: worker_generation.clone(),
         });
-        let mut worker_handle = Some(browser_thread(
+        let mut worker_handle = Some(worker_spawner(
             cfg.clone(),
             cmd_rx,
             ready_tx,
@@ -492,7 +589,7 @@ impl ObscuraPool {
                 let (next_tx, next_rx) = mpsc::channel::<Command>(64);
                 *cmd_tx.write().await = next_tx;
                 let (next_ready_tx, next_ready_rx) = oneshot::channel::<Result<()>>();
-                worker_handle = Some(browser_thread(
+                worker_handle = Some(worker_spawner(
                     cfg.clone(),
                     next_rx,
                     next_ready_tx,
