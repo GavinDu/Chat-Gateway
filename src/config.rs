@@ -111,6 +111,9 @@ pub struct ProviderConfig {
     pub priority: u32,
     #[serde(default = "default_timeout")]
     pub timeout_seconds: u64,
+    /// Conservative fallback idle grace after response text stabilizes, in milliseconds.
+    #[serde(default = "default_completion_idle_ms")]
+    pub completion_idle_ms: u64,
     #[serde(default = "default_queue_timeout")]
     pub queue_timeout_seconds: u64,
     #[serde(default = "default_pool")]
@@ -231,6 +234,12 @@ impl AppConfig {
                     provider.name
                 );
             }
+            if !(1_000..=60_000).contains(&provider.completion_idle_ms) {
+                anyhow::bail!(
+                    "provider '{}' completion_idle_ms must be between 1000 and 60000 milliseconds",
+                    provider.name
+                );
+            }
             if provider.queue_timeout_seconds == 0 {
                 anyhow::bail!(
                     "provider '{}' queue_timeout_seconds must be greater than zero",
@@ -286,6 +295,9 @@ fn default_priority() -> u32 {
 }
 fn default_timeout() -> u64 {
     120
+}
+fn default_completion_idle_ms() -> u64 {
+    15_000
 }
 fn default_queue_timeout() -> u64 {
     30
@@ -384,6 +396,27 @@ mod tests {
 
         let empty = config("providers: []\n");
         assert!(empty.validate().is_ok());
+    }
+
+    #[test]
+    fn provider_completion_idle_grace_defaults_and_validates_bounds() {
+        let defaults = config("providers:\n  - name: chatgpt\n");
+        assert_eq!(
+            defaults.provider("chatgpt").unwrap().completion_idle_ms,
+            15_000
+        );
+        assert!(defaults.validate().is_ok());
+
+        let too_short = config("providers:\n  - name: chatgpt\n    completion_idle_ms: 999\n");
+        assert!(too_short.validate().is_err());
+        let too_long = config("providers:\n  - name: chatgpt\n    completion_idle_ms: 60001\n");
+        assert!(too_long.validate().is_err());
+        let configured = config("providers:\n  - name: chatgpt\n    completion_idle_ms: 12000\n");
+        assert_eq!(
+            configured.provider("chatgpt").unwrap().completion_idle_ms,
+            12_000
+        );
+        assert!(configured.validate().is_ok());
     }
 
     #[test]

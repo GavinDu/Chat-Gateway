@@ -24,6 +24,7 @@ providers:
     enabled: false
     priority: 1
     timeout_seconds: 120
+    completion_idle_ms: 15000 # fallback after stable text; valid range: 1000-60000
     queue_timeout_seconds: 30
     session_pool_size: 1
     min_request_interval_ms: 5000

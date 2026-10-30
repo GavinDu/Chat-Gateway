@@ -425,15 +425,16 @@ fn completion_idle_ticks(
     saw_streaming: bool,
     post_answer_affordance: bool,
     poll_tick: Duration,
+    completion_idle: Duration,
 ) -> u32 {
     let grace = match done_signal {
-        DoneSignal::StableResponseText => Duration::from_secs(15),
+        DoneSignal::StableResponseText => completion_idle,
         DoneSignal::StopControlDisappeared if saw_streaming && post_answer_affordance => {
             Duration::from_secs(1)
         }
         // Never infer completion from disappearance alone: require a known
-        // post-answer affordance, otherwise retain the conservative fallback.
-        DoneSignal::StopControlDisappeared => Duration::from_secs(15),
+        // post-answer affordance, otherwise retain the configured fallback.
+        DoneSignal::StopControlDisappeared => completion_idle,
     };
     ticks_for_grace(grace, poll_tick)
 }
@@ -445,6 +446,7 @@ fn completion_ready(
     saw_streaming: bool,
     post_answer_affordance: bool,
     poll_tick: Duration,
+    completion_idle: Duration,
 ) -> bool {
     stable_ticks
         >= completion_idle_ticks(
@@ -452,6 +454,7 @@ fn completion_ready(
             saw_streaming,
             post_answer_affordance,
             poll_tick,
+            completion_idle,
         )
         && !streaming
 }
@@ -462,6 +465,7 @@ pub async fn run_send(
     prompt: String,
     timeout: Duration,
     poll_tick: Duration,
+    completion_idle: Duration,
     chunks: mpsc::Sender<Result<ProviderChunk>>,
 ) {
     if crate::provider_guard::is_challenge_page(&page) {
@@ -615,6 +619,7 @@ pub async fn run_send(
                             saw_streaming,
                             confirmed_post_answer_affordance,
                             poll_tick,
+                            completion_idle,
                         )
                     {
                         // Sample the full body immediately before completion, even
@@ -717,6 +722,7 @@ pub async fn run_send(
                 saw_streaming,
                 confirmed_post_answer_affordance,
                 poll_tick,
+                completion_idle,
             ) {
                 // A final full-body check closes the gap between periodic
                 // sampling and declaring the provider turn complete.
@@ -877,6 +883,7 @@ mod response_completion_tests {
             true,
             false,
             DEFAULT_POLL_TICK,
+            Duration::from_millis(15_000),
         ));
         assert!(!completion_ready(
             COMPLETION_IDLE_TICKS - 1,
@@ -885,6 +892,7 @@ mod response_completion_tests {
             true,
             false,
             DEFAULT_POLL_TICK,
+            Duration::from_millis(15_000),
         ));
         assert!(completion_ready(
             COMPLETION_IDLE_TICKS,
@@ -893,6 +901,7 @@ mod response_completion_tests {
             true,
             false,
             DEFAULT_POLL_TICK,
+            Duration::from_millis(15_000),
         ));
     }
 
@@ -905,6 +914,7 @@ mod response_completion_tests {
             true,
             false,
             DEFAULT_POLL_TICK,
+            Duration::from_millis(15_000),
         ));
     }
 
@@ -926,6 +936,7 @@ mod response_completion_tests {
                 true,
                 true,
                 DEFAULT_POLL_TICK,
+                Duration::from_millis(15_000),
             ),
             EXPLICIT_DONE_IDLE_TICKS,
         );
@@ -935,6 +946,7 @@ mod response_completion_tests {
                 false,
                 true,
                 DEFAULT_POLL_TICK,
+                Duration::from_millis(15_000),
             ),
             COMPLETION_IDLE_TICKS,
         );
@@ -944,6 +956,7 @@ mod response_completion_tests {
                 true,
                 false,
                 DEFAULT_POLL_TICK,
+                Duration::from_millis(15_000),
             ),
             COMPLETION_IDLE_TICKS,
             "missing post-answer affordance must use the conservative fallback",
@@ -955,6 +968,7 @@ mod response_completion_tests {
             true,
             true,
             DEFAULT_POLL_TICK,
+            Duration::from_millis(15_000),
         ));
         assert!(completion_ready(
             EXPLICIT_DONE_IDLE_TICKS,
@@ -963,6 +977,7 @@ mod response_completion_tests {
             true,
             true,
             DEFAULT_POLL_TICK,
+            Duration::from_millis(15_000),
         ));
         assert!(!completion_ready(
             EXPLICIT_DONE_IDLE_TICKS,
@@ -971,6 +986,7 @@ mod response_completion_tests {
             true,
             true,
             DEFAULT_POLL_TICK,
+            Duration::from_millis(15_000),
         ));
     }
 
