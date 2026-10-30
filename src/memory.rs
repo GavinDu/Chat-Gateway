@@ -69,22 +69,6 @@ struct TurnWrite<'a> {
 /// Implementations keep synchronous SQLite work off Tokio request workers.
 #[async_trait::async_trait]
 pub trait ConversationStore: Send + Sync {
-    #[allow(dead_code)] // Kept as a compatibility seam while callers use atomic turn persistence.
-    async fn read_transcript(
-        self: Arc<Self>,
-        owner_key_id: String,
-        conversation_id: String,
-    ) -> anyhow::Result<Vec<ChatMessage>>;
-
-    /// Kept for the staged call-site migration; callers will adopt this method next.
-    #[allow(dead_code)]
-    async fn read_history(
-        self: Arc<Self>,
-        owner_key_id: String,
-        conversation_id: String,
-        max_messages: usize,
-    ) -> anyhow::Result<Vec<ChatMessage>>;
-
     /// Read the canonical transcript and rolling summary in one SQLite snapshot,
     /// then build provider context on Tokio's blocking pool.
     async fn build_context_with_transcript(
@@ -140,32 +124,6 @@ pub trait ConversationStore: Send + Sync {
 
 #[async_trait::async_trait]
 impl ConversationStore for UnifiedMemory {
-    async fn read_transcript(
-        self: Arc<Self>,
-        owner_key_id: String,
-        conversation_id: String,
-    ) -> anyhow::Result<Vec<ChatMessage>> {
-        self.conversation_messages_for_owner_blocking(owner_key_id, conversation_id)
-            .await
-    }
-
-    async fn read_history(
-        self: Arc<Self>,
-        owner_key_id: String,
-        conversation_id: String,
-        max_messages: usize,
-    ) -> anyhow::Result<Vec<ChatMessage>> {
-        tokio::task::spawn_blocking(move || {
-            self.conversation_history_for_owner_with_limit(
-                &owner_key_id,
-                &conversation_id,
-                max_messages,
-            )
-        })
-        .await
-        .map_err(|error| anyhow::anyhow!("bounded conversation history task failed: {error}"))?
-    }
-
     async fn build_context_with_transcript(
         self: Arc<Self>,
         owner_key_id: String,
