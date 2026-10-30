@@ -24,15 +24,21 @@ fn provider_network_tap_provider_supported(provider: Provider) -> bool {
     matches!(provider, Provider::ChatGPT | Provider::Claude)
 }
 
+fn provider_network_tap_flag_enabled(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes"
+    )
+}
+
+fn provider_network_tap_reported_bytes(body_len: usize) -> usize {
+    body_len.min(1_048_576)
+}
+
 fn provider_network_tap_enabled(provider: Provider) -> bool {
     provider_network_tap_provider_supported(provider)
         && std::env::var("CHAT_GATEWAY_PROVIDER_NETWORK_TAP")
-            .map(|value| {
-                matches!(
-                    value.trim().to_ascii_lowercase().as_str(),
-                    "1" | "true" | "yes"
-                )
-            })
+            .map(|value| provider_network_tap_flag_enabled(&value))
             .unwrap_or(false)
 }
 
@@ -57,7 +63,7 @@ fn attach_provider_network_tap(page: &mut obscura_core::Page, provider: Provider
             host,
             resource_type = ?info.resource_type,
             status = response.status,
-            response_bytes = response.body.len(),
+            response_bytes = provider_network_tap_reported_bytes(response.body.len()),
             "provider network response observed (metadata only)"
         );
     }));
@@ -128,6 +134,26 @@ mod worker_supervisor_tests {
         assert!(
             worker.is_none(),
             "the finished worker handle must be consumed"
+        );
+    }
+
+    #[test]
+    fn metadata_tap_flag_requires_an_explicit_truthy_value() {
+        for value in ["1", "true", "TRUE", " yes "] {
+            assert!(super::provider_network_tap_flag_enabled(value), "{value:?}");
+        }
+        for value in ["", "0", "false", "no", "enabled", "true please"] {
+            assert!(!super::provider_network_tap_flag_enabled(value), "{value:?}");
+        }
+    }
+
+    #[test]
+    fn metadata_tap_byte_count_is_bounded() {
+        assert_eq!(super::provider_network_tap_reported_bytes(0), 0);
+        assert_eq!(super::provider_network_tap_reported_bytes(4096), 4096);
+        assert_eq!(
+            super::provider_network_tap_reported_bytes(usize::MAX),
+            1_048_576
         );
     }
 
