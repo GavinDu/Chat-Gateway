@@ -3501,7 +3501,11 @@ mod http_api_regression_tests {
     ) -> Response {
         let limit = query.limit.unwrap_or(50).clamp(1, 100);
         let offset = query.offset.unwrap_or(0);
-        match memory.list_conversations_async(limit, offset) {
+        match memory
+            .clone()
+            .list_conversations_async("local".to_owned(), limit, offset)
+            .await
+        {
             Ok(conversations) => Json(serde_json::json!({
                 "data": conversations,
                 "limit": limit,
