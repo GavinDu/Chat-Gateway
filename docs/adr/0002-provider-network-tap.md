@@ -36,6 +36,12 @@ This confirms that a network-observation spike is feasible without adding Chromi
 - Diagnostics expose only provider name, event type, timing, and bounded byte counts.
 - Fixture tests cover chunk boundaries, malformed frames, empty frames, cancellation, and duplicate terminal events.
 
+## Prototype status (2026-10-30)
+
+An opt-in metadata-only observer is implemented for warmed ChatGPT and Claude pages. Set `CHAT_GATEWAY_PROVIDER_NETWORK_TAP=1` to enable it. Debug events contain only provider, response host, resource type, HTTP status, and bounded response byte count. URL paths and query strings, headers, cookies, prompts, and response bodies are never logged.
+
+The pinned passive callback exposes a complete buffered response, not proven incremental SSE chunks or a terminal signal. Existing DOM polling therefore remains authoritative. A sanitized trace from real provider sessions is still required before selecting stable endpoints or implementing a stream parser.
+
 ## Decision
 
 Proceed with the prototype, but keep it separate from the existing DOM-based completion path until the pinned API is compiled against directly and a real provider trace demonstrates incremental delivery. If only buffered bodies are available, use the tap for metadata/response correlation and retain DOM polling for streaming.
