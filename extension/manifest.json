@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Chat Gateway Browser Relay",
   "version": "0.1.0",
-  "description": "Explicitly link approved provider cookies to a paired local Chat Gateway. Never captures passwords or page content.",
+  "description": "Explicitly link approved provider cookies and bounded localStorage from the active tab to a paired local Chat Gateway. Never captures passwords, MFA, or page DOM.",
   "permissions": [
     "cookies",
     "storage",
