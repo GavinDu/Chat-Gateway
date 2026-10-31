@@ -130,6 +130,29 @@ raise SystemExit(1 if os.environ.get("CURL_FAIL") == "1" else 0)
                 1,
             )
 
+    def test_status_returns_nonzero_when_gateway_health_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            bin_dir, calls = self.make_tools(root)
+            env = os.environ.copy()
+            env.update({
+                "PATH": f"{bin_dir}:{env.get('PATH', '')}",
+                "DOCKER_CALLS": str(calls),
+                "CURL_CALLS": str(root / "curl-calls.txt"),
+                "CURL_FAIL": "1",
+            })
+            result = subprocess.run(
+                ["bash", str(HELPER), "status"],
+                cwd=ROOT,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Health: unhealthy", result.stderr)
+            self.assertIn("docker-run.sh logs", result.stderr)
+
     def test_login_opens_provider_site_in_external_browser_without_collecting_password(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
