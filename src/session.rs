@@ -342,6 +342,20 @@ fn migrate_legacy_snapshot(
     provider: &str,
     key: &[u8; 32],
 ) -> Result<SessionFile> {
+    migrate_legacy_snapshot_with_remover(legacy_path, vault_path, provider, key, |path| {
+        std::fs::remove_file(path)
+    })
+}
+
+// The injected remover makes the final destructive migration step testable:
+// a failed unlink must preserve both the legacy source and verified vault copy.
+fn migrate_legacy_snapshot_with_remover(
+    legacy_path: &Path,
+    vault_path: &Path,
+    provider: &str,
+    key: &[u8; 32],
+    remove_legacy: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> Result<SessionFile> {
     let legacy_bytes = Zeroizing::new(std::fs::read(legacy_path)?);
     let legacy = serde_json::from_slice::<SessionFile>(&legacy_bytes)?;
     let parent = vault_path.parent().unwrap_or_else(|| Path::new("sessions"));
@@ -367,7 +381,7 @@ fn migrate_legacy_snapshot(
 
     // A deletion failure leaves both copies intact and returns an error, rather
     // than reporting a completed migration with a plaintext source still present.
-    std::fs::remove_file(legacy_path)?;
+    remove_legacy(legacy_path)?;
     record_session_write(provider);
     tracing::info!(provider, "migrated plaintext session into encrypted vault");
     Ok(verified)
@@ -1732,6 +1746,47 @@ mod vault_tests {
         );
         assert_eq!(std::fs::read(&legacy_path).unwrap(), malformed);
         assert!(!vault_path.exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn migration_delete_failure_preserves_both_recoverable_copies() {
+        let root = std::env::temp_dir().join(format!(
+            "chat-gateway-vault-migration-delete-failure-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let legacy_path = root.join("legacy.json");
+        let vault_path = root.join("vault.vault");
+        let legacy_bytes = serde_json::to_vec(&sample_session()).unwrap();
+        let key = [0x5a; 32];
+        std::fs::write(&legacy_path, &legacy_bytes).unwrap();
+
+        let result = migrate_legacy_snapshot_with_remover(
+            &legacy_path,
+            &vault_path,
+            "chatgpt",
+            &key,
+            |_| {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "injected legacy deletion failure",
+                ))
+            },
+        );
+
+        assert!(result.is_err());
+        assert_eq!(
+            std::fs::read(&legacy_path).unwrap(),
+            legacy_bytes,
+            "plaintext source must remain recoverable when deletion fails"
+        );
+        let encrypted = std::fs::read(&vault_path).unwrap();
+        let restored = decrypt_session_snapshot(&encrypted, "chatgpt", &key).unwrap();
+        assert_eq!(
+            restored.local_storage.get("access_token").unwrap(),
+            "sensitive-value"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
