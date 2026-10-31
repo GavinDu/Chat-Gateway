@@ -347,7 +347,7 @@ fn migrate_legacy_snapshot(
         vault_path,
         provider,
         key,
-        std::fs::remove_file,
+        |path| std::fs::remove_file(path),
     )
 }
 
