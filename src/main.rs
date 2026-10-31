@@ -3824,8 +3824,8 @@ mod login_security_middleware_http_tests {
 
     #[test]
     fn server_listener_is_loopback_only_by_default() {
-        assert!(server_bind_addr(8080).ip().is_loopback());
-        assert_eq!(server_bind_addr(8080).port(), 8080);
+        assert!(server_bind_addr(8080, false).ip().is_loopback());
+        assert_eq!(server_bind_addr(8080, false).port(), 8080);
     }
     #[tokio::test]
     async fn host_protection_also_applies_to_non_login_routes() {
