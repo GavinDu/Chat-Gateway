@@ -22,12 +22,18 @@ The server listens on `server.port` (default 8080, `PORT` env overrides).
 
 ## Security boundary: local login relay
 
-The gateway binds to `127.0.0.1` only. This is intentional: the login UI and
-`/login/api/*` endpoints can control provider browser sessions and persist
-session cookies/localStorage, so they are **local-machine control surfaces**, not
-a remotely accessible login service. The server does not currently support a
-public or LAN bind address, and changing the bind address is not a supported
-configuration option.
+The gateway binds to `127.0.0.1` only by default. This is intentional: the
+login UI and `/login/api/*` endpoints can control provider browser sessions
+and persist reusable authentication material, so they are **local-machine
+control surfaces**, not a remotely accessible login service.
+
+The supported Docker helper has one explicit exception: the process binds to
+the container interface only when `CHAT_GATEWAY_DOCKER_LOCAL_BIND=1` is set,
+and the helper publishes the port exclusively on host loopback
+(`127.0.0.1:<port>:<port>`). Do not change that publication to `0.0.0.0`,
+a LAN address, a reverse proxy, or a tunnel. The Docker option exists so a
+normal host Chrome/Firefox browser and the local browser extension can reach
+the container without exposing the login control plane to the network.
 
 The HTTP middleware also rejects requests whose `Host` is not an explicit
 loopback authority, rejects unsafe `Origin` values, and rejects cross-site
@@ -41,6 +47,71 @@ container port publication to an untrusted network.** Remote access is not
 supported until a separate design adds explicit authentication, TLS, and
 origin/CSRF protections for the remote trust boundary. Do not log or share
 provider session files: they may contain reusable authentication material.
+
+## Docker run and external browser sign-in
+
+The supported local Docker workflow builds the image, stores conversation data
+and provider sessions in Docker-managed volumes, and keeps the AES-256-GCM
+session-vault key in a separate Docker-managed volume. The key is mounted
+read-only into the gateway from a private `0600` file; it is not printed or
+passed as an environment value.
+
+```bash
+scripts/docker-run.sh init
+# Edit config.yaml: enable only the providers you are authorized to use.
+scripts/docker-run.sh build
+CHAT_GATEWAY_EXTENSION_ID=<your-unpacked-extension-id> scripts/docker-run.sh start
+scripts/docker-run.sh logs
+```
+
+The extension ID is shown in Chrome at `chrome://extensions` after loading
+the repository's `extension/` directory with Developer mode enabled. Set it
+before starting the gateway; the relay accepts only that exact extension
+origin. The one-time pairing code is printed in the container logs and expires
+after ten minutes:
+
+```bash
+scripts/docker-run.sh pairing-code
+```
+
+Open the extension popup, set gateway URL to
+`http://127.0.0.1:8080`, enter the pairing code, and pair. Then sign in
+normally in your host browser (including provider username/password, passkey,
+MFA, and human CAPTCHA/challenge flows), open the extension popup, choose the
+provider, and select **Review permissions & link**. The extension reads the
+provider's allowed cookies from that browser profile and sends them directly
+to the loopback gateway over the paired relay. The gateway encrypts the
+provider-scoped session into its Docker session volume and refreshes the
+embedded Obscura page. Passwords and MFA codes are not collected by Chat
+Gateway.
+
+For example, `scripts/docker-run.sh login chatgpt` opens the provider's
+normal sign-in page in the host browser. Supported provider arguments are
+`chatgpt`, `claude`, `gemini`, `grok`, `qwen`, `metaai`, `mistral`,
+and `perplexity`.
+
+The browser extension currently transfers cookies only. Relay localStorage
+import is deliberately disabled until provider-specific storage-key
+allowlists are reviewed; a provider whose authentication depends on
+localStorage may therefore need additional integration before its session can
+be linked successfully. The extension's cookie permissions are provider
+scoped; grant only the provider domains you intend to link.
+
+Useful commands:
+
+```bash
+scripts/docker-run.sh status
+scripts/docker-run.sh logs
+scripts/docker-run.sh stop
+scripts/docker-run.sh restart
+```
+
+The data, session, and vault-key volumes are named
+`chat-gateway-data`, `chat-gateway-sessions`, and
+`chat-gateway-vault-key` by default. Back up the session and key volumes
+together: encrypted session files cannot be recovered without the matching
+key volume. Do not remove the key volume while retaining session data.
+The published gateway port is host-loopback-only; never widen it.
 
 ## API (OpenAI compatible)
 
