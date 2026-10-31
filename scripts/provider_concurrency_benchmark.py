@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import json
+import math
 import os
 import statistics
 import subprocess
@@ -21,15 +22,14 @@ def percentile(values: list[int], p: float) -> int | None:
     if not values:
         return None
     ordered = sorted(values)
-    index = max(0, min(len(ordered) - 1, int((p / 100) * len(ordered) + 0.999999) - 1))
+    index = max(0, min(len(ordered) - 1, math.ceil((p / 100) * len(ordered)) - 1))
     return ordered[index]
 
 
-def parse_sse(lines) -> tuple[int | None, bool, bool]:
+def parse_sse(lines, request_started: float) -> tuple[int | None, bool, bool]:
     first_token_ms = None
     saw_done = False
     provider_error = False
-    started = time.monotonic()
     for raw in lines:
         line = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else raw
         if not line.startswith("data:"):
@@ -53,7 +53,7 @@ def parse_sse(lines) -> tuple[int | None, bool, bool]:
             delta = choices[0].get("delta") or {}
             content = delta.get("content")
             if isinstance(content, str) and content and first_token_ms is None:
-                first_token_ms = int((time.monotonic() - started) * 1000)
+                first_token_ms = int((time.monotonic() - request_started) * 1000)
     return first_token_ms, saw_done, provider_error
 
 
@@ -92,7 +92,7 @@ def one_request(base_url: str, api_key: str, provider: str, model: str,
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             actual_provider = response.headers.get("X-Gateway-Provider", "").lower()
-            ttft_ms, saw_done, provider_error = parse_sse(response)
+            ttft_ms, saw_done, provider_error = parse_sse(response, started)
             status = response.status
     except urllib.error.HTTPError as error:
         return {"ok": False, "failure": f"http_{error.code}"}
