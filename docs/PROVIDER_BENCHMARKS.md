@@ -52,6 +52,27 @@ available, use these counters to cross-check client-side timing. The metrics
 endpoint is loopback-only and may require an admin-scoped API key when key
 authentication is enabled.
 
+### Reproducible concurrency sweep
+
+Run the opt-in live harness against one deliberately enabled, authenticated
+provider. It sends independent conversations at concurrency 1, 2 and 4 by
+default, measures end-to-end TTFT from request submission, total latency,
+failures, and optional before/after gateway RSS:
+
+```sh
+CHAT_GATEWAY_API_KEY=<local-api-key> \
+python3 scripts/provider_concurrency_benchmark.py \
+  --provider chatgpt --model <provider-model> --samples 8 --pid <gateway-pid>
+```
+
+Use a non-sensitive test account and prompt. The harness validates the
+gateway's provider identity header and SSE terminal event. Output contains
+aggregate timing/failure counts only; it does not print prompts, response text,
+cookies or credentials. RSS values are snapshots before and after the sweep,
+not peak RSS. Run at least three times per machine/session state and keep
+provider-specific results separate. A nonzero exit indicates one or more
+failed requests; do not silently discard failures when comparing latency.
+
 ## Reporting template
 
 | Field | Value |
