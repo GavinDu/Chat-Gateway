@@ -142,25 +142,40 @@ def assert_turn_history(conversation: dict, expected_turns: int) -> None:
         raise RuntimeError("conversation_message_order_mismatch")
 
 
-def write_state(path: Path, conversation_id: str, marker: str) -> None:
+def write_state(
+    path: Path,
+    conversation_id: str,
+    marker: str,
+    isolated_conversation_id: str,
+    isolated_marker: str,
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, stat.S_IRUSR | stat.S_IWUSR)
     with os.fdopen(descriptor, "w", encoding="utf-8") as state_file:
-        json.dump({"conversation_id": conversation_id, "marker": marker}, state_file)
+        json.dump({
+            "conversation_id": conversation_id,
+            "marker": marker,
+            "isolated_conversation_id": isolated_conversation_id,
+            "isolated_marker": isolated_marker,
+        }, state_file)
         state_file.write("\n")
     os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
 
 
-def read_state(path: Path) -> tuple[str, str]:
+def read_state(path: Path) -> tuple[str, str, str, str]:
     try:
         state = json.loads(path.read_text(encoding="utf-8"))
-        conversation_id = state["conversation_id"]
-        marker = state["marker"]
+        values = (
+            state["conversation_id"], state["marker"],
+            state["isolated_conversation_id"], state["isolated_marker"],
+        )
     except (OSError, KeyError, TypeError, json.JSONDecodeError):
         raise RuntimeError("canary_state_missing_or_invalid") from None
-    if not isinstance(conversation_id, str) or not isinstance(marker, str):
+    if not all(isinstance(value, str) and value for value in values):
         raise RuntimeError("canary_state_missing_or_invalid")
-    return conversation_id, marker
+    if values[0] == values[2] or values[1] == values[3]:
+        raise RuntimeError("canary_state_missing_or_invalid")
+    return values
 
 
 def run_phase(phase: str) -> dict:
