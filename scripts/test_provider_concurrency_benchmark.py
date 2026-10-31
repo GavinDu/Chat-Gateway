@@ -1,6 +1,6 @@
 import unittest
 
-from provider_concurrency_benchmark import parse_sse, percentile
+from provider_concurrency_benchmark import parse_sse, peak_rss_kb, percentile
 
 
 class ProviderConcurrencyBenchmarkTests(unittest.TestCase):
@@ -9,6 +9,10 @@ class ProviderConcurrencyBenchmarkTests(unittest.TestCase):
         self.assertEqual(percentile(values, 50), 30)
         self.assertEqual(percentile(values, 95), 50)
         self.assertIsNone(percentile([], 95))
+
+    def test_peak_rss_ignores_missing_samples(self):
+        self.assertEqual(peak_rss_kb([100, None, 250, 180]), 250)
+        self.assertIsNone(peak_rss_kb([None, None]))
 
     def test_sse_records_first_content_and_terminal_event(self):
         import time
