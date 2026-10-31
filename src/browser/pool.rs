@@ -989,7 +989,6 @@ fn touch_login_meta(login_meta: &Rc<RefCell<HashMap<Provider, LoginMeta>>>, prov
     }
 }
 
-
 /// A persisted provider thread URL must remain on the provider's configured
 /// origin. This prevents stale or corrupted thread metadata from navigating
 /// the authenticated browser page to an unrelated site.
