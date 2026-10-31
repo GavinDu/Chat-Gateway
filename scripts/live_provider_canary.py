@@ -168,7 +168,7 @@ def write_state(
                 "isolated_conversation_id": isolated_conversation_id,
                 "isolated_marker": isolated_marker,
             }, state_file)
-            state_file.write("\\n")
+            state_file.write("\n")
             state_file.flush()
             os.fsync(state_file.fileno())
         os.replace(temporary_path, path)
