@@ -112,6 +112,14 @@ def request_turn(base_url: str, api_key: str, provider: str, model: str,
             "conversation_id": returned_conversation}
 
 
+def latency_category(previous_provider: str | None, provider: str) -> str:
+    if previous_provider is None:
+        return "initial_provider_request"
+    if previous_provider != provider:
+        return "after_provider_switch"
+    return "same_provider_follow_up"
+
+
 def summarize(values: list[int]) -> dict:
     return {"samples": len(values), "p50_ms": percentile(values, 50),
             "p95_ms": percentile(values, 95)}
@@ -152,16 +160,14 @@ def main() -> int:
                 failures[f"{provider}:{failure}"] = failures.get(f"{provider}:{failure}", 0) + 1
             else:
                 conversation_ids[provider] = result["conversation_id"]
-                if previous_provider is None:
-                    category = "initial_provider_request"
-                elif previous_provider != provider:
-                    category = "after_provider_switch"
-                else:
-                    category = "same_provider_follow_up"
+                category = latency_category(previous_provider, provider)
                 categories[category].append(result["ttft_ms"])
                 categories[category + "_total"] = categories.get(category + "_total", [])
                 categories[category + "_total"].append(result["total_ms"])
-                previous_provider = provider
+            # Classification follows the requested sequence, not successful
+            # completions. A failed step must not make the next provider look
+            # like an initial request or a same-provider follow-up.
+            previous_provider = provider
 
     report = {
         "sequence": [provider for provider, _ in args.step],
