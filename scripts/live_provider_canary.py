@@ -195,6 +195,8 @@ def run_phase(phase: str) -> dict:
         if not model:
             raise RuntimeError("CANARY_CHATGPT_MODEL_not_set")
         marker = "CGCANARY-" + secrets.token_hex(8)
+        isolated_marker = "CGCANARY-ISOLATED-" + secrets.token_hex(8)
+
         first = request_turn(
             base_url, api_key, model, "chatgpt",
             f"Remember this exact continuity marker for this conversation: {marker}. Reply only ACK.",
@@ -203,9 +205,22 @@ def run_phase(phase: str) -> dict:
         conversation_id = first["conversation_id"]
         if not conversation_id:
             raise RuntimeError("conversation_id_header_missing")
-        results.append({"provider": "chatgpt", "scenario": "initial_turn",
+        results.append({"provider": "chatgpt", "scenario": "primary_initial_turn",
                         "status": "passed", "ttft_ms": first["ttft_ms"],
                         "total_ms": first["total_ms"]})
+
+        isolated_first = request_turn(
+            base_url, api_key, model, "chatgpt",
+            f"Remember this different exact marker only in this separate conversation: {isolated_marker}. Reply only ACK.",
+            None, timeout,
+        )
+        isolated_conversation_id = isolated_first["conversation_id"]
+        if not isolated_conversation_id or isolated_conversation_id == conversation_id:
+            raise RuntimeError("isolated_conversation_id_missing_or_reused")
+        results.append({"provider": "chatgpt", "scenario": "interleaved_isolated_initial_turn",
+                        "status": "passed", "ttft_ms": isolated_first["ttft_ms"],
+                        "total_ms": isolated_first["total_ms"]})
+
         follow_up = request_turn(
             base_url, api_key, model, "chatgpt",
             "Return the exact continuity marker I asked you to remember. Do not explain.",
@@ -214,14 +229,34 @@ def run_phase(phase: str) -> dict:
         if marker.lower() not in follow_up["content"].lower():
             raise RuntimeError("chatgpt_same_thread_continuity_failed")
         assert_turn_history(fetch_conversation(base_url, api_key, conversation_id, timeout), 2)
-        results.append({"provider": "chatgpt", "scenario": "same_provider_follow_up",
+        results.append({"provider": "chatgpt", "scenario": "primary_same_provider_follow_up",
                         "status": "passed", "ttft_ms": follow_up["ttft_ms"],
                         "total_ms": follow_up["total_ms"]})
-        write_state(state_path, conversation_id, marker)
+
+        isolated_follow_up = request_turn(
+            base_url, api_key, model, "chatgpt",
+            "Return the exact marker from this separate conversation. Do not guess.",
+            isolated_conversation_id, timeout,
+        )
+        if isolated_marker.lower() not in isolated_follow_up["content"].lower():
+            raise RuntimeError("interleaved_conversation_continuity_failed")
+        if marker.lower() in isolated_follow_up["content"].lower():
+            raise RuntimeError("conversation_context_leaked_between_threads")
+        assert_turn_history(
+            fetch_conversation(base_url, api_key, isolated_conversation_id, timeout), 2
+        )
+        results.append({"provider": "chatgpt", "scenario": "interleaved_isolated_follow_up",
+                        "status": "passed", "ttft_ms": isolated_follow_up["ttft_ms"],
+                        "total_ms": isolated_follow_up["total_ms"]})
+
+        write_state(
+            state_path, conversation_id, marker,
+            isolated_conversation_id, isolated_marker,
+        )
         return {"phase": phase, "status": "passed", "results": results,
                 "next_step": "Restart Chat-Gateway without deleting SQLite or Obscura session storage, then run --phase after-restart."}
 
-    conversation_id, marker = read_state(state_path)
+    conversation_id, marker, isolated_conversation_id, isolated_marker = read_state(state_path)
     for provider in CORE_PHASE_TWO:
         model = os.environ.get(f"CANARY_{provider.upper()}_MODEL")
         if not model:
