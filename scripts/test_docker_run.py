@@ -22,8 +22,10 @@ import json, os, sys
 args = sys.argv[1:]
 with open(os.environ["DOCKER_CALLS"], "a", encoding="utf-8") as stream:
     stream.write(json.dumps(args) + "\\n")
-if args[:2] in (["network", "inspect"], ["image", "inspect"], ["container", "inspect"]):
+if args[:2] in (["network", "inspect"], ["image", "inspect"]):
     raise SystemExit(1)
+if args[:2] == ["container", "inspect"]:
+    raise SystemExit(0 if os.environ.get("CONTAINER_EXISTS") == "1" else 1)
 """,
             encoding="utf-8",
         )
@@ -38,6 +40,17 @@ with open(os.environ["OPENED_URLS"], "a", encoding="utf-8") as stream:
             encoding="utf-8",
         )
         opener.chmod(0o755)
+        curl = bin_dir / "curl"
+        curl.write_text(
+            """#!/usr/bin/env python3
+import os, sys
+with open(os.environ["CURL_CALLS"], "a", encoding="utf-8") as stream:
+    stream.write(sys.argv[-1] + "\\n")
+raise SystemExit(1 if os.environ.get("CURL_FAIL") == "1" else 0)
+""",
+            encoding="utf-8",
+        )
+        curl.chmod(0o755)
         return bin_dir, calls
 
     def test_start_publishes_only_loopback_and_keeps_vault_key_in_readonly_volume(self):
@@ -50,6 +63,7 @@ with open(os.environ["OPENED_URLS"], "a", encoding="utf-8") as stream:
             env.update({
                 "PATH": f"{bin_dir}:{env.get('PATH', '')}",
                 "DOCKER_CALLS": str(calls),
+                "CURL_CALLS": str(root / "curl-calls.txt"),
                 "CHAT_GATEWAY_CONFIG": str(config),
                 "CHAT_GATEWAY_EXTENSION_ID": "abcdefghijklmnopabcdefghijklmnop",
                 "PORT": "18080",
@@ -81,6 +95,62 @@ with open(os.environ["OPENED_URLS"], "a", encoding="utf-8") as stream:
             )
             self.assertIn("CHAT_GATEWAY_EXTENSION_ID=abcdefghijklmnopabcdefghijklmnop", gateway_run)
             self.assertFalse(any("CHAT_GATEWAY_VAULT_KEY=" in arg for arg in gateway_run))
+            self.assertEqual(
+                (root / "curl-calls.txt").read_text(encoding="utf-8").strip(),
+                "http://127.0.0.1:18080/health",
+            )
+            self.assertIn("is healthy", result.stdout)
+
+
+    def test_start_fails_closed_when_health_check_never_succeeds(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            bin_dir, calls = self.make_tools(root)
+            config = root / "config.yaml"
+            config.write_text("providers: []\\n", encoding="utf-8")
+            env = os.environ.copy()
+            env.update({
+                "PATH": f"{bin_dir}:{env.get('PATH', '')}",
+                "DOCKER_CALLS": str(calls),
+                "CURL_CALLS": str(root / "curl-calls.txt"),
+                "CURL_FAIL": "1",
+                "CHAT_GATEWAY_CONFIG": str(config),
+                "CHAT_GATEWAY_STARTUP_TIMEOUT_SECONDS": "1",
+            })
+            result = subprocess.run(
+                ["bash", str(HELPER), "start"],
+                cwd=ROOT,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("did not become healthy", result.stderr)
+            self.assertIn("docker-run.sh logs", result.stderr)
+
+    def test_status_returns_nonzero_when_gateway_health_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            bin_dir, calls = self.make_tools(root)
+            env = os.environ.copy()
+            env.update({
+                "PATH": f"{bin_dir}:{env.get('PATH', '')}",
+                "DOCKER_CALLS": str(calls),
+                "CURL_CALLS": str(root / "curl-calls.txt"),
+                "CURL_FAIL": "1",
+                "CONTAINER_EXISTS": "1",
+            })
+            result = subprocess.run(
+                ["bash", str(HELPER), "status"],
+                cwd=ROOT,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Health: unhealthy", result.stderr)
 
     def test_login_opens_provider_site_in_external_browser_without_collecting_password(self):
         with tempfile.TemporaryDirectory() as directory:
