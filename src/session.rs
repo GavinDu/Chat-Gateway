@@ -342,13 +342,9 @@ fn migrate_legacy_snapshot(
     provider: &str,
     key: &[u8; 32],
 ) -> Result<SessionFile> {
-    migrate_legacy_snapshot_with_remover(
-        legacy_path,
-        vault_path,
-        provider,
-        key,
-        |path| std::fs::remove_file(path),
-    )
+    migrate_legacy_snapshot_with_remover(legacy_path, vault_path, provider, key, |path| {
+        std::fs::remove_file(path)
+    })
 }
 
 fn migrate_legacy_snapshot_with_remover(
