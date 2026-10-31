@@ -114,3 +114,6 @@ jobs:
 
       - name: Test Python provider benchmark parser
         run: python3 -m unittest discover -s scripts -p 'test_*.py'
+
+      - name: Test live provider canary assertions
+        run: python3 -m unittest discover -s scripts -p 'test_live_provider_canary.py'
