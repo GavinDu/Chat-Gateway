@@ -15,7 +15,7 @@ pub(crate) async fn health(State(state): State<Arc<AppState>>) -> impl IntoRespo
         .iter()
         .map(|p| {
             let session = provider_state::status(&p.name);
-            let challenge_disabled_reason = provider_guard::provider_disabled_reason(&p.name);
+            let challenge_disabled_reason = state.provider_guard.provider_disabled_reason(&p.name);
             serde_json::json!({
                 "name": p.name,
                 "enabled": p.enabled,
@@ -85,7 +85,7 @@ pub(crate) async fn readiness(State(state): State<Arc<AppState>>) -> impl IntoRe
         .filter(|p| {
             p.enabled
                 && provider_state::is_available(&p.name)
-                && provider_guard::provider_disabled_reason(&p.name).is_none()
+                && state.provider_guard.provider_disabled_reason(&p.name).is_none()
         })
         .count();
     readiness_response(routable, true, state.pool.worker_generation())

@@ -476,10 +476,11 @@ pub async fn run_send(
     timeout: Duration,
     poll_tick: Duration,
     completion_idle: Duration,
+    provider_guard: crate::provider_guard::ProviderGuard,
     chunks: mpsc::Sender<Result<ProviderChunk>>,
 ) {
     if crate::provider_guard::is_challenge_page(&page) {
-        crate::provider_guard::disable_provider(
+        provider_guard.disable_provider(
             adapter.name(),
             "challenge page detected; manual review required",
         );
@@ -573,7 +574,7 @@ pub async fn run_send(
             poll_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
         );
         if probe_has_challenge(&probe) {
-            crate::provider_guard::disable_provider(
+            provider_guard.disable_provider(
                 adapter.name(),
                 "challenge page detected; manual review required",
             );
@@ -645,7 +646,7 @@ pub async fn run_send(
                                 .min(u64::MAX as u128) as u64,
                         );
                         if probe_has_challenge(&final_probe) {
-                            crate::provider_guard::disable_provider(
+                            provider_guard.disable_provider(
                                 adapter.name(),
                                 "challenge page detected; manual review required",
                             );
@@ -747,7 +748,7 @@ pub async fn run_send(
                         .min(u64::MAX as u128) as u64,
                 );
                 if probe_has_challenge(&final_probe) {
-                    crate::provider_guard::disable_provider(
+                    provider_guard.disable_provider(
                         adapter.name(),
                         "challenge page detected; manual review required",
                     );

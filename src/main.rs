@@ -268,7 +268,7 @@ async fn main() -> anyhow::Result<()> {
         router: ProviderRouter::new(cfg.clone()),
         models_cache: Arc::new(RwLock::new(HashMap::new())),
         relay: Arc::new(relay_state),
-        provider_guard: provider_guard::ProviderGuard::default(),
+        provider_guard: pool.provider_guard(),
     });
 
     // Background model discovery (reads pickers without sending messages)
