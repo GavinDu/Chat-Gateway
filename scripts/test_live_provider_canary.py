@@ -73,6 +73,41 @@ class ConsumeSseTests(unittest.TestCase):
             )
             self.assertEqual(path.stat().st_mode & 0o777, 0o600)
 
+    def test_restart_state_replaces_symlink_without_touching_target(self):
+        import os
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "target.json"
+            target.write_text("do not overwrite", encoding="utf-8")
+            path = root / "canary-state.json"
+            try:
+                path.symlink_to(target)
+            except (OSError, NotImplementedError):
+                self.skipTest("symlinks are unavailable on this platform")
+            write_state(path, "primary-id", "primary-marker", "isolated-id", "isolated-marker")
+            self.assertFalse(path.is_symlink())
+            self.assertEqual(target.read_text(encoding="utf-8"), "do not overwrite")
+            self.assertEqual(read_state(path)[0], "primary-id")
+
+    def test_restart_state_rejects_symlink_and_oversized_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "target.json"
+            target.write_text("{}", encoding="utf-8")
+            link = root / "link.json"
+            try:
+                link.symlink_to(target)
+            except (OSError, NotImplementedError):
+                self.skipTest("symlinks are unavailable on this platform")
+            with self.assertRaisesRegex(RuntimeError, "canary_state_missing_or_invalid"):
+                read_state(link)
+
+            oversized = root / "oversized.json"
+            oversized.write_text(" " * 16_385, encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "canary_state_missing_or_invalid"):
+                read_state(oversized)
+
     def test_restart_state_rejects_reused_conversation_or_marker(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "canary-state.json"
