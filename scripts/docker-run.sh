@@ -139,7 +139,23 @@ start_gateway() {
   args+=("$IMAGE" --config /config.yaml)
   docker "${args[@]}" >/dev/null
 
-  echo "Chat Gateway started at http://127.0.0.1:$PORT"
+  local startup_timeout="${CHAT_GATEWAY_STARTUP_TIMEOUT_SECONDS:-60}"
+  if [[ ! "$startup_timeout" =~ ^[0-9]+$ ]] || (( startup_timeout < 1 || startup_timeout > 600 )); then
+    echo "CHAT_GATEWAY_STARTUP_TIMEOUT_SECONDS must be between 1 and 600" >&2
+    exit 1
+  fi
+  local health_url="http://127.0.0.1:$PORT/health"
+  local deadline=$((SECONDS + startup_timeout))
+  until curl --fail --silent --show-error "$health_url" >/dev/null 2>&1; do
+    if (( SECONDS >= deadline )); then
+      echo "Chat Gateway did not become healthy within ${startup_timeout}s." >&2
+      echo "The container is left running for diagnosis. Inspect it with '$0 logs' or '$0 status'." >&2
+      exit 1
+    fi
+    sleep 1
+  done
+
+  echo "Chat Gateway is healthy at http://127.0.0.1:$PORT"
   echo "Container: $CONTAINER"
   echo "Persistent data: $DATA_VOLUME, $SESSION_VOLUME"
   echo "Encrypted-vault key: $KEY_VOLUME (mounted read-only; key is not printed)"
