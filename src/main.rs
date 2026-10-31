@@ -2669,6 +2669,10 @@ async fn chat_completions(
                 });
                 yield Ok::<_, anyhow::Error>(Event::default().data(role.to_string()));
                 let mut stream_error: Option<String> = None;
+                // A provider stream is successful only when its explicit terminal
+                // event is observed. Channel closure alone can indicate a worker
+                // crash or truncated response and must never commit partial output.
+                let mut saw_terminal_completion = false;
                 // Keep the raw detail only for internal session-state classification;
                 // client-facing stream errors remain generic and never expose it.
                 let mut provider_error_detail: Option<String> = None;
@@ -2679,7 +2683,10 @@ async fn chat_completions(
                 } {
                     match item {
                         Ok(c) => {
-                            if c.done { break; }
+                            if c.done {
+                                saw_terminal_completion = true;
+                                break;
+                            }
                             if ttft_ms.is_none() {
                                 ttft_ms = Some(provider_started_c.elapsed().as_millis().min(u64::MAX as u128) as u64);
                             }
@@ -2700,6 +2707,10 @@ async fn chat_completions(
                             break;
                         }
                     }
+                }
+                if !saw_terminal_completion && stream_error.is_none() {
+                    provider_error_detail = Some("provider stream closed before terminal completion".to_owned());
+                    stream_error = Some("provider stream closed before terminal completion; partial response was not committed".to_owned());
                 }
 
                 let provider_work_ms = provider_started_c.elapsed().as_millis().min(u64::MAX as u128) as u64;
