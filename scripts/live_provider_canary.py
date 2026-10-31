@@ -274,6 +274,24 @@ def run_phase(phase: str) -> dict:
         results.append({"provider": provider, "scenario": "post_restart_cross_provider_continuity",
                         "status": "passed", "ttft_ms": response["ttft_ms"],
                         "total_ms": response["total_ms"]})
+    chatgpt_model = os.environ.get("CANARY_CHATGPT_MODEL")
+    if not chatgpt_model:
+        raise RuntimeError("CANARY_CHATGPT_MODEL_not_set")
+    isolated = request_turn(
+        base_url, api_key, chatgpt_model, "chatgpt",
+        "Return the exact marker from this separate conversation after the gateway restart. Do not guess.",
+        isolated_conversation_id, timeout,
+    )
+    if isolated_marker.lower() not in isolated["content"].lower():
+        raise RuntimeError("isolated_conversation_lost_after_restart")
+    if marker.lower() in isolated["content"].lower():
+        raise RuntimeError("primary_context_leaked_into_isolated_conversation")
+    assert_turn_history(
+        fetch_conversation(base_url, api_key, isolated_conversation_id, timeout), 3
+    )
+    results.append({"provider": "chatgpt", "scenario": "isolated_conversation_after_restart",
+                    "status": "passed", "ttft_ms": isolated["ttft_ms"],
+                    "total_ms": isolated["total_ms"]})
     try:
         state_path.unlink()
     except FileNotFoundError:
