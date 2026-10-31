@@ -1674,8 +1674,10 @@ fn browser_thread(
                                         prompt,
                                         timeout,
                                         poll_tick,
-                                        completion_idle,
-                                        provider_guard,
+                                        providers::ProviderSendPolicy {
+                                            completion_idle,
+                                            provider_guard,
+                                        },
                                         save_tx,
                                     ) => {}
                                 }

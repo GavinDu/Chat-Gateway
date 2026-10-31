@@ -469,16 +469,22 @@ fn completion_ready(
         && !streaming
 }
 
+/// Per-request runtime policy shared with the browser send loop.
+pub struct ProviderSendPolicy {
+    pub completion_idle: Duration,
+    pub provider_guard: crate::provider_guard::ProviderGuard,
+}
+
 pub async fn run_send(
     adapter: Arc<dyn SiteAdapter>,
     page: Rc<Page>,
     prompt: String,
     timeout: Duration,
     poll_tick: Duration,
-    completion_idle: Duration,
-    provider_guard: crate::provider_guard::ProviderGuard,
+    policy: ProviderSendPolicy,
     chunks: mpsc::Sender<Result<ProviderChunk>>,
 ) {
+    let ProviderSendPolicy { completion_idle, provider_guard } = policy;
     if crate::provider_guard::is_challenge_page(&page) {
         provider_guard.disable_provider(
             adapter.name(),

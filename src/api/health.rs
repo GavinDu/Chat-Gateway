@@ -6,7 +6,7 @@ use axum::{
 };
 use std::sync::Arc;
 
-use crate::{provider_guard, provider_state, AppState};
+use crate::{provider_state, AppState};
 
 pub(crate) async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let providers = state
