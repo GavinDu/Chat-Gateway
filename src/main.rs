@@ -430,7 +430,12 @@ async fn main() -> anyhow::Result<()> {
 
     // Security default: the gateway exposes browser/session control routes and must not listen on public interfaces by default.
     // Remote access should be added only with explicit authentication and TLS.
-    let addr = server_bind_addr(cfg.server.port);
+    // Docker mode is an explicit opt-in used only by the local run script,
+    // which publishes this port on host loopback (127.0.0.1). The default
+    // process bind remains loopback-only.
+    let docker_local_bind =
+        std::env::var("CHAT_GATEWAY_DOCKER_LOCAL_BIND").is_ok_and(|value| value == "1");
+    let addr = server_bind_addr(cfg.server.port, docker_local_bind);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     println!("Chat Gateway v2 Obscura Native listening on {}", addr);
     // Bound graceful draining so a stuck stream cannot prevent shutdown forever.
@@ -511,8 +516,12 @@ async fn refresh_models(state: &Arc<AppState>) {
 /// types it, and only cookies/localStorage are persisted on Complete.
 /// The login relay can read and persist provider session material. Keep the HTTP
 /// listener loopback-only until an authenticated remote-access mode is designed.
-fn server_bind_addr(port: u16) -> SocketAddr {
-    SocketAddr::from(([127, 0, 0, 1], port))
+fn server_bind_addr(port: u16, docker_local_bind: bool) -> SocketAddr {
+    if docker_local_bind {
+        SocketAddr::from(([0, 0, 0, 0], port))
+    } else {
+        SocketAddr::from(([127, 0, 0, 1], port))
+    }
 }
 
 /// Protect browser-control endpoints against cross-origin requests (CSRF).
@@ -3712,6 +3721,18 @@ mod login_security_middleware_http_tests {
         assert!(response.headers().contains_key("x-request-id"));
     }
 
+    #[test]
+    fn server_bind_defaults_to_loopback_and_requires_explicit_docker_opt_in() {
+        assert_eq!(
+            server_bind_addr(8080, false),
+            SocketAddr::from(([127, 0, 0, 1], 8080))
+        );
+        assert_eq!(
+            server_bind_addr(8080, true),
+            SocketAddr::from(([0, 0, 0, 0], 8080))
+        );
+    }
+
     #[tokio::test]
     async fn rejects_mismatched_origin_at_http_boundary() {
         let response = request(
@@ -3803,8 +3824,8 @@ mod login_security_middleware_http_tests {
 
     #[test]
     fn server_listener_is_loopback_only_by_default() {
-        assert!(server_bind_addr(8080).ip().is_loopback());
-        assert_eq!(server_bind_addr(8080).port(), 8080);
+        assert!(server_bind_addr(8080, false).ip().is_loopback());
+        assert_eq!(server_bind_addr(8080, false).port(), 8080);
     }
     #[tokio::test]
     async fn host_protection_also_applies_to_non_login_routes() {

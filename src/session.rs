@@ -38,6 +38,53 @@ impl Drop for SessionFile {
 }
 
 #[cfg(test)]
+mod vault_key_file_tests {
+    use super::*;
+    use std::io::Write;
+
+    fn write_key(path: &Path) {
+        let mut file = std::fs::File::create(path).unwrap();
+        file.write_all(b"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+            .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn vault_key_file_accepts_private_file_and_rejects_permissive_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!(
+            "chat-gateway-vault-key-file-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("vault.key");
+        write_key(&path);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(read_vault_key_file(&path).is_ok());
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(read_vault_key_file(&path).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn vault_key_file_rejects_symlinks() {
+        use std::os::unix::fs::symlink;
+        let root = std::env::temp_dir().join(format!(
+            "chat-gateway-vault-key-link-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let real = root.join("real.key");
+        write_key(&real);
+        let link = root.join("link.key");
+        symlink(&real, &link).unwrap();
+        assert!(read_vault_key_file(&link).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
 mod session_zeroization_tests {
     use super::*;
 
@@ -176,7 +223,8 @@ impl SessionStore for FileSessionStore {
 
 /// Encrypted on-disk session storage. Select it at runtime with
 /// CHAT_GATEWAY_SESSION_STORE=vault and provide a 32-byte hex key through
-/// CHAT_GATEWAY_VAULT_KEY. Missing or invalid keys fail closed.
+/// CHAT_GATEWAY_VAULT_KEY or a private CHAT_GATEWAY_VAULT_KEY_FILE. Missing
+/// or invalid keys fail closed.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct VaultSessionStore;
 
@@ -195,8 +243,30 @@ impl SessionStore for VaultSessionStore {
     }
 
     async fn save_if_changed(&self, browser: &Browser, page: &Page, provider: &str) -> Result<()> {
-        let key = vault_key_from_env()?;
         let file = capture_session(browser, page, provider).await?;
+        self.save_file_if_changed(file, provider).await
+    }
+}
+
+impl VaultSessionStore {
+    async fn save_session(&self, browser: &Browser, page: &Page, provider: &str) -> Result<()> {
+        let file = capture_session(browser, page, provider).await?;
+        let key = vault_key_from_env()?;
+        ensure_private_session_dir(Path::new("sessions")).await?;
+        let encrypted = encrypt_session_snapshot(&file, provider, &key)?;
+        write_session_file_atomically(Path::new(&session_vault_path(provider)?), &encrypted)?;
+        remove_legacy_session_snapshot(provider)?;
+        record_session_write(provider);
+        tracing::info!(
+            provider,
+            cookies = file.cookies.len(),
+            "encrypted session saved"
+        );
+        Ok(())
+    }
+
+    async fn save_file_if_changed(&self, file: SessionFile, provider: &str) -> Result<()> {
+        let key = vault_key_from_env()?;
         let current_hash = session_state_hash(&file)?;
         let destination = session_vault_path(provider)?;
         let previous_hash = match std::fs::read(&destination) {
@@ -755,13 +825,38 @@ pub fn parse_vault_key(encoded: &str) -> Result<Zeroizing<[u8; 32]>> {
     Ok(Zeroizing::new(key))
 }
 
+fn read_vault_key_file(path: &Path) -> Result<Zeroizing<String>> {
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| anyhow::anyhow!("cannot inspect CHAT_GATEWAY_VAULT_KEY_FILE: {error}"))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        anyhow::bail!("CHAT_GATEWAY_VAULT_KEY_FILE must be a regular, non-symlink file");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o077 != 0 {
+            anyhow::bail!(
+                "CHAT_GATEWAY_VAULT_KEY_FILE must not be accessible by group or other users"
+            );
+        }
+    }
+    Ok(Zeroizing::new(std::fs::read_to_string(path).map_err(
+        |error| anyhow::anyhow!("cannot read CHAT_GATEWAY_VAULT_KEY_FILE: {error}"),
+    )?))
+}
+
 fn vault_key_from_env() -> Result<Zeroizing<[u8; 32]>> {
-    let encoded = Zeroizing::new(std::env::var("CHAT_GATEWAY_VAULT_KEY").map_err(|_| {
-        anyhow::anyhow!("CHAT_GATEWAY_VAULT_KEY is required for encrypted session storage")
-    })?);
-    parse_vault_key(&encoded).map_err(|_| {
-        anyhow::anyhow!("CHAT_GATEWAY_VAULT_KEY must be exactly 64 hexadecimal characters")
-    })
+    let encoded = if let Ok(value) = std::env::var("CHAT_GATEWAY_VAULT_KEY") {
+        Zeroizing::new(value)
+    } else if let Ok(path) = std::env::var("CHAT_GATEWAY_VAULT_KEY_FILE") {
+        read_vault_key_file(Path::new(&path))?
+    } else {
+        anyhow::bail!(
+            "CHAT_GATEWAY_VAULT_KEY or CHAT_GATEWAY_VAULT_KEY_FILE is required for encrypted session storage"
+        );
+    };
+    parse_vault_key(encoded.trim())
+        .map_err(|_| anyhow::anyhow!("session vault key must be exactly 64 hexadecimal characters"))
 }
 
 fn vault_aad(provider: &str) -> String {
@@ -984,8 +1079,17 @@ async fn capture_session(browser: &Browser, page: &Page, provider: &str) -> Resu
 /// Capture cookies (from the browser's CookieStore) and localStorage into
 /// sessions/<provider>.json. Login completion deliberately forces a save.
 pub async fn save_session(browser: &Browser, page: &Page, provider: &str) -> Result<()> {
-    let file = capture_session(browser, page, provider).await?;
-    write_session_snapshot(file, provider).await
+    if matches!(
+        std::env::var("CHAT_GATEWAY_SESSION_STORE").as_deref(),
+        Ok("vault")
+    ) {
+        VaultSessionStore
+            .save_session(browser, page, provider)
+            .await
+    } else {
+        let file = capture_session(browser, page, provider).await?;
+        write_session_snapshot(file, provider).await
+    }
 }
 
 /// Persist a post-send snapshot only when the provider-scoped session changed.

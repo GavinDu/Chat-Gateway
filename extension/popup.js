@@ -10,7 +10,7 @@ async function refreshStatus() {
     li.textContent = item.provider + ": " + (item.linked ? "linked" : "not linked");
     return li;
   }));
-  if (!data.vault_mode) message("Vault mode is off. Set CHAT_GATEWAY_SESSION_STORE=vault and CHAT_GATEWAY_VAULT_KEY, then restart the gateway.");
+  if (!data.vault_mode) message("Vault mode is off. Set CHAT_GATEWAY_SESSION_STORE=vault and CHAT_GATEWAY_VAULT_KEY (or CHAT_GATEWAY_VAULT_KEY_FILE), then restart the gateway.");
 }
 
 async function initialize() {
