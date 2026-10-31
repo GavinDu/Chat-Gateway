@@ -347,6 +347,8 @@ fn migrate_legacy_snapshot(
     })
 }
 
+// The injected remover makes the final destructive migration step testable:
+// a failed unlink must preserve both the legacy source and verified vault copy.
 fn migrate_legacy_snapshot_with_remover(
     legacy_path: &Path,
     vault_path: &Path,
