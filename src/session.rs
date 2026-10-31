@@ -257,7 +257,11 @@ impl VaultSessionStore {
         write_session_file_atomically(Path::new(&session_vault_path(provider)?), &encrypted)?;
         remove_legacy_session_snapshot(provider)?;
         record_session_write(provider);
-        tracing::info!(provider, cookies = file.cookies.len(), "encrypted session saved");
+        tracing::info!(
+            provider,
+            cookies = file.cookies.len(),
+            "encrypted session saved"
+        );
         Ok(())
     }
 
@@ -822,9 +826,8 @@ pub fn parse_vault_key(encoded: &str) -> Result<Zeroizing<[u8; 32]>> {
 }
 
 fn read_vault_key_file(path: &Path) -> Result<Zeroizing<String>> {
-    let metadata = std::fs::symlink_metadata(path).map_err(|error| {
-        anyhow::anyhow!("cannot inspect CHAT_GATEWAY_VAULT_KEY_FILE: {error}")
-    })?;
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| anyhow::anyhow!("cannot inspect CHAT_GATEWAY_VAULT_KEY_FILE: {error}"))?;
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         anyhow::bail!("CHAT_GATEWAY_VAULT_KEY_FILE must be a regular, non-symlink file");
     }
@@ -832,12 +835,14 @@ fn read_vault_key_file(path: &Path) -> Result<Zeroizing<String>> {
     {
         use std::os::unix::fs::PermissionsExt;
         if metadata.permissions().mode() & 0o077 != 0 {
-            anyhow::bail!("CHAT_GATEWAY_VAULT_KEY_FILE must not be accessible by group or other users");
+            anyhow::bail!(
+                "CHAT_GATEWAY_VAULT_KEY_FILE must not be accessible by group or other users"
+            );
         }
     }
-    Ok(Zeroizing::new(std::fs::read_to_string(path).map_err(|error| {
-        anyhow::anyhow!("cannot read CHAT_GATEWAY_VAULT_KEY_FILE: {error}")
-    })?))
+    Ok(Zeroizing::new(std::fs::read_to_string(path).map_err(
+        |error| anyhow::anyhow!("cannot read CHAT_GATEWAY_VAULT_KEY_FILE: {error}"),
+    )?))
 }
 
 fn vault_key_from_env() -> Result<Zeroizing<[u8; 32]>> {
@@ -850,9 +855,8 @@ fn vault_key_from_env() -> Result<Zeroizing<[u8; 32]>> {
             "CHAT_GATEWAY_VAULT_KEY or CHAT_GATEWAY_VAULT_KEY_FILE is required for encrypted session storage"
         );
     };
-    parse_vault_key(encoded.trim()).map_err(|_| {
-        anyhow::anyhow!("session vault key must be exactly 64 hexadecimal characters")
-    })
+    parse_vault_key(encoded.trim())
+        .map_err(|_| anyhow::anyhow!("session vault key must be exactly 64 hexadecimal characters"))
 }
 
 fn vault_aad(provider: &str) -> String {
@@ -1079,7 +1083,9 @@ pub async fn save_session(browser: &Browser, page: &Page, provider: &str) -> Res
         std::env::var("CHAT_GATEWAY_SESSION_STORE").as_deref(),
         Ok("vault")
     ) {
-        VaultSessionStore.save_session(browser, page, provider).await
+        VaultSessionStore
+            .save_session(browser, page, provider)
+            .await
     } else {
         let file = capture_session(browser, page, provider).await?;
         write_session_snapshot(file, provider).await
