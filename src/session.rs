@@ -218,8 +218,26 @@ impl SessionStore for VaultSessionStore {
     }
 
     async fn save_if_changed(&self, browser: &Browser, page: &Page, provider: &str) -> Result<()> {
-        let key = vault_key_from_env()?;
         let file = capture_session(browser, page, provider).await?;
+        self.save_file_if_changed(file, provider).await
+    }
+}
+
+impl VaultSessionStore {
+    async fn save_session(&self, browser: &Browser, page: &Page, provider: &str) -> Result<()> {
+        let file = capture_session(browser, page, provider).await?;
+        let key = vault_key_from_env()?;
+        ensure_private_session_dir(Path::new("sessions")).await?;
+        let encrypted = encrypt_session_snapshot(&file, provider, &key)?;
+        write_session_file_atomically(Path::new(&session_vault_path(provider)?), &encrypted)?;
+        remove_legacy_session_snapshot(provider)?;
+        record_session_write(provider);
+        tracing::info!(provider, cookies = file.cookies.len(), "encrypted session saved");
+        Ok(())
+    }
+
+    async fn save_file_if_changed(&self, file: SessionFile, provider: &str) -> Result<()> {
+        let key = vault_key_from_env()?;
         let current_hash = session_state_hash(&file)?;
         let destination = session_vault_path(provider)?;
         let previous_hash = match std::fs::read(&destination) {
@@ -1028,8 +1046,15 @@ async fn capture_session(browser: &Browser, page: &Page, provider: &str) -> Resu
 /// Capture cookies (from the browser's CookieStore) and localStorage into
 /// sessions/<provider>.json. Login completion deliberately forces a save.
 pub async fn save_session(browser: &Browser, page: &Page, provider: &str) -> Result<()> {
-    let file = capture_session(browser, page, provider).await?;
-    write_session_snapshot(file, provider).await
+    if matches!(
+        std::env::var("CHAT_GATEWAY_SESSION_STORE").as_deref(),
+        Ok("vault")
+    ) {
+        VaultSessionStore.save_session(browser, page, provider).await
+    } else {
+        let file = capture_session(browser, page, provider).await?;
+        write_session_snapshot(file, provider).await
+    }
 }
 
 /// Persist a post-send snapshot only when the provider-scoped session changed.
