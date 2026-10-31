@@ -7,7 +7,6 @@ aggregate timing and failure categories; prompts and responses are never printed
 from __future__ import annotations
 
 import argparse
-import concurrent.futures
 import json
 import math
 import os
@@ -162,7 +161,7 @@ def main() -> int:
                 categories[category].append(result["ttft_ms"])
                 categories[category + "_total"] = categories.get(category + "_total", [])
                 categories[category + "_total"].append(result["total_ms"])
-            previous_provider = provider
+                previous_provider = provider
 
     report = {
         "sequence": [provider for provider, _ in args.step],
