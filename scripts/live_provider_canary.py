@@ -21,10 +21,10 @@ from typing import Iterable
 CORE_PHASE_TWO = ("claude", "gemini", "grok")
 
 
-def consume_sse(lines: Iterable[str]) -> dict:
+def consume_sse(lines: Iterable[str], started_at: float | None = None) -> dict:
     content: list[str] = []
     first_content_ms = None
-    started = time.monotonic()
+    started = time.monotonic() if started_at is None else started_at
     saw_done = False
     provider_error = False
     for raw_line in lines:
@@ -86,7 +86,7 @@ def request_turn(base_url: str, api_key: str, model: str, prompt: str,
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             returned_conversation_id = response.headers.get("X-Conversation-Id")
-            parsed = consume_sse(response)
+            parsed = consume_sse(response, started)
             status = response.status
     except urllib.error.HTTPError as error:
         raise RuntimeError(f"http_status_{error.code}") from None
