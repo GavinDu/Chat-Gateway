@@ -98,6 +98,8 @@ def request_turn(base_url: str, api_key: str, model: str, expected_provider: str
         raise RuntimeError(f"http_status_{status}")
     if returned_provider != expected_provider:
         raise RuntimeError("provider_identity_header_missing_or_mismatched")
+    if conversation_id and returned_conversation_id != conversation_id:
+        raise RuntimeError("conversation_id_changed_during_follow_up")
     if parsed["provider_error"]:
         raise RuntimeError("provider_stream_error")
     if not parsed["content"]:
