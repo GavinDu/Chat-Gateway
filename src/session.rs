@@ -223,7 +223,8 @@ impl SessionStore for FileSessionStore {
 
 /// Encrypted on-disk session storage. Select it at runtime with
 /// CHAT_GATEWAY_SESSION_STORE=vault and provide a 32-byte hex key through
-/// CHAT_GATEWAY_VAULT_KEY. Missing or invalid keys fail closed.
+/// CHAT_GATEWAY_VAULT_KEY or a private CHAT_GATEWAY_VAULT_KEY_FILE. Missing
+/// or invalid keys fail closed.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct VaultSessionStore;
 
