@@ -54,9 +54,13 @@ impl ChatService {
         attempt_started: Instant,
     ) -> CollectedResponse {
         let mut collected = CollectedResponse::default();
+        let mut saw_terminal_completion = false;
         while let Some(item) = events.recv().await {
             match item {
-                Ok(event) if event.done => break,
+                Ok(event) if event.done => {
+                    saw_terminal_completion = true;
+                    break;
+                }
                 Ok(event) => {
                     // TTFT is the time to the first actual content, not an
                     // empty heartbeat or metadata-only event.
@@ -72,6 +76,14 @@ impl ChatService {
                     break;
                 }
             }
+        }
+        if !saw_terminal_completion && collected.error.is_none() {
+            // A closed channel is not equivalent to a provider's explicit
+            // terminal event. Treat it as a failed (possibly partial) turn so
+            // callers never persist truncated output as a successful answer.
+            collected.error = Some(GatewayError::provider_failure(
+                "provider stream closed before terminal completion",
+            ));
         }
         collected
     }
@@ -229,6 +241,24 @@ mod tests {
         let collected = service.collect(rx, std::time::Instant::now()).await;
         assert_eq!(collected.content, "partial");
         assert_eq!(collected.error.unwrap().message, "upstream failed");
+    }
+
+    #[tokio::test]
+    async fn collect_rejects_closed_stream_without_terminal_completion() {
+        let service = ChatService::new(Arc::new(FakeBackend));
+        let (tx, rx) = mpsc::channel(1);
+        tx.send(Ok(ChatEvent {
+            content: "partial answer".into(),
+            done: false,
+        }))
+        .await
+        .unwrap();
+        drop(tx);
+
+        let collected = service.collect(rx, std::time::Instant::now()).await;
+        assert_eq!(collected.content, "partial answer");
+        let error = collected.error.expect("missing terminal event must fail");
+        assert!(error.message.contains("closed before terminal completion"));
     }
 
     #[tokio::test]
