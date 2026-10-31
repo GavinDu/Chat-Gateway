@@ -156,14 +156,14 @@ def main() -> int:
                         choices=("chatgpt", "claude", "gemini", "grok", "qwen", "metaai", "mistral", "perplexity"))
     parser.add_argument("--model", required=True)
     parser.add_argument("--base-url", default=os.environ.get("CHAT_GATEWAY_URL", "http://127.0.0.1:8080"))
-    parser.add_argument("--api-key", default=os.environ.get("CHAT_GATEWAY_API_KEY", ""))
     parser.add_argument("--samples", type=int, default=8)
     parser.add_argument("--timeout", type=int, default=180)
     parser.add_argument("--pid", type=int, help="Gateway PID for before/after RSS samples")
     parser.add_argument("--concurrency", type=int, nargs="+", default=[1, 2, 4])
     args = parser.parse_args()
-    if not args.api_key:
-        parser.error("set CHAT_GATEWAY_API_KEY or pass --api-key")
+    api_key = os.environ.get("CHAT_GATEWAY_API_KEY", "")
+    if not api_key:
+        parser.error("set CHAT_GATEWAY_API_KEY in the environment")
     if args.samples < 1 or args.timeout < 1:
         parser.error("--samples and --timeout must be positive")
     if not args.concurrency or any(value < 1 or value > 32 for value in args.concurrency):
@@ -171,10 +171,9 @@ def main() -> int:
     report = {
         "provider": args.provider,
         "model": args.model,
-        "base_url": args.base_url,
         "sample_count_per_level": args.samples,
         "results": [
-            summarize(args.base_url, args.api_key, args.provider, args.model,
+            summarize(args.base_url, api_key, args.provider, args.model,
                       level, args.samples, args.timeout, args.pid)
             for level in args.concurrency
         ],
