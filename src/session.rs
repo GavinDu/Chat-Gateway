@@ -38,6 +38,29 @@ impl Drop for SessionFile {
 }
 
 #[cfg(test)]
+mod vault_key_file_tests {
+    use super::*;
+    use std::io::Write;
+
+    #[cfg(unix)]
+    #[test]
+    fn vault_key_file_rejects_group_or_world_readable_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = std::env::temp_dir().join(format!(
+            "chat-gateway-vault-key-permissions-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let mut file = std::fs::File::create(&path).unwrap();
+        file.write_all(b"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+            .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let metadata = std::fs::symlink_metadata(&path).unwrap();
+        assert_ne!(metadata.permissions().mode() & 0o077, 0);
+        std::fs::remove_file(path).unwrap();
+    }
+}
+
+#[cfg(test)]
 mod session_zeroization_tests {
     use super::*;
 
@@ -756,11 +779,32 @@ pub fn parse_vault_key(encoded: &str) -> Result<Zeroizing<[u8; 32]>> {
 }
 
 fn vault_key_from_env() -> Result<Zeroizing<[u8; 32]>> {
-    let encoded = Zeroizing::new(std::env::var("CHAT_GATEWAY_VAULT_KEY").map_err(|_| {
-        anyhow::anyhow!("CHAT_GATEWAY_VAULT_KEY is required for encrypted session storage")
-    })?);
-    parse_vault_key(&encoded).map_err(|_| {
-        anyhow::anyhow!("CHAT_GATEWAY_VAULT_KEY must be exactly 64 hexadecimal characters")
+    let encoded = if let Ok(value) = std::env::var("CHAT_GATEWAY_VAULT_KEY") {
+        Zeroizing::new(value)
+    } else if let Ok(path) = std::env::var("CHAT_GATEWAY_VAULT_KEY_FILE") {
+        let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
+            anyhow::anyhow!("cannot inspect CHAT_GATEWAY_VAULT_KEY_FILE: {error}")
+        })?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            anyhow::bail!("CHAT_GATEWAY_VAULT_KEY_FILE must be a regular, non-symlink file");
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if metadata.permissions().mode() & 0o077 != 0 {
+                anyhow::bail!("CHAT_GATEWAY_VAULT_KEY_FILE must not be accessible by group or other users");
+            }
+        }
+        Zeroizing::new(std::fs::read_to_string(path).map_err(|error| {
+            anyhow::anyhow!("cannot read CHAT_GATEWAY_VAULT_KEY_FILE: {error}")
+        })?)
+    } else {
+        anyhow::bail!(
+            "CHAT_GATEWAY_VAULT_KEY or CHAT_GATEWAY_VAULT_KEY_FILE is required for encrypted session storage"
+        );
+    };
+    parse_vault_key(encoded.trim()).map_err(|_| {
+        anyhow::anyhow!("session vault key must be exactly 64 hexadecimal characters")
     })
 }
 
