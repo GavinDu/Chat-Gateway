@@ -433,8 +433,8 @@ async fn main() -> anyhow::Result<()> {
     // Docker mode is an explicit opt-in used only by the local run script,
     // which publishes this port on host loopback (127.0.0.1). The default
     // process bind remains loopback-only.
-    let docker_local_bind = std::env::var("CHAT_GATEWAY_DOCKER_LOCAL_BIND")
-        .is_ok_and(|value| value == "1");
+    let docker_local_bind =
+        std::env::var("CHAT_GATEWAY_DOCKER_LOCAL_BIND").is_ok_and(|value| value == "1");
     let addr = server_bind_addr(cfg.server.port, docker_local_bind);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     println!("Chat Gateway v2 Obscura Native listening on {}", addr);
