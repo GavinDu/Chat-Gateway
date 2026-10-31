@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import patch
 
-from provider_switch_benchmark import consume_sse, parse_step, percentile, summarize
+from provider_switch_benchmark import consume_sse, latency_category, parse_step, percentile, summarize
 
 
 class ProviderSwitchBenchmarkTests(unittest.TestCase):
@@ -17,6 +17,11 @@ class ProviderSwitchBenchmarkTests(unittest.TestCase):
         self.assertEqual(summarize([10, 20]), {
             "samples": 2, "p50_ms": 10, "p95_ms": 20,
         })
+
+    def test_failed_prior_step_does_not_change_sequence_classification(self):
+        self.assertEqual(latency_category(None, "chatgpt"), "initial_provider_request")
+        self.assertEqual(latency_category("chatgpt", "claude"), "after_provider_switch")
+        self.assertEqual(latency_category("claude", "claude"), "same_provider_follow_up")
 
     def test_sse_measures_first_content_and_terminal(self):
         class FakeResponse:
