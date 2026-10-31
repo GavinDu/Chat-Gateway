@@ -1,6 +1,8 @@
+import tempfile
 import unittest
+from pathlib import Path
 
-from live_provider_canary import assert_turn_history, consume_sse
+from live_provider_canary import assert_turn_history, consume_sse, read_state, write_state
 
 
 class ConsumeSseTests(unittest.TestCase):
@@ -59,6 +61,24 @@ class ConsumeSseTests(unittest.TestCase):
         }
         with self.assertRaisesRegex(RuntimeError, "message_order_mismatch"):
             assert_turn_history(conversation, 2)
+
+
+    def test_restart_state_preserves_two_distinct_conversations(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "canary-state.json"
+            write_state(path, "primary-id", "primary-marker", "isolated-id", "isolated-marker")
+            self.assertEqual(
+                read_state(path),
+                ("primary-id", "primary-marker", "isolated-id", "isolated-marker"),
+            )
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+
+    def test_restart_state_rejects_reused_conversation_or_marker(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "canary-state.json"
+            write_state(path, "same-id", "primary-marker", "same-id", "isolated-marker")
+            with self.assertRaisesRegex(RuntimeError, "canary_state_missing_or_invalid"):
+                read_state(path)
 
     def test_provider_error_is_reported_without_exposing_payload(self):
         result = consume_sse([
