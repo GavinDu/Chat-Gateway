@@ -7,6 +7,7 @@ CONTAINER="${CHAT_GATEWAY_CONTAINER:-chat-gateway}"
 DATA_VOLUME="${CHAT_GATEWAY_DATA_VOLUME:-chat-gateway-data}"
 SESSION_VOLUME="${CHAT_GATEWAY_SESSION_VOLUME:-chat-gateway-sessions}"
 KEY_VOLUME="${CHAT_GATEWAY_KEY_VOLUME:-chat-gateway-vault-key}"
+NETWORK="${CHAT_GATEWAY_NETWORK:-chat-gateway-local}"
 PORT="${PORT:-8080}"
 CONFIG="${CHAT_GATEWAY_CONFIG:-$ROOT/config.yaml}"
 EXTENSION_ID="${CHAT_GATEWAY_EXTENSION_ID:-}"
@@ -77,6 +78,7 @@ ensure_volumes_and_key() {
   docker volume create "$DATA_VOLUME" >/dev/null
   docker volume create "$SESSION_VOLUME" >/dev/null
   docker volume create "$KEY_VOLUME" >/dev/null
+  docker network inspect "$NETWORK" >/dev/null 2>&1 || docker network create "$NETWORK" >/dev/null
 
   # Generate the 256-bit vault key inside a dedicated Docker volume. The
   # gateway mounts this volume read-only and reads the key from a 0600 file.
@@ -120,7 +122,7 @@ start_gateway() {
   fi
 
   local args=(
-    run -d --name "$CONTAINER" --restart unless-stopped
+    run -d --name "$CONTAINER" --restart unless-stopped --network "$NETWORK"
     -p "127.0.0.1:$PORT:$PORT"
     -e "PORT=$PORT"
     -e "CHAT_GATEWAY_DOCKER_LOCAL_BIND=1"
