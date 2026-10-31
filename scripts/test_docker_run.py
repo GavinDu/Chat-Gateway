@@ -90,6 +90,7 @@ with open(os.environ["OPENED_URLS"], "a", encoding="utf-8") as stream:
             env = os.environ.copy()
             env.update({
                 "PATH": f"{bin_dir}:{env.get('PATH', '')}",
+                "DOCKER_CALLS": str(root / "docker-calls.jsonl"),
                 "OPENED_URLS": str(opened),
             })
 
