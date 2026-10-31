@@ -12,6 +12,7 @@ import json
 import math
 import os
 import statistics
+import threading
 import subprocess
 import time
 import urllib.error
@@ -70,6 +71,11 @@ def process_rss_kb(pid: int | None) -> int | None:
         return None
 
 
+def peak_rss_kb(samples: list[int | None]) -> int | None:
+    observed = [sample for sample in samples if sample is not None]
+    return max(observed) if observed else None
+
+
 def one_request(base_url: str, api_key: str, provider: str, model: str,
                 timeout: int, sample: int) -> dict:
     payload = json.dumps({
@@ -115,6 +121,16 @@ def one_request(base_url: str, api_key: str, provider: str, model: str,
 def summarize(base_url: str, api_key: str, provider: str, model: str,
               concurrency: int, samples: int, timeout: int, pid: int | None) -> dict:
     rss_before = process_rss_kb(pid)
+    rss_samples: list[int | None] = [rss_before]
+    stop_sampling = threading.Event()
+
+    def sample_rss() -> None:
+        while not stop_sampling.wait(0.05):
+            rss_samples.append(process_rss_kb(pid))
+
+    sampler = threading.Thread(target=sample_rss, name="gateway-rss-sampler", daemon=True)
+    if pid is not None:
+        sampler.start()
     started = time.monotonic()
     results = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as executor:
@@ -137,6 +153,10 @@ def summarize(base_url: str, api_key: str, provider: str, model: str,
     ttft = [item["ttft_ms"] for item in successes]
     total = [item["total_ms"] for item in successes]
     rss_after = process_rss_kb(pid)
+    if pid is not None:
+        stop_sampling.set()
+        sampler.join(timeout=1)
+        rss_samples.append(rss_after)
     return {
         "concurrency": concurrency,
         "samples": samples,
@@ -147,6 +167,8 @@ def summarize(base_url: str, api_key: str, provider: str, model: str,
         "elapsed_ms": elapsed_ms,
         "gateway_rss_kb_before": rss_before,
         "gateway_rss_kb_after": rss_after,
+        "gateway_peak_rss_kb_sampled": peak_rss_kb(rss_samples),
+        "gateway_rss_sample_interval_ms": 50 if pid is not None else None,
     }
 
 
