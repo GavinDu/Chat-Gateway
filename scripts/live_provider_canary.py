@@ -12,6 +12,7 @@ import os
 import secrets
 import stat
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -150,20 +151,50 @@ def write_state(
     isolated_marker: str,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, stat.S_IRUSR | stat.S_IWUSR)
-    with os.fdopen(descriptor, "w", encoding="utf-8") as state_file:
-        json.dump({
-            "conversation_id": conversation_id,
-            "marker": marker,
-            "isolated_conversation_id": isolated_conversation_id,
-            "isolated_marker": isolated_marker,
-        }, state_file)
-        state_file.write("\n")
-    os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
+    # Write a private temporary file and atomically replace the destination.
+    # os.replace replaces a destination symlink itself rather than following it.
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=path.parent,
+    )
+    temporary_path = Path(temporary_name)
+    try:
+        os.fchmod(descriptor, stat.S_IRUSR | stat.S_IWUSR)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as state_file:
+            json.dump({
+                "conversation_id": conversation_id,
+                "marker": marker,
+                "isolated_conversation_id": isolated_conversation_id,
+                "isolated_marker": isolated_marker,
+            }, state_file)
+            state_file.write("\\n")
+            state_file.flush()
+            os.fsync(state_file.fileno())
+        os.replace(temporary_path, path)
+        # Persist the directory entry where directory fsync is supported.
+        directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        try:
+            directory_fd = os.open(path.parent, directory_flags)
+        except OSError:
+            directory_fd = None
+        if directory_fd is not None:
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+    finally:
+        try:
+            temporary_path.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def read_state(path: Path) -> tuple[str, str, str, str]:
     try:
+        metadata = path.lstat()
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > 16_384:
+            raise RuntimeError("canary_state_missing_or_invalid")
         state = json.loads(path.read_text(encoding="utf-8"))
         values = (
             state["conversation_id"], state["marker"],
