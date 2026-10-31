@@ -42,21 +42,45 @@ mod vault_key_file_tests {
     use super::*;
     use std::io::Write;
 
-    #[cfg(unix)]
-    #[test]
-    fn vault_key_file_rejects_group_or_world_readable_permissions() {
-        use std::os::unix::fs::PermissionsExt;
-        let path = std::env::temp_dir().join(format!(
-            "chat-gateway-vault-key-permissions-{}",
-            uuid::Uuid::new_v4()
-        ));
-        let mut file = std::fs::File::create(&path).unwrap();
+    fn write_key(path: &Path) {
+        let mut file = std::fs::File::create(path).unwrap();
         file.write_all(b"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
             .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn vault_key_file_accepts_private_file_and_rejects_permissive_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!(
+            "chat-gateway-vault-key-file-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("vault.key");
+        write_key(&path);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(read_vault_key_file(&path).is_ok());
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
-        let metadata = std::fs::symlink_metadata(&path).unwrap();
-        assert_ne!(metadata.permissions().mode() & 0o077, 0);
-        std::fs::remove_file(path).unwrap();
+        assert!(read_vault_key_file(&path).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn vault_key_file_rejects_symlinks() {
+        use std::os::unix::fs::symlink;
+        let root = std::env::temp_dir().join(format!(
+            "chat-gateway-vault-key-link-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let real = root.join("real.key");
+        write_key(&real);
+        let link = root.join("link.key");
+        symlink(&real, &link).unwrap();
+        assert!(read_vault_key_file(&link).is_err());
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
 
@@ -796,26 +820,30 @@ pub fn parse_vault_key(encoded: &str) -> Result<Zeroizing<[u8; 32]>> {
     Ok(Zeroizing::new(key))
 }
 
+fn read_vault_key_file(path: &Path) -> Result<Zeroizing<String>> {
+    let metadata = std::fs::symlink_metadata(path).map_err(|error| {
+        anyhow::anyhow!("cannot inspect CHAT_GATEWAY_VAULT_KEY_FILE: {error}")
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        anyhow::bail!("CHAT_GATEWAY_VAULT_KEY_FILE must be a regular, non-symlink file");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o077 != 0 {
+            anyhow::bail!("CHAT_GATEWAY_VAULT_KEY_FILE must not be accessible by group or other users");
+        }
+    }
+    Ok(Zeroizing::new(std::fs::read_to_string(path).map_err(|error| {
+        anyhow::anyhow!("cannot read CHAT_GATEWAY_VAULT_KEY_FILE: {error}")
+    })?))
+}
+
 fn vault_key_from_env() -> Result<Zeroizing<[u8; 32]>> {
     let encoded = if let Ok(value) = std::env::var("CHAT_GATEWAY_VAULT_KEY") {
         Zeroizing::new(value)
     } else if let Ok(path) = std::env::var("CHAT_GATEWAY_VAULT_KEY_FILE") {
-        let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
-            anyhow::anyhow!("cannot inspect CHAT_GATEWAY_VAULT_KEY_FILE: {error}")
-        })?;
-        if metadata.file_type().is_symlink() || !metadata.is_file() {
-            anyhow::bail!("CHAT_GATEWAY_VAULT_KEY_FILE must be a regular, non-symlink file");
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            if metadata.permissions().mode() & 0o077 != 0 {
-                anyhow::bail!("CHAT_GATEWAY_VAULT_KEY_FILE must not be accessible by group or other users");
-            }
-        }
-        Zeroizing::new(std::fs::read_to_string(path).map_err(|error| {
-            anyhow::anyhow!("cannot read CHAT_GATEWAY_VAULT_KEY_FILE: {error}")
-        })?)
+        read_vault_key_file(Path::new(&path))?
     } else {
         anyhow::bail!(
             "CHAT_GATEWAY_VAULT_KEY or CHAT_GATEWAY_VAULT_KEY_FILE is required for encrypted session storage"
