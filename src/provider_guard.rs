@@ -141,8 +141,14 @@ mod tests {
     #[tokio::test]
     async fn rejects_zero_budget_values() {
         let guard = ProviderGuard::default();
-        assert!(guard.wait_for_request_slot("test-zero-interval", 0, 1).await.is_err());
-        assert!(guard.wait_for_request_slot("test-zero-cap", 1, 0).await.is_err());
+        assert!(guard
+            .wait_for_request_slot("test-zero-interval", 0, 1)
+            .await
+            .is_err());
+        assert!(guard
+            .wait_for_request_slot("test-zero-cap", 1, 0)
+            .await
+            .is_err());
     }
 
     #[tokio::test]
@@ -158,9 +164,18 @@ mod tests {
         let first = ProviderGuard::default();
         let clone = first.clone();
         let second = ProviderGuard::default();
-        first.wait_for_request_slot("shared-budget", 1, 1).await.unwrap();
-        assert!(clone.wait_for_request_slot("shared-budget", 1, 1).await.is_err());
-        assert!(second.wait_for_request_slot("shared-budget", 1, 1).await.is_ok());
+        first
+            .wait_for_request_slot("shared-budget", 1, 1)
+            .await
+            .unwrap();
+        assert!(clone
+            .wait_for_request_slot("shared-budget", 1, 1)
+            .await
+            .is_err());
+        assert!(second
+            .wait_for_request_slot("shared-budget", 1, 1)
+            .await
+            .is_ok());
     }
 
     #[test]

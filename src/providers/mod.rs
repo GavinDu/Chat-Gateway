@@ -484,7 +484,10 @@ pub async fn run_send(
     policy: ProviderSendPolicy,
     chunks: mpsc::Sender<Result<ProviderChunk>>,
 ) {
-    let ProviderSendPolicy { completion_idle, provider_guard } = policy;
+    let ProviderSendPolicy {
+        completion_idle,
+        provider_guard,
+    } = policy;
     if crate::provider_guard::is_challenge_page(&page) {
         provider_guard.disable_provider(
             adapter.name(),

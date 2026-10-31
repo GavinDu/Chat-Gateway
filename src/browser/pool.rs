@@ -1,6 +1,6 @@
-use crate::provider_guard::ProviderGuard;
 use crate::config::AppConfig;
 use crate::login::{self, LoginAction, LoginView};
+use crate::provider_guard::ProviderGuard;
 use crate::providers::{self, Provider, ProviderChunk};
 use crate::session;
 use anyhow::Result;
