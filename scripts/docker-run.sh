@@ -189,9 +189,13 @@ case "${1:-}" in
   status)
     require_docker
     if container_exists; then
-      docker ps --filter "name=^/$CONTAINER$" --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'
-      curl --fail --silent "http://127.0.0.1:$PORT/health" || true
-      echo
+      docker ps --filter "name=^/$CONTAINER$" --format 'table {{.Names}}\\t{{.Status}}\\t{{.Ports}}'
+      if curl --fail --silent "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
+        echo "Health: healthy"
+      else
+        echo "Health: unhealthy (inspect with '$0 logs')" >&2
+        exit 1
+      fi
     else
       echo "Container $CONTAINER is not created."
     fi
