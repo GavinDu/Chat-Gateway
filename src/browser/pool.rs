@@ -989,7 +989,6 @@ fn touch_login_meta(login_meta: &Rc<RefCell<HashMap<Provider, LoginMeta>>>, prov
     }
 }
 
-
 /// Compare provider thread URLs without requiring byte-for-byte URL equality.
 /// Providers may add a trailing slash, tracking query, or fragment during a
 /// redirect; origin and path still identify the same conversation.
@@ -1010,7 +1009,14 @@ fn provider_thread_navigation_matches(actual: &str, target: &str) -> bool {
         } else {
             path
         };
-        Some((format!("{}://{}", scheme.to_ascii_lowercase(), authority.to_ascii_lowercase()), normalized_path))
+        Some((
+            format!(
+                "{}://{}",
+                scheme.to_ascii_lowercase(),
+                authority.to_ascii_lowercase()
+            ),
+            normalized_path,
+        ))
     }
 
     matches!(
@@ -1037,7 +1043,11 @@ fn provider_landing_navigation_ready(
         if scheme.is_empty() || authority.is_empty() {
             return None;
         }
-        Some(format!("{}://{}", scheme.to_ascii_lowercase(), authority.to_ascii_lowercase()))
+        Some(format!(
+            "{}://{}",
+            scheme.to_ascii_lowercase(),
+            authority.to_ascii_lowercase()
+        ))
     }
 
     if origin(actual) != origin(target) {
