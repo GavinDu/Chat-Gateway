@@ -31,6 +31,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Validate Docker helper shell syntax
+        run: bash -n scripts/docker-run.sh
+
       - name: Validate browser extension JavaScript and manifest
         run: |
           node --check extension/background.js
