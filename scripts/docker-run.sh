@@ -115,7 +115,7 @@ start_gateway() {
 
   ensure_volumes_and_key
   if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
-    "$0" build
+    bash "$0" build
   fi
   if container_exists; then
     docker rm -f "$CONTAINER" >/dev/null
