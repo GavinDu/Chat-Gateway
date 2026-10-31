@@ -57,11 +57,11 @@ read-only into the gateway from a private `0600` file; it is not printed or
 passed as an environment value.
 
 ```bash
-scripts/docker-run.sh init
+bash scripts/docker-run.sh init
 # Edit config.yaml: enable only the providers you are authorized to use.
-scripts/docker-run.sh build
-CHAT_GATEWAY_EXTENSION_ID=<your-unpacked-extension-id> scripts/docker-run.sh start
-scripts/docker-run.sh logs
+bash scripts/docker-run.sh build
+CHAT_GATEWAY_EXTENSION_ID=<your-unpacked-extension-id> bash scripts/docker-run.sh start
+bash scripts/docker-run.sh logs
 ```
 
 The extension ID is shown in Chrome at `chrome://extensions` after loading
@@ -71,7 +71,7 @@ origin. The one-time pairing code is printed in the container logs and expires
 after ten minutes:
 
 ```bash
-scripts/docker-run.sh pairing-code
+bash scripts/docker-run.sh pairing-code
 ```
 
 Open the extension popup, set gateway URL to
@@ -85,7 +85,7 @@ provider-scoped session into its Docker session volume and refreshes the
 embedded Obscura page. Passwords and MFA codes are not collected by Chat
 Gateway.
 
-For example, `scripts/docker-run.sh login chatgpt` opens the provider's
+For example, `bash scripts/docker-run.sh login chatgpt` opens the provider's
 normal sign-in page in the host browser. Supported provider arguments are
 `chatgpt`, `claude`, `gemini`, `grok`, `qwen`, `metaai`, `mistral`,
 and `perplexity`.
@@ -100,10 +100,10 @@ scoped; grant only the provider domains you intend to link.
 Useful commands:
 
 ```bash
-scripts/docker-run.sh status
-scripts/docker-run.sh logs
-scripts/docker-run.sh stop
-scripts/docker-run.sh restart
+bash scripts/docker-run.sh status
+bash scripts/docker-run.sh logs
+bash scripts/docker-run.sh stop
+bash scripts/docker-run.sh restart
 ```
 
 The data, session, and vault-key volumes are named
