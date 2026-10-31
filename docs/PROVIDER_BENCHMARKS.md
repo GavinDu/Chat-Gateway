@@ -80,7 +80,7 @@ same-provider follow-up. Supply an ordered sequence with explicit provider/model
 pairs. Each provider retains its own conversation ID within a repetition, so
 returning to a provider measures a follow-up on its existing gateway thread.
 
-\`\`\`sh
+```sh
 CHAT_GATEWAY_API_KEY=<local-api-key> \
 python3 scripts/provider_switch_benchmark.py \
   --step chatgpt=<chatgpt-model> \
@@ -88,7 +88,7 @@ python3 scripts/provider_switch_benchmark.py \
   --step chatgpt=<chatgpt-model> \
   --step gemini=<gemini-model> \
   --repeat 3
-\`\`\`
+```
 
 The report separates initial provider requests, first requests after a provider
 switch, and same-provider follow-ups. It includes p50/p95 TTFT and total latency
