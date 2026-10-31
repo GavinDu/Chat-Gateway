@@ -989,6 +989,32 @@ fn touch_login_meta(login_meta: &Rc<RefCell<HashMap<Provider, LoginMeta>>>, prov
     }
 }
 
+
+/// A persisted provider thread URL must remain on the provider's configured
+/// origin. This prevents stale or corrupted thread metadata from navigating
+/// the authenticated browser page to an unrelated site.
+fn provider_thread_url_is_same_origin(candidate: &str, provider_home: &str) -> bool {
+    fn origin(value: &str) -> Option<String> {
+        let without_fragment = value.split('#').next()?;
+        let without_query = without_fragment.split('?').next()?;
+        let (scheme, rest) = without_query.split_once("://")?;
+        let authority = rest.split('/').next()?;
+        if scheme.is_empty() || authority.is_empty() || authority.contains('@') {
+            return None;
+        }
+        Some(format!(
+            "{}://{}",
+            scheme.to_ascii_lowercase(),
+            authority.to_ascii_lowercase()
+        ))
+    }
+
+    matches!(
+        (origin(candidate), origin(provider_home)),
+        (Some(candidate), Some(home)) if candidate == home
+    )
+}
+
 /// Compare provider thread URLs without requiring byte-for-byte URL equality.
 /// Providers may add a trailing slash, tracking query, or fragment during a
 /// redirect; origin and path still identify the same conversation.
@@ -1081,6 +1107,26 @@ mod provider_thread_navigation_tests {
         assert!(!provider_thread_navigation_matches(
             "https://chatgpt.com/c/thread-456",
             "https://chatgpt.com/c/thread-123"
+        ));
+    }
+
+    #[test]
+    fn saved_thread_url_must_match_the_configured_provider_origin() {
+        assert!(super::provider_thread_url_is_same_origin(
+            "https://chatgpt.com/c/thread-1?utm_source=redirect",
+            "https://chatgpt.com/"
+        ));
+        assert!(!super::provider_thread_url_is_same_origin(
+            "https://chatgpt.com.attacker.example/c/thread-1",
+            "https://chatgpt.com/"
+        ));
+        assert!(!super::provider_thread_url_is_same_origin(
+            "https://chatgpt.com@attacker.example/c/thread-1",
+            "https://chatgpt.com/"
+        ));
+        assert!(!super::provider_thread_url_is_same_origin(
+            "https://claude.ai/thread-1",
+            "https://chatgpt.com/"
         ));
     }
 
@@ -1517,6 +1563,16 @@ fn browser_thread(
                                 // to the provider landing page to avoid cross-conversation reuse.
                                 // Navigating the current page avoids leaking one tab per conversation.
                                 let target_url = thread_url.as_deref().unwrap_or_else(|| provider.login_url());
+                                if thread_url.is_some()
+                                    && !provider_thread_url_is_same_origin(target_url, provider.login_url())
+                                {
+                                    let _ = chunks
+                                        .send(Err(anyhow::anyhow!(
+                                            "provider thread URL origin mismatch; refusing to navigate"
+                                        )))
+                                        .await;
+                                    return;
+                                }
                                 if page.url() != target_url {
                                     let target_literal = serde_json::to_string(target_url)
                                         .expect("provider URL serialization cannot fail");
