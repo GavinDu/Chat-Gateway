@@ -192,15 +192,23 @@ def write_state(
 
 def read_state(path: Path) -> tuple[str, str, str, str]:
     try:
-        metadata = path.lstat()
-        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > 16_384:
-            raise RuntimeError("canary_state_missing_or_invalid")
-        state = json.loads(path.read_text(encoding="utf-8"))
+        # O_NOFOLLOW plus fstat checks the opened inode, avoiding an lstat/read
+        # race in which an attacker swaps the state path for a symlink.
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags)
+        with os.fdopen(descriptor, "rb") as state_file:
+            metadata = os.fstat(state_file.fileno())
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > 16_384:
+                raise RuntimeError("canary_state_missing_or_invalid")
+            encoded = state_file.read(16_385)
+            if len(encoded) > 16_384:
+                raise RuntimeError("canary_state_missing_or_invalid")
+        state = json.loads(encoded.decode("utf-8"))
         values = (
             state["conversation_id"], state["marker"],
             state["isolated_conversation_id"], state["isolated_marker"],
         )
-    except (OSError, KeyError, TypeError, json.JSONDecodeError):
+    except (OSError, KeyError, TypeError, UnicodeDecodeError, json.JSONDecodeError):
         raise RuntimeError("canary_state_missing_or_invalid") from None
     if not all(isinstance(value, str) and value for value in values):
         raise RuntimeError("canary_state_missing_or_invalid")
