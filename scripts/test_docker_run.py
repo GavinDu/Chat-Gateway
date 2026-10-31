@@ -22,8 +22,10 @@ import json, os, sys
 args = sys.argv[1:]
 with open(os.environ["DOCKER_CALLS"], "a", encoding="utf-8") as stream:
     stream.write(json.dumps(args) + "\\n")
-if args[:2] in (["network", "inspect"], ["image", "inspect"], ["container", "inspect"]):
+if args[:2] in (["network", "inspect"], ["image", "inspect"]):
     raise SystemExit(1)
+if args[:2] == ["container", "inspect"]:
+    raise SystemExit(0 if os.environ.get("CONTAINER_EXISTS") == "1" else 1)
 """,
             encoding="utf-8",
         )
@@ -140,6 +142,7 @@ raise SystemExit(1 if os.environ.get("CURL_FAIL") == "1" else 0)
                 "DOCKER_CALLS": str(calls),
                 "CURL_CALLS": str(root / "curl-calls.txt"),
                 "CURL_FAIL": "1",
+                "CONTAINER_EXISTS": "1",
             })
             result = subprocess.run(
                 ["bash", str(HELPER), "status"],
@@ -161,6 +164,7 @@ raise SystemExit(1 if os.environ.get("CURL_FAIL") == "1" else 0)
             env = os.environ.copy()
             env.update({
                 "PATH": f"{bin_dir}:{env.get('PATH', '')}",
+                "DOCKER_CALLS": str(root / "docker-calls.jsonl"),
                 "OPENED_URLS": str(opened),
             })
 
