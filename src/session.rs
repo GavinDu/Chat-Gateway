@@ -1769,10 +1769,12 @@ mod vault_tests {
             &vault_path,
             "chatgpt",
             &key,
-            |_| Err(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                "injected legacy deletion failure",
-            )),
+            |_| {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "injected legacy deletion failure",
+                ))
+            },
         );
 
         assert!(result.is_err());
