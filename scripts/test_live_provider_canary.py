@@ -1,6 +1,6 @@
 import unittest
 
-from live_provider_canary import consume_sse
+from live_provider_canary import assert_turn_history, consume_sse
 
 
 class ConsumeSseTests(unittest.TestCase):
@@ -33,6 +33,32 @@ class ConsumeSseTests(unittest.TestCase):
         ])
         self.assertEqual(result["content"], "partial")
         self.assertFalse(result["saw_done"])
+
+    def test_transcript_assertion_rejects_missing_or_duplicate_turns(self):
+        conversation = {
+            "messages": [
+                {"role": "user", "content": "redacted"},
+                {"role": "assistant", "content": "redacted"},
+                {"role": "user", "content": "redacted"},
+                {"role": "assistant", "content": "redacted"},
+            ]
+        }
+        assert_turn_history(conversation, 2)
+        with self.assertRaisesRegex(RuntimeError, "message_count_mismatch"):
+            assert_turn_history({"messages": conversation["messages"][:-1]}, 2)
+        duplicate = {"messages": conversation["messages"] + [conversation["messages"][-1]]}
+        with self.assertRaisesRegex(RuntimeError, "message_count_mismatch"):
+            assert_turn_history(duplicate, 2)
+
+    def test_transcript_assertion_rejects_wrong_message_order(self):
+        conversation = {
+            "messages": [
+                {"role": "user"}, {"role": "assistant"},
+                {"role": "assistant"}, {"role": "user"},
+            ]
+        }
+        with self.assertRaisesRegex(RuntimeError, "message_order_mismatch"):
+            assert_turn_history(conversation, 2)
 
     def test_provider_error_is_reported_without_exposing_payload(self):
         result = consume_sse([

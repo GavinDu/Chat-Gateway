@@ -62,8 +62,8 @@ def consume_sse(lines: Iterable[str], started_at: float | None = None) -> dict:
     }
 
 
-def request_turn(base_url: str, api_key: str, model: str, prompt: str,
-                 conversation_id: str | None, timeout: int) -> dict:
+def request_turn(base_url: str, api_key: str, model: str, expected_provider: str,
+                 prompt: str, conversation_id: str | None, timeout: int) -> dict:
     payload = json.dumps({
         "model": model,
         "stream": True,
@@ -86,6 +86,7 @@ def request_turn(base_url: str, api_key: str, model: str, prompt: str,
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             returned_conversation_id = response.headers.get("X-Conversation-Id")
+            returned_provider = response.headers.get("X-Gateway-Provider", "").lower()
             parsed = consume_sse(response, started)
             status = response.status
     except urllib.error.HTTPError as error:
@@ -95,6 +96,10 @@ def request_turn(base_url: str, api_key: str, model: str, prompt: str,
     elapsed_ms = int((time.monotonic() - started) * 1000)
     if status < 200 or status >= 300:
         raise RuntimeError(f"http_status_{status}")
+    if returned_provider != expected_provider:
+        raise RuntimeError("provider_identity_header_missing_or_mismatched")
+    if conversation_id and returned_conversation_id != conversation_id:
+        raise RuntimeError("conversation_id_changed_during_follow_up")
     if parsed["provider_error"]:
         raise RuntimeError("provider_stream_error")
     if not parsed["content"]:
@@ -103,10 +108,38 @@ def request_turn(base_url: str, api_key: str, model: str, prompt: str,
         raise RuntimeError("missing_sse_done")
     return {
         "conversation_id": returned_conversation_id,
+        "provider": returned_provider,
         "content": parsed["content"],
         "ttft_ms": parsed["first_content_ms"],
         "total_ms": elapsed_ms,
     }
+
+
+def fetch_conversation(base_url: str, api_key: str, conversation_id: str, timeout: int) -> dict:
+    request = urllib.request.Request(
+        base_url.rstrip("/") + "/v1/conversations/" + conversation_id,
+        headers={"Authorization": f"Bearer {api_key}", "Accept": "application/json"},
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            if response.status != 200:
+                raise RuntimeError(f"conversation_export_http_status_{response.status}")
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as error:
+        raise RuntimeError(f"conversation_export_http_status_{error.code}") from None
+    except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError):
+        raise RuntimeError("conversation_export_failed") from None
+
+
+def assert_turn_history(conversation: dict, expected_turns: int) -> None:
+    messages = conversation.get("messages")
+    if not isinstance(messages, list) or len(messages) != expected_turns * 2:
+        raise RuntimeError("conversation_message_count_mismatch")
+    expected_roles = ["user", "assistant"] * expected_turns
+    actual_roles = [message.get("role") for message in messages if isinstance(message, dict)]
+    if actual_roles != expected_roles:
+        raise RuntimeError("conversation_message_order_mismatch")
 
 
 def write_state(path: Path, conversation_id: str, marker: str) -> None:
@@ -148,7 +181,7 @@ def run_phase(phase: str) -> dict:
             raise RuntimeError("CANARY_CHATGPT_MODEL_not_set")
         marker = "CGCANARY-" + secrets.token_hex(8)
         first = request_turn(
-            base_url, api_key, model,
+            base_url, api_key, model, "chatgpt",
             f"Remember this exact continuity marker for this conversation: {marker}. Reply only ACK.",
             None, timeout,
         )
@@ -159,12 +192,13 @@ def run_phase(phase: str) -> dict:
                         "status": "passed", "ttft_ms": first["ttft_ms"],
                         "total_ms": first["total_ms"]})
         follow_up = request_turn(
-            base_url, api_key, model,
+            base_url, api_key, model, "chatgpt",
             "Return the exact continuity marker I asked you to remember. Do not explain.",
             conversation_id, timeout,
         )
         if marker.lower() not in follow_up["content"].lower():
             raise RuntimeError("chatgpt_same_thread_continuity_failed")
+        assert_turn_history(fetch_conversation(base_url, api_key, conversation_id, timeout), 2)
         results.append({"provider": "chatgpt", "scenario": "same_provider_follow_up",
                         "status": "passed", "ttft_ms": follow_up["ttft_ms"],
                         "total_ms": follow_up["total_ms"]})
@@ -178,13 +212,15 @@ def run_phase(phase: str) -> dict:
         if not model:
             raise RuntimeError(f"CANARY_{provider.upper()}_MODEL_not_set")
         response = request_turn(
-            base_url, api_key, model,
+            base_url, api_key, model, provider,
             "Across provider changes and a gateway restart, return the exact continuity marker "
             "from earlier in this conversation. Do not guess; if unavailable, say UNKNOWN.",
             conversation_id, timeout,
         )
         if marker.lower() not in response["content"].lower():
             raise RuntimeError(f"{provider}_cross_provider_continuity_failed")
+        expected_turns = 2 + CORE_PHASE_TWO.index(provider) + 1
+        assert_turn_history(fetch_conversation(base_url, api_key, conversation_id, timeout), expected_turns)
         results.append({"provider": provider, "scenario": "post_restart_cross_provider_continuity",
                         "status": "passed", "ttft_ms": response["ttft_ms"],
                         "total_ms": response["total_ms"]})
