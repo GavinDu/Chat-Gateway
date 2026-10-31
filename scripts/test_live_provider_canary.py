@@ -22,7 +22,7 @@ class ConsumeSseTests(unittest.TestCase):
 
         with patch("live_provider_canary.time.monotonic", return_value=10.25):
             result = consume_sse(
-                ['data: {"choices":[{"delta":{"content":"first"}}]}\\n'],
+                ['data: {"choices":[{"delta":{"content":"first"}}]}\n'],
                 started_at=10.0,
             )
         self.assertEqual(result["first_content_ms"], 250)
