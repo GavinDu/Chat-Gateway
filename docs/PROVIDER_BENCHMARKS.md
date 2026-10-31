@@ -73,6 +73,31 @@ not peak RSS. Run at least three times per machine/session state and keep
 provider-specific results separate. A nonzero exit indicates one or more
 failed requests; do not silently discard failures when comparing latency.
 
+### Provider-switch latency sweep
+
+Measure first-request latency after changing providers separately from a
+same-provider follow-up. Supply an ordered sequence with explicit provider/model
+pairs. Each provider retains its own conversation ID within a repetition, so
+returning to a provider measures a follow-up on its existing gateway thread.
+
+\`\`\`sh
+CHAT_GATEWAY_API_KEY=<local-api-key> \
+python3 scripts/provider_switch_benchmark.py \
+  --step chatgpt=<chatgpt-model> \
+  --step claude=<claude-model> \
+  --step chatgpt=<chatgpt-model> \
+  --step gemini=<gemini-model> \
+  --repeat 3
+\`\`\`
+
+The report separates initial provider requests, first requests after a provider
+switch, and same-provider follow-ups. It includes p50/p95 TTFT and total latency
+plus failure counts. It never prints prompts, response text, credentials or
+conversation IDs. Run only against deliberately enabled, authenticated
+providers; compare like-for-like model and session conditions. Failed requests
+make the command exit nonzero and are not silently dropped from the failure
+report.
+
 ## Reporting template
 
 | Field | Value |
