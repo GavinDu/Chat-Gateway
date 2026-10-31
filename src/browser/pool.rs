@@ -1,5 +1,6 @@
 use crate::config::AppConfig;
 use crate::login::{self, LoginAction, LoginView};
+use crate::provider_guard::ProviderGuard;
 use crate::providers::{self, Provider, ProviderChunk};
 use crate::session;
 use anyhow::Result;
@@ -371,6 +372,7 @@ pub struct ObscuraPool {
     shutting_down: Arc<AtomicBool>,
     worker_ready: Arc<AtomicBool>,
     worker_generation: Arc<AtomicU64>,
+    provider_guard: ProviderGuard,
 }
 
 enum Command {
@@ -386,6 +388,7 @@ enum Command {
         thread_url: Option<String>,
         timeout: Duration,
         completion_idle: Duration,
+        provider_guard: ProviderGuard,
         chunks: mpsc::Sender<Result<ProviderChunk>>,
     },
     CurrentUrl {
@@ -531,6 +534,7 @@ impl ObscuraPool {
             shutting_down: shutting_down.clone(),
             worker_ready: worker_ready.clone(),
             worker_generation: worker_generation.clone(),
+            provider_guard: ProviderGuard::default(),
         });
         let mut worker_handle = Some(worker_spawner(
             cfg.clone(),
@@ -618,6 +622,11 @@ impl ObscuraPool {
             }
         });
         Ok(pool)
+    }
+
+    /// Clone the per-gateway provider pacing and challenge guard.
+    pub fn provider_guard(&self) -> ProviderGuard {
+        self.provider_guard.clone()
     }
 
     /// Whether the dedicated browser thread still owns its command receiver.
@@ -730,6 +739,7 @@ impl ObscuraPool {
                 thread_url,
                 timeout,
                 completion_idle,
+                provider_guard: self.provider_guard.clone(),
                 chunks: tx,
             })
             .await
@@ -1543,7 +1553,7 @@ fn browser_thread(
                                 let _ = reply.send(res);
                             });
                         }
-                        Command::Send { provider, prompt, model, has_history, thread_url, timeout, completion_idle, chunks } => {
+                        Command::Send { provider, prompt, model, has_history, thread_url, timeout, completion_idle, provider_guard, chunks } => {
                             let Some(page) = pages.borrow().get(&provider).cloned() else {
                                 let _ = chunks.send(Err(anyhow::anyhow!("provider page not warmed"))).await;
                                 continue;
@@ -1664,7 +1674,10 @@ fn browser_thread(
                                         prompt,
                                         timeout,
                                         poll_tick,
-                                        completion_idle,
+                                        providers::ProviderSendPolicy {
+                                            completion_idle,
+                                            provider_guard,
+                                        },
                                         save_tx,
                                     ) => {}
                                 }

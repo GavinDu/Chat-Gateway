@@ -268,6 +268,7 @@ async fn main() -> anyhow::Result<()> {
         router: ProviderRouter::new(cfg.clone()),
         models_cache: Arc::new(RwLock::new(HashMap::new())),
         relay: Arc::new(relay_state),
+        provider_guard: pool.provider_guard(),
     });
 
     // Background model discovery (reads pickers without sending messages)
@@ -2401,7 +2402,10 @@ async fn chat_completions(
             last_err = Some(format!("provider '{provider_name}' needs login"));
             continue;
         }
-        if let Some(reason) = provider_guard::provider_disabled_reason(&provider_name) {
+        if let Some(reason) = state
+            .provider_guard
+            .provider_disabled_reason(&provider_name)
+        {
             last_err = Some(format!("provider '{provider_name}' disabled: {reason}"));
             continue;
         }
@@ -2414,19 +2418,17 @@ async fn chat_completions(
                 continue;
             }
         };
-        if let Some(reason) = provider_guard::provider_disabled_reason(&provider_name) {
-            last_err = Some(format!("provider '{provider_name}' disabled: {reason}"));
-            continue;
-        }
         // Reserve/wait for the provider's pacing slot before taking its
         // exclusive browser permit. Otherwise a long interval blocks every
         // other caller behind a permit that is not doing useful work.
-        if let Err(error) = provider_guard::wait_for_request_slot(
-            &provider_name,
-            provider_cfg.min_request_interval_ms,
-            provider_cfg.daily_request_cap,
-        )
-        .await
+        if let Err(error) = state
+            .provider_guard
+            .wait_for_request_slot(
+                &provider_name,
+                provider_cfg.min_request_interval_ms,
+                provider_cfg.daily_request_cap,
+            )
+            .await
         {
             last_err = Some(error.to_string());
             continue;
