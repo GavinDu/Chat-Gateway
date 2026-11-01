@@ -1736,6 +1736,43 @@ async fn persist_provider_thread(
     }
 }
 
+
+async fn persist_completed_turn(
+    state: &AppState,
+    owner_key_id: &str,
+    conversation_id: &str,
+    user_messages: Vec<ChatMessage>,
+    assistant_content: String,
+    provider: &str,
+    model: &str,
+) -> anyhow::Result<()> {
+    let synced_marker = state
+        .memory
+        .clone()
+        .persist_turn(
+            owner_key_id.to_owned(),
+            conversation_id.to_owned(),
+            user_messages,
+            ChatMessage {
+                role: "assistant".to_owned(),
+                content: assistant_content,
+            },
+            provider.to_owned(),
+            None,
+        )
+        .await?;
+    persist_provider_thread(
+        state,
+        owner_key_id,
+        conversation_id,
+        provider,
+        model,
+        synced_marker,
+    )
+    .await;
+    Ok(())
+}
+
 fn is_reopenable_provider_thread_url(provider: &str, value: &str) -> bool {
     let Some(provider_kind) = providers::Provider::from_name(provider) else {
         return false;
@@ -2756,26 +2793,26 @@ async fn chat_completions(
                     yield Ok(Event::default().data(error.to_string()));
                 } else {
                     state_c.provider_sessions.record_success(&provider_c);
-                    let synced_marker = match state_c.memory.clone().persist_turn(
-                        owner_key_id_c.clone(),
-                        conv_stream.clone(),
+                    if persist_completed_turn(
+                        &state_c,
+                        &owner_key_id_c,
+                        &conv_stream,
                         windowed_c.clone(),
-                        ChatMessage { role: "assistant".to_string(), content: full.clone() },
-                        provider_c.clone(),
-                        None,
-                    ).await {
-                        Ok(marker) => marker,
-                        Err(_error) => {
-                            tracing::error!(conversation_id = %conv_stream, "conversation persistence failed after stream");
-                            let error = serde_json::json!({
-                                "error": { "message": "conversation could not be persisted", "type": "server_error", "code": "memory_persistence_failed" }
-                            });
-                            yield Ok(Event::default().data(error.to_string()));
-                            yield Ok(Event::default().data("[DONE]"));
-                            return;
-                        }
-                    };
-                    persist_provider_thread(&state_c, &owner_key_id_c, &conv_stream, &provider_c, &model_c, synced_marker).await;
+                        full.clone(),
+                        &provider_c,
+                        &model_c,
+                    )
+                    .await
+                    .is_err()
+                    {
+                        tracing::error!(conversation_id = %conv_stream, "conversation persistence failed after stream");
+                        let error = serde_json::json!({
+                            "error": { "message": "conversation could not be persisted", "type": "server_error", "code": "memory_persistence_failed" }
+                        });
+                        yield Ok(Event::default().data(error.to_string()));
+                        yield Ok(Event::default().data("[DONE]"));
+                        return;
+                    }
                     let completion_tokens = estimate_tokens(&full);
                     let finish = serde_json::json!({
                         "id": format!("chatcmpl-{}", &conv_stream[..8]),
@@ -2854,43 +2891,26 @@ async fn chat_completions(
                 total_ms,
             },
         );
-        let synced_marker = match state
-            .memory
-            .clone()
-            .persist_turn(
-                owner_key_id.clone(),
-                new_conv_id.clone(),
-                windowed.clone(),
-                ChatMessage {
-                    role: "assistant".to_string(),
-                    content: full.clone(),
-                },
-                provider_name.clone(),
-                None,
-            )
-            .await
-        {
-            Ok(marker) => marker,
-            Err(_error) => {
-                tracing::error!(conversation_id = %new_conv_id, "conversation persistence failed");
-                return api_error(
-                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    "server_error",
-                    "memory_persistence_failed",
-                    "conversation could not be persisted",
-                );
-            }
-        };
-
-        persist_provider_thread(
+        if persist_completed_turn(
             &state,
             &owner_key_id,
             &new_conv_id,
+            windowed.clone(),
+            full.clone(),
             &provider_name,
             &req.model,
-            synced_marker,
         )
-        .await;
+        .await
+        .is_err()
+        {
+            tracing::error!(conversation_id = %new_conv_id, "conversation persistence failed");
+            return api_error(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                "memory_persistence_failed",
+                "conversation could not be persisted",
+            );
+        }
         let prompt_tokens = estimate_tokens(&provider_prompt);
         let completion_tokens = estimate_tokens(&full);
         let body = serde_json::json!({
