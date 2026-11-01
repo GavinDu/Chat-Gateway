@@ -89,11 +89,12 @@ pub(crate) fn remote_gateway_origin() -> anyhow::Result<Option<(String, String)>
     {
         anyhow::bail!("CHAT_GATEWAY_REMOTE_ORIGIN has an invalid authority");
     }
-    Ok(Some((format!("https://{authority}"), authority.to_ascii_lowercase())))
+    let authority = authority.to_ascii_lowercase();
+    Ok(Some((format!("https://{authority}"), authority)))
 }
 
 /// Remote mode is opt-in and requires an explicitly trusted TLS-terminating proxy,
-/// an API credential hash, and a configured extension identity.
+/// a high-entropy API credential, and a configured extension identity.
 pub(crate) fn validate_remote_gateway_config() -> anyhow::Result<bool> {
     let Some((_origin, _authority)) = remote_gateway_origin()? else {
         return Ok(false);
