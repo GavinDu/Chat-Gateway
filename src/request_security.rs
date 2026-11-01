@@ -101,10 +101,10 @@ pub(crate) fn validate_remote_gateway_config() -> anyhow::Result<bool> {
     if std::env::var("CHAT_GATEWAY_TRUSTED_PROXY").as_deref() != Ok("1") {
         anyhow::bail!("remote mode requires CHAT_GATEWAY_TRUSTED_PROXY=1");
     }
-    let auth_hash = std::env::var("CHAT_GATEWAY_AUTH_SECRET_HASH")
-        .map_err(|_| anyhow::anyhow!("remote mode requires CHAT_GATEWAY_AUTH_SECRET_HASH"))?;
-    if auth_hash.len() != 64 || !auth_hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        anyhow::bail!("CHAT_GATEWAY_AUTH_SECRET_HASH must be a 64-character SHA-256 hex digest");
+    let api_key = std::env::var("CHAT_GATEWAY_API_KEY")
+        .map_err(|_| anyhow::anyhow!("remote mode requires CHAT_GATEWAY_API_KEY"))?;
+    if api_key.len() < 32 || api_key.bytes().any(|byte| byte.is_ascii_whitespace()) {
+        anyhow::bail!("CHAT_GATEWAY_API_KEY must contain at least 32 non-whitespace characters");
     }
     let extension_id = std::env::var("CHAT_GATEWAY_EXTENSION_ID")
         .map_err(|_| anyhow::anyhow!("remote mode requires CHAT_GATEWAY_EXTENSION_ID"))?;
