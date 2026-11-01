@@ -2630,6 +2630,7 @@ async fn chat_completions(
                     let error = "provider stream closed before first output";
                     record_attempt_error(
                         &state.provider_sessions,
+                        &state.metrics,
                         &provider_name,
                         error,
                         queue_ms,
