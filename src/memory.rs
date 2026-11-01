@@ -877,14 +877,19 @@ impl UnifiedMemory {
 
         for attempt in 0..5 {
             match connection.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?))
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
             }) {
                 Ok((0, _, _)) => {
                     checkpointed = true;
                     break;
                 }
                 Ok((busy, _, _)) => {
-                    last_contention = Some(format!("checkpoint reported {busy} busy connection(s)"));
+                    last_contention =
+                        Some(format!("checkpoint reported {busy} busy connection(s)"));
                 }
                 Err(error) if is_sqlite_lock_contention(&error) => {
                     last_contention = Some(error.to_string());
@@ -910,7 +915,9 @@ impl UnifiedMemory {
                 tracing::warn!(%error, "deferring SQLite optimize during shutdown");
                 return Ok(());
             }
-            return Err(anyhow::anyhow!("SQLite optimize during shutdown failed: {error}"));
+            return Err(anyhow::anyhow!(
+                "SQLite optimize during shutdown failed: {error}"
+            ));
         }
         Ok(())
     }
