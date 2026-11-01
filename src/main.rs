@@ -46,7 +46,9 @@ use chat_service::{first_event, ChatService, FirstEvent};
 use cli::Cli;
 use config::AppConfig;
 use context::{ContextBuilder, ContextPlan, ThreadSyncState};
-use memory::{ChatMessage, ConversationStore, LongTermMemoryStore, ProviderThread, UnifiedMemory};
+use memory::{
+    ChatMessage, ConversationStore, LongTermMemoryStore, ProviderThread, UnifiedMemory,
+};
 use request_security::{is_loopback_authority, login_origin_is_same_authority};
 use router::ProviderRouter;
 
