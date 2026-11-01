@@ -1318,6 +1318,21 @@ mod cookie_restore_result_tests {
     }
 
     #[test]
+    fn session_write_throttles_are_isolated_per_gateway_and_provider() {
+        let first_gateway = SessionWriteTracker::default();
+        let second_gateway = SessionWriteTracker::default();
+        first_gateway.record_success("chatgpt");
+        let check_at = Instant::now() + Duration::from_secs(1);
+
+        assert!(first_gateway.is_rate_limited("chatgpt", check_at));
+        assert!(!first_gateway.is_rate_limited("claude", check_at));
+        assert!(
+            !second_gateway.is_rate_limited("chatgpt", check_at),
+            "one gateway's successful write must not throttle another gateway"
+        );
+    }
+
+    #[test]
     fn cookie_restore_succeeds_when_all_eligible_cookies_are_written() {
         assert!(ensure_cookie_restore_complete(0).is_ok());
     }
