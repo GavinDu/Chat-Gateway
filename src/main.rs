@@ -580,7 +580,7 @@ async fn protect_login_api(req: Request<Body>, next: Next) -> Response {
                 "error": {
                     "message": "request authority or origin rejected",
                     "type": "security_error",
-                    "code": "unsafe_gateway_request"
+                    "code": if remote_gateway_origin().ok().flatten().is_some() { "unsafe_gateway_request" } else { "unsafe_local_request" }
                 }
             })),
         )
