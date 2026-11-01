@@ -1,8 +1,8 @@
 use crate::config::AppConfig;
 use crate::login::{self, LoginAction, LoginView};
+use crate::metrics::MetricsRegistry;
 use crate::provider_guard::ProviderGuard;
 use crate::provider_state::ProviderSessionRegistry;
-use crate::metrics::MetricsRegistry;
 use crate::providers::{self, Provider, ProviderChunk};
 use crate::session;
 use anyhow::Result;
@@ -201,7 +201,9 @@ mod worker_supervisor_tests {
         pool.warm_all()
             .await
             .expect("initial worker should report ready");
-        let restart_metric_before = pool.metrics().render_with_provider_states(&[])
+        let restart_metric_before = pool
+            .metrics()
+            .render_with_provider_states(&[])
             .lines()
             .find(|line| line.starts_with("gateway_browser_worker_restarts_total "))
             .and_then(|line| line.split_whitespace().nth(1))
@@ -255,7 +257,9 @@ mod worker_supervisor_tests {
             axum::http::StatusCode::OK,
             "readiness must recover after replacement warm-up"
         );
-        let restart_metric_after = pool.metrics().render_with_provider_states(&[])
+        let restart_metric_after = pool
+            .metrics()
+            .render_with_provider_states(&[])
             .lines()
             .find(|line| line.starts_with("gateway_browser_worker_restarts_total "))
             .and_then(|line| line.split_whitespace().nth(1))
@@ -650,7 +654,9 @@ impl ObscuraPool {
         self.provider_sessions.clone()
     }
 
-    pub fn metrics(&self) -> MetricsRegistry { self.metrics.clone() }
+    pub fn metrics(&self) -> MetricsRegistry {
+        self.metrics.clone()
+    }
 
     /// Whether the dedicated browser thread still owns its command receiver.
     ///
