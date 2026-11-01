@@ -2,12 +2,16 @@
   "manifest_version": 3,
   "name": "Chat Gateway Browser Relay",
   "version": "0.1.0",
-  "description": "Explicitly link approved provider cookies to a paired local Chat Gateway. Never captures passwords or page content.",
+  "description": "Explicitly link approved provider cookies to a paired local or opt-in HTTPS Chat Gateway. Never captures passwords or page content.",
   "permissions": [
     "cookies",
     "storage"
   ],
   "optional_host_permissions": [
+    "http://127.0.0.1/*",
+    "http://localhost/*",
+    "http://[::1]/*",
+    "https://*/*",
     "https://qwen.ai/*",
     "https://*.qwen.ai/*",
     "https://aliyun.com/*",
