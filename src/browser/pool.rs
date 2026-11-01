@@ -1708,7 +1708,6 @@ fn browser_thread(
                                     let _ = completion_tx.send(completed);
                                 });
                                 let page_for_save = page.clone();
-                                let session_write_tracker = session_write_tracker.clone();
                                 tokio::select! {
                                     _ = cancel_send.notified() => return,
                                     _ = providers::run_send(
