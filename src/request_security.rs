@@ -271,7 +271,12 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("host", "gateway.example.com".parse().unwrap());
         headers.insert("x-forwarded-proto", "https".parse().unwrap());
-        headers.insert("origin", "chrome-extension://abcdefghijklmnopabcdefghijklmnop".parse().unwrap());
+        headers.insert(
+            "origin",
+            "chrome-extension://abcdefghijklmnopabcdefghijklmnop"
+                .parse()
+                .unwrap(),
+        );
         assert!(remote_request_is_allowed(
             &headers,
             "https://gateway.example.com",
