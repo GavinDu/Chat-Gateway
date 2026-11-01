@@ -42,12 +42,12 @@ and cross-site browser requests; they are defense in depth, not authentication.
 Local automation clients that omit `Origin` are supported, but should only be
 used by trusted local processes.
 
-**Do not expose this service through a reverse proxy, tunnel, port-forward, or
-container port publication to an untrusted network.** Remote access is not
-supported until a separate design adds explicit authentication, TLS, and
-origin/CSRF protections for the remote trust boundary. Do not log or share
-provider session files: they may contain reusable authentication material.
+Do not expose this service through a reverse proxy, tunnel, port-forward, or container port publication unless the optional private HTTPS mode below is fully configured. Local loopback remains the default. Do not log or share provider session files: they may contain reusable authentication material.
 
+
+### Optional private HTTPS remote mode
+
+Remote mode is opt-in. It requires CHAT_GATEWAY_REMOTE_ORIGIN (exact HTTPS origin), CHAT_GATEWAY_TRUSTED_PROXY=1, CHAT_GATEWAY_API_KEY (at least 32 non-whitespace characters), and CHAT_GATEWAY_EXTENSION_ID (exact Chrome extension ID). The trusted edge must terminate TLS, strip client-supplied forwarded headers, set X-Forwarded-Proto: https, and be the only network path to the gateway process. Remote interactive /login controls remain disabled. If the hosting platform cannot guarantee these proxy and network properties, keep remote mode disabled. See docs/BROWSER_EXTENSION.md for setup.
 ## Docker run and external browser sign-in
 
 The supported local Docker workflow builds the image, stores conversation data
