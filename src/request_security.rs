@@ -86,6 +86,7 @@ pub(crate) fn remote_gateway_origin() -> anyhow::Result<Option<(String, String)>
         || authority.contains('#')
         || authority.contains('\\')
         || authority.chars().any(char::is_whitespace)
+        || authority.parse::<axum::http::uri::Authority>().is_err()
     {
         anyhow::bail!("CHAT_GATEWAY_REMOTE_ORIGIN has an invalid authority");
     }
