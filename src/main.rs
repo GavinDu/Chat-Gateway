@@ -2148,32 +2148,36 @@ fn record_attempt_error(
 /// Keep provider timing metrics and completion logs identical for streaming
 /// and non-streaming requests. State transitions remain at the call site
 /// because stream errors carry additional session-expiry classification.
-fn record_provider_outcome(
-    metrics_registry: &metrics::MetricsRegistry,
-    request_id: &str,
-    provider: &str,
-    outcome: &str,
+struct ProviderOutcome<'a> {
+    request_id: &'a str,
+    provider: &'a str,
+    outcome: &'a str,
     queue_ms: u64,
     ttft_ms: Option<u64>,
     provider_work_ms: u64,
     total_ms: u64,
+}
+
+fn record_provider_outcome(
+    metrics_registry: &metrics::MetricsRegistry,
+    outcome: ProviderOutcome<'_>,
 ) {
     metrics_registry.record_provider_timings(
-        provider,
-        outcome,
-        queue_ms,
-        ttft_ms,
-        provider_work_ms,
-        total_ms,
+        outcome.provider,
+        outcome.outcome,
+        outcome.queue_ms,
+        outcome.ttft_ms,
+        outcome.provider_work_ms,
+        outcome.total_ms,
     );
     tracing::info!(
-        request_id = %request_id,
-        provider = %provider,
-        queue_ms,
-        ttft_ms = ?ttft_ms,
-        provider_work_ms,
-        total_ms,
-        outcome,
+        request_id = %outcome.request_id,
+        provider = %outcome.provider,
+        queue_ms = outcome.queue_ms,
+        ttft_ms = ?outcome.ttft_ms,
+        provider_work_ms = outcome.provider_work_ms,
+        total_ms = outcome.total_ms,
+        outcome = outcome.outcome,
         "provider request completed"
     );
 }
@@ -2744,13 +2748,15 @@ async fn chat_completions(
                 let total_ms = request_started_c.elapsed().as_millis().min(u64::MAX as u128) as u64;
                 record_provider_outcome(
                     &state_c.metrics,
-                    &request_id_c,
-                    &provider_c,
-                    if stream_error.is_some() { "error" } else { "success" },
-                    queue_ms_c,
-                    ttft_ms,
-                    provider_work_ms,
-                    total_ms,
+                    ProviderOutcome {
+                        request_id: &request_id_c,
+                        provider: &provider_c,
+                        outcome: if stream_error.is_some() { "error" } else { "success" },
+                        queue_ms: queue_ms_c,
+                        ttft_ms,
+                        provider_work_ms,
+                        total_ms,
+                    },
                 );
                 if let Some(message) = stream_error {
                     // Preserve sanitized session-expiry state for routing and health reporting.
@@ -2825,13 +2831,15 @@ async fn chat_completions(
             state.provider_sessions.record_error(&provider_name, &e);
             record_provider_outcome(
                 &state.metrics,
-                &request_id,
-                &provider_name,
-                "error",
-                queue_ms,
-                ttft_ms,
-                provider_work_ms,
-                total_ms,
+                ProviderOutcome {
+                    request_id: &request_id,
+                    provider: &provider_name,
+                    outcome: "error",
+                    queue_ms,
+                    ttft_ms,
+                    provider_work_ms,
+                    total_ms,
+                },
             );
             if full.is_empty() {
                 tracing::warn!(provider = %provider_name, "provider failed before output: {e}");
@@ -2850,13 +2858,15 @@ async fn chat_completions(
         state.provider_sessions.record_success(&provider_name);
         record_provider_outcome(
             &state.metrics,
-            &request_id,
-            &provider_name,
-            "success",
-            queue_ms,
-            ttft_ms,
-            provider_work_ms,
-            total_ms,
+            ProviderOutcome {
+                request_id: &request_id,
+                provider: &provider_name,
+                outcome: "success",
+                queue_ms,
+                ttft_ms,
+                provider_work_ms,
+                total_ms,
+            },
         );
         let synced_marker = match state
             .memory
