@@ -579,7 +579,7 @@ pub async fn run_send(
         // tick, but inspect challenge text every five polls (~1.75 seconds).
         let check_body_challenge = should_check_body_challenge(poll_count);
         let probe = adapter.response_probe(&page, check_body_challenge);
-        crate::metrics::record_browser_poll(
+        metrics.record_browser_poll(
             adapter.name(),
             1,
             poll_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
@@ -648,7 +648,7 @@ pub async fn run_send(
                         // when this poll is not one of the periodic body checks.
                         let final_probe_started = Instant::now();
                         let final_probe = adapter.response_probe(&page, true);
-                        crate::metrics::record_browser_poll(
+                        metrics.record_browser_poll(
                             adapter.name(),
                             1,
                             final_probe_started
@@ -750,7 +750,7 @@ pub async fn run_send(
                 // sampling and declaring the provider turn complete.
                 let final_probe_started = Instant::now();
                 let final_probe = adapter.response_probe(&page, true);
-                crate::metrics::record_browser_poll(
+                metrics.record_browser_poll(
                     adapter.name(),
                     1,
                     final_probe_started
