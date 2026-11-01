@@ -1273,6 +1273,7 @@ impl UnifiedMemory {
 
     /// List every stored item for inspection/export, including expired items.
     /// This deliberately remains available when retrieval is disabled.
+    #[allow(dead_code)]
     pub fn list_long_term_memory_items(
         &self,
         owner_key_id: &str,
@@ -1285,6 +1286,33 @@ impl UnifiedMemory {
         )?;
         let rows = statement.query_map([owner_key_id], memory_item_from_row)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Read the opt-in flag and exported items from one SQLite snapshot.
+    pub fn long_term_memory_snapshot(
+        &self,
+        owner_key_id: &str,
+    ) -> anyhow::Result<(bool, Vec<LongTermMemoryItem>)> {
+        let mut connection = self.lock()?;
+        let tx = connection.transaction_with_behavior(TransactionBehavior::Deferred)?;
+        let enabled = tx
+            .query_row(
+                "SELECT enabled FROM memory_settings WHERE owner_key_id=?1",
+                [owner_key_id],
+                |row| row.get::<_, bool>(0),
+            )
+            .optional()?
+            .unwrap_or(false);
+        let mut statement = tx.prepare(
+            "SELECT id, memory_key, value, source_conversation_id, confidence,
+                    created_at, updated_at, expires_at
+             FROM memory_items WHERE owner_key_id=?1 ORDER BY updated_at DESC, id",
+        )?;
+        let rows = statement.query_map([owner_key_id], memory_item_from_row)?;
+        let items = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(statement);
+        tx.commit()?;
+        Ok((enabled, items))
     }
 
     /// Retrieval is empty unless explicitly enabled and always excludes expired items.
@@ -1408,6 +1436,240 @@ fn extractive_rolling_summary(messages: &[ChatMessage], max_chars: usize) -> Str
     }
     lines.reverse();
     lines.join("\n")
+}
+
+/// Async operations for opt-in cross-conversation memory controls and items.
+#[async_trait::async_trait]
+pub trait LongTermMemoryStore: Send + Sync {
+    async fn long_term_memory_enabled_async(
+        self: Arc<Self>,
+        owner_key_id: String,
+    ) -> anyhow::Result<bool>;
+
+    async fn set_long_term_memory_enabled_async(
+        self: Arc<Self>,
+        owner_key_id: String,
+        enabled: bool,
+    ) -> anyhow::Result<()>;
+
+    async fn long_term_memory_snapshot_async(
+        self: Arc<Self>,
+        owner_key_id: String,
+    ) -> anyhow::Result<(bool, Vec<LongTermMemoryItem>)>;
+
+    async fn save_long_term_memory_item_async(
+        self: Arc<Self>,
+        owner_key_id: String,
+        memory_key: String,
+        value: String,
+        source_conversation_id: Option<String>,
+        confidence: f64,
+        expires_at: Option<i64>,
+    ) -> anyhow::Result<LongTermMemoryItem>;
+
+    async fn delete_long_term_memory_item_async(
+        self: Arc<Self>,
+        owner_key_id: String,
+        item_id: String,
+    ) -> anyhow::Result<bool>;
+
+    async fn delete_all_long_term_memory_items_async(
+        self: Arc<Self>,
+        owner_key_id: String,
+    ) -> anyhow::Result<usize>;
+
+    async fn retrieve_long_term_memory_items_async(
+        self: Arc<Self>,
+        owner_key_id: String,
+        limit: usize,
+    ) -> anyhow::Result<Vec<LongTermMemoryItem>>;
+}
+
+#[async_trait::async_trait]
+impl LongTermMemoryStore for UnifiedMemory {
+    async fn long_term_memory_enabled_async(
+        self: Arc<Self>,
+        owner_key_id: String,
+    ) -> anyhow::Result<bool> {
+        tokio::task::spawn_blocking(move || self.long_term_memory_enabled(&owner_key_id))
+            .await
+            .map_err(|error| anyhow::anyhow!("memory settings read task failed: {error}"))?
+    }
+
+    async fn set_long_term_memory_enabled_async(
+        self: Arc<Self>,
+        owner_key_id: String,
+        enabled: bool,
+    ) -> anyhow::Result<()> {
+        tokio::task::spawn_blocking(move || {
+            self.set_long_term_memory_enabled(&owner_key_id, enabled)
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("memory settings write task failed: {error}"))?
+    }
+
+    async fn long_term_memory_snapshot_async(
+        self: Arc<Self>,
+        owner_key_id: String,
+    ) -> anyhow::Result<(bool, Vec<LongTermMemoryItem>)> {
+        tokio::task::spawn_blocking(move || self.long_term_memory_snapshot(&owner_key_id))
+            .await
+            .map_err(|error| anyhow::anyhow!("memory snapshot task failed: {error}"))?
+    }
+
+    async fn save_long_term_memory_item_async(
+        self: Arc<Self>,
+        owner_key_id: String,
+        memory_key: String,
+        value: String,
+        source_conversation_id: Option<String>,
+        confidence: f64,
+        expires_at: Option<i64>,
+    ) -> anyhow::Result<LongTermMemoryItem> {
+        tokio::task::spawn_blocking(move || {
+            self.save_long_term_memory_item(
+                &owner_key_id,
+                &memory_key,
+                &value,
+                source_conversation_id.as_deref(),
+                confidence,
+                expires_at,
+            )
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("memory item save task failed: {error}"))?
+    }
+
+    async fn delete_long_term_memory_item_async(
+        self: Arc<Self>,
+        owner_key_id: String,
+        item_id: String,
+    ) -> anyhow::Result<bool> {
+        tokio::task::spawn_blocking(move || {
+            self.delete_long_term_memory_item(&owner_key_id, &item_id)
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("memory item deletion task failed: {error}"))?
+    }
+
+    async fn delete_all_long_term_memory_items_async(
+        self: Arc<Self>,
+        owner_key_id: String,
+    ) -> anyhow::Result<usize> {
+        tokio::task::spawn_blocking(move || self.delete_all_long_term_memory_items(&owner_key_id))
+            .await
+            .map_err(|error| anyhow::anyhow!("memory bulk deletion task failed: {error}"))?
+    }
+
+    async fn retrieve_long_term_memory_items_async(
+        self: Arc<Self>,
+        owner_key_id: String,
+        limit: usize,
+    ) -> anyhow::Result<Vec<LongTermMemoryItem>> {
+        tokio::task::spawn_blocking(move || {
+            self.retrieve_long_term_memory_items(&owner_key_id, limit)
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("memory retrieval task failed: {error}"))?
+    }
+}
+
+#[cfg(test)]
+#[allow(dead_code, unused_imports)]
+mod async_long_term_memory_store_tests {
+    use super::{LongTermMemoryStore, UnifiedMemory};
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn async_store_methods_preserve_opt_in_and_owner_isolation() {
+        let store = Arc::new(UnifiedMemory::new(8000));
+        assert!(!store
+            .clone()
+            .long_term_memory_enabled_async("owner-a".into())
+            .await
+            .unwrap());
+
+        store
+            .clone()
+            .set_long_term_memory_enabled_async("owner-a".into(), true)
+            .await
+            .unwrap();
+        store
+            .clone()
+            .save_long_term_memory_item_async(
+                "owner-a".into(),
+                "timezone".into(),
+                "America/New_York".into(),
+                None,
+                0.9,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let (enabled, items) = store
+            .clone()
+            .long_term_memory_snapshot_async("owner-a".into())
+            .await
+            .unwrap();
+        assert!(enabled);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].value, "America/New_York");
+
+        let (other_enabled, other_items) = store
+            .clone()
+            .long_term_memory_snapshot_async("owner-b".into())
+            .await
+            .unwrap();
+        assert!(!other_enabled);
+        assert!(other_items.is_empty());
+        assert!(store
+            .clone()
+            .retrieve_long_term_memory_items_async("owner-b".into(), 20)
+            .await
+            .unwrap()
+            .is_empty());
+
+        let id = items[0].id.clone();
+        assert!(!store
+            .clone()
+            .delete_long_term_memory_item_async("owner-b".into(), id.clone())
+            .await
+            .unwrap());
+        assert!(store
+            .clone()
+            .delete_long_term_memory_item_async("owner-a".into(), id)
+            .await
+            .unwrap());
+
+        store
+            .clone()
+            .save_long_term_memory_item_async(
+                "owner-a".into(),
+                "timezone".into(),
+                "Europe/London".into(),
+                None,
+                0.8,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .clone()
+                .delete_all_long_term_memory_items_async("owner-a".into())
+                .await
+                .unwrap(),
+            1
+        );
+        assert!(store
+            .clone()
+            .long_term_memory_snapshot_async("owner-a".into())
+            .await
+            .unwrap()
+            .1
+            .is_empty());
+    }
 }
 
 #[cfg(test)]
