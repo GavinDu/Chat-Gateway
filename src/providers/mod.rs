@@ -473,6 +473,7 @@ fn completion_ready(
 pub struct ProviderSendPolicy {
     pub completion_idle: Duration,
     pub provider_guard: crate::provider_guard::ProviderGuard,
+    pub metrics: crate::metrics::MetricsRegistry,
 }
 
 pub async fn run_send(
@@ -487,6 +488,7 @@ pub async fn run_send(
     let ProviderSendPolicy {
         completion_idle,
         provider_guard,
+        metrics,
     } = policy;
     if crate::provider_guard::is_challenge_page(&page) {
         provider_guard.disable_provider(
@@ -577,7 +579,7 @@ pub async fn run_send(
         // tick, but inspect challenge text every five polls (~1.75 seconds).
         let check_body_challenge = should_check_body_challenge(poll_count);
         let probe = adapter.response_probe(&page, check_body_challenge);
-        crate::metrics::record_browser_poll(
+        metrics.record_browser_poll(
             adapter.name(),
             1,
             poll_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
@@ -646,7 +648,7 @@ pub async fn run_send(
                         // when this poll is not one of the periodic body checks.
                         let final_probe_started = Instant::now();
                         let final_probe = adapter.response_probe(&page, true);
-                        crate::metrics::record_browser_poll(
+                        metrics.record_browser_poll(
                             adapter.name(),
                             1,
                             final_probe_started
@@ -686,7 +688,7 @@ pub async fn run_send(
                             }
                         }
                         if let Some(last_delta_at) = last_delta_at {
-                            crate::metrics::record_provider_tail(
+                            metrics.record_provider_tail(
                                 adapter.name(),
                                 last_delta_at.elapsed().as_millis().min(u64::MAX as u128) as u64,
                             );
@@ -748,7 +750,7 @@ pub async fn run_send(
                 // sampling and declaring the provider turn complete.
                 let final_probe_started = Instant::now();
                 let final_probe = adapter.response_probe(&page, true);
-                crate::metrics::record_browser_poll(
+                metrics.record_browser_poll(
                     adapter.name(),
                     1,
                     final_probe_started
@@ -770,7 +772,7 @@ pub async fn run_send(
                     return;
                 }
                 if let Some(last_delta_at) = last_delta_at {
-                    crate::metrics::record_provider_tail(
+                    metrics.record_provider_tail(
                         adapter.name(),
                         last_delta_at.elapsed().as_millis().min(u64::MAX as u128) as u64,
                     );
