@@ -61,7 +61,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    let remote_mode = validate_remote_gateway_config()?;
+    validate_remote_gateway_config()?;
     let cli = Cli::parse();
     if cli.show_memory_egress_policy {
         let policy = memory_egress::MemoryEgressPolicy::from_env()
