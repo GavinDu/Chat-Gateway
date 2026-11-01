@@ -10,10 +10,29 @@ use std::{
     collections::{BTreeMap, HashMap},
     io::Write,
     path::Path,
-    sync::{Mutex, OnceLock},
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 use zeroize::{Zeroize, Zeroizing};
+
+/// Per-gateway throttle for successful session snapshot writes.
+#[derive(Clone, Default)]
+pub struct SessionWriteTracker {
+    last_successful_write: Arc<Mutex<HashMap<String, Instant>>>,
+}
+impl SessionWriteTracker {
+    fn is_rate_limited(&self, provider: &str, now: Instant) -> bool {
+        self.last_successful_write.lock().ok()
+            .and_then(|writes| writes.get(provider).copied())
+            .is_some_and(|last| now.duration_since(last) < SESSION_WRITE_INTERVAL)
+    }
+    fn record_success(&self, provider: &str) {
+        if let Ok(mut writes) = self.last_successful_write.lock() {
+            writes.insert(provider.to_owned(), Instant::now());
+        }
+    }
+}
+const SESSION_WRITE_INTERVAL: Duration = Duration::from_secs(60);
 
 #[derive(Serialize, Deserialize)]
 pub struct SessionFile {
@@ -203,7 +222,7 @@ mod session_path_tests {
 #[async_trait::async_trait(?Send)]
 pub trait SessionStore {
     fn load(&self, provider: &str) -> Result<Option<SessionFile>>;
-    async fn save_if_changed(&self, browser: &Browser, page: &Page, provider: &str) -> Result<()>;
+    async fn save_if_changed(&self, browser: &Browser, page: &Page, provider: &str, tracker: &SessionWriteTracker) -> Result<()>;
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -216,8 +235,8 @@ impl SessionStore for FileSessionStore {
         load_session_file_from_path(Path::new(&path))
     }
 
-    async fn save_if_changed(&self, browser: &Browser, page: &Page, provider: &str) -> Result<()> {
-        save_session_if_changed_file(browser, page, provider).await
+    async fn save_if_changed(&self, browser: &Browser, page: &Page, provider: &str, tracker: &SessionWriteTracker) -> Result<()> {
+        save_session_if_changed_file(browser, page, provider, tracker).await
     }
 }
 
@@ -242,21 +261,21 @@ impl SessionStore for VaultSessionStore {
         )
     }
 
-    async fn save_if_changed(&self, browser: &Browser, page: &Page, provider: &str) -> Result<()> {
+    async fn save_if_changed(&self, browser: &Browser, page: &Page, provider: &str, tracker: &SessionWriteTracker) -> Result<()> {
         let file = capture_session(browser, page, provider).await?;
-        self.save_file_if_changed(file, provider).await
+        self.save_file_if_changed(file, provider, tracker).await
     }
 }
 
 impl VaultSessionStore {
-    async fn save_session(&self, browser: &Browser, page: &Page, provider: &str) -> Result<()> {
+    async fn save_session(&self, browser: &Browser, page: &Page, provider: &str, tracker: &SessionWriteTracker) -> Result<()> {
         let file = capture_session(browser, page, provider).await?;
         let key = vault_key_from_env()?;
         ensure_private_session_dir(Path::new("sessions")).await?;
         let encrypted = encrypt_session_snapshot(&file, provider, &key)?;
         write_session_file_atomically(Path::new(&session_vault_path(provider)?), &encrypted)?;
         remove_legacy_session_snapshot(provider)?;
-        record_session_write(provider);
+        tracker.record_success(provider);
         tracing::info!(
             provider,
             cookies = file.cookies.len(),
@@ -265,7 +284,7 @@ impl VaultSessionStore {
         Ok(())
     }
 
-    async fn save_file_if_changed(&self, file: SessionFile, provider: &str) -> Result<()> {
+    async fn save_file_if_changed(&self, file: SessionFile, provider: &str, tracker: &SessionWriteTracker) -> Result<()> {
         let key = vault_key_from_env()?;
         let current_hash = session_state_hash(&file)?;
         let destination = session_vault_path(provider)?;
@@ -281,7 +300,7 @@ impl VaultSessionStore {
             remove_legacy_session_snapshot(provider)?;
             return Ok(());
         }
-        if session_write_is_rate_limited(provider, Instant::now()) {
+        if tracker.is_rate_limited(provider, Instant::now()) {
             tracing::debug!(
                 provider,
                 "encrypted session changed but snapshot write is rate-limited"
@@ -293,7 +312,7 @@ impl VaultSessionStore {
         write_session_file_atomically(Path::new(&destination), &encrypted)?;
         // Do not leave a plaintext copy behind once encrypted persistence works.
         remove_legacy_session_snapshot(provider)?;
-        record_session_write(provider);
+        tracker.record_success(provider);
         tracing::info!(
             provider,
             cookies = file.cookies.len(),
@@ -382,7 +401,7 @@ fn migrate_legacy_snapshot_with_remover(
     // A deletion failure leaves both copies intact and returns an error, rather
     // than reporting a completed migration with a plaintext source still present.
     remove_legacy(legacy_path)?;
-    record_session_write(provider);
+    
     tracing::info!(provider, "migrated plaintext session into encrypted vault");
     Ok(verified)
 }
@@ -429,7 +448,7 @@ pub fn import_relay_session(provider: &str, file: &SessionFile) -> Result<()> {
         return Err(error);
     }
     remove_legacy_session_snapshot(provider)?;
-    record_session_write(provider);
+    
     tracing::info!(
         provider,
         cookies = file.cookies.len(),
@@ -1029,29 +1048,6 @@ async fn ensure_private_session_dir(path: &Path) -> Result<()> {
     }
     Ok(())
 }
-/// Last successful session writes, shared by login completion and post-send
-/// refreshes so rapid provider activity cannot churn credential files.
-static LAST_SESSION_WRITE: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
-const SESSION_WRITE_INTERVAL: Duration = Duration::from_secs(60);
-
-fn session_write_is_rate_limited(provider: &str, now: Instant) -> bool {
-    LAST_SESSION_WRITE
-        .get_or_init(|| Mutex::new(HashMap::new()))
-        .lock()
-        .ok()
-        .and_then(|writes| writes.get(provider).copied())
-        .is_some_and(|last| now.duration_since(last) < SESSION_WRITE_INTERVAL)
-}
-
-fn record_session_write(provider: &str) {
-    if let Ok(mut writes) = LAST_SESSION_WRITE
-        .get_or_init(|| Mutex::new(HashMap::new()))
-        .lock()
-    {
-        writes.insert(provider.to_string(), Instant::now());
-    }
-}
-
 fn session_state_hash(file: &SessionFile) -> Result<String> {
     // Ignore ts and normalize ordering so a cookie jar with unchanged values
     // produces the same fingerprint across snapshots.
@@ -1092,34 +1088,34 @@ async fn capture_session(browser: &Browser, page: &Page, provider: &str) -> Resu
 
 /// Capture cookies (from the browser's CookieStore) and localStorage into
 /// sessions/<provider>.json. Login completion deliberately forces a save.
-pub async fn save_session(browser: &Browser, page: &Page, provider: &str) -> Result<()> {
+pub async fn save_session(browser: &Browser, page: &Page, provider: &str, tracker: &SessionWriteTracker) -> Result<()> {
     if matches!(
         std::env::var("CHAT_GATEWAY_SESSION_STORE").as_deref(),
         Ok("vault")
     ) {
         VaultSessionStore
-            .save_session(browser, page, provider)
+            .save_session(browser, page, provider, tracker)
             .await
     } else {
         let file = capture_session(browser, page, provider).await?;
-        write_session_snapshot(file, provider).await
+        write_session_snapshot(file, provider, tracker).await
     }
 }
 
 /// Persist a post-send snapshot only when the provider-scoped session changed.
 /// Writes are atomic and capped at one per provider per minute. A skipped
 /// changed snapshot will be retried after the interval on the next successful send.
-pub async fn save_session_if_changed(browser: &Browser, page: &Page, provider: &str) -> Result<()> {
+pub async fn save_session_if_changed(browser: &Browser, page: &Page, provider: &str, tracker: &SessionWriteTracker) -> Result<()> {
     if matches!(
         std::env::var("CHAT_GATEWAY_SESSION_STORE").as_deref(),
         Ok("vault")
     ) {
         VaultSessionStore
-            .save_if_changed(browser, page, provider)
+            .save_if_changed(browser, page, provider, tracker)
             .await
     } else {
         FileSessionStore
-            .save_if_changed(browser, page, provider)
+            .save_if_changed(browser, page, provider, tracker)
             .await
     }
 }
@@ -1128,6 +1124,7 @@ async fn save_session_if_changed_file(
     browser: &Browser,
     page: &Page,
     provider: &str,
+    tracker: &SessionWriteTracker,
 ) -> Result<()> {
     let file = capture_session(browser, page, provider).await?;
     let current_hash = session_state_hash(&file)?;
@@ -1141,17 +1138,17 @@ async fn save_session_if_changed_file(
     if previous_hash.as_deref() == Some(current_hash.as_str()) {
         return Ok(());
     }
-    if session_write_is_rate_limited(provider, Instant::now()) {
+    if tracker.is_rate_limited(provider, Instant::now()) {
         tracing::debug!(
             provider,
             "session changed but snapshot write is rate-limited"
         );
         return Ok(());
     }
-    write_session_snapshot(file, provider).await
+    write_session_snapshot(file, provider, tracker).await
 }
 
-async fn write_session_snapshot(file: SessionFile, provider: &str) -> Result<()> {
+async fn write_session_snapshot(file: SessionFile, provider: &str, tracker: &SessionWriteTracker) -> Result<()> {
     ensure_private_session_dir(Path::new("sessions")).await?;
     let destination = session_path(provider)?;
     let serialized = Zeroizing::new(serde_json::to_vec_pretty(&file)?);
@@ -1159,7 +1156,7 @@ async fn write_session_snapshot(file: SessionFile, provider: &str) -> Result<()>
     // Session files contain reusable authentication cookies. Create them
     // privately on Unix and replace the destination atomically.
     write_session_file_atomically(Path::new(&destination), &serialized)?;
-    record_session_write(provider);
+    tracker.record_success(provider);
     tracing::info!(
         provider = provider,
         cookies = file.cookies.len(),
@@ -1267,23 +1264,12 @@ mod cookie_restore_result_tests {
     #[test]
     fn post_send_session_write_rate_limit_is_sixty_seconds() {
         let now = Instant::now();
-        let mut writes = LAST_SESSION_WRITE
-            .get_or_init(|| Mutex::new(HashMap::new()))
-            .lock()
-            .unwrap();
-        writes.insert("test-provider".to_string(), now);
-        drop(writes);
-        assert!(session_write_is_rate_limited(
-            "test-provider",
-            now + Duration::from_secs(59)
-        ));
-        assert!(!session_write_is_rate_limited(
-            "test-provider",
-            now + Duration::from_secs(60)
-        ));
-        if let Ok(mut writes) = LAST_SESSION_WRITE.get().unwrap().lock() {
-            writes.remove("test-provider");
+        let tracker = SessionWriteTracker::default();
+        if let Ok(mut writes) = tracker.last_successful_write.lock() {
+            writes.insert("test-provider".to_owned(), now);
         }
+        assert!(tracker.is_rate_limited("test-provider", now + Duration::from_secs(59)));
+        assert!(!tracker.is_rate_limited("test-provider", now + Duration::from_secs(60)));
     }
 
     #[test]
