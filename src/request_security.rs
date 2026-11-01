@@ -65,7 +65,6 @@ pub(crate) fn is_loopback_authority(authority: &str) -> bool {
     )
 }
 
-
 /// Parse the explicit public HTTPS origin for opt-in reverse-proxy deployments.
 /// The proxy must strip incoming forwarded headers and set X-Forwarded-Proto itself.
 pub(crate) fn remote_gateway_origin() -> anyhow::Result<Option<(String, String)>> {
@@ -110,7 +109,11 @@ pub(crate) fn validate_remote_gateway_config() -> anyhow::Result<bool> {
     }
     let extension_id = std::env::var("CHAT_GATEWAY_EXTENSION_ID")
         .map_err(|_| anyhow::anyhow!("remote mode requires CHAT_GATEWAY_EXTENSION_ID"))?;
-    if extension_id.len() != 32 || !extension_id.bytes().all(|byte| (b'a'..=b'p').contains(&byte)) {
+    if extension_id.len() != 32
+        || !extension_id
+            .bytes()
+            .all(|byte| (b'a'..=b'p').contains(&byte))
+    {
         anyhow::bail!("CHAT_GATEWAY_EXTENSION_ID must be a 32-character Chrome extension ID");
     }
     Ok(true)
@@ -284,5 +287,4 @@ mod tests {
             true
         ));
     }
-
 }
