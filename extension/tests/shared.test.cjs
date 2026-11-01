@@ -66,6 +66,19 @@ test("relayFetch rejects a remote gateway value restored from extension storage"
 });
 
 
+
+test("relayFetch refuses to send the install token when exact HTTPS host permission is absent", async () => {
+  const api = loadShared([], false, {
+    gateway: "https://attacker.example",
+    token: "relay-secret"
+  });
+  await assert.rejects(
+    () => api.relayFetch("/relay/v1/status"),
+    /Gateway host permission is missing/
+  );
+  assert.equal(api.fetchCalls.length, 0);
+});
+
 test("relayFetch supports an HTTPS gateway without weakening the HTTP loopback rule", async () => {
   const api = loadShared([], true, {
     gateway: "https://gateway.example.com",
