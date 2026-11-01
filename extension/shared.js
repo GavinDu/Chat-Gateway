@@ -11,10 +11,16 @@ const PROVIDERS = {
 
 function normalizeGateway(value) {
   const url = new URL(value);
-  if (url.protocol !== "http:" || !["127.0.0.1", "localhost", "[::1]"].includes(url.hostname)) {
-    throw new Error("Gateway URL must be local HTTP on 127.0.0.1, localhost, or ::1.");
+  if (url.username || url.password || url.search || url.hash || (url.pathname !== "/" && url.pathname !== "")) {
+    throw new Error("Gateway URL must be an origin without credentials, path, query, or fragment.");
   }
-  return url.origin;
+  if (url.protocol === "http:" && ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname)) {
+    return url.origin;
+  }
+  if (url.protocol === "https:" && url.hostname && !url.hostname.endsWith(".localhost")) {
+    return url.origin;
+  }
+  throw new Error("Gateway URL must be local HTTP or an explicitly configured HTTPS remote origin.");
 }
 
 function randomHex(bytes = 16) {
