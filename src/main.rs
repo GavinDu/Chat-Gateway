@@ -522,7 +522,7 @@ async fn refresh_models(state: &Arc<AppState>) {
 /// credentials — relayed text lives in memory only for the action that
 /// types it, and only cookies/localStorage are persisted on Complete.
 /// The login relay can read and persist provider session material. Keep the HTTP
-/// listener loopback-only until an authenticated remote-access mode is designed.
+/// listener loopback-only by default; remote binding requires validated opt-in configuration.
 fn server_bind_addr(port: u16, docker_local_bind: bool) -> SocketAddr {
     if docker_local_bind || std::env::var("CHAT_GATEWAY_REMOTE_ORIGIN").is_ok() {
         SocketAddr::from(([0, 0, 0, 0], port))
