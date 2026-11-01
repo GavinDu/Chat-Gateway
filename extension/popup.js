@@ -28,6 +28,8 @@ $("pair").addEventListener("click", async () => {
     const gateway = normalizeGateway($("gateway").value);
     const code = $("code").value.trim();
     if (!/^\d{8}$/.test(code)) throw new Error("Enter the 8-digit code printed by the gateway.");
+    const granted = await chrome.permissions.request({origins:[gateway + "/*"]});
+    if (!granted) throw new Error("Gateway host permission was not granted.");
     const response = await fetch(gateway + "/relay/v1/pair", {
       method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({code}), cache:"no-store"
     });
