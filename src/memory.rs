@@ -263,6 +263,17 @@ impl ConversationStore for UnifiedMemory {
     }
 }
 
+fn is_sqlite_lock_contention(error: &rusqlite::Error) -> bool {
+    matches!(
+        error,
+        rusqlite::Error::SqliteFailure(code, _)
+            if matches!(
+                code.code,
+                rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+            )
+    )
+}
+
 impl UnifiedMemory {
     // Test-only helper is shared across test targets; some targets do not call it.
     #[cfg(test)]
@@ -894,18 +905,53 @@ impl UnifiedMemory {
     }
 
     /// Flush SQLite WAL pages after HTTP requests have drained.
+    ///
+    /// Checkpointing is maintenance, not a commit boundary: committed WAL
+    /// transactions are already durable. A transient SQLITE_BUSY/SQLITE_LOCKED
+    /// during shutdown must therefore defer compaction rather than turn an
+    /// otherwise clean process exit into a failure.
     pub fn checkpoint(&self) -> anyhow::Result<()> {
         let connection = self.lock()?;
-        let (busy, _log_frames, _checkpointed_frames): (i64, i64, i64) =
-            connection.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-            })?;
-        if busy != 0 {
-            anyhow::bail!(
-                "SQLite WAL checkpoint could not complete because another connection is busy"
-            );
+        let mut checkpointed = false;
+        let mut last_contention = None;
+
+        for attempt in 0..5 {
+            match connection.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?))
+            }) {
+                Ok((0, _, _)) => {
+                    checkpointed = true;
+                    break;
+                }
+                Ok((busy, _, _)) => {
+                    last_contention = Some(format!("checkpoint reported {busy} busy connection(s)"));
+                }
+                Err(error) if is_sqlite_lock_contention(&error) => {
+                    last_contention = Some(error.to_string());
+                }
+                Err(error) => {
+                    return Err(anyhow::anyhow!("SQLite WAL checkpoint failed: {error}"));
+                }
+            }
+
+            std::thread::sleep(std::time::Duration::from_millis(100 * (attempt + 1)));
         }
-        connection.execute_batch("PRAGMA optimize;")?;
+
+        if !checkpointed {
+            tracing::warn!(
+                reason = last_contention.as_deref().unwrap_or("checkpoint remained busy"),
+                "deferring SQLite WAL checkpoint during shutdown; committed data remains in the WAL"
+            );
+            return Ok(());
+        }
+
+        if let Err(error) = connection.execute_batch("PRAGMA optimize;") {
+            if is_sqlite_lock_contention(&error) {
+                tracing::warn!(%error, "deferring SQLite optimize during shutdown");
+                return Ok(());
+            }
+            return Err(anyhow::anyhow!("SQLite optimize during shutdown failed: {error}"));
+        }
         Ok(())
     }
 
