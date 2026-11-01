@@ -148,8 +148,8 @@ impl MetricsRegistry {
                 .or_default() += 1;
         }
     }
-
 }
+
 fn escape_label(value: &str) -> String {
     value
         .replace('\\', "\\\\")
