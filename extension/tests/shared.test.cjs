@@ -30,18 +30,20 @@ function loadShared(cookieFixtures = [], hasAllPermissions = true, storageValues
   return { ...context.__testApi, getCookieReads: () => cookieReads, fetchCalls };
 }
 
-test("gateway normalization accepts only local HTTP origins", () => {
+test("gateway normalization accepts local HTTP and explicit HTTPS origins", () => {
   const api = loadShared();
-  assert.equal(api.normalizeGateway("http://127.0.0.1:8080/path?secret=ignored"), "http://127.0.0.1:8080");
+  assert.equal(api.normalizeGateway("http://127.0.0.1:8080"), "http://127.0.0.1:8080");
   assert.equal(api.normalizeGateway("http://localhost:3000/"), "http://localhost:3000");
   assert.equal(api.normalizeGateway("http://[::1]:8080"), "http://[::1]:8080");
+  assert.equal(api.normalizeGateway("https://gateway.example.com"), "https://gateway.example.com");
 });
 
-test("gateway normalization rejects remote, HTTPS, and lookalike hosts", () => {
+test("gateway normalization rejects remote HTTP and malformed HTTPS origins", () => {
   const api = loadShared();
   for (const value of [
-    "https://localhost:8080",
     "http://gateway.example",
+    "https://gateway.example.com/path",
+    "https://user:pass@gateway.example.com",
     "http://localhost.attacker.example",
     "http://127.0.0.2:8080",
     "file:///tmp/gateway"
@@ -58,9 +60,35 @@ test("relayFetch rejects a remote gateway value restored from extension storage"
 
   await assert.rejects(
     () => api.relayFetch("/relay/v1/session/chatgpt", {method:"POST", body:"{}"}),
-    /Gateway URL must be local HTTP/
+    /Gateway URL must be local HTTP or an explicitly configured HTTPS remote origin/
   );
   assert.equal(api.fetchCalls.length, 0, "no request or relay token may reach a remote host");
+});
+
+
+
+test("relayFetch refuses to send the install token when exact HTTPS host permission is absent", async () => {
+  const api = loadShared([], false, {
+    gateway: "https://attacker.example",
+    token: "relay-secret"
+  });
+  await assert.rejects(
+    () => api.relayFetch("/relay/v1/status"),
+    /Gateway host permission is missing/
+  );
+  assert.equal(api.fetchCalls.length, 0);
+});
+
+test("relayFetch supports an HTTPS gateway without weakening the HTTP loopback rule", async () => {
+  const api = loadShared([], true, {
+    gateway: "https://gateway.example.com",
+    token: "relay-secret"
+  });
+  await api.relayFetch("/relay/v1/status");
+  assert.equal(api.fetchCalls.length, 1);
+  assert.equal(api.fetchCalls[0].url, "https://gateway.example.com/relay/v1/status");
+  assert.equal(api.fetchCalls[0].options.headers.get("Authorization"), "Bearer relay-secret");
+  assert.equal(api.fetchCalls[0].options.cache, "no-store");
 });
 
 test("provider cookie snapshot excludes cookies outside that provider's domain roots", async () => {

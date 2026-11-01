@@ -65,6 +65,86 @@ pub(crate) fn is_loopback_authority(authority: &str) -> bool {
     )
 }
 
+/// Parse the explicit public HTTPS origin for opt-in reverse-proxy deployments.
+/// The proxy must strip incoming forwarded headers and set X-Forwarded-Proto itself.
+pub(crate) fn remote_gateway_origin() -> anyhow::Result<Option<(String, String)>> {
+    let Ok(value) = std::env::var("CHAT_GATEWAY_REMOTE_ORIGIN") else {
+        return Ok(None);
+    };
+    let value = value.trim();
+    let Some((scheme, remainder)) = value.split_once("://") else {
+        anyhow::bail!("CHAT_GATEWAY_REMOTE_ORIGIN must be an HTTPS origin");
+    };
+    let authority = remainder.strip_suffix('/').unwrap_or(remainder);
+    if scheme != "https" || authority.is_empty() || authority.contains('/') {
+        anyhow::bail!("CHAT_GATEWAY_REMOTE_ORIGIN must be an HTTPS origin without a path");
+    }
+    if authority.is_empty()
+        || authority.contains('@')
+        || authority.contains('?')
+        || authority.contains('#')
+        || authority.contains('\\')
+        || authority.chars().any(char::is_whitespace)
+        || authority.parse::<axum::http::uri::Authority>().is_err()
+    {
+        anyhow::bail!("CHAT_GATEWAY_REMOTE_ORIGIN has an invalid authority");
+    }
+    let authority = authority.to_ascii_lowercase();
+    Ok(Some((format!("https://{authority}"), authority)))
+}
+
+/// Remote mode is opt-in and requires an explicitly trusted TLS-terminating proxy,
+/// a high-entropy API credential, and a configured extension identity.
+pub(crate) fn validate_remote_gateway_config() -> anyhow::Result<bool> {
+    let Some((_origin, _authority)) = remote_gateway_origin()? else {
+        return Ok(false);
+    };
+    if std::env::var("CHAT_GATEWAY_TRUSTED_PROXY").as_deref() != Ok("1") {
+        anyhow::bail!("remote mode requires CHAT_GATEWAY_TRUSTED_PROXY=1");
+    }
+    let api_key = std::env::var("CHAT_GATEWAY_API_KEY")
+        .map_err(|_| anyhow::anyhow!("remote mode requires CHAT_GATEWAY_API_KEY"))?;
+    if api_key.len() < 32 || api_key.bytes().any(|byte| byte.is_ascii_whitespace()) {
+        anyhow::bail!("CHAT_GATEWAY_API_KEY must contain at least 32 non-whitespace characters");
+    }
+    let extension_id = std::env::var("CHAT_GATEWAY_EXTENSION_ID")
+        .map_err(|_| anyhow::anyhow!("remote mode requires CHAT_GATEWAY_EXTENSION_ID"))?;
+    if extension_id.len() != 32
+        || !extension_id
+            .bytes()
+            .all(|byte| (b'a'..=b'p').contains(&byte))
+    {
+        anyhow::bail!("CHAT_GATEWAY_EXTENSION_ID must be a 32-character Chrome extension ID");
+    }
+    Ok(true)
+}
+
+pub(crate) fn remote_request_is_allowed(
+    headers: &HeaderMap,
+    remote_origin: &str,
+    remote_authority: &str,
+    relay_origin_allowed: bool,
+) -> bool {
+    let host_matches = headers
+        .get(axum::http::header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|host| host.eq_ignore_ascii_case(remote_authority));
+    let proxy_reports_https = headers
+        .get("x-forwarded-proto")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("https"));
+    if !host_matches || !proxy_reports_https {
+        return false;
+    }
+    if relay_origin_allowed {
+        return true;
+    }
+    match headers.get(axum::http::header::ORIGIN) {
+        None => true,
+        Some(origin) => origin.to_str().is_ok_and(|origin| origin == remote_origin),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -150,5 +230,61 @@ mod tests {
                 "expected unsafe authority to be rejected: {authority}"
             );
         }
+    }
+    #[test]
+    fn remote_requests_require_exact_host_https_proxy_and_origin() {
+        let mut headers = HeaderMap::new();
+        headers.insert("host", "gateway.example.com".parse().unwrap());
+        headers.insert("x-forwarded-proto", "https".parse().unwrap());
+        headers.insert("origin", "https://gateway.example.com".parse().unwrap());
+        assert!(remote_request_is_allowed(
+            &headers,
+            "https://gateway.example.com",
+            "gateway.example.com",
+            false
+        ));
+
+        headers.insert("origin", "https://attacker.example".parse().unwrap());
+        assert!(!remote_request_is_allowed(
+            &headers,
+            "https://gateway.example.com",
+            "gateway.example.com",
+            false
+        ));
+        headers.insert("origin", "https://gateway.example.com".parse().unwrap());
+        headers.insert("host", "attacker.example".parse().unwrap());
+        assert!(!remote_request_is_allowed(
+            &headers,
+            "https://gateway.example.com",
+            "gateway.example.com",
+            false
+        ));
+        headers.insert("host", "gateway.example.com".parse().unwrap());
+        headers.insert("x-forwarded-proto", "http".parse().unwrap());
+        assert!(!remote_request_is_allowed(
+            &headers,
+            "https://gateway.example.com",
+            "gateway.example.com",
+            false
+        ));
+    }
+
+    #[test]
+    fn remote_relay_origin_is_checked_separately_after_host_and_proxy() {
+        let mut headers = HeaderMap::new();
+        headers.insert("host", "gateway.example.com".parse().unwrap());
+        headers.insert("x-forwarded-proto", "https".parse().unwrap());
+        headers.insert(
+            "origin",
+            "chrome-extension://abcdefghijklmnopabcdefghijklmnop"
+                .parse()
+                .unwrap(),
+        );
+        assert!(remote_request_is_allowed(
+            &headers,
+            "https://gateway.example.com",
+            "gateway.example.com",
+            true
+        ));
     }
 }

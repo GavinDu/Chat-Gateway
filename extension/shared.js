@@ -11,10 +11,16 @@ const PROVIDERS = {
 
 function normalizeGateway(value) {
   const url = new URL(value);
-  if (url.protocol !== "http:" || !["127.0.0.1", "localhost", "[::1]"].includes(url.hostname)) {
-    throw new Error("Gateway URL must be local HTTP on 127.0.0.1, localhost, or ::1.");
+  if (url.username || url.password || url.search || url.hash || (url.pathname !== "/" && url.pathname !== "")) {
+    throw new Error("Gateway URL must be an origin without credentials, path, query, or fragment.");
   }
-  return url.origin;
+  if (url.protocol === "http:" && ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname)) {
+    return url.origin;
+  }
+  if (url.protocol === "https:" && url.hostname && !url.hostname.endsWith(".localhost")) {
+    return url.origin;
+  }
+  throw new Error("Gateway URL must be local HTTP or an explicitly configured HTTPS remote origin.");
 }
 
 function randomHex(bytes = 16) {
@@ -28,6 +34,10 @@ async function relayFetch(path, options = {}) {
   // Treat browser storage as untrusted: a stale or tampered gateway value must
   // never redirect provider cookies or the relay token to a remote origin.
   const localGateway = normalizeGateway(gateway);
+  const hasGatewayPermission = await chrome.permissions.contains({origins:[localGateway + "/*"]});
+  if (!hasGatewayPermission) {
+    throw new Error("Gateway host permission is missing. Re-pair and grant access only to the configured gateway origin.");
+  }
   const headers = new Headers(options.headers || {});
   headers.set("X-Relay-Timestamp", String(Math.floor(Date.now() / 1000)));
   headers.set("X-Relay-Nonce", randomHex());
