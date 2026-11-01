@@ -1070,7 +1070,9 @@ async fn attach_request_id(mut req: Request<Body>, next: Next) -> Response {
     let started = Instant::now();
     let mut response = next.run(req).await;
     let duration_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
-    if let Some(registry) = metrics_registry { registry.record_http_request(&route, response.status().as_u16(), duration_ms); }
+    if let Some(registry) = metrics_registry {
+        registry.record_http_request(&route, response.status().as_u16(), duration_ms);
+    }
     tracing::info!(
         request_id = %request_id,
         method = %method,
