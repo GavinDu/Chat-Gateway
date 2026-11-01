@@ -1,5 +1,6 @@
 use crate::config::AppConfig;
 use crate::login::{self, LoginAction, LoginView};
+use crate::metrics::MetricsRegistry;
 use crate::provider_guard::ProviderGuard;
 use crate::provider_state::ProviderSessionRegistry;
 use crate::providers::{self, Provider, ProviderChunk};
@@ -26,6 +27,7 @@ type BrowserWorkerSpawner = fn(
     oneshot::Sender<Result<()>>,
     Arc<AtomicBool>,
     ProviderSessionRegistry,
+    MetricsRegistry,
 ) -> std::thread::JoinHandle<()>;
 
 fn join_finished_worker(worker: &mut Option<std::thread::JoinHandle<()>>) -> bool {
@@ -150,6 +152,7 @@ mod worker_supervisor_tests {
         ready: tokio::sync::oneshot::Sender<anyhow::Result<()>>,
         worker_ready: Arc<AtomicBool>,
         _provider_sessions: super::ProviderSessionRegistry,
+        _metrics: super::MetricsRegistry,
     ) -> std::thread::JoinHandle<()> {
         let generation = RESTART_TEST_SPAWNS.fetch_add(1, Ordering::SeqCst);
         std::thread::spawn(move || {
@@ -186,12 +189,6 @@ mod worker_supervisor_tests {
     #[tokio::test]
     async fn request_after_worker_panic_succeeds_only_after_replacement_warmup() {
         RESTART_TEST_SPAWNS.store(0, Ordering::SeqCst);
-        let restart_metric_before = crate::metrics::render_with_provider_states(&[])
-            .lines()
-            .find(|line| line.starts_with("gateway_browser_worker_restarts_total "))
-            .and_then(|line| line.split_whitespace().nth(1))
-            .and_then(|value| value.parse::<u64>().ok())
-            .unwrap_or_default();
         let config: crate::config::AppConfig =
             serde_yaml::from_str("providers: []").expect("empty test config should parse");
         let pool = super::ObscuraPool::new_with_worker_spawner(
@@ -204,6 +201,14 @@ mod worker_supervisor_tests {
         pool.warm_all()
             .await
             .expect("initial worker should report ready");
+        let restart_metric_before = pool
+            .metrics()
+            .render_with_provider_states(&[])
+            .lines()
+            .find(|line| line.starts_with("gateway_browser_worker_restarts_total "))
+            .and_then(|line| line.split_whitespace().nth(1))
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or_default();
         // The /ready route delegates to this response helper; exercise its
         // healthy contract with the injected worker before inducing a panic.
         assert_eq!(
@@ -252,7 +257,9 @@ mod worker_supervisor_tests {
             axum::http::StatusCode::OK,
             "readiness must recover after replacement warm-up"
         );
-        let restart_metric_after = crate::metrics::render_with_provider_states(&[])
+        let restart_metric_after = pool
+            .metrics()
+            .render_with_provider_states(&[])
             .lines()
             .find(|line| line.starts_with("gateway_browser_worker_restarts_total "))
             .and_then(|line| line.split_whitespace().nth(1))
@@ -377,6 +384,7 @@ pub struct ObscuraPool {
     worker_generation: Arc<AtomicU64>,
     provider_guard: ProviderGuard,
     provider_sessions: ProviderSessionRegistry,
+    metrics: MetricsRegistry,
 }
 
 enum Command {
@@ -540,14 +548,17 @@ impl ObscuraPool {
             worker_generation: worker_generation.clone(),
             provider_guard: ProviderGuard::default(),
             provider_sessions: ProviderSessionRegistry::default(),
+            metrics: MetricsRegistry::default(),
         });
         let provider_sessions = pool.provider_sessions.clone();
+        let metrics = pool.metrics.clone();
         let mut worker_handle = Some(worker_spawner(
             cfg.clone(),
             cmd_rx,
             ready_tx,
             worker_ready.clone(),
             provider_sessions.clone(),
+            metrics.clone(),
         ));
 
         // Recreate the thread-affine engine after a crash; never move Page values
@@ -594,12 +605,13 @@ impl ObscuraPool {
                     next_ready_tx,
                     worker_ready.clone(),
                     provider_sessions.clone(),
+                    metrics.clone(),
                 ));
                 match tokio::time::timeout(Duration::from_secs(90), next_ready_rx).await {
                     Ok(Ok(Ok(()))) => {
                         worker_ready.store(true, Ordering::Release);
                         worker_generation.fetch_add(1, Ordering::AcqRel);
-                        crate::metrics::record_browser_worker_restart();
+                        metrics.record_browser_worker_restart();
                         tracing::info!("browser worker restarted and warmed successfully");
                         backoff = Duration::from_secs(1);
                     }
@@ -640,6 +652,10 @@ impl ObscuraPool {
     /// Clone the per-gateway provider session lifecycle registry.
     pub fn provider_sessions(&self) -> ProviderSessionRegistry {
         self.provider_sessions.clone()
+    }
+
+    pub fn metrics(&self) -> MetricsRegistry {
+        self.metrics.clone()
     }
 
     /// Whether the dedicated browser thread still owns its command receiver.
@@ -1322,6 +1338,7 @@ fn browser_thread(
     ready_tx: oneshot::Sender<Result<()>>,
     worker_ready: Arc<AtomicBool>,
     provider_sessions: ProviderSessionRegistry,
+    metrics: MetricsRegistry,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let _ready_guard = WorkerReadyGuard(worker_ready.clone());
@@ -1581,6 +1598,7 @@ fn browser_thread(
                             let browser_for_save = browser.clone();
                             let provider_name = provider.name().to_string();
                             let poll_tick = gateway_poll_tick;
+                            let request_metrics = metrics.clone();
                             tokio::task::spawn_local(async move {
                                 let _guard = lock.lock().await;
                                 // Reopen only a validated provider-owned thread. Otherwise return
@@ -1692,6 +1710,7 @@ fn browser_thread(
                                         providers::ProviderSendPolicy {
                                             completion_idle,
                                             provider_guard,
+                                            metrics: request_metrics,
                                         },
                                         save_tx,
                                     ) => {}
