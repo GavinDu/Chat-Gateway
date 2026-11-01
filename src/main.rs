@@ -46,9 +46,7 @@ use chat_service::{first_event, ChatService, FirstEvent};
 use cli::Cli;
 use config::AppConfig;
 use context::{ContextBuilder, ContextPlan, ThreadSyncState};
-use memory::{
-    ChatMessage, ConversationStore, LongTermMemoryStore, ProviderThread, UnifiedMemory,
-};
+use memory::{ChatMessage, ConversationStore, LongTermMemoryStore, ProviderThread, UnifiedMemory};
 use request_security::{is_loopback_authority, login_origin_is_same_authority};
 use router::ProviderRouter;
 
@@ -1422,7 +1420,12 @@ async fn export_long_term_memory_items(
     auth_context: Option<Extension<AuthKeyContext>>,
 ) -> Response {
     let owner = memory_owner(&auth_context).to_owned();
-    match state.memory.clone().long_term_memory_snapshot_async(owner).await {
+    match state
+        .memory
+        .clone()
+        .long_term_memory_snapshot_async(owner)
+        .await
+    {
         Ok((enabled, items)) => long_term_memory_export_response(enabled, items),
         _ => api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1735,7 +1738,6 @@ async fn persist_provider_thread(
         tracing::warn!(provider, %error, "provider thread mapping could not be persisted");
     }
 }
-
 
 async fn persist_completed_turn(
     state: &AppState,
