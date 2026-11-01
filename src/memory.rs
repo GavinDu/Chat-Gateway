@@ -1616,7 +1616,11 @@ mod async_long_term_memory_store_tests {
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].value, "America/New_York");
 
-        let (other_enabled, other_items) = store.clone().long_term_memory_snapshot_async("owner-b".into()).await.unwrap();
+        let (other_enabled, other_items) = store
+            .clone()
+            .long_term_memory_snapshot_async("owner-b".into())
+            .await
+            .unwrap();
         assert!(!other_enabled);
         assert!(other_items.is_empty());
         assert!(store
