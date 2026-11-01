@@ -23,6 +23,8 @@ jobs:
         run: docker build --pull --tag chat-gateway-rs:ci .
       - name: Verify container entrypoint
         run: docker run --rm --entrypoint /usr/local/bin/chat-gateway-rs chat-gateway-rs:ci --help
+      - name: Verify isolated Docker HTTP and graceful-shutdown smoke
+        run: bash scripts/docker-runtime-smoke.sh chat-gateway-rs:ci
 
   test:
     runs-on: ubuntu-latest
@@ -32,7 +34,9 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Validate Docker helper shell syntax
-        run: bash -n scripts/docker-run.sh
+        run: |
+          bash -n scripts/docker-run.sh
+          bash -n scripts/docker-runtime-smoke.sh
 
       - name: Validate browser extension JavaScript and manifest
         run: |
