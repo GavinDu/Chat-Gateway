@@ -272,6 +272,7 @@ async fn main() -> anyhow::Result<()> {
         relay: Arc::new(relay_state),
         provider_guard: pool.provider_guard(),
         provider_sessions: pool.provider_sessions(),
+        metrics: pool.metrics(),
     });
 
     // Background model discovery (reads pickers without sending messages)
@@ -429,7 +430,8 @@ async fn main() -> anyhow::Result<()> {
         .layer(DefaultBodyLimit::max(1024 * 1024))
         .layer(middleware::from_fn(protect_login_api))
         // Keep request IDs on both successful responses and middleware rejections.
-        .layer(middleware::from_fn(attach_request_id));
+        .layer(middleware::from_fn(attach_request_id))
+        .layer(Extension(state.metrics.clone()));
 
     // Security default: the gateway exposes browser/session control routes and must not listen on public interfaces by default.
     // Remote access should be added only with explicit authentication and TLS.
@@ -1051,7 +1053,7 @@ async fn metrics_endpoint(State(state): State<Arc<AppState>>) -> impl IntoRespon
     );
     (
         headers,
-        metrics::render_with_provider_states(&provider_states),
+        state.metrics.render_with_provider_states(&provider_states),
     )
 }
 
@@ -1062,6 +1064,7 @@ async fn attach_request_id(mut req: Request<Body>, next: Next) -> Response {
     let request_id = uuid::Uuid::new_v4().to_string();
     let method = req.method().to_string();
     let route = metrics::normalize_route(req.uri().path());
+    let metrics_registry = req.extensions().get::<metrics::MetricsRegistry>().cloned();
     let is_chat_completion = req.uri().path() == "/v1/chat/completions";
     if let Ok(value) = axum::http::HeaderValue::from_str(&request_id) {
         req.headers_mut().insert("x-request-id", value);
@@ -1069,7 +1072,9 @@ async fn attach_request_id(mut req: Request<Body>, next: Next) -> Response {
     let started = Instant::now();
     let mut response = next.run(req).await;
     let duration_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
-    metrics::record_http_request(&route, response.status().as_u16(), duration_ms);
+    if let Some(registry) = metrics_registry {
+        registry.record_http_request(&route, response.status().as_u16(), duration_ms);
+    }
     tracing::info!(
         request_id = %request_id,
         method = %method,
@@ -1768,7 +1773,6 @@ async fn persist_completed_turn(
     Ok(())
 }
 
-
 fn is_reopenable_provider_thread_url(provider: &str, value: &str) -> bool {
     let Some(provider_kind) = providers::Provider::from_name(provider) else {
         return false;
@@ -2145,6 +2149,7 @@ async fn read_conversation_context_with_transcript_for_owner(
 
 fn record_attempt_error(
     provider_sessions: &provider_state::ProviderSessionRegistry,
+    metrics_registry: &metrics::MetricsRegistry,
     provider: &str,
     error: &str,
     queue_ms: u64,
@@ -2154,7 +2159,7 @@ fn record_attempt_error(
     let provider_work_ms = provider_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
     let total_ms = request_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
     provider_sessions.record_error(provider, error);
-    metrics::record_provider_timings(
+    metrics_registry.record_provider_timings(
         provider,
         "error",
         queue_ms,
@@ -2167,31 +2172,36 @@ fn record_attempt_error(
 /// Keep provider timing metrics and completion logs identical for streaming
 /// and non-streaming requests. State transitions remain at the call site
 /// because stream errors carry additional session-expiry classification.
-fn record_provider_outcome(
-    request_id: &str,
-    provider: &str,
-    outcome: &str,
+struct ProviderOutcome<'a> {
+    request_id: &'a str,
+    provider: &'a str,
+    outcome: &'a str,
     queue_ms: u64,
     ttft_ms: Option<u64>,
     provider_work_ms: u64,
     total_ms: u64,
+}
+
+fn record_provider_outcome(
+    metrics_registry: &metrics::MetricsRegistry,
+    outcome: ProviderOutcome<'_>,
 ) {
-    metrics::record_provider_timings(
-        provider,
-        outcome,
-        queue_ms,
-        ttft_ms,
-        provider_work_ms,
-        total_ms,
+    metrics_registry.record_provider_timings(
+        outcome.provider,
+        outcome.outcome,
+        outcome.queue_ms,
+        outcome.ttft_ms,
+        outcome.provider_work_ms,
+        outcome.total_ms,
     );
     tracing::info!(
-        request_id = %request_id,
-        provider = %provider,
-        queue_ms,
-        ttft_ms = ?ttft_ms,
-        provider_work_ms,
-        total_ms,
-        outcome,
+        request_id = %outcome.request_id,
+        provider = %outcome.provider,
+        queue_ms = outcome.queue_ms,
+        ttft_ms = ?outcome.ttft_ms,
+        provider_work_ms = outcome.provider_work_ms,
+        total_ms = outcome.total_ms,
+        outcome = outcome.outcome,
         "provider request completed"
     );
 }
@@ -2619,6 +2629,7 @@ async fn chat_completions(
                     let error = "provider completed without output before stream started";
                     record_attempt_error(
                         &state.provider_sessions,
+                        &state.metrics,
                         &provider_name,
                         error,
                         queue_ms,
@@ -2632,6 +2643,7 @@ async fn chat_completions(
                     let message = error.to_string();
                     record_attempt_error(
                         &state.provider_sessions,
+                        &state.metrics,
                         &provider_name,
                         &message,
                         queue_ms,
@@ -2645,6 +2657,7 @@ async fn chat_completions(
                     let error = "provider stream closed before first output";
                     record_attempt_error(
                         &state.provider_sessions,
+                        &state.metrics,
                         &provider_name,
                         error,
                         queue_ms,
@@ -2661,7 +2674,7 @@ async fn chat_completions(
                     let total_ms =
                         request_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
                     state.provider_sessions.record_error(&provider_name, error);
-                    metrics::record_provider_timings(
+                    state.metrics.record_provider_timings(
                         &provider_name,
                         "error",
                         queue_ms,
@@ -2757,13 +2770,16 @@ async fn chat_completions(
                 let provider_work_ms = provider_started_c.elapsed().as_millis().min(u64::MAX as u128) as u64;
                 let total_ms = request_started_c.elapsed().as_millis().min(u64::MAX as u128) as u64;
                 record_provider_outcome(
-                    &request_id_c,
-                    &provider_c,
-                    if stream_error.is_some() { "error" } else { "success" },
-                    queue_ms_c,
-                    ttft_ms,
-                    provider_work_ms,
-                    total_ms,
+                    &state_c.metrics,
+                    ProviderOutcome {
+                        request_id: &request_id_c,
+                        provider: &provider_c,
+                        outcome: if stream_error.is_some() { "error" } else { "success" },
+                        queue_ms: queue_ms_c,
+                        ttft_ms,
+                        provider_work_ms,
+                        total_ms,
+                    },
                 );
                 if let Some(message) = stream_error {
                     // Preserve sanitized session-expiry state for routing and health reporting.
@@ -2778,9 +2794,16 @@ async fn chat_completions(
                 } else {
                     state_c.provider_sessions.record_success(&provider_c);
                     if let Err(error) = persist_completed_turn(
-                        &state_c, &owner_key_id_c, &conv_stream, windowed_c.clone(), full.clone(),
-                        &provider_c, &model_c,
-                    ).await {
+                        &state_c,
+                        &owner_key_id_c,
+                        &conv_stream,
+                        windowed_c.clone(),
+                        full.clone(),
+                        &provider_c,
+                        &model_c,
+                    )
+                    .await
+                    {
                         tracing::error!(conversation_id = %conv_stream, %error, "conversation persistence failed after stream");
                         let error = serde_json::json!({
                             "error": { "message": "conversation could not be persisted", "type": "server_error", "code": "memory_persistence_failed" }
@@ -2829,13 +2852,16 @@ async fn chat_completions(
         if let Some(e) = failed {
             state.provider_sessions.record_error(&provider_name, &e);
             record_provider_outcome(
-                &request_id,
-                &provider_name,
-                "error",
-                queue_ms,
-                ttft_ms,
-                provider_work_ms,
-                total_ms,
+                &state.metrics,
+                ProviderOutcome {
+                    request_id: &request_id,
+                    provider: &provider_name,
+                    outcome: "error",
+                    queue_ms,
+                    ttft_ms,
+                    provider_work_ms,
+                    total_ms,
+                },
             );
             if full.is_empty() {
                 tracing::warn!(provider = %provider_name, "provider failed before output: {e}");
@@ -2853,18 +2879,28 @@ async fn chat_completions(
 
         state.provider_sessions.record_success(&provider_name);
         record_provider_outcome(
-            &request_id,
-            &provider_name,
-            "success",
-            queue_ms,
-            ttft_ms,
-            provider_work_ms,
-            total_ms,
+            &state.metrics,
+            ProviderOutcome {
+                request_id: &request_id,
+                provider: &provider_name,
+                outcome: "success",
+                queue_ms,
+                ttft_ms,
+                provider_work_ms,
+                total_ms,
+            },
         );
         if let Err(error) = persist_completed_turn(
-            &state, &owner_key_id, &new_conv_id, windowed.clone(), full.clone(),
-            &provider_name, &req.model,
-        ).await {
+            &state,
+            &owner_key_id,
+            &new_conv_id,
+            windowed.clone(),
+            full.clone(),
+            &provider_name,
+            &req.model,
+        )
+        .await
+        {
             tracing::error!(conversation_id = %new_conv_id, %error, "conversation persistence failed");
             return api_error(
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -4313,8 +4349,10 @@ mod first_event_tests {
             panic!("expected first-event error");
         };
         let provider_sessions = crate::provider_state::ProviderSessionRegistry::default();
+        let metrics_registry = crate::metrics::MetricsRegistry::default();
         record_attempt_error(
             &provider_sessions,
+            &metrics_registry,
             provider,
             &error.to_string(),
             0,
@@ -4326,7 +4364,7 @@ mod first_event_tests {
             provider_sessions.status(provider).state,
             crate::provider_state::ProviderSessionState::NeedsLogin
         );
-        let metrics = crate::metrics::render_with_provider_states(&[]);
+        let metrics = metrics_registry.render_with_provider_states(&[]);
         assert!(metrics.contains(&format!(
             "gateway_provider_requests_total{{provider=\"{provider}\",outcome=\"error\"}} 1"
         )));
