@@ -4,7 +4,7 @@ use crate::metrics::MetricsRegistry;
 use crate::provider_guard::ProviderGuard;
 use crate::provider_state::ProviderSessionRegistry;
 use crate::providers::{self, Provider, ProviderChunk};
-use crate::session;
+use crate::session::{self, SessionWriteTracker};
 use anyhow::Result;
 use dashmap::DashMap;
 use std::cell::RefCell;
@@ -28,6 +28,7 @@ type BrowserWorkerSpawner = fn(
     Arc<AtomicBool>,
     ProviderSessionRegistry,
     MetricsRegistry,
+    SessionWriteTracker,
 ) -> std::thread::JoinHandle<()>;
 
 fn join_finished_worker(worker: &mut Option<std::thread::JoinHandle<()>>) -> bool {
@@ -153,6 +154,7 @@ mod worker_supervisor_tests {
         worker_ready: Arc<AtomicBool>,
         _provider_sessions: super::ProviderSessionRegistry,
         _metrics: super::MetricsRegistry,
+        _session_writes: super::SessionWriteTracker,
     ) -> std::thread::JoinHandle<()> {
         let generation = RESTART_TEST_SPAWNS.fetch_add(1, Ordering::SeqCst);
         std::thread::spawn(move || {
@@ -385,6 +387,7 @@ pub struct ObscuraPool {
     provider_guard: ProviderGuard,
     provider_sessions: ProviderSessionRegistry,
     metrics: MetricsRegistry,
+    session_writes: SessionWriteTracker,
 }
 
 enum Command {
@@ -549,9 +552,11 @@ impl ObscuraPool {
             provider_guard: ProviderGuard::default(),
             provider_sessions: ProviderSessionRegistry::default(),
             metrics: MetricsRegistry::default(),
+            session_writes: SessionWriteTracker::default(),
         });
         let provider_sessions = pool.provider_sessions.clone();
         let metrics = pool.metrics.clone();
+        let session_writes = pool.session_writes.clone();
         let mut worker_handle = Some(worker_spawner(
             cfg.clone(),
             cmd_rx,
@@ -559,6 +564,7 @@ impl ObscuraPool {
             worker_ready.clone(),
             provider_sessions.clone(),
             metrics.clone(),
+            session_writes.clone(),
         ));
 
         // Recreate the thread-affine engine after a crash; never move Page values
@@ -606,6 +612,7 @@ impl ObscuraPool {
                     worker_ready.clone(),
                     provider_sessions.clone(),
                     metrics.clone(),
+                    session_writes.clone(),
                 ));
                 match tokio::time::timeout(Duration::from_secs(90), next_ready_rx).await {
                     Ok(Ok(Ok(()))) => {
@@ -1339,6 +1346,7 @@ fn browser_thread(
     worker_ready: Arc<AtomicBool>,
     provider_sessions: ProviderSessionRegistry,
     metrics: MetricsRegistry,
+    session_write_tracker: SessionWriteTracker,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let _ready_guard = WorkerReadyGuard(worker_ready.clone());
@@ -1599,6 +1607,7 @@ fn browser_thread(
                             let provider_name = provider.name().to_string();
                             let poll_tick = gateway_poll_tick;
                             let request_metrics = metrics.clone();
+                            let send_session_write_tracker = session_write_tracker.clone();
                             tokio::task::spawn_local(async move {
                                 let _guard = lock.lock().await;
                                 // Reopen only a validated provider-owned thread. Otherwise return
@@ -1723,6 +1732,7 @@ fn browser_thread(
                                         &browser_for_save,
                                         &page_for_save,
                                         &provider_name,
+                                        &send_session_write_tracker,
                                     ).await {
                                         tracing::warn!(provider = %provider_name, %error, "rotated session snapshot failed");
                                     }
@@ -1758,6 +1768,7 @@ fn browser_thread(
                         Command::TestAdapter { provider, reply } => {
                             let browser = browser.clone();
                             let registry = registry.clone();
+                            let adapter_session_write_tracker = session_write_tracker.clone();
                             tokio::task::spawn_local(async move {
                                 let mut report = TestAdapterReport::default();
                                 let finish = |report: TestAdapterReport| {
@@ -1874,7 +1885,7 @@ fn browser_thread(
                                 if !report.response_token {
                                     report.errors.push("response: no token within 45s".to_string());
                                 } else if let Err(error) =
-                                    session::save_session_if_changed(&browser, &page, provider.name()).await
+                                    session::save_session_if_changed(&browser, &page, provider.name(), &adapter_session_write_tracker).await
                                 {
                                     tracing::warn!(provider = provider.name(), %error, "probe session snapshot failed");
                                 }
@@ -1978,6 +1989,7 @@ fn browser_thread(
                             let locks = locks.clone();
                             let login_pages = login_pages.clone();
                             let login_meta = login_meta.clone();
+                            let login_session_write_tracker = session_write_tracker.clone();
                             tokio::task::spawn_local(async move {
                                 sweep_login_pages(&login_pages, &login_meta);
                                 let res: Result<LoginCompleted> = async {
@@ -1999,7 +2011,7 @@ fn browser_thread(
                                     // session::save_session (cookies from
                                     // the browser-wide CookieStore +
                                     // localStorage from this page).
-                                    session::save_session(&browser, &login_page, provider.name()).await?;
+                                    session::save_session(&browser, &login_page, provider.name(), &login_session_write_tracker).await?;
                                     pages.borrow_mut().insert(provider, login_page);
                                     login_pages.borrow_mut().remove(&provider);
                                     login_meta.borrow_mut().remove(&provider);
