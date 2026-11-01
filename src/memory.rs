@@ -1259,6 +1259,8 @@ impl UnifiedMemory {
 
     /// List every stored item for inspection/export, including expired items.
     /// This deliberately remains available when retrieval is disabled.
+    // Retained for compatibility and focused storage tests after handlers migrate to snapshots.
+    #[allow(dead_code)]
     pub fn list_long_term_memory_items(
         &self,
         owner_key_id: &str,
@@ -1561,6 +1563,7 @@ impl LongTermMemoryStore for UnifiedMemory {
     }
 }
 
+#[cfg(test)]
 #[cfg(test)]
 mod async_long_term_memory_store_tests {
     use super::{ConversationStore, LongTermMemoryStore, UnifiedMemory};
