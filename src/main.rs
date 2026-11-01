@@ -2777,11 +2777,11 @@ async fn chat_completions(
                     yield Ok(Event::default().data(error.to_string()));
                 } else {
                     state_c.provider_sessions.record_success(&provider_c);
-                    if persist_completed_turn(
+                    if let Err(error) = persist_completed_turn(
                         &state_c, &owner_key_id_c, &conv_stream, windowed_c.clone(), full.clone(),
                         &provider_c, &model_c,
-                    ).await.is_err() {
-                        tracing::error!(conversation_id = %conv_stream, "conversation persistence failed after stream");
+                    ).await {
+                        tracing::error!(conversation_id = %conv_stream, %error, "conversation persistence failed after stream");
                         let error = serde_json::json!({
                             "error": { "message": "conversation could not be persisted", "type": "server_error", "code": "memory_persistence_failed" }
                         });
@@ -2861,11 +2861,11 @@ async fn chat_completions(
             provider_work_ms,
             total_ms,
         );
-        if persist_completed_turn(
+        if let Err(error) = persist_completed_turn(
             &state, &owner_key_id, &new_conv_id, windowed.clone(), full.clone(),
             &provider_name, &req.model,
-        ).await.is_err() {
-            tracing::error!(conversation_id = %new_conv_id, "conversation persistence failed");
+        ).await {
+            tracing::error!(conversation_id = %new_conv_id, %error, "conversation persistence failed");
             return api_error(
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                 "server_error",
