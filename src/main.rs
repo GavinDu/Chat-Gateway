@@ -1210,12 +1210,13 @@ async fn authenticate_api_key(
         && !path.starts_with("/relay/v1/")
         && path != "/relay/v1/pair"
     {
-        let expected = std::env::var("CHAT_GATEWAY_AUTH_SECRET_HASH").unwrap_or_default();
+        let expected = std::env::var("CHAT_GATEWAY_API_KEY").unwrap_or_default();
         let supplied = authorization
             .and_then(|header| header.split_once(' '))
             .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("bearer"))
             .map(|(_, secret)| hash_api_key(secret));
-        if supplied.as_deref().is_none_or(|digest| !constant_time_eq(digest.as_bytes(), expected.to_ascii_lowercase().as_bytes())) {
+        let expected_hash = hash_api_key(&expected);
+        if supplied.as_deref().is_none_or(|digest| !constant_time_eq(digest.as_bytes(), expected_hash.as_bytes())) {
             return api_error(
                 StatusCode::UNAUTHORIZED,
                 "authentication_error",
