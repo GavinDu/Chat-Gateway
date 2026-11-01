@@ -22,7 +22,9 @@ pub struct SessionWriteTracker {
 }
 impl SessionWriteTracker {
     fn is_rate_limited(&self, provider: &str, now: Instant) -> bool {
-        self.last_successful_write.lock().ok()
+        self.last_successful_write
+            .lock()
+            .ok()
             .and_then(|writes| writes.get(provider).copied())
             .is_some_and(|last| now.duration_since(last) < SESSION_WRITE_INTERVAL)
     }
@@ -235,7 +237,13 @@ impl SessionStore for FileSessionStore {
         load_session_file_from_path(Path::new(&path))
     }
 
-    async fn save_if_changed(&self, browser: &Browser, page: &Page, provider: &str, tracker: &SessionWriteTracker) -> Result<()> {
+    async fn save_if_changed(
+        &self,
+        browser: &Browser,
+        page: &Page,
+        provider: &str,
+        tracker: &SessionWriteTracker,
+    ) -> Result<()> {
         save_session_if_changed_file(browser, page, provider, tracker).await
     }
 }
@@ -261,14 +269,26 @@ impl SessionStore for VaultSessionStore {
         )
     }
 
-    async fn save_if_changed(&self, browser: &Browser, page: &Page, provider: &str, tracker: &SessionWriteTracker) -> Result<()> {
+    async fn save_if_changed(
+        &self,
+        browser: &Browser,
+        page: &Page,
+        provider: &str,
+        tracker: &SessionWriteTracker,
+    ) -> Result<()> {
         let file = capture_session(browser, page, provider).await?;
         self.save_file_if_changed(file, provider, tracker).await
     }
 }
 
 impl VaultSessionStore {
-    async fn save_session(&self, browser: &Browser, page: &Page, provider: &str, tracker: &SessionWriteTracker) -> Result<()> {
+    async fn save_session(
+        &self,
+        browser: &Browser,
+        page: &Page,
+        provider: &str,
+        tracker: &SessionWriteTracker,
+    ) -> Result<()> {
         let file = capture_session(browser, page, provider).await?;
         let key = vault_key_from_env()?;
         ensure_private_session_dir(Path::new("sessions")).await?;
@@ -284,7 +304,12 @@ impl VaultSessionStore {
         Ok(())
     }
 
-    async fn save_file_if_changed(&self, file: SessionFile, provider: &str, tracker: &SessionWriteTracker) -> Result<()> {
+    async fn save_file_if_changed(
+        &self,
+        file: SessionFile,
+        provider: &str,
+        tracker: &SessionWriteTracker,
+    ) -> Result<()> {
         let key = vault_key_from_env()?;
         let current_hash = session_state_hash(&file)?;
         let destination = session_vault_path(provider)?;
@@ -401,7 +426,7 @@ fn migrate_legacy_snapshot_with_remover(
     // A deletion failure leaves both copies intact and returns an error, rather
     // than reporting a completed migration with a plaintext source still present.
     remove_legacy(legacy_path)?;
-    
+
     tracing::info!(provider, "migrated plaintext session into encrypted vault");
     Ok(verified)
 }
@@ -448,7 +473,7 @@ pub fn import_relay_session(provider: &str, file: &SessionFile) -> Result<()> {
         return Err(error);
     }
     remove_legacy_session_snapshot(provider)?;
-    
+
     tracing::info!(
         provider,
         cookies = file.cookies.len(),
@@ -1088,7 +1113,12 @@ async fn capture_session(browser: &Browser, page: &Page, provider: &str) -> Resu
 
 /// Capture cookies (from the browser's CookieStore) and localStorage into
 /// sessions/<provider>.json. Login completion deliberately forces a save.
-pub async fn save_session(browser: &Browser, page: &Page, provider: &str, tracker: &SessionWriteTracker) -> Result<()> {
+pub async fn save_session(
+    browser: &Browser,
+    page: &Page,
+    provider: &str,
+    tracker: &SessionWriteTracker,
+) -> Result<()> {
     if matches!(
         std::env::var("CHAT_GATEWAY_SESSION_STORE").as_deref(),
         Ok("vault")
@@ -1105,7 +1135,12 @@ pub async fn save_session(browser: &Browser, page: &Page, provider: &str, tracke
 /// Persist a post-send snapshot only when the provider-scoped session changed.
 /// Writes are atomic and capped at one per provider per minute. A skipped
 /// changed snapshot will be retried after the interval on the next successful send.
-pub async fn save_session_if_changed(browser: &Browser, page: &Page, provider: &str, tracker: &SessionWriteTracker) -> Result<()> {
+pub async fn save_session_if_changed(
+    browser: &Browser,
+    page: &Page,
+    provider: &str,
+    tracker: &SessionWriteTracker,
+) -> Result<()> {
     if matches!(
         std::env::var("CHAT_GATEWAY_SESSION_STORE").as_deref(),
         Ok("vault")
@@ -1148,7 +1183,11 @@ async fn save_session_if_changed_file(
     write_session_snapshot(file, provider, tracker).await
 }
 
-async fn write_session_snapshot(file: SessionFile, provider: &str, tracker: &SessionWriteTracker) -> Result<()> {
+async fn write_session_snapshot(
+    file: SessionFile,
+    provider: &str,
+    tracker: &SessionWriteTracker,
+) -> Result<()> {
     ensure_private_session_dir(Path::new("sessions")).await?;
     let destination = session_path(provider)?;
     let serialized = Zeroizing::new(serde_json::to_vec_pretty(&file)?);
