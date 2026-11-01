@@ -65,6 +65,19 @@ test("relayFetch rejects a remote gateway value restored from extension storage"
   assert.equal(api.fetchCalls.length, 0, "no request or relay token may reach a remote host");
 });
 
+
+test("relayFetch supports an HTTPS gateway without weakening the HTTP loopback rule", async () => {
+  const api = loadShared([], true, {
+    gateway: "https://gateway.example.com",
+    token: "relay-secret"
+  });
+  await api.relayFetch("/relay/v1/status");
+  assert.equal(api.fetchCalls.length, 1);
+  assert.equal(api.fetchCalls[0].url, "https://gateway.example.com/relay/v1/status");
+  assert.equal(api.fetchCalls[0].options.headers.get("Authorization"), "Bearer relay-secret");
+  assert.equal(api.fetchCalls[0].options.cache, "no-store");
+});
+
 test("provider cookie snapshot excludes cookies outside that provider's domain roots", async () => {
   const fixtures = [
     { name: "session", value: "keep", domain: ".chatgpt.com", path: "/", secure: true, httpOnly: true },
