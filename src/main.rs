@@ -556,7 +556,7 @@ async fn protect_login_api(req: Request<Body>, next: Next) -> Response {
     };
 
     let authority_is_safe = if let Ok(Some((_, authority))) = remote_gateway_origin() {
-        remote_request_is_allowed(headers, &authority, is_relay_api && relay::relay_origin_is_allowed(headers))
+        remote_request_is_allowed(headers, &remote_gateway_origin().ok().flatten().map(|(origin, _)| origin).unwrap_or_default(), &authority, is_relay_api && relay::relay_origin_is_allowed(headers))
     } else {
         headers
             .get(axum::http::header::HOST)
