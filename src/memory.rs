@@ -120,13 +120,6 @@ pub trait ConversationStore: Send + Sync {
         owner_key_id: String,
         thread: ProviderThread,
     ) -> anyhow::Result<()>;
-    async fn long_term_memory_enabled_async(self: Arc<Self>, owner_key_id: String) -> anyhow::Result<bool>;
-    async fn set_long_term_memory_enabled_async(self: Arc<Self>, owner_key_id: String, enabled: bool) -> anyhow::Result<()>;
-    async fn long_term_memory_snapshot_async(self: Arc<Self>, owner_key_id: String) -> anyhow::Result<(bool, Vec<LongTermMemoryItem>)>;
-    async fn save_long_term_memory_item_async(self: Arc<Self>, owner_key_id: String, memory_key: String, value: String, source_conversation_id: Option<String>, confidence: f64, expires_at: Option<i64>) -> anyhow::Result<LongTermMemoryItem>;
-    async fn delete_long_term_memory_item_async(self: Arc<Self>, owner_key_id: String, item_id: String) -> anyhow::Result<bool>;
-    async fn delete_all_long_term_memory_items_async(self: Arc<Self>, owner_key_id: String) -> anyhow::Result<usize>;
-    async fn retrieve_long_term_memory_items_async(self: Arc<Self>, owner_key_id: String, limit: usize) -> anyhow::Result<Vec<LongTermMemoryItem>>;
 
 }
 
@@ -228,40 +221,6 @@ impl ConversationStore for UnifiedMemory {
         })
         .await
         .map_err(|error| anyhow::anyhow!("provider thread persistence task failed: {error}"))?
-    }
-    async fn long_term_memory_enabled_async(self: Arc<Self>, owner_key_id: String) -> anyhow::Result<bool> {
-        tokio::task::spawn_blocking(move || self.long_term_memory_enabled(&owner_key_id))
-            .await.map_err(|error| anyhow::anyhow!("memory settings read task failed: {error}"))?
-    }
-
-    async fn set_long_term_memory_enabled_async(self: Arc<Self>, owner_key_id: String, enabled: bool) -> anyhow::Result<()> {
-        tokio::task::spawn_blocking(move || self.set_long_term_memory_enabled(&owner_key_id, enabled))
-            .await.map_err(|error| anyhow::anyhow!("memory settings write task failed: {error}"))?
-    }
-
-    async fn long_term_memory_snapshot_async(self: Arc<Self>, owner_key_id: String) -> anyhow::Result<(bool, Vec<LongTermMemoryItem>)> {
-        tokio::task::spawn_blocking(move || self.long_term_memory_snapshot(&owner_key_id))
-            .await.map_err(|error| anyhow::anyhow!("memory snapshot task failed: {error}"))?
-    }
-
-    async fn save_long_term_memory_item_async(self: Arc<Self>, owner_key_id: String, memory_key: String, value: String, source_conversation_id: Option<String>, confidence: f64, expires_at: Option<i64>) -> anyhow::Result<LongTermMemoryItem> {
-        tokio::task::spawn_blocking(move || self.save_long_term_memory_item(&owner_key_id, &memory_key, &value, source_conversation_id.as_deref(), confidence, expires_at))
-            .await.map_err(|error| anyhow::anyhow!("memory item save task failed: {error}"))?
-    }
-
-    async fn delete_long_term_memory_item_async(self: Arc<Self>, owner_key_id: String, item_id: String) -> anyhow::Result<bool> {
-        tokio::task::spawn_blocking(move || self.delete_long_term_memory_item(&owner_key_id, &item_id))
-            .await.map_err(|error| anyhow::anyhow!("memory item deletion task failed: {error}"))?
-    }
-
-    async fn delete_all_long_term_memory_items_async(self: Arc<Self>, owner_key_id: String) -> anyhow::Result<usize> {
-        tokio::task::spawn_blocking(move || self.delete_all_long_term_memory_items(&owner_key_id))
-            .await.map_err(|error| anyhow::anyhow!("memory bulk deletion task failed: {error}"))?
-    }
-
-    async fn retrieve_long_term_memory_items_async(self: Arc<Self>, owner_key_id: String, limit: usize) -> anyhow::Result<Vec<LongTermMemoryItem>> {
-        tokio::task::spawn_blocking(move || self.retrieve_long_term_memory_items(&owner_key_id, limit))
-            .await.map_err(|error| anyhow::anyhow!("memory retrieval task failed: {error}"))?
     }
 
 }
@@ -1428,6 +1387,58 @@ fn extractive_rolling_summary(messages: &[ChatMessage], max_chars: usize) -> Str
 }
 
 
+
+/// Async operations for opt-in cross-conversation memory controls and items.
+#[async_trait::async_trait]
+pub trait LongTermMemoryStore: Send + Sync {
+    async fn long_term_memory_enabled_async(self: Arc<Self>, owner_key_id: String) -> anyhow::Result<bool>;
+    async fn set_long_term_memory_enabled_async(self: Arc<Self>, owner_key_id: String, enabled: bool) -> anyhow::Result<()>;
+    async fn long_term_memory_snapshot_async(self: Arc<Self>, owner_key_id: String) -> anyhow::Result<(bool, Vec<LongTermMemoryItem>)>;
+    async fn save_long_term_memory_item_async(self: Arc<Self>, owner_key_id: String, memory_key: String, value: String, source_conversation_id: Option<String>, confidence: f64, expires_at: Option<i64>) -> anyhow::Result<LongTermMemoryItem>;
+    async fn delete_long_term_memory_item_async(self: Arc<Self>, owner_key_id: String, item_id: String) -> anyhow::Result<bool>;
+    async fn delete_all_long_term_memory_items_async(self: Arc<Self>, owner_key_id: String) -> anyhow::Result<usize>;
+    async fn retrieve_long_term_memory_items_async(self: Arc<Self>, owner_key_id: String, limit: usize) -> anyhow::Result<Vec<LongTermMemoryItem>>;
+
+}
+
+#[async_trait::async_trait]
+impl LongTermMemoryStore for UnifiedMemory {
+    async fn long_term_memory_enabled_async(self: Arc<Self>, owner_key_id: String) -> anyhow::Result<bool> {
+        tokio::task::spawn_blocking(move || self.long_term_memory_enabled(&owner_key_id))
+            .await.map_err(|error| anyhow::anyhow!("memory settings read task failed: {error}"))?
+    }
+
+    async fn set_long_term_memory_enabled_async(self: Arc<Self>, owner_key_id: String, enabled: bool) -> anyhow::Result<()> {
+        tokio::task::spawn_blocking(move || self.set_long_term_memory_enabled(&owner_key_id, enabled))
+            .await.map_err(|error| anyhow::anyhow!("memory settings write task failed: {error}"))?
+    }
+
+    async fn long_term_memory_snapshot_async(self: Arc<Self>, owner_key_id: String) -> anyhow::Result<(bool, Vec<LongTermMemoryItem>)> {
+        tokio::task::spawn_blocking(move || self.long_term_memory_snapshot(&owner_key_id))
+            .await.map_err(|error| anyhow::anyhow!("memory snapshot task failed: {error}"))?
+    }
+
+    async fn save_long_term_memory_item_async(self: Arc<Self>, owner_key_id: String, memory_key: String, value: String, source_conversation_id: Option<String>, confidence: f64, expires_at: Option<i64>) -> anyhow::Result<LongTermMemoryItem> {
+        tokio::task::spawn_blocking(move || self.save_long_term_memory_item(&owner_key_id, &memory_key, &value, source_conversation_id.as_deref(), confidence, expires_at))
+            .await.map_err(|error| anyhow::anyhow!("memory item save task failed: {error}"))?
+    }
+
+    async fn delete_long_term_memory_item_async(self: Arc<Self>, owner_key_id: String, item_id: String) -> anyhow::Result<bool> {
+        tokio::task::spawn_blocking(move || self.delete_long_term_memory_item(&owner_key_id, &item_id))
+            .await.map_err(|error| anyhow::anyhow!("memory item deletion task failed: {error}"))?
+    }
+
+    async fn delete_all_long_term_memory_items_async(self: Arc<Self>, owner_key_id: String) -> anyhow::Result<usize> {
+        tokio::task::spawn_blocking(move || self.delete_all_long_term_memory_items(&owner_key_id))
+            .await.map_err(|error| anyhow::anyhow!("memory bulk deletion task failed: {error}"))?
+    }
+
+    async fn retrieve_long_term_memory_items_async(self: Arc<Self>, owner_key_id: String, limit: usize) -> anyhow::Result<Vec<LongTermMemoryItem>> {
+        tokio::task::spawn_blocking(move || self.retrieve_long_term_memory_items(&owner_key_id, limit))
+            .await.map_err(|error| anyhow::anyhow!("memory retrieval task failed: {error}"))?
+    }
+
+}
 
 #[cfg(test)]
 mod async_long_term_memory_store_tests {
