@@ -132,134 +132,51 @@ pub trait ConversationStore: Send + Sync {
 
 #[async_trait::async_trait]
 impl ConversationStore for UnifiedMemory {
-    async fn build_context_with_transcript(
-        self: Arc<Self>,
-        owner_key_id: String,
-        conversation_id: Option<String>,
-        new_messages: Vec<ChatMessage>,
-        token_budget: usize,
-    ) -> anyhow::Result<(String, Vec<ChatMessage>, bool, Vec<ChatMessage>)> {
-        self.build_context_for_owner_with_transcript_budget_blocking(
-            owner_key_id,
-            conversation_id,
-            new_messages,
-            token_budget,
-        )
-        .await
+    async fn build_context_with_transcript(self: Arc<Self>, owner_key_id: String, conversation_id: Option<String>, new_messages: Vec<ChatMessage>, token_budget: usize) -> anyhow::Result<(String, Vec<ChatMessage>, bool, Vec<ChatMessage>)> {
+        self.build_context_for_owner_with_transcript_budget_blocking(owner_key_id, conversation_id, new_messages, token_budget).await
     }
-
-    async fn persist_turn(
-        self: Arc<Self>,
-        owner_key_id: String,
-        conversation_id: String,
-        user_messages: Vec<ChatMessage>,
-        assistant_message: ChatMessage,
-        provider: String,
-        tab_id: Option<String>,
-    ) -> anyhow::Result<String> {
-        self.store_turn_for_owner_with_tab_id_marker_blocking(
-            owner_key_id,
-            conversation_id,
-            user_messages,
-            assistant_message,
-            provider,
-            tab_id,
-        )
-        .await
+    async fn persist_turn(self: Arc<Self>, owner_key_id: String, conversation_id: String, user_messages: Vec<ChatMessage>, assistant_message: ChatMessage, provider: String, tab_id: Option<String>) -> anyhow::Result<String> {
+        self.store_turn_for_owner_with_tab_id_marker_blocking(owner_key_id, conversation_id, user_messages, assistant_message, provider, tab_id).await
     }
-
-    async fn list_conversations_async(
-        self: Arc<Self>,
-        owner_key_id: String,
-        limit: usize,
-        offset: usize,
-    ) -> anyhow::Result<Vec<ConversationSummary>> {
-        tokio::task::spawn_blocking(move || {
-            self.list_conversations_for_owner(&owner_key_id, limit, offset)
-        })
-        .await
-        .map_err(|error| anyhow::anyhow!("conversation list task failed: {error}"))?
+    async fn list_conversations_async(self: Arc<Self>, owner_key_id: String, limit: usize, offset: usize) -> anyhow::Result<Vec<ConversationSummary>> {
+        tokio::task::spawn_blocking(move || self.list_conversations_for_owner(&owner_key_id, limit, offset)).await.map_err(|e| anyhow::anyhow!("conversation list task failed: {e}"))?
     }
-
-    async fn export_conversation_async(
-        self: Arc<Self>,
-        owner_key_id: String,
-        conversation_id: String,
-    ) -> anyhow::Result<Option<Conversation>> {
-        tokio::task::spawn_blocking(move || {
-            self.export_conversation_for_owner(&owner_key_id, &conversation_id)
-        })
-        .await
-        .map_err(|error| anyhow::anyhow!("conversation export task failed: {error}"))?
+    async fn export_conversation_async(self: Arc<Self>, owner_key_id: String, conversation_id: String) -> anyhow::Result<Option<Conversation>> {
+        tokio::task::spawn_blocking(move || self.export_conversation_for_owner(&owner_key_id, &conversation_id)).await.map_err(|e| anyhow::anyhow!("conversation export task failed: {e}"))?
     }
-
-    async fn delete_conversation_async(
-        self: Arc<Self>,
-        owner_key_id: String,
-        conversation_id: String,
-    ) -> anyhow::Result<bool> {
-        tokio::task::spawn_blocking(move || {
-            self.delete_conversation_for_owner(&owner_key_id,
+    async fn delete_conversation_async(self: Arc<Self>, owner_key_id: String, conversation_id: String) -> anyhow::Result<bool> {
+        tokio::task::spawn_blocking(move || self.delete_conversation_for_owner(&owner_key_id, &conversation_id)).await.map_err(|e| anyhow::anyhow!("conversation deletion task failed: {e}"))?
+    }
+    async fn get_provider_thread_async(self: Arc<Self>, owner_key_id: String, conversation_id: String, provider: String) -> anyhow::Result<Option<ProviderThread>> {
+        tokio::task::spawn_blocking(move || self.get_provider_thread_for_owner(&owner_key_id, &conversation_id, &provider)).await.map_err(|e| anyhow::anyhow!("provider thread lookup task failed: {e}"))?
+    }
+    async fn upsert_provider_thread_async(self: Arc<Self>, owner_key_id: String, thread: ProviderThread) -> anyhow::Result<()> {
+        tokio::task::spawn_blocking(move || self.upsert_provider_thread_for_owner(&owner_key_id, &thread)).await.map_err(|e| anyhow::anyhow!("provider thread persistence task failed: {e}"))?
+    }
     async fn long_term_memory_enabled_async(self: Arc<Self>, owner_key_id: String) -> anyhow::Result<bool> {
-        tokio::task::spawn_blocking(move || self.long_term_memory_enabled(&owner_key_id)).await
-            .map_err(|error| anyhow::anyhow!("memory settings read task failed: {error}"))?
+        tokio::task::spawn_blocking(move || self.long_term_memory_enabled(&owner_key_id)).await.map_err(|e| anyhow::anyhow!("memory settings read task failed: {e}"))?
     }
     async fn set_long_term_memory_enabled_async(self: Arc<Self>, owner_key_id: String, enabled: bool) -> anyhow::Result<()> {
-        tokio::task::spawn_blocking(move || self.set_long_term_memory_enabled(&owner_key_id, enabled)).await
-            .map_err(|error| anyhow::anyhow!("memory settings write task failed: {error}"))?
+        tokio::task::spawn_blocking(move || self.set_long_term_memory_enabled(&owner_key_id, enabled)).await.map_err(|e| anyhow::anyhow!("memory settings write task failed: {e}"))?
     }
     async fn list_long_term_memory_snapshot_async(self: Arc<Self>, owner_key_id: String) -> anyhow::Result<(bool, Vec<LongTermMemoryItem>)> {
         tokio::task::spawn_blocking(move || {
             let enabled = self.long_term_memory_enabled(&owner_key_id)?;
             let items = self.list_long_term_memory_items(&owner_key_id)?;
             Ok((enabled, items))
-        }).await.map_err(|error| anyhow::anyhow!("memory item snapshot task failed: {error}"))?
+        }).await.map_err(|e| anyhow::anyhow!("memory item snapshot task failed: {e}"))?
     }
     async fn retrieve_long_term_memory_items_async(self: Arc<Self>, owner_key_id: String, limit: usize) -> anyhow::Result<Vec<LongTermMemoryItem>> {
-        tokio::task::spawn_blocking(move || self.retrieve_long_term_memory_items(&owner_key_id, limit)).await
-            .map_err(|error| anyhow::anyhow!("memory item retrieval task failed: {error}"))?
+        tokio::task::spawn_blocking(move || self.retrieve_long_term_memory_items(&owner_key_id, limit)).await.map_err(|e| anyhow::anyhow!("memory item retrieval task failed: {e}"))?
     }
     async fn save_long_term_memory_item_async(self: Arc<Self>, owner_key_id: String, memory_key: String, value: String, source_conversation_id: Option<String>, confidence: f64, expires_at: Option<i64>) -> anyhow::Result<LongTermMemoryItem> {
-        tokio::task::spawn_blocking(move || self.save_long_term_memory_item(&owner_key_id, &memory_key, &value, source_conversation_id.as_deref(), confidence, expires_at)).await
-            .map_err(|error| anyhow::anyhow!("memory item save task failed: {error}"))?
+        tokio::task::spawn_blocking(move || self.save_long_term_memory_item(&owner_key_id, &memory_key, &value, source_conversation_id.as_deref(), confidence, expires_at)).await.map_err(|e| anyhow::anyhow!("memory item save task failed: {e}"))?
     }
     async fn delete_long_term_memory_item_async(self: Arc<Self>, owner_key_id: String, item_id: String) -> anyhow::Result<bool> {
-        tokio::task::spawn_blocking(move || self.delete_long_term_memory_item(&owner_key_id, &item_id)).await
-            .map_err(|error| anyhow::anyhow!("memory item deletion task failed: {error}"))?
+        tokio::task::spawn_blocking(move || self.delete_long_term_memory_item(&owner_key_id, &item_id)).await.map_err(|e| anyhow::anyhow!("memory item deletion task failed: {e}"))?
     }
     async fn delete_all_long_term_memory_items_async(self: Arc<Self>, owner_key_id: String) -> anyhow::Result<usize> {
-        tokio::task::spawn_blocking(move || self.delete_all_long_term_memory_items(&owner_key_id)).await
-            .map_err(|error| anyhow::anyhow!("memory bulk deletion task failed: {error}"))?
-    }
- &conversation_id)
-        })
-        .await
-        .map_err(|error| anyhow::anyhow!("conversation deletion task failed: {error}"))?
-    }
-
-    async fn get_provider_thread_async(
-        self: Arc<Self>,
-        owner_key_id: String,
-        conversation_id: String,
-        provider: String,
-    ) -> anyhow::Result<Option<ProviderThread>> {
-        tokio::task::spawn_blocking(move || {
-            self.get_provider_thread_for_owner(&owner_key_id, &conversation_id, &provider)
-        })
-        .await
-        .map_err(|error| anyhow::anyhow!("provider thread lookup task failed: {error}"))?
-    }
-
-    async fn upsert_provider_thread_async(
-        self: Arc<Self>,
-        owner_key_id: String,
-        thread: ProviderThread,
-    ) -> anyhow::Result<()> {
-        tokio::task::spawn_blocking(move || {
-            self.upsert_provider_thread_for_owner(&owner_key_id, &thread)
-        })
-        .await
-        .map_err(|error| anyhow::anyhow!("provider thread persistence task failed: {error}"))?
+        tokio::task::spawn_blocking(move || self.delete_all_long_term_memory_items(&owner_key_id)).await.map_err(|e| anyhow::anyhow!("memory bulk deletion task failed: {e}"))?
     }
 }
 
