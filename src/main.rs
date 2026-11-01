@@ -4335,7 +4335,7 @@ mod first_event_tests {
             panic!("expected first-event error");
         };
         let provider_sessions = crate::provider_state::ProviderSessionRegistry::default();
-        let metrics_registry = metrics::MetricsRegistry::default();
+        let metrics_registry = crate::metrics::MetricsRegistry::default();
         record_attempt_error(
             &provider_sessions,
             &metrics_registry,
