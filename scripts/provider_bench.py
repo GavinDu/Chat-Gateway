@@ -34,6 +34,8 @@ def has_content_delta(sse_line):
     """Return true only for a non-empty OpenAI-compatible streamed content delta."""
     if isinstance(sse_line, bytes):
         sse_line = sse_line.decode("utf-8", errors="replace")
+    if not isinstance(sse_line, str):
+        return False
     line = sse_line.strip()
     if not line.startswith("data:"):
         return False
@@ -42,9 +44,17 @@ def has_content_delta(sse_line):
         return False
     try:
         event = json.loads(data)
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, TypeError, ValueError):
         return False
-    content = (event.get("choices") or [{}])[0].get("delta", {}).get("content")
+    if not isinstance(event, dict):
+        return False
+    choices = event.get("choices")
+    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+        return False
+    delta = choices[0].get("delta")
+    if not isinstance(delta, dict):
+        return False
+    content = delta.get("content")
     return isinstance(content, str) and bool(content)
 
 
