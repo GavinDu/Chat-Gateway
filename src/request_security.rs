@@ -76,10 +76,10 @@ pub(crate) fn remote_gateway_origin() -> anyhow::Result<Option<(String, String)>
     let Some((scheme, remainder)) = value.split_once("://") else {
         anyhow::bail!("CHAT_GATEWAY_REMOTE_ORIGIN must be an HTTPS origin");
     };
-    if scheme != "https" || remainder.is_empty() || remainder.contains('/') && !remainder.ends_with('/') {
+    let authority = remainder.strip_suffix('/').unwrap_or(remainder);
+    if scheme != "https" || authority.is_empty() || authority.contains('/') {
         anyhow::bail!("CHAT_GATEWAY_REMOTE_ORIGIN must be an HTTPS origin without a path");
     }
-    let authority = remainder.trim_end_matches('/');
     if authority.is_empty()
         || authority.contains('@')
         || authority.contains('?')
