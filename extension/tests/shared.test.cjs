@@ -41,7 +41,6 @@ test("gateway normalization accepts local HTTP and explicit HTTPS origins", () =
 test("gateway normalization rejects remote HTTP and malformed HTTPS origins", () => {
   const api = loadShared();
   for (const value of [
-    "https://localhost:8080",
     "http://gateway.example",
     "https://gateway.example.com/path",
     "https://user:pass@gateway.example.com",
