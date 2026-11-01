@@ -1,0 +1,11 @@
+{
+  "name": "chat-gateway-login-browser",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "test:browser-policy": "node --test browser-login/*.test.mjs"
+  },
+  "dependencies": {
+    "playwright": "1.55.0"
+  }
+}

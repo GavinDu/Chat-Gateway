@@ -135,11 +135,64 @@ pub struct Cookie {
     pub path: String,
     pub secure: bool,
     pub http_only: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub same_site: Option<String>,
 }
 
 impl Drop for Cookie {
     fn drop(&mut self) {
         self.value.zeroize();
+    }
+}
+impl Cookie {
+    fn validate_browser_metadata(&self) -> Result<()> {
+        if self.expires.is_some_and(|e| !e.is_finite() || e < -1.0) {
+            anyhow::bail!("invalid cookie expiry");
+        }
+        if self
+            .same_site
+            .as_deref()
+            .is_some_and(|s| !matches!(s, "Strict" | "Lax" | "None"))
+        {
+            anyhow::bail!("invalid cookie SameSite");
+        }
+        if self.same_site.as_deref() == Some("None") && !self.secure {
+            anyhow::bail!("SameSite=None requires a secure cookie");
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod browser_cookie_metadata_tests {
+    use super::*;
+    #[test]
+    fn legacy_cookie_and_browser_attributes_roundtrip_without_forced_lax() {
+        let mut cookie: Cookie = serde_json::from_value(serde_json::json!({
+            "name":"fixture","value":"dummy","domain":"chatgpt.com","path":"/",
+            "secure":true,"http_only":true
+        }))
+        .unwrap();
+        assert!(cookie.expires.is_none());
+        assert!(cookie.same_site.is_none());
+        assert!(serde_json::to_value(&cookie)
+            .unwrap()
+            .get("expires")
+            .is_none());
+        cookie.expires = Some(2000000000.0);
+        cookie.same_site = Some("Strict".into());
+        cookie.validate_browser_metadata().unwrap();
+        let roundtrip: Cookie =
+            serde_json::from_value(serde_json::to_value(&cookie).unwrap()).unwrap();
+        assert_eq!(roundtrip.expires, cookie.expires);
+        assert_eq!(roundtrip.same_site, cookie.same_site);
+        cookie.same_site = Some("unexpected".into());
+        assert!(cookie.validate_browser_metadata().is_err());
+        cookie.same_site = Some("None".into());
+        cookie.secure = false;
+        assert!(cookie.validate_browser_metadata().is_err());
     }
 }
 
@@ -152,6 +205,8 @@ impl From<obscura_core::Cookie> for Cookie {
             path: c.path,
             secure: c.secure,
             http_only: c.http_only,
+            expires: None,
+            same_site: None,
         }
     }
 }
@@ -441,6 +496,9 @@ fn migrate_legacy_snapshot_with_remover(
 /// localStorage export is deliberately disabled until each provider has a
 /// reviewed key allowlist.
 pub fn import_relay_session(provider: &str, file: &SessionFile) -> Result<()> {
+    for cookie in &file.cookies {
+        cookie.validate_browser_metadata()?;
+    }
     if !matches!(
         std::env::var("CHAT_GATEWAY_SESSION_STORE").as_deref(),
         Ok("vault")
@@ -909,6 +967,14 @@ fn read_vault_key_file(path: &Path) -> Result<Zeroizing<String>> {
     )?))
 }
 
+pub fn validate_encrypted_store_configuration() -> Result<()> {
+    if std::env::var("CHAT_GATEWAY_SESSION_STORE").as_deref() == Ok("vault") {
+        // Parse only in the gateway process. Do not open any session file.
+        let _key = vault_key_from_env()?;
+    }
+    Ok(())
+}
+
 fn vault_key_from_env() -> Result<Zeroizing<[u8; 32]>> {
     let encoded = if let Ok(value) = std::env::var("CHAT_GATEWAY_VAULT_KEY") {
         Zeroizing::new(value)
@@ -1269,6 +1335,8 @@ mod cookie_restore_result_tests {
                     path: "/".into(),
                     secure: true,
                     http_only: true,
+                    expires: None,
+                    same_site: None,
                 },
                 Cookie {
                     name: "a".into(),
@@ -1277,6 +1345,8 @@ mod cookie_restore_result_tests {
                     path: "/".into(),
                     secure: true,
                     http_only: true,
+                    expires: None,
+                    same_site: None,
                 },
             ],
             ts: "old".into(),
@@ -1298,6 +1368,8 @@ mod cookie_restore_result_tests {
                 path: "/".into(),
                 secure: true,
                 http_only: true,
+                expires: None,
+                same_site: None,
             }],
             ts: "now".into(),
         };
@@ -1538,6 +1610,8 @@ mod cookie_scope_tests {
             path: path.to_string(),
             secure: true,
             http_only: true,
+            expires: None,
+            same_site: None,
         }
     }
 
@@ -1718,6 +1792,8 @@ mod vault_tests {
                 path: "/".to_owned(),
                 secure: true,
                 http_only: true,
+                expires: None,
+                same_site: None,
             }],
             ts: "2026-10-27T00:00:00Z".to_owned(),
         }

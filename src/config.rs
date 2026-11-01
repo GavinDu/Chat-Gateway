@@ -140,9 +140,35 @@ impl AppConfig {
         if let Ok(port) = std::env::var("PORT") {
             cfg.server.port = parse_port_override(&port)?;
         }
+        if std::env::var("CHAT_GATEWAY_OWNER_AUTH_FROM_ENV").as_deref() == Ok("1") {
+            let key =
+                zeroize::Zeroizing::new(std::env::var("CHAT_GATEWAY_API_KEY").map_err(|_| {
+                    anyhow::anyhow!("CHAT_GATEWAY_API_KEY is required for owner auth")
+                })?);
+            cfg.install_environment_owner_key(&key)?;
+        }
         cfg.validate()?;
         cfg.providers.sort_by_key(|x| x.priority);
         Ok(cfg)
+    }
+
+    /// Explicit local-owner opt-in; hash in the gateway process, never in a
+    /// launcher, command line, config file, or diagnostic. Not remote enablement.
+    fn install_environment_owner_key(&mut self, key: &str) -> anyhow::Result<()> {
+        use sha2::Digest;
+        if key.len() < 32 || !key.bytes().all(|b| b.is_ascii_graphic()) {
+            anyhow::bail!("CHAT_GATEWAY_API_KEY must be at least 32 printable non-whitespace ASCII characters");
+        }
+        if !self.auth.keys.is_empty() {
+            anyhow::bail!("environment owner auth requires an empty configured auth.keys list");
+        }
+        self.auth.keys.push(ApiKeyConfig {
+            name: "runtime-owner".to_owned(),
+            secret_hash: format!("{:x}", sha2::Sha256::digest(key.as_bytes())),
+            scopes: vec!["admin".into(), "chat".into()],
+            provider_allowlist: None,
+        });
+        Ok(())
     }
 
     /// Reject configuration that would otherwise be silently ignored or
@@ -452,6 +478,27 @@ mod tests {
     fn defaults_queue_timeout_to_thirty_seconds() {
         let cfg = config("providers:\n  - name: chatgpt\n");
         assert_eq!(cfg.provider("chatgpt").unwrap().queue_timeout_seconds, 30);
+    }
+
+    #[test]
+    fn explicit_environment_owner_auth_is_hashed_and_rejects_unsafe_input() {
+        let mut cfg = config("");
+        for bad in [
+            "short",
+            "                                ",
+            "long-enough-but-with-a-space-123456789 ",
+            "non-ascii-登录-123456789012345678901234567890",
+        ] {
+            assert!(cfg.install_environment_owner_key(bad).is_err());
+            assert!(cfg.auth.keys.is_empty());
+        }
+        let dummy = "offline-test-owner-key-not-a-real-credential";
+        cfg.install_environment_owner_key(dummy).unwrap();
+        assert_ne!(cfg.auth.keys[0].secret_hash, dummy);
+        assert_eq!(cfg.auth.keys[0].secret_hash.len(), 64);
+        assert!(cfg.auth.keys[0].scopes.iter().any(|s| s == "admin"));
+        assert!(cfg.validate().is_ok());
+        assert!(cfg.install_environment_owner_key(dummy).is_err());
     }
 
     #[test]
