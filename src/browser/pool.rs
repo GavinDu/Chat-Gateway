@@ -1,6 +1,7 @@
 use crate::config::AppConfig;
 use crate::login::{self, LoginAction, LoginView};
 use crate::provider_guard::ProviderGuard;
+use crate::provider_state::ProviderSessionRegistry;
 use crate::providers::{self, Provider, ProviderChunk};
 use crate::session;
 use anyhow::Result;
@@ -24,6 +25,7 @@ type BrowserWorkerSpawner = fn(
     mpsc::Receiver<Command>,
     oneshot::Sender<Result<()>>,
     Arc<AtomicBool>,
+    ProviderSessionRegistry,
 ) -> std::thread::JoinHandle<()>;
 
 fn join_finished_worker(worker: &mut Option<std::thread::JoinHandle<()>>) -> bool {
@@ -147,6 +149,7 @@ mod worker_supervisor_tests {
         mut commands: tokio::sync::mpsc::Receiver<super::Command>,
         ready: tokio::sync::oneshot::Sender<anyhow::Result<()>>,
         worker_ready: Arc<AtomicBool>,
+        _provider_sessions: super::ProviderSessionRegistry,
     ) -> std::thread::JoinHandle<()> {
         let generation = RESTART_TEST_SPAWNS.fetch_add(1, Ordering::SeqCst);
         std::thread::spawn(move || {
@@ -373,6 +376,7 @@ pub struct ObscuraPool {
     worker_ready: Arc<AtomicBool>,
     worker_generation: Arc<AtomicU64>,
     provider_guard: ProviderGuard,
+    provider_sessions: ProviderSessionRegistry,
 }
 
 enum Command {
@@ -535,12 +539,15 @@ impl ObscuraPool {
             worker_ready: worker_ready.clone(),
             worker_generation: worker_generation.clone(),
             provider_guard: ProviderGuard::default(),
+            provider_sessions: ProviderSessionRegistry::default(),
         });
+        let provider_sessions = pool.provider_sessions.clone();
         let mut worker_handle = Some(worker_spawner(
             cfg.clone(),
             cmd_rx,
             ready_tx,
             worker_ready.clone(),
+            provider_sessions.clone(),
         ));
 
         // Recreate the thread-affine engine after a crash; never move Page values
@@ -586,6 +593,7 @@ impl ObscuraPool {
                     next_rx,
                     next_ready_tx,
                     worker_ready.clone(),
+                    provider_sessions.clone(),
                 ));
                 match tokio::time::timeout(Duration::from_secs(90), next_ready_rx).await {
                     Ok(Ok(Ok(()))) => {
@@ -627,6 +635,11 @@ impl ObscuraPool {
     /// Clone the per-gateway provider pacing and challenge guard.
     pub fn provider_guard(&self) -> ProviderGuard {
         self.provider_guard.clone()
+    }
+
+    /// Clone the per-gateway provider session lifecycle registry.
+    pub fn provider_sessions(&self) -> ProviderSessionRegistry {
+        self.provider_sessions.clone()
     }
 
     /// Whether the dedicated browser thread still owns its command receiver.
@@ -1308,6 +1321,7 @@ fn browser_thread(
     mut cmd_rx: mpsc::Receiver<Command>,
     ready_tx: oneshot::Sender<Result<()>>,
     worker_ready: Arc<AtomicBool>,
+    provider_sessions: ProviderSessionRegistry,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let _ready_guard = WorkerReadyGuard(worker_ready.clone());
@@ -1425,7 +1439,7 @@ fn browser_thread(
                                     Ok(())
                                 })();
                                 if let Err(error) = cleanup {
-                                    crate::provider_state::record_probe_failure(provider.name());
+                                    provider_sessions.record_probe_failure(provider.name());
                                     tracing::error!(
                                         provider = %pcfg.name,
                                         %error,
@@ -1434,7 +1448,7 @@ fn browser_thread(
                                     continue;
                                 }
                                 if let Err(error) = page.goto(provider.login_url()).await {
-                                    crate::provider_state::record_probe_failure(provider.name());
+                                    provider_sessions.record_probe_failure(provider.name());
                                     tracing::error!(
                                         provider = %pcfg.name,
                                         %error,
@@ -1442,7 +1456,7 @@ fn browser_thread(
                                     );
                                     continue;
                                 }
-                                crate::provider_state::record_needs_login(provider.name());
+                                provider_sessions.record_needs_login(provider.name());
                             } else {
                                 // Verify the restored session before publishing this page as
                                 // usable. Expired credentials are revoked from disk and from
@@ -1452,8 +1466,8 @@ fn browser_thread(
                                     None => Err(anyhow::anyhow!("provider adapter is not registered")),
                                 };
                                 match verification {
-                                    Ok(true) => crate::provider_state::record_success(provider.name()),
-                                    Ok(false) => crate::provider_state::record_needs_login(provider.name()),
+                                    Ok(true) => provider_sessions.record_success(provider.name()),
+                                    Ok(false) => provider_sessions.record_needs_login(provider.name()),
                                     Err(error) if error.downcast_ref::<ProviderSessionExpiredError>().is_some() => {
                                         let cleanup = (|| -> Result<()> {
                                             session::clear_provider_cookies(&browser, provider.name())?;
@@ -1467,7 +1481,7 @@ fn browser_thread(
                                             Ok(())
                                         })();
                                         if let Err(cleanup_error) = cleanup {
-                                            crate::provider_state::record_probe_failure(provider.name());
+                                            provider_sessions.record_probe_failure(provider.name());
                                             tracing::error!(
                                                 provider = %pcfg.name,
                                                 %cleanup_error,
@@ -1476,7 +1490,7 @@ fn browser_thread(
                                             continue;
                                         }
                                         if let Err(navigation_error) = page.goto(provider.login_url()).await {
-                                            crate::provider_state::record_probe_failure(provider.name());
+                                            provider_sessions.record_probe_failure(provider.name());
                                             tracing::error!(
                                                 provider = %pcfg.name,
                                                 %navigation_error,
@@ -1484,14 +1498,14 @@ fn browser_thread(
                                             );
                                             continue;
                                         }
-                                        crate::provider_state::record_needs_login(provider.name());
+                                        provider_sessions.record_needs_login(provider.name());
                                         tracing::warn!(
                                             provider = %pcfg.name,
                                             "expired provider session was invalidated; interactive login required"
                                         );
                                     }
                                     Err(error) => {
-                                        crate::provider_state::record_probe_failure(provider.name());
+                                        provider_sessions.record_probe_failure(provider.name());
                                         tracing::warn!(
                                             provider = %pcfg.name,
                                             %error,
@@ -1517,6 +1531,7 @@ fn browser_thread(
                     let Some(page) = pages.borrow().get(&provider).cloned() else { continue };
                     let Some(lock) = locks.borrow().get(&provider).cloned() else { continue };
                     let Some(adapter) = registry.get(&provider).cloned() else { continue };
+                    let provider_sessions = provider_sessions.clone();
                     tokio::task::spawn_local(async move {
                         let jitter = provider.name().bytes().map(u64::from).sum::<u64>() % 21;
                         tokio::time::sleep(Duration::from_secs(30 + jitter)).await;
@@ -1524,9 +1539,9 @@ fn browser_thread(
                             {
                                 let _guard = lock.lock().await;
                                 match verify_session_page(provider, &page, adapter.as_ref()) {
-                                    Ok(true) => crate::provider_state::record_success(provider.name()),
-                                    Ok(false) => crate::provider_state::record_needs_login(provider.name()),
-                                    Err(_) => crate::provider_state::record_probe_failure(provider.name()),
+                                    Ok(true) => provider_sessions.record_success(provider.name()),
+                                    Ok(false) => provider_sessions.record_needs_login(provider.name()),
+                                    Err(_) => provider_sessions.record_probe_failure(provider.name()),
                                 }
                             }
                             tokio::time::sleep(Duration::from_secs(60 + jitter)).await;
