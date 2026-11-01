@@ -2616,6 +2616,7 @@ async fn chat_completions(
                     let message = error.to_string();
                     record_attempt_error(
                         &state.provider_sessions,
+                        &state.metrics,
                         &provider_name,
                         &message,
                         queue_ms,

@@ -27,6 +27,7 @@ type BrowserWorkerSpawner = fn(
     oneshot::Sender<Result<()>>,
     Arc<AtomicBool>,
     ProviderSessionRegistry,
+    MetricsRegistry,
 ) -> std::thread::JoinHandle<()>;
 
 fn join_finished_worker(worker: &mut Option<std::thread::JoinHandle<()>>) -> bool {
@@ -151,6 +152,7 @@ mod worker_supervisor_tests {
         ready: tokio::sync::oneshot::Sender<anyhow::Result<()>>,
         worker_ready: Arc<AtomicBool>,
         _provider_sessions: super::ProviderSessionRegistry,
+        _metrics: super::MetricsRegistry,
     ) -> std::thread::JoinHandle<()> {
         let generation = RESTART_TEST_SPAWNS.fetch_add(1, Ordering::SeqCst);
         std::thread::spawn(move || {
@@ -598,6 +600,7 @@ impl ObscuraPool {
                     next_ready_tx,
                     worker_ready.clone(),
                     provider_sessions.clone(),
+                    metrics.clone(),
                 ));
                 match tokio::time::timeout(Duration::from_secs(90), next_ready_rx).await {
                     Ok(Ok(Ok(()))) => {
@@ -1328,6 +1331,7 @@ fn browser_thread(
     ready_tx: oneshot::Sender<Result<()>>,
     worker_ready: Arc<AtomicBool>,
     provider_sessions: ProviderSessionRegistry,
+    metrics: MetricsRegistry,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let _ready_guard = WorkerReadyGuard(worker_ready.clone());
@@ -1698,6 +1702,7 @@ fn browser_thread(
                                         providers::ProviderSendPolicy {
                                             completion_idle,
                                             provider_guard,
+                                            metrics: metrics.clone(),
                                         },
                                         save_tx,
                                     ) => {}

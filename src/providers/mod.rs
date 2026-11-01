@@ -473,6 +473,7 @@ fn completion_ready(
 pub struct ProviderSendPolicy {
     pub completion_idle: Duration,
     pub provider_guard: crate::provider_guard::ProviderGuard,
+    pub metrics: crate::metrics::MetricsRegistry,
 }
 
 pub async fn run_send(
@@ -487,6 +488,7 @@ pub async fn run_send(
     let ProviderSendPolicy {
         completion_idle,
         provider_guard,
+        metrics,
     } = policy;
     if crate::provider_guard::is_challenge_page(&page) {
         provider_guard.disable_provider(
@@ -686,7 +688,7 @@ pub async fn run_send(
                             }
                         }
                         if let Some(last_delta_at) = last_delta_at {
-                            crate::metrics::record_provider_tail(
+                            metrics.record_provider_tail(
                                 adapter.name(),
                                 last_delta_at.elapsed().as_millis().min(u64::MAX as u128) as u64,
                             );
@@ -770,7 +772,7 @@ pub async fn run_send(
                     return;
                 }
                 if let Some(last_delta_at) = last_delta_at {
-                    crate::metrics::record_provider_tail(
+                    metrics.record_provider_tail(
                         adapter.name(),
                         last_delta_at.elapsed().as_millis().min(u64::MAX as u128) as u64,
                     );
