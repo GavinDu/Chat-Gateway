@@ -47,7 +47,10 @@ use cli::Cli;
 use config::AppConfig;
 use context::{ContextBuilder, ContextPlan, ThreadSyncState};
 use memory::{ChatMessage, ConversationStore, LongTermMemoryStore, ProviderThread, UnifiedMemory};
-use request_security::{is_loopback_authority, login_origin_is_same_authority};
+use request_security::{
+    is_loopback_authority, login_origin_is_same_authority, remote_gateway_origin,
+    remote_request_is_allowed, validate_remote_gateway_config,
+};
 use router::ProviderRouter;
 
 #[tokio::main]
@@ -58,6 +61,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
+    validate_remote_gateway_config()?;
     let cli = Cli::parse();
     if cli.show_memory_egress_policy {
         let policy = memory_egress::MemoryEgressPolicy::from_env()
@@ -520,7 +524,7 @@ async fn refresh_models(state: &Arc<AppState>) {
 /// The login relay can read and persist provider session material. Keep the HTTP
 /// listener loopback-only until an authenticated remote-access mode is designed.
 fn server_bind_addr(port: u16, docker_local_bind: bool) -> SocketAddr {
-    if docker_local_bind {
+    if docker_local_bind || std::env::var("CHAT_GATEWAY_REMOTE_ORIGIN").is_ok() {
         SocketAddr::from(([0, 0, 0, 0], port))
     } else {
         SocketAddr::from(([127, 0, 0, 1], port))
@@ -532,38 +536,58 @@ fn server_bind_addr(port: u16, docker_local_bind: bool) -> SocketAddr {
 /// requests must have an Origin authority identical to the request Host.
 async fn protect_login_api(req: Request<Body>, next: Next) -> Response {
     let headers = req.headers();
-    // The service binds to loopback, but DNS rebinding can still send a
-    // browser request with an attacker-controlled Host that resolves to
-    // 127.0.0.1. Enforce the loopback authority on every route, not only
-    // the browser-control endpoints.
-    let host_is_loopback = headers
-        .get(axum::http::header::HOST)
-        .and_then(|value| value.to_str().ok())
-        .map(is_loopback_authority)
-        .unwrap_or(false);
+    let path = req.uri().path();
+    let is_login_control = path == "/login" || path.starts_with("/login/api/");
+    let is_login_api = path.starts_with("/login/api/");
+    let is_relay_api = path.starts_with("/relay/v1/");
     let origin_present = headers.contains_key(axum::http::header::ORIGIN);
     let fetch_site = headers.get("sec-fetch-site").and_then(|v| v.to_str().ok());
-    let is_login_api = req.uri().path().starts_with("/login/api/");
-    let is_relay_api = req.uri().path().starts_with("/relay/v1/");
+
     let origin_is_safe = if is_relay_api {
         relay::relay_origin_is_allowed(headers)
+    } else if let Ok(Some((expected_origin, _))) = remote_gateway_origin() {
+        !origin_present
+            || headers
+                .get(axum::http::header::ORIGIN)
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|origin| origin == expected_origin)
     } else {
         !origin_present || login_origin_is_same_authority(headers)
     };
-    if !host_is_loopback || (is_login_api && fetch_site == Some("cross-site")) || !origin_is_safe {
+
+    let authority_is_safe = if let Ok(Some((origin, authority))) = remote_gateway_origin() {
+        remote_request_is_allowed(
+            headers,
+            &origin,
+            &authority,
+            is_relay_api && relay::relay_origin_is_allowed(headers),
+        )
+    } else {
+        headers
+            .get(axum::http::header::HOST)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(is_loopback_authority)
+    };
+
+    if !authority_is_safe
+        || !origin_is_safe
+        || (is_login_api && fetch_site == Some("cross-site"))
+        || (std::env::var("CHAT_GATEWAY_REMOTE_ORIGIN").is_ok() && is_login_control)
+    {
         return (
             StatusCode::FORBIDDEN,
             Json(serde_json::json!({
                 "error": {
                     "message": "request authority or origin rejected",
                     "type": "security_error",
-                    "code": "unsafe_local_request"
+                    "code": "unsafe_gateway_request"
                 }
             })),
         )
             .into_response();
     }
-    let allowed_relay_origin = if is_relay_api {
+
+    let allowed_relay_origin = if is_relay_api && relay::relay_origin_is_allowed(headers) {
         headers.get(axum::http::header::ORIGIN).cloned()
     } else {
         None
@@ -1183,6 +1207,28 @@ async fn authenticate_api_key(
         .headers()
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok());
+    let path = req.uri().path();
+    if remote_gateway_origin().ok().flatten().is_some()
+        && path != "/health"
+        && !path.starts_with("/relay/v1/")
+    {
+        let expected = std::env::var("CHAT_GATEWAY_API_KEY").unwrap_or_default();
+        let supplied = authorization
+            .and_then(|header| header.split_once(' '))
+            .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("bearer"))
+            .map(|(_, secret)| hash_api_key(secret));
+        let expected_hash = hash_api_key(&expected);
+        if supplied.as_deref().is_none_or(|digest| {
+            !constant_time_eq(digest.as_bytes(), expected_hash.as_bytes())
+        }) {
+            return api_error(
+                StatusCode::UNAUTHORIZED,
+                "authentication_error",
+                "invalid_api_key",
+                "a valid remote gateway Bearer credential is required",
+            );
+        }
+    }
     match authorize_api_request(&auth, authorization, req.uri().path(), req.method()) {
         Ok(Some(context)) => {
             req.extensions_mut().insert(context);
