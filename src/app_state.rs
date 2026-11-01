@@ -4,8 +4,8 @@ use tokio::sync::RwLock;
 
 use crate::{
     browser::pool::ObscuraPool, chat_service::ChatService, config::AppConfig,
-    memory::UnifiedMemory, provider_guard::ProviderGuard, relay::RelayState,
-    router::ProviderRouter,
+    memory::UnifiedMemory, provider_guard::ProviderGuard, provider_state::ProviderSessionRegistry,
+    relay::RelayState, router::ProviderRouter,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -25,4 +25,6 @@ pub(crate) struct AppState {
     pub(crate) relay: Arc<RelayState>,
     /// Per-gateway provider pacing and challenge circuit-breaker state.
     pub(crate) provider_guard: ProviderGuard,
+    /// Typed provider authentication and availability lifecycle.
+    pub(crate) provider_sessions: ProviderSessionRegistry,
 }

@@ -269,6 +269,7 @@ async fn main() -> anyhow::Result<()> {
         models_cache: Arc::new(RwLock::new(HashMap::new())),
         relay: Arc::new(relay_state),
         provider_guard: pool.provider_guard(),
+        provider_sessions: pool.provider_sessions(),
     });
 
     // Background model discovery (reads pickers without sending messages)
@@ -284,13 +285,14 @@ async fn main() -> anyhow::Result<()> {
     // to avoid synchronized browser work after startup.
     for provider in cfg.providers.iter().filter(|provider| provider.enabled) {
         let pool = state.pool.clone();
+        let provider_sessions = state.provider_sessions.clone();
         let provider_name = provider.name.clone();
         let jitter_seconds = provider_session_probe_jitter_seconds(&provider_name);
         tokio::spawn(async move {
             // Probe once immediately at startup; subsequent checks remain staggered.
             loop {
                 match pool.verify_session(&provider_name).await {
-                    Ok(true) => provider_state::record_success(&provider_name),
+                    Ok(true) => provider_sessions.record_success(&provider_name),
                     // A false result means the page is not warmed yet, not that
                     // the provider session is invalid. Leave routing state unchanged.
                     Ok(false) => {}
@@ -299,7 +301,7 @@ async fn main() -> anyhow::Result<()> {
                             .downcast_ref::<crate::browser::pool::ProviderSessionExpiredError>()
                             .is_some() =>
                     {
-                        provider_state::record_needs_login(&provider_name);
+                        provider_sessions.record_needs_login(&provider_name);
                         tracing::warn!(
                             provider = %provider_name,
                             "periodic provider session verification found login required"
@@ -322,10 +324,8 @@ async fn main() -> anyhow::Result<()> {
                             provider = %provider_name,
                             "periodic provider session verification failed"
                         );
-                        provider_state::record_error(
-                            &provider_name,
-                            "periodic session verification failed",
-                        );
+                        provider_sessions
+                            .record_error(&provider_name, "periodic session verification failed");
                     }
                 }
                 tokio::time::sleep(std::time::Duration::from_secs(60 + jitter_seconds)).await;
@@ -670,7 +670,7 @@ async fn login_complete(
         Ok(r) => {
             // Successful human re-authentication must make the provider routable
             // again; otherwise needs_login is sticky because routing skips sends.
-            provider_state::record_success(&provider);
+            state.provider_sessions.record_success(&provider);
             Json(serde_json::json!({
                 "ok": true, "provider": provider,
                 "session_path": r.session_path,
@@ -1033,7 +1033,9 @@ async fn metrics_endpoint(State(state): State<Arc<AppState>>) -> impl IntoRespon
         .map(|provider| {
             (
                 provider.name.clone(),
-                provider_state::status(&provider.name)
+                state
+                    .provider_sessions
+                    .status(&provider.name)
                     .state
                     .as_str()
                     .to_owned(),
@@ -2119,6 +2121,7 @@ async fn read_conversation_context_with_transcript_for_owner(
 }
 
 fn record_attempt_error(
+    provider_sessions: &provider_state::ProviderSessionRegistry,
     provider: &str,
     error: &str,
     queue_ms: u64,
@@ -2127,7 +2130,7 @@ fn record_attempt_error(
 ) {
     let provider_work_ms = provider_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
     let total_ms = request_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
-    provider_state::record_error(provider, error);
+    provider_sessions.record_error(provider, error);
     metrics::record_provider_timings(
         provider,
         "error",
@@ -2398,7 +2401,7 @@ async fn chat_completions(
     let mut busy_count = 0usize;
     let mut last_err: Option<String> = None;
     for provider_name in candidates {
-        if !provider_state::is_routable(&provider_name) {
+        if !state.provider_sessions.is_routable(&provider_name) {
             last_err = Some(format!("provider '{provider_name}' needs login"));
             continue;
         }
@@ -2569,7 +2572,9 @@ async fn chat_completions(
                 // Worker loss is an infrastructure failure, not evidence that
                 // the provider's authentication session has expired.
                 if !retryable_worker_error {
-                    provider_state::record_error(&provider_name, &e.to_string());
+                    state
+                        .provider_sessions
+                        .record_error(&provider_name, &e.to_string());
                 }
                 last_err = Some(e.to_string());
                 continue;
@@ -2591,6 +2596,7 @@ async fn chat_completions(
                 FirstEvent::EmptyCompletion => {
                     let error = "provider completed without output before stream started";
                     record_attempt_error(
+                        &state.provider_sessions,
                         &provider_name,
                         error,
                         queue_ms,
@@ -2603,6 +2609,7 @@ async fn chat_completions(
                 FirstEvent::Error(error) => {
                     let message = error.to_string();
                     record_attempt_error(
+                        &state.provider_sessions,
                         &provider_name,
                         &message,
                         queue_ms,
@@ -2615,6 +2622,7 @@ async fn chat_completions(
                 FirstEvent::Closed => {
                     let error = "provider stream closed before first output";
                     record_attempt_error(
+                        &state.provider_sessions,
                         &provider_name,
                         error,
                         queue_ms,
@@ -2630,7 +2638,7 @@ async fn chat_completions(
                         provider_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
                     let total_ms =
                         request_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
-                    provider_state::record_error(&provider_name, error);
+                    state.provider_sessions.record_error(&provider_name, error);
                     metrics::record_provider_timings(
                         &provider_name,
                         "error",
@@ -2737,7 +2745,7 @@ async fn chat_completions(
                 );
                 if let Some(message) = stream_error {
                     // Preserve sanitized session-expiry state for routing and health reporting.
-                    provider_state::record_error(
+                    state_c.provider_sessions.record_error(
                         &provider_c,
                         provider_error_detail.as_deref().unwrap_or(&message),
                     );
@@ -2746,7 +2754,7 @@ async fn chat_completions(
                     });
                     yield Ok(Event::default().data(error.to_string()));
                 } else {
-                    provider_state::record_success(&provider_c);
+                    state_c.provider_sessions.record_success(&provider_c);
                     let synced_marker = match state_c.memory.clone().persist_turn(
                         owner_key_id_c.clone(),
                         conv_stream.clone(),
@@ -2805,7 +2813,7 @@ async fn chat_completions(
         let provider_work_ms = provider_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
         let total_ms = request_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
         if let Some(e) = failed {
-            provider_state::record_error(&provider_name, &e);
+            state.provider_sessions.record_error(&provider_name, &e);
             record_provider_outcome(
                 &request_id,
                 &provider_name,
@@ -2829,7 +2837,7 @@ async fn chat_completions(
             );
         }
 
-        provider_state::record_success(&provider_name);
+        state.provider_sessions.record_success(&provider_name);
         record_provider_outcome(
             &request_id,
             &provider_name,
@@ -4315,7 +4323,9 @@ mod first_event_tests {
         let FirstEvent::Error(error) = event else {
             panic!("expected first-event error");
         };
+        let provider_sessions = crate::provider_state::ProviderSessionRegistry::default();
         record_attempt_error(
+            &provider_sessions,
             provider,
             &error.to_string(),
             0,
@@ -4324,7 +4334,7 @@ mod first_event_tests {
         );
 
         assert_eq!(
-            crate::provider_state::status(provider).state,
+            provider_sessions.status(provider).state,
             crate::provider_state::ProviderSessionState::NeedsLogin
         );
         let metrics = crate::metrics::render_with_provider_states(&[]);

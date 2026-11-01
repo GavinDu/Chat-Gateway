@@ -6,7 +6,7 @@ use axum::{
 };
 use std::sync::Arc;
 
-use crate::{provider_state, AppState};
+use crate::AppState;
 
 pub(crate) async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let providers = state
@@ -14,7 +14,7 @@ pub(crate) async fn health(State(state): State<Arc<AppState>>) -> impl IntoRespo
         .providers
         .iter()
         .map(|p| {
-            let session = provider_state::status(&p.name);
+            let session = state.provider_sessions.status(&p.name);
             let challenge_disabled_reason = state.provider_guard.provider_disabled_reason(&p.name);
             serde_json::json!({
                 "name": p.name,
@@ -84,7 +84,7 @@ pub(crate) async fn readiness(State(state): State<Arc<AppState>>) -> impl IntoRe
         .iter()
         .filter(|p| {
             p.enabled
-                && provider_state::is_available(&p.name)
+                && state.provider_sessions.is_available(&p.name)
                 && state
                     .provider_guard
                     .provider_disabled_reason(&p.name)
