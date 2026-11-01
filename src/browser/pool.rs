@@ -554,6 +554,7 @@ impl ObscuraPool {
             ready_tx,
             worker_ready.clone(),
             provider_sessions.clone(),
+            metrics.clone(),
         ));
 
         // Recreate the thread-affine engine after a crash; never move Page values
@@ -1591,6 +1592,7 @@ fn browser_thread(
                             let browser_for_save = browser.clone();
                             let provider_name = provider.name().to_string();
                             let poll_tick = gateway_poll_tick;
+                            let request_metrics = metrics.clone();
                             tokio::task::spawn_local(async move {
                                 let _guard = lock.lock().await;
                                 // Reopen only a validated provider-owned thread. Otherwise return
@@ -1702,7 +1704,7 @@ fn browser_thread(
                                         providers::ProviderSendPolicy {
                                             completion_idle,
                                             provider_guard,
-                                            metrics: metrics.clone(),
+                                            metrics: request_metrics,
                                         },
                                         save_tx,
                                     ) => {}
