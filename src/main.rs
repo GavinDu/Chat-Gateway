@@ -4333,9 +4333,10 @@ mod first_event_tests {
             panic!("expected first-event error");
         };
         let provider_sessions = crate::provider_state::ProviderSessionRegistry::default();
+        let metrics_registry = metrics::MetricsRegistry::default();
         record_attempt_error(
             &provider_sessions,
-            &metrics::MetricsRegistry::default(),
+            &metrics_registry,
             provider,
             &error.to_string(),
             0,
@@ -4347,7 +4348,7 @@ mod first_event_tests {
             provider_sessions.status(provider).state,
             crate::provider_state::ProviderSessionState::NeedsLogin
         );
-        let metrics = crate::metrics::MetricsRegistry::default().render_with_provider_states(&[]);
+        let metrics = metrics_registry.render_with_provider_states(&[]);
         assert!(metrics.contains(&format!(
             "gateway_provider_requests_total{{provider=\"{provider}\",outcome=\"error\"}} 1"
         )));
