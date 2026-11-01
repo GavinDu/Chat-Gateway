@@ -110,7 +110,8 @@ impl MetricsRegistry {
         }
     }
 
-    pub fn record_provider_timings(&self, 
+    pub fn record_provider_timings(
+        &self,
         provider: &str,
         outcome: &str,
         queue_ms: u64,
@@ -147,7 +148,6 @@ impl MetricsRegistry {
                 .or_default() += 1;
         }
     }
-
 }
 
 fn escape_label(value: &str) -> String {
@@ -252,7 +252,6 @@ impl MetricsRegistry {
         }
         out
     }
-
 }
 
 #[cfg(test)]
@@ -263,9 +262,9 @@ mod tests {
     fn browser_worker_restart_metric_counts_successful_restarts() {
         let registry = MetricsRegistry::default();
         registry.record_browser_worker_restart();
-        assert!(registry.render_with_provider_states(&[]).contains(
-            "gateway_browser_worker_restarts_total 1"
-        ));
+        assert!(registry
+            .render_with_provider_states(&[])
+            .contains("gateway_browser_worker_restarts_total 1"));
     }
 
     #[test]
@@ -288,8 +287,14 @@ mod tests {
 
     #[test]
     fn route_labels_have_bounded_cardinality() {
-        assert_eq!(normalize_route("/v1/conversations/secret-id"), "/v1/conversations/:id");
-        assert_eq!(normalize_route("/random/attacker-controlled-path"), "/other");
+        assert_eq!(
+            normalize_route("/v1/conversations/secret-id"),
+            "/v1/conversations/:id"
+        );
+        assert_eq!(
+            normalize_route("/random/attacker-controlled-path"),
+            "/other"
+        );
     }
 
     #[test]
@@ -300,18 +305,18 @@ mod tests {
         assert!(first.render_with_provider_states(&[]).contains(
             "gateway_provider_requests_total{provider=\"chatgpt\",outcome=\"success\"} 1"
         ));
-        assert!(!second.render_with_provider_states(&[]).contains(
-            "gateway_provider_requests_total{provider=\"chatgpt\""
-        ));
+        assert!(!second
+            .render_with_provider_states(&[])
+            .contains("gateway_provider_requests_total{provider=\"chatgpt\""));
     }
 
     #[test]
     fn clones_share_registry_data() {
         let first = MetricsRegistry::default();
         first.clone().record_http_request("/health", 200, 3);
-        assert!(first.render_with_provider_states(&[]).contains(
-            "gateway_http_requests_total{route=\"/health\",status=\"200\"} 1"
-        ));
+        assert!(first
+            .render_with_provider_states(&[])
+            .contains("gateway_http_requests_total{route=\"/health\",status=\"200\"} 1"));
     }
 
     #[test]
