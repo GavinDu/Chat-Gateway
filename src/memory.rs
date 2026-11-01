@@ -1438,7 +1438,6 @@ fn extractive_rolling_summary(messages: &[ChatMessage], max_chars: usize) -> Str
     lines.join("\n")
 }
 
-
 /// Async operations for opt-in cross-conversation memory controls and items.
 #[async_trait::async_trait]
 pub trait LongTermMemoryStore: Send + Sync {
@@ -1584,15 +1583,35 @@ mod async_long_term_memory_store_tests {
     #[tokio::test]
     async fn async_store_methods_preserve_opt_in_and_owner_isolation() {
         let store = Arc::new(UnifiedMemory::new(8000));
-        assert!(!store.clone().long_term_memory_enabled_async("owner-a".into()).await.unwrap());
+        assert!(!store
+            .clone()
+            .long_term_memory_enabled_async("owner-a".into())
+            .await
+            .unwrap());
 
-        store.clone().set_long_term_memory_enabled_async("owner-a".into(), true).await.unwrap();
-        store.clone().save_long_term_memory_item_async(
-            "owner-a".into(), "timezone".into(), "America/New_York".into(),
-            None, 0.9, None,
-        ).await.unwrap();
+        store
+            .clone()
+            .set_long_term_memory_enabled_async("owner-a".into(), true)
+            .await
+            .unwrap();
+        store
+            .clone()
+            .save_long_term_memory_item_async(
+                "owner-a".into(),
+                "timezone".into(),
+                "America/New_York".into(),
+                None,
+                0.9,
+                None,
+            )
+            .await
+            .unwrap();
 
-        let (enabled, items) = store.clone().long_term_memory_snapshot_async("owner-a".into()).await.unwrap();
+        let (enabled, items) = store
+            .clone()
+            .long_term_memory_snapshot_async("owner-a".into())
+            .await
+            .unwrap();
         assert!(enabled);
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].value, "America/New_York");
@@ -1600,18 +1619,52 @@ mod async_long_term_memory_store_tests {
         let (other_enabled, other_items) = store.clone().long_term_memory_snapshot_async("owner-b".into()).await.unwrap();
         assert!(!other_enabled);
         assert!(other_items.is_empty());
-        assert!(store.clone().retrieve_long_term_memory_items_async("owner-b".into(), 20).await.unwrap().is_empty());
+        assert!(store
+            .clone()
+            .retrieve_long_term_memory_items_async("owner-b".into(), 20)
+            .await
+            .unwrap()
+            .is_empty());
 
         let id = items[0].id.clone();
-        assert!(!store.clone().delete_long_term_memory_item_async("owner-b".into(), id.clone()).await.unwrap());
-        assert!(store.clone().delete_long_term_memory_item_async("owner-a".into(), id).await.unwrap());
+        assert!(!store
+            .clone()
+            .delete_long_term_memory_item_async("owner-b".into(), id.clone())
+            .await
+            .unwrap());
+        assert!(store
+            .clone()
+            .delete_long_term_memory_item_async("owner-a".into(), id)
+            .await
+            .unwrap());
 
-        store.clone().save_long_term_memory_item_async(
-            "owner-a".into(), "timezone".into(), "Europe/London".into(),
-            None, 0.8, None,
-        ).await.unwrap();
-        assert_eq!(store.clone().delete_all_long_term_memory_items_async("owner-a".into()).await.unwrap(), 1);
-        assert!(store.clone().long_term_memory_snapshot_async("owner-a".into()).await.unwrap().1.is_empty());
+        store
+            .clone()
+            .save_long_term_memory_item_async(
+                "owner-a".into(),
+                "timezone".into(),
+                "Europe/London".into(),
+                None,
+                0.8,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .clone()
+                .delete_all_long_term_memory_items_async("owner-a".into())
+                .await
+                .unwrap(),
+            1
+        );
+        assert!(store
+            .clone()
+            .long_term_memory_snapshot_async("owner-a".into())
+            .await
+            .unwrap()
+            .1
+            .is_empty());
     }
 }
 
