@@ -451,7 +451,7 @@ pub async fn unlink(
     }
     match app.pool.unlink_session(&provider).await {
         Ok(removed) => {
-            crate::provider_state::record_unlinked(&provider);
+            app.provider_sessions.record_unlinked(&provider);
             tracing::info!(
                 provider,
                 "browser relay provider unlinked from embedded browser and persistent storage"
