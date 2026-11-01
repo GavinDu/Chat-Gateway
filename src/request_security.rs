@@ -116,6 +116,7 @@ pub(crate) fn validate_remote_gateway_config() -> anyhow::Result<bool> {
 
 pub(crate) fn remote_request_is_allowed(
     headers: &HeaderMap,
+    remote_origin: &str,
     remote_authority: &str,
     relay_origin_allowed: bool,
 ) -> bool {
@@ -135,12 +136,7 @@ pub(crate) fn remote_request_is_allowed(
     }
     match headers.get(axum::http::header::ORIGIN) {
         None => true,
-        Some(origin) => origin.to_str().is_ok_and(|origin| {
-            remote_gateway_origin()
-                .ok()
-                .flatten()
-                .is_some_and(|(expected, _)| origin == expected)
-        }),
+        Some(origin) => origin.to_str().is_ok_and(|origin| origin == remote_origin),
     }
 }
 
@@ -230,4 +226,56 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn remote_requests_require_exact_host_https_proxy_and_origin() {
+        let mut headers = HeaderMap::new();
+        headers.insert("host", "gateway.example.com".parse().unwrap());
+        headers.insert("x-forwarded-proto", "https".parse().unwrap());
+        headers.insert("origin", "https://gateway.example.com".parse().unwrap());
+        assert!(remote_request_is_allowed(
+            &headers,
+            "https://gateway.example.com",
+            "gateway.example.com",
+            false
+        ));
+
+        headers.insert("origin", "https://attacker.example".parse().unwrap());
+        assert!(!remote_request_is_allowed(
+            &headers,
+            "https://gateway.example.com",
+            "gateway.example.com",
+            false
+        ));
+        headers.insert("origin", "https://gateway.example.com".parse().unwrap());
+        headers.insert("host", "attacker.example".parse().unwrap());
+        assert!(!remote_request_is_allowed(
+            &headers,
+            "https://gateway.example.com",
+            "gateway.example.com",
+            false
+        ));
+        headers.insert("host", "gateway.example.com".parse().unwrap());
+        headers.insert("x-forwarded-proto", "http".parse().unwrap());
+        assert!(!remote_request_is_allowed(
+            &headers,
+            "https://gateway.example.com",
+            "gateway.example.com",
+            false
+        ));
+    }
+
+    #[test]
+    fn remote_relay_origin_is_checked_separately_after_host_and_proxy() {
+        let mut headers = HeaderMap::new();
+        headers.insert("host", "gateway.example.com".parse().unwrap());
+        headers.insert("x-forwarded-proto", "https".parse().unwrap());
+        headers.insert("origin", "chrome-extension://abcdefghijklmnopabcdefghijklmnop".parse().unwrap());
+        assert!(remote_request_is_allowed(
+            &headers,
+            "https://gateway.example.com",
+            "gateway.example.com",
+            true
+        ));
+    }
+
 }
