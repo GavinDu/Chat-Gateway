@@ -2,6 +2,7 @@ use crate::config::AppConfig;
 use crate::login::{self, LoginAction, LoginView};
 use crate::provider_guard::ProviderGuard;
 use crate::provider_state::ProviderSessionRegistry;
+use crate::metrics::MetricsRegistry;
 use crate::providers::{self, Provider, ProviderChunk};
 use crate::session;
 use anyhow::Result;
@@ -377,6 +378,7 @@ pub struct ObscuraPool {
     worker_generation: Arc<AtomicU64>,
     provider_guard: ProviderGuard,
     provider_sessions: ProviderSessionRegistry,
+    metrics: MetricsRegistry,
 }
 
 enum Command {
@@ -540,8 +542,10 @@ impl ObscuraPool {
             worker_generation: worker_generation.clone(),
             provider_guard: ProviderGuard::default(),
             provider_sessions: ProviderSessionRegistry::default(),
+            metrics: MetricsRegistry::default(),
         });
         let provider_sessions = pool.provider_sessions.clone();
+        let metrics = pool.metrics.clone();
         let mut worker_handle = Some(worker_spawner(
             cfg.clone(),
             cmd_rx,
@@ -599,7 +603,7 @@ impl ObscuraPool {
                     Ok(Ok(Ok(()))) => {
                         worker_ready.store(true, Ordering::Release);
                         worker_generation.fetch_add(1, Ordering::AcqRel);
-                        crate::metrics::record_browser_worker_restart();
+                        metrics.record_browser_worker_restart();
                         tracing::info!("browser worker restarted and warmed successfully");
                         backoff = Duration::from_secs(1);
                     }
@@ -641,6 +645,8 @@ impl ObscuraPool {
     pub fn provider_sessions(&self) -> ProviderSessionRegistry {
         self.provider_sessions.clone()
     }
+
+    pub fn metrics(&self) -> MetricsRegistry { self.metrics.clone() }
 
     /// Whether the dedicated browser thread still owns its command receiver.
     ///

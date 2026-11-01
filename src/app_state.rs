@@ -27,4 +27,5 @@ pub(crate) struct AppState {
     pub(crate) provider_guard: ProviderGuard,
     /// Typed provider authentication and availability lifecycle.
     pub(crate) provider_sessions: ProviderSessionRegistry,
+    pub(crate) metrics: crate::metrics::MetricsRegistry,
 }
