@@ -34,6 +34,10 @@ async function relayFetch(path, options = {}) {
   // Treat browser storage as untrusted: a stale or tampered gateway value must
   // never redirect provider cookies or the relay token to a remote origin.
   const localGateway = normalizeGateway(gateway);
+  const hasGatewayPermission = await chrome.permissions.contains({origins:[localGateway + "/*"]});
+  if (!hasGatewayPermission) {
+    throw new Error("Gateway host permission is missing. Re-pair and grant access only to the configured gateway origin.");
+  }
   const headers = new Headers(options.headers || {});
   headers.set("X-Relay-Timestamp", String(Math.floor(Date.now() / 1000)));
   headers.set("X-Relay-Nonce", randomHex());
