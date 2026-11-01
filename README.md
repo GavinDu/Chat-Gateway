@@ -9,6 +9,12 @@ in-process - no chromiumoxide, no external `obscura serve` CDP process).
 
 ## Quick start
 
+**Interactive provider login:** the separately supported [Replit-native browser
+runtime](browser-login/README.md) uses sandboxed Playwright Chromium, CDP frames
+and an encrypted vault. The default distroless Docker image does **not** package
+this runtime and explicitly rejects embedded-browser admission; its extension
+relay remains a separate option. Never expose the native login listener publicly.
+
 ```bash
 cp config.example.yaml config.yaml
 # Read docs/PROVIDERS_POLICY.md, then explicitly enable only providers

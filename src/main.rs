@@ -511,7 +511,7 @@ async fn shutdown_signal() {
         }
     }
 
-    embedded_login::shutdown_all();
+    embedded_login::shutdown_all().await;
     tracing::info!("shutdown signal received; draining in-flight HTTP requests");
 }
 

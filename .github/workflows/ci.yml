@@ -13,6 +13,43 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  embedded-native:
+    # Ubuntu 22.04 supports the Chromium user-namespace sandbox without
+    # disabling AppArmor restrictions on newer hosts. Never use --no-sandbox.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: embedded-ubuntu22-${{ hashFiles('Cargo.lock') }}
+      - name: Install native and browser runtime dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake clang libclang-dev llvm-dev openssh-client
+          npm ci --ignore-scripts
+          npm audit --audit-level=high
+          npx playwright install --with-deps chromium
+      - name: Build the exact native browser implementation
+        run: bash scripts/native-rust.sh cargo build --locked
+      - name: Policy and owner tunnel unit tests
+        run: |
+          node --test browser-login/*.test.mjs
+          python3 -B -m unittest discover -s browser-login -p 'test_*.py'
+      - name: Isolated authenticated HTTP acceptance
+        run: node browser-login/http-smoke.mjs target/debug/chat-gateway-rs
+      - name: Sandboxed browser acceptance over an actual temporary SSH connection
+        run: node browser-login/smoke.mjs target/debug/chat-gateway-rs --through-ssh
+
   docker-build:
     runs-on: ubuntu-latest
     timeout-minutes: 45

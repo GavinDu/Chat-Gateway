@@ -24,6 +24,14 @@ class CommandTests(unittest.TestCase):
 
 
 class PipeTests(unittest.IsolatedAsyncioTestCase):
+    def test_explicit_ports_and_config_never_rewrite_headers(self):
+        command = ssh_command("fixture", 2222, 8199, "/tmp/owner-config")
+        self.assertEqual(command[:3], ["ssh", "-F", "/tmp/owner-config"])
+        self.assertIn("8199", command[-1])
+        self.assertNotIn("8099", command[-1])
+        with self.assertRaises(ValueError):
+            ssh_command("fixture", 22, 0)
+
     async def test_raw_http_and_websocket_bytes_preserved(self):
         echo = [sys.executable, "-u", "-c",
                 "import os\nwhile True:\n d=os.read(0,65536)\n"

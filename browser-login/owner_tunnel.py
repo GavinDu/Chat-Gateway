@@ -10,6 +10,7 @@ import contextlib
 import re
 import shlex
 import shutil
+import signal
 
 # Fixed remote command: only connect to the gateway's loopback socket. No
 # session/profile/filesystem access, header rewriting or TLS-proxy assertions.
@@ -31,17 +32,20 @@ s.close()
 """
 
 
-def ssh_command(target, port):
+def ssh_command(target, port, gateway_port=8099, config=None):
     if (not re.fullmatch(r"[A-Za-z0-9_.@\[\]:-]+", target)
             or target.startswith("-") or target.count("@") > 1):
         raise ValueError("Use the SSH target or host alias from the SSH tool.")
     if not 1 <= port <= 65535:
         raise ValueError("SSH port must be between 1 and 65535.")
-    return [
-        "ssh", "-T", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes",
+    if not 1 <= gateway_port <= 65535:
+        raise ValueError("Gateway port must be between 1 and 65535.")
+    return ["ssh", *(["-F", config] if config else []),
+        "-T", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes",
         "-o", "ConnectTimeout=15",
         "-o", "ServerAliveInterval=30", "-o", "ServerAliveCountMax=3",
-        "-p", str(port), target, "python3 -c " + shlex.quote(REMOTE),
+        "-p", str(port), target,
+        "python3 -c " + shlex.quote(REMOTE.replace("8099", str(gateway_port))),
     ]
 
 
@@ -93,7 +97,7 @@ async def bridge(reader, writer, command):
             await writer.wait_closed()
 
 
-async def serve(command):
+async def serve(command, port=8099):
     slots = asyncio.Semaphore(12)
 
     async def accept(reader, writer):
@@ -103,9 +107,13 @@ async def serve(command):
         async with slots:
             await bridge(reader, writer, command)
 
-    server = await asyncio.start_server(accept, "127.0.0.1", 8099)
-    print("Owner-only local UI: http://127.0.0.1:8099/login", flush=True)
+    server = await asyncio.start_server(accept, "127.0.0.1", port)
+    bound_port = server.sockets[0].getsockname()[1]
+    print(f"Owner-only local UI: http://127.0.0.1:{bound_port}/login", flush=True)
     print("SSH authentication and gateway authorization are both required.", flush=True)
+    with contextlib.suppress(NotImplementedError):
+        asyncio.get_running_loop().add_signal_handler(
+            signal.SIGTERM, asyncio.current_task().cancel)
     async with server:
         await server.serve_forever()
 
@@ -114,15 +122,21 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--ssh-target", required=True, help="Target/alias from Replit SSH tool")
     parser.add_argument("--ssh-port", type=int, default=22)
+    parser.add_argument("--ssh-config", help="Optional owner-local OpenSSH config path")
+    parser.add_argument("--gateway-port", type=int, default=8099)
+    parser.add_argument("--local-port", type=int, default=8099)
     args = parser.parse_args()
     try:
-        command = ssh_command(args.ssh_target, args.ssh_port)
+        command = ssh_command(args.ssh_target, args.ssh_port,
+                              args.gateway_port, args.ssh_config)
+        if not 0 <= args.local_port <= 65535:
+            raise ValueError("Invalid local port.")
         if not shutil.which("ssh"):
             parser.error("OpenSSH client is required on the owner's computer.")
-        asyncio.run(serve(command))
+        asyncio.run(serve(command, args.local_port))
     except (OSError, ValueError):
         parser.exit(1, "Tunnel unavailable. Check the SSH tool, trusted host, agent and local port.\n")
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, asyncio.CancelledError):
         pass
 
 

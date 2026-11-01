@@ -91,7 +91,10 @@
       throw new Error('Could not reach the local gateway. Check its address and try again.');
     }
     if (!response.ok) {
-      const failure = new Error(safeFailure(response.status));
+      const code = (await response.json().catch(() => null))?.error?.code;
+      const failure = new Error(code === 'embedded_browser_not_packaged'
+        ? 'This runtime does not package embedded Chromium. Use the documented Replit-native setup or the extension relay.'
+        : safeFailure(response.status));
       failure.status = response.status;
       throw failure;
     }
@@ -480,6 +483,7 @@
 
   function describeBrowserFailure(code) {
     const safeMessages = {
+      embedded_browser_not_packaged: 'Embedded Chromium is not packaged in this runtime. Use the documented Replit-native setup; the browser extension relay remains a separate option.',
       unauthorized: 'Browser authorization failed. Refresh the gateway status and start again.',
       ticket_expired: 'The browser ticket expired before the session started. Start again.',
       provider_disabled: 'This provider is disabled by the gateway.',

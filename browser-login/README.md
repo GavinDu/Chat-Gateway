@@ -120,29 +120,52 @@ Automated tests cover target validation, host/auth flags, HTTP/WebSocket byte
 preservation, EOF and failure cleanup. The owner's actual desktop-to-Replit SSH
 connection still needs owner verification; it was not attempted by the agent.
 
-## Replit isolated implementation
+## Supported native runtime; separate Docker boundary
 
-Base revision: `c03f0ad8681b9394709ef014acb6d4d582e70cb3`.
-The old pinned checkout, package, and runtime are unchanged. Modified application
-source is in `generated-artifacts/embedded-login/source`, a separate local Git
-checkout, not committed or pushed.
+The embedded browser is supported on Linux/Replit **natively**, not in the
+default distroless Docker image. That image contains neither Node/Playwright
+nor worker/browser assets and sets `CHAT_GATEWAY_EMBEDDED_BROWSER=disabled`.
+Authenticated browser-ticket requests return HTTP 503 with
+`embedded_browser_not_packaged`; the UI explains the native alternative.
+Health/API and the independently secured extension relay remain available.
+Overriding the flag cannot supply missing worker assets. The native-only-image
+HTTP regression verifies this rejection still requires authorization.
 
-From the Replit workspace root:
+From a clean feature-branch checkout, install Node >=22, Python >=3.10, an
+OpenSSH client, Rust with rustfmt/Clippy, cmake, clang/libclang and a C/C++ compiler:
 
 ```sh
-bash e2e-runner/embedded-login.sh fmt
-bash e2e-runner/embedded-login.sh build
-bash e2e-runner/embedded-login.sh test
-bash e2e-runner/embedded-login.sh clippy
-node --test generated-artifacts/embedded-login/source/browser-login/*.test.mjs
-bash e2e-runner/embedded-login.sh http
-bash e2e-runner/embedded-login.sh bench-memory
-bash e2e-runner/embedded-login.sh bench-provider
-bash e2e-runner/embedded-login.sh smoke
+npm ci --ignore-scripts
+npm audit --audit-level=high
+# Replit already supplies sandbox-capable /repl/tools/bin/chromium.
+# On a supported Ubuntu host instead:
+# npx playwright install --with-deps chromium
+bash scripts/native-rust.sh cargo fmt --all -- --check
+bash scripts/native-rust.sh cargo build --locked
+bash scripts/native-rust.sh cargo test --locked
+bash scripts/native-rust.sh cargo clippy --locked --all-targets -- -D warnings
+node --test browser-login/*.test.mjs
+python3 -B -m unittest discover -s scripts -p test_native_login.py
+python3 -B -m unittest discover -s browser-login -p 'test_*.py'
+node browser-login/http-smoke.mjs target/debug/chat-gateway-rs
+node browser-login/smoke.mjs target/debug/chat-gateway-rs --through-ssh
+python3 -B scripts/run-native-login.py --diagnose
+python3 -B scripts/run-native-login.py
 ```
 
-`e2e-runner/run_embedded_login.py` is an opt-in loopback launcher on port 8099,
-using a separate private-state directory. It requires the existing
+`scripts/run-native-login.py` binds **127.0.0.1:8099 only**, rejecting remote
+mode. Keep this checkout and its `browser-login/` files at their build location:
+the binary references the worker in its compilation checkout. Do not copy the
+binary alone to an unrelated host. `/dev/shm` must support private temporary
+profiles and Chromium's sandbox must work; never add `--no-sandbox`.
+
+The default persistent native state is `data/native-login/` (SQLite and encrypted
+sessions), with 0700 directories/0600 files. `CHAT_GATEWAY_NATIVE_STATE_DIR`
+selects an owner-approved private persistent path; `CHAT_GATEWAY_NATIVE_BINARY`
+can select the corresponding build artifact. These are **non-secret** settings.
+Do not assume an ephemeral container filesystem is durable; verify storage
+availability/backups and retain the vault key separately under owner control.
+Never point smoke tests at the persistent state. The launcher requires
 `CHAT_GATEWAY_VAULT_KEY` and `CHAT_GATEWAY_API_KEY` Secrets. The launcher tests
 their names for presence only; Rust consumes/validates them normally in process.
 An optional **non-secret** `CHAT_GATEWAY_AUTH_SECRET_HASH` setting can select
@@ -161,7 +184,32 @@ provider requests with local synthetic fixtures. Production has no fixture
 endpoint or allowlist bypass. It uses fresh test-only credentials/state and
 does not inherit configured Secrets or contact a provider.
 
-Build output was relocated to a task-owned `/tmp` cache after a workspace quota
-failure, without deleting previous artifacts. That cache can expire; build
-commands recreate its directory. The separate `package/chat-gateway-rs` binary
-used by the owner launcher is retained in the workspace.
+The SSH variant starts a test-only SSH server on loopback with fresh ephemeral
+host/client keys, pinned host-key verification and signed public-key
+authentication. It runs the **production owner helper CLI** and remote Python
+stdio command; the full real-gateway/browser suite crosses that encrypted pipe.
+No existing SSH configuration, configured Secrets, provider state or host keys
+are read. All generated keys are temporary fixtures, never printed or committed.
+This verifies the transport, not the owner's actual desktop/Replit SSH trust,
+account access or provider authentication. The owner must still establish that
+connection using the Replit SSH tool. `--ssh-config` can select their local
+OpenSSH config. Default local/remote gateway ports remain 8099; optional
+`--local-port`/`--gateway-port` support other loopback ports without header
+rewriting.
+
+The Rust-only Nix workaround is `GLIBC_TUNABLES=glibc.rtld.optional_static_tls=1048576`
+plus the installed GCC runtime library directory in `LD_LIBRARY_PATH`; the
+native launcher/fixture platform helper apply it only when that Nix path exists.
+Do not export it globally into Node/Chromium. On non-Nix hosts the fixtures use
+the Playwright-installed executable unless the public
+`CHAT_GATEWAY_CHROMIUM_PATH` explicitly selects another sandbox-capable Chromium.
+`scripts/native-rust.sh` reproduces these build settings with a temporary HOME,
+cleared environment and the configured public `CARGO_HOME`/`CARGO_TARGET_DIR`
+caches. Put the installed Rust toolchain on PATH first; compiler/cache paths are
+ordinary settings, never gateway Secrets. This script is part of the repository
+and does not depend on a separate Replit runner checkout.
+
+CI runs the portable native suite separately from Docker, on Ubuntu 22.04 with
+Chromium's namespace sandbox enabled. No production provider or synthetic
+fixture enables routing. Real-account acceptance, MFA/CAPTCHA and cookie-only
+session compatibility remain owner tests, not CI success claims.

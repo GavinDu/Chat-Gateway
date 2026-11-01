@@ -6,6 +6,9 @@
     "test:browser-policy": "node --test browser-login/*.test.mjs"
   },
   "dependencies": {
-    "playwright": "1.55.0"
+    "playwright": "1.55.1"
+  },
+  "devDependencies": {
+    "ssh2": "1.17.0"
   }
 }

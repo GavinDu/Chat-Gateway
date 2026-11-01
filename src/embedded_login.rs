@@ -28,6 +28,19 @@ const IDLE: Duration = Duration::from_secs(10 * 60);
 const LIFETIME: Duration = Duration::from_secs(30 * 60);
 const HELPER: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/browser-login/worker.mjs");
 
+fn runtime_supported(setting: Option<&str>, worker_present: bool) -> bool {
+    worker_present && setting.is_none_or(|value| value == "enabled")
+}
+
+fn runtime_available() -> bool {
+    runtime_supported(
+        std::env::var("CHAT_GATEWAY_EMBEDDED_BROWSER")
+            .ok()
+            .as_deref(),
+        std::path::Path::new(HELPER).is_file(),
+    )
+}
+
 #[derive(Default)]
 struct Registry {
     tickets: HashMap<String, (String, Instant)>,
@@ -54,8 +67,19 @@ fn shutdown_channel() -> &'static tokio::sync::watch::Sender<bool> {
     static CHANNEL: OnceLock<tokio::sync::watch::Sender<bool>> = OnceLock::new();
     CHANNEL.get_or_init(|| tokio::sync::watch::channel(false).0)
 }
-pub fn shutdown_all() {
+pub async fn shutdown_all() {
     shutdown_channel().send_replace(true);
+    // Hyper does not drain upgraded WebSockets. Keep the runtime alive until
+    // each actor has closed Chromium, waited for its worker and dropped its
+    // profile/lease; otherwise dropping Node can strand Chromium profile files.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        if registry().lock().is_ok_and(|r| r.active.is_empty()) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    tracing::warn!("embedded browser shutdown exceeded its cleanup deadline");
 }
 struct Lease(String);
 impl Drop for Lease {
@@ -152,6 +176,15 @@ pub async fn ticket(
     if require_vault().is_err() {
         return error(StatusCode::SERVICE_UNAVAILABLE, "encrypted_vault_required");
     }
+    if !runtime_available() {
+        return error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "embedded_browser_not_packaged",
+        );
+    }
+    if *shutdown_channel().borrow() {
+        return error(StatusCode::SERVICE_UNAVAILABLE, "browser_shutting_down");
+    }
     let now = Instant::now();
     let Ok(mut registry) = registry().lock() else {
         return error(StatusCode::SERVICE_UNAVAILABLE, "browser_unavailable");
@@ -189,6 +222,16 @@ fn same_origin(headers: &HeaderMap) -> bool {
 #[cfg(test)]
 mod origin_tests {
     use super::*;
+    #[test]
+    fn incomplete_or_disabled_browser_runtime_fails_closed() {
+        assert!(runtime_supported(None, true));
+        assert!(runtime_supported(Some("enabled"), true));
+        for setting in [None, Some("enabled"), Some("disabled"), Some("unknown")] {
+            assert!(!runtime_supported(setting, false));
+        }
+        assert!(!runtime_supported(Some("disabled"), true));
+        assert!(!runtime_supported(Some("unknown"), true));
+    }
     #[test]
     fn browser_controls_require_explicit_matching_origin() {
         let mut headers = HeaderMap::new();
@@ -296,6 +339,9 @@ async fn run_browser(
     mut cancel: tokio::sync::watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
     require_vault()?;
+    anyhow::ensure!(runtime_available(), "embedded browser runtime not packaged");
+    let mut shutdown = shutdown_channel().subscribe();
+    anyhow::ensure!(!*shutdown.borrow(), "browser shutting down");
     let p = crate::providers::Provider::from_name(provider)
         .ok_or_else(|| anyhow::anyhow!("unknown provider"))?;
     let profile = Profile::create()?;
@@ -319,7 +365,6 @@ async fn run_browser(
     let output = child.stdout.take().ok_or_else(|| anyhow::anyhow!("pipe"))?;
     let mut lines = BufReader::new(output);
     let mut pending_line = zeroize::Zeroizing::new(Vec::new());
-    let mut shutdown = shutdown_channel().subscribe();
     let result: anyhow::Result<()> = async {
         // Interactive login must never use the legacy plaintext fallback,
         // even if a future caller accidentally bypasses ticket admission.
@@ -338,6 +383,9 @@ async fn run_browser(
         let deadline = tokio::time::sleep(LIFETIME);
         tokio::pin!(deadline);
         loop {
+            if *shutdown.borrow() {
+                break;
+            }
             tokio::select! {
                 _ = shutdown.changed() => break,
                 _ = cancel.changed() => {

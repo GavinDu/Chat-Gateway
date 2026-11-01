@@ -11,13 +11,14 @@ import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import net from 'node:net';
 import http from 'node:http';
+import { chromiumExecutable, rustRuntimeEnv } from './runtime-env.mjs';
 
 const root = dirname(fileURLToPath(import.meta.url));
 const playwrightModule = join(dirname(createRequire(import.meta.url).resolve('playwright/package.json')), 'index.mjs');
 const temp = await mkdtemp('/tmp/cg-embedded-smoke-');
 const source = resolve(root, '..');
 const results = [];
-let gateway, owner, page;
+let gateway, owner, page, tunnel;
 let controlDiagnostics = [];
 let stage = 'initialization';
 const delay = ms => new Promise(r => setTimeout(r, ms));
@@ -159,12 +160,18 @@ chromium.launchPersistentContext = async (...args) => {
       CHAT_GATEWAY_SESSION_STORE: 'vault', CHAT_GATEWAY_VAULT_KEY: fixtureVaultKey,
       CHAT_GATEWAY_MEMORY_PATH: join(temp, 'memory.sqlite3'),
       CHAT_GATEWAY_LEGACY_LOGIN_RELAY: '0',
-      CHAT_GATEWAY_CHROMIUM_PATH: '/repl/tools/bin/chromium',
+      CHAT_GATEWAY_CHROMIUM_PATH: chromiumExecutable(),
       GLIBC_TUNABLES: 'glibc.rtld.optional_static_tls=1048576',
-      LD_LIBRARY_PATH: '/nix/store/2ga5nd1m56n5cx2wh8vbf6nrdhqk2f0q-gcc-15.3.0-lib/lib' },
+      ...rustRuntimeEnv() },
     stdio: 'ignore'
   });
   gateway = startGateway();
+  if (process.argv.includes('--through-ssh')) {
+    stage = 'authenticated SSH owner transport';
+    const { startOwnerTunnel } = await import('./ssh-fixture.mjs');
+    tunnel = await startOwnerTunnel(listen);
+    base = 'http://127.0.0.1:' + tunnel.port;
+  }
   await until(async () => {
     if (gateway.exitCode !== null) throw new Error('gateway exited before health');
     try { return (await fetch(base + '/health')).status === 200; } catch { return false; }
@@ -193,7 +200,7 @@ chromium.launchPersistentContext = async (...args) => {
   pass('HTTP/WS invalid key, non-admin, provider scope, CSRF, ticket binding and replay rejected');
   stage = 'owner Chromium launch';
   owner = await chromium.launch({
-    executablePath: '/repl/tools/bin/chromium', headless: true, chromiumSandbox: true,
+    executablePath: chromiumExecutable(), headless: true, chromiumSandbox: true,
     env: { PATH: process.env.PATH, HOME: join(temp, 'home'), LANG: 'C.UTF-8' }
   });
   stage = 'owner browser context';
@@ -440,14 +447,31 @@ chromium.launchPersistentContext = async (...args) => {
     permission: /Permission denied|Operation not permitted/, resource: /quota|space|memory|pthread/,
     missing: /Executable doesn't exist|ENOENT/, navigation: /net::ERR|Navigation failed/
   })) if (pattern.test(String(error.message))) console.error('Diagnostic category: ' + name);
+  const owned = markers.split('\n').filter(s =>
+    /^fixture-profile:\/dev\/shm\/chat-gateway-login-[a-f0-9-]+$/.test(s));
+  const remaining = await Promise.all(owned.map(async (s,index) =>
+    await stat(s.slice('fixture-profile:'.length)).then(() => index, () => null)));
+  console.error('Remaining test-owned profile indices: ' + remaining.filter(i=>i!==null).join(','));
   process.exitCode = 1;
 } finally {
+  if (tunnel) {
+    if (tunnel.authenticated < 1 || tunnel.rejected !== 0) process.exitCode = 1;
+    else pass('production owner helper + real SSH public-key authentication + unchanged HTTP/WebSocket bytes');
+    await tunnel.stop();
+  }
   await page?.close().catch(() => {});
   await owner?.close().catch(() => {});
   if (gateway?.exitCode === null) {
     gateway.kill('SIGTERM');
     await delay(1500);
     if (gateway.exitCode === null) gateway.kill('SIGKILL');
+  }
+  // Keep the cleanup assertion above intact. On failure also remove only paths
+  // explicitly recorded by this test's shim, never glob real owner profiles.
+  const owned = await readFile(join(temp,'events'),'utf8').catch(()=>'');
+  for (const marker of owned.split('\n').filter(s =>
+    /^fixture-profile:\/dev\/shm\/chat-gateway-login-[a-f0-9-]+$/.test(s))) {
+    await rm(marker.slice('fixture-profile:'.length),{recursive:true,force:true});
   }
   await rm(temp, { recursive: true, force: true });
   console.log('CLEANUP temporary gateway, owner browser, fixture state and generated test credentials removed');

@@ -7,6 +7,7 @@ import { mkdtemp, mkdir, writeFile, rm, stat } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import net from 'node:net';
 import http from 'node:http';
+import { rustRuntimeEnv } from './runtime-env.mjs';
 
 const temp = await mkdtemp('/tmp/cg-http-mvp-');
 const binary = resolve(process.argv[2]);
@@ -56,7 +57,7 @@ async function start(name, auth, extra = {}) {
     CHAT_GATEWAY_SESSION_STORE:'vault', CHAT_GATEWAY_VAULT_KEY:randomBytes(32).toString('hex'),
     CHAT_GATEWAY_MEMORY_PATH:join(state,'conversations.sqlite3'),
     GLIBC_TUNABLES:'glibc.rtld.optional_static_tls=1048576',
-    LD_LIBRARY_PATH:'/nix/store/2ga5nd1m56n5cx2wh8vbf6nrdhqk2f0q-gcc-15.3.0-lib/lib',
+    ...rustRuntimeEnv(),
     ...extra}});
   return state;
 }
@@ -125,6 +126,17 @@ try {
   }
   await stop();assert.equal(child.exitCode,0);
   pass('native SIGTERM exit 0');
+  stage = 'explicit native-only Docker boundary';
+  await start('native-only-image',keys,{CHAT_GATEWAY_EMBEDDED_BROWSER:'disabled'});
+  await until(async()=>{try{return (await fetch(base+'/health')).status===200;}catch{return false;}});
+  const unavailable = await fetch(base+'/login/api/chatgpt/browser/ticket',
+    {method:'POST',headers:headers()});
+  assert.equal(unavailable.status,503);
+  assert.equal((await unavailable.json()).error.code,'embedded_browser_not_packaged');
+  assert.equal((await fetch(base+'/login/api/chatgpt/browser/ticket',
+    {method:'POST',headers:{Authorization:'Bearer invalid',Origin:base}})).status,401);
+  await stop();assert.equal(child.exitCode,0);
+  pass('native-only image explicitly rejects embedded admission without bypassing authentication');
   stage = 'process-local owner authentication';
   await start('owner-env',[],{CHAT_GATEWAY_OWNER_AUTH_FROM_ENV:'1',CHAT_GATEWAY_API_KEY:owner});
   await until(async()=>{try{return (await fetch(base+'/health')).status===200;}catch{return false;}});
