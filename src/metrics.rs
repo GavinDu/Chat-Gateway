@@ -252,7 +252,6 @@ impl MetricsRegistry {
         }
         out
     }
-
 }
 
 #[cfg(test)]
