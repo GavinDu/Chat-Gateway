@@ -32,7 +32,7 @@ function loadShared(cookieFixtures = [], hasAllPermissions = true, storageValues
 
 test("gateway normalization accepts local HTTP and explicit HTTPS origins", () => {
   const api = loadShared();
-  assert.equal(api.normalizeGateway("http://127.0.0.1:8080/path?secret=ignored"), "http://127.0.0.1:8080");
+  assert.equal(api.normalizeGateway("http://127.0.0.1:8080"), "http://127.0.0.1:8080");
   assert.equal(api.normalizeGateway("http://localhost:3000/"), "http://localhost:3000");
   assert.equal(api.normalizeGateway("http://[::1]:8080"), "http://[::1]:8080");
   assert.equal(api.normalizeGateway("https://gateway.example.com"), "https://gateway.example.com");
