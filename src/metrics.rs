@@ -70,83 +70,84 @@ pub struct MetricsRegistry {
 }
 
 impl MetricsRegistry {
-pub fn record_http_request(&self, route: &str, status: u16, duration_ms: u64) {
-    if let Ok(mut data) = self.data.lock() {
-        *data.requests.entry((route.to_owned(), status)).or_default() += 1;
-        data.handler_ms
-            .entry(route.to_owned())
-            .or_default()
-            .observe(duration_ms);
+    pub fn record_http_request(&self, route: &str, status: u16, duration_ms: u64) {
+        if let Ok(mut data) = self.data.lock() {
+            *data.requests.entry((route.to_owned(), status)).or_default() += 1;
+            data.handler_ms
+                .entry(route.to_owned())
+                .or_default()
+                .observe(duration_ms);
+        }
     }
-}
 
-/// Record one browser polling tick and the number of DOM evaluations used.
-pub fn record_browser_poll(&self, provider: &str, evaluations: u64, duration_ms: u64) {
-    if let Ok(mut data) = self.data.lock() {
-        data.poll_tick_ms
-            .entry(provider.to_owned())
-            .or_default()
-            .observe(duration_ms);
-        *data
-            .poll_evaluations
-            .entry(provider.to_owned())
-            .or_default() += evaluations;
-    }
-}
-
-/// Record the completion tail: elapsed time from the most recent emitted delta to done.
-pub fn record_browser_worker_restart(&self, ) {
-    if let Ok(mut data) = self.data.lock() {
-        data.browser_worker_restarts += 1;
-    }
-}
-
-pub fn record_provider_tail(&self, provider: &str, duration_ms: u64) {
-    if let Ok(mut data) = self.data.lock() {
-        data.provider_tail_ms
-            .entry(provider.to_owned())
-            .or_default()
-            .observe(duration_ms);
-    }
-}
-
-pub fn record_provider_timings(&self, 
-    provider: &str,
-    outcome: &str,
-    queue_ms: u64,
-    ttft_ms: Option<u64>,
-    provider_work_ms: u64,
-    total_ms: u64,
-) {
-    if let Ok(mut data) = self.data.lock() {
-        data.queue_ms
-            .entry(provider.to_owned())
-            .or_default()
-            .observe(queue_ms);
-        if let Some(ttft) = ttft_ms {
-            data.ttft_ms
+    /// Record one browser polling tick and the number of DOM evaluations used.
+    pub fn record_browser_poll(&self, provider: &str, evaluations: u64, duration_ms: u64) {
+        if let Ok(mut data) = self.data.lock() {
+            data.poll_tick_ms
                 .entry(provider.to_owned())
                 .or_default()
-                .observe(ttft);
+                .observe(duration_ms);
+            *data
+                .poll_evaluations
+                .entry(provider.to_owned())
+                .or_default() += evaluations;
         }
-        data.provider_work_ms
-            .entry(provider.to_owned())
-            .or_default()
-            .observe(provider_work_ms);
-        data.chat_total_ms
-            .entry(provider.to_owned())
-            .or_default()
-            .observe(total_ms);
-        data.gateway_overhead_ms
-            .entry(provider.to_owned())
-            .or_default()
-            .observe(total_ms.saturating_sub(queue_ms.saturating_add(provider_work_ms)));
-        *data
-            .provider_outcomes
-            .entry((provider.to_owned(), outcome.to_owned()))
-            .or_default() += 1;
     }
-}
+
+    /// Record the completion tail: elapsed time from the most recent emitted delta to done.
+    pub fn record_browser_worker_restart(&self) {
+        if let Ok(mut data) = self.data.lock() {
+            data.browser_worker_restarts += 1;
+        }
+    }
+
+    pub fn record_provider_tail(&self, provider: &str, duration_ms: u64) {
+        if let Ok(mut data) = self.data.lock() {
+            data.provider_tail_ms
+                .entry(provider.to_owned())
+                .or_default()
+                .observe(duration_ms);
+        }
+    }
+
+    pub fn record_provider_timings(
+        &self,
+        provider: &str,
+        outcome: &str,
+        queue_ms: u64,
+        ttft_ms: Option<u64>,
+        provider_work_ms: u64,
+        total_ms: u64,
+    ) {
+        if let Ok(mut data) = self.data.lock() {
+            data.queue_ms
+                .entry(provider.to_owned())
+                .or_default()
+                .observe(queue_ms);
+            if let Some(ttft) = ttft_ms {
+                data.ttft_ms
+                    .entry(provider.to_owned())
+                    .or_default()
+                    .observe(ttft);
+            }
+            data.provider_work_ms
+                .entry(provider.to_owned())
+                .or_default()
+                .observe(provider_work_ms);
+            data.chat_total_ms
+                .entry(provider.to_owned())
+                .or_default()
+                .observe(total_ms);
+            data.gateway_overhead_ms
+                .entry(provider.to_owned())
+                .or_default()
+                .observe(total_ms.saturating_sub(queue_ms.saturating_add(provider_work_ms)));
+            *data
+                .provider_outcomes
+                .entry((provider.to_owned(), outcome.to_owned()))
+                .or_default() += 1;
+        }
+    }
 
 }
 fn escape_label(value: &str) -> String {
@@ -177,80 +178,80 @@ pub fn normalize_route(path: &str) -> String {
 /// Render metrics plus the current session state for each configured provider.
 /// State values are emitted as a bounded one-hot gauge for dashboards.
 impl MetricsRegistry {
-pub fn render_with_provider_states(&self, provider_states: &[(String, String)]) -> String {
-    let Ok(data) = self.data.lock() else {
-        return String::new();
-    };
-    let mut out = String::new();
-    let _ = writeln!(out, "# TYPE gateway_http_requests_total counter");
-    for ((route, status), count) in &data.requests {
-        let _ = writeln!(
-            out,
-            "gateway_http_requests_total{{route=\"{}\",status=\"{}\"}} {count}",
-            escape_label(route),
-            status
-        );
-    }
-    for (metric, values) in [
-        ("gateway_http_handler_duration_ms", &data.handler_ms),
-        ("gateway_provider_queue_duration_ms", &data.queue_ms),
-        ("gateway_provider_ttft_ms", &data.ttft_ms),
-        ("gateway_provider_work_duration_ms", &data.provider_work_ms),
-        ("gateway_provider_tail_ms", &data.provider_tail_ms),
-        ("gateway_chat_total_duration_ms", &data.chat_total_ms),
-        ("gateway_overhead_ms", &data.gateway_overhead_ms),
-    ] {
-        let _ = writeln!(out, "# TYPE {metric} histogram");
-        let label = if metric == "gateway_http_handler_duration_ms" {
-            "route"
-        } else {
-            "provider"
+    pub fn render_with_provider_states(&self, provider_states: &[(String, String)]) -> String {
+        let Ok(data) = self.data.lock() else {
+            return String::new();
         };
-        for (key, histogram) in values {
-            histogram.render(&mut out, metric, label, key);
-        }
-    }
-    let _ = writeln!(out, "# TYPE gateway_poll_tick_ms histogram");
-    for (provider, histogram) in &data.poll_tick_ms {
-        histogram.render(&mut out, "gateway_poll_tick_ms", "provider", provider);
-    }
-    let _ = writeln!(out, "# TYPE gateway_poll_evaluations_total counter");
-    for (provider, count) in &data.poll_evaluations {
-        let _ = writeln!(
-            out,
-            "gateway_poll_evaluations_total{{provider=\"{}\"}} {count}",
-            escape_label(provider)
-        );
-    }
-    let _ = writeln!(out, "# TYPE gateway_provider_requests_total counter");
-    for ((provider, outcome), count) in &data.provider_outcomes {
-        let _ = writeln!(
-            out,
-            "gateway_provider_requests_total{{provider=\"{}\",outcome=\"{}\"}} {count}",
-            escape_label(provider),
-            escape_label(outcome)
-        );
-    }
-    let _ = writeln!(out, "# TYPE gateway_browser_worker_restarts_total counter");
-    let _ = writeln!(
-        out,
-        "gateway_browser_worker_restarts_total {}",
-        data.browser_worker_restarts
-    );
-    let _ = writeln!(out, "# TYPE gateway_provider_session_state gauge");
-    for (provider, state) in provider_states {
-        for known_state in ["unknown", "ready", "needs_login", "degraded"] {
-            let value = u8::from(state == known_state);
+        let mut out = String::new();
+        let _ = writeln!(out, "# TYPE gateway_http_requests_total counter");
+        for ((route, status), count) in &data.requests {
             let _ = writeln!(
                 out,
-                "gateway_provider_session_state{{provider=\"{}\",state=\"{}\"}} {value}",
-                escape_label(provider),
-                known_state
+                "gateway_http_requests_total{{route=\"{}\",status=\"{}\"}} {count}",
+                escape_label(route),
+                status
             );
         }
+        for (metric, values) in [
+            ("gateway_http_handler_duration_ms", &data.handler_ms),
+            ("gateway_provider_queue_duration_ms", &data.queue_ms),
+            ("gateway_provider_ttft_ms", &data.ttft_ms),
+            ("gateway_provider_work_duration_ms", &data.provider_work_ms),
+            ("gateway_provider_tail_ms", &data.provider_tail_ms),
+            ("gateway_chat_total_duration_ms", &data.chat_total_ms),
+            ("gateway_overhead_ms", &data.gateway_overhead_ms),
+        ] {
+            let _ = writeln!(out, "# TYPE {metric} histogram");
+            let label = if metric == "gateway_http_handler_duration_ms" {
+                "route"
+            } else {
+                "provider"
+            };
+            for (key, histogram) in values {
+                histogram.render(&mut out, metric, label, key);
+            }
+        }
+        let _ = writeln!(out, "# TYPE gateway_poll_tick_ms histogram");
+        for (provider, histogram) in &data.poll_tick_ms {
+            histogram.render(&mut out, "gateway_poll_tick_ms", "provider", provider);
+        }
+        let _ = writeln!(out, "# TYPE gateway_poll_evaluations_total counter");
+        for (provider, count) in &data.poll_evaluations {
+            let _ = writeln!(
+                out,
+                "gateway_poll_evaluations_total{{provider=\"{}\"}} {count}",
+                escape_label(provider)
+            );
+        }
+        let _ = writeln!(out, "# TYPE gateway_provider_requests_total counter");
+        for ((provider, outcome), count) in &data.provider_outcomes {
+            let _ = writeln!(
+                out,
+                "gateway_provider_requests_total{{provider=\"{}\",outcome=\"{}\"}} {count}",
+                escape_label(provider),
+                escape_label(outcome)
+            );
+        }
+        let _ = writeln!(out, "# TYPE gateway_browser_worker_restarts_total counter");
+        let _ = writeln!(
+            out,
+            "gateway_browser_worker_restarts_total {}",
+            data.browser_worker_restarts
+        );
+        let _ = writeln!(out, "# TYPE gateway_provider_session_state gauge");
+        for (provider, state) in provider_states {
+            for known_state in ["unknown", "ready", "needs_login", "degraded"] {
+                let value = u8::from(state == known_state);
+                let _ = writeln!(
+                    out,
+                    "gateway_provider_session_state{{provider=\"{}\",state=\"{}\"}} {value}",
+                    escape_label(provider),
+                    known_state
+                );
+            }
+        }
+        out
     }
-    out
-}
 
 }
 
