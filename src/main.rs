@@ -555,8 +555,13 @@ async fn protect_login_api(req: Request<Body>, next: Next) -> Response {
         !origin_present || login_origin_is_same_authority(headers)
     };
 
-    let authority_is_safe = if let Ok(Some((_, authority))) = remote_gateway_origin() {
-        remote_request_is_allowed(headers, &remote_gateway_origin().ok().flatten().map(|(origin, _)| origin).unwrap_or_default(), &authority, is_relay_api && relay::relay_origin_is_allowed(headers))
+    let authority_is_safe = if let Ok(Some((origin, authority))) = remote_gateway_origin() {
+        remote_request_is_allowed(
+            headers,
+            &origin,
+            &authority,
+            is_relay_api && relay::relay_origin_is_allowed(headers),
+        )
     } else {
         headers
             .get(axum::http::header::HOST)
@@ -1216,7 +1221,9 @@ async fn authenticate_api_key(
             .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("bearer"))
             .map(|(_, secret)| hash_api_key(secret));
         let expected_hash = hash_api_key(&expected);
-        if supplied.as_deref().is_none_or(|digest| !constant_time_eq(digest.as_bytes(), expected_hash.as_bytes())) {
+        if supplied.as_deref().is_none_or(|digest| {
+            !constant_time_eq(digest.as_bytes(), expected_hash.as_bytes())
+        }) {
             return api_error(
                 StatusCode::UNAUTHORIZED,
                 "authentication_error",
