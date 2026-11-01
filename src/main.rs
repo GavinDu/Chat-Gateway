@@ -1336,8 +1336,13 @@ async fn get_long_term_memory_settings(
     auth_context: Option<Extension<AuthKeyContext>>,
 ) -> Response {
     let owner = memory_owner(&auth_context).to_owned();
-    match state.memory.clone().long_term_memory_enabled_async(owner).await {
-        Ok(Ok(enabled)) => Json(serde_json::json!({ "enabled": enabled })).into_response(),
+    match state
+        .memory
+        .clone()
+        .long_term_memory_enabled_async(owner)
+        .await
+    {
+        Ok(enabled) => Json(serde_json::json!({ "enabled": enabled })).into_response(),
         _ => api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "server_error",
@@ -1354,8 +1359,13 @@ async fn put_long_term_memory_settings(
 ) -> Response {
     let owner = memory_owner(&auth_context).to_owned();
     let enabled = request.enabled;
-    match state.memory.clone().set_long_term_memory_enabled_async(owner, enabled).await {
-        Ok(Ok(())) => Json(serde_json::json!({ "enabled": enabled })).into_response(),
+    match state
+        .memory
+        .clone()
+        .set_long_term_memory_enabled_async(owner, enabled)
+        .await
+    {
+        Ok(()) => Json(serde_json::json!({ "enabled": enabled })).into_response(),
         _ => api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "server_error",
@@ -1370,8 +1380,13 @@ async fn list_long_term_memory_items(
     auth_context: Option<Extension<AuthKeyContext>>,
 ) -> Response {
     let owner = memory_owner(&auth_context).to_owned();
-    match state.memory.clone().long_term_memory_snapshot_async(owner).await {
-        Ok(Ok((enabled, items))) => Json(serde_json::json!({
+    match state
+        .memory
+        .clone()
+        .long_term_memory_snapshot_async(owner)
+        .await
+    {
+        Ok((enabled, items)) => Json(serde_json::json!({
             "enabled": enabled,
             "data": items,
         }))
@@ -1408,7 +1423,7 @@ async fn export_long_term_memory_items(
 ) -> Response {
     let owner = memory_owner(&auth_context).to_owned();
     match state.memory.clone().long_term_memory_snapshot_async(owner).await {
-        Ok(Ok((enabled, items))) => long_term_memory_export_response(enabled, items),
+        Ok((enabled, items)) => long_term_memory_export_response(enabled, items),
         _ => api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "server_error",
@@ -1429,39 +1444,40 @@ async fn save_long_term_memory_item(
     let source_conversation_id = request.source_conversation_id;
     let confidence = request.confidence.unwrap_or(1.0);
     let expires_at = request.expires_at;
-    match state.memory.clone().save_long_term_memory_item_async(
-        owner, memory_key, value, source_conversation_id, confidence, expires_at,
-    ).await {
-        Ok(Ok(item)) => (StatusCode::OK, Json(item)).into_response(),
-        Ok(Err(error)) if error.to_string().contains("disabled") => api_error(
+    match state
+        .memory
+        .clone()
+        .save_long_term_memory_item_async(
+            owner,
+            memory_key,
+            value,
+            source_conversation_id,
+            confidence,
+            expires_at,
+        )
+        .await
+    {
+        Ok(item) => (StatusCode::OK, Json(item)).into_response(),
+        Err(error) if error.to_string().contains("disabled") => api_error(
             StatusCode::CONFLICT,
             "invalid_request_error",
             "long_term_memory_disabled",
             "enable long-term memory before saving items",
         ),
-        Ok(Err(error)) if error.to_string().contains("invalid long-term memory item") => api_error(
+        Err(error) if error.to_string().contains("invalid long-term memory item") => api_error(
             StatusCode::BAD_REQUEST,
             "invalid_request_error",
             "invalid_memory_item",
             "memory key, value, or confidence is invalid",
         ),
-        Ok(Err(error)) if error.to_string().contains("source conversation") => api_error(
+        Err(error) if error.to_string().contains("source conversation") => api_error(
             StatusCode::BAD_REQUEST,
             "invalid_request_error",
             "invalid_memory_provenance",
             "source conversation must belong to this API key",
         ),
-        Ok(Err(error)) => {
-            tracing::error!(%error, "long-term memory item save failed");
-            api_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "server_error",
-                "memory_write_failed",
-                "memory item could not be saved safely",
-            )
-        }
         Err(error) => {
-            tracing::error!(%error, "long-term memory item task failed");
+            tracing::error!(%error, "long-term memory item save failed");
             api_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "server_error",
@@ -1486,9 +1502,14 @@ async fn delete_long_term_memory_item(
         );
     }
     let owner = memory_owner(&auth_context).to_owned();
-    match state.memory.clone().delete_long_term_memory_item_async(owner, item_id).await {
-        Ok(Ok(true)) => StatusCode::NO_CONTENT.into_response(),
-        Ok(Ok(false)) => api_error(
+    match state
+        .memory
+        .clone()
+        .delete_long_term_memory_item_async(owner, item_id)
+        .await
+    {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => api_error(
             StatusCode::NOT_FOUND,
             "not_found",
             "memory_item_not_found",
@@ -1517,19 +1538,15 @@ async fn delete_all_long_term_memory_items(
         );
     }
     let owner = memory_owner(&auth_context).to_owned();
-    match state.memory.clone().delete_all_long_term_memory_items_async(owner).await {
-        Ok(Ok(deleted)) => Json(serde_json::json!({ "deleted": deleted })).into_response(),
-        Ok(Err(error)) => {
-            tracing::error!(%error, "long-term memory bulk deletion failed");
-            api_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "server_error",
-                "memory_delete_failed",
-                "memory items could not be deleted safely",
-            )
-        }
+    match state
+        .memory
+        .clone()
+        .delete_all_long_term_memory_items_async(owner)
+        .await
+    {
+        Ok(deleted) => Json(serde_json::json!({ "deleted": deleted })).into_response(),
         Err(error) => {
-            tracing::error!(%error, "long-term memory bulk deletion task failed");
+            tracing::error!(%error, "long-term memory bulk deletion failed");
             api_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "server_error",
@@ -2269,8 +2286,13 @@ async fn chat_completions(
     // closed rather than silently changing the prompt. Reserve a fixed portion
     // of the context budget before assembling transcript history.
     let retrieved_memory = if personal_memory_egress_enabled {
-        match state.memory.clone().retrieve_long_term_memory_items_async(owner_key_id.clone(), 20).await {
-            Ok(Ok(items)) => items,
+        match state
+            .memory
+            .clone()
+            .retrieve_long_term_memory_items_async(owner_key_id.clone(), 20)
+            .await
+        {
+            Ok(items) => items,
             _ => {
                 return api_error(
                     StatusCode::INTERNAL_SERVER_ERROR,
