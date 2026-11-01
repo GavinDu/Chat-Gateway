@@ -1288,8 +1288,6 @@ impl UnifiedMemory {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
-    /// Retrieval is empty unless explicitly enabled and always excludes expired items.
-
     /// Read the opt-in flag and exported items from one SQLite snapshot.
     pub fn long_term_memory_snapshot(
         &self,
@@ -1577,9 +1575,10 @@ impl LongTermMemoryStore for UnifiedMemory {
     }
 }
 
-#[cfg(all(test, not(bench)))]
+#[cfg(test)]
+#[allow(dead_code, unused_imports)]
 mod async_long_term_memory_store_tests {
-    use super::{ConversationStore, LongTermMemoryStore, UnifiedMemory};
+    use super::{LongTermMemoryStore, UnifiedMemory};
     use std::sync::Arc;
 
     #[tokio::test]
