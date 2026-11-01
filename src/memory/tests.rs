@@ -2,6 +2,7 @@
 #![allow(dead_code)]
 
 use super::*;
+use crate::memory::ConversationStore;
 use std::{
     collections::HashMap,
     fs,
@@ -3044,6 +3045,28 @@ impl ConversationStore for CountingStore {
             .upsert_provider_thread_async(owner_key_id, thread)
             .await
     }
+    async fn long_term_memory_enabled_async(self: Arc<Self>, owner_key_id: String) -> anyhow::Result<bool> {
+        self.inner.clone().long_term_memory_enabled_async(owner_key_id).await
+    }
+    async fn set_long_term_memory_enabled_async(self: Arc<Self>, owner_key_id: String, enabled: bool) -> anyhow::Result<()> {
+        self.inner.clone().set_long_term_memory_enabled_async(owner_key_id, enabled).await
+    }
+    async fn list_long_term_memory_snapshot_async(self: Arc<Self>, owner_key_id: String) -> anyhow::Result<(bool, Vec<LongTermMemoryItem>)> {
+        self.inner.clone().list_long_term_memory_snapshot_async(owner_key_id).await
+    }
+    async fn retrieve_long_term_memory_items_async(self: Arc<Self>, owner_key_id: String, limit: usize) -> anyhow::Result<Vec<LongTermMemoryItem>> {
+        self.inner.clone().retrieve_long_term_memory_items_async(owner_key_id, limit).await
+    }
+    async fn save_long_term_memory_item_async(self: Arc<Self>, owner_key_id: String, memory_key: String, value: String, source_conversation_id: Option<String>, confidence: f64, expires_at: Option<i64>) -> anyhow::Result<LongTermMemoryItem> {
+        self.inner.clone().save_long_term_memory_item_async(owner_key_id, memory_key, value, source_conversation_id, confidence, expires_at).await
+    }
+    async fn delete_long_term_memory_item_async(self: Arc<Self>, owner_key_id: String, item_id: String) -> anyhow::Result<bool> {
+        self.inner.clone().delete_long_term_memory_item_async(owner_key_id, item_id).await
+    }
+    async fn delete_all_long_term_memory_items_async(self: Arc<Self>, owner_key_id: String) -> anyhow::Result<usize> {
+        self.inner.clone().delete_all_long_term_memory_items_async(owner_key_id).await
+    }
+
 }
 
 #[tokio::test]
