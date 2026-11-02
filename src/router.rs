@@ -123,7 +123,10 @@ impl ProviderRouter {
                 .get_provider_for_owner_async(owner_key_id.to_owned(), conversation_id.to_owned())
                 .await?
             {
-                if let Some(position) = candidates.iter().position(|candidate| candidate == &previous_provider) {
+                if let Some(position) = candidates
+                    .iter()
+                    .position(|candidate| candidate == &previous_provider)
+                {
                     let first = candidates.remove(position);
                     candidates.insert(0, first);
                 }
@@ -219,8 +222,14 @@ mod tests {
             .persist_turn(
                 "owner-a".into(),
                 "conversation-123".into(),
-                vec![ChatMessage { role: "user".into(), content: "hello".into() }],
-                ChatMessage { role: "assistant".into(), content: "world".into() },
+                vec![ChatMessage {
+                    role: "user".into(),
+                    content: "hello".into(),
+                }],
+                ChatMessage {
+                    role: "assistant".into(),
+                    content: "world".into(),
+                },
                 "chatgpt".into(),
                 None,
             )
@@ -228,12 +237,7 @@ mod tests {
             .unwrap();
 
         let candidates = router
-            .resolve_for_owner_async(
-                "owner-a",
-                "auto",
-                Some("conversation-123"),
-                memory,
-            )
+            .resolve_for_owner_async("owner-a", "auto", Some("conversation-123"), memory)
             .await
             .unwrap();
         assert_eq!(candidates, vec!["chatgpt", "claude"]);
@@ -248,8 +252,14 @@ mod tests {
             .persist_turn(
                 "owner-a".into(),
                 "conversation-123".into(),
-                vec![crate::memory::ChatMessage { role: "user".into(), content: "hello".into() }],
-                crate::memory::ChatMessage { role: "assistant".into(), content: "world".into() },
+                vec![crate::memory::ChatMessage {
+                    role: "user".into(),
+                    content: "hello".into(),
+                }],
+                crate::memory::ChatMessage {
+                    role: "assistant".into(),
+                    content: "world".into(),
+                },
                 "chatgpt".into(),
                 None,
             )
@@ -257,12 +267,7 @@ mod tests {
             .unwrap();
 
         let owner_b_candidates = router
-            .resolve_for_owner_async(
-                "owner-b",
-                "auto",
-                Some("conversation-123"),
-                memory,
-            )
+            .resolve_for_owner_async("owner-b", "auto", Some("conversation-123"), memory)
             .await
             .unwrap();
         assert_eq!(owner_b_candidates, vec!["claude", "chatgpt"]);
