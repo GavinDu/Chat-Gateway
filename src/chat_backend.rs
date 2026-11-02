@@ -263,7 +263,7 @@ impl ChatBackend for crate::browser::pool::ObscuraPool {
         &self,
         request: ChatRequest,
     ) -> std::result::Result<mpsc::Receiver<Result<ChatEvent, GatewayError>>, GatewayError> {
-        let mut source = crate::browser::pool::ObscuraPool::send_stream(
+        let source = crate::browser::pool::ObscuraPool::send_stream(
             self,
             request.provider.as_str(),
             request.prompt,
