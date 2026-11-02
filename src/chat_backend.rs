@@ -199,7 +199,10 @@ pub trait ChatBackend: Send + Sync {
 /// routing uses this distinction to stop retrying a dead session and request
 /// an explicit owner re-login. Worker loss remains retryable infrastructure.
 fn map_backend_error(error: anyhow::Error) -> GatewayError {
-    if error.downcast_ref::<ProviderSessionExpiredError>().is_some() {
+    if error
+        .downcast_ref::<ProviderSessionExpiredError>()
+        .is_some()
+    {
         return GatewayError::session_expired("provider session expired; re-login required");
     }
     if error
@@ -325,16 +328,16 @@ mod tests {
 
     #[test]
     fn backend_errors_preserve_session_expiry_and_worker_unavailability_types() {
-        let expired = super::map_backend_error(anyhow::Error::new(
-            ProviderSessionExpiredError,
-        ));
+        let expired = super::map_backend_error(anyhow::Error::new(ProviderSessionExpiredError));
         assert_eq!(expired.kind, GatewayErrorKind::SessionExpired);
         assert!(!expired.is_retryable());
-        assert_eq!(expired.message, "provider session expired; re-login required");
+        assert_eq!(
+            expired.message,
+            "provider session expired; re-login required"
+        );
 
-        let unavailable = super::map_backend_error(anyhow::Error::new(
-            BrowserWorkerUnavailableError,
-        ));
+        let unavailable =
+            super::map_backend_error(anyhow::Error::new(BrowserWorkerUnavailableError));
         assert_eq!(unavailable.kind, GatewayErrorKind::BackendUnavailable);
         assert!(unavailable.is_retryable());
 
