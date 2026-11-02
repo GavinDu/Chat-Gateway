@@ -63,7 +63,12 @@ pub(crate) fn start_background_workers(state: &Arc<AppState>) {
     // Verify idle provider sessions on the browser worker. Each probe is
     // read-only and serialized by the provider page lock; stagger providers
     // to avoid synchronized browser work after startup.
-    for provider in state.cfg.providers.iter().filter(|provider| provider.enabled) {
+    for provider in state
+        .cfg
+        .providers
+        .iter()
+        .filter(|provider| provider.enabled)
+    {
         let pool = state.pool.clone();
         let provider_sessions = state.provider_sessions.clone();
         let provider_name = provider.name.clone();
