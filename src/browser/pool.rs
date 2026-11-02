@@ -207,6 +207,21 @@ struct LoginMeta {
 
 const LOGIN_IDLE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
+/// Record a test-adapter session restore failure and tell the caller to stop.
+fn record_test_adapter_restore_result(
+    report: &mut TestAdapterReport,
+    stage: &str,
+    result: Result<()>,
+) -> bool {
+    match result {
+        Ok(()) => true,
+        Err(error) => {
+            report.errors.push(format!("{stage}: {error}"));
+            false
+        }
+    }
+}
+
 /// Live-send test-adapter outcome, phase by phase (Go RunAdapterTest
 /// shape, adapted to the restored tree: probe uses the full Rust v1
 /// selector arrays, and the live send uses the restored send path).
@@ -1370,16 +1385,26 @@ fn browser_thread(
                                     }
                                 };
                                 if let Some(file) = session_file {
-                                    if let Err(error) = session::restore_cookies(&browser, &file, provider.name()) {
-                                        report.errors.push(format!("session cookie restore failed: {error}"));
+                                    if !record_test_adapter_restore_result(
+                                        &mut report,
+                                        "session cookie restore failed",
+                                        session::restore_cookies(&browser, &file, provider.name()),
+                                    ) {
+                                        finish(report);
+                                        return;
                                     }
                                     if page.goto(provider.login_url()).await.is_err() {
                                         report.errors.push("page navigation failed".to_string());
                                         finish(report);
                                         return;
                                     }
-                                    if let Err(error) = session::restore_local_storage(&page, &file) {
-                                        report.errors.push(format!("session localStorage restore failed: {error}"));
+                                    if !record_test_adapter_restore_result(
+                                        &mut report,
+                                        "session localStorage restore failed",
+                                        session::restore_local_storage(&page, &file),
+                                    ) {
+                                        finish(report);
+                                        return;
                                     }
                                     if page.goto(provider.login_url()).await.is_err() {
                                         report.errors.push("page navigation failed".to_string());
