@@ -171,12 +171,14 @@ chromium.launchPersistentContext = async (...args) => {
     const { startOwnerTunnel } = await import('./ssh-fixture.mjs');
     tunnel = await startOwnerTunnel(listen);
     base = 'http://127.0.0.1:' + tunnel.port;
+    stage = 'authenticated SSH tunnel health';
   }
   await until(async () => {
     if (gateway.exitCode !== null) throw new Error('gateway exited before health');
     try { return (await fetch(base + '/health')).status === 200; } catch { return false; }
   }, 'health');
   pass('actual gateway health HTTP 200');
+  if (process.argv.includes('--through-ssh')) stage = 'authenticated SSH HTTP contract';
   assert.equal((await fetch(base + '/ready', { headers: { Authorization: 'Bearer ' + key } })).status, 503);
   assert.equal((await fetch(base + '/v1/models', { headers: { Authorization: 'Bearer ' + key } })).status, 200);
   pass('readiness truthfully rejects disabled routing; authenticated model listing works');
@@ -428,8 +430,13 @@ chromium.launchPersistentContext = async (...args) => {
   pass('all test-owned provider profile directories removed after cancel/save/crash/revoke/shutdown');
 } catch (error) {
   // No raw errors/objects: browser tooling can include request or input values.
-  console.error('FAIL stage=' + stage + ' ' + (String(error.message).startsWith('timeout:')
-    ? error.message : 'smoke assertion/runtime failure'));
+  const safeErrorName = typeof error?.name === 'string' && /^[A-Za-z]+Error$/.test(error.name)
+    ? error.name : 'Error';
+  const safeErrorCode = typeof error?.code === 'string' && /^[A-Z0-9_]{2,48}$/.test(error.code)
+    ? ' code=' + error.code : '';
+  console.error('FAIL stage=' + stage + ' type=' + safeErrorName + safeErrorCode + ' ' +
+    (String(error.message).startsWith('timeout:')
+      ? error.message : 'smoke assertion/runtime failure'));
   const publicCodes = controlDiagnostics.filter(m => m.type === 'error')
     .map(m => m.code).filter(c => ['browser_runtime_unavailable','navigation_blocked',
       'no_provider_session','invalid_input','page_limit','input_queue_full','session_revoked'].includes(c));
