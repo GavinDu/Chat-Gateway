@@ -297,7 +297,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/v1/conversations", get(list_conversations))
         .route(
             "/v1/memory/settings",
-            get(memory_api::get_long_term_memory_settings).put(memory_api::put_long_term_memory_settings),
+            get(memory_api::get_long_term_memory_settings)
+                .put(memory_api::put_long_term_memory_settings),
         )
         .route(
             "/v1/memory/items",
@@ -305,7 +306,10 @@ async fn main() -> anyhow::Result<()> {
                 .put(memory_api::save_long_term_memory_item)
                 .delete(memory_api::delete_all_long_term_memory_items),
         )
-        .route("/v1/memory/export", get(memory_api::export_long_term_memory_items))
+        .route(
+            "/v1/memory/export",
+            get(memory_api::export_long_term_memory_items),
+        )
         .route(
             "/v1/memory/items/:item_id",
             axum::routing::delete(memory_api::delete_long_term_memory_item),
