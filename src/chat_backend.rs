@@ -1,5 +1,8 @@
 //! Canonical chat execution contract independent of the browser engine.
-use crate::providers::ProviderChunk;
+use crate::{
+    browser::pool::{BrowserWorkerUnavailableError, ProviderSessionExpiredError},
+    providers::ProviderChunk,
+};
 use anyhow::Result;
 use std::{error::Error, fmt};
 use tokio::sync::mpsc;
@@ -190,6 +193,54 @@ pub trait ChatBackend: Send + Sync {
     async fn models(&self, provider: ProviderId) -> std::result::Result<Vec<String>, GatewayError>;
 }
 
+/// Convert browser/backend failures into stable gateway error categories.
+///
+/// Provider auth expiry must not be flattened into a generic provider failure:
+/// routing uses this distinction to stop retrying a dead session and request
+/// an explicit owner re-login. Worker loss remains retryable infrastructure.
+fn map_backend_error(error: anyhow::Error) -> GatewayError {
+    if error
+        .downcast_ref::<ProviderSessionExpiredError>()
+        .is_some()
+    {
+        return GatewayError::session_expired("provider session expired; re-login required");
+    }
+    if error
+        .downcast_ref::<BrowserWorkerUnavailableError>()
+        .is_some_and(BrowserWorkerUnavailableError::is_retryable)
+    {
+        return GatewayError::backend_unavailable("browser worker is temporarily unavailable");
+    }
+    GatewayError::provider_failure(error.to_string())
+}
+
+/// Forward browser-provider events while observing downstream cancellation.
+///
+/// The downstream receiver is the HTTP/service consumer. If it is dropped,
+/// stop reading the provider stream immediately so the underlying browser send
+/// (and its provider permit) is released even when the provider is idle.
+fn forward_provider_stream(
+    mut source: mpsc::Receiver<Result<ProviderChunk>>,
+    tx: mpsc::Sender<Result<ChatEvent, GatewayError>>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = tx.closed() => break,
+                chunk = source.recv() => {
+                    let Some(chunk) = chunk else {
+                        break;
+                    };
+                    let event = chunk.map(ChatEvent::from).map_err(map_backend_error);
+                    if tx.send(event).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    })
+}
+
 #[async_trait::async_trait]
 impl ChatBackend for crate::browser::pool::ObscuraPool {
     fn id(&self) -> BackendId {
@@ -208,23 +259,14 @@ impl ChatBackend for crate::browser::pool::ObscuraPool {
     async fn models(&self, provider: ProviderId) -> std::result::Result<Vec<String>, GatewayError> {
         crate::browser::pool::ObscuraPool::discover(self, provider.as_str())
             .await
-            .map_err(|error| {
-                if error
-                    .downcast_ref::<crate::browser::pool::BrowserWorkerUnavailableError>()
-                    .is_some_and(|worker_error| worker_error.is_retryable())
-                {
-                    GatewayError::backend_unavailable(error.to_string())
-                } else {
-                    GatewayError::provider_failure(error.to_string())
-                }
-            })
+            .map_err(map_backend_error)
     }
 
     async fn send_stream(
         &self,
         request: ChatRequest,
     ) -> std::result::Result<mpsc::Receiver<Result<ChatEvent, GatewayError>>, GatewayError> {
-        let mut source = crate::browser::pool::ObscuraPool::send_stream(
+        let source = crate::browser::pool::ObscuraPool::send_stream(
             self,
             request.provider.as_str(),
             request.prompt,
@@ -233,27 +275,9 @@ impl ChatBackend for crate::browser::pool::ObscuraPool {
             request.thread_url,
         )
         .await
-        .map_err(|error| {
-            if error
-                .downcast_ref::<crate::browser::pool::BrowserWorkerUnavailableError>()
-                .is_some_and(|worker_error| worker_error.is_retryable())
-            {
-                GatewayError::backend_unavailable(error.to_string())
-            } else {
-                GatewayError::provider_failure(error.to_string())
-            }
-        })?;
+        .map_err(map_backend_error)?;
         let (tx, rx) = mpsc::channel(32);
-        tokio::spawn(async move {
-            while let Some(chunk) = source.recv().await {
-                let event = chunk
-                    .map(ChatEvent::from)
-                    .map_err(|error| GatewayError::provider_failure(error.to_string()));
-                if tx.send(event).await.is_err() {
-                    break;
-                }
-            }
-        });
+        forward_provider_stream(source, tx);
         Ok(rx)
     }
 }
@@ -262,8 +286,9 @@ impl ChatBackend for crate::browser::pool::ObscuraPool {
 mod tests {
     use super::{
         BackendCapabilities, BackendId, ChatBackend, ChatEvent, ChatRequest, GatewayError,
-        GatewayErrorKind, ProviderId,
+        GatewayErrorKind, ProviderChunk, ProviderId,
     };
+    use crate::browser::pool::{BrowserWorkerUnavailableError, ProviderSessionExpiredError};
     use anyhow::Result;
     use std::sync::Arc;
     use tokio::sync::mpsc;
@@ -299,6 +324,44 @@ mod tests {
             .expect("receiver should be alive");
             Ok(rx)
         }
+    }
+
+    #[test]
+    fn backend_errors_preserve_session_expiry_and_worker_unavailability_types() {
+        let expired = super::map_backend_error(anyhow::Error::new(ProviderSessionExpiredError));
+        assert_eq!(expired.kind, GatewayErrorKind::SessionExpired);
+        assert!(!expired.is_retryable());
+        assert_eq!(
+            expired.message,
+            "provider session expired; re-login required"
+        );
+
+        let unavailable =
+            super::map_backend_error(anyhow::Error::new(BrowserWorkerUnavailableError));
+        assert_eq!(unavailable.kind, GatewayErrorKind::BackendUnavailable);
+        assert!(unavailable.is_retryable());
+
+        let ordinary = super::map_backend_error(anyhow::anyhow!("provider rejected request"));
+        assert_eq!(ordinary.kind, GatewayErrorKind::ProviderFailure);
+        assert!(!ordinary.is_retryable());
+    }
+
+    #[tokio::test]
+    async fn dropping_event_receiver_cancels_idle_provider_stream() {
+        let (source_tx, source_rx) = mpsc::channel::<Result<ProviderChunk>>(1);
+        let (event_tx, event_rx) = mpsc::channel(1);
+        let forwarding = super::forward_provider_stream(source_rx, event_tx);
+
+        // No provider event is sent: cancellation must not depend on the
+        // upstream producing another chunk to notice that the consumer left.
+        drop(event_rx);
+        tokio::time::timeout(std::time::Duration::from_secs(1), source_tx.closed())
+            .await
+            .expect("dropping the event receiver must close the provider stream");
+
+        forwarding
+            .await
+            .expect("provider forwarding task should stop cleanly");
     }
 
     #[tokio::test]
