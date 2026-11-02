@@ -67,7 +67,6 @@ pub(super) fn closed_command_channel() -> mpsc::Sender<Command> {
     sender
 }
 
-
 #[cfg(test)]
 mod worker_supervisor_tests {
     use super::{
@@ -299,4 +298,3 @@ mod worker_supervisor_tests {
         );
     }
 }
-
