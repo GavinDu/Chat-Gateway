@@ -824,10 +824,13 @@ async fn open_page_with_session(
     provider: Provider,
     session_file: Option<&session::SessionFile>,
 ) -> Result<()> {
-    if let Some(file) = session_file {
-        session::restore_cookies(browser, file, provider.name())?;
-    }
+    let cookie_restore = session_file
+        .map(|file| session::restore_cookies(browser, file, provider.name()))
+        .transpose();
+    // Navigate even when cookie import failed so the caller's fail-closed
+    // cleanup can clear origin-scoped localStorage on the provider origin.
     page.goto(provider.login_url()).await?;
+    cookie_restore?;
     if let Some(file) = session_file {
         session::restore_local_storage(page, file)?;
         page.goto(provider.login_url()).await?;
