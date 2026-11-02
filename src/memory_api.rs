@@ -110,7 +110,7 @@ pub(crate) async fn list_long_term_memory_items(
     }
 }
 
-fn long_term_memory_export_response(
+pub(crate) fn long_term_memory_export_response(
     enabled: bool,
     items: Vec<memory::LongTermMemoryItem>,
 ) -> Response {
