@@ -3022,6 +3022,17 @@ impl ConversationStore for CountingStore {
             .await
     }
 
+    async fn get_provider_for_owner_async(
+        self: Arc<Self>,
+        owner_key_id: String,
+        conversation_id: String,
+    ) -> anyhow::Result<Option<String>> {
+        self.inner
+            .clone()
+            .get_provider_for_owner_async(owner_key_id, conversation_id)
+            .await
+    }
+
     async fn get_provider_thread_async(
         self: Arc<Self>,
         owner_key_id: String,

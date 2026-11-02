@@ -108,6 +108,12 @@ pub trait ConversationStore: Send + Sync {
         conversation_id: String,
     ) -> anyhow::Result<bool>;
 
+    async fn get_provider_for_owner_async(
+        self: Arc<Self>,
+        owner_key_id: String,
+        conversation_id: String,
+    ) -> anyhow::Result<Option<String>>;
+
     async fn get_provider_thread_async(
         self: Arc<Self>,
         owner_key_id: String,
@@ -195,6 +201,18 @@ impl ConversationStore for UnifiedMemory {
         })
         .await
         .map_err(|error| anyhow::anyhow!("conversation deletion task failed: {error}"))?
+    }
+
+    async fn get_provider_for_owner_async(
+        self: Arc<Self>,
+        owner_key_id: String,
+        conversation_id: String,
+    ) -> anyhow::Result<Option<String>> {
+        tokio::task::spawn_blocking(move || {
+            self.get_provider_for_owner(&owner_key_id, &conversation_id)
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("provider affinity lookup task failed: {error}"))?
     }
 
     async fn get_provider_thread_async(
