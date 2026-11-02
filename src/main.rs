@@ -18,6 +18,7 @@ use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Instant};
 use tokio::sync::RwLock;
 
 mod api;
+mod app;
 mod app_state;
 mod browser;
 pub mod chat_backend;
@@ -40,6 +41,7 @@ mod router;
 mod session;
 
 use api::{add_gateway_headers, api_error, estimate_tokens, validate_chat_req, ChatReq};
+use app::{refresh_models, shutdown_signal};
 use app_state::{AppState, AuthKeyContext};
 use browser::pool::{BrowserWorkerUnavailableError, ObscuraPool};
 use chat_backend::{BackendRequest, ProviderId};
@@ -483,54 +485,6 @@ async fn main() -> anyhow::Result<()> {
     state.memory.clone().checkpoint_blocking().await?;
     drop(state);
     Ok(())
-}
-
-/// Stop accepting new connections on SIGINT/SIGTERM and let Axum drain
-/// in-flight requests before the process exits.
-async fn shutdown_signal() {
-    #[cfg(unix)]
-    {
-        use tokio::signal::unix::{signal, SignalKind};
-
-        let mut terminate =
-            signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
-        tokio::select! {
-            result = tokio::signal::ctrl_c() => {
-                if let Err(error) = result {
-                    tracing::warn!(%error, "failed to listen for Ctrl-C");
-                }
-            }
-            _ = terminate.recv() => {}
-        }
-    }
-
-    #[cfg(not(unix))]
-    {
-        if let Err(error) = tokio::signal::ctrl_c().await {
-            tracing::warn!(%error, "failed to listen for Ctrl-C");
-        }
-    }
-
-    embedded_login::shutdown_all().await;
-    tracing::info!("shutdown signal received; draining in-flight HTTP requests");
-}
-
-async fn refresh_models(state: &Arc<AppState>) {
-    for p in &state.cfg.providers {
-        if !p.enabled {
-            continue;
-        }
-        match state.pool.discover(&p.name).await {
-            Ok(models) => {
-                state
-                    .models_cache
-                    .write()
-                    .await
-                    .insert(p.name.clone(), models);
-            }
-            Err(e) => tracing::warn!(provider = %p.name, "model discovery failed: {e}"),
-        }
-    }
 }
 
 /// Login delegate UI (see src/login.rs): relay-based provider login.
