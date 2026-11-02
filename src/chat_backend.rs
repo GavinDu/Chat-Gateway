@@ -283,7 +283,7 @@ impl ChatBackend for crate::browser::pool::ObscuraPool {
 mod tests {
     use super::{
         BackendCapabilities, BackendId, ChatBackend, ChatEvent, ChatRequest, GatewayError,
-        GatewayErrorKind, ProviderId,
+        GatewayErrorKind, ProviderChunk, ProviderId,
     };
     use crate::browser::pool::{BrowserWorkerUnavailableError, ProviderSessionExpiredError};
     use anyhow::Result;
