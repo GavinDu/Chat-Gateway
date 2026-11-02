@@ -71,6 +71,37 @@ fn browser_worker_unavailable() -> anyhow::Error {
 }
 
 #[cfg(test)]
+mod test_adapter_restore_tests {
+    use super::{record_test_adapter_restore_result, TestAdapterReport};
+
+    #[test]
+    fn restore_success_allows_adapter_probe_to_continue() {
+        let mut report = TestAdapterReport::default();
+        assert!(record_test_adapter_restore_result(
+            &mut report,
+            "session restore failed",
+            Ok(())
+        ));
+        assert!(report.errors.is_empty());
+    }
+
+    #[test]
+    fn restore_failure_is_reported_and_stops_adapter_probe() {
+        let mut report = TestAdapterReport::default();
+        let should_continue = record_test_adapter_restore_result(
+            &mut report,
+            "session restore failed",
+            Err(anyhow::anyhow!("injected restore failure")),
+        );
+        assert!(!should_continue);
+        assert_eq!(
+            report.errors,
+            vec!["session restore failed: injected restore failure"]
+        );
+    }
+}
+
+#[cfg(test)]
 mod browser_worker_error_tests {
     use super::{browser_worker_unavailable, BrowserWorkerUnavailableError};
 
@@ -206,6 +237,21 @@ struct LoginMeta {
 }
 
 const LOGIN_IDLE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+
+/// Record a TestAdapter restore failure and signal that probing must stop.
+fn record_test_adapter_restore_result(
+    report: &mut TestAdapterReport,
+    stage: &str,
+    result: Result<()>,
+) -> bool {
+    match result {
+        Ok(()) => true,
+        Err(error) => {
+            report.errors.push(format!("{stage}: {error}"));
+            false
+        }
+    }
+}
 
 /// Live-send test-adapter outcome, phase by phase (Go RunAdapterTest
 /// shape, adapted to the restored tree: probe uses the full Rust v1
@@ -1372,15 +1418,17 @@ fn browser_thread(
                                         None
                                     }
                                 };
-                                if let Err(error) = open_page_with_session(
-                                    &browser,
-                                    &mut page,
-                                    provider,
-                                    session_file.as_ref(),
-                                )
-                                .await
-                                {
-                                    report.errors.push(format!("session restore failed: {error}"));
+                                if !record_test_adapter_restore_result(
+                                    &mut report,
+                                    "session restore failed",
+                                    open_page_with_session(
+                                        &browser,
+                                        &mut page,
+                                        provider,
+                                        session_file.as_ref(),
+                                    )
+                                    .await,
+                                ) {
                                     finish(report);
                                     return;
                                 }
