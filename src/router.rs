@@ -122,7 +122,6 @@ impl ProviderRouter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::memory::ConversationStore;
     use crate::config::{
         AppConfig, AuthConfig, MemoryConfig, ObscuraConfig, ProviderConfig, ServerConfig,
     };
