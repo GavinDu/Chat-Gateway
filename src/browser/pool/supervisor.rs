@@ -1,8 +1,7 @@
 //! Browser worker lifecycle supervision and its failure/recovery tests.
-use super::{
-    Command, MetricsRegistry, ObscuraPool, ProviderSessionRegistry, SessionWriteTracker,
-    WorkerReadyGuard,
-};
+use super::{Command, MetricsRegistry, ProviderSessionRegistry, SessionWriteTracker};
+#[cfg(test)]
+use super::{ObscuraPool, WorkerReadyGuard};
 use crate::config::AppConfig;
 use anyhow::Result;
 use std::sync::atomic::{AtomicBool, Ordering};
