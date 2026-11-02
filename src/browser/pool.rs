@@ -20,12 +20,12 @@ use tokio::sync::{mpsc, oneshot, Notify, OwnedSemaphorePermit, Semaphore};
 mod supervisor;
 #[path = "pool/worker.rs"]
 mod worker;
-use worker::browser_thread;
 use supervisor::{
     closed_command_channel, effective_session_pool_size, join_finished_worker,
     join_worker_on_shutdown, next_browser_worker_restart_backoff, wait_for_worker_shutdown,
     BrowserWorkerSpawner,
 };
+use worker::browser_thread;
 
 #[cfg(test)]
 mod queue_capacity_tests {
@@ -982,4 +982,3 @@ impl Drop for WorkerReadyGuard {
         self.0.store(false, Ordering::Release);
     }
 }
-
