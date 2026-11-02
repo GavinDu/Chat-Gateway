@@ -174,6 +174,7 @@ impl ProviderRouter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::memory::ConversationStore;
     use crate::config::{
         AppConfig, AuthConfig, MemoryConfig, ObscuraConfig, ProviderConfig, ServerConfig,
     };
@@ -240,7 +241,7 @@ mod tests {
 
     #[tokio::test]
     async fn async_resolution_uses_conversation_affinity_without_blocking_api() {
-        use crate::memory::{ChatMessage, ConversationStore};
+        use crate::memory::ChatMessage;
         let router = router();
         let memory = Arc::new(UnifiedMemory::new(1000));
         memory
