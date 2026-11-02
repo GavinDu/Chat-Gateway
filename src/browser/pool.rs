@@ -207,9 +207,6 @@ struct LoginMeta {
 
 const LOGIN_IDLE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
-/// Live-send test-adapter outcome, phase by phase (Go RunAdapterTest
-/// shape, adapted to the restored tree: probe uses the full Rust v1
-/// selector arrays, and the live send uses the restored send path).
 /// Record a test-adapter session restore failure and tell the caller to stop.
 fn record_test_adapter_restore_result(
     report: &mut TestAdapterReport,
@@ -225,6 +222,9 @@ fn record_test_adapter_restore_result(
     }
 }
 
+/// Live-send test-adapter outcome, phase by phase (Go RunAdapterTest
+/// shape, adapted to the restored tree: probe uses the full Rust v1
+/// selector arrays, and the live send uses the restored send path).
 #[derive(Default, Debug, serde::Serialize)]
 pub struct TestAdapterReport {
     pub session_ok: bool,
