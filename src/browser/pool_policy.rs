@@ -6,7 +6,7 @@ use crate::login;
 /// A persisted provider thread URL must remain on the provider's configured
 /// origin. This prevents stale or corrupted thread metadata from navigating
 /// the authenticated browser page to an unrelated site.
-fn provider_thread_url_is_same_origin(candidate: &str, provider_home: &str) -> bool {
+pub(super) fn provider_thread_url_is_same_origin(candidate: &str, provider_home: &str) -> bool {
     fn origin(value: &str) -> Option<String> {
         let without_fragment = value.split('#').next()?;
         let without_query = without_fragment.split('?').next()?;
@@ -31,7 +31,7 @@ fn provider_thread_url_is_same_origin(candidate: &str, provider_home: &str) -> b
 /// Compare provider thread URLs without requiring byte-for-byte URL equality.
 /// Providers may add a trailing slash, tracking query, or fragment during a
 /// redirect; origin and path still identify the same conversation.
-fn provider_thread_navigation_matches(actual: &str, target: &str) -> bool {
+pub(super) fn provider_thread_navigation_matches(actual: &str, target: &str) -> bool {
     fn origin_and_path(value: &str) -> Option<(String, String)> {
         let without_fragment = value.split('#').next()?;
         let without_query = without_fragment.split('?').next()?;
@@ -120,25 +120,24 @@ mod provider_thread_navigation_tests {
 }
 
 
-fn session_probe_requires_login(is_login_page: bool, input_found: bool) -> bool {
+pub(super) fn session_probe_requires_login(is_login_page: bool, input_found: bool) -> bool {
     login::login_state(is_login_page, input_found).0 == "login_required"
 }
 
-fn session_probe_page_healthy(is_login_page: bool, input_found: bool) -> bool {
+pub(super) fn session_probe_page_healthy(is_login_page: bool, input_found: bool) -> bool {
     let (_, logged_in) = login::login_state(is_login_page, input_found);
     logged_in == Some(true)
 }
 
 #[cfg(test)]
 mod session_probe_tests {
+    use super::{session_probe_page_healthy, session_probe_requires_login};
+
     #[test]
     fn probe_distinguishes_expired_login_page_from_unwarmed_page() {
         assert!(session_probe_requires_login(true, true));
-                assert!(!session_probe_page_healthy(false, false));
-        assert!(matches!(
-            session_probe_page_healthy(false, true),
-            Ok(true)
-        ));
+        assert!(!session_probe_page_healthy(false, false));
+        assert!(session_probe_page_healthy(false, true));
     }
 
     #[test]
