@@ -1242,6 +1242,7 @@ fn export_conversation_response(memory: &UnifiedMemory, conversation_id: &str) -
     export_conversation_response_for_owner(memory, "local", conversation_id)
 }
 
+#[cfg(test)]
 fn export_conversation_response_for_owner(
     memory: &UnifiedMemory,
     owner_key_id: &str,
@@ -4157,7 +4158,7 @@ mod long_term_memory_export_tests {
             .unwrap();
 
         let items = memory.list_long_term_memory_items("owner-a").unwrap();
-        let response = long_term_memory_export_response(true, items);
+        let response = memory_api::long_term_memory_export_response(true, items);
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
             response.headers().get(header::CONTENT_DISPOSITION).unwrap(),
