@@ -34,60 +34,8 @@ impl ProviderRouter {
         conversation_id: Option<&str>,
         memory: &UnifiedMemory,
     ) -> anyhow::Result<Vec<String>> {
-        let model_lc = model.trim().to_lowercase();
-        if model_lc == "auto" {
-            return self.with_affinity(
-                owner_key_id,
-                self.enabled_in_priority_order(),
-                conversation_id,
-                memory,
-            );
-        }
-
-        let (pinned_provider, requested_model) = match model_lc.split_once('/') {
-            Some((provider, requested)) if !provider.is_empty() && !requested.is_empty() => {
-                (Some(provider), requested)
-            }
-            _ => (None, model_lc.as_str()),
-        };
-
-        let candidates: Vec<String> = self
-            .cfg
-            .providers
-            .iter()
-            .filter(|p| p.enabled)
-            .filter(|p| {
-                pinned_provider
-                    .map(|name| p.name.eq_ignore_ascii_case(name))
-                    .unwrap_or(true)
-            })
-            .filter(|p| {
-                p.models
-                    .iter()
-                    .any(|m| m.eq_ignore_ascii_case(requested_model))
-            })
-            .map(|p| p.name.clone())
-            .collect();
-
+        let candidates = self.resolve_without_affinity(model);
         self.with_affinity(owner_key_id, candidates, conversation_id, memory)
-    }
-
-    fn with_affinity(
-        &self,
-        owner_key_id: &str,
-        mut candidates: Vec<String>,
-        conversation_id: Option<&str>,
-        memory: &UnifiedMemory,
-    ) -> anyhow::Result<Vec<String>> {
-        if let Some(cid) = conversation_id {
-            if let Some(prev) = memory.get_provider_for_owner(owner_key_id, cid)? {
-                if let Some(pos) = candidates.iter().position(|c| c == &prev) {
-                    let first = candidates.remove(pos);
-                    candidates.insert(0, first);
-                }
-            }
-        }
-        Ok(candidates)
     }
 
     /// Resolve providers using the async conversation-store contract so
