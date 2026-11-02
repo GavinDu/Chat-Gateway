@@ -2,7 +2,7 @@ use axum::{
     body::Body,
     extract::{DefaultBodyLimit, Extension, Path, Query, State},
     http::HeaderMap,
-    http::{header, HeaderValue, Request, StatusCode},
+    http::{header, Request, StatusCode},
     middleware::{self, Next},
     response::Response,
     response::{
@@ -1240,23 +1240,6 @@ fn delete_conversation_response_for_owner(
 #[cfg(test)]
 fn export_conversation_response(memory: &UnifiedMemory, conversation_id: &str) -> Response {
     export_conversation_response_for_owner(memory, "local", conversation_id)
-}
-
-fn long_term_memory_export_response(
-    enabled: bool,
-    items: Vec<memory::LongTermMemoryItem>,
-) -> Response {
-    let mut response = Json(serde_json::json!({
-        "format_version": 1,
-        "enabled": enabled,
-        "data": items,
-    }))
-    .into_response();
-    response.headers_mut().insert(
-        header::CONTENT_DISPOSITION,
-        HeaderValue::from_static("attachment; filename=\"long-term-memory.json\""),
-    );
-    response
 }
 
 fn export_conversation_response_for_owner(
