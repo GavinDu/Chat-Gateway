@@ -65,7 +65,6 @@ pub(super) fn provider_thread_navigation_matches(actual: &str, target: &str) -> 
     )
 }
 
-
 #[cfg(test)]
 mod provider_thread_navigation_tests {
     use super::{provider_thread_navigation_matches, provider_thread_url_is_same_origin};
@@ -119,7 +118,6 @@ mod provider_thread_navigation_tests {
     }
 }
 
-
 pub(super) fn session_probe_requires_login(is_login_page: bool, input_found: bool) -> bool {
     login::login_state(is_login_page, input_found).0 == "login_required"
 }
@@ -147,5 +145,3 @@ mod session_probe_tests {
         assert!(!session_probe_page_healthy(false, false));
     }
 }
-
-
