@@ -1243,6 +1243,23 @@ fn export_conversation_response(memory: &UnifiedMemory, conversation_id: &str) -
 }
 
 #[cfg(test)]
+fn long_term_memory_export_response(
+    enabled: bool,
+    items: Vec<memory::LongTermMemoryItem>,
+) -> Response {
+    let mut response = Json(serde_json::json!({
+        "format_version": 1,
+        "enabled": enabled,
+        "data": items,
+    }))
+    .into_response();
+    response.headers_mut().insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_static("attachment; filename=\"long-term-memory.json\""),
+    );
+    response
+}
+
 fn export_conversation_response_for_owner(
     memory: &UnifiedMemory,
     owner_key_id: &str,
@@ -4116,10 +4133,10 @@ mod long_term_memory_retrieval_tests {
             .set_long_term_memory_enabled("owner-a", true)
             .unwrap();
         memory
-            .memory_api::save_long_term_memory_item("owner-a", "low", "lower confidence", None, 0.2, None)
+            .save_long_term_memory_item("owner-a", "low", "lower confidence", None, 0.2, None)
             .unwrap();
         memory
-            .memory_api::save_long_term_memory_item("owner-a", "high", "higher confidence", None, 0.9, None)
+            .save_long_term_memory_item("owner-a", "high", "higher confidence", None, 0.9, None)
             .unwrap();
 
         assert!(memory
@@ -4148,16 +4165,16 @@ mod long_term_memory_export_tests {
             .set_long_term_memory_enabled("owner-a", true)
             .unwrap();
         memory
-            .memory_api::save_long_term_memory_item("owner-a", "timezone", "America/New_York", None, 0.9, None)
+            .save_long_term_memory_item("owner-a", "timezone", "America/New_York", None, 0.9, None)
             .unwrap();
         memory
             .set_long_term_memory_enabled("owner-b", true)
             .unwrap();
         memory
-            .memory_api::save_long_term_memory_item("owner-b", "timezone", "Europe/London", None, 1.0, None)
+            .save_long_term_memory_item("owner-b", "timezone", "Europe/London", None, 1.0, None)
             .unwrap();
 
-        let items = memory.memory_api::list_long_term_memory_items("owner-a").unwrap();
+        let items = memory.list_long_term_memory_items("owner-a").unwrap();
         let response = long_term_memory_export_response(true, items);
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
