@@ -1,3 +1,4 @@
+use super::pool_policy;
 use crate::config::AppConfig;
 use crate::login::{self, LoginAction, LoginView};
 use crate::metrics::MetricsRegistry;
@@ -1035,68 +1036,6 @@ fn touch_login_meta(login_meta: &Rc<RefCell<HashMap<Provider, LoginMeta>>>, prov
     }
 }
 
-/// A persisted provider thread URL must remain on the provider's configured
-/// origin. This prevents stale or corrupted thread metadata from navigating
-/// the authenticated browser page to an unrelated site.
-fn provider_thread_url_is_same_origin(candidate: &str, provider_home: &str) -> bool {
-    fn origin(value: &str) -> Option<String> {
-        let without_fragment = value.split('#').next()?;
-        let without_query = without_fragment.split('?').next()?;
-        let (scheme, rest) = without_query.split_once("://")?;
-        let authority = rest.split('/').next()?;
-        if scheme.is_empty() || authority.is_empty() || authority.contains('@') {
-            return None;
-        }
-        Some(format!(
-            "{}://{}",
-            scheme.to_ascii_lowercase(),
-            authority.to_ascii_lowercase()
-        ))
-    }
-
-    matches!(
-        (origin(candidate), origin(provider_home)),
-        (Some(candidate), Some(home)) if candidate == home
-    )
-}
-
-/// Compare provider thread URLs without requiring byte-for-byte URL equality.
-/// Providers may add a trailing slash, tracking query, or fragment during a
-/// redirect; origin and path still identify the same conversation.
-fn provider_thread_navigation_matches(actual: &str, target: &str) -> bool {
-    fn origin_and_path(value: &str) -> Option<(String, String)> {
-        let without_fragment = value.split('#').next()?;
-        let without_query = without_fragment.split('?').next()?;
-        let (scheme, rest) = without_query.split_once("://")?;
-        let (authority, path) = match rest.split_once('/') {
-            Some((authority, path)) => (authority, format!("/{path}")),
-            None => (rest, "/".to_owned()),
-        };
-        if authority.is_empty() || scheme.is_empty() {
-            return None;
-        }
-        let normalized_path = if path.len() > 1 {
-            path.trim_end_matches('/').to_owned()
-        } else {
-            path
-        };
-        Some((
-            format!(
-                "{}://{}",
-                scheme.to_ascii_lowercase(),
-                authority.to_ascii_lowercase()
-            ),
-            normalized_path,
-        ))
-    }
-
-    matches!(
-        (origin_and_path(actual), origin_and_path(target)),
-        (Some((actual_origin, actual_path)), Some((target_origin, target_path)))
-            if actual_origin == target_origin && actual_path == target_path
-    )
-}
-
 /// Landing pages can canonicalize the provider root to an app route. Accept
 /// that redirect only on the same origin and only after the adapter composer
 /// is present; thread URLs use the stricter path comparison above.
@@ -1131,59 +1070,6 @@ fn provider_landing_navigation_ready(
         .any(|selector| page.query_selector(selector).is_some())
 }
 
-#[cfg(test)]
-mod provider_thread_navigation_tests {
-    use super::provider_thread_navigation_matches;
-
-    #[test]
-    fn thread_navigation_accepts_trailing_slash_query_and_fragment_redirects() {
-        assert!(provider_thread_navigation_matches(
-            "https://chatgpt.com/c/thread-123/?utm_source=redirect#latest",
-            "https://chatgpt.com/c/thread-123"
-        ));
-    }
-
-    #[test]
-    fn thread_navigation_rejects_wrong_origin_or_thread_path() {
-        assert!(!provider_thread_navigation_matches(
-            "https://evil.example/c/thread-123",
-            "https://chatgpt.com/c/thread-123"
-        ));
-        assert!(!provider_thread_navigation_matches(
-            "https://chatgpt.com/c/thread-456",
-            "https://chatgpt.com/c/thread-123"
-        ));
-    }
-
-    #[test]
-    fn saved_thread_url_must_match_the_configured_provider_origin() {
-        assert!(super::provider_thread_url_is_same_origin(
-            "https://chatgpt.com/c/thread-1?utm_source=redirect",
-            "https://chatgpt.com/"
-        ));
-        assert!(!super::provider_thread_url_is_same_origin(
-            "https://chatgpt.com.attacker.example/c/thread-1",
-            "https://chatgpt.com/"
-        ));
-        assert!(!super::provider_thread_url_is_same_origin(
-            "https://chatgpt.com@attacker.example/c/thread-1",
-            "https://chatgpt.com/"
-        ));
-        assert!(!super::provider_thread_url_is_same_origin(
-            "https://claude.ai/thread-1",
-            "https://chatgpt.com/"
-        ));
-    }
-
-    #[test]
-    fn thread_navigation_rejects_malformed_urls() {
-        assert!(!provider_thread_navigation_matches(
-            "not-a-url",
-            "https://chatgpt.com/c/thread-123"
-        ));
-    }
-}
-
 /// Typed outcome for a probe that confirms the provider has redirected to login.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProviderSessionExpiredError;
@@ -1213,45 +1099,13 @@ fn verify_session_page(
 }
 
 fn classify_session_probe(is_login_page: bool, input_found: bool) -> Result<bool> {
-    if session_probe_requires_login(is_login_page, input_found) {
+    if pool_policy::session_probe_requires_login(is_login_page, input_found) {
         return Err(anyhow::Error::new(ProviderSessionExpiredError));
     }
-    if !session_probe_page_healthy(is_login_page, input_found) {
+    if !pool_policy::session_probe_page_healthy(is_login_page, input_found) {
         anyhow::bail!("session verification failed: chat input not found");
     }
     Ok(true)
-}
-
-#[cfg(test)]
-mod session_probe_tests {
-    #[test]
-    fn probe_distinguishes_expired_login_page_from_unwarmed_page() {
-        let expired = super::classify_session_probe(true, true).unwrap_err();
-        assert!(expired
-            .downcast_ref::<super::ProviderSessionExpiredError>()
-            .is_some());
-        assert!(super::classify_session_probe(false, false).is_err());
-        assert!(matches!(
-            super::classify_session_probe(false, true),
-            Ok(true)
-        ));
-    }
-
-    #[test]
-    fn probe_requires_chat_input_and_not_a_login_page() {
-        assert!(super::session_probe_page_healthy(false, true));
-        assert!(!super::session_probe_page_healthy(true, true));
-        assert!(!super::session_probe_page_healthy(false, false));
-    }
-}
-
-fn session_probe_requires_login(is_login_page: bool, input_found: bool) -> bool {
-    login::login_state(is_login_page, input_found).0 == "login_required"
-}
-
-fn session_probe_page_healthy(is_login_page: bool, input_found: bool) -> bool {
-    let (_, logged_in) = login::login_state(is_login_page, input_found);
-    logged_in == Some(true)
 }
 
 fn build_login_view(
@@ -1615,7 +1469,7 @@ fn browser_thread(
                                 // Navigating the current page avoids leaking one tab per conversation.
                                 let target_url = thread_url.as_deref().unwrap_or_else(|| provider.login_url());
                                 if thread_url.is_some()
-                                    && !provider_thread_url_is_same_origin(target_url, provider.login_url())
+                                    && !pool_policy::provider_thread_url_is_same_origin(target_url, provider.login_url())
                                 {
                                     let _ = chunks
                                         .send(Err(anyhow::anyhow!(
@@ -1632,7 +1486,7 @@ fn browser_thread(
                                         loop {
                                             let current_url = page.url();
                                             let arrived = if thread_url.is_some() {
-                                                provider_thread_navigation_matches(&current_url, target_url)
+                                                pool_policy::provider_thread_navigation_matches(&current_url, target_url)
                                             } else {
                                                 provider_landing_navigation_ready(
                                                     &current_url,
