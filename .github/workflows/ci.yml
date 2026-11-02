@@ -45,6 +45,7 @@ jobs:
         run: |
           node --test browser-login/*.test.mjs
           python3 -B -m unittest discover -s browser-login -p 'test_*.py'
+          python3 -B -m unittest discover -s scripts -p test_native_login.py
       - name: Isolated authenticated HTTP acceptance
         run: node browser-login/http-smoke.mjs target/debug/chat-gateway-rs
       - name: Sandboxed browser acceptance over an actual temporary SSH connection
@@ -121,8 +122,9 @@ jobs:
           diff -ru --exclude=Cargo.toml --exclude=Cargo.toml.orig --exclude=.cargo_vcs_info.json --exclude=.github --exclude=.gitignore --exclude=CHANGELOG.md --exclude=Cargo.lock --exclude=examples --exclude=release-plz.toml --exclude=rustfmt.toml --exclude=tests --exclude=PATCHES.md vendor/wreq-util "$upstream_dir"
           grep -Fq 'version = "3.0.0-rc.12"' vendor/wreq-util/Cargo.toml
           grep -Fq 'zstd = { version = "0.14.3", optional = true }' vendor/wreq-util/Cargo.toml
-          grep -Fq '"zstd 0.14.3"' Cargo.lock
-          ! grep -Fq '"zstd 0.13.3"' Cargo.lock
+          # Cargo omits the version in dependency references when unambiguous.
+          # Validate the actual locked package, not its reference spelling.
+          python3 -c 'import tomllib; p = tomllib.load(open("Cargo.lock", "rb"))["package"]; assert [x["version"] for x in p if x["name"] == "zstd"] == ["0.14.3"]'
 
       - name: Install native build dependencies
         run: |

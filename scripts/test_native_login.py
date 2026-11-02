@@ -12,6 +12,19 @@ launcher = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(launcher)
 
 class StartupPlanTests(unittest.TestCase):
+    def test_rust_wrapper_preserves_explicit_public_toolchain_location(self):
+        with tempfile.TemporaryDirectory() as home:
+            result = subprocess.run(
+                ["bash", str(Path(__file__).with_name("native-rust.sh")),
+                 "python3", "-B", "-c",
+                 "import os; assert os.environ['RUSTUP_HOME'] == '/tmp/test-rustup'; "
+                 "assert os.environ['RUSTUP_TOOLCHAIN'] == 'test-toolchain'"],
+                env={"PATH": os.environ["PATH"], "HOME": home,
+                     "RUSTUP_HOME": "/tmp/test-rustup",
+                     "RUSTUP_TOOLCHAIN": "test-toolchain"},
+                capture_output=True, text=True, check=True)
+            self.assertEqual(result.stdout, "")
+
     def test_rust_wrapper_clears_inherited_private_environment(self):
         with tempfile.TemporaryDirectory() as home:
             result = subprocess.run(
