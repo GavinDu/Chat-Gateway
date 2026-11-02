@@ -11,6 +11,11 @@ RUN mkdir -p /app/data /app/sessions && chown -R 65532:65532 /app/data /app/sess
 
 FROM gcr.io/distroless/cc:nonroot
 WORKDIR /app
+# This native-only image supports the extension relay, not embedded Chromium.
+# See browser-login/README.md for the separately supported Replit-native runtime.
+# Browser admission also checks for worker assets; overriding this cannot enable
+# an incomplete runtime.
+ENV CHAT_GATEWAY_EMBEDDED_BROWSER=disabled
 COPY --from=builder --chown=nonroot:nonroot /app/target/release/chat-gateway-rs /usr/local/bin/chat-gateway-rs
 COPY --from=builder --chown=nonroot:nonroot /app/data /app/data
 COPY --from=builder --chown=nonroot:nonroot /app/sessions /app/sessions

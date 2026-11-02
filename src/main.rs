@@ -26,6 +26,7 @@ mod cli;
 mod config;
 mod context;
 mod diagnostics;
+mod embedded_login;
 mod login;
 mod memory;
 mod memory_egress;
@@ -144,6 +145,7 @@ async fn main() -> anyhow::Result<()> {
         anyhow::bail!("--json requires --all or --test-adapter <provider>");
     }
     let cfg = Arc::new(AppConfig::load(&cli.config)?);
+    session::validate_encrypted_store_configuration()?;
     if cfg.auth.keys.is_empty() {
         tracing::warn!("API-key authentication is disabled; the listener remains loopback-only");
     }
@@ -407,6 +409,19 @@ async fn main() -> anyhow::Result<()> {
             get(export_conversation).delete(delete_conversation),
         )
         .route("/login", get(login_page))
+        .route("/login/browser.js", get(embedded_login::javascript))
+        .route(
+            "/login/api/:provider/browser/ticket",
+            post(embedded_login::ticket),
+        )
+        .route(
+            "/login/api/:provider/browser/session",
+            axum::routing::delete(embedded_login::revoke),
+        )
+        .route(
+            "/login/api/:provider/browser/stream",
+            get(embedded_login::stream),
+        )
         .route("/login/api/status", get(login_status))
         .route("/login/api/:provider/start", post(login_start))
         .route("/login/api/:provider/cancel", post(login_cancel))
@@ -496,6 +511,7 @@ async fn shutdown_signal() {
         }
     }
 
+    embedded_login::shutdown_all().await;
     tracing::info!("shutdown signal received; draining in-flight HTTP requests");
 }
 
@@ -606,7 +622,18 @@ async fn protect_login_api(req: Request<Body>, next: Next) -> Response {
 }
 
 async fn login_page() -> impl IntoResponse {
-    Html(login::LOGIN_HTML)
+    (
+        [
+            (header::CACHE_CONTROL, "no-store"),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+            (header::REFERRER_POLICY, "no-referrer"),
+            (
+                header::CONTENT_SECURITY_POLICY,
+                "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'self'; base-uri 'none'; form-action 'none'",
+            ),
+        ],
+        Html(login::LOGIN_HTML),
+    )
 }
 
 fn login_err(msg: String) -> axum::response::Response {
@@ -1203,6 +1230,21 @@ async fn authenticate_api_key(
     mut req: Request<Body>,
     next: Next,
 ) -> Response {
+    if req.uri().path().starts_with("/login/api/") && auth.keys.is_empty() {
+        return api_error(
+            StatusCode::FORBIDDEN,
+            "authentication_error",
+            "owner_authorization_required",
+            "browser controls require a configured admin API key",
+        );
+    }
+    // The shell contains no private data. Browser WebSockets cannot set a
+    // Bearer header: their handler instead consumes an admin-issued, expiring,
+    // provider-bound, single-use capability, and requires a same-origin Origin.
+    // protect_login_api still enforces local authority and rejects remote mode.
+    if embedded_login::uses_separate_authorization(req.method(), req.uri().path()) {
+        return next.run(req).await;
+    }
     let authorization = req
         .headers()
         .get(axum::http::header::AUTHORIZATION)
@@ -1248,6 +1290,45 @@ async fn authenticate_api_key(
             "insufficient_scope",
             "the API key does not have the required scope",
         ),
+    }
+}
+
+#[cfg(test)]
+mod embedded_owner_auth_tests {
+    use super::*;
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn anonymous_mode_cannot_control_either_login_backend() {
+        let app = Router::new()
+            .route("/login", get(|| async { "public shell" }))
+            .route("/login/api/status", get(|| async { "private" }))
+            .route(
+                "/login/api/chatgpt/browser/stream",
+                get(|| async { "private" }),
+            )
+            .layer(middleware::from_fn_with_state(
+                config::AuthConfig::default(),
+                authenticate_api_key,
+            ));
+        for path in ["/login/api/status", "/login/api/chatgpt/browser/stream"] {
+            let response = app
+                .clone()
+                .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        }
+        let shell = app
+            .oneshot(
+                Request::builder()
+                    .uri("/login")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(shell.status(), StatusCode::OK);
     }
 }
 

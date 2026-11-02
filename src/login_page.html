@@ -1,173 +1,246 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Chat Gateway — Login</title>
-<style>
-body{font-family:system-ui,-apple-system,sans-serif;margin:2rem auto;max-width:960px;padding:0 1rem;color:#1a1a1a}
-h1{font-size:1.5rem} h2{font-size:1.1rem;margin-top:2rem}
-.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:0.75rem}
-.card{border:1px solid #ccc;border-radius:8px;padding:0.75rem}
-.card h3{margin:0 0 0.4rem;text-transform:capitalize}
-.badge{display:inline-block;padding:0.1rem 0.45rem;border-radius:999px;font-size:0.75rem;background:#eee}
-.badge.ok{background:#d4edda}.badge.warn{background:#fff3cd}.badge.bad{background:#f8d7da}
-button{margin:0.15rem;padding:0.35rem 0.7rem;border-radius:6px;border:1px solid #888;background:#f6f6f6;cursor:pointer}
-button:disabled{opacity:0.5;cursor:default}
-input[type=text],input[type=password],input[type=url]{padding:0.35rem;border:1px solid #aaa;border-radius:6px;width:100%;box-sizing:border-box}
-table{border-collapse:collapse;width:100%} td,th{border-bottom:1px solid #ddd;padding:0.3rem;text-align:left;font-size:0.9rem}
-pre{white-space:pre-wrap;background:#f6f6f6;padding:0.75rem;border-radius:8px;max-height:240px;overflow:auto}
-.note{background:#fff8e1;border:1px solid #e6c87a;border-radius:8px;padding:0.75rem;font-size:0.9rem}
-.row{display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap}
-.row>*{flex:1} .row>button{flex:0 0 auto}
-#msg{margin:1rem 0;font-weight:600}
-small{color:#555}
-</style>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Gateway · Sign in privately</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --paper: #f4f1e8;
+      --panel: #fffdf7;
+      --ink: #202d2b;
+      --muted: #697674;
+      --line: #d9ded5;
+      --mint: #d7ebe0;
+      --mint-ink: #285547;
+      --orange: #d96843;
+      --orange-dark: #a84027;
+      --gold: #f0d9a1;
+      --night: #172321;
+      --mono: "DM Mono", ui-monospace, monospace;
+      --sans: "DM Sans", sans-serif;
+      --display: "Manrope", sans-serif;
+      font-family: var(--sans);
+      color: var(--ink);
+      background: var(--paper);
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100dvh; background: var(--paper); }
+    button, input, select { font: inherit; }
+    button { cursor: pointer; }
+    button:disabled { cursor: not-allowed; opacity: .48; }
+    :focus-visible { outline: 3px solid #d96843; outline-offset: 3px; }
+    .shell { width: min(1440px, 100%); margin: auto; padding: 24px clamp(16px, 3.8vw, 54px) 56px; }
+    .topbar { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding-bottom: 18px; border-bottom: 1px solid var(--line); }
+    .wordmark { display: flex; align-items: center; gap: 11px; font: 800 13px var(--display); letter-spacing: .12em; text-transform: uppercase; }
+    .mark { width: 29px; height: 29px; background: var(--orange); border-radius: 9px 9px 9px 2px; display: grid; place-items: center; color: #fff8ed; font: 500 12px var(--mono); }
+    .top-note { color: var(--muted); font: 11px var(--mono); letter-spacing: .05em; text-transform: uppercase; }
+    .intro { padding: 44px 0 30px; display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(260px, .9fr); gap: 24px 8%; align-items: end; }
+    .eyebrow { color: var(--orange-dark); font: 500 11px var(--mono); letter-spacing: .13em; text-transform: uppercase; }
+    h1 { margin: 12px 0 0; max-width: 720px; font: 700 clamp(36px, 5.3vw, 68px)/1.02 var(--display); letter-spacing: -.055em; }
+    .intro-copy { max-width: 440px; margin: 0 0 4px; color: #52615e; font-size: 15px; line-height: 1.65; }
+    .gateway-bar { display: grid; grid-template-columns: minmax(230px, 1fr) auto auto; gap: 12px; align-items: end; padding: 16px; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; }
+    label { display: block; color: #40514d; font-size: 12px; font-weight: 700; }
+    label span { display: block; margin-bottom: 7px; }
+    input, select { width: 100%; min-height: 42px; padding: 10px 12px; border: 1px solid #c7d0c9; border-radius: 7px; background: #fffefa; color: var(--ink); }
+    input::placeholder { color: #99a39e; }
+    .help-text { grid-column: 1 / -1; margin: -1px 0 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+    .button { border: 1px solid transparent; min-height: 40px; padding: 9px 14px; border-radius: 7px; font-size: 12px; font-weight: 700; transition: transform .16s ease, background .16s ease, opacity .16s ease; }
+    .button:not(:disabled):hover { transform: translateY(-1px); }
+    .button-primary { background: var(--orange); color: #fffaf1; }
+    .button-primary:not(:disabled):hover { background: var(--orange-dark); }
+    .button-quiet { background: var(--mint); color: var(--mint-ink); border-color: #c3dbce; }
+    .button-plain { background: transparent; border-color: var(--line); color: #40514d; }
+    .button-danger { background: #f7e5dc; color: #933f2d; border-color: #ebc9ba; }
+    .notice { min-height: 24px; padding: 10px 2px 7px; color: #53625e; font: 12px var(--mono); }
+    .notice[data-tone="error"] { color: #a13d2b; }
+    .notice[data-tone="success"] { color: #286047; }
+    .workspace { display: grid; grid-template-columns: 272px minmax(0, 1fr); gap: 16px; align-items: start; }
+    .provider-rail, .browser-panel, .safety-card, .extension-card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; }
+    .provider-rail { overflow: hidden; }
+    .section-head { padding: 17px 17px 13px; border-bottom: 1px solid var(--line); }
+    .section-head h2, .panel-heading h2 { margin: 0; font: 700 15px var(--display); letter-spacing: -.02em; }
+    .section-head p { margin: 5px 0 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
+    .provider-list { padding: 7px; }
+    .provider-choice { width: 100%; display: flex; justify-content: space-between; align-items: center; gap: 8px; text-align: left; border: 1px solid transparent; background: transparent; border-radius: 8px; padding: 10px 9px; color: var(--ink); }
+    .provider-choice:hover { background: #f6f5ed; }
+    .provider-choice[aria-pressed="true"] { background: var(--mint); border-color: #c3dbce; }
+    .provider-name { font-size: 13px; font-weight: 700; }
+    .provider-meta { display: block; margin-top: 3px; color: var(--muted); font: 10px var(--mono); }
+    .dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: #bdc7c0; }
+    .dot.enabled { background: #49836b; }
+    .dot.saved { background: #d07838; }
+    .main-column { display: grid; gap: 14px; }
+    .browser-panel { overflow: hidden; }
+    .panel-heading { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 15px 17px; border-bottom: 1px solid var(--line); }
+    .heading-label { display: flex; align-items: center; gap: 9px; min-width: 0; }
+    .live-indicator { display: inline-flex; align-items: center; gap: 7px; color: var(--muted); font: 10px var(--mono); text-transform: uppercase; letter-spacing: .06em; white-space: nowrap; }
+    .live-indicator::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: #aeb9b1; }
+    .live-indicator[data-live="true"]::before { background: #428664; }
+    .toolbar { display: grid; grid-template-columns: auto auto auto minmax(0, 1fr) auto; gap: 6px; padding: 10px 12px; border-bottom: 1px solid #273632; background: #21312e; }
+    .tool-button { width: 34px; height: 34px; border: 1px solid #3a4a46; border-radius: 6px; background: #2a3a36; color: #e6eee9; font-size: 15px; }
+    .tool-button:hover:not(:disabled) { background: #394b45; }
+    .address-form { display: flex; min-width: 0; gap: 6px; }
+    .address-form input { min-height: 34px; padding: 7px 10px; border-color: #46554f; background: #172321; color: #e6eee9; font: 11px var(--mono); }
+    .address-form input::placeholder { color: #93a19a; }
+    .address-form button { min-height: 34px; padding: 6px 11px; background: var(--gold); color: #3d3829; border: 0; border-radius: 5px; font-size: 11px; font-weight: 700; }
+    .page-tabs { display: flex; gap: 5px; overflow-x: auto; padding: 8px 10px; border-bottom: 1px solid var(--line); background: #f8f7f0; }
+    .page-tabs[hidden] { display: none; }
+    .page-tab { flex: 0 0 auto; max-width: min(260px, 65vw); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 7px 11px; border: 1px solid transparent; border-radius: 6px; color: #40514d; background: transparent; font-size: 11px; }
+    .page-tab[aria-selected="true"] { border-color: #c3dbce; background: var(--mint); color: #23483c; font-weight: 700; }
+    .viewport-wrap { position: relative; display: grid; place-items: center; width: 100%; height: clamp(300px, 57vw, 650px); min-height: 300px; background: var(--night); overflow: hidden; }
+    #browser-viewport { display: block; width: 100%; height: 100%; object-fit: contain; outline: none; touch-action: none; cursor: default; }
+    #browser-viewport:focus-visible { outline: 2px solid var(--gold); outline-offset: -4px; }
+    .viewport-empty { position: absolute; inset: 0; display: grid; place-items: center; padding: 28px; text-align: center; color: #cfdbd3; pointer-events: none; }
+    .viewport-empty[hidden] { display: none; }
+    .empty-inner { max-width: 360px; }
+    .empty-stamp { width: 48px; height: 48px; display: grid; place-items: center; margin: 0 auto 15px; border: 1px solid #52625a; border-radius: 15px 15px 15px 3px; color: var(--gold); font: 16px var(--mono); }
+    .viewport-empty strong { display: block; margin-bottom: 7px; color: #f2f4e9; font: 700 17px var(--display); }
+    .viewport-empty p { margin: 0; color: #b6c5bb; font-size: 12px; line-height: 1.6; }
+    .viewport-foot { display: flex; justify-content: space-between; gap: 10px; align-items: center; min-height: 37px; padding: 8px 13px; background: #f8f7f0; color: var(--muted); font: 10px var(--mono); }
+    #safe-url { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .action-bar { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 12px 14px; border-top: 1px solid var(--line); }
+    .action-note { max-width: 430px; color: var(--muted); font-size: 11px; line-height: 1.45; }
+    .action-buttons { display: flex; flex: none; flex-wrap: wrap; justify-content: flex-end; gap: 7px; }
+    .below-grid { display: grid; grid-template-columns: 1.1fr .9fr; gap: 14px; }
+    .safety-card, .extension-card { padding: 17px 18px; }
+    .safety-card { background: #e4eee6; border-color: #cfdfd3; }
+    .safety-card h2, .extension-card h2 { margin: 0 0 10px; font: 700 14px var(--display); }
+    .safety-card p, .extension-card p, .extension-card li { margin: 0; color: #50615b; font-size: 12px; line-height: 1.65; }
+    .safety-card p + p { margin-top: 8px; }
+    .extension-card ol { margin: 0; padding-left: 18px; }
+    .extension-card li + li { margin-top: 4px; }
+    code { color: #31584a; font: 11px var(--mono); }
+    .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+    @media (max-width: 850px) {
+      .intro { grid-template-columns: 1fr; gap: 14px; }
+      .intro-copy { max-width: 620px; }
+      .workspace { grid-template-columns: 1fr; }
+      .provider-list { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); }
+      .provider-choice { min-height: 59px; }
+      .below-grid { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 560px) {
+      .shell { padding-top: 15px; }
+      .top-note { font-size: 9px; }
+      .intro { padding: 33px 0 23px; }
+      .gateway-bar { grid-template-columns: 1fr 1fr; }
+      .gateway-bar label { grid-column: 1 / -1; }
+      .gateway-bar .help-text { grid-column: 1 / -1; }
+      .provider-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .toolbar { grid-template-columns: 32px 32px 32px minmax(0, 1fr); }
+      .address-form { grid-column: 1 / -1; grid-row: 2; }
+      .viewport-wrap { height: 62vh; min-height: 300px; }
+      .panel-heading { align-items: flex-start; }
+      .action-bar { align-items: flex-start; flex-direction: column; }
+      .action-buttons { width: 100%; }
+       .action-buttons .button { flex: 1 1 120px; }
+    }
+    @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; } }
+  </style>
 </head>
 <body>
-<h1>Chat Gateway — Provider Login</h1>
-<p class="note"><b>How this works (relay login, no screenshots):</b> the gateway's embedded
-browser has no screenshot or keyboard API, so you cannot see the provider page directly here.
-Instead this page shows the live URL, title, detected form fields and buttons, and a text
-snapshot — and you drive the page with relay actions (click, type, Enter, navigate)
-that the gateway executes inside the provider page. Complete the sign-in (including any SSO
-redirects — use Navigate if a step lands on a new URL), then press <b>Complete</b> to capture
-the session into <code>sessions/&lt;provider&gt;.json</code> for the normal send path.
-<br><br><b>Credentials:</b> text relay is disabled by default; this page does not send text
-or passwords to the gateway. Use the browser extension to link an authenticated provider session.
-For trusted local development only, legacy typing can be explicitly enabled with
-<code>CHAT_GATEWAY_LEGACY_LOGIN_RELAY=1</code>; enabling it means text entered here reaches the gateway.
-<br><br><b>Honest limits:</b> captchas, 2FA prompts, and SSO popups cannot be solved by the
-relay — you must complete those steps through the relay actions themselves (e.g. type the 2FA
-code into the code field when it appears), and some providers' bot checks may refuse synthetic
-input entirely. Sessions expire; when a provider reports <code>session_expired</code>, come
-back here and re-capture.</p>
+  <main class="shell">
+    <header class="topbar">
+      <div class="wordmark"><span class="mark" aria-hidden="true">cg</span> Chat Gateway</div>
+      <div class="top-note">Private browser session · local gateway</div>
+    </header>
 
-<div id="msg"></div>
-<h2>Providers</h2>
-<div class="cards" id="cards"></div>
+    <section class="intro" aria-labelledby="page-title">
+      <div>
+        <div class="eyebrow">Provider access / private by design</div>
+        <h1 id="page-title">Sign in on the other side.</h1>
+      </div>
+      <p class="intro-copy">Use the embedded browser to complete provider sign-in yourself. Your password, MFA and CAPTCHA stay inside that browser—not in this page.</p>
+    </section>
 
-<h2>Active login session</h2>
-<div class="row">
-  <label>Provider
-    <select id="selProvider"></select>
-  </label>
-  <button onclick="refreshView()">Refresh view</button>
-</div>
-<div id="detail"><small>No login session selected. Press Start on a provider above.</small></div>
+    <form class="gateway-bar" id="authorization-form">
+      <label for="gateway-authorization">
+        <span>Gateway admin API credential</span>
+        <input id="gateway-authorization" type="password" autocomplete="off" spellcheck="false" placeholder="Enter gateway credential" required>
+      </label>
+      <button class="button button-primary" type="submit">Connect gateway</button>
+      <button class="button button-plain" type="button" id="refresh-status">Refresh</button>
+      <p class="help-text">Used only as a Bearer credential for this page’s gateway requests. Kept in memory; never saved to browser storage, URL, or logs.</p>
+    </form>
+    <div id="notice" class="notice" role="status" aria-live="polite" data-tone="neutral">Enter your gateway credential to load provider availability.</div>
 
-<h3>Relay action</h3>
-<div class="row">
-  <label>Selector <input id="relaySel" type="text" placeholder="#continue, button[type='submit'], textarea…"></label>
-</div>
-<div class="row">
-  <button onclick="act('click')">Click selector</button>
-  <button onclick="act('enter')">Press Enter</button>
-</div>
-<div class="row">
-  <label>Navigate to URL <input id="navUrl" type="url" placeholder="https://…"></label>
-  <button onclick="act('navigate')">Go</button>
-</div>
-
-<script>
-const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-const msg = t => document.getElementById('msg').textContent = t;
-let selected = null;
-
-async function api(path, method, body) {
-  const r = await fetch(path, {method, headers: {'Content-Type': 'application/json'},
-    body: body ? JSON.stringify(body) : undefined});
-  const j = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(j.error || ('HTTP ' + r.status));
-  return j;
-}
-
-async function refreshStatus() {
-  try {
-    const st = await api('/login/api/status', 'GET');
-    const cards = document.getElementById('cards');
-    const sel = document.getElementById('selProvider');
-    cards.innerHTML = '';
-    sel.innerHTML = '';
-    for (const p of st.providers) {
-      const stateCls = p.login_active ? (p.logged_in === true ? 'ok' : p.logged_in === false ? 'bad' : 'warn') : '';
-      const stateTxt = p.login_active ? (p.logged_in === true ? 'likely logged in' : p.logged_in === false ? 'login required' : 'active, unknown') : 'idle';
-      const card = document.createElement('div');
-      card.className = 'card';
-      card.innerHTML = `<h3>${esc(p.name)}</h3>
-        <span class="badge">${p.enabled ? 'enabled' : 'disabled'}</span>
-        <span class="badge ${p.session_present ? 'ok' : ''}">${p.session_present ? 'session saved' + (p.session_ts ? ' ' + esc(p.session_ts.slice(0, 10)) : '') : 'no session'}</span>
-        <span class="badge ${stateCls}">${stateTxt}</span>
-        <div style="margin-top:0.5rem">
-          <button onclick="startLogin('${esc(p.name)}')" ${p.login_active ? 'disabled' : ''}>Start</button>
-          <button onclick="cancelLogin('${esc(p.name)}')" ${p.login_active ? '' : 'disabled'}>Cancel</button>
-          <button onclick="completeLogin('${esc(p.name)}')" ${p.login_active ? '' : 'disabled'}>Complete</button>
+    <section class="workspace" aria-label="Provider browser login">
+      <aside class="provider-rail" aria-labelledby="providers-heading">
+        <div class="section-head">
+          <h2 id="providers-heading">Choose a provider</h2>
+          <p>Availability and saved-session status come from the gateway.</p>
         </div>
-        ${p.login_url ? `<div><small>${esc(p.login_url)}</small></div>` : ''}`;
-      cards.appendChild(card);
-      const opt = document.createElement('option');
-      opt.value = p.name; opt.textContent = p.name;
-      if (p.login_active) { opt.selected = true; selected = p.name; }
-      sel.appendChild(opt);
-    }
-    if (!selected && sel.options.length) { selected = sel.options[0].value; }
-    sel.value = selected || '';
-  } catch (e) { msg('status error: ' + e.message); }
-}
+        <div class="provider-list" id="provider-list" aria-live="polite"></div>
+      </aside>
 
-async function startLogin(name) {
-  try { msg('Starting login for ' + name + '…'); await api('/login/api/' + name + '/start', 'POST'); selected = name; msg('Login page opened for ' + name + '. Use Refresh view to follow it.'); await refreshStatus(); await refreshView(); }
-  catch (e) { msg('start error: ' + e.message); }
-}
-async function cancelLogin(name) {
-  try { await api('/login/api/' + name + '/cancel', 'POST'); msg('Login cancelled for ' + name + '.'); await refreshStatus(); await refreshView(); }
-  catch (e) { msg('cancel error: ' + e.message); }
-}
-async function completeLogin(name) {
-  try { const r = await api('/login/api/' + name + '/complete', 'POST'); msg('Session saved for ' + name + ' (' + r.session_path + ')' + (r.warm_swapped ? ', warm page refreshed' : '') + (r.warning ? ' — ' + r.warning : '') + '.'); await refreshStatus(); await refreshView(); }
-  catch (e) { msg('complete error: ' + e.message); }
-}
+      <div class="main-column">
+        <section class="browser-panel" aria-labelledby="browser-title">
+          <div class="panel-heading">
+            <div class="heading-label">
+              <h2 id="browser-title">Browser viewport</h2>
+              <span class="live-indicator" id="connection-state" data-live="false">Not started</span>
+            </div>
+            <button class="button button-quiet" id="start-session" type="button" disabled>Start session</button>
+          </div>
+          <div class="toolbar" aria-label="Browser navigation">
+            <button class="tool-button" id="go-back" type="button" aria-label="Go back" title="Back" disabled>←</button>
+            <button class="tool-button" id="go-forward" type="button" aria-label="Go forward" title="Forward" disabled>→</button>
+            <button class="tool-button" id="reload-page" type="button" aria-label="Reload page" title="Reload" disabled>↻</button>
+            <form class="address-form" id="address-form">
+              <label class="sr-only" for="address">Navigate to approved provider domain</label>
+              <input id="address" type="url" placeholder="https://approved-provider.example" autocomplete="off" spellcheck="false" disabled>
+              <button type="submit" disabled id="address-go">Go</button>
+            </form>
+          </div>
+          <div class="page-tabs" id="page-tabs" role="tablist" aria-label="Open browser pages" hidden></div>
+          <div class="viewport-wrap" id="viewport-wrap" role="tabpanel" tabindex="0" aria-label="Browser page viewport">
+            <canvas id="browser-viewport" tabindex="0" role="img" aria-label="Remote provider browser. Select this viewport to use keyboard controls." aria-describedby="viewport-instructions"></canvas>
+            <div class="viewport-empty" id="viewport-empty">
+              <div class="empty-inner">
+                <div class="empty-stamp" aria-hidden="true">01</div>
+                <strong>Waiting for a private session</strong>
+                <p>Select an enabled provider and start. Its browser will appear here; this page never reads the fields you fill in.</p>
+              </div>
+            </div>
+          </div>
+          <p class="sr-only" id="viewport-instructions">Focus the browser viewport to use its keyboard. Mouse, wheel, navigation and keystrokes are sent to the remote provider browser. Passwords and MFA must be entered there directly. Paste sends plain text from the paste event, up to 4096 characters. Copy and clipboard reading are not provided. IME and passkey support are not claimed.</p>
+          <div class="viewport-foot">
+            <span id="safe-url">No page loaded</span>
+            <span id="frame-size">Viewport idle</span>
+          </div>
+          <div class="action-bar">
+            <div class="action-note" id="session-note">No provider session is running.</div>
+            <div class="action-buttons">
+              <button class="button button-danger" id="cancel-session" type="button" disabled>Cancel</button>
+              <button class="button button-primary" id="save-session" type="button" disabled>Save session</button>
+              <button class="button button-danger" id="forget-session" type="button" disabled>Forget saved session</button>
+            </div>
+          </div>
+        </section>
 
-async function refreshView() {
-  const name = document.getElementById('selProvider').value;
-  if (!name) return;
-  selected = name;
-  const d = document.getElementById('detail');
-  try {
-    const v = await api('/login/api/' + name + '/view', 'GET');
-    if (!v.active) { d.innerHTML = '<small>No active login session for ' + esc(name) + '. Press Start above.</small>'; return; }
-    const fields = v.fields.map(f => `<tr><td>${esc(f.tag)}</td><td>${esc(f.type)}</td><td>${esc(f.placeholder || f.label || f.name)}</td><td><code>${esc(f.selector)}</code></td><td><button onclick="useSelector(${JSON.stringify(f.selector)})">Use</button></td></tr>`).join('') || '<tr><td colspan="5"><small>no fields detected</small></td></tr>';
-    const btns = v.buttons.map(b => `<button onclick="clickButton(${b.index})">${esc(b.text)}</button>`).join(' ') || '<small>no buttons detected</small>';
-    d.innerHTML = `<p><b>URL:</b> <code>${esc(v.url || '')}</code><br><b>Title:</b> ${esc(v.title || '')}<br>
-      <b>State:</b> <span class="badge ${v.logged_in === true ? 'ok' : v.logged_in === false ? 'bad' : 'warn'}">${esc(v.state)}</span>
-      <small>(best-effort: URL keywords + chat-input presence)</small><br>
-      <b>Chat input detected:</b> ${v.input_found ? 'yes' : 'no'}</p>
-      <h3>Form fields (values are never read)</h3>
-      <table><tr><th>Tag</th><th>Type</th><th>Placeholder / label / name</th><th>Selector</th><th></th></tr>${fields}</table>
-      <h3>Buttons</h3><p>${btns}</p>
-      <h3>Page text snapshot</h3><pre>${esc(v.snapshot)}</pre>`;
-  } catch (e) { d.innerHTML = '<small>view error: ' + esc(e.message) + '</small>'; }
-}
-
-function useSelector(sel) { document.getElementById('relaySel').value = sel; }
-async function clickButton(index) {
-  const name = document.getElementById('selProvider').value;
-  try { await api('/login/api/' + name + '/act', 'POST', {action: 'click_button', index}); msg('Clicked button #' + index + '.'); setTimeout(refreshView, 800); }
-  catch (e) { msg('click error: ' + e.message); }
-}
-async function act(kind) {
-  const name = document.getElementById('selProvider').value;
-  const selector = document.getElementById('relaySel').value.trim();
-  const url = document.getElementById('navUrl').value.trim();
-  const body = {action: kind, selector, url};
-  try { const r = await api('/login/api/' + name + '/act', 'POST', body); msg(r.detail || ('action ' + kind + ' done.')); setTimeout(refreshView, 800); }
-  catch (e) { msg('action error: ' + e.message); }
-}
-
-document.getElementById('selProvider').addEventListener('change', e => { selected = e.target.value; refreshView(); });
-refreshStatus();
-setInterval(refreshStatus, 5000);
-setInterval(() => { if (selected) refreshView(); }, 8000);
-</script>
+        <div class="below-grid">
+          <section class="safety-card" aria-labelledby="safety-heading">
+            <h2 id="safety-heading">A private, deliberate sign-in</h2>
+            <p>Use only provider domains you are authorized to access. This is a private, local-only browser session—not a shared login. Check the address before entering account details.</p>
+            <p>Type passwords, MFA codes and CAPTCHA responses directly into the remote browser. Cookies are captured only when you choose <b>Save session</b>, and only through the gateway’s encrypted save flow. This page does not import saved sessions from local storage.</p>
+          </section>
+          <section class="extension-card" aria-labelledby="extension-heading">
+            <h2 id="extension-heading">Alternative: Chrome extension relay</h2>
+            <ol>
+              <li>In Chrome, open <code>chrome://extensions</code> and enable Developer mode.</li>
+              <li>Choose <b>Load unpacked</b> and select the gateway repository’s <code>extension</code> folder.</li>
+              <li>Open the extension, set its local gateway URL, and enter the one-time pairing code in the extension only.</li>
+              <li>Select a provider and choose <b>Review permissions &amp; link</b>; approve the requested access in Chrome.</li>
+            </ol>
+            <p style="margin-top:8px">The one-time code is issued by the gateway pairing flow; this page never displays or requests it.</p>
+          </section>
+        </div>
+      </div>
+    </section>
+  </main>
+  <script src="/login/browser.js" defer></script>
 </body>
 </html>
