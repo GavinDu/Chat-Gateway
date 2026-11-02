@@ -71,6 +71,37 @@ fn browser_worker_unavailable() -> anyhow::Error {
 }
 
 #[cfg(test)]
+mod test_adapter_restore_tests {
+    use super::{record_test_adapter_restore_result, TestAdapterReport};
+
+    #[test]
+    fn restore_success_allows_adapter_probe_to_continue() {
+        let mut report = TestAdapterReport::default();
+        assert!(record_test_adapter_restore_result(
+            &mut report,
+            "session restore failed",
+            Ok(())
+        ));
+        assert!(report.errors.is_empty());
+    }
+
+    #[test]
+    fn restore_failure_is_reported_and_stops_adapter_probe() {
+        let mut report = TestAdapterReport::default();
+        let should_continue = record_test_adapter_restore_result(
+            &mut report,
+            "session restore failed",
+            Err(anyhow::anyhow!("injected restore failure")),
+        );
+        assert!(!should_continue);
+        assert_eq!(
+            report.errors,
+            vec!["session restore failed: injected restore failure"]
+        );
+    }
+}
+
+#[cfg(test)]
 mod browser_worker_error_tests {
     use super::{browser_worker_unavailable, BrowserWorkerUnavailableError};
 
@@ -207,7 +238,7 @@ struct LoginMeta {
 
 const LOGIN_IDLE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
-/// Record a test-adapter session restore failure and tell the caller to stop.
+/// Record a TestAdapter restore failure and signal that probing must stop.
 fn record_test_adapter_restore_result(
     report: &mut TestAdapterReport,
     stage: &str,
@@ -815,6 +846,29 @@ impl std::fmt::Display for ProviderSessionExpiredError {
 
 impl std::error::Error for ProviderSessionExpiredError {}
 
+/// Restore a provider snapshot using the single canonical warm-up order:
+/// cookies → navigation → localStorage → application reload.
+/// With no snapshot, this only navigates to the provider's login/chat entrypoint.
+async fn open_page_with_session(
+    browser: &obscura_core::Browser,
+    page: &mut obscura_core::Page,
+    provider: Provider,
+    session_file: Option<&session::SessionFile>,
+) -> Result<()> {
+    let cookie_restore = session_file
+        .map(|file| session::restore_cookies(browser, file, provider.name()))
+        .transpose();
+    // Navigate even when cookie import failed so the caller's fail-closed
+    // cleanup can clear origin-scoped localStorage on the provider origin.
+    page.goto(provider.login_url()).await?;
+    cookie_restore?;
+    if let Some(file) = session_file {
+        session::restore_local_storage(page, file)?;
+        page.goto(provider.login_url()).await?;
+    }
+    Ok(())
+}
+
 /// Verify that a warmed provider page still looks like an authenticated chat page.
 /// Call only while holding that provider page's lock so probes never race a send.
 fn verify_session_page(
@@ -996,44 +1050,24 @@ fn browser_thread(
                                     None
                                 }
                             };
-                            let mut restore_failed = false;
-                            if let Some(file) = &session_file {
-                                if let Err(error) = session::restore_cookies(&browser, file, &pcfg.name) {
-                                    restore_failed = true;
+                            let restore_failed = match open_page_with_session(
+                                &browser,
+                                &mut page,
+                                provider,
+                                session_file.as_ref(),
+                            )
+                            .await
+                            {
+                                Ok(()) => false,
+                                Err(error) => {
                                     tracing::warn!(
                                         provider = %pcfg.name,
                                         %error,
-                                        "provider cookie restoration failed"
+                                        "provider page session warm-up failed"
                                     );
+                                    true
                                 }
-                            }
-                            if let Err(error) = page.goto(provider.login_url()).await {
-                                tracing::warn!(provider = %pcfg.name, %error, "warm navigation failed");
-                            }
-                            if let Some(file) = &session_file {
-                                if !restore_failed {
-                                    if let Err(error) = session::restore_local_storage(&page, file) {
-                                        restore_failed = true;
-                                        tracing::warn!(
-                                            provider = %pcfg.name,
-                                            %error,
-                                            "provider localStorage restoration failed"
-                                        );
-                                    }
-                                }
-                                if !restore_failed {
-                                    // Reload so the provider application initializes with the
-                                    // restored cookie and localStorage state.
-                                    if let Err(error) = page.goto(provider.login_url()).await {
-                                        restore_failed = true;
-                                        tracing::warn!(
-                                            provider = %pcfg.name,
-                                            %error,
-                                            "provider navigation after session restoration failed"
-                                        );
-                                    }
-                                }
-                            }
+                            };
                             if restore_failed {
                                 // A partially restored session is never usable. Clear both
                                 // persistence layers and invalidate the snapshot before allowing
@@ -1384,35 +1418,17 @@ fn browser_thread(
                                         None
                                     }
                                 };
-                                if let Some(file) = session_file {
-                                    if !record_test_adapter_restore_result(
-                                        &mut report,
-                                        "session cookie restore failed",
-                                        session::restore_cookies(&browser, &file, provider.name()),
-                                    ) {
-                                        finish(report);
-                                        return;
-                                    }
-                                    if page.goto(provider.login_url()).await.is_err() {
-                                        report.errors.push("page navigation failed".to_string());
-                                        finish(report);
-                                        return;
-                                    }
-                                    if !record_test_adapter_restore_result(
-                                        &mut report,
-                                        "session localStorage restore failed",
-                                        session::restore_local_storage(&page, &file),
-                                    ) {
-                                        finish(report);
-                                        return;
-                                    }
-                                    if page.goto(provider.login_url()).await.is_err() {
-                                        report.errors.push("page navigation failed".to_string());
-                                        finish(report);
-                                        return;
-                                    }
-                                } else if page.goto(provider.login_url()).await.is_err() {
-                                    report.errors.push("page navigation failed".to_string());
+                                if !record_test_adapter_restore_result(
+                                    &mut report,
+                                    "session restore failed",
+                                    open_page_with_session(
+                                        &browser,
+                                        &mut page,
+                                        provider,
+                                        session_file.as_ref(),
+                                    )
+                                    .await,
+                                ) {
                                     finish(report);
                                     return;
                                 }
@@ -1509,10 +1525,7 @@ fn browser_thread(
                                     session::clear_provider_cookies(&browser, provider.name())?;
                                     let file = session::load_session_file(provider.name())?
                                         .ok_or_else(|| anyhow::anyhow!("imported provider session is missing"))?;
-                                    session::restore_cookies(&browser, &file, provider.name())?;
-                                    page.goto(provider.login_url()).await?;
-                                    session::restore_local_storage(&page, &file)?;
-                                    page.goto(provider.login_url()).await?;
+                                    open_page_with_session(&browser, &mut page, provider, Some(&file)).await?;
                                     pages.borrow_mut().insert(provider, Rc::new(page));
                                     Ok(())
                                 }.await;
