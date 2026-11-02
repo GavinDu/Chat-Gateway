@@ -38,6 +38,29 @@ impl ProviderRouter {
         self.with_affinity(owner_key_id, candidates, conversation_id, memory)
     }
 
+    fn with_affinity(
+        &self,
+        owner_key_id: &str,
+        mut candidates: Vec<String>,
+        conversation_id: Option<&str>,
+        memory: &UnifiedMemory,
+    ) -> anyhow::Result<Vec<String>> {
+        if let Some(conversation_id) = conversation_id {
+            if let Some(previous_provider) =
+                memory.get_provider_for_owner(owner_key_id, conversation_id)?
+            {
+                if let Some(position) = candidates
+                    .iter()
+                    .position(|candidate| candidate == &previous_provider)
+                {
+                    let first = candidates.remove(position);
+                    candidates.insert(0, first);
+                }
+            }
+        }
+        Ok(candidates)
+    }
+
     /// Resolve providers using the async conversation-store contract so
     /// affinity metadata reads never block a Tokio request worker.
     pub async fn resolve_for_owner_async<T>(
