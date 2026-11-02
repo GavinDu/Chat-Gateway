@@ -1,6 +1,6 @@
+use super::pool_policy;
 use crate::config::AppConfig;
 use crate::login::{self, LoginAction, LoginView};
-use super::pool_policy;
 use crate::metrics::MetricsRegistry;
 use crate::provider_guard::ProviderGuard;
 use crate::provider_state::ProviderSessionRegistry;
