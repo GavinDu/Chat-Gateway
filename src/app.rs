@@ -1,8 +1,6 @@
 use crate::{app_state::AppState, browser::pool::BrowserWorkerUnavailableError, embedded_login};
 use std::{sync::Arc, time::Duration};
 
-use crate::memory::UnifiedMemory;
-
 /// Stop accepting new connections on SIGINT/SIGTERM and let Axum drain
 /// in-flight requests before the process exits.
 pub(crate) async fn shutdown_signal() {
