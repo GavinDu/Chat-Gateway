@@ -2100,18 +2100,17 @@ async fn chat_completions(
     let routing_owner = owner_key_id.clone();
     let routing_model = req.model.clone();
     let routing_conversation_id = conversation_id.clone();
-    let mut candidates = match tokio::task::spawn_blocking(move || {
-        router.resolve_for_owner(
+    let mut candidates = match router
+        .resolve_for_owner_async(
             &routing_owner,
             &routing_model,
             routing_conversation_id.as_deref(),
-            &routing_memory,
+            routing_memory,
         )
-    })
-    .await
+        .await
     {
-        Ok(Ok(candidates)) => candidates,
-        Ok(Err(_)) | Err(_) => {
+        Ok(candidates) => candidates,
+        Err(_) => {
             tracing::error!(conversation_id = ?conversation_id, "provider affinity read failed");
             return api_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
