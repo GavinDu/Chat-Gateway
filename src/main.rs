@@ -40,8 +40,8 @@ mod request_security;
 mod router;
 mod session;
 
-use app::{refresh_models, shutdown_signal};
 use api::{add_gateway_headers, api_error, estimate_tokens, validate_chat_req, ChatReq};
+use app::{refresh_models, shutdown_signal};
 use app_state::{AppState, AuthKeyContext};
 use browser::pool::{BrowserWorkerUnavailableError, ObscuraPool};
 use chat_backend::{BackendRequest, ProviderId};
