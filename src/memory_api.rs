@@ -8,7 +8,11 @@ use axum::{
 };
 use std::sync::Arc;
 
-use crate::{api::api_error, app_state::{AppState, AuthKeyContext}};
+use crate::{
+    api::api_error,
+    app_state::{AppState, AuthKeyContext},
+    memory,
+};
 
 #[derive(Debug, serde::Deserialize)]
 pub(crate) struct LongTermMemorySettingsRequest {
@@ -29,7 +33,7 @@ pub(crate) struct DeleteAllLongTermMemoryRequest {
     confirm: bool,
 }
 
-pub(crate) fn memory_owner(auth_context: &Option<Extension<AuthKeyContext>>) -> &str {
+fn memory_owner(auth_context: &Option<Extension<AuthKeyContext>>) -> &str {
     auth_context
         .as_ref()
         .map(|Extension(context)| context.key_id.as_str())
