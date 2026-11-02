@@ -190,6 +190,35 @@ pub trait ChatBackend: Send + Sync {
     async fn models(&self, provider: ProviderId) -> std::result::Result<Vec<String>, GatewayError>;
 }
 
+/// Forward browser-provider events while observing downstream cancellation.
+///
+/// The downstream receiver is the HTTP/service consumer. If it is dropped,
+/// stop reading the provider stream immediately so the underlying browser send
+/// (and its provider permit) is released even when the provider is idle.
+fn forward_provider_stream(
+    mut source: mpsc::Receiver<Result<ProviderChunk>>,
+    tx: mpsc::Sender<Result<ChatEvent, GatewayError>>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = tx.closed() => break,
+                chunk = source.recv() => {
+                    let Some(chunk) = chunk else {
+                        break;
+                    };
+                    let event = chunk
+                        .map(ChatEvent::from)
+                        .map_err(|error| GatewayError::provider_failure(error.to_string()));
+                    if tx.send(event).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    })
+}
+
 #[async_trait::async_trait]
 impl ChatBackend for crate::browser::pool::ObscuraPool {
     fn id(&self) -> BackendId {
@@ -244,16 +273,7 @@ impl ChatBackend for crate::browser::pool::ObscuraPool {
             }
         })?;
         let (tx, rx) = mpsc::channel(32);
-        tokio::spawn(async move {
-            while let Some(chunk) = source.recv().await {
-                let event = chunk
-                    .map(ChatEvent::from)
-                    .map_err(|error| GatewayError::provider_failure(error.to_string()));
-                if tx.send(event).await.is_err() {
-                    break;
-                }
-            }
-        });
+        forward_provider_stream(source, tx);
         Ok(rx)
     }
 }
@@ -299,6 +319,24 @@ mod tests {
             .expect("receiver should be alive");
             Ok(rx)
         }
+    }
+
+    #[tokio::test]
+    async fn dropping_event_receiver_cancels_idle_provider_stream() {
+        let (source_tx, source_rx) = mpsc::channel::<Result<ProviderChunk>>(1);
+        let (event_tx, event_rx) = mpsc::channel(1);
+        let forwarding = super::forward_provider_stream(source_rx, event_tx);
+
+        // No provider event is sent: cancellation must not depend on the
+        // upstream producing another chunk to notice that the consumer left.
+        drop(event_rx);
+        tokio::time::timeout(std::time::Duration::from_secs(1), source_tx.closed())
+            .await
+            .expect("dropping the event receiver must close the provider stream");
+
+        forwarding
+            .await
+            .expect("provider forwarding task should stop cleanly");
     }
 
     #[tokio::test]
