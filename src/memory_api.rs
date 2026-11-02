@@ -1,4 +1,5 @@
 //! Owner-scoped long-term memory HTTP handlers.
+//! Export formatting stays here with the endpoint that owns its response contract.
 
 use axum::{
     extract::{Extension, Path, State},
