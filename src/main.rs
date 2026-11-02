@@ -30,6 +30,7 @@ mod diagnostics;
 mod embedded_login;
 mod login;
 mod memory;
+mod memory_api;
 mod memory_egress;
 mod metrics;
 mod provider_guard;
@@ -296,18 +297,18 @@ async fn main() -> anyhow::Result<()> {
         .route("/v1/conversations", get(list_conversations))
         .route(
             "/v1/memory/settings",
-            get(get_long_term_memory_settings).put(put_long_term_memory_settings),
+            get(memory_api::get_long_term_memory_settings).put(memory_api::put_long_term_memory_settings),
         )
         .route(
             "/v1/memory/items",
-            get(list_long_term_memory_items)
-                .put(save_long_term_memory_item)
-                .delete(delete_all_long_term_memory_items),
+            get(memory_api::list_long_term_memory_items)
+                .put(memory_api::save_long_term_memory_item)
+                .delete(memory_api::delete_all_long_term_memory_items),
         )
-        .route("/v1/memory/export", get(export_long_term_memory_items))
+        .route("/v1/memory/export", get(memory_api::export_long_term_memory_items))
         .route(
             "/v1/memory/items/:item_id",
-            axum::routing::delete(delete_long_term_memory_item),
+            axum::routing::delete(memory_api::delete_long_term_memory_item),
         )
         .route(
             "/v1/conversations/:conversation_id/provider-threads/:provider",
@@ -1270,263 +1271,6 @@ fn export_conversation_response_for_owner(
                 "server_error",
                 "memory_persistence_failed",
                 "conversation could not be exported safely",
-            )
-        }
-    }
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct LongTermMemorySettingsRequest {
-    enabled: bool,
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct LongTermMemoryItemRequest {
-    memory_key: String,
-    value: String,
-    source_conversation_id: Option<String>,
-    confidence: Option<f64>,
-    expires_at: Option<i64>,
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct DeleteAllLongTermMemoryRequest {
-    confirm: bool,
-}
-
-fn memory_owner(auth_context: &Option<Extension<AuthKeyContext>>) -> &str {
-    auth_context
-        .as_ref()
-        .map(|Extension(context)| context.key_id.as_str())
-        .unwrap_or("local")
-}
-
-async fn get_long_term_memory_settings(
-    State(state): State<Arc<AppState>>,
-    auth_context: Option<Extension<AuthKeyContext>>,
-) -> Response {
-    let owner = memory_owner(&auth_context).to_owned();
-    match state
-        .memory
-        .clone()
-        .long_term_memory_enabled_async(owner)
-        .await
-    {
-        Ok(enabled) => Json(serde_json::json!({ "enabled": enabled })).into_response(),
-        _ => api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "server_error",
-            "memory_read_failed",
-            "memory settings could not be read safely",
-        ),
-    }
-}
-
-async fn put_long_term_memory_settings(
-    State(state): State<Arc<AppState>>,
-    auth_context: Option<Extension<AuthKeyContext>>,
-    Json(request): Json<LongTermMemorySettingsRequest>,
-) -> Response {
-    let owner = memory_owner(&auth_context).to_owned();
-    let enabled = request.enabled;
-    match state
-        .memory
-        .clone()
-        .set_long_term_memory_enabled_async(owner, enabled)
-        .await
-    {
-        Ok(()) => Json(serde_json::json!({ "enabled": enabled })).into_response(),
-        _ => api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "server_error",
-            "memory_settings_write_failed",
-            "memory settings could not be saved safely",
-        ),
-    }
-}
-
-async fn list_long_term_memory_items(
-    State(state): State<Arc<AppState>>,
-    auth_context: Option<Extension<AuthKeyContext>>,
-) -> Response {
-    let owner = memory_owner(&auth_context).to_owned();
-    match state
-        .memory
-        .clone()
-        .long_term_memory_snapshot_async(owner)
-        .await
-    {
-        Ok((enabled, items)) => Json(serde_json::json!({
-            "enabled": enabled,
-            "data": items,
-        }))
-        .into_response(),
-        _ => api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "server_error",
-            "memory_read_failed",
-            "memory items could not be listed safely",
-        ),
-    }
-}
-
-fn long_term_memory_export_response(
-    enabled: bool,
-    items: Vec<memory::LongTermMemoryItem>,
-) -> Response {
-    let mut response = Json(serde_json::json!({
-        "format_version": 1,
-        "enabled": enabled,
-        "data": items,
-    }))
-    .into_response();
-    response.headers_mut().insert(
-        header::CONTENT_DISPOSITION,
-        HeaderValue::from_static("attachment; filename=\"long-term-memory.json\""),
-    );
-    response
-}
-
-async fn export_long_term_memory_items(
-    State(state): State<Arc<AppState>>,
-    auth_context: Option<Extension<AuthKeyContext>>,
-) -> Response {
-    let owner = memory_owner(&auth_context).to_owned();
-    match state
-        .memory
-        .clone()
-        .long_term_memory_snapshot_async(owner)
-        .await
-    {
-        Ok((enabled, items)) => long_term_memory_export_response(enabled, items),
-        _ => api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "server_error",
-            "memory_export_failed",
-            "memory items could not be exported safely",
-        ),
-    }
-}
-
-async fn save_long_term_memory_item(
-    State(state): State<Arc<AppState>>,
-    auth_context: Option<Extension<AuthKeyContext>>,
-    Json(request): Json<LongTermMemoryItemRequest>,
-) -> Response {
-    let owner = memory_owner(&auth_context).to_owned();
-    let memory_key = request.memory_key;
-    let value = request.value;
-    let source_conversation_id = request.source_conversation_id;
-    let confidence = request.confidence.unwrap_or(1.0);
-    let expires_at = request.expires_at;
-    match state
-        .memory
-        .clone()
-        .save_long_term_memory_item_async(
-            owner,
-            memory_key,
-            value,
-            source_conversation_id,
-            confidence,
-            expires_at,
-        )
-        .await
-    {
-        Ok(item) => (StatusCode::OK, Json(item)).into_response(),
-        Err(error) if error.to_string().contains("disabled") => api_error(
-            StatusCode::CONFLICT,
-            "invalid_request_error",
-            "long_term_memory_disabled",
-            "enable long-term memory before saving items",
-        ),
-        Err(error) if error.to_string().contains("invalid long-term memory item") => api_error(
-            StatusCode::BAD_REQUEST,
-            "invalid_request_error",
-            "invalid_memory_item",
-            "memory key, value, or confidence is invalid",
-        ),
-        Err(error) if error.to_string().contains("source conversation") => api_error(
-            StatusCode::BAD_REQUEST,
-            "invalid_request_error",
-            "invalid_memory_provenance",
-            "source conversation must belong to this API key",
-        ),
-        Err(error) => {
-            tracing::error!(%error, "long-term memory item save failed");
-            api_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "server_error",
-                "memory_write_failed",
-                "memory item could not be saved safely",
-            )
-        }
-    }
-}
-
-async fn delete_long_term_memory_item(
-    State(state): State<Arc<AppState>>,
-    Path(item_id): Path<String>,
-    auth_context: Option<Extension<AuthKeyContext>>,
-) -> Response {
-    if item_id.is_empty() || item_id.len() > 64 {
-        return api_error(
-            StatusCode::BAD_REQUEST,
-            "invalid_request_error",
-            "invalid_memory_item_id",
-            "memory item ID is invalid",
-        );
-    }
-    let owner = memory_owner(&auth_context).to_owned();
-    match state
-        .memory
-        .clone()
-        .delete_long_term_memory_item_async(owner, item_id)
-        .await
-    {
-        Ok(true) => StatusCode::NO_CONTENT.into_response(),
-        Ok(false) => api_error(
-            StatusCode::NOT_FOUND,
-            "not_found",
-            "memory_item_not_found",
-            "memory item was not found",
-        ),
-        _ => api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "server_error",
-            "memory_delete_failed",
-            "memory item could not be deleted safely",
-        ),
-    }
-}
-
-async fn delete_all_long_term_memory_items(
-    State(state): State<Arc<AppState>>,
-    auth_context: Option<Extension<AuthKeyContext>>,
-    Json(request): Json<DeleteAllLongTermMemoryRequest>,
-) -> Response {
-    if !request.confirm {
-        return api_error(
-            StatusCode::BAD_REQUEST,
-            "invalid_request_error",
-            "confirmation_required",
-            "set confirm=true to delete all of your long-term memory items",
-        );
-    }
-    let owner = memory_owner(&auth_context).to_owned();
-    match state
-        .memory
-        .clone()
-        .delete_all_long_term_memory_items_async(owner)
-        .await
-    {
-        Ok(deleted) => Json(serde_json::json!({ "deleted": deleted })).into_response(),
-        Err(error) => {
-            tracing::error!(%error, "long-term memory bulk deletion failed");
-            api_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "server_error",
-                "memory_delete_failed",
-                "memory items could not be deleted safely",
             )
         }
     }
@@ -4372,10 +4116,10 @@ mod long_term_memory_retrieval_tests {
             .set_long_term_memory_enabled("owner-a", true)
             .unwrap();
         memory
-            .save_long_term_memory_item("owner-a", "low", "lower confidence", None, 0.2, None)
+            .memory_api::save_long_term_memory_item("owner-a", "low", "lower confidence", None, 0.2, None)
             .unwrap();
         memory
-            .save_long_term_memory_item("owner-a", "high", "higher confidence", None, 0.9, None)
+            .memory_api::save_long_term_memory_item("owner-a", "high", "higher confidence", None, 0.9, None)
             .unwrap();
 
         assert!(memory
@@ -4404,16 +4148,16 @@ mod long_term_memory_export_tests {
             .set_long_term_memory_enabled("owner-a", true)
             .unwrap();
         memory
-            .save_long_term_memory_item("owner-a", "timezone", "America/New_York", None, 0.9, None)
+            .memory_api::save_long_term_memory_item("owner-a", "timezone", "America/New_York", None, 0.9, None)
             .unwrap();
         memory
             .set_long_term_memory_enabled("owner-b", true)
             .unwrap();
         memory
-            .save_long_term_memory_item("owner-b", "timezone", "Europe/London", None, 1.0, None)
+            .memory_api::save_long_term_memory_item("owner-b", "timezone", "Europe/London", None, 1.0, None)
             .unwrap();
 
-        let items = memory.list_long_term_memory_items("owner-a").unwrap();
+        let items = memory.memory_api::list_long_term_memory_items("owner-a").unwrap();
         let response = long_term_memory_export_response(true, items);
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
