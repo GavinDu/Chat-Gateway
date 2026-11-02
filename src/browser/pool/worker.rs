@@ -60,7 +60,7 @@ pub(super) fn browser_thread(
                     let Some(provider) = Provider::from_name(&pcfg.name) else { continue };
                     match browser.new_page().await {
                         Ok(mut page) => {
-                            super::network_tap::attach_provider_network_tap(&mut page, provider);
+                            crate::browser::network_tap::attach_provider_network_tap(&mut page, provider);
                             let session_file = match session::load_session_file(&pcfg.name) {
                                 Ok(file) => file,
                                 Err(error) => {
