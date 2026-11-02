@@ -1108,7 +1108,6 @@ fn classify_session_probe(is_login_page: bool, input_found: bool) -> Result<bool
     Ok(true)
 }
 
-
 fn build_login_view(
     provider: Provider,
     page: &obscura_core::Page,
