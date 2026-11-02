@@ -2,7 +2,7 @@
 
 use axum::{
     extract::{Extension, Path, State},
-    http::{header, StatusCode},
+    http::{header, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
@@ -109,6 +109,23 @@ pub(crate) async fn list_long_term_memory_items(
     }
 }
 
+fn long_term_memory_export_response(
+    enabled: bool,
+    items: Vec<memory::LongTermMemoryItem>,
+) -> Response {
+    let mut response = Json(serde_json::json!({
+        "format_version": 1,
+        "enabled": enabled,
+        "data": items,
+    }))
+    .into_response();
+    response.headers_mut().insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_static("attachment; filename=\"long-term-memory.json\""),
+    );
+    response
+}
+
 pub(crate) async fn export_long_term_memory_items(
     State(state): State<Arc<AppState>>,
     auth_context: Option<Extension<AuthKeyContext>>,
@@ -120,7 +137,7 @@ pub(crate) async fn export_long_term_memory_items(
         .long_term_memory_snapshot_async(owner)
         .await
     {
-        Ok((enabled, items)) => super::long_term_memory_export_response(enabled, items),
+        Ok((enabled, items)) => long_term_memory_export_response(enabled, items),
         _ => api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "server_error",
