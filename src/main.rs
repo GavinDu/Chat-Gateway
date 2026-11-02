@@ -1242,7 +1242,6 @@ fn export_conversation_response(memory: &UnifiedMemory, conversation_id: &str) -
     export_conversation_response_for_owner(memory, "local", conversation_id)
 }
 
-#[cfg(test)]
 fn long_term_memory_export_response(
     enabled: bool,
     items: Vec<memory::LongTermMemoryItem>,
