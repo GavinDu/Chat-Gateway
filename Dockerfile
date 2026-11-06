@@ -1,12 +1,21 @@
 FROM rust:1.99.1 AS builder
 WORKDIR /app
-COPY Cargo.toml Cargo.lock ./
-COPY src ./src
-COPY benches ./benches
-COPY vendor ./vendor
+# Keep system libraries and Rust dependencies independent of source edits.
 RUN apt-get update && apt-get install -y --no-install-recommends build-essential cmake clang libclang-dev llvm-dev \
     && rm -rf /var/lib/apt/lists/*
+COPY Cargo.toml Cargo.lock ./
+COPY vendor ./vendor
+# Compile the *same pinned dependency graph* with a dummy binary. BuildKit
+# can reuse this layer when only application sources change. Keep the bench
+# target present because it is explicitly declared in Cargo.toml.
+RUN mkdir -p src benches \
+    && printf 'fn main() {}\n' > src/main.rs \
+    && printf 'fn main() {}\n' > benches/memory_sqlite.rs
 RUN cargo build --locked --release --features render,stealth
+# Build the actual application using the already compiled dependency artifacts.
+COPY src ./src
+COPY benches ./benches
+RUN touch src/main.rs && cargo build --locked --release --features render,stealth
 RUN mkdir -p /app/data /app/sessions && chown -R 65532:65532 /app/data /app/sessions
 
 FROM gcr.io/distroless/cc:nonroot
