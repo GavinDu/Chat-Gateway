@@ -128,9 +128,10 @@ RAM and no swap**, verifies those limits, invokes the actual
 architecture, and runs its entrypoint and isolated Docker HTTP/shutdown smoke.
 It uses a distinct cache scope populated only by that bounded builder.
 It also loads the cached build stage and forces the shared production link
-command to run again with **768 MiB and no swap**, offline. The controlled old
-GNU-linker implementation failed at this tighter limit, while the production
-LLD command passed. A roomy 2 GiB container alone might have allowed the old
+command to run again with **1 GiB and no swap**, offline. The original GNU-linker control still failed with an OOM kill at 1 GiB.
+The initial 768 MiB relink passed locally but failed on the hosted ARM runner;
+1 GiB leaves cross-host headroom while retaining a budget that rejects the
+original linker. The production LLD command must pass this hosted gate. A roomy 2 GiB container alone might have allowed the old
 linker to pass while a whole 2 GiB VM lacked enough free memory; the separate
 final-link gate addresses that distinction.
 The existing x86 Docker, native browser/SSH and Rust checks remain intact.
