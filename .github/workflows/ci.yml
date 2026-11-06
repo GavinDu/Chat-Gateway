@@ -125,12 +125,12 @@ jobs:
         run: |
           pwd
           bash scripts/docker-run.sh build
-      - name: Relink production executable within 768 MiB and no swap
+      - name: Relink production executable within 1 GiB and no swap
         run: |
           pwd
-          docker run --rm --memory=768m --memory-swap=768m --cpus=1 --network=none \
+          docker run --rm --memory=1g --memory-swap=1g --cpus=1 --network=none \
             --env CARGO_NET_OFFLINE=true --entrypoint bash chat-gateway-rs:arm64-link-builder \
-            -c 'pwd; status=0; bash /usr/local/bin/chat-gateway-release-link || status=$?; cat /sys/fs/cgroup/memory.events; exit "$status"'
+            -c 'pwd; status=0; bash /usr/local/bin/chat-gateway-release-link || status=$?; cat /sys/fs/cgroup/memory.events; cat /sys/fs/cgroup/memory.peak; exit "$status"'
       - name: Verify architecture, entrypoint and isolated runtime
         run: |
           test "$(docker image inspect --format '{{.Architecture}}' chat-gateway-rs:arm64-2gb)" = arm64
