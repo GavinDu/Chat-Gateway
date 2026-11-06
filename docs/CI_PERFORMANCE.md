@@ -52,6 +52,31 @@ investigate cache scope/size and consider moving the dependency build cache
 into a separately managed base image. Do not skip tests, sandboxing, provider
 terms checks, or local-only security checks.
 
+## Native BoringSSL FIPS compilation and low-memory Docker hosts
+
+A failed `btls-sys` build may report
+`c++: fatal error: Killed signal terminated program cc1plus` while compiling
+`crypto/fipsmodule/bcm.cc`, followed by a CMake error and Cargo exit 101.
+This strongly indicates the OS/container killed the C++ compiler after memory
+pressure; it is not a BoringSSL patch failure. Lines such as `trailing
+whitespace`, `Applied patch ... cleanly`, or `libunwind not found` are
+nonfatal in this context.
+
+Dockerfile release builds set `CARGO_BUILD_JOBS=1` and
+`CMAKE_BUILD_PARALLEL_LEVEL=1`, limiting simultaneous Rust/native compiler
+workers. The build still compiles the exact locked features, keeps FIPS
+implementation and crypto tests intact, and runs the same Docker smoke tests.
+This may make **cold** builds slower; warm BuildKit cache reuse still applies.
+On a machine with sufficient RAM, users can explicitly raise the Cargo limit
+with `docker build --build-arg CARGO_BUILD_JOBS=2 ...`; the CMake concurrency
+limit remains one to prevent simultaneous BoringSSL C++ workers.
+
+If a single C++ compilation is still OOM-killed on Docker Desktop, raise its
+memory allocation (ideally 6–8 GiB or more for this dependency graph), check
+available system memory and whether other parallel builds are running.
+Do not disable BoringSSL/FIPS features, weaken cryptographic checks, or
+skip CI to work around memory exhaustion.
+
 ## Generic Rust cache reduction (issue #671)
 
 The test job in run 42243205149 restored an archive of 2,953,182,050 bytes
