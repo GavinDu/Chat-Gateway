@@ -116,6 +116,21 @@ jobs:
         run: |
           pwd
           bash scripts/docker-run.sh build
+      - name: Load cached release builder for the strict final-link regression
+        env:
+          BUILDX_BUILDER: ${{ steps.buildx.outputs.name }}
+          CHAT_GATEWAY_IMAGE: chat-gateway-rs:arm64-link-builder
+          CHAT_GATEWAY_BUILD_PLATFORM: linux/arm64
+          CHAT_GATEWAY_BUILD_TARGET: builder
+        run: |
+          pwd
+          bash scripts/docker-run.sh build
+      - name: Relink production executable within 768 MiB and no swap
+        run: |
+          pwd
+          docker run --rm --memory=768m --memory-swap=768m --cpus=1 --network=none \
+            --env CARGO_NET_OFFLINE=true --entrypoint bash chat-gateway-rs:arm64-link-builder \
+            -c 'pwd; status=0; bash /usr/local/bin/chat-gateway-release-link || status=$?; cat /sys/fs/cgroup/memory.events; exit "$status"'
       - name: Verify architecture, entrypoint and isolated runtime
         run: |
           test "$(docker image inspect --format '{{.Architecture}}' chat-gateway-rs:arm64-2gb)" = arm64
@@ -135,6 +150,8 @@ jobs:
         run: |
           bash -n scripts/docker-run.sh
           bash -n scripts/docker-runtime-smoke.sh
+          bash -n scripts/docker-release-link.sh
+          bash -n scripts/docker-main-e2e.sh
 
       - name: Validate browser extension JavaScript and manifest
         run: |
