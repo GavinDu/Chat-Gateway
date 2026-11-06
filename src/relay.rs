@@ -390,7 +390,10 @@ pub async fn status(State(app): State<Arc<crate::AppState>>, headers: HeaderMap)
                 );
             }
         };
-        providers.push(serde_json::json!({"provider":provider,"linked":session_present}));
+        let enabled = app.cfg.provider(provider).is_some_and(|config| config.enabled);
+        // Saved cookies are not proof of a valid provider login. Authentication
+        // remains unknown until a permitted live provider check succeeds.
+        providers.push(serde_json::json!({"provider":provider,"linked":session_present,"enabled":enabled,"authentication":"unknown"}));
     }
     Json(serde_json::json!({"ok":true,"providers":providers,"vault_mode":std::env::var("CHAT_GATEWAY_SESSION_STORE").as_deref()==Ok("vault")})).into_response()
 }
