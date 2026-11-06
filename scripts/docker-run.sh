@@ -94,6 +94,12 @@ ensure_volumes_and_key() {
       test "$(wc -c < /vault/vault.key | tr -d " ")" = 64
       chmod 600 /vault/vault.key
       chown 65532:65532 /vault/vault.key
+      if [ ! -s /vault/pairing-admin.key ]; then
+        od -An -N32 -tx1 /dev/urandom | tr -d " \n" > /vault/pairing-admin.key.tmp
+        chmod 600 /vault/pairing-admin.key.tmp
+        mv /vault/pairing-admin.key.tmp /vault/pairing-admin.key
+      fi
+      chown 65532:65532 /vault/pairing-admin.key
     ' >/dev/null
 }
 
@@ -162,7 +168,7 @@ start_gateway() {
   if [[ -z "$EXTENSION_ID" ]]; then
     echo "Set CHAT_GATEWAY_EXTENSION_ID to enable the Chrome cookie relay."
   fi
-  echo "Pairing code: run '$0 pairing-code' (expires 10 minutes after startup)."
+  echo "Pairing code: run '$0 pairing-code' (generates a fresh, single-use code)."
 }
 
 case "${1:-}" in
@@ -206,7 +212,14 @@ case "${1:-}" in
     ;;
   pairing-code)
     require_docker
-    docker logs "$CONTAINER" 2>&1 | sed -n 's/.*Browser relay pairing code.*: //p' | tail -n 1
+    if ! container_exists; then
+      echo "Gateway container not found. Start the gateway first." >&2
+      exit 1
+    fi
+    admin_secret="$(docker run --rm --mount "type=volume,source=$KEY_VOLUME,target=/vault,readonly" alpine:3.22 cat /vault/pairing-admin.key)"
+    response="$(curl --fail --silent --show-error --max-time 10 -X POST "http://127.0.0.1:$PORT/relay/v1/pairing-code/rotate" -H "Authorization: Bearer $admin_secret")"
+    unset admin_secret
+    printf '%s\n' "$response" | python3 -c 'import json,sys; print(json.load(sys.stdin)["code"])'
     ;;
   login)
     require_docker
