@@ -219,7 +219,12 @@ case "${1:-}" in
     admin_secret="$(docker run --rm --mount "type=volume,source=$KEY_VOLUME,target=/vault,readonly" alpine:3.22 cat /vault/pairing-admin.key)"
     response="$(curl --fail --silent --show-error --max-time 10 -X POST "http://127.0.0.1:$PORT/relay/v1/pairing-code/rotate" -H "Authorization: Bearer $admin_secret")"
     unset admin_secret
-    printf '%s\n' "$response" | python3 -c 'import json,sys; print(json.load(sys.stdin)["code"])'
+    code="$(printf '%s\n' "$response" | sed -n 's/.*"code":"\\([0-9]\\{8\\}\\)".*/\\1/p')"
+    if [[ ! "$code" =~ ^[0-9]{8}$ ]]; then
+      echo "Gateway did not return a valid pairing code" >&2
+      exit 1
+    fi
+    printf '%s\n' "$code"
     ;;
   login)
     require_docker
