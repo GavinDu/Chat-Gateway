@@ -5,12 +5,66 @@ async function refreshStatus() {
   const response = await relayFetch("/relay/v1/status");
   if (!response.ok) throw new Error("Status request failed (" + response.status + ").");
   const data = await response.json();
-  $("status").replaceChildren(...data.providers.map(item => {
+  const items = await Promise.all(data.providers.map(async item => {
     const li = document.createElement("li");
-    li.textContent = item.provider + ": " + (item.linked ? "linked" : "not linked");
+    const heading = document.createElement("strong");
+    heading.textContent = item.provider;
+    li.append(heading);
+
+    const status = document.createElement("p");
+    status.className = "provider-detail";
+    const enabled = item.enabled === false ? "Disabled in gateway config" : "Enabled in gateway";
+    const linked = item.linked ? "Session saved" : "Not linked";
+    let browser = "Browser permission not granted";
+    const domains = PROVIDERS[item.provider] || [];
+    const origins = domains.flatMap(domain => ["https://" + domain + "/*", "https://*." + domain + "/*"]);
+    if (origins.length && await chrome.permissions.contains({origins})) {
+      const present = await Promise.all(domains.map(domain => chrome.cookies.getAll({domain})));
+      browser = present.some(cookies => cookies.length > 0) ? "Browser cookies present" : "No browser cookies";
+    }
+    status.textContent = [enabled, linked, browser, "Login not verified"].join(" · ");
+    li.append(status);
+
+    const openButton = document.createElement("button");
+    openButton.type = "button";
+    openButton.className = "secondary provider-action";
+    openButton.textContent = "Open login";
+    openButton.addEventListener("click", () => openProviderLogin(item.provider).catch(error => message(error.message)));
+    li.append(openButton);
+
+    const linkButton = document.createElement("button");
+    linkButton.type = "button";
+    linkButton.className = "provider-action";
+    linkButton.textContent = item.linked ? "Sync session" : "Link account";
+    linkButton.disabled = item.enabled === false;
+    linkButton.addEventListener("click", () => {
+      $("provider").value = item.provider;
+      $("link").click();
+    });
+    li.append(linkButton);
+
+    if (item.linked) {
+      const unlinkButton = document.createElement("button");
+      unlinkButton.type = "button";
+      unlinkButton.className = "danger provider-action";
+      unlinkButton.textContent = "Unlink";
+      unlinkButton.addEventListener("click", () => {
+        $("provider").value = item.provider;
+        $("unlink").click();
+      });
+      li.append(unlinkButton);
+    }
     return li;
   }));
+  $("status").replaceChildren(...items);
   if (!data.vault_mode) message("Vault mode is off. Set CHAT_GATEWAY_SESSION_STORE=vault and CHAT_GATEWAY_VAULT_KEY (or CHAT_GATEWAY_VAULT_KEY_FILE), then restart the gateway.");
+}
+
+async function openProviderLogin(provider) {
+  const url = PROVIDER_LOGIN_URLS[provider];
+  if (!url) throw new Error("This provider is not yet supported by Chat-Gateway.");
+  await chrome.tabs.create({url});
+  message("Sign in on the provider website. Then return here and choose Link account. Credentials and MFA stay on the provider website.");
 }
 
 async function initialize() {
@@ -42,6 +96,10 @@ $("pair").addEventListener("click", async () => {
   } catch (error) { message(error.message); }
 });
 
+$("open-login").addEventListener("click", async () => {
+  try { await openProviderLogin($("provider").value); } catch (error) { message(error.message); }
+});
+
 $("link").addEventListener("click", async () => {
   try {
     const provider = $("provider").value;
@@ -68,6 +126,7 @@ $("refresh").addEventListener("click", async () => {
 $("unlink").addEventListener("click", async () => {
   try {
     const provider = $("provider").value;
+    if (!confirm("Remove the saved " + provider + " session from Chat-Gateway?")) return;
     const response = await relayFetch("/relay/v1/session/" + encodeURIComponent(provider), {method:"DELETE",body:"{}"});
     if (!response.ok) throw new Error("Could not unlink " + provider + ".");
     const stored = await chrome.storage.local.get(["linkedProviders"]);
