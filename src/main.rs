@@ -1,6 +1,6 @@
 use axum::{
     body::Body,
-    extract::{DefaultBodyLimit, Extension, Path, Query, State},
+    extract::{ConnectInfo, DefaultBodyLimit, Extension, Path, Query, State},
     http::HeaderMap,
     http::{header, Request, StatusCode},
     middleware::{self, Next},
@@ -53,7 +53,7 @@ use context::{ContextBuilder, ContextPlan, ThreadSyncState};
 use memory::{ChatMessage, ConversationStore, LongTermMemoryStore, ProviderThread, UnifiedMemory};
 use request_security::{
     is_loopback_authority, login_origin_is_same_authority, remote_gateway_origin,
-    remote_request_is_allowed, validate_remote_gateway_config,
+    remote_request_is_allowed, validate_remote_gateway_config, RemoteProxyTrust,
 };
 use router::ProviderRouter;
 
@@ -65,7 +65,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    validate_remote_gateway_config()?;
+    let remote_proxy_trust = validate_remote_gateway_config()?;
     let cli = Cli::parse();
     if cli.show_memory_egress_policy {
         let policy = memory_egress::MemoryEgressPolicy::from_env()
@@ -369,6 +369,7 @@ async fn main() -> anyhow::Result<()> {
         // request validation has a chance to reject it.
         .layer(DefaultBodyLimit::max(1024 * 1024))
         .layer(middleware::from_fn(protect_login_api))
+        .layer(Extension(remote_proxy_trust))
         // Keep request IDs on both successful responses and middleware rejections.
         .layer(middleware::from_fn(attach_request_id))
         .layer(Extension(state.metrics.clone()));
@@ -390,7 +391,11 @@ async fn main() -> anyhow::Result<()> {
         let _ = shutdown_tx.send(());
     };
     let mut server = Box::pin(std::future::IntoFuture::into_future(
-        axum::serve(listener, app).with_graceful_shutdown(shutdown),
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(shutdown),
     ));
     tokio::select! {
         result = &mut server => result?,
@@ -426,6 +431,14 @@ fn server_bind_addr(port: u16, docker_local_bind: bool) -> SocketAddr {
 /// Non-browser clients without an Origin header remain usable, while browser
 /// requests must have an Origin authority identical to the request Host.
 async fn protect_login_api(req: Request<Body>, next: Next) -> Response {
+    protect_login_api_for_origin(req, next, remote_gateway_origin().ok().flatten()).await
+}
+
+async fn protect_login_api_for_origin(
+    mut req: Request<Body>,
+    next: Next,
+    remote_origin: Option<(String, String)>,
+) -> Response {
     let headers = req.headers();
     let path = req.uri().path();
     let is_login_control = path == "/login" || path.starts_with("/login/api/");
@@ -436,26 +449,37 @@ async fn protect_login_api(req: Request<Body>, next: Next) -> Response {
     let fetch_site = headers.get("sec-fetch-site").and_then(|v| v.to_str().ok());
 
     let origin_is_safe = if is_pairing_admin {
-        !origin_present && std::env::var("CHAT_GATEWAY_REMOTE_ORIGIN").is_err()
+        !origin_present && remote_origin.is_none()
     } else if is_relay_api {
         relay::relay_origin_is_allowed(headers)
-    } else if let Ok(Some((expected_origin, _))) = remote_gateway_origin() {
+    } else if let Some((expected_origin, _)) = remote_origin.as_ref() {
         !origin_present
             || headers
                 .get(axum::http::header::ORIGIN)
                 .and_then(|value| value.to_str().ok())
-                .is_some_and(|origin| origin == expected_origin)
+                .is_some_and(|origin| origin == expected_origin.as_str())
     } else {
         !origin_present || login_origin_is_same_authority(headers)
     };
 
-    let authority_is_safe = if let Ok(Some((origin, authority))) = remote_gateway_origin() {
-        remote_request_is_allowed(
-            headers,
-            &origin,
-            &authority,
-            is_relay_api && relay::relay_origin_is_allowed(headers),
-        )
+    let authority_is_safe = if let Some((origin, authority)) = remote_origin.as_ref() {
+        req.extensions()
+            .get::<Option<RemoteProxyTrust>>()
+            .and_then(Option::as_ref)
+            .is_some_and(|trust| {
+                trust.allows(
+                    headers,
+                    req.extensions()
+                        .get::<ConnectInfo<SocketAddr>>()
+                        .map(|peer| peer.0),
+                )
+            })
+            && remote_request_is_allowed(
+                headers,
+                origin,
+                authority,
+                is_relay_api && relay::relay_origin_is_allowed(headers),
+            )
     } else {
         headers
             .get(axum::http::header::HOST)
@@ -466,7 +490,7 @@ async fn protect_login_api(req: Request<Body>, next: Next) -> Response {
     if !authority_is_safe
         || !origin_is_safe
         || (is_login_api && fetch_site == Some("cross-site"))
-        || (std::env::var("CHAT_GATEWAY_REMOTE_ORIGIN").is_ok() && is_login_control)
+        || (remote_origin.is_some() && is_login_control)
     {
         return (
             StatusCode::FORBIDDEN,
@@ -474,7 +498,7 @@ async fn protect_login_api(req: Request<Body>, next: Next) -> Response {
                 "error": {
                     "message": "request authority or origin rejected",
                     "type": "security_error",
-                    "code": if remote_gateway_origin().ok().flatten().is_some() { "unsafe_gateway_request" } else { "unsafe_local_request" }
+                    "code": if remote_origin.is_some() { "unsafe_gateway_request" } else { "unsafe_local_request" }
                 }
             })),
         )
@@ -486,6 +510,8 @@ async fn protect_login_api(req: Request<Body>, next: Next) -> Response {
     } else {
         None
     };
+    // Consume the edge credential at the boundary, before handlers/logging.
+    req.headers_mut().remove("x-chat-gateway-proxy-key");
     let mut response = next.run(req).await;
     if let Some(origin) = allowed_relay_origin {
         response
@@ -3476,6 +3502,192 @@ mod login_security_middleware_http_tests {
             .oneshot(builder.body(Body::empty()).unwrap())
             .await
             .unwrap()
+    }
+
+    fn remote_app(peer: Option<SocketAddr>, configured: bool) -> Router {
+        let trust = configured.then(|| {
+            RemoteProxyTrust::parse(
+                "127.0.0.1",
+                "edge-only-secret-0123456789abcdef0123456789",
+                "api",
+            )
+            .unwrap()
+        });
+        let app = Router::new()
+            .route(
+                "/health",
+                get(|headers: HeaderMap| async move {
+                    assert!(!headers.contains_key("x-chat-gateway-proxy-key"));
+                    StatusCode::OK
+                }),
+            )
+            .route("/login", get(|| async { StatusCode::OK }))
+            .layer(middleware::from_fn(|req, next| {
+                protect_login_api_for_origin(
+                    req,
+                    next,
+                    Some((
+                        "https://gateway.example.com".into(),
+                        "gateway.example.com".into(),
+                    )),
+                )
+            }))
+            .layer(Extension(trust));
+        if let Some(peer) = peer {
+            app.layer(Extension(ConnectInfo(peer)))
+        } else {
+            app
+        }
+    }
+
+    #[tokio::test]
+    async fn remote_boundary_checks_real_peer_secret_headers_and_login_prohibition() {
+        for (peer, configured, secret, tls, host, origin, path, expected) in [
+            (
+                Some("127.0.0.1:12345"),
+                true,
+                Some("edge-only-secret-0123456789abcdef0123456789"),
+                "https",
+                "gateway.example.com",
+                "https://gateway.example.com",
+                "/health",
+                StatusCode::OK,
+            ),
+            (
+                None,
+                true,
+                Some("edge-only-secret-0123456789abcdef0123456789"),
+                "https",
+                "gateway.example.com",
+                "https://gateway.example.com",
+                "/health",
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                Some("192.0.2.1:12345"),
+                true,
+                Some("edge-only-secret-0123456789abcdef0123456789"),
+                "https",
+                "gateway.example.com",
+                "https://gateway.example.com",
+                "/health",
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                Some("127.0.0.1:12345"),
+                false,
+                Some("edge-only-secret-0123456789abcdef0123456789"),
+                "https",
+                "gateway.example.com",
+                "https://gateway.example.com",
+                "/health",
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                Some("127.0.0.1:12345"),
+                true,
+                None,
+                "https",
+                "gateway.example.com",
+                "https://gateway.example.com",
+                "/health",
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                Some("127.0.0.1:12345"),
+                true,
+                Some("wrong"),
+                "https",
+                "gateway.example.com",
+                "https://gateway.example.com",
+                "/health",
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                Some("127.0.0.1:12345"),
+                true,
+                Some("edge-only-secret-0123456789abcdef0123456789"),
+                "http",
+                "gateway.example.com",
+                "https://gateway.example.com",
+                "/health",
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                Some("127.0.0.1:12345"),
+                true,
+                Some("edge-only-secret-0123456789abcdef0123456789"),
+                "https",
+                "evil.example",
+                "https://gateway.example.com",
+                "/health",
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                Some("127.0.0.1:12345"),
+                true,
+                Some("edge-only-secret-0123456789abcdef0123456789"),
+                "https",
+                "gateway.example.com",
+                "https://evil.example",
+                "/health",
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                Some("127.0.0.1:12345"),
+                true,
+                Some("edge-only-secret-0123456789abcdef0123456789"),
+                "https",
+                "gateway.example.com",
+                "https://gateway.example.com",
+                "/login",
+                StatusCode::FORBIDDEN,
+            ),
+        ] {
+            let mut request = Request::builder()
+                .uri(path)
+                .header("host", host)
+                .header("origin", origin)
+                .header("x-forwarded-proto", tls)
+                .header("x-forwarded-for", "127.0.0.1");
+            if let Some(secret) = secret {
+                request = request.header("x-chat-gateway-proxy-key", secret);
+            }
+            let response = remote_app(peer.map(|peer| peer.parse().unwrap()), configured)
+                .oneshot(request.body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                expected,
+                "peer={peer:?}, configured={configured}, path={path}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn strips_edge_credential_before_local_handlers() {
+        let app = Router::new()
+            .route(
+                "/health",
+                get(|headers: HeaderMap| async move {
+                    assert!(!headers.contains_key("x-chat-gateway-proxy-key"));
+                    StatusCode::OK
+                }),
+            )
+            .layer(middleware::from_fn(protect_login_api));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .header("host", "127.0.0.1:8080")
+                    .header("x-chat-gateway-proxy-key", "should-never-reach-handler")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[tokio::test]
