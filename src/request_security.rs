@@ -1,4 +1,60 @@
 use axum::http::HeaderMap;
+use sha2::{Digest, Sha256};
+use std::net::{IpAddr, SocketAddr};
+use subtle::ConstantTimeEq;
+
+/// The immediate TCP peer and an independent edge credential must both match.
+/// Forwarded headers and the ordinary gateway API key cannot establish trust.
+#[derive(Clone)]
+pub(crate) struct RemoteProxyTrust {
+    peers: Vec<IpAddr>,
+    key_hash: [u8; 32],
+}
+
+impl RemoteProxyTrust {
+    pub(crate) fn parse(peers: &str, key: &str, gateway_key: &str) -> anyhow::Result<Self> {
+        let peers = peers
+            .split(',')
+            .map(|entry| entry.trim().parse::<IpAddr>())
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| {
+                anyhow::anyhow!("CHAT_GATEWAY_TRUSTED_PROXY_IPS must contain exact IP addresses")
+            })?;
+        if peers.is_empty()
+            || peers.len() > 16
+            || peers
+                .iter()
+                .any(|ip| ip.is_unspecified() || ip.is_multicast())
+        {
+            anyhow::bail!(
+                "CHAT_GATEWAY_TRUSTED_PROXY_IPS requires 1-16 specific unicast addresses"
+            );
+        }
+        if key.len() < 32 || !key.bytes().all(|byte| byte.is_ascii_graphic()) || key == gateway_key
+        {
+            anyhow::bail!("CHAT_GATEWAY_PROXY_KEY must be an independent secret with at least 32 printable non-whitespace ASCII characters");
+        }
+        Ok(Self {
+            peers,
+            key_hash: Sha256::digest(key.as_bytes()).into(),
+        })
+    }
+
+    pub(crate) fn allows(&self, headers: &HeaderMap, peer: Option<SocketAddr>) -> bool {
+        if !peer.is_some_and(|peer| self.peers.contains(&peer.ip())) {
+            return false;
+        }
+        let mut values = headers.get_all("x-chat-gateway-proxy-key").iter();
+        let Some(value) = values.next() else {
+            return false;
+        };
+        if values.next().is_some() {
+            return false;
+        }
+        let candidate: [u8; 32] = Sha256::digest(value.as_bytes()).into();
+        bool::from(candidate.ct_eq(&self.key_hash))
+    }
+}
 
 /// Validate the Origin/Host pair used by local login and relay endpoints.
 /// Requiring an explicit loopback authority prevents DNS-rebinding hostnames
@@ -95,15 +151,17 @@ pub(crate) fn remote_gateway_origin() -> anyhow::Result<Option<(String, String)>
 
 /// Remote mode is opt-in and requires an explicitly trusted TLS-terminating proxy,
 /// a high-entropy API credential, and a configured extension identity.
-pub(crate) fn validate_remote_gateway_config() -> anyhow::Result<bool> {
+pub(crate) fn validate_remote_gateway_config() -> anyhow::Result<Option<RemoteProxyTrust>> {
     let Some((_origin, _authority)) = remote_gateway_origin()? else {
-        return Ok(false);
+        return Ok(None);
     };
     if std::env::var("CHAT_GATEWAY_TRUSTED_PROXY").as_deref() != Ok("1") {
         anyhow::bail!("remote mode requires CHAT_GATEWAY_TRUSTED_PROXY=1");
     }
-    let api_key = std::env::var("CHAT_GATEWAY_API_KEY")
-        .map_err(|_| anyhow::anyhow!("remote mode requires CHAT_GATEWAY_API_KEY"))?;
+    let api_key = zeroize::Zeroizing::new(
+        std::env::var("CHAT_GATEWAY_API_KEY")
+            .map_err(|_| anyhow::anyhow!("remote mode requires CHAT_GATEWAY_API_KEY"))?,
+    );
     if api_key.len() < 32 || api_key.bytes().any(|byte| byte.is_ascii_whitespace()) {
         anyhow::bail!("CHAT_GATEWAY_API_KEY must contain at least 32 non-whitespace characters");
     }
@@ -116,7 +174,13 @@ pub(crate) fn validate_remote_gateway_config() -> anyhow::Result<bool> {
     {
         anyhow::bail!("CHAT_GATEWAY_EXTENSION_ID must be a 32-character Chrome extension ID");
     }
-    Ok(true)
+    let peers = std::env::var("CHAT_GATEWAY_TRUSTED_PROXY_IPS")
+        .map_err(|_| anyhow::anyhow!("remote mode requires CHAT_GATEWAY_TRUSTED_PROXY_IPS"))?;
+    let proxy_key = zeroize::Zeroizing::new(
+        std::env::var("CHAT_GATEWAY_PROXY_KEY")
+            .map_err(|_| anyhow::anyhow!("remote mode requires CHAT_GATEWAY_PROXY_KEY"))?,
+    );
+    Ok(Some(RemoteProxyTrust::parse(&peers, &proxy_key, &api_key)?))
 }
 
 pub(crate) fn remote_request_is_allowed(
@@ -125,6 +189,12 @@ pub(crate) fn remote_request_is_allowed(
     remote_authority: &str,
     relay_origin_allowed: bool,
 ) -> bool {
+    if headers.get_all("host").iter().count() != 1
+        || headers.get_all("x-forwarded-proto").iter().count() != 1
+        || headers.get_all("origin").iter().count() > 1
+    {
+        return false;
+    }
     let host_matches = headers
         .get(axum::http::header::HOST)
         .and_then(|value| value.to_str().ok())
@@ -148,6 +218,68 @@ pub(crate) fn remote_request_is_allowed(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn proxy_trust_requires_exact_peer_and_independent_credential() {
+        let key = "edge-only-secret-0123456789abcdef0123456789";
+        let trust =
+            RemoteProxyTrust::parse("127.0.0.1, ::1", key, "different-gateway-secret").unwrap();
+        let peer = Some("127.0.0.1:12345".parse().unwrap());
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-proto", "https".parse().unwrap());
+        headers.insert("x-forwarded-for", "127.0.0.1".parse().unwrap());
+        assert!(!trust.allows(&headers, peer));
+        headers.insert("x-chat-gateway-proxy-key", "wrong".parse().unwrap());
+        assert!(!trust.allows(&headers, peer));
+        headers.insert("x-chat-gateway-proxy-key", key.parse().unwrap());
+        assert!(trust.allows(&headers, peer));
+        assert!(trust.allows(&headers, Some("[::1]:9999".parse().unwrap())));
+        assert!(!trust.allows(&headers, Some("192.0.2.1:12345".parse().unwrap())));
+        assert!(!trust.allows(&headers, None));
+        headers.append("x-chat-gateway-proxy-key", key.parse().unwrap());
+        assert!(!trust.allows(&headers, peer));
+    }
+
+    #[test]
+    fn proxy_configuration_rejects_ambiguous_peers_and_weak_or_reused_keys() {
+        let key = "edge-only-secret-0123456789abcdef0123456789";
+        for peers in [
+            "",
+            "localhost",
+            "127.0.0.0/8",
+            "0.0.0.0",
+            "::",
+            "224.0.0.1",
+            "127.0.0.1,",
+        ] {
+            assert!(RemoteProxyTrust::parse(peers, key, "api").is_err());
+        }
+        for weak in [
+            "short",
+            "secret with spaces 0123456789abcdef0123456789",
+            key,
+        ] {
+            assert!(RemoteProxyTrust::parse("127.0.0.1", weak, key).is_err());
+        }
+    }
+
+    #[test]
+    fn duplicate_remote_authority_or_tls_headers_fail_closed() {
+        let mut headers = HeaderMap::new();
+        headers.insert("host", "gateway.example.com".parse().unwrap());
+        headers.insert("x-forwarded-proto", "https".parse().unwrap());
+        for name in ["host", "x-forwarded-proto", "origin"] {
+            let mut duplicate = headers.clone();
+            duplicate.append(name, "https".parse().unwrap());
+            duplicate.append(name, "https".parse().unwrap());
+            assert!(!remote_request_is_allowed(
+                &duplicate,
+                "https://gateway.example.com",
+                "gateway.example.com",
+                false
+            ));
+        }
+    }
 
     #[test]
     fn allows_matching_local_origin_and_host() {
