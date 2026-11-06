@@ -68,6 +68,9 @@ jobs:
           context: .
           push: false
           load: true
+          # Preserve --pull from the original build so floating distroless
+          # base-image security fixes are not hidden by layer caching.
+          pull: true
           tags: chat-gateway-rs:ci
           cache-from: type=gha,scope=chat-gateway-rs
           # Cache export is an optimization only: quota/rate-limit failures
