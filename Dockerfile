@@ -3,6 +3,14 @@ WORKDIR /app
 # Keep system libraries and Rust dependencies independent of source edits.
 RUN apt-get update && apt-get install -y --no-install-recommends build-essential cmake clang libclang-dev llvm-dev \
     && rm -rf /var/lib/apt/lists/*
+# btls-sys compiles BoringSSL's very large FIPS C++ module. Docker's available
+# memory may be far below its reported CPU count, so the default Cargo and
+# CMake parallelism can trigger an OOM-killed cc1plus (exit code 101).
+# Serialize the native build by default; larger builders may override Cargo
+# parallelism with --build-arg CARGO_BUILD_JOBS=2 after ensuring enough RAM.
+ARG CARGO_BUILD_JOBS=1
+ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS} \
+    CMAKE_BUILD_PARALLEL_LEVEL=1
 COPY Cargo.toml Cargo.lock ./
 COPY vendor ./vendor
 # Compile the *same pinned dependency graph* with a dummy binary. BuildKit
