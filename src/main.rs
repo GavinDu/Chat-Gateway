@@ -347,6 +347,12 @@ async fn main() -> anyhow::Result<()> {
         .route("/login/api/:provider/view", get(login_view))
         .route("/login/api/:provider/act", post(login_act))
         .route("/relay/v1/pair", post(relay::pair))
+        .route("/relay/v1/connect/request", post(relay::connect_request))
+        .route("/relay/v1/connect/poll", post(relay::connect_poll))
+        .route(
+            "/relay/approve/:id",
+            get(relay::approval_page).post(relay::approve_connection),
+        )
         // Local operator administration, not a provider or extension endpoint.
         .route(
             "/relay/v1/pairing-code/rotate",
@@ -1084,7 +1090,7 @@ fn authorize_api_request(
     path: &str,
     method: &axum::http::Method,
 ) -> Result<Option<AuthKeyContext>, AuthFailure> {
-    if path.starts_with("/relay/v1/") {
+    if path.starts_with("/relay/v1/") || path.starts_with("/relay/approve/") {
         // Relay handlers enforce a separate extension-origin + install-token protocol.
         return Ok(None);
     }

@@ -51,3 +51,9 @@ In loopback mode, relay requests are restricted to loopback. In remote mode, the
 - Provider unlink includes embedded-browser in-memory cookie/storage cleanup. Real-account restart restoration and live unlink/revocation still require validation against linked provider sessions.
 - Provider automation must be permitted by the provider's terms and account policy. The extension must not be used to evade access restrictions. Keep unsupported providers disabled.
 - No live provider test is implied by CI. Use recorded fixtures and CI for routine verification; perform any live-provider check only with an account you control and where the provider permits it.
+
+## Extension connection and provider status
+
+Enter the local relay URL in the extension and choose **Connect to gateway**. A local approval tab asks you to approve that configured extension once. No pairing code or separate provider login dashboard is needed. The request expires after five minutes; its approval and token exchange are single-use. The extension keeps its connection in the browser profile and reconnects after browser/gateway restarts. Legacy command-line pairing remains available for compatibility.
+
+Provider status is shown in the extension and refreshed while its popup is open. Choose **Connect account** to grant that provider's browser permissions. An existing browser session is synced immediately; otherwise the official provider site opens for sign-in. Cookie changes and periodic refresh keep connected sessions synced afterward. Passwords, MFA and CAPTCHA remain on the official provider site. A saved session or browser cookies are reported separately from a gateway-verified login; cookies alone do not prove authentication.

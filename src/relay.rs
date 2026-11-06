@@ -1,7 +1,7 @@
 use axum::{
-    extract::{Path, State},
+    extract::{Form, Path, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
-    response::{IntoResponse, Response},
+    response::{Html, IntoResponse, Response},
     Json,
 };
 use ring::rand::{SecureRandom, SystemRandom};
@@ -23,7 +23,16 @@ const NONCE_RETENTION: Duration = Duration::from_secs(5 * 60);
 const MAX_PAIR_ATTEMPTS: u8 = 5;
 const MAX_RELAY_REQUESTS_PER_MINUTE: usize = 120;
 
+struct PendingApproval {
+    id: String,
+    csrf: String,
+    poll_secret: String,
+    expires: Instant,
+    approved: bool,
+}
+
 pub struct RelayState {
+    approval: Mutex<Option<PendingApproval>>,
     pairing_hash: Mutex<[u8; 32]>,
     pairing_expires: Mutex<Instant>,
     pairing_attempts: Mutex<u8>,
@@ -43,6 +52,7 @@ impl RelayState {
         let hash: [u8; 32] = Sha256::digest(code.as_bytes()).into();
         Ok((
             Self {
+                approval: Mutex::new(None),
                 pairing_hash: Mutex::new(hash),
                 pairing_expires: Mutex::new(Instant::now() + PAIRING_LIFETIME),
                 pairing_attempts: Mutex::new(0),
@@ -233,6 +243,207 @@ pub fn relay_origin_is_allowed(headers: &HeaderMap) -> bool {
         .is_some_and(|origin| extension_origin_matches(&id, origin))
 }
 
+fn issue_install_token(relay: &RelayState) -> Result<String, Response> {
+    let mut slot = relay.install_token_hash.lock().map_err(|_| {
+        json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "relay_unavailable",
+            "relay state is unavailable",
+        )
+    })?;
+    let token = random_capability()?;
+    let hash: [u8; 32] = Sha256::digest(token.as_bytes()).into();
+    persist_install_token_hash(&hash).map_err(|_| {
+        json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "relay_unavailable",
+            "could not persist extension connection",
+        )
+    })?;
+    *slot = Some(hash);
+    Ok(token)
+}
+
+fn random_capability() -> Result<String, Response> {
+    let mut bytes = [0_u8; 32];
+    SystemRandom::new().fill(&mut bytes).map_err(|_| {
+        json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "relay_unavailable",
+            "could not generate connection capability",
+        )
+    })?;
+    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+// Local approval is a short-lived, single-use exchange. The extension receives
+// only the polling capability; the approval CSRF value is delivered exclusively
+// to a top-level local browser navigation, with framing and caching disabled.
+pub async fn connect_request(
+    State(app): State<Arc<crate::AppState>>,
+    headers: HeaderMap,
+) -> Response {
+    if !relay_origin_is_allowed(&headers) || crate::remote_gateway_origin().ok().flatten().is_some()
+    {
+        return json_error(
+            StatusCode::FORBIDDEN,
+            "local_approval_required",
+            "local configured extension required",
+        );
+    }
+    let Ok(mut pending) = app.relay.approval.lock() else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+    if pending
+        .as_ref()
+        .is_some_and(|request| request.expires > Instant::now())
+    {
+        return json_error(
+            StatusCode::CONFLICT,
+            "approval_pending",
+            "an approval request is already pending; finish it or wait five minutes",
+        );
+    }
+    let (Ok(id), Ok(csrf), Ok(poll_secret)) = (
+        random_capability(),
+        random_capability(),
+        random_capability(),
+    ) else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+    *pending = Some(PendingApproval {
+        id: id.clone(),
+        csrf,
+        poll_secret: poll_secret.clone(),
+        expires: Instant::now() + Duration::from_secs(300),
+        approved: false,
+    });
+    Json(serde_json::json!({"request_id":id,"poll_secret":poll_secret})).into_response()
+}
+
+pub async fn approval_page(
+    State(app): State<Arc<crate::AppState>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if crate::remote_gateway_origin().ok().flatten().is_some()
+        || headers.get("sec-fetch-mode").and_then(|v| v.to_str().ok()) != Some("navigate")
+        || headers.get("sec-fetch-dest").and_then(|v| v.to_str().ok()) != Some("document")
+    {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let Ok(pending) = app.relay.approval.lock() else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+    let Some(request) = pending
+        .as_ref()
+        .filter(|r| r.id == id && r.expires > Instant::now() && !r.approved)
+    else {
+        return StatusCode::GONE.into_response();
+    };
+    // IDs, CSRF values and extension ID are generated/validated ASCII, never user HTML.
+    let extension = extension_id().unwrap_or_default();
+    let html = format!(
+        r#"<!doctype html><html><head><meta charset="utf-8"><title>Approve Chat Gateway extension</title></head><body><h1>Connect your extension</h1><p>Allow extension {extension} to sync the provider sessions you choose and show their status.</p><form method="post"><input type="hidden" name="csrf" value="{}"><button type="submit">Approve connection</button></form><p>Only approve a connection you just started in the Chat Gateway extension. Close this tab to leave it unapproved.</p></body></html>"#,
+        request.csrf
+    );
+    (
+        [
+            (header::CACHE_CONTROL, "no-store"),
+            (
+                header::CONTENT_SECURITY_POLICY,
+                "default-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+            ),
+            (header::REFERRER_POLICY, "no-referrer"),
+        ],
+        Html(html),
+    )
+        .into_response()
+}
+
+#[derive(Deserialize)]
+pub struct ApprovalConfirm {
+    csrf: String,
+}
+
+pub async fn approve_connection(
+    State(app): State<Arc<crate::AppState>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Form(body): Form<ApprovalConfirm>,
+) -> Response {
+    if crate::remote_gateway_origin().ok().flatten().is_some()
+        || !headers.contains_key(header::ORIGIN)
+        || !crate::login_origin_is_same_authority(&headers)
+    {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let Ok(mut pending) = app.relay.approval.lock() else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+    let Some(request) = pending
+        .as_mut()
+        .filter(|r| r.id == id && r.expires > Instant::now() && !r.approved)
+    else {
+        return StatusCode::GONE.into_response();
+    };
+    if !bool::from(request.csrf.as_bytes().ct_eq(body.csrf.as_bytes())) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    request.approved = true;
+    (
+        [
+            (header::CACHE_CONTROL, "no-store"),
+            (
+                header::CONTENT_SECURITY_POLICY,
+                "default-src 'none'; frame-ancestors 'none'",
+            ),
+        ],
+        Html("Connection approved. Return to the extension; you may close this tab."),
+    )
+        .into_response()
+}
+
+#[derive(Deserialize)]
+pub struct ApprovalPoll {
+    request_id: String,
+    poll_secret: String,
+}
+
+pub async fn connect_poll(
+    State(app): State<Arc<crate::AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<ApprovalPoll>,
+) -> Response {
+    if !relay_origin_is_allowed(&headers) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let Ok(mut pending) = app.relay.approval.lock() else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+    let Some(request) = pending.as_ref().filter(|r| {
+        r.expires > Instant::now()
+            && r.id == body.request_id
+            && bool::from(r.poll_secret.as_bytes().ct_eq(body.poll_secret.as_bytes()))
+    }) else {
+        return StatusCode::GONE.into_response();
+    };
+    if !request.approved {
+        return (
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({"pending":true})),
+        )
+            .into_response();
+    }
+    match issue_install_token(&app.relay) {
+        Ok(token) => {
+            *pending = None;
+            Json(serde_json::json!({"token":token})).into_response()
+        }
+        Err(response) => response,
+    }
+}
+
 pub async fn pair(
     State(app): State<Arc<crate::AppState>>,
     headers: HeaderMap,
@@ -298,37 +509,10 @@ pub async fn pair(
             "pairing code is invalid or expired",
         );
     }
-    let mut token_slot = match app.relay.install_token_hash.lock() {
-        Ok(value) => value,
-        Err(_) => {
-            return json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "relay_unavailable",
-                "relay state is unavailable",
-            )
-        }
+    let token = match issue_install_token(&app.relay) {
+        Ok(token) => token,
+        Err(response) => return response,
     };
-    let mut random = [0_u8; 32];
-    if SystemRandom::new().fill(&mut random).is_err() {
-        return json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "relay_unavailable",
-            "could not create install token",
-        );
-    }
-    let token = random
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    let token_hash: [u8; 32] = Sha256::digest(token.as_bytes()).into();
-    if persist_install_token_hash(&token_hash).is_err() {
-        return json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "relay_unavailable",
-            "could not persist paired extension state",
-        );
-    }
-    *token_slot = Some(token_hash);
     // A successful exchange consumes the pairing code permanently.
     *attempts = MAX_PAIR_ATTEMPTS;
     tracing::info!("browser extension paired");
@@ -594,6 +778,9 @@ pub async fn unpair(State(app): State<Arc<crate::AppState>>, headers: HeaderMap)
     if let Err(response) = authenticated_request(&app, &headers) {
         return *response;
     }
+    if let Ok(mut pending) = app.relay.approval.lock() {
+        *pending = None;
+    }
     match app.relay.install_token_hash.lock() {
         Ok(mut token) => {
             if delete_install_token_hash().is_err() {
@@ -647,6 +834,7 @@ mod tests {
             hash
         });
         RelayState {
+            approval: Mutex::new(None),
             pairing_hash: Mutex::new([0; 32]),
             pairing_expires: Mutex::new(Instant::now() + PAIRING_LIFETIME),
             pairing_attempts: Mutex::new(0),

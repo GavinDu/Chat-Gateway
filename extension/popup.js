@@ -38,7 +38,7 @@ async function refreshStatus() {
     const linkButton = document.createElement("button");
     linkButton.type = "button";
     linkButton.className = "provider-action";
-    linkButton.textContent = item.linked ? "Sync session" : "Link account";
+    linkButton.textContent = item.linked ? "Sync session" : "Connect account";
     linkButton.disabled = item.enabled === false;
     linkButton.addEventListener("click", () => {
       $("provider").value = item.provider;
@@ -67,7 +67,7 @@ async function openProviderLogin(provider) {
   const url = PROVIDER_LOGIN_URLS[provider];
   if (!url) throw new Error("This provider is not yet supported by Chat-Gateway.");
   await chrome.tabs.create({url});
-  message("Sign in on the provider website. Then return here and choose Link account. Credentials and MFA stay on the provider website.");
+  message("Sign in on the provider website. Connected accounts sync automatically; credentials and MFA stay on that website.");
 }
 
 async function initialize() {
@@ -83,25 +83,21 @@ async function initialize() {
 $("pair").addEventListener("click", async () => {
   try {
     const gateway = normalizeGateway($("gateway").value);
-    const code = $("code").value.trim();
-    if (!/^\d{8}$/.test(code)) throw new Error("Enter the 8-digit code printed by the gateway.");
+    if (!gateway.startsWith("http://")) throw new Error("One-click approval requires a local HTTP gateway.");
     const granted = await chrome.permissions.request({origins:[gateway + "/*"]});
-    if (!granted) throw new Error("Gateway host permission was not granted.");
-    const response = await fetch(gateway + "/relay/v1/pair", {
-      method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({code}), cache:"no-store"
+    if (!granted) throw new Error("Gateway permission was not granted.");
+    const response = await fetch(gateway + "/relay/v1/connect/request", {
+      method:"POST", headers:{"Content-Type":"application/json"}, body:"{}", cache:"no-store"
     });
-    if (!response.ok) {
-      const detail = await response.json().catch(() => ({}));
-      const code = detail?.error?.code;
-      if (response.status === 401) throw new Error("Pairing code expired, incorrect, or used. Run scripts/docker-run.sh pairing-code for a fresh 8-digit code (valid 10 minutes; maximum five attempts).");
-      if (response.status === 403 || code === "extension_origin_rejected") throw new Error("Extension ID mismatch. Set CHAT_GATEWAY_EXTENSION_ID to the ID shown at chrome://extensions and restart Docker.");
-      throw new Error("Pairing failed (HTTP " + response.status + "). Check gateway connection and Docker logs.");
-    }
+    if (!response.ok) throw new Error(response.status === 409
+      ? "An approval is already pending. Finish it in the local approval tab or retry in five minutes."
+      : "Could not request approval. Check the gateway URL and configured extension ID.");
     const data = await response.json();
-    await chrome.storage.local.set({gateway,token:data.token,linkedProviders:[]});
-    $("pairing").hidden = true; $("linked").hidden = false;
-    message("Paired. The token is stored in extension-local storage; protect this browser profile.");
-    await refreshStatus();
+    if (!/^[a-f0-9]{64}$/.test(data.request_id) || !/^[a-f0-9]{64}$/.test(data.poll_secret)) throw new Error("Invalid connection response.");
+    await chrome.storage.local.set({pendingConnection:{gateway, ...data, expires:Date.now()+300000}});
+    await chrome.alarms.create("relay-connection", {periodInMinutes:1});
+    await chrome.tabs.create({url:gateway + "/relay/approve/" + data.request_id});
+    message("Approve the connection in the local tab, then return here.");
   } catch (error) { message(error.message); }
 });
 
@@ -116,13 +112,18 @@ $("link").addEventListener("click", async () => {
     const granted = await chrome.permissions.request({origins:patterns});
     if (!granted) throw new Error("Provider permissions were not granted.");
     const snapshot = await providerCookieSnapshot(provider);
-    if (snapshot.cookies.length === 0) throw new Error("No cookies found for this provider. Sign in normally in Chrome first.");
+    const stored = await chrome.storage.local.get(["linkedProviders"]);
+    await chrome.storage.local.set({linkedProviders:Array.from(new Set([...(stored.linkedProviders || []),provider]))});
+    if (snapshot.cookies.length === 0) {
+      await openProviderLogin(provider);
+      message("Sign in on the provider website. This account will sync automatically when session cookies become available.");
+      return;
+    }
     const response = await relayFetch("/relay/v1/session/" + encodeURIComponent(provider), {method:"POST",body:JSON.stringify(snapshot)});
     if (!response.ok) throw new Error("Gateway rejected session import (" + response.status + "). Ensure vault mode is enabled and provider domains are allowed.");
-    const stored = await chrome.storage.local.get(["linkedProviders"]);
     const linkedProviders = Array.from(new Set([...(stored.linkedProviders || []),provider]));
     await chrome.storage.local.set({linkedProviders});
-    message("Linked " + provider + ". The gateway activated this session in its embedded browser; no restart is required, and cookie changes sync automatically.");
+    message("Connected " + provider + ". Existing browser session synced; future cookie changes sync automatically.");
     await refreshStatus();
   } catch (error) { message(error.message); }
 });
@@ -155,4 +156,21 @@ $("unpair").addEventListener("click", async () => {
   } catch (error) { message(error.message); }
 });
 
-initialize();
+let checkingConnection = false;
+async function updateConnection() {
+  if (checkingConnection) return;
+  checkingConnection = true;
+  try {
+    const result = await chrome.runtime.sendMessage({type:"poll-connection"});
+    if (result?.error) message(result.error);
+    const {token, pendingConnection} = await chrome.storage.local.get(["token","pendingConnection"]);
+    $("pairing").hidden = Boolean(token);
+    $("linked").hidden = !token;
+    if (token) await refreshStatus();
+    else if (pendingConnection) message("Waiting for your approval in the local gateway tab.");
+  } catch (error) { message(error.message); }
+  finally { checkingConnection = false; }
+}
+initialize().then(updateConnection);
+setInterval(updateConnection, 5000);
+window.addEventListener("focus", updateConnection);
