@@ -4,15 +4,21 @@
 set -Eeuo pipefail
 set +x
 
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 IMAGE="${1:-chat-gateway-rs:ci}"
 NAME="chat-gateway-ci-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-1}-$$"
 # Colima shares the user home, but not macOS /var/folders (default TMPDIR).
-# Keep the disposable bind-mounted secret in that shared location.
+# Keep local scratch files in a location available to the Docker VM.
 TMP="$(mktemp -d "${HOME:?HOME is required}/.chat-gateway-smoke.XXXXXXXX")"
+KEY_VOLUME="$NAME-pairing-key"
+KEY_VOLUME_CREATED=0
 CONTAINER_CREATED=0
 cleanup() {
   if [[ "$CONTAINER_CREATED" == "1" ]]; then
     docker rm -f "$NAME" >/dev/null 2>&1 || true
+  fi
+  if [[ "$KEY_VOLUME_CREATED" == "1" ]]; then
+    docker volume rm "$KEY_VOLUME" >/dev/null 2>&1 || true
   fi
   rm -rf "$TMP"
 }
@@ -23,17 +29,20 @@ command -v curl >/dev/null 2>&1
 command -v openssl >/dev/null 2>&1
 command -v python3 >/dev/null 2>&1
 
-# Disposable local pairing administrator secret, readable only through the
-# isolated test container mount and never printed.
+# Use the same Docker-volume-backed key path as the real pairing-code helper.
+# The throwaway key is sent over stdin, never included in Docker arguments/logs.
 PAIRING_ADMIN_KEY="$(openssl rand -hex 32)"
-printf '%s' "$PAIRING_ADMIN_KEY" > "$TMP/pairing-admin.key"
-chmod 0644 "$TMP/pairing-admin.key"
+docker volume create "$KEY_VOLUME" >/dev/null
+KEY_VOLUME_CREATED=1
+printf '%s' "$PAIRING_ADMIN_KEY" | docker run --rm --interactive \
+  --mount "type=volume,source=$KEY_VOLUME,target=/vault" \
+  alpine:3.22 sh -eu -c 'umask 077; cat > /vault/pairing-admin.key; chown 65532:65532 /vault/pairing-admin.key'
 VAULT_KEY="$(openssl rand -hex 32)"
 docker run --detach \
   --name "$NAME" \
   --publish 127.0.0.1::8080 \
   --log-driver none \
-  --mount "type=bind,source=$TMP/pairing-admin.key,target=/run/secrets/pairing-admin.key,readonly" \
+  --mount "type=volume,source=$KEY_VOLUME,target=/run/secrets,readonly" \
   --tmpfs /app/data:rw,nosuid,nodev,noexec,uid=65532,gid=65532,mode=0700 \
   --tmpfs /app/sessions:rw,nosuid,nodev,noexec,uid=65532,gid=65532,mode=0700 \
   --tmpfs /app/browser:rw,nosuid,nodev,noexec,uid=65532,gid=65532,mode=0700 \
@@ -108,7 +117,8 @@ fi
 denied="$(curl --silent --show-error --max-time 5 -o /dev/null -w '%{http_code}' -X POST "$ORIGIN/relay/v1/pairing-code/rotate")"
 test "$denied" = "401" || { echo "Unauthenticated pairing rotation was not rejected" >&2; exit 1; }
 rotate() {
-  curl --fail --silent --show-error --max-time 5 -X POST "$ORIGIN/relay/v1/pairing-code/rotate" -H "Authorization: Bearer $PAIRING_ADMIN_KEY" | python3 -c 'import json,sys; print(json.load(sys.stdin)["code"])'
+    CHAT_GATEWAY_CONTAINER="$NAME" CHAT_GATEWAY_KEY_VOLUME="$KEY_VOLUME" PORT="$PORT" \
+    bash "$ROOT/scripts/docker-run.sh" pairing-code
 }
 old_code="$(rotate)"
 new_code="$(rotate)"
@@ -137,4 +147,4 @@ if curl --silent --show-error --max-time 2 "$ORIGIN/health" >/dev/null 2>&1; the
   exit 1
 fi
 
-echo "Docker runtime smoke passed: /health=200, /ready=503(no_enabled_provider), request IDs present, graceful exit=0."
+echo "Docker runtime smoke passed: /health=200, /ready=503(no_enabled_provider), request IDs present, real pairing-code CLI rotation and single-use verified, graceful exit=0."
