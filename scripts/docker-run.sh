@@ -32,6 +32,9 @@ Environment:
   CHAT_GATEWAY_EXTENSION_ID    Chrome extension ID from chrome://extensions
   CHAT_GATEWAY_CONFIG          Config file (default: ./config.yaml)
   CHAT_GATEWAY_IMAGE           Image tag (default: chat-gateway-rs:local)
+  CHAT_GATEWAY_BUILD_PLATFORM  Optional target platform (for example linux/arm64)
+  CHAT_GATEWAY_BUILD_CACHE_FROM Optional Buildx cache source
+  CHAT_GATEWAY_BUILD_CACHE_TO   Optional Buildx cache destination
 
 The gateway port is published on 127.0.0.1 only. Provider sessions are stored
 in an encrypted vault inside Docker-managed volumes. The vault key is stored
@@ -42,6 +45,29 @@ EOF
 require_docker() {
   command -v docker >/dev/null 2>&1 || { echo "docker is required" >&2; exit 1; }
   docker info >/dev/null 2>&1 || { echo "Docker daemon is not reachable" >&2; exit 1; }
+}
+
+build_image() {
+  require_docker
+  if ! docker buildx version >/dev/null 2>&1; then
+    echo "Docker Buildx is required; the legacy builder is unsupported." >&2
+    echo "macOS/Homebrew: brew install docker-buildx; follow its CLI plugin setup instructions." >&2
+    echo "Docker Desktop includes Buildx. Linux: install docker-buildx-plugin from Docker's repository." >&2
+    exit 1
+  fi
+  local args=(buildx build --load --pull --tag "$IMAGE")
+  if [[ -n "${CHAT_GATEWAY_BUILD_PLATFORM:-}" ]]; then
+    args+=(--platform "$CHAT_GATEWAY_BUILD_PLATFORM")
+  fi
+  if [[ -n "${CHAT_GATEWAY_BUILD_CACHE_FROM:-}" ]]; then
+    args+=(--cache-from "$CHAT_GATEWAY_BUILD_CACHE_FROM")
+  fi
+  if [[ -n "${CHAT_GATEWAY_BUILD_CACHE_TO:-}" ]]; then
+    args+=(--cache-to "$CHAT_GATEWAY_BUILD_CACHE_TO")
+  fi
+  args+=("$ROOT")
+  # Preserve build failure status; never fall back to a stale image or builder.
+  docker "${args[@]}"
 }
 
 absolute_config() {
@@ -176,8 +202,7 @@ case "${1:-}" in
     init_config
     ;;
   build)
-    require_docker
-    docker build --pull --tag "$IMAGE" "$ROOT"
+    build_image
     ;;
   start)
     start_gateway

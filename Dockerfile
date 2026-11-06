@@ -20,10 +20,18 @@ RUN mkdir -p src benches \
     && printf 'fn main() {}\n' > src/main.rs \
     && printf 'fn main() {}\n' > benches/memory_sqlite.rs
 RUN cargo build --locked --release --features render,stealth
+# The real executable pulls in the large V8/BoringSSL archives. GNU ld can be
+# OOM-killed at the final ARM64 link even with Cargo/CMake serialized. Install
+# LLD after the dependency layer so existing compiled dependencies stay reusable.
+RUN apt-get update && apt-get install -y --no-install-recommends lld \
+    && rm -rf /var/lib/apt/lists/*
 # Build the actual application using the already compiled dependency artifacts.
 COPY src ./src
 COPY benches ./benches
-RUN touch src/main.rs && cargo build --locked --release --features render,stealth
+# Apply linker flags only to the application target, not every dependency.
+# Bound LLD to one thread to keep the release link within the small-builder gate.
+RUN touch src/main.rs && cargo rustc --locked --release --features render,stealth -- \
+    -C linker=clang -C link-arg=-fuse-ld=lld -C link-arg=-Wl,--threads=1
 RUN mkdir -p /app/data /app/sessions && chown -R 65532:65532 /app/data /app/sessions
 
 FROM gcr.io/distroless/cc:nonroot
