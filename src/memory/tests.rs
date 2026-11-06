@@ -3171,6 +3171,37 @@ fn concurrent_conversations_keep_provider_thread_mappings_isolated() {
         .get_provider_thread_for_owner("different-owner", "parallel-a", "chatgpt")
         .expect("owner-scoped lookup should succeed")
         .is_none());
+    // Reopening after concurrent writes must preserve each conversation's
+    // own mapping and transcript, including the tenant boundary.
+    drop(memory);
+    let reopened = fixture.open();
+    for (conversation_id, suffix) in [("parallel-a", "a"), ("parallel-b", "b")] {
+        let restored = reopened
+            .get_provider_thread_for_owner("parallel-owner", conversation_id, "chatgpt")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            restored.thread_url,
+            format!("https://chatgpt.com/c/parallel-thread-{suffix}")
+        );
+        assert_eq!(
+            restored.synced_through_message_id,
+            Some(format!("parallel-marker-{suffix}"))
+        );
+        assert_eq!(restored.model.as_deref(), Some("gpt-4o"));
+        assert_eq!(
+            reopened
+                .conversation_for_owner("parallel-owner", conversation_id)
+                .unwrap()
+                .unwrap()
+                .messages,
+            vec![m("user", conversation_id), m("assistant", "stored")]
+        );
+        assert!(reopened
+            .get_provider_thread_for_owner("different-owner", conversation_id, "chatgpt")
+            .unwrap()
+            .is_none());
+    }
 }
 
 #[test]
