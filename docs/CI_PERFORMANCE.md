@@ -51,3 +51,22 @@ If cache export frequently times out or storage use becomes excessive,
 investigate cache scope/size and consider moving the dependency build cache
 into a separately managed base image. Do not skip tests, sandboxing, provider
 terms checks, or local-only security checks.
+
+## Generic Rust cache reduction (issue #671)
+
+The test job in run 42243205149 restored an archive of 2,953,182,050 bytes
+(~2.75 GiB), with ~20 seconds downloading and ~30 seconds unpacking.
+The workflow previously cached the entire `target` directory using
+`actions/cache@v4`, including stale/incremental build artifacts.
+
+The `test` job now uses `Swatinem/rust-cache@v2` **after** selecting the Rust
+toolchain. This action caches Cargo dependencies and trims workspace,
+incremental, and stale build artifacts before upload. It retains library
+and dependency compilations needed by Clippy, tests, and benchmark smoke.
+The separate `embedded-native` job is unchanged until its cache behavior
+is separately measured. No test, audit, or vendor-integrity validation was
+removed. Cold builds may be slower while populating the new cache.
+
+Validation requires a full green workflow on the changed configuration,
+followed by a warm same-commit re-run; record the restored archive size,
+restore time, and total test job duration versus the 2.75 GiB baseline.
