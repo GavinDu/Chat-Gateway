@@ -243,35 +243,35 @@ pub fn relay_origin_is_allowed(headers: &HeaderMap) -> bool {
         .is_some_and(|origin| extension_origin_matches(&id, origin))
 }
 
-fn issue_install_token(relay: &RelayState) -> Result<String, Response> {
+fn issue_install_token(relay: &RelayState) -> Result<String, Box<Response>> {
     let mut slot = relay.install_token_hash.lock().map_err(|_| {
-        json_error(
+        Box::new(json_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "relay_unavailable",
             "relay state is unavailable",
-        )
+        ))
     })?;
     let token = random_capability()?;
     let hash: [u8; 32] = Sha256::digest(token.as_bytes()).into();
     persist_install_token_hash(&hash).map_err(|_| {
-        json_error(
+        Box::new(json_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "relay_unavailable",
             "could not persist extension connection",
-        )
+        ))
     })?;
     *slot = Some(hash);
     Ok(token)
 }
 
-fn random_capability() -> Result<String, Response> {
+fn random_capability() -> Result<String, Box<Response>> {
     let mut bytes = [0_u8; 32];
     SystemRandom::new().fill(&mut bytes).map_err(|_| {
-        json_error(
+        Box::new(json_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "relay_unavailable",
             "could not generate connection capability",
-        )
+        ))
     })?;
     Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
 }
@@ -440,7 +440,7 @@ pub async fn connect_poll(
             *pending = None;
             Json(serde_json::json!({"token":token})).into_response()
         }
-        Err(response) => response,
+        Err(response) => *response,
     }
 }
 
@@ -511,7 +511,7 @@ pub async fn pair(
     }
     let token = match issue_install_token(&app.relay) {
         Ok(token) => token,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     // A successful exchange consumes the pairing code permanently.
     *attempts = MAX_PAIR_ATTEMPTS;

@@ -3,6 +3,12 @@ function message(text) { $("message").textContent = text; }
 
 async function refreshStatus() {
   const response = await relayFetch("/relay/v1/status");
+  if (response.status === 401) {
+    await chrome.storage.local.remove("token");
+    $("pairing").hidden = false;
+    $("linked").hidden = true;
+    throw new Error("Gateway connection expired or was revoked. Choose Connect to gateway to approve it again.");
+  }
   if (!response.ok) throw new Error("Status request failed (" + response.status + ").");
   const data = await response.json();
   const items = await Promise.all(data.providers.map(async item => {
