@@ -115,7 +115,7 @@ unset PAIRING_ADMIN_KEY
 try_pair() {
   curl --silent --show-error --max-time 5 -o "$TMP/pair.body" -w '%{http_code}' \
     -X POST "$ORIGIN/relay/v1/pair" -H 'Origin: chrome-extension://abcdefghijklmnopabcdefghijklmnop' \
-    -H 'Content-Type: application/json' -d "{\\\"code\\\":\\\"$1\\\"}"
+    -H 'Content-Type: application/json' -d '{"code":"'"$1"'"}'
 }
 old_status="$(try_pair "$old_code")"
 test "$old_status" = "401" || { echo "Old pairing code remained valid after rotation" >&2; exit 1; }
