@@ -21,11 +21,17 @@ command -v curl >/dev/null 2>&1
 command -v openssl >/dev/null 2>&1
 command -v python3 >/dev/null 2>&1
 
+# Disposable local pairing administrator secret, readable only through the
+# isolated test container mount and never printed.
+PAIRING_ADMIN_KEY="$(openssl rand -hex 32)"
+printf '%s' "$PAIRING_ADMIN_KEY" > "$TMP/pairing-admin.key"
+chmod 0644 "$TMP/pairing-admin.key"
 VAULT_KEY="$(openssl rand -hex 32)"
 docker run --detach \
   --name "$NAME" \
   --publish 127.0.0.1::8080 \
   --log-driver none \
+  --mount "type=bind,source=$TMP/pairing-admin.key,target=/run/secrets/pairing-admin.key,readonly" \
   --tmpfs /app/data:rw,nosuid,nodev,noexec,uid=65532,gid=65532,mode=0700 \
   --tmpfs /app/sessions:rw,nosuid,nodev,noexec,uid=65532,gid=65532,mode=0700 \
   --tmpfs /app/browser:rw,nosuid,nodev,noexec,uid=65532,gid=65532,mode=0700 \
@@ -34,6 +40,7 @@ docker run --detach \
   --env PORT=8080 \
   --env TOKIO_WORKER_THREADS=2 \
   --env CHAT_GATEWAY_DOCKER_LOCAL_BIND=1 \
+  --env CHAT_GATEWAY_EXTENSION_ID=abcdefghijklmnopabcdefghijklmnop \
   --env CHAT_GATEWAY_SESSION_STORE=vault \
   --env "CHAT_GATEWAY_VAULT_KEY=$VAULT_KEY" \
   --env CHAT_GATEWAY_MEMORY_PATH=/app/data/conversations.sqlite3 \
@@ -93,6 +100,29 @@ then
   echo "Docker runtime /ready did not report the expected offline no-enabled-provider state" >&2
   exit 1
 fi
+
+# The rotation endpoint must reject requests without the local administrator
+# credential; rotated codes must invalidate prior codes and remain single-use.
+denied="$(curl --silent --show-error --max-time 5 -o /dev/null -w '%{http_code}' -X POST "$ORIGIN/relay/v1/pairing-code/rotate")"
+test "$denied" = "401" || { echo "Unauthenticated pairing rotation was not rejected" >&2; exit 1; }
+rotate() {
+  curl --fail --silent --show-error --max-time 5 -X POST "$ORIGIN/relay/v1/pairing-code/rotate" -H "Authorization: Bearer $PAIRING_ADMIN_KEY" | python3 -c 'import json,sys; print(json.load(sys.stdin)["code"])'
+}
+old_code="$(rotate)"
+new_code="$(rotate)"
+unset PAIRING_ADMIN_KEY
+[[ "$old_code" =~ ^[0-9]{8}$ && "$new_code" =~ ^[0-9]{8}$ ]] || { echo "Invalid rotated pairing code" >&2; exit 1; }
+try_pair() {
+  curl --silent --show-error --max-time 5 -o "$TMP/pair.body" -w '%{http_code}' \
+    -X POST "$ORIGIN/relay/v1/pair" -H 'Origin: chrome-extension://abcdefghijklmnopabcdefghijklmnop' \
+    -H 'Content-Type: application/json' -d '{"code":"'"$1"'"}'
+}
+old_status="$(try_pair "$old_code")"
+test "$old_status" = "401" || { echo "Old pairing code remained valid after rotation" >&2; exit 1; }
+new_status="$(try_pair "$new_code")"
+test "$new_status" = "200" || { echo "New pairing code was not accepted" >&2; exit 1; }
+replay_status="$(try_pair "$new_code")"
+test "$replay_status" = "401" || { echo "Pairing code could be replayed" >&2; exit 1; }
 
 docker stop --time 30 "$NAME" >/dev/null
 EXIT_CODE="$(docker inspect --format '{{.State.ExitCode}}' "$NAME")"
