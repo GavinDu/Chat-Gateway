@@ -136,6 +136,8 @@ test "$new_status" = "200" || { echo "New pairing code was not accepted" >&2; ex
 replay_status="$(try_pair "$new_code")"
 test "$replay_status" = "401" || { echo "Pairing code could be replayed" >&2; exit 1; }
 
+python3 "$ROOT/scripts/relay-approval-smoke.py" "$ORIGIN" abcdefghijklmnopabcdefghijklmnop
+
 docker stop --time 30 "$NAME" >/dev/null
 EXIT_CODE="$(docker inspect --format '{{.State.ExitCode}}' "$NAME")"
 if [[ "$EXIT_CODE" != "0" ]]; then
