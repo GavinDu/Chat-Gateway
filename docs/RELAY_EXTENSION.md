@@ -11,8 +11,8 @@ cookies are sensitive bearer credentials.
 2. In the extension, enter the exact gateway origin, normally
    `http://127.0.0.1:8080`. The local Docker default is **8080**, not 3000.
 3. Generate a fresh, single-use code using
-   `./scripts/docker-run.sh pairing-code` (after the pairing-rotation
-   improvement is merged and the Docker image rebuilt).
+   `./scripts/docker-run.sh pairing-code` with an up-to-date rebuilt gateway.
+   Re-running the command invalidates any previous unused code.
 4. Enter the eight-digit code promptly and select **Pair extension**.
 
 The one-time code expires after ten minutes and has a maximum of five failed
