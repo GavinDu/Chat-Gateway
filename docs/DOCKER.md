@@ -48,3 +48,17 @@ single build job alone does not reduce a single linker's peak memory. The
 ARM64 CI build is limited to 2 GiB with no swap; the VM also needs room for
 Docker and any other running services. See `docs/CI_PERFORMANCE.md` for the
 exact regression gate and its limits.
+
+
+For release Docker E2E, run this from a clean merged main checkout:
+
+```sh
+bash scripts/docker-main-e2e.sh
+```
+
+This builds through the real Docker helper **before** testing the resulting
+image's entrypoint and isolated HTTP/pairing/shutdown behavior. It prints the
+workspace and main commit at each stage, rejects feature/dirty checkouts,
+propagates failures and uses a separate E2E image tag by default. Optionally
+set `CHAT_GATEWAY_E2E_COMMIT` to pin the expected main SHA. The native
+`scripts/main-e2e.sh` suite remains a separate browser/SSH runtime gate.
