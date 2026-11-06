@@ -10,6 +10,7 @@ pub struct GrokAdapter {
     pub cfg: ProviderConfig,
 }
 
+// Keep explicit send controls only; generic submit/SVG fallbacks can hit unrelated forms.
 pub const SELECTORS: SelectorSet = SelectorSet {
     url: "https://grok.com",
     picker: &[
