@@ -102,17 +102,6 @@ jobs:
           node --test extension/tests/*.test.cjs
           node -e "JSON.parse(require('fs').readFileSync('extension/manifest.json', 'utf8'))"
 
-      - name: Cache Cargo dependencies and build artifacts
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
-
       - name: Verify Obscura vendor matches pinned revision
         run: |
           set -euo pipefail
@@ -152,6 +141,16 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+
+      # The former generic cache restored ~2.8 GiB of registry/git/target,
+      # costing ~50s just to transfer and unpack. rust-cache retains only
+      # dependency artifacts and drops obsolete/incremental/workspace outputs.
+      # Place it after toolchain selection so keys track the actual rustc.
+      - name: Restore lean Rust dependency cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+          key: chat-gateway-ci-deps
 
       - name: Run Clippy
         run: cargo clippy --all-targets --locked -- -D warnings

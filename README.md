@@ -73,8 +73,9 @@ bash scripts/docker-run.sh logs
 The extension ID is shown in Chrome at `chrome://extensions` after loading
 the repository's `extension/` directory with Developer mode enabled. Set it
 before starting the gateway; the relay accepts only that exact extension
-origin. The one-time pairing code is printed in the container logs and expires
-after ten minutes:
+origin. Generate a new one-time pairing code for every pairing attempt;
+it expires after ten minutes, is single-use, and any previous code is
+invalidated whenever a new one is issued:
 
 ```bash
 bash scripts/docker-run.sh pairing-code
