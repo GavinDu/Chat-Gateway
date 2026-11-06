@@ -430,10 +430,13 @@ async fn protect_login_api(req: Request<Body>, next: Next) -> Response {
     let is_login_control = path == "/login" || path.starts_with("/login/api/");
     let is_login_api = path.starts_with("/login/api/");
     let is_relay_api = path.starts_with("/relay/v1/");
+    let is_pairing_admin = path == "/relay/v1/pairing-code/rotate";
     let origin_present = headers.contains_key(axum::http::header::ORIGIN);
     let fetch_site = headers.get("sec-fetch-site").and_then(|v| v.to_str().ok());
 
-    let origin_is_safe = if is_relay_api {
+    let origin_is_safe = if is_pairing_admin {
+        !origin_present && std::env::var("CHAT_GATEWAY_REMOTE_ORIGIN").is_err()
+    } else if is_relay_api {
         relay::relay_origin_is_allowed(headers)
     } else if let Ok(Some((expected_origin, _))) = remote_gateway_origin() {
         !origin_present
