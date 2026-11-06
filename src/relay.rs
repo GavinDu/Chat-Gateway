@@ -369,14 +369,9 @@ pub async fn status(State(app): State<Arc<crate::AppState>>, headers: HeaderMap)
     if let Err(response) = authenticated_request(&app, &headers) {
         return *response;
     }
-    let active = match app.pool.login_status_all().await {
-        Ok(active) => active,
-        Err(_) => return json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "session_status_unavailable",
-            "provider login status could not be read",
-        ),
-    };
+    // A Docker installation may not have an embedded login worker. Keep the
+    // saved-session dashboard available and treat live verification as unknown.
+    let active = app.pool.login_status_all().await.unwrap_or_default();
     let mut providers = Vec::new();
     for provider in [
         "qwen",
