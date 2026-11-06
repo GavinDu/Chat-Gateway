@@ -24,8 +24,8 @@ const MAX_PAIR_ATTEMPTS: u8 = 5;
 const MAX_RELAY_REQUESTS_PER_MINUTE: usize = 120;
 
 pub struct RelayState {
-    pairing_hash: [u8; 32],
-    pairing_expires: Instant,
+    pairing_hash: Mutex<[u8; 32]>,
+    pairing_expires: Mutex<Instant>,
     pairing_attempts: Mutex<u8>,
     install_token_hash: Mutex<Option<[u8; 32]>>,
     used_nonces: Mutex<HashMap<String, Instant>>,
@@ -43,8 +43,8 @@ impl RelayState {
         let hash: [u8; 32] = Sha256::digest(code.as_bytes()).into();
         Ok((
             Self {
-                pairing_hash: hash,
-                pairing_expires: Instant::now() + PAIRING_LIFETIME,
+                pairing_hash: Mutex::new(hash),
+                pairing_expires: Mutex::new(Instant::now() + PAIRING_LIFETIME),
                 pairing_attempts: Mutex::new(0),
                 install_token_hash: Mutex::new(load_install_token_hash()?),
                 used_nonces: Mutex::new(HashMap::new()),
@@ -53,6 +53,49 @@ impl RelayState {
             code,
         ))
     }
+}
+
+/// Only a local operator holding the separate, Docker-volume-backed pairing
+/// administration secret can rotate a pairing code. Never expose this secret
+/// to the browser extension or accept an unauthenticated regeneration request.
+pub async fn rotate_pairing_code(
+    State(app): State<Arc<crate::AppState>>,
+    headers: HeaderMap,
+) -> Response {
+    let secret = match fs::read_to_string("/run/secrets/pairing-admin.key") {
+        Ok(value) if value.trim().len() >= 32 => value,
+        _ => return json_error(StatusCode::SERVICE_UNAVAILABLE, "pairing_admin_unavailable", "pairing administration is not configured"),
+    };
+    let supplied = headers.get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .unwrap_or("");
+    let expected: [u8; 32] = Sha256::digest(secret.trim().as_bytes()).into();
+    let candidate: [u8; 32] = Sha256::digest(supplied.as_bytes()).into();
+    if !bool::from(candidate.ct_eq(&expected)) {
+        return json_error(StatusCode::UNAUTHORIZED, "pairing_admin_rejected", "pairing administrator authentication required");
+    }
+    let mut attempts = match app.relay.pairing_attempts.lock() {
+        Ok(value) => value,
+        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "relay_unavailable", "relay state is unavailable"),
+    };
+    let mut hash = match app.relay.pairing_hash.lock() {
+        Ok(value) => value,
+        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "relay_unavailable", "relay state is unavailable"),
+    };
+    let mut expiry = match app.relay.pairing_expires.lock() {
+        Ok(value) => value,
+        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "relay_unavailable", "relay state is unavailable"),
+    };
+    let mut random = [0_u8; 8];
+    if SystemRandom::new().fill(&mut random).is_err() {
+        return json_error(StatusCode::INTERNAL_SERVER_ERROR, "relay_unavailable", "could not generate pairing code");
+    }
+    let code = format!("{:08}", u64::from_be_bytes(random) % 100_000_000);
+    *hash = Sha256::digest(code.as_bytes()).into();
+    *expiry = Instant::now() + PAIRING_LIFETIME;
+    *attempts = 0;
+    Json(serde_json::json!({"ok":true,"code":code,"expires_in_seconds":PAIRING_LIFETIME.as_secs()})).into_response()
 }
 
 fn install_token_hash_path() -> &'static FsPath {
@@ -185,7 +228,11 @@ pub async fn pair(
             )
         }
     };
-    if *attempts >= MAX_PAIR_ATTEMPTS || Instant::now() >= app.relay.pairing_expires {
+    let expiry = match app.relay.pairing_expires.lock() {
+        Ok(value) => *value,
+        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "relay_unavailable", "relay state is unavailable"),
+    };
+    if *attempts >= MAX_PAIR_ATTEMPTS || Instant::now() >= expiry {
         return json_error(
             StatusCode::UNAUTHORIZED,
             "pairing_rejected",
@@ -194,7 +241,11 @@ pub async fn pair(
     }
     *attempts = attempts.saturating_add(1);
     let candidate: [u8; 32] = Sha256::digest(request.code.as_bytes()).into();
-    if !bool::from(candidate.ct_eq(&app.relay.pairing_hash)) {
+    let expected = match app.relay.pairing_hash.lock() {
+        Ok(value) => *value,
+        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "relay_unavailable", "relay state is unavailable"),
+    };
+    if !bool::from(candidate.ct_eq(&expected)) {
         return json_error(
             StatusCode::UNAUTHORIZED,
             "pairing_rejected",
@@ -527,8 +578,8 @@ mod tests {
             hash
         });
         RelayState {
-            pairing_hash: [0; 32],
-            pairing_expires: Instant::now() + PAIRING_LIFETIME,
+            pairing_hash: Mutex::new([0; 32]),
+            pairing_expires: Mutex::new(Instant::now() + PAIRING_LIFETIME),
             pairing_attempts: Mutex::new(0),
             install_token_hash: Mutex::new(install_token_hash),
             used_nonces: Mutex::new(HashMap::new()),
@@ -599,7 +650,7 @@ mod tests {
         let (state, code) = RelayState::new().unwrap();
         assert_eq!(code.len(), 8);
         assert!(code.bytes().all(|byte| byte.is_ascii_digit()));
-        assert!(state.pairing_expires > Instant::now());
+        assert!(*state.pairing_expires.lock().unwrap() > Instant::now());
     }
 
     #[test]
