@@ -57,8 +57,22 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Build container image
-        run: docker build --pull --tag chat-gateway-rs:ci .
+      # The original `docker build --pull` recompiled a release binary for
+      # 5-7 minutes on every fresh runner. Persist BuildKit dependency layers
+      # across jobs while still loading and smoke-testing the exact image.
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+      - name: Build container image with reusable layer cache
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: false
+          load: true
+          tags: chat-gateway-rs:ci
+          cache-from: type=gha,scope=chat-gateway-rs
+          # Cache export is an optimization only: quota/rate-limit failures
+          # must not prevent the security and runtime smoke checks.
+          cache-to: type=gha,scope=chat-gateway-rs,mode=max,timeout=3m,ignore-error=true
       - name: Verify container entrypoint
         run: docker run --rm --entrypoint /usr/local/bin/chat-gateway-rs chat-gateway-rs:ci --help
       - name: Verify isolated Docker HTTP and graceful-shutdown smoke
