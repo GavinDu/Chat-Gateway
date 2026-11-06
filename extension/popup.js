@@ -22,7 +22,10 @@ async function refreshStatus() {
       const present = await Promise.all(domains.map(domain => chrome.cookies.getAll({domain})));
       browser = present.some(cookies => cookies.length > 0) ? "Browser cookies present" : "No browser cookies";
     }
-    status.textContent = [enabled, linked, browser, "Login not verified"].join(" · ");
+    const auth = item.authentication === "verified" ? "Login verified"
+      : item.authentication === "needs_login" ? "Login needed"
+      : "Login unverified";
+    status.textContent = [enabled, linked, browser, auth].join(" · ");
     li.append(status);
 
     const openButton = document.createElement("button");
