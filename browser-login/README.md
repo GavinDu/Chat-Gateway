@@ -17,12 +17,12 @@ The existing browser-extension relay remains available as a secondary option.
 
 ## Runtime
 
-Node 18+ (tested Node 24.22.1), Playwright 1.55.0, a compatible Chromium binary,
+Node 18+ (tested Node 24.22.1), Playwright 1.55.1, a compatible Chromium binary,
 and writable Linux `/dev/shm` are required. The Replit workspace includes the
 Node dependency in its root package lock and uses `/repl/tools/bin/chromium`.
 The implementation checkout also includes portable package.json/package-lock
 files: run `npm ci` there when moving it outside this workspace.
-For a portable install, install Playwright 1.55.0 and its Chromium distribution,
+For a portable install, install Playwright 1.55.1 and its Chromium distribution,
 or set `CHAT_GATEWAY_CHROMIUM_PATH` to a verified compatible browser.
 The worker lives alongside this checkout; do not ship just the Rust binary.
 
@@ -131,7 +131,8 @@ Health/API and the independently secured extension relay remain available.
 Overriding the flag cannot supply missing worker assets. The native-only-image
 HTTP regression verifies this rejection still requires authorization.
 
-From a clean feature-branch checkout, install Node >=22, Python >=3.10, an
+For E2E, use a clean checkout of the merged `main` branch. Feature branches may
+run unit/build checks, but must not be used for E2E acceptance. Install Node >=22, Python >=3.10, an
 OpenSSH client, Rust with rustfmt/Clippy, cmake, clang/libclang and a C/C++ compiler:
 
 ```sh
@@ -213,3 +214,29 @@ CI runs the portable native suite separately from Docker, on Ubuntu 22.04 with
 Chromium's namespace sandbox enabled. No production provider or synthetic
 fixture enables routing. Real-account acceptance, MFA/CAPTCHA and cookie-only
 session compatibility remain owner tests, not CI success claims.
+
+## Local MCP sandbox acceptance
+
+Run `bash scripts/main-e2e.sh /absolute/path/to/chat-gateway-rs` inside the local
+sandbox after building the same clean `main` commit. The runner prints the
+working directory and commit before every acceptance command, refuses a dirty
+or feature checkout, and disables core dumps. Set `CHAT_GATEWAY_E2E_COMMIT` to
+pin the expected commit. `--http-only` explicitly selects HTTP acceptance;
+it must not be reported as browser acceptance.
+
+A minimal read-only sandbox needs more than Node: install the locked Playwright
+browser and its runtime libraries **and fonts**, plus OpenSSH for tunnel tests.
+A browser that launches but crashes on text-heavy pages may have no usable fonts.
+The Chromium namespace sandbox must work. For a locked-down Docker host, use an
+isolated test companion with Playwright's reviewed seccomp profile allowing
+user-namespace operations; when all container capabilities are dropped, Chromium
+also needs the `chroot` syscall inside its own namespace. Keep the non-root user,
+read-only application mounts, dropped host capabilities, and no-new-privileges.
+Never replace browser sandboxing with `--no-sandbox` or a privileged container.
+Do not reconfigure an active shared MCP container to run fixture tests.
+
+Serialize Cargo/CMake builds on small local VMs and provide adequate memory or
+swap. This dependency graph can exhaust a 2 GiB VM even with one build job; keep
+this distinct from application-test failures. A compiler helper must match the
+sandbox's Linux distribution so the resulting binary's libc requirement is
+compatible. Real provider credentials remain owner-entered and are not fixtures.
