@@ -70,3 +70,6 @@ home, which Colima shares with its VM; macOS `/var/folders` is not shared by
 default. The test removes its temporary container, key volume and files on exit.
 
 Use the [testing checklist](TESTING_CHECKLIST.md) for release and pairing acceptance.
+
+Follow the required branch, CI, MCP sandbox, merge, main E2E, and install order
+in [DEVELOPMENT_WORKFLOW.md](DEVELOPMENT_WORKFLOW.md).
