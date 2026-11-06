@@ -1,0 +1,25 @@
+# Never send local credentials, git metadata, or build output to Docker.
+.git
+.github
+.gitignore
+node_modules
+target
+dist
+build
+.DS_Store
+.env
+.env.*
+!.env.example
+config.yaml
+config.*.local.yaml
+*.pem
+*.key
+*.p12
+*.pfx
+data
+sessions
+browser
+screenshots
+playwright-report
+test-results
+coverage
