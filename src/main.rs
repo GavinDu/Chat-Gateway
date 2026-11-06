@@ -347,6 +347,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/login/api/:provider/view", get(login_view))
         .route("/login/api/:provider/act", post(login_act))
         .route("/relay/v1/pair", post(relay::pair))
+        .route("/relay/v1/pairing-code/rotate", post(relay::rotate_pairing_code))
         .route("/relay/v1/status", get(relay::status))
         .route(
             "/relay/v1/session/:provider",
