@@ -393,7 +393,10 @@ pub async fn status(State(app): State<Arc<crate::AppState>>, headers: HeaderMap)
                 );
             }
         };
-        let enabled = app.cfg.provider(provider).is_some_and(|config| config.enabled);
+        let enabled = app
+            .cfg
+            .provider(provider)
+            .is_some_and(|config| config.enabled);
         // Report the embedded browser's observed state only when available.
         // Saved cookies alone are never proof of a valid provider login.
         let observed = active
