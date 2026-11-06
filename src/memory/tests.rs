@@ -3171,6 +3171,37 @@ fn concurrent_conversations_keep_provider_thread_mappings_isolated() {
         .get_provider_thread_for_owner("different-owner", "parallel-a", "chatgpt")
         .expect("owner-scoped lookup should succeed")
         .is_none());
+    // Reopening after concurrent writes must preserve each conversation's
+    // own mapping and transcript, including the tenant boundary.
+    drop(memory);
+    let reopened = fixture.open();
+    for (conversation_id, suffix) in [("parallel-a", "a"), ("parallel-b", "b")] {
+        let restored = reopened
+            .get_provider_thread_for_owner("parallel-owner", conversation_id, "chatgpt")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            restored.thread_url,
+            format!("https://chatgpt.com/c/parallel-thread-{suffix}")
+        );
+        assert_eq!(
+            restored.synced_through_message_id,
+            Some(format!("parallel-marker-{suffix}"))
+        );
+        assert_eq!(restored.model.as_deref(), Some("gpt-4o"));
+        assert_eq!(
+            reopened
+                .conversation_for_owner("parallel-owner", conversation_id)
+                .unwrap()
+                .unwrap()
+                .messages,
+            vec![m("user", conversation_id), m("assistant", "stored")]
+        );
+        assert!(reopened
+            .get_provider_thread_for_owner("different-owner", conversation_id, "chatgpt")
+            .unwrap()
+            .is_none());
+    }
 }
 
 #[test]
@@ -3357,99 +3388,4 @@ async fn async_store_keeps_interleaved_conversation_thread_maps_isolated() {
         transcript_b,
         vec![m("user", "question B"), m("assistant", "answer B")]
     );
-}
-
-#[test]
-fn concurrent_conversations_keep_provider_thread_mappings_isolated() {
-    let fixture = Fixture::new();
-    let memory = fixture.open();
-    let barrier = Arc::new(Barrier::new(3));
-
-    thread::scope(|scope| {
-        for (conversation_id, thread_url, marker) in [
-            (
-                "parallel-a",
-                "https://chatgpt.com/c/parallel-thread-a",
-                "parallel-marker-a",
-            ),
-            (
-                "parallel-b",
-                "https://chatgpt.com/c/parallel-thread-b",
-                "parallel-marker-b",
-            ),
-        ] {
-            let barrier = barrier.clone();
-            let memory = &memory;
-            scope.spawn(move || {
-                barrier.wait();
-                memory
-                    .store_turn_for_owner(
-                        "parallel-owner",
-                        conversation_id.to_owned(),
-                        vec![m("user", conversation_id)],
-                        m("assistant", "stored"),
-                        "chatgpt".to_owned(),
-                        "shared-tab".to_owned(),
-                    )
-                    .expect("conversation turn should persist");
-                memory
-                    .upsert_provider_thread_for_owner(
-                        "parallel-owner",
-                        &ProviderThread {
-                            conversation_id: conversation_id.to_owned(),
-                            provider: "chatgpt".to_owned(),
-                            thread_url: thread_url.to_owned(),
-                            synced_through_message_id: Some(marker.to_owned()),
-                            model: Some("gpt-4o".to_owned()),
-                            updated_at: 300,
-                        },
-                    )
-                    .expect("provider thread mapping should persist");
-            });
-        }
-        barrier.wait();
-    });
-
-    for (conversation_id, expected_url, expected_marker) in [
-        (
-            "parallel-a",
-            "https://chatgpt.com/c/parallel-thread-a",
-            "parallel-marker-a",
-        ),
-        (
-            "parallel-b",
-            "https://chatgpt.com/c/parallel-thread-b",
-            "parallel-marker-b",
-        ),
-    ] {
-        let restored = memory
-            .get_provider_thread_for_owner("parallel-owner", conversation_id, "chatgpt")
-            .expect("provider thread lookup should succeed")
-            .expect("each concurrent conversation should retain its mapping");
-        assert_eq!(restored.thread_url, expected_url);
-        assert_eq!(
-            restored.synced_through_message_id.as_deref(),
-            Some(expected_marker)
-        );
-    }
-
-    assert!(memory
-        .get_provider_thread_for_owner("different-owner", "parallel-a", "chatgpt")
-        .expect("owner-scoped lookup should succeed")
-        .is_none());
-
-    // Reopening the database simulates a gateway restart: provider thread
-    // mappings must remain available for the next request.
-    drop(memory);
-    let reopened = fixture.open();
-    for (conversation_id, expected_url) in [
-        ("parallel-a", "https://chatgpt.com/c/parallel-thread-a"),
-        ("parallel-b", "https://chatgpt.com/c/parallel-thread-b"),
-    ] {
-        let restored = reopened
-            .get_provider_thread_for_owner("parallel-owner", conversation_id, "chatgpt")
-            .expect("provider thread lookup should succeed after reopening")
-            .expect("provider thread mapping should survive database reopen");
-        assert_eq!(restored.thread_url, expected_url);
-    }
 }
