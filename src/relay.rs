@@ -466,6 +466,9 @@ pub async fn status(State(app): State<Arc<crate::AppState>>, headers: HeaderMap)
     if let Err(response) = authenticated_request(&app, &headers) {
         return *response;
     }
+    // A Docker installation may not have an embedded login worker. Keep the
+    // saved-session dashboard available and treat live verification as unknown.
+    let active = app.pool.login_status_all().await.unwrap_or_default();
     let mut providers = Vec::new();
     for provider in [
         "qwen",
@@ -487,7 +490,27 @@ pub async fn status(State(app): State<Arc<crate::AppState>>, headers: HeaderMap)
                 );
             }
         };
-        providers.push(serde_json::json!({"provider":provider,"linked":session_present}));
+        let enabled = app
+            .cfg
+            .provider(provider)
+            .is_some_and(|config| config.enabled);
+        // Report the embedded browser's observed state only when available.
+        // Saved cookies alone are never proof of a valid provider login.
+        let observed = active
+            .iter()
+            .find(|item| item.provider == provider)
+            .and_then(|item| item.logged_in);
+        let authentication = match observed {
+            Some(true) => "verified",
+            Some(false) => "needs_login",
+            None => "unknown",
+        };
+        providers.push(serde_json::json!({
+            "provider": provider,
+            "linked": session_present,
+            "enabled": enabled,
+            "authentication": authentication,
+        }));
     }
     Json(serde_json::json!({"ok":true,"providers":providers,"vault_mode":std::env::var("CHAT_GATEWAY_SESSION_STORE").as_deref()==Ok("vault")})).into_response()
 }
