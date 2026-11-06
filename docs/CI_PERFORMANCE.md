@@ -115,9 +115,11 @@ Why previous checks missed it:
 - The helper tests mocked Docker, so they could not detect the owner's missing
   Buildx plugin or measure linker memory.
 
-The real application now uses Clang/LLD with one linker thread. Flags apply
-only to the final Cargo application target, preserving cached dependencies.
-LLD is installed after the dependency layer. This does not disable render,
+All Rust targets now use Clang/LLD with one linker thread, including dependency
+build scripts. A cold local test also reproduced GNU ld OOM in the Obscura/V8
+build-script link, so fixing only the final executable would have left that
+path exposed. LLD is installed before compiling dependencies; the linker
+change intentionally invalidates the old dependency cache once. This does not disable render,
 stealth, V8, BoringSSL/FIPS, audits, or any test.
 
 The native `ubuntu-24.04-arm` job bounds the entire BuildKit builder to **2 GiB
@@ -125,6 +127,12 @@ RAM and no swap**, verifies those limits, invokes the actual
 `scripts/docker-run.sh build` helper, checks the loaded image's ARM64
 architecture, and runs its entrypoint and isolated Docker HTTP/shutdown smoke.
 It uses a distinct cache scope populated only by that bounded builder.
+It also loads the cached build stage and forces the shared production link
+command to run again with **768 MiB and no swap**, offline. The controlled old
+GNU-linker implementation failed at this tighter limit, while the production
+LLD command passed. A roomy 2 GiB container alone might have allowed the old
+linker to pass while a whole 2 GiB VM lacked enough free memory; the separate
+final-link gate addresses that distinction.
 The existing x86 Docker, native browser/SSH and Rust checks remain intact.
 
 The local helper explicitly uses Buildx with `--load`; absent Buildx fails

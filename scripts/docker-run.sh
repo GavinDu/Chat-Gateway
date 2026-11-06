@@ -33,6 +33,7 @@ Environment:
   CHAT_GATEWAY_CONFIG          Config file (default: ./config.yaml)
   CHAT_GATEWAY_IMAGE           Image tag (default: chat-gateway-rs:local)
   CHAT_GATEWAY_BUILD_PLATFORM  Optional target platform (for example linux/arm64)
+  CHAT_GATEWAY_BUILD_TARGET    Optional Dockerfile target (for example builder)
   CHAT_GATEWAY_BUILD_CACHE_FROM Optional Buildx cache source
   CHAT_GATEWAY_BUILD_CACHE_TO   Optional Buildx cache destination
 
@@ -58,6 +59,9 @@ build_image() {
   local args=(buildx build --load --pull --tag "$IMAGE")
   if [[ -n "${CHAT_GATEWAY_BUILD_PLATFORM:-}" ]]; then
     args+=(--platform "$CHAT_GATEWAY_BUILD_PLATFORM")
+  fi
+  if [[ -n "${CHAT_GATEWAY_BUILD_TARGET:-}" ]]; then
+    args+=(--target "$CHAT_GATEWAY_BUILD_TARGET")
   fi
   if [[ -n "${CHAT_GATEWAY_BUILD_CACHE_FROM:-}" ]]; then
     args+=(--cache-from "$CHAT_GATEWAY_BUILD_CACHE_FROM")

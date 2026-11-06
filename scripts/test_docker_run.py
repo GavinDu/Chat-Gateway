@@ -90,12 +90,14 @@ raise SystemExit(1 if os.environ.get("CURL_FAIL") == "1" else 0)
 
     def test_build_forwards_platform_and_cache_as_single_arguments(self):
         options = {"CHAT_GATEWAY_BUILD_PLATFORM": "linux/arm64",
+                   "CHAT_GATEWAY_BUILD_TARGET": "builder",
                    "CHAT_GATEWAY_BUILD_CACHE_FROM": "type=gha,scope=arm64-2gb",
                    "CHAT_GATEWAY_BUILD_CACHE_TO": "type=gha,scope=arm64-2gb,mode=max"}
         result, calls = self.build(options)
         self.assertEqual(result.returncode, 0, result.stderr)
         command = next(args for args in calls if args[:2] == ["buildx", "build"])
         for flag, value in [("--platform", options["CHAT_GATEWAY_BUILD_PLATFORM"]),
+                            ("--target", options["CHAT_GATEWAY_BUILD_TARGET"]),
                             ("--cache-from", options["CHAT_GATEWAY_BUILD_CACHE_FROM"]),
                             ("--cache-to", options["CHAT_GATEWAY_BUILD_CACHE_TO"])]:
             self.assertEqual(command[command.index(flag) + 1], value)
