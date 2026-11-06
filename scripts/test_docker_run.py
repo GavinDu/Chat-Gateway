@@ -28,6 +28,8 @@ if args[:2] == ["buildx", "version"] and os.environ.get("BUILDX_MISSING") == "1"
     raise SystemExit(1)
 if args[:2] == ["buildx", "build"]:
     raise SystemExit(int(os.environ.get("BUILD_EXIT", "0")))
+if args and args[0] == "run" and args[-1] == "/vault/pairing-admin.key":
+    print("test-only-pairing-admin-secret-32chars")
 if args[:2] == ["container", "inspect"]:
     raise SystemExit(0 if os.environ.get("CONTAINER_EXISTS") == "1" else 1)
 """,
@@ -50,6 +52,7 @@ with open(os.environ["OPENED_URLS"], "a", encoding="utf-8") as stream:
 import os, sys
 with open(os.environ["CURL_CALLS"], "a", encoding="utf-8") as stream:
     stream.write(sys.argv[-1] + "\\n")
+sys.stdout.write(os.environ.get("CURL_RESPONSE", ""))
 raise SystemExit(1 if os.environ.get("CURL_FAIL") == "1" else 0)
 """,
             encoding="utf-8",
@@ -101,6 +104,40 @@ raise SystemExit(1 if os.environ.get("CURL_FAIL") == "1" else 0)
                             ("--cache-from", options["CHAT_GATEWAY_BUILD_CACHE_FROM"]),
                             ("--cache-to", options["CHAT_GATEWAY_BUILD_CACHE_TO"])]:
             self.assertEqual(command[command.index(flag) + 1], value)
+
+    def pairing_code(self, response, fail=False):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            bin_dir, _calls = self.make_tools(root)
+            env = {**os.environ, "PATH": f"{bin_dir}:{os.environ.get('PATH', '')}",
+                   "DOCKER_CALLS": str(root / "docker-calls.jsonl"),
+                   "CURL_CALLS": str(root / "curl-calls.txt"),
+                   "CONTAINER_EXISTS": "1", "CURL_RESPONSE": response,
+                   "CURL_FAIL": "1" if fail else "0"}
+            return subprocess.run(["bash", str(HELPER), "pairing-code"],
+                                  cwd=ROOT, env=env, text=True, capture_output=True)
+
+    def test_pairing_code_prints_only_eight_digits_and_preserves_leading_zeros(self):
+        for response in ['{"code":"00123456"}', '{\n  "code" : "00123456"\n}']:
+            with self.subTest(response=response):
+                result = self.pairing_code(response)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, "00123456\n")
+                self.assertNotIn("test-only-pairing-admin-secret", result.stderr)
+
+    def test_pairing_code_rejects_missing_nonstring_and_invalid_codes(self):
+        for payload in [{}, {"code": 12345678}, {"code": "1234567"},
+                        {"code": "123456789"}, {"code": "abcdefgh"}]:
+            with self.subTest(payload=payload):
+                result = self.pairing_code(json.dumps(payload))
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(result.stdout, "")
+                self.assertIn("valid pairing code", result.stderr)
+
+    def test_pairing_code_never_prints_a_code_when_http_rotation_fails(self):
+        result = self.pairing_code('{"code":"12345678"}', fail=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
 
     def test_start_publishes_only_loopback_and_keeps_vault_key_in_readonly_volume(self):
         with tempfile.TemporaryDirectory() as directory:
