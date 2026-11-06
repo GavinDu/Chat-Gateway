@@ -24,6 +24,10 @@ with open(os.environ["DOCKER_CALLS"], "a", encoding="utf-8") as stream:
     stream.write(json.dumps(args) + "\\n")
 if args[:2] in (["network", "inspect"], ["image", "inspect"]):
     raise SystemExit(1)
+if args[:2] == ["buildx", "version"] and os.environ.get("BUILDX_MISSING") == "1":
+    raise SystemExit(1)
+if args[:2] == ["buildx", "build"]:
+    raise SystemExit(int(os.environ.get("BUILD_EXIT", "0")))
 if args[:2] == ["container", "inspect"]:
     raise SystemExit(0 if os.environ.get("CONTAINER_EXISTS") == "1" else 1)
 """,
@@ -52,6 +56,51 @@ raise SystemExit(1 if os.environ.get("CURL_FAIL") == "1" else 0)
         )
         curl.chmod(0o755)
         return bin_dir, calls
+
+    def build(self, overrides=None):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        bin_dir, calls = self.make_tools(root)
+        env = {**os.environ, "PATH": f"{bin_dir}:{os.environ.get('PATH', '')}",
+               "DOCKER_CALLS": str(calls), "CHAT_GATEWAY_IMAGE": "gateway:test"}
+        env.update(overrides or {})
+        result = subprocess.run(["bash", str(HELPER), "build"], cwd=ROOT, env=env,
+                                text=True, capture_output=True, check=False)
+        return result, [json.loads(line) for line in calls.read_text().splitlines()]
+
+    def test_build_uses_buildx_and_loads_the_exact_image(self):
+        result, calls = self.build()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        command = next(args for args in calls if args[:2] == ["buildx", "build"])
+        self.assertEqual(command, ["buildx", "build", "--load", "--pull", "--tag", "gateway:test", str(ROOT)])
+        self.assertFalse(any(args and args[0] == "build" for args in calls))
+
+    def test_missing_buildx_fails_before_attempting_a_legacy_build(self):
+        result, calls = self.build({"BUILDX_MISSING": "1"})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Buildx is required", result.stderr)
+        self.assertIn("brew install docker-buildx", result.stderr)
+        self.assertFalse(any(args[:2] == ["buildx", "build"] or args[0] == "build" for args in calls))
+
+    def test_build_failure_is_not_hidden_or_retried_with_a_stale_builder(self):
+        result, calls = self.build({"BUILD_EXIT": "71"})
+        self.assertEqual(result.returncode, 71)
+        self.assertEqual(sum(args[:2] == ["buildx", "build"] for args in calls), 1)
+
+    def test_build_forwards_platform_and_cache_as_single_arguments(self):
+        options = {"CHAT_GATEWAY_BUILD_PLATFORM": "linux/arm64",
+                   "CHAT_GATEWAY_BUILD_TARGET": "builder",
+                   "CHAT_GATEWAY_BUILD_CACHE_FROM": "type=gha,scope=arm64-2gb",
+                   "CHAT_GATEWAY_BUILD_CACHE_TO": "type=gha,scope=arm64-2gb,mode=max"}
+        result, calls = self.build(options)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        command = next(args for args in calls if args[:2] == ["buildx", "build"])
+        for flag, value in [("--platform", options["CHAT_GATEWAY_BUILD_PLATFORM"]),
+                            ("--target", options["CHAT_GATEWAY_BUILD_TARGET"]),
+                            ("--cache-from", options["CHAT_GATEWAY_BUILD_CACHE_FROM"]),
+                            ("--cache-to", options["CHAT_GATEWAY_BUILD_CACHE_TO"])]:
+            self.assertEqual(command[command.index(flag) + 1], value)
 
     def test_start_publishes_only_loopback_and_keeps_vault_key_in_readonly_volume(self):
         with tempfile.TemporaryDirectory() as directory:

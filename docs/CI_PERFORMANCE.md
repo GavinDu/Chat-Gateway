@@ -2,8 +2,8 @@
 
 ## Baseline (November 6, 2026)
 
-The full checks must remain required: `test`, `embedded-native`, and
-`docker-build`. Logs from the successful pre-optimization run
+The full checks must remain required: `test`, `embedded-native`,
+`docker-build`, and `docker-arm64-low-memory`. Logs from the successful pre-optimization run
 [42243205149](https://github.com/GavinDu/Chat-Gateway/actions/runs/42243205149)
 showed:
 
@@ -95,3 +95,55 @@ removed. Cold builds may be slower while populating the new cache.
 Validation requires a full green workflow on the changed configuration,
 followed by a warm same-commit re-run; record the restored archive size,
 restore time, and total test job duration versus the 2.75 GiB baseline.
+
+
+## ARM64 release-link regression (November 6, 2026)
+
+The reported failure was at the final application link, after compilation:
+`collect2: fatal error: ld terminated with signal 9 [Killed]`.
+This is distinct from the earlier BoringSSL compiler OOM. Serial Cargo/CMake
+jobs reduce concurrent compilation but do not cap a single linker's memory.
+The vendored cosmic-text lifetime messages are warnings and are not its cause.
+
+Why previous checks missed it:
+
+- Docker CI ran on an x86-64 hosted runner with much more RAM than the owner's
+  ~2 GiB ARM64 Colima VM, without a build memory limit.
+- Native browser acceptance built the debug profile, not the release Docker
+  artifact. The local native compilation used temporary swap. Runtime E2E
+  cannot detect a release build that it never performs.
+- The helper tests mocked Docker, so they could not detect the owner's missing
+  Buildx plugin or measure linker memory.
+
+All Rust targets now use Clang/LLD with one linker thread, including dependency
+build scripts. A cold local test also reproduced GNU ld OOM in the Obscura/V8
+build-script link, so fixing only the final executable would have left that
+path exposed. LLD is installed before compiling dependencies; the linker
+change intentionally invalidates the old dependency cache once. This does not disable render,
+stealth, V8, BoringSSL/FIPS, audits, or any test.
+
+The native `ubuntu-24.04-arm` job bounds the entire BuildKit builder to **2 GiB
+RAM and no swap**, verifies those limits, invokes the actual
+`scripts/docker-run.sh build` helper, checks the loaded image's ARM64
+architecture, and runs its entrypoint and isolated Docker HTTP/shutdown smoke.
+It uses a distinct cache scope populated only by that bounded builder.
+It also loads the cached build stage and forces the shared production link
+command to run again with **1 GiB and no swap**, offline. The original GNU-linker control still failed with an OOM kill at 1 GiB.
+The initial 768 MiB relink passed locally but failed on the hosted ARM runner;
+1 GiB leaves cross-host headroom while retaining a budget that rejects the
+original linker. The production LLD command must pass this hosted gate. A roomy 2 GiB container alone might have allowed the old
+linker to pass while a whole 2 GiB VM lacked enough free memory; the separate
+final-link gate addresses that distinction.
+The existing x86 Docker, native browser/SSH and Rust checks remain intact.
+
+The local helper explicitly uses Buildx with `--load`; absent Buildx fails
+before building with installation instructions. Builder failures retain their
+exit status. New helper tests cover missing plugins, image loading, argument
+forwarding and failure propagation. See Docker's official
+[bounded builder options](https://docs.docker.com/build/builders/drivers/docker-container/).
+
+A 2 GiB build-container budget is not a promise that a whole 2 GiB VM can run
+that build alongside other services. If the host has insufficient available
+memory, give the VM more RAM or stop other workloads before a cold build.
+Do not use temporary swap in a no-swap regression test or report debug-runtime
+acceptance as proof that the local release Docker build succeeded.

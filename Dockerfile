@@ -1,7 +1,7 @@
 FROM rust:1.99.1 AS builder
 WORKDIR /app
 # Keep system libraries and Rust dependencies independent of source edits.
-RUN apt-get update && apt-get install -y --no-install-recommends build-essential cmake clang libclang-dev llvm-dev \
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential cmake clang lld libclang-dev llvm-dev \
     && rm -rf /var/lib/apt/lists/*
 # btls-sys compiles BoringSSL's very large FIPS C++ module. Docker's available
 # memory may be far below its reported CPU count, so the default Cargo and
@@ -10,7 +10,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends build-essential
 # parallelism with --build-arg CARGO_BUILD_JOBS=2 after ensuring enough RAM.
 ARG CARGO_BUILD_JOBS=1
 ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS} \
-    CMAKE_BUILD_PARALLEL_LEVEL=1
+    CMAKE_BUILD_PARALLEL_LEVEL=1 \
+    RUSTFLAGS="-C linker=clang -C link-arg=-fuse-ld=lld -C link-arg=-Wl,--threads=1"
 COPY Cargo.toml Cargo.lock ./
 COPY vendor ./vendor
 # Compile the *same pinned dependency graph* with a dummy binary. BuildKit
@@ -20,10 +21,15 @@ RUN mkdir -p src benches \
     && printf 'fn main() {}\n' > src/main.rs \
     && printf 'fn main() {}\n' > benches/memory_sqlite.rs
 RUN cargo build --locked --release --features render,stealth
+# RUSTFLAGS above also apply to dependency build scripts: the Obscura/V8
+# build-script link can exhaust small builders before the final app is reached.
 # Build the actual application using the already compiled dependency artifacts.
 COPY src ./src
 COPY benches ./benches
-RUN touch src/main.rs && cargo build --locked --release --features render,stealth
+# Force an application rebuild even if the cached layer contains a dummy main.
+# CI reuses this exact command for the tighter final-link memory regression.
+COPY scripts/docker-release-link.sh /usr/local/bin/chat-gateway-release-link
+RUN bash /usr/local/bin/chat-gateway-release-link
 RUN mkdir -p /app/data /app/sessions && chown -R 65532:65532 /app/data /app/sessions
 
 FROM gcr.io/distroless/cc:nonroot
