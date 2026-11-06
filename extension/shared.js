@@ -9,6 +9,17 @@ const PROVIDERS = {
   perplexity: ["perplexity.ai"]
 };
 
+const PROVIDER_LOGIN_URLS = Object.freeze({
+  chatgpt: "https://chatgpt.com/",
+  claude: "https://claude.ai/",
+  gemini: "https://gemini.google.com/",
+  qwen: "https://chat.qwen.ai/",
+  metaai: "https://www.meta.ai/",
+  grok: "https://grok.com/",
+  mistral: "https://chat.mistral.ai/",
+  perplexity: "https://www.perplexity.ai/"
+});
+
 function normalizeGateway(value) {
   const url = new URL(value);
   if (url.username || url.password || url.search || url.hash || (url.pathname !== "/" && url.pathname !== "")) {
