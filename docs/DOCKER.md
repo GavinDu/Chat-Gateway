@@ -62,3 +62,8 @@ workspace and main commit at each stage, rejects feature/dirty checkouts,
 propagates failures and uses a separate E2E image tag by default. Optionally
 set `CHAT_GATEWAY_E2E_COMMIT` to pin the expected main SHA. The native
 `scripts/main-e2e.sh` suite remains a separate browser/SSH runtime gate.
+
+The isolated runtime smoke keeps its disposable pairing key in a temporary
+directory under the user home, which Colima shares with its VM. macOS
+`/var/folders` temporary paths are not shared by default. The test removes
+the key and directory on exit.

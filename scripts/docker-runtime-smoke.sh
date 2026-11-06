@@ -6,7 +6,9 @@ set +x
 
 IMAGE="${1:-chat-gateway-rs:ci}"
 NAME="chat-gateway-ci-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-1}-$$"
-TMP="$(mktemp -d)"
+# Colima shares the user home, but not macOS /var/folders (default TMPDIR).
+# Keep the disposable bind-mounted secret in that shared location.
+TMP="$(mktemp -d "${HOME:?HOME is required}/.chat-gateway-smoke.XXXXXXXX")"
 CONTAINER_CREATED=0
 cleanup() {
   if [[ "$CONTAINER_CREATED" == "1" ]]; then
