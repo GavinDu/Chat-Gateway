@@ -196,7 +196,7 @@ start_gateway() {
   echo "Persistent data: $DATA_VOLUME, $SESSION_VOLUME"
   echo "Encrypted-vault key: $KEY_VOLUME (mounted read-only; key is not printed)"
   if [[ -z "$EXTENSION_ID" ]]; then
-    echo "Set CHAT_GATEWAY_EXTENSION_ID to enable the Chrome cookie relay."
+    echo "Connect from the extension and approve locally to remember its ID. CHAT_GATEWAY_EXTENSION_ID can optionally pin it."
   fi
   echo "Pairing code: run '$0 pairing-code' (generates a fresh, single-use code)."
 }

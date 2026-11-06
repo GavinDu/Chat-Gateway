@@ -10,8 +10,10 @@ This is the Chrome Manifest V3 client for ADR 0001. It transfers only cookies fo
    - Provide the stable 32-byte vault key either as `CHAT_GATEWAY_VAULT_KEY` (exactly 64 hexadecimal characters) or as `CHAT_GATEWAY_VAULT_KEY_FILE` (a regular, non-symlink file with owner-only permissions).
    - Keep the key outside the repository, config files, logs, container image, and extension storage. Back it up securely; losing it makes the vault unreadable.
 3. Load the unpacked `extension/` directory from `chrome://extensions` with Developer mode enabled.
-4. Copy the extension ID shown by Chrome and configure `CHAT_GATEWAY_EXTENSION_ID=<32-character-extension-id>`. The ID must be the actual installed extension ID; the server rejects all other extension origins.
-5. Start the gateway and run `bash scripts/docker-run.sh pairing-code` to generate a **fresh** one-time 8-digit pairing code. Each request replaces the previous code; the code expires after ten minutes and permits at most five attempts. Never post the code or an install token publicly.
+4. Start the gateway. Enter its local relay URL in the extension, choose **Connect to gateway**, and approve the local confirmation tab once. The gateway remembers that approved extension ID; no pairing code or manual extension-ID setup is needed.
+5. Choose **Connect account** for a provider to grant its permissions and reuse an existing session, or sign in on its official site if needed. Status and cookie updates refresh automatically.
+
+An explicitly configured `CHAT_GATEWAY_EXTENSION_ID` still pins the installation to that ID. Legacy CLI pairing remains available for compatibility; a code is not needed for the local extension approval flow.
 
 The default popup gateway URL is `http://127.0.0.1:8080`; adjust it if the configured gateway port differs. The extension accepts loopback HTTP or an explicitly configured HTTPS remote origin; it never permits a remote HTTP URL.
 

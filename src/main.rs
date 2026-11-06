@@ -457,7 +457,7 @@ async fn protect_login_api_for_origin(
     let origin_is_safe = if is_pairing_admin {
         !origin_present && remote_origin.is_none()
     } else if is_relay_api {
-        relay::relay_origin_is_allowed(headers)
+        relay::relay_request_origin_is_allowed(path, headers)
     } else if let Some((expected_origin, _)) = remote_origin.as_ref() {
         !origin_present
             || headers
@@ -484,7 +484,7 @@ async fn protect_login_api_for_origin(
                 headers,
                 origin,
                 authority,
-                is_relay_api && relay::relay_origin_is_allowed(headers),
+                is_relay_api && relay::relay_request_origin_is_allowed(path, headers),
             )
     } else {
         headers
@@ -511,11 +511,12 @@ async fn protect_login_api_for_origin(
             .into_response();
     }
 
-    let allowed_relay_origin = if is_relay_api && relay::relay_origin_is_allowed(headers) {
-        headers.get(axum::http::header::ORIGIN).cloned()
-    } else {
-        None
-    };
+    let allowed_relay_origin =
+        if is_relay_api && relay::relay_request_origin_is_allowed(path, headers) {
+            headers.get(axum::http::header::ORIGIN).cloned()
+        } else {
+            None
+        };
     // Consume the edge credential at the boundary, before handlers/logging.
     req.headers_mut().remove("x-chat-gateway-proxy-key");
     let mut response = next.run(req).await;

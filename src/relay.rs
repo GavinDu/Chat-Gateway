@@ -1,6 +1,6 @@
 use axum::{
     extract::{Form, Path, State},
-    http::{header, HeaderMap, HeaderValue, StatusCode},
+    http::{header, HeaderMap, HeaderValue, StatusCode, Uri},
     response::{Html, IntoResponse, Response},
     Json,
 };
@@ -27,8 +27,14 @@ struct PendingApproval {
     id: String,
     csrf: String,
     poll_secret: String,
+    extension_id: String,
     expires: Instant,
     approved: bool,
+}
+
+fn approval_navigation_is_allowed(headers: &HeaderMap) -> bool {
+    headers.get("sec-fetch-mode").and_then(|v| v.to_str().ok()) == Some("navigate")
+        && headers.get("sec-fetch-dest").and_then(|v| v.to_str().ok()) == Some("document")
 }
 
 pub struct RelayState {
@@ -160,16 +166,17 @@ fn load_install_token_hash() -> anyhow::Result<Option<[u8; 32]>> {
 }
 
 fn persist_install_token_hash(hash: &[u8; 32]) -> anyhow::Result<()> {
+    persist_private_record("relay-install-token.sha256", hash)
+}
+
+fn persist_private_record(name: &str, bytes: &[u8]) -> anyhow::Result<()> {
     fs::create_dir_all("sessions")?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions("sessions", fs::Permissions::from_mode(0o700))?;
     }
-    let temporary = format!(
-        "sessions/relay-install-token.sha256.tmp-{}",
-        uuid::Uuid::new_v4()
-    );
+    let temporary = format!("sessions/{name}.tmp-{}", uuid::Uuid::new_v4());
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -179,7 +186,7 @@ fn persist_install_token_hash(hash: &[u8; 32]) -> anyhow::Result<()> {
     }
     let mut file = options.open(&temporary)?;
     if let Err(error) = (|| -> anyhow::Result<()> {
-        file.write_all(hash)?;
+        file.write_all(bytes)?;
         file.sync_all()?;
         Ok(())
     })() {
@@ -188,7 +195,7 @@ fn persist_install_token_hash(hash: &[u8; 32]) -> anyhow::Result<()> {
         return Err(error);
     }
     drop(file);
-    if let Err(error) = fs::rename(&temporary, install_token_hash_path()) {
+    if let Err(error) = fs::rename(&temporary, format!("sessions/{name}")) {
         let _ = fs::remove_file(&temporary);
         return Err(error.into());
     }
@@ -224,8 +231,29 @@ fn extension_id_is_valid(id: &str) -> bool {
 }
 
 fn extension_id() -> Option<String> {
-    let id = std::env::var("CHAT_GATEWAY_EXTENSION_ID").ok()?;
+    let id = match std::env::var("CHAT_GATEWAY_EXTENSION_ID") {
+        Ok(id) => id,
+        Err(_) => fs::read_to_string("sessions/relay-extension-id").ok()?,
+    };
     extension_id_is_valid(&id).then_some(id)
+}
+
+fn requested_extension_id(headers: &HeaderMap) -> Option<String> {
+    let id = headers
+        .get(header::ORIGIN)?
+        .to_str()
+        .ok()?
+        .strip_prefix("chrome-extension://")?;
+    extension_id_is_valid(id).then(|| id.to_owned())
+}
+
+pub fn relay_request_origin_is_allowed(path: &str, headers: &HeaderMap) -> bool {
+    if matches!(path, "/relay/v1/connect/request" | "/relay/v1/connect/poll")
+        && std::env::var_os("CHAT_GATEWAY_EXTENSION_ID").is_none()
+    {
+        return requested_extension_id(headers).is_some();
+    }
+    relay_origin_is_allowed(headers)
 }
 
 fn extension_origin_matches(id: &str, origin: &str) -> bool {
@@ -283,7 +311,8 @@ pub async fn connect_request(
     State(app): State<Arc<crate::AppState>>,
     headers: HeaderMap,
 ) -> Response {
-    if !relay_origin_is_allowed(&headers) || crate::remote_gateway_origin().ok().flatten().is_some()
+    if !relay_request_origin_is_allowed("/relay/v1/connect/request", &headers)
+        || crate::remote_gateway_origin().ok().flatten().is_some()
     {
         return json_error(
             StatusCode::FORBIDDEN,
@@ -315,6 +344,7 @@ pub async fn connect_request(
         id: id.clone(),
         csrf,
         poll_secret: poll_secret.clone(),
+        extension_id: requested_extension_id(&headers).unwrap_or_default(),
         expires: Instant::now() + Duration::from_secs(300),
         approved: false,
     });
@@ -327,8 +357,7 @@ pub async fn approval_page(
     headers: HeaderMap,
 ) -> Response {
     if crate::remote_gateway_origin().ok().flatten().is_some()
-        || headers.get("sec-fetch-mode").and_then(|v| v.to_str().ok()) != Some("navigate")
-        || headers.get("sec-fetch-dest").and_then(|v| v.to_str().ok()) != Some("document")
+        || !approval_navigation_is_allowed(&headers)
     {
         return StatusCode::FORBIDDEN.into_response();
     }
@@ -342,7 +371,7 @@ pub async fn approval_page(
         return StatusCode::GONE.into_response();
     };
     // IDs, CSRF values and extension ID are generated/validated ASCII, never user HTML.
-    let extension = extension_id().unwrap_or_default();
+    let extension = &request.extension_id;
     let html = format!(
         r#"<!doctype html><html><head><meta charset="utf-8"><title>Approve Chat Gateway extension</title></head><body><h1>Connect your extension</h1><p>Allow extension {extension} to sync the provider sessions you choose and show their status.</p><form method="post"><input type="hidden" name="csrf" value="{}"><button type="submit">Approve connection</button></form><p>Only approve a connection you just started in the Chat Gateway extension. Close this tab to leave it unapproved.</p></body></html>"#,
         request.csrf
@@ -415,14 +444,20 @@ pub async fn connect_poll(
     headers: HeaderMap,
     Json(body): Json<ApprovalPoll>,
 ) -> Response {
-    if !relay_origin_is_allowed(&headers) {
+    if !relay_request_origin_is_allowed("/relay/v1/connect/poll", &headers) {
         return StatusCode::FORBIDDEN.into_response();
     }
     let Ok(mut pending) = app.relay.approval.lock() else {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
     let Some(request) = pending.as_ref().filter(|r| {
-        r.expires > Instant::now()
+        extension_origin_matches(
+            &r.extension_id,
+            headers
+                .get(header::ORIGIN)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or(""),
+        ) && r.expires > Instant::now()
             && r.id == body.request_id
             && bool::from(r.poll_secret.as_bytes().ct_eq(body.poll_secret.as_bytes()))
     }) else {
@@ -434,6 +469,13 @@ pub async fn connect_poll(
             Json(serde_json::json!({"pending":true})),
         )
             .into_response();
+    }
+    if persist_private_record("relay-extension-id", request.extension_id.as_bytes()).is_err() {
+        return json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "relay_unavailable",
+            "could not persist approved extension identity",
+        );
     }
     match issue_install_token(&app.relay) {
         Ok(token) => {
@@ -802,12 +844,16 @@ pub async fn unpair(State(app): State<Arc<crate::AppState>>, headers: HeaderMap)
     }
 }
 
-pub async fn preflight(headers: HeaderMap) -> Response {
-    if !relay_origin_is_allowed(&headers) {
+pub async fn preflight(uri: Uri, headers: HeaderMap) -> Response {
+    if !relay_request_origin_is_allowed(uri.path(), &headers) {
         return StatusCode::FORBIDDEN.into_response();
     }
     let mut response = StatusCode::NO_CONTENT.into_response();
-    let origin = format!("chrome-extension://{}", extension_id().unwrap_or_default());
+    let origin = headers
+        .get(header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_owned();
     let headers = response.headers_mut();
     if let Ok(value) = HeaderValue::from_str(&origin) {
         headers.insert("access-control-allow-origin", value);
@@ -827,6 +873,39 @@ pub async fn preflight(headers: HeaderMap) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn approval_requires_top_level_navigation_not_script_or_frame() {
+        for (mode, destination, allowed) in [
+            ("navigate", "document", true),
+            ("cors", "empty", false),
+            ("navigate", "iframe", false),
+            ("same-origin", "empty", false),
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert("sec-fetch-mode", HeaderValue::from_static(mode));
+            headers.insert("sec-fetch-dest", HeaderValue::from_static(destination));
+            assert_eq!(approval_navigation_is_allowed(&headers), allowed);
+        }
+        assert!(!approval_navigation_is_allowed(&HeaderMap::new()));
+    }
+
+    #[test]
+    fn requested_identity_only_accepts_exact_chrome_extension_origins() {
+        for (origin, allowed) in [
+            ("chrome-extension://abcdefghijklmnopabcdefghijklmnop", true),
+            ("https://abcdefghijklmnopabcdefghijklmnop", false),
+            (
+                "chrome-extension://abcdefghijklmnopabcdefghijklmnop.evil",
+                false,
+            ),
+            ("chrome-extension://short", false),
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::ORIGIN, HeaderValue::from_static(origin));
+            assert_eq!(requested_extension_id(&headers).is_some(), allowed);
+        }
+    }
 
     fn relay_state_with_token(token: Option<&str>) -> RelayState {
         let install_token_hash = token.map(|token| {
