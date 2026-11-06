@@ -33,7 +33,13 @@ $("pair").addEventListener("click", async () => {
     const response = await fetch(gateway + "/relay/v1/pair", {
       method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({code}), cache:"no-store"
     });
-    if (!response.ok) throw new Error("Pairing rejected (" + response.status + "). Check extension ID configuration and code expiry.");
+    if (!response.ok) {
+      const detail = await response.json().catch(() => ({}));
+      const code = detail?.error?.code;
+      if (response.status === 401) throw new Error("Pairing code expired, incorrect, or used. Run scripts/docker-run.sh pairing-code for a fresh 8-digit code (valid 10 minutes; maximum five attempts).");
+      if (response.status === 403 || code === "extension_origin_rejected") throw new Error("Extension ID mismatch. Set CHAT_GATEWAY_EXTENSION_ID to the ID shown at chrome://extensions and restart Docker.");
+      throw new Error("Pairing failed (HTTP " + response.status + "). Check gateway connection and Docker logs.");
+    }
     const data = await response.json();
     await chrome.storage.local.set({gateway,token:data.token,linkedProviders:[]});
     $("pairing").hidden = true; $("linked").hidden = false;
