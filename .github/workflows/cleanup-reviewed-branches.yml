@@ -111,8 +111,16 @@ jobs:
               } else {
                 throw new Error("Unreviewed cleanup candidate: " + candidate.name);
               }
-              await github.rest.git.deleteRef({
-                owner, repo, ref: "heads/" + candidate.name,
-              });
-              core.info("Deleted reviewed branch: " + candidate.name);
+              try {
+                await github.rest.git.deleteRef({
+                  owner, repo, ref: "heads/" + candidate.name,
+                });
+                core.info("Deleted reviewed branch: " + candidate.name);
+              } catch (error) {
+                if (error.status === 404) {
+                  core.info("Already deleted by concurrent cleanup: " + candidate.name);
+                  continue;
+                }
+                throw error;
+              }
             }
