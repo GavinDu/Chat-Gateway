@@ -5,7 +5,11 @@ const path = require("node:path");
 const vm = require("node:vm");
 
 function loadWorker({failDelete = false} = {}) {
-  const values = {linkedProviders:["metaai"]};
+  const values = {
+    gateway:"http://127.0.0.1:8080",
+    token:"install-old",
+    linkedProviders:["metaai"]
+  };
   const calls = [];
   const listeners = {};
   let releaseSync;
@@ -36,7 +40,10 @@ function loadWorker({failDelete = false} = {}) {
       startedSync();
       await gate;
     },
-    async relayFetch(url, args) {
+    async relayFetch(url, args, expected) {
+      if (expected && (expected.gateway !== values.gateway || expected.token !== values.token)) {
+        throw new Error("Gateway connection changed during provider logout.");
+      }
       calls.push(args.method + " " + url);
       return {ok: !failDelete, status:failDelete?500:200};
     },
@@ -77,4 +84,24 @@ test("failed vault deletion never silently re-enables background sync", async ()
   assert.equal(result.ok,false);
   assert.match(result.error,/logout failed/);
   assert.deepEqual(Array.from(worker.values.linkedProviders),[]);
+});
+
+test("queued logout cannot revoke a different gateway after re-pair", async () => {
+  const worker = loadWorker();
+  const syncing = worker.send({type:"sync-provider",provider:"metaai"});
+  await worker.started;
+  const loggingOut = worker.send({type:"logout-provider",provider:"metaai"});
+  // The logout captures the original connection at message receipt, but its
+  // work cannot execute until the preceding provider sync completes.
+  await Promise.resolve();
+  worker.values.gateway = "https://new-gateway.example";
+  worker.values.token = "install-new";
+  worker.values.linkedProviders = ["metaai"];
+  worker.releaseSync();
+  assert.equal((await syncing).ok, true);
+  const result = await loggingOut;
+  assert.equal(result.ok, false);
+  assert.match(result.error, /Gateway connection changed/);
+  assert.deepEqual(worker.calls, ["sync metaai"]);
+  assert.deepEqual(worker.values.linkedProviders, ["metaai"]);
 });
