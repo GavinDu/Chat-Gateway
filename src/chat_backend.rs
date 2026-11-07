@@ -427,26 +427,71 @@ mod tests {
 
     #[tokio::test]
     async fn typed_errors_render_safe_openai_envelopes_with_expected_statuses() {
-        use axum::{body::to_bytes, http::{header, StatusCode}, response::IntoResponse};
+        use axum::{
+            body::to_bytes,
+            http::{header, StatusCode},
+            response::IntoResponse,
+        };
 
         let cases = [
-            (GatewayErrorKind::InvalidRequest, StatusCode::BAD_REQUEST, "invalid_request"),
-            (GatewayErrorKind::ModelNotFound, StatusCode::NOT_FOUND, "model_not_found"),
-            (GatewayErrorKind::ProviderBusy, StatusCode::TOO_MANY_REQUESTS, "provider_busy"),
-            (GatewayErrorKind::SessionExpired, StatusCode::UNAUTHORIZED, "provider_session_expired"),
-            (GatewayErrorKind::Challenge, StatusCode::FORBIDDEN, "provider_challenge"),
-            (GatewayErrorKind::Timeout, StatusCode::GATEWAY_TIMEOUT, "provider_timeout"),
-            (GatewayErrorKind::Memory, StatusCode::INTERNAL_SERVER_ERROR, "memory_error"),
-            (GatewayErrorKind::ProviderFailure, StatusCode::BAD_GATEWAY, "provider_unavailable"),
-            (GatewayErrorKind::BackendUnavailable, StatusCode::BAD_GATEWAY, "provider_unavailable"),
+            (
+                GatewayErrorKind::InvalidRequest,
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+            ),
+            (
+                GatewayErrorKind::ModelNotFound,
+                StatusCode::NOT_FOUND,
+                "model_not_found",
+            ),
+            (
+                GatewayErrorKind::ProviderBusy,
+                StatusCode::TOO_MANY_REQUESTS,
+                "provider_busy",
+            ),
+            (
+                GatewayErrorKind::SessionExpired,
+                StatusCode::UNAUTHORIZED,
+                "provider_session_expired",
+            ),
+            (
+                GatewayErrorKind::Challenge,
+                StatusCode::FORBIDDEN,
+                "provider_challenge",
+            ),
+            (
+                GatewayErrorKind::Timeout,
+                StatusCode::GATEWAY_TIMEOUT,
+                "provider_timeout",
+            ),
+            (
+                GatewayErrorKind::Memory,
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "memory_error",
+            ),
+            (
+                GatewayErrorKind::ProviderFailure,
+                StatusCode::BAD_GATEWAY,
+                "provider_unavailable",
+            ),
+            (
+                GatewayErrorKind::BackendUnavailable,
+                StatusCode::BAD_GATEWAY,
+                "provider_unavailable",
+            ),
         ];
         for (kind, expected_status, expected_code) in cases {
             let response = GatewayError::typed(
                 kind,
                 "sensitive: cookie=account-session; bearer=private-token",
                 true,
-            ).into_response();
-            assert_eq!(response.status(), expected_status, "wrong status for {kind:?}");
+            )
+            .into_response();
+            assert_eq!(
+                response.status(),
+                expected_status,
+                "wrong status for {kind:?}"
+            );
             assert_eq!(
                 response.headers().get(header::RETRY_AFTER).is_some(),
                 kind == GatewayErrorKind::ProviderBusy,
