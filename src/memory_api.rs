@@ -148,6 +148,40 @@ pub(crate) async fn export_long_term_memory_items(
     }
 }
 
+/// Preserve the API's stable error contract without classifying arbitrary
+/// SQLite/task error messages by substring (which could mislabel a 500 as 4xx).
+fn memory_save_error_response(error: anyhow::Error) -> Response {
+    match error.downcast_ref::<memory::LongTermMemoryWriteError>() {
+        Some(memory::LongTermMemoryWriteError::Disabled) => api_error(
+            StatusCode::CONFLICT,
+            "invalid_request_error",
+            "long_term_memory_disabled",
+            "enable long-term memory before saving items",
+        ),
+        Some(memory::LongTermMemoryWriteError::InvalidItem) => api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            "invalid_memory_item",
+            "memory key, value, or confidence is invalid",
+        ),
+        Some(memory::LongTermMemoryWriteError::InvalidProvenance) => api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            "invalid_memory_provenance",
+            "source conversation must belong to this API key",
+        ),
+        None => {
+            tracing::error!(%error, "long-term memory item save failed");
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                "memory_write_failed",
+                "memory item could not be saved safely",
+            )
+        }
+    }
+}
+
 pub(crate) async fn save_long_term_memory_item(
     State(state): State<Arc<AppState>>,
     auth_context: Option<Extension<AuthKeyContext>>,
@@ -173,33 +207,7 @@ pub(crate) async fn save_long_term_memory_item(
         .await
     {
         Ok(item) => (StatusCode::OK, Json(item)).into_response(),
-        Err(error) if error.to_string().contains("disabled") => api_error(
-            StatusCode::CONFLICT,
-            "invalid_request_error",
-            "long_term_memory_disabled",
-            "enable long-term memory before saving items",
-        ),
-        Err(error) if error.to_string().contains("invalid long-term memory item") => api_error(
-            StatusCode::BAD_REQUEST,
-            "invalid_request_error",
-            "invalid_memory_item",
-            "memory key, value, or confidence is invalid",
-        ),
-        Err(error) if error.to_string().contains("source conversation") => api_error(
-            StatusCode::BAD_REQUEST,
-            "invalid_request_error",
-            "invalid_memory_provenance",
-            "source conversation must belong to this API key",
-        ),
-        Err(error) => {
-            tracing::error!(%error, "long-term memory item save failed");
-            api_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "server_error",
-                "memory_write_failed",
-                "memory item could not be saved safely",
-            )
-        }
+        Err(error) => memory_save_error_response(error),
     }
 }
 
