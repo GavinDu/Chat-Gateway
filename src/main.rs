@@ -267,8 +267,12 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let (relay_state, _legacy_pairing_code) = relay::RelayState::new()?;
-    println!("Browser relay: connect from the extension and approve locally.");
+    let (relay_state, legacy_pairing_code) = relay::RelayState::new()?;
+    if remote_gateway_origin()?.is_some() {
+        println!("Private remote relay pairing code (single use, expires in 10 minutes): {legacy_pairing_code}");
+    } else {
+        println!("Browser relay: connect from the extension and approve locally.");
+    }
     let state = Arc::new(AppState {
         cfg: cfg.clone(),
         pool: pool.clone(),

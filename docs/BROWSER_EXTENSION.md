@@ -19,6 +19,8 @@ The default popup gateway URL is `http://127.0.0.1:8080`; adjust it if the confi
 
 ## Optional private HTTPS gateway (remote mode)
 
+Local one-click approval is not exposed remotely. Explicit private HTTPS deployments retain their pinned extension ID and legacy code entry. Obtain the short-lived remote pairing code from the private gateway startup log; restart the remote gateway to issue a new code if it expires. Local gateways use approval and do not print a code at startup.
+
 Remote mode is opt-in and is intended only for a private deployment behind a trusted TLS-terminating edge. It is not enabled by setting a public bind address alone.
 
 Set these Replit/deployment environment values:
