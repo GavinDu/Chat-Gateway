@@ -26,6 +26,7 @@ pub struct CollectedResponse {
 /// A channel closing without an explicit terminal event is never success.
 /// Keep this constant shared by JSON and SSE consumers.
 pub const INCOMPLETE_PROVIDER_STREAM: &str = "provider stream closed before terminal completion";
+pub const EMPTY_PROVIDER_RESPONSE: &str = "provider completed without response content";
 
 /// The event reducer is shared by SSE and JSON responses. Persistence is
 /// permitted only after `Complete`; a partial response is never committed.
@@ -93,8 +94,16 @@ impl ResponseAccumulator {
     /// Finalize after an explicit done/error or a closed channel. Missing
     /// terminal events are errors even if content has already been emitted.
     pub fn finish(mut self) -> CollectedResponse {
-        if !self.saw_done && self.collected.error.is_none() {
-            self.collected.error = Some(GatewayError::provider_failure(INCOMPLETE_PROVIDER_STREAM));
+        if self.collected.error.is_none() {
+            if !self.saw_done {
+                self.collected.error =
+                    Some(GatewayError::provider_failure(INCOMPLETE_PROVIDER_STREAM));
+            } else if self.collected.content.is_empty() {
+                // Streaming already rejects an empty completion at first-event
+                // admission. JSON must not persist that same empty response.
+                self.collected.error =
+                    Some(GatewayError::provider_failure(EMPTY_PROVIDER_RESPONSE));
+            }
         }
         self.collected
     }
@@ -239,6 +248,11 @@ mod tests {
 
         let collected = service.collect(rx, std::time::Instant::now()).await;
         assert!(collected.content.is_empty());
+        assert_eq!(
+            collected.error.unwrap().message,
+            super::EMPTY_PROVIDER_RESPONSE,
+            "an empty terminal event must not commit a successful JSON turn"
+        );
         assert!(
             collected.first_event_elapsed.is_none(),
             "empty heartbeat events must not be reported as TTFT"
