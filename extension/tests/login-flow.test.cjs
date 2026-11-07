@@ -70,8 +70,8 @@ function fixture({connected = false, linked = false, cookies = true} = {}) {
       }
       throw new Error("Unexpected relay request " + uri);
     },
-    fetch:async url=>{
-      network.push({uri:url,method:"POST"});
+    fetch:async (url,opts)=>{
+      network.push({uri:url,method:"POST",redirect:opts.redirect});
       return {ok:true,json:async()=>({request_id:"a".repeat(64),poll_secret:"b".repeat(64)})};
     },
   };
@@ -94,7 +94,9 @@ test("Connect opens approval and reuses the pending request after popup reopen",
   assert.equal(f.nodes.get("pairing").hidden,false);
   await f.nodes.get("pair").click();
   await f.nodes.get("pair").click();
-  assert.equal(f.network.filter(call => call.uri.endsWith("/relay/v1/connect/request")).length,1);
+  const pairing = f.network.filter(call => call.uri.endsWith("/relay/v1/connect/request"));
+  assert.equal(pairing.length,1);
+  assert.equal(pairing[0].redirect,"error");
   assert.equal(f.openedTabs.length,2);
   assert.equal(f.openedTabs[0],"http://127.0.0.1:8080/relay/approve/" + "a".repeat(64));
   assert.equal(f.values.token,undefined);
