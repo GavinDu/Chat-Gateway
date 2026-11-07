@@ -1158,6 +1158,23 @@ async fn authenticate_api_key(
     if embedded_login::uses_separate_authorization(req.method(), req.uri().path()) {
         return next.run(req).await;
     }
+    // An intermediary may select a different value when Authorization is
+    // repeated. Never authenticate against an ambiguous header set, even
+    // when both values happen to be identical.
+    if req
+        .headers()
+        .get_all(axum::http::header::AUTHORIZATION)
+        .iter()
+        .count()
+        > 1
+    {
+        return api_error(
+            StatusCode::UNAUTHORIZED,
+            "authentication_error",
+            "invalid_api_key",
+            "exactly one Bearer API key header is permitted",
+        );
+    }
     let authorization = req
         .headers()
         .get(axum::http::header::AUTHORIZATION)
@@ -1210,6 +1227,47 @@ async fn authenticate_api_key(
 mod embedded_owner_auth_tests {
     use super::*;
     use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn duplicate_api_authorization_is_rejected_before_auth_policy() {
+        let app = Router::new()
+            .route("/health", get(|| async { "ok" }))
+            .layer(middleware::from_fn_with_state(
+                config::AuthConfig::default(),
+                authenticate_api_key,
+            ));
+
+        let mut ambiguous = Request::builder()
+            .uri("/health")
+            .body(Body::empty())
+            .unwrap();
+        ambiguous.headers_mut().append(
+            header::AUTHORIZATION,
+            axum::http::HeaderValue::from_static("Bearer synthetic-token"),
+        );
+        ambiguous.headers_mut().append(
+            header::AUTHORIZATION,
+            axum::http::HeaderValue::from_static("Bearer synthetic-token"),
+        );
+        assert_eq!(
+            app.clone().oneshot(ambiguous).await.unwrap().status(),
+            StatusCode::UNAUTHORIZED,
+        );
+
+        // No other authentication behavior changes for a single header.
+        let mut unambiguous = Request::builder()
+            .uri("/health")
+            .body(Body::empty())
+            .unwrap();
+        unambiguous.headers_mut().insert(
+            header::AUTHORIZATION,
+            axum::http::HeaderValue::from_static("Bearer synthetic-token"),
+        );
+        assert_eq!(
+            app.oneshot(unambiguous).await.unwrap().status(),
+            StatusCode::OK,
+        );
+    }
 
     #[tokio::test]
     async fn anonymous_mode_cannot_control_either_login_backend() {
