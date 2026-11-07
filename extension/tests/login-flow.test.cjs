@@ -176,3 +176,47 @@ test("Sync session stays in the extension without opening a new tab", async () =
   assert.equal(f.openedTabs.length,0);
   assert.equal(f.messages.filter(x=>x.type==="sync-provider").length,1);
 });
+
+test("pending provider cookie read cannot restore consent after gateway disconnect", async () => {
+  const f = fixture({connected:true,linked:false,cookies:true});
+  await settle();
+  let release;
+  const gate = new Promise(resolve => { release=resolve; });
+  let snapshotStarted;
+  const started = new Promise(resolve => { snapshotStarted=resolve; });
+  f.context.providerCookieSnapshot = async () => {
+    snapshotStarted();
+    await gate;
+    return {cookies:[{name:"session",value:"fixture-only"}]};
+  };
+  const pending = f.context.connectProviderForTest("metaai");
+  await started;
+  await f.context.chrome.storage.local.remove(["token","linkedProviders"]);
+  release();
+  await assert.rejects(pending,/Gateway connection changed/);
+  assert.equal(f.values.linkedProviders,undefined);
+  assert.equal(f.messages.filter(m=>m.type==="sync-provider").length,0);
+});
+
+test("pending provider consent never carries over to a different gateway install", async () => {
+  const f = fixture({connected:true,linked:false,cookies:true});
+  await settle();
+  let release;
+  const gate = new Promise(resolve => { release=resolve; });
+  let snapshotStarted;
+  const started = new Promise(resolve => { snapshotStarted=resolve; });
+  f.context.providerCookieSnapshot = async () => {
+    snapshotStarted();
+    await gate;
+    return {cookies:[{name:"session",value:"fixture-only"}]};
+  };
+  const pending = f.context.connectProviderForTest("metaai");
+  await started;
+  f.values.gateway = "https://other.example";
+  f.values.token = "d".repeat(64);
+  f.values.linkedProviders = ["claude"];
+  release();
+  await assert.rejects(pending,/Gateway connection changed/);
+  assert.deepEqual(Array.from(f.values.linkedProviders),["claude"]);
+  assert.equal(f.messages.filter(m=>m.type==="sync-provider").length,0);
+});

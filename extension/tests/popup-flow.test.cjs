@@ -85,6 +85,7 @@ test("Connect to gateway opens local approval page automatically",async()=>{
 
 test("connected dashboard exposes login and small logout, then allows reconnection",async()=>{
   const popup=loadPopup();
+  popup.values.token="c".repeat(64);
   await popup.controls.refreshStatus();
   let row=popup.elements.get("status").children[0];
   let buttons=row.children.find(n=>n.className==="provider-actions").children;

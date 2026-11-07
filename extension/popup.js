@@ -210,12 +210,21 @@ $("pair").addEventListener("click", async () => {
 async function connectProvider(provider, openLogin = false) {
   const domains = PROVIDERS[provider];
   if (!domains) throw new Error("Unsupported provider.");
+  // Pairing may be revoked or replaced while Chrome's permission prompt or
+  // browser cookie read is pending. Consent must belong to the exact install.
+  const connection = await chrome.storage.local.get(["gateway", "token"]);
+  if (!connection.gateway || !connection.token) {
+    throw new Error("Connect to gateway before linking a provider.");
+  }
   const patterns = domains.flatMap(domain => ["https://" + domain + "/*", "https://*." + domain + "/*"]);
   if (!await chrome.permissions.request({origins:patterns})) {
     throw new Error("Provider permissions were not granted.");
   }
   const snapshot = await providerCookieSnapshot(provider);
-  const stored = await chrome.storage.local.get(["linkedProviders"]);
+  const stored = await chrome.storage.local.get(["gateway", "token", "linkedProviders"]);
+  if (stored.gateway !== connection.gateway || stored.token !== connection.token) {
+    throw new Error("Gateway connection changed while linking the provider. Reconnect and retry.");
+  }
   const prior = stored.linkedProviders || [];
   await chrome.storage.local.set({linkedProviders:Array.from(new Set([...prior,provider]))});
   if (snapshot.cookies.length === 0) {
