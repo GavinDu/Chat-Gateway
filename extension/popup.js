@@ -72,9 +72,16 @@ async function refreshStatus() {
     let browser = "Browser permission not granted";
     const domains = PROVIDERS[item.provider] || [];
     const origins = domains.flatMap(domain => ["https://" + domain + "/*", "https://*." + domain + "/*"]);
-    if (origins.length && await chrome.permissions.contains({origins})) {
-      const present = await Promise.all(domains.map(domain => chrome.cookies.getAll({domain})));
-      browser = present.some(cookies => cookies.length > 0) ? "Browser cookies present" : "No browser cookies";
+    // Chrome can revoke a provider's permission or fail a cookie read while
+    // another provider is healthy. Keep the dashboard usable and fail closed
+    // for only the affected provider; do not lose all login/logout controls.
+    try {
+      if (origins.length && await chrome.permissions.contains({origins})) {
+        const present = await Promise.all(domains.map(domain => chrome.cookies.getAll({domain})));
+        browser = present.some(cookies => cookies.length > 0) ? "Browser cookies present" : "No browser cookies";
+      }
+    } catch {
+      browser = "Browser cookie check unavailable";
     }
     const auth = item.authentication === "verified" ? "Login verified"
       : item.authentication === "needs_login" ? "Login needed"
