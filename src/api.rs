@@ -176,7 +176,10 @@ mod wire_chat_message_contract_tests {
             ("tool_call_id", serde_json::json!("call_123")),
             ("name", serde_json::json!("tool_name")),
             ("refusal", serde_json::json!("no")),
-            ("function_call", serde_json::json!({"name": "go", "arguments": "{}"})),
+            (
+                "function_call",
+                serde_json::json!({"name": "go", "arguments": "{}"}),
+            ),
             ("audio", serde_json::json!({"id": "a"})),
         ] {
             let mut request = serde_json::json!({
