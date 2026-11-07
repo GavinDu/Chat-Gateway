@@ -19,11 +19,11 @@ fn prepare_chat_request(
     headers: &HeaderMap,
     auth_context: Option<&Extension<AuthKeyContext>>,
     body: Result<axum::body::Bytes, axum::extract::rejection::BytesRejection>,
-) -> Result<PreparedChatRequest, Response> {
+) -> Result<PreparedChatRequest, Box<Response>> {
     // Bytes extraction happens before the handler; preserve the structured
     // OpenAI error envelope on oversized payloads.
-    let body = body.map_err(|_| oversized_chat_body_error())?;
-    let req = parse_and_validate_chat_req(&body)?;
+    let body = body.map_err(|_| Box::new(oversized_chat_body_error()))?;
+    let req = parse_and_validate_chat_req(&body).map_err(Box::new)?;
     let owner_key_id = auth_context
         .map(|Extension(context)| context.key_id.as_str())
         .unwrap_or("local")
@@ -32,20 +32,20 @@ fn prepare_chat_request(
         None => None,
         Some(value) => {
             let value = value.to_str().map_err(|_| {
-                api_error(
+                Box::new(api_error(
                     StatusCode::BAD_REQUEST,
                     "invalid_request_error",
                     "invalid_conversation_id",
                     "X-Conversation-Id must be a valid ASCII identifier",
-                )
+                ))
             })?;
             if !valid_conversation_id(value) {
-                return Err(api_error(
+                return Err(Box::new(api_error(
                     StatusCode::BAD_REQUEST,
                     "invalid_request_error",
                     "invalid_conversation_id",
                     "X-Conversation-Id must be 8-128 ASCII letters, digits, '_' or '-'",
-                ));
+                )));
             }
             Some(value.to_owned())
         }
@@ -139,7 +139,7 @@ pub(super) async fn run(
         conversation_id,
     } = match prepare_chat_request(&headers, auth_context.as_ref(), body) {
         Ok(prepared) => prepared,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
 
     let memory_egress_policy = match memory_egress::MemoryEgressPolicy::from_env() {
