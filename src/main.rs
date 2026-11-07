@@ -2373,23 +2373,27 @@ async fn chat_completions(
             continue;
         }
 
+        let provider_started = Instant::now();
         let mut rx = match state
             .chat_service
-            .stream(BackendRequest {
-                provider: match ProviderId::new(provider_name.clone()) {
-                    Some(provider) => provider,
-                    None => {
-                        last_err = Some(
-                            "provider router returned an invalid provider identifier".to_owned(),
-                        );
-                        continue;
-                    }
+            .stream_with_timeout(
+                BackendRequest {
+                    provider: match ProviderId::new(provider_name.clone()) {
+                        Some(provider) => provider,
+                        None => {
+                            last_err = Some(
+                                "provider router returned an invalid provider identifier".to_owned(),
+                            );
+                            continue;
+                        }
+                    },
+                    prompt: provider_prompt.clone(),
+                    model: provider_model.clone(),
+                    has_history: has_history && thread_url.is_some(),
+                    thread_url,
                 },
-                prompt: provider_prompt.clone(),
-                model: provider_model.clone(),
-                has_history: has_history && thread_url.is_some(),
-                thread_url,
-            })
+                std::time::Duration::from_secs(provider_cfg.timeout_seconds),
+            )
             .await
         {
             Ok(rx) => rx,
@@ -2407,21 +2411,23 @@ async fn chat_completions(
                         .provider_sessions
                         .record_error(&provider_name, &e.to_string());
                 }
+                state.metrics.record_provider_timings(
+                    &provider_name,
+                    "error",
+                    queue_ms,
+                    None,
+                    provider_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+                    request_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+                );
                 last_err = Some(e.to_string());
                 continue;
             }
         };
-        let provider_started = Instant::now();
 
         let mut first_stream_chunk: Option<chat_backend::ChatEvent> = None;
         if req.stream {
-            let first_chunk_timeout = std::time::Duration::from_secs(
-                state
-                    .cfg
-                    .provider(&provider_name)
-                    .map(|provider| provider.timeout_seconds)
-                    .unwrap_or(120),
-            );
+            let first_chunk_timeout = std::time::Duration::from_secs(provider_cfg.timeout_seconds)
+                .saturating_sub(provider_started.elapsed());
             let first = match first_event(&mut rx, first_chunk_timeout).await {
                 FirstEvent::Chunk(chunk) => chunk,
                 FirstEvent::EmptyCompletion => {
