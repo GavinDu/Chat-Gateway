@@ -52,7 +52,7 @@ use config::AppConfig;
 use context::{ContextBuilder, ContextPlan, ThreadSyncState};
 use memory::{ChatMessage, ConversationStore, LongTermMemoryStore, ProviderThread, UnifiedMemory};
 use request_security::{
-    is_loopback_authority, login_origin_is_same_authority, remote_gateway_origin,
+    local_request_authority_is_safe, login_origin_is_same_authority, remote_gateway_origin,
     remote_request_is_allowed, validate_remote_gateway_config, RemoteProxyTrust,
 };
 use router::ProviderRouter;
@@ -491,10 +491,7 @@ async fn protect_login_api_for_origin(
                 is_relay_api && relay::relay_request_origin_is_allowed(path, headers),
             )
     } else {
-        headers
-            .get(axum::http::header::HOST)
-            .and_then(|value| value.to_str().ok())
-            .is_some_and(is_loopback_authority)
+        local_request_authority_is_safe(headers)
     };
 
     if !authority_is_safe
@@ -1553,11 +1550,32 @@ fn is_reopenable_provider_thread_url(provider: &str, value: &str) -> bool {
         return false;
     };
     let location = format!("/{location}");
+    // A generic prefix like /c/ is not a remote conversation identity.
+    // Treat only an exact, nonempty ID segment as safely reopenable; a URL
+    // without an ID may redirect back into another warm provider thread.
+    let path = location
+        .split(['?', '#'])
+        .next()
+        .unwrap_or_default()
+        .trim_end_matches('/');
+    let has_thread_id = |prefix: &str| {
+        path.strip_prefix(prefix)
+            .is_some_and(|id| !id.is_empty() && !id.contains('/'))
+    };
     match provider {
         "chatgpt" => {
-            location.starts_with("/c/") || (location.starts_with("/g/") && location.contains("/c/"))
+            has_thread_id("/c/")
+                || path
+                    .strip_prefix("/g/")
+                    .and_then(|path| path.split_once("/c/"))
+                    .is_some_and(|(gpt, thread)| {
+                        !gpt.is_empty()
+                            && !gpt.contains('/')
+                            && !thread.is_empty()
+                            && !thread.contains('/')
+                    })
         }
-        "claude" => location.starts_with("/chat/") && location.len() > "/chat/".len(),
+        "claude" => has_thread_id("/chat/"),
         "gemini" => location.starts_with("/app/") && location.len() > "/app/".len(),
         "grok" => {
             location.starts_with("/c/")
@@ -2509,8 +2527,12 @@ async fn chat_completions(
                     Some(item) => Some(item),
                     None => rx.recv().await,
                 } {
-                    match accumulator.push(item) {
-                        chat_service::StreamUpdate::Delta(content) => {
+                    let update = accumulator.push(item);
+                    let done_after_delta =
+                        matches!(&update, chat_service::StreamUpdate::CompleteWithDelta(_));
+                    match update {
+                        chat_service::StreamUpdate::Delta(content)
+                        | chat_service::StreamUpdate::CompleteWithDelta(content) => {
                             let data = serde_json::json!({
                                 "id": format!("chatcmpl-{}", &conv_stream[..8]),
                                 "object": "chat.completion.chunk",
@@ -2519,6 +2541,9 @@ async fn chat_completions(
                                 "choices": [{ "delta": { "content": content }, "index": 0, "finish_reason": null }],
                             });
                             yield Ok::<_, anyhow::Error>(Event::default().data(data.to_string()));
+                            if done_after_delta {
+                                break;
+                            }
                         }
                         chat_service::StreamUpdate::Complete => break,
                         chat_service::StreamUpdate::Failed => {
@@ -3799,6 +3824,37 @@ mod login_security_middleware_http_tests {
     }
 
     #[tokio::test]
+    async fn rejects_duplicate_local_host_and_origin_at_real_http_boundary() {
+        let duplicate_host = request(
+            "/login/api/status",
+            &[
+                ("host", "127.0.0.1:8080"),
+                ("host", "attacker.example:8080"),
+            ],
+        )
+        .await;
+        assert_eq!(duplicate_host.status(), StatusCode::FORBIDDEN);
+
+        let duplicate_origin = request(
+            "/login/api/status",
+            &[
+                ("host", "127.0.0.1:8080"),
+                ("origin", "http://127.0.0.1:8080"),
+                ("origin", "https://attacker.example"),
+            ],
+        )
+        .await;
+        assert_eq!(duplicate_origin.status(), StatusCode::FORBIDDEN);
+
+        let same_host_twice = request(
+            "/health",
+            &[("host", "localhost:8080"), ("host", "localhost:8080")],
+        )
+        .await;
+        assert_eq!(same_host_twice.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
     async fn allows_matching_loopback_origin_and_originless_local_clients() {
         let matching = request(
             "/login/api/status",
@@ -4202,7 +4258,10 @@ mod provider_thread_url_tests {
     fn reopenable_thread_urls_match_the_supported_provider_paths() {
         let supported = [
             ("chatgpt", "https://chatgpt.com/c/123"),
+            ("chatgpt", "https://chatgpt.com/c/123/?model=default"),
+            ("chatgpt", "https://chatgpt.com/g/g-123/c/thread-456"),
             ("claude", "https://claude.ai/chat/123"),
+            ("claude", "https://claude.ai/chat/123?source=sidebar"),
         ];
         for (provider, url) in supported {
             assert!(
@@ -4232,6 +4291,16 @@ mod provider_thread_url_tests {
             ("perplexity", "https://perplexity.ai/"),
             ("chatgpt", "https://chatgpt.com.attacker.invalid/c/123"),
             ("claude", "https://attacker.invalid/chat/123"),
+            ("chatgpt", "https://chatgpt.com/c/"),
+            ("chatgpt", "https://chatgpt.com/c/?source=sidebar"),
+            ("chatgpt", "https://chatgpt.com/c/#fragment"),
+            ("chatgpt", "https://chatgpt.com/c/123/extra"),
+            ("chatgpt", "https://chatgpt.com/g/g-123/c/"),
+            ("chatgpt", "https://chatgpt.com/g//c/thread-123"),
+            ("chatgpt", "https://chatgpt.com/g/g-123/c/thread-123/extra"),
+            ("claude", "https://claude.ai/chat/"),
+            ("claude", "https://claude.ai/chat/?source=sidebar"),
+            ("claude", "https://claude.ai/chat/123/extra"),
         ];
         for (provider, url) in invalid {
             assert!(
@@ -4251,7 +4320,7 @@ mod initial_stream_chunk_tests {
         assert!(usable_initial_stream_chunk("first token", false));
         assert!(!usable_initial_stream_chunk("", false));
         assert!(!usable_initial_stream_chunk("", true));
-        assert!(!usable_initial_stream_chunk("content marked done", true));
+        assert!(usable_initial_stream_chunk("content marked done", true));
     }
 }
 
@@ -4517,5 +4586,480 @@ mod gateway_completion_outcome_tests {
         assert_eq!(completed_chat_outcome(true, false), "error");
         assert_eq!(completed_chat_outcome(false, true), "error");
         assert_eq!(completed_chat_outcome(true, true), "error");
+    }
+}
+
+#[cfg(test)]
+mod real_chat_router_scripted_backend_tests {
+    use super::*;
+    use crate::chat_backend::{
+        test_support::{ScriptedBackend, ScriptedSend},
+        ChatEvent, GatewayError,
+    };
+    use axum::body::to_bytes;
+    use tower::ServiceExt;
+
+    fn configured_provider(name: &str, priority: u32) -> config::ProviderConfig {
+        config::ProviderConfig {
+            name: name.to_owned(),
+            enabled: true,
+            priority,
+            timeout_seconds: 1,
+            completion_idle_ms: 15_000,
+            queue_timeout_seconds: 1,
+            session_pool_size: 1,
+            min_request_interval_ms: 1,
+            daily_request_cap: 100,
+            models: vec!["fake-model".to_owned()],
+        }
+    }
+
+    fn fixture(
+        providers: &[&str],
+        scripted: Vec<ScriptedSend>,
+        allowed: Option<Vec<String>>,
+    ) -> (Router, Arc<AppState>) {
+        let (app, state, _) = fixture_with_backend(providers, scripted, allowed);
+        (app, state)
+    }
+
+    fn fixture_with_backend(
+        providers: &[&str],
+        scripted: Vec<ScriptedSend>,
+        allowed: Option<Vec<String>>,
+    ) -> (Router, Arc<AppState>, Arc<ScriptedBackend>) {
+        let cfg = Arc::new(AppConfig {
+            server: config::ServerConfig::default(),
+            memory: config::MemoryConfig::default(),
+            obscura: config::ObscuraConfig::default(),
+            auth: config::AuthConfig::default(),
+            providers: providers
+                .iter()
+                .enumerate()
+                .map(|(index, provider)| configured_provider(provider, index as u32))
+                .collect(),
+        });
+        let pool = ObscuraPool::for_scripted_backend_tests(cfg.clone());
+        let (relay, _) = relay::RelayState::new().unwrap();
+        let backend = Arc::new(ScriptedBackend::new(scripted));
+        let state = Arc::new(AppState {
+            cfg: cfg.clone(),
+            pool: pool.clone(),
+            chat_service: ChatService::new(backend.clone()),
+            memory: Arc::new(UnifiedMemory::new(8_000)),
+            router: ProviderRouter::new(cfg),
+            models_cache: Arc::new(RwLock::new(HashMap::new())),
+            relay: Arc::new(relay),
+            provider_guard: pool.provider_guard(),
+            provider_sessions: pool.provider_sessions(),
+            metrics: pool.metrics(),
+        });
+        // Use the same handler and State extraction as production: no copied
+        // validation_endpoint or fake HTTP handler implementation.
+        let mut app = Router::new()
+            .route("/v1/chat/completions", post(chat_completions))
+            .with_state(state.clone())
+            .layer(DefaultBodyLimit::max(1024 * 1024));
+        if let Some(provider_allowlist) = allowed {
+            app = app.layer(Extension(AuthKeyContext {
+                key_id: "local".to_owned(),
+                provider_allowlist: Some(provider_allowlist),
+            }));
+        }
+        (app, state, backend)
+    }
+
+    fn response_events(content: &str) -> ScriptedSend {
+        ScriptedSend::Events(vec![
+            Ok(ChatEvent {
+                content: content.to_owned(),
+                done: false,
+            }),
+            Ok(ChatEvent {
+                content: String::new(),
+                done: true,
+            }),
+        ])
+    }
+
+    async fn send(app: Router, stream: bool, model: &str, conversation: &str) -> Response {
+        send_prompt(app, stream, model, conversation, "synthetic prompt").await
+    }
+
+    async fn send_prompt(
+        app: Router,
+        stream: bool,
+        model: &str,
+        conversation: &str,
+        prompt: &str,
+    ) -> Response {
+        app.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("X-Conversation-Id", conversation)
+                .body(Body::from(
+                    serde_json::json!({
+                        "model": model,
+                        "stream": stream,
+                        "messages": [{"role":"user","content":prompt}]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn real_router_json_success_commits_one_canonical_turn() {
+        let (app, state) = fixture(
+            &["chatgpt"],
+            vec![response_events("synthetic answer")],
+            None,
+        );
+        let response = send(app, false, "chatgpt/fake-model", "router_json_001").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["X-Gateway-Provider"], "chatgpt");
+        let body = to_bytes(response.into_body(), 65_536).await.unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            payload["choices"][0]["message"]["content"],
+            "synthetic answer"
+        );
+        let messages = state
+            .memory
+            .conversation_messages_for_owner("local", "router_json_001")
+            .unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].content, "synthetic prompt");
+        assert_eq!(messages[1].content, "synthetic answer");
+    }
+
+    #[tokio::test]
+    async fn real_router_fails_over_on_backend_admission_error_before_output() {
+        let (app, state) = fixture(
+            &["chatgpt", "claude"],
+            vec![
+                ScriptedSend::Reject(GatewayError::provider_failure(
+                    "synthetic backend admission rejection",
+                )),
+                response_events("answer from second provider"),
+            ],
+            None,
+        );
+        let response = send(app, false, "auto", "router_retry_001").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["X-Gateway-Provider"], "claude");
+        assert_eq!(
+            state
+                .memory
+                .conversation_messages_for_owner("local", "router_retry_001")
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn real_router_partial_json_error_never_commits_transcript() {
+        let (app, state) = fixture(
+            &["chatgpt"],
+            vec![ScriptedSend::Events(vec![
+                Ok(ChatEvent {
+                    content: "partial private answer".to_owned(),
+                    done: false,
+                }),
+                Err(GatewayError::provider_failure("synthetic provider error")),
+            ])],
+            None,
+        );
+        let response = send(app, false, "chatgpt/fake-model", "router_partial_json_001").await;
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let body = to_bytes(response.into_body(), 65_536).await.unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["error"]["code"], "partial_response");
+        assert!(!String::from_utf8_lossy(&body).contains("partial private answer"));
+        assert!(state
+            .memory
+            .conversation_messages_for_owner("local", "router_partial_json_001")
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn real_router_stream_has_role_delta_done_and_durable_turn() {
+        let (app, state) = fixture(&["chatgpt"], vec![response_events("stream answer")], None);
+        let response = send(app, true, "chatgpt/fake-model", "router_stream_001").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["content-type"], "text/event-stream");
+        let body = to_bytes(response.into_body(), 65_536).await.unwrap();
+        let content = String::from_utf8(body.to_vec()).unwrap();
+        assert!(content.contains(r#""role":"assistant""#));
+        assert!(content.contains(r#""content":"stream answer""#));
+        assert!(content.contains("data: [DONE]"));
+        assert_eq!(
+            state
+                .memory
+                .conversation_messages_for_owner("local", "router_stream_001")
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn real_router_stream_error_sends_error_event_without_committing_turn() {
+        let (app, state) = fixture(
+            &["chatgpt"],
+            vec![ScriptedSend::Events(vec![
+                Ok(ChatEvent {
+                    content: "partial".to_owned(),
+                    done: false,
+                }),
+                Err(GatewayError::provider_failure("provider stopped")),
+            ])],
+            None,
+        );
+        let response = send(app, true, "chatgpt/fake-model", "router_stream_error_001").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 65_536).await.unwrap();
+        let content = String::from_utf8(body.to_vec()).unwrap();
+        assert!(content.contains("stream_failed"));
+        assert!(content.contains("data: [DONE]"));
+        assert!(state
+            .memory
+            .conversation_messages_for_owner("local", "router_stream_error_001")
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn real_router_honors_key_provider_allowlist_before_fake_send() {
+        let (app, state) = fixture(
+            &["chatgpt", "claude"],
+            vec![response_events("allowed answer")],
+            Some(vec!["claude".to_owned()]),
+        );
+        let response = send(app, false, "auto", "router_allowlist_001").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["X-Gateway-Provider"], "claude");
+        assert_eq!(
+            state
+                .memory
+                .conversation_messages_for_owner("local", "router_allowlist_001")
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn real_router_client_drop_cancels_sse_and_releases_provider_permit() {
+        let (cancelled_tx, cancelled_rx) = tokio::sync::oneshot::channel();
+        let (app, state) = fixture(
+            &["chatgpt"],
+            vec![ScriptedSend::PartialThenHold(
+                ChatEvent {
+                    content: "partial first delta".to_owned(),
+                    done: false,
+                },
+                cancelled_tx,
+            )],
+            None,
+        );
+        let response = send(app, true, "chatgpt/fake-model", "router_drop_sse_001").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        // The handler prefetched first content, then returned the real SSE
+        // response. Simulate client disconnect before a terminal [DONE].
+        drop(response);
+        tokio::time::timeout(std::time::Duration::from_secs(2), cancelled_rx)
+            .await
+            .expect("client drop should close backend receiver")
+            .expect("scripted backend should observe cancellation");
+        let _reacquired = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            state.pool.acquire("chatgpt"),
+        )
+        .await
+        .expect("client cancellation must release browser permit")
+        .expect("provider permit should be available again");
+        assert!(state
+            .memory
+            .conversation_messages_for_owner("local", "router_drop_sse_001")
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn real_router_interleaved_conversations_never_send_other_threads_context() {
+        let (app, state, backend) = fixture_with_backend(
+            &["chatgpt"],
+            vec![
+                response_events("answer A1"),
+                response_events("answer B1"),
+                response_events("answer A2"),
+                response_events("answer B2"),
+            ],
+            None,
+        );
+        let a = "router_context_a_001";
+        let b = "router_context_b_001";
+        for (id, prompt) in [
+            (a, "SYNTHETIC_PRIVATE_MARKER_A_314"),
+            (b, "SYNTHETIC_PRIVATE_MARKER_B_159"),
+            (a, "repeat the first A marker"),
+            (b, "repeat the first B marker"),
+        ] {
+            let response = send_prompt(app.clone(), false, "chatgpt/fake-model", id, prompt).await;
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+        let requests = backend.observed_requests().await;
+        assert_eq!(requests.len(), 4);
+        assert!(requests[2]
+            .prompt
+            .contains("SYNTHETIC_PRIVATE_MARKER_A_314"));
+        assert!(!requests[2]
+            .prompt
+            .contains("SYNTHETIC_PRIVATE_MARKER_B_159"));
+        assert!(requests[3]
+            .prompt
+            .contains("SYNTHETIC_PRIVATE_MARKER_B_159"));
+        assert!(!requests[3]
+            .prompt
+            .contains("SYNTHETIC_PRIVATE_MARKER_A_314"));
+        for conversation in [a, b] {
+            let messages = state
+                .memory
+                .conversation_messages_for_owner("local", conversation)
+                .unwrap();
+            assert_eq!(messages.len(), 4);
+        }
+    }
+
+    #[tokio::test]
+    async fn real_router_provider_switch_replays_bounded_canonical_history() {
+        let (app, state, backend) = fixture_with_backend(
+            &["chatgpt", "claude"],
+            vec![
+                response_events("synthetic answer from chatgpt"),
+                response_events("synthetic answer from claude"),
+            ],
+            None,
+        );
+        let conversation = "router_handoff_001";
+        let first = send_prompt(
+            app.clone(),
+            false,
+            "chatgpt/fake-model",
+            conversation,
+            "SYNTHETIC_HANDOFF_MARKER_123",
+        )
+        .await;
+        assert_eq!(first.status(), StatusCode::OK);
+        let second = send_prompt(
+            app,
+            false,
+            "claude/fake-model",
+            conversation,
+            "Please continue after the provider switch",
+        )
+        .await;
+        assert_eq!(second.status(), StatusCode::OK);
+
+        let requests = backend.observed_requests().await;
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].provider.as_str(), "chatgpt");
+        assert_eq!(requests[1].provider.as_str(), "claude");
+        assert!(requests[1].prompt.contains("SYNTHETIC_HANDOFF_MARKER_123"));
+        assert!(requests[1].prompt.contains("synthetic answer from chatgpt"));
+        assert!(requests[1]
+            .prompt
+            .contains("Please continue after the provider switch"));
+        let persisted = state
+            .memory
+            .conversation_messages_for_owner("local", conversation)
+            .unwrap();
+        assert_eq!(persisted.len(), 4);
+        assert_eq!(persisted[3].content, "synthetic answer from claude");
+    }
+
+    #[tokio::test]
+    async fn real_router_failed_handoff_never_advances_canonical_transcript() {
+        let (app, state, backend) = fixture_with_backend(
+            &["chatgpt", "claude"],
+            vec![
+                response_events("first committed answer"),
+                ScriptedSend::Events(vec![
+                    Ok(ChatEvent {
+                        content: "partial discarded answer".to_owned(),
+                        done: false,
+                    }),
+                    Err(GatewayError::provider_failure("synthetic interrupted send")),
+                ]),
+                response_events("recovered answer"),
+            ],
+            None,
+        );
+        let conversation = "router_failed_handoff_001";
+        let first = send_prompt(
+            app.clone(),
+            false,
+            "chatgpt/fake-model",
+            conversation,
+            "SYNTHETIC_FIRST_TURN",
+        )
+        .await;
+        assert_eq!(first.status(), StatusCode::OK);
+        let failed = send_prompt(
+            app.clone(),
+            false,
+            "claude/fake-model",
+            conversation,
+            "SYNTHETIC_UNCOMMITTED_TURN",
+        )
+        .await;
+        assert_eq!(failed.status(), StatusCode::BAD_GATEWAY);
+        let before = state
+            .memory
+            .conversation_messages_for_owner("local", conversation)
+            .unwrap();
+        assert_eq!(before.len(), 2, "failed handoff must not commit a turn");
+
+        let recovered = send_prompt(
+            app,
+            false,
+            "chatgpt/fake-model",
+            conversation,
+            "SYNTHETIC_RECOVERED_TURN",
+        )
+        .await;
+        assert_eq!(recovered.status(), StatusCode::OK);
+        let requests = backend.observed_requests().await;
+        assert_eq!(requests.len(), 3);
+        assert!(!requests[2].prompt.contains("SYNTHETIC_UNCOMMITTED_TURN"));
+        assert!(!requests[2].prompt.contains("partial discarded answer"));
+        let after = state
+            .memory
+            .conversation_messages_for_owner("local", conversation)
+            .unwrap();
+        assert_eq!(after.len(), 4);
+        assert_eq!(after[3].content, "recovered answer");
+    }
+
+    #[tokio::test]
+    async fn real_router_busy_provider_returns_retry_after_and_no_commit() {
+        let (app, state) = fixture(&["chatgpt"], vec![], None);
+        let _held = state.pool.acquire("chatgpt").await.unwrap();
+        let response = send(app, false, "chatgpt/fake-model", "router_busy_001").await;
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(response.headers().contains_key(header::RETRY_AFTER));
+        assert!(state
+            .memory
+            .conversation_messages_for_owner("local", "router_busy_001")
+            .unwrap()
+            .is_empty());
     }
 }

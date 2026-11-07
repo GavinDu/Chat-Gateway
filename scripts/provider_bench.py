@@ -6,8 +6,80 @@ import json
 import os
 import statistics
 import time
+import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
+
+MAX_SSE_LINE_BYTES = 65_536
+MAX_SSE_STREAM_BYTES = 2_097_152
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, fp, code, msg, headers, newurl):
+        return None
+
+
+def validate_benchmark_target(endpoint):
+    """Allow private/local gateway endpoints without leaking API auth on redirects."""
+    try:
+        target = urllib.parse.urlsplit(endpoint)
+        port = target.port
+    except ValueError:
+        raise RuntimeError("invalid_benchmark_endpoint") from None
+    local = target.hostname in {"127.0.0.1", "localhost", "::1"}
+    if (
+        target.scheme not in ("http", "https")
+        or not target.netloc
+        or target.username is not None
+        or target.password is not None
+        or target.path.rstrip("/") != "/v1"
+        or target.query
+        or target.fragment
+        or port == 0
+        or (target.scheme == "http" and not local)
+    ):
+        raise RuntimeError("invalid_benchmark_endpoint")
+
+
+def consume_live_benchmark_sse(response, started):
+    """Return TTFT only for a complete successful stream; never store content."""
+    first_content_delta = None
+    saw_done = False
+    consumed_bytes = 0
+    while True:
+        line = response.readline(MAX_SSE_LINE_BYTES + 1)
+        if not line:
+            break
+        if len(line) > MAX_SSE_LINE_BYTES:
+            raise RuntimeError("benchmark_sse_line_too_large")
+        consumed_bytes += len(line)
+        if consumed_bytes > MAX_SSE_STREAM_BYTES:
+            raise RuntimeError("benchmark_sse_stream_too_large")
+        if not line.startswith(b"data:"):
+            continue
+        data = line[5:].strip()
+        if data == b"[DONE]":
+            saw_done = True
+            break
+        if not data:
+            continue
+        try:
+            event = json.loads(data)
+        except (ValueError, UnicodeDecodeError):
+            raise RuntimeError("benchmark_invalid_stream_event") from None
+        if not isinstance(event, dict):
+            raise RuntimeError("benchmark_invalid_stream_event")
+        if event.get("error") is not None:
+            raise RuntimeError("benchmark_provider_stream_failed")
+        if first_content_delta is None and has_content_delta(line):
+            first_content_delta = time.perf_counter()
+
+    if first_content_delta is None:
+        raise RuntimeError("endpoint completed without a streamed content delta")
+    if not saw_done:
+        raise RuntimeError("benchmark_incomplete_stream")
+    return (first_content_delta - started) * 1000
 
 
 def rss_bytes():
@@ -59,6 +131,7 @@ def has_content_delta(sse_line):
 
 
 def live_trial(args):
+    validate_benchmark_target(args.endpoint)
     # Keep this payload within the gateway's implemented OpenAI-compatible
     # request schema. max_tokens is not currently supported and is rejected.
     payload = json.dumps({
@@ -74,15 +147,18 @@ def live_trial(args):
         method="POST",
     )
     started = time.perf_counter()
-    first_content_delta = None
-    with urllib.request.urlopen(req, timeout=args.timeout) as response:
-        for line in response:
-            if has_content_delta(line):
-                first_content_delta = time.perf_counter()
-                break
-    if first_content_delta is None:
-        raise RuntimeError("endpoint completed without a streamed content delta")
-    return (first_content_delta - started) * 1000, None
+    try:
+        # Never allow a redirect to replay an API key or prompt to another origin.
+        opener = urllib.request.build_opener(_NoRedirect())
+        with opener.open(req, timeout=args.timeout) as response:
+            if response.status != 200:
+                raise RuntimeError("benchmark_http_status_" + str(response.status))
+            ttft = consume_live_benchmark_sse(response, started)
+    except urllib.error.HTTPError as error:
+        raise RuntimeError("benchmark_http_status_" + str(error.code)) from None
+    except (urllib.error.URLError, OSError, TimeoutError):
+        raise RuntimeError("benchmark_gateway_unreachable") from None
+    return ttft, None
 
 
 def summary(values):
