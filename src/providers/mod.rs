@@ -415,15 +415,16 @@ fn probe_has_challenge(probe: &common::ResponseProbe) -> bool {
 /// invalidates completion. Otherwise a provider can append text just after
 /// the last delta and have the gateway commit a truncated turn.
 fn final_probe_confirms_completion(
-    initial: &common::ResponseProbe,
+    initial_text: &str,
+    initial_count: usize,
     final_probe: &common::ResponseProbe,
     done_signal: DoneSignal,
     saw_streaming: bool,
     confirmed_post_answer_affordance: bool,
 ) -> bool {
     if final_probe.streaming
-        || final_probe.text.as_deref() != initial.text.as_deref()
-        || final_probe.count != initial.count
+        || final_probe.text.as_deref() != Some(initial_text)
+        || final_probe.count != initial_count
     {
         return false;
     }
@@ -699,7 +700,8 @@ pub async fn run_send(
                             return;
                         }
                         if !final_probe_confirms_completion(
-                            &probe,
+                            &txt,
+                            probe.count,
                             &final_probe,
                             done_signal,
                             saw_streaming,
@@ -813,7 +815,8 @@ pub async fn run_send(
                     return;
                 }
                 if !final_probe_confirms_completion(
-                    &probe,
+                    &txt,
+                    probe.count,
                     &final_probe,
                     done_signal,
                     saw_streaming,
@@ -1077,31 +1080,31 @@ mod response_completion_tests {
         };
         let stable = initial.clone();
         assert!(final_probe_confirms_completion(
-            &initial, &stable, DoneSignal::StopControlDisappeared, true, true,
+            initial.text.as_deref().unwrap(), initial.count, &stable, DoneSignal::StopControlDisappeared, true, true,
         ));
 
         let mut late_token = stable.clone();
         late_token.text = Some("first part and more".to_owned());
         assert!(!final_probe_confirms_completion(
-            &initial, &late_token, DoneSignal::StopControlDisappeared, true, true,
+            initial.text.as_deref().unwrap(), initial.count, &late_token, DoneSignal::StopControlDisappeared, true, true,
         ));
 
         let mut new_node = stable.clone();
         new_node.count += 1;
         assert!(!final_probe_confirms_completion(
-            &initial, &new_node, DoneSignal::StableResponseText, false, false,
+            initial.text.as_deref().unwrap(), initial.count, &new_node, DoneSignal::StableResponseText, false, false,
         ));
 
         let mut resumed = stable.clone();
         resumed.streaming = true;
         assert!(!final_probe_confirms_completion(
-            &initial, &resumed, DoneSignal::StableResponseText, true, false,
+            initial.text.as_deref().unwrap(), initial.count, &resumed, DoneSignal::StableResponseText, true, false,
         ));
 
         let mut gone = stable.clone();
         gone.text = None;
         assert!(!final_probe_confirms_completion(
-            &initial, &gone, DoneSignal::StableResponseText, false, false,
+            initial.text.as_deref().unwrap(), initial.count, &gone, DoneSignal::StableResponseText, false, false,
         ));
     }
 
@@ -1119,12 +1122,12 @@ mod response_completion_tests {
         let mut final_probe = initial.clone();
         final_probe.post_answer_affordance = false;
         assert!(!final_probe_confirms_completion(
-            &initial, &final_probe, DoneSignal::StopControlDisappeared, true, true,
+            initial.text.as_deref().unwrap(), initial.count, &final_probe, DoneSignal::StopControlDisappeared, true, true,
         ));
         // Providers without a validated fast-done signal may still finish
         // after the full configured fallback grace.
         assert!(final_probe_confirms_completion(
-            &initial, &final_probe, DoneSignal::StableResponseText, true, false,
+            initial.text.as_deref().unwrap(), initial.count, &final_probe, DoneSignal::StableResponseText, true, false,
         ));
     }
 
