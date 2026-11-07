@@ -2377,21 +2377,24 @@ async fn chat_completions(
         let provider_timeout = std::time::Duration::from_secs(provider_cfg.timeout_seconds);
         let mut rx = match state
             .chat_service
-            .stream_with_timeout(BackendRequest {
-                provider: match ProviderId::new(provider_name.clone()) {
-                    Some(provider) => provider,
-                    None => {
-                        last_err = Some(
-                            "provider router returned an invalid provider identifier".to_owned(),
-                        );
-                        continue;
-                    }
+            .stream_with_timeout(
+                BackendRequest {
+                    provider: match ProviderId::new(provider_name.clone()) {
+                        Some(provider) => provider,
+                        None => {
+                            last_err = Some(
+                                "provider router returned an invalid provider identifier".to_owned(),
+                            );
+                            continue;
+                        }
+                    },
+                    prompt: provider_prompt.clone(),
+                    model: provider_model.clone(),
+                    has_history: has_history && thread_url.is_some(),
+                    thread_url,
                 },
-                prompt: provider_prompt.clone(),
-                model: provider_model.clone(),
-                has_history: has_history && thread_url.is_some(),
-                thread_url,
-            }, provider_timeout)
+                provider_timeout,
+            )
             .await
         {
             Ok(rx) => rx,
@@ -2409,6 +2412,9 @@ async fn chat_completions(
                         .provider_sessions
                         .record_error(&provider_name, &e.to_string());
                 }
+                let provider_work_ms =
+                    provider_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+                let total_ms = request_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
                 record_provider_outcome(
                     &state.metrics,
                     ProviderOutcome {
@@ -2417,8 +2423,8 @@ async fn chat_completions(
                         outcome: "error",
                         queue_ms,
                         ttft_ms: None,
-                        provider_work_ms: provider_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
-                        total_ms: request_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+                        provider_work_ms,
+                        total_ms,
                     },
                 );
                 last_err = Some(e.to_string());
