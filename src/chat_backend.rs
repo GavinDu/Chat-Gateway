@@ -174,6 +174,73 @@ impl fmt::Display for GatewayError {
 
 impl Error for GatewayError {}
 
+/// Canonical, redacted OpenAI-style response mapping. Backend error messages
+/// are untrusted provider/browser diagnostics and must not be reflected to
+/// clients. The active handler will migrate to this boundary incrementally.
+impl axum::response::IntoResponse for GatewayError {
+    fn into_response(self) -> axum::response::Response {
+        use axum::http::{header, HeaderValue, StatusCode};
+
+        let (status, error_type, code, message) = match self.kind {
+            GatewayErrorKind::InvalidRequest => (
+                StatusCode::BAD_REQUEST,
+                "invalid_request_error",
+                "invalid_request",
+                "invalid chat request",
+            ),
+            GatewayErrorKind::ModelNotFound => (
+                StatusCode::NOT_FOUND,
+                "invalid_request_error",
+                "model_not_found",
+                "requested model is not available",
+            ),
+            GatewayErrorKind::ProviderBusy => (
+                StatusCode::TOO_MANY_REQUESTS,
+                "server_error",
+                "provider_busy",
+                "provider is busy; retry shortly",
+            ),
+            GatewayErrorKind::SessionExpired => (
+                StatusCode::UNAUTHORIZED,
+                "authentication_error",
+                "provider_session_expired",
+                "provider session expired; re-login required",
+            ),
+            GatewayErrorKind::Challenge => (
+                StatusCode::FORBIDDEN,
+                "provider_error",
+                "provider_challenge",
+                "provider challenge requires manual review",
+            ),
+            GatewayErrorKind::Timeout => (
+                StatusCode::GATEWAY_TIMEOUT,
+                "provider_error",
+                "provider_timeout",
+                "provider request timed out",
+            ),
+            GatewayErrorKind::Memory => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                "memory_error",
+                "conversation could not be processed",
+            ),
+            GatewayErrorKind::ProviderFailure | GatewayErrorKind::BackendUnavailable => (
+                StatusCode::BAD_GATEWAY,
+                "provider_error",
+                "provider_unavailable",
+                "provider request failed",
+            ),
+        };
+        let mut response = crate::api::api_error(status, error_type, code, message);
+        if self.kind == GatewayErrorKind::ProviderBusy {
+            response
+                .headers_mut()
+                .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
+        }
+        response
+    }
+}
+
 #[async_trait::async_trait]
 pub trait ChatBackend: Send + Sync {
     /// Identifier for this execution backend (not the selected provider).
@@ -356,6 +423,42 @@ mod tests {
         let ordinary = super::map_backend_error(anyhow::anyhow!("provider rejected request"));
         assert_eq!(ordinary.kind, GatewayErrorKind::ProviderFailure);
         assert!(!ordinary.is_retryable());
+    }
+
+    #[tokio::test]
+    async fn typed_errors_render_safe_openai_envelopes_with_expected_statuses() {
+        use axum::{body::to_bytes, http::{header, StatusCode}, response::IntoResponse};
+
+        let cases = [
+            (GatewayErrorKind::InvalidRequest, StatusCode::BAD_REQUEST, "invalid_request"),
+            (GatewayErrorKind::ModelNotFound, StatusCode::NOT_FOUND, "model_not_found"),
+            (GatewayErrorKind::ProviderBusy, StatusCode::TOO_MANY_REQUESTS, "provider_busy"),
+            (GatewayErrorKind::SessionExpired, StatusCode::UNAUTHORIZED, "provider_session_expired"),
+            (GatewayErrorKind::Challenge, StatusCode::FORBIDDEN, "provider_challenge"),
+            (GatewayErrorKind::Timeout, StatusCode::GATEWAY_TIMEOUT, "provider_timeout"),
+            (GatewayErrorKind::Memory, StatusCode::INTERNAL_SERVER_ERROR, "memory_error"),
+            (GatewayErrorKind::ProviderFailure, StatusCode::BAD_GATEWAY, "provider_unavailable"),
+            (GatewayErrorKind::BackendUnavailable, StatusCode::BAD_GATEWAY, "provider_unavailable"),
+        ];
+        for (kind, expected_status, expected_code) in cases {
+            let response = GatewayError::typed(
+                kind,
+                "sensitive: cookie=account-session; bearer=private-token",
+                true,
+            ).into_response();
+            assert_eq!(response.status(), expected_status, "wrong status for {kind:?}");
+            assert_eq!(
+                response.headers().get(header::RETRY_AFTER).is_some(),
+                kind == GatewayErrorKind::ProviderBusy,
+                "Retry-After must be exclusive to the provider-busy response",
+            );
+            let bytes = to_bytes(response.into_body(), 16 * 1024).await.unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(body["error"]["code"], expected_code);
+            assert!(body["error"]["message"].as_str().is_some());
+            assert!(!String::from_utf8_lossy(&bytes).contains("account-session"));
+            assert!(!String::from_utf8_lossy(&bytes).contains("private-token"));
+        }
     }
 
     #[tokio::test]
