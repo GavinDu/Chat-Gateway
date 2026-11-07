@@ -275,6 +275,32 @@ pub struct ObscuraPermit {
 }
 
 impl ObscuraPool {
+    /// Test-only admission/semaphore handle. Real Axum handler tests inject a
+    /// scripted ChatBackend; no browser thread, provider cookies or owner
+    /// session storage are created. Browser commands fail closed immediately.
+    #[cfg(test)]
+    pub(crate) fn for_scripted_backend_tests(cfg: Arc<AppConfig>) -> Arc<Self> {
+        let (cmd_tx, cmd_rx) = mpsc::channel::<Command>(1);
+        drop(cmd_rx);
+        let semaphores = DashMap::new();
+        for provider in cfg.providers.iter().filter(|provider| provider.enabled) {
+            semaphores.insert(provider.name.clone(), Arc::new(Semaphore::new(1)));
+        }
+        Arc::new(Self {
+            cmd_tx: Arc::new(tokio::sync::RwLock::new(cmd_tx)),
+            ready: tokio::sync::Mutex::new(None),
+            semaphores,
+            cfg,
+            shutting_down: Arc::new(AtomicBool::new(false)),
+            worker_ready: Arc::new(AtomicBool::new(false)),
+            worker_generation: Arc::new(AtomicU64::new(0)),
+            provider_guard: ProviderGuard::default(),
+            provider_sessions: ProviderSessionRegistry::default(),
+            metrics: MetricsRegistry::default(),
+            session_writes: SessionWriteTracker::default(),
+        })
+    }
+
     /// Spawn the browser thread (browser build + page warm-up happen
     /// there; call warm_all() to await readiness).
     pub async fn new(cfg: Arc<AppConfig>) -> Result<Arc<Self>> {

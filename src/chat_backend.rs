@@ -354,6 +354,112 @@ impl ChatBackend for crate::browser::pool::ObscuraPool {
     }
 }
 
+/// Deterministic backend for exercising the real ChatService and, as the
+/// HTTP handler is decomposed, the production router without an Obscura page.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::{ChatBackend, ChatEvent, ChatRequest, GatewayError, ProviderId};
+    use std::{collections::VecDeque, time::Duration};
+    use tokio::sync::{mpsc, oneshot, Mutex};
+
+    pub(crate) enum ScriptedSend {
+        /// A backend rejected admission before a response stream exists.
+        Reject(GatewayError),
+        /// Emit events in order, including incomplete or errored streams.
+        Events(Vec<Result<ChatEvent, GatewayError>>),
+        /// Simulate delayed first content without blocking the HTTP worker.
+        Delay(Duration, Vec<Result<ChatEvent, GatewayError>>),
+        /// Keep the response idle until the consumer drops it.
+        Hold(oneshot::Sender<()>),
+        /// Emit first content then hold the stream; notify on client drop.
+        PartialThenHold(ChatEvent, oneshot::Sender<()>),
+    }
+
+    pub(crate) struct ScriptedBackend {
+        sends: Mutex<VecDeque<ScriptedSend>>,
+        requests: Mutex<Vec<ChatRequest>>,
+    }
+
+    impl ScriptedBackend {
+        pub(crate) fn new(sends: Vec<ScriptedSend>) -> Self {
+            Self {
+                sends: Mutex::new(sends.into()),
+                requests: Mutex::new(Vec::new()),
+            }
+        }
+
+        pub(crate) async fn observed_requests(&self) -> Vec<ChatRequest> {
+            self.requests.lock().await.clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ChatBackend for ScriptedBackend {
+        async fn models(&self, provider: ProviderId) -> Result<Vec<String>, GatewayError> {
+            Ok(vec![format!("{}-test-model", provider.as_str())])
+        }
+
+        async fn send_stream(
+            &self,
+            request: ChatRequest,
+        ) -> Result<mpsc::Receiver<Result<ChatEvent, GatewayError>>, GatewayError> {
+            self.requests.lock().await.push(request);
+            let scripted = self
+                .sends
+                .lock()
+                .await
+                .pop_front()
+                .expect("each test request needs a scripted backend response");
+            match scripted {
+                ScriptedSend::Reject(error) => Err(error),
+                ScriptedSend::Events(events) => {
+                    let (tx, rx) = mpsc::channel(events.len().max(1));
+                    for event in events {
+                        tx.send(event)
+                            .await
+                            .expect("scripted receiver is still held by this function");
+                    }
+                    Ok(rx)
+                }
+                ScriptedSend::Delay(delay, events) => {
+                    let (tx, rx) = mpsc::channel(8);
+                    tokio::spawn(async move {
+                        tokio::select! {
+                            _ = tx.closed() => {}
+                            _ = tokio::time::sleep(delay) => {
+                                for event in events {
+                                    if tx.send(event).await.is_err() {
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    });
+                    Ok(rx)
+                }
+                ScriptedSend::Hold(cancelled) => {
+                    let (tx, rx) = mpsc::channel::<Result<ChatEvent, GatewayError>>(1);
+                    tokio::spawn(async move {
+                        tx.closed().await;
+                        let _ = cancelled.send(());
+                    });
+                    Ok(rx)
+                }
+                ScriptedSend::PartialThenHold(first, cancelled) => {
+                    let (tx, rx) = mpsc::channel(1);
+                    tokio::spawn(async move {
+                        if tx.send(Ok(first)).await.is_ok() {
+                            tx.closed().await;
+                        }
+                        let _ = cancelled.send(());
+                    });
+                    Ok(rx)
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
