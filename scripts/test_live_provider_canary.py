@@ -99,6 +99,39 @@ class ConsumeSseTests(unittest.TestCase):
             ), self.assertRaisesRegex(RuntimeError, category):
                 fetch_conversation(endpoint, "", "synthetic-conversation", 5)
 
+    def test_valid_json_wrong_sse_event_shapes_fail_with_sanitized_status(self):
+        # Valid JSON can still have shapes that would otherwise crash the
+        # live owner-account canary with an unhandled AttributeError/TypeError.
+        malformed = (
+            None, [], "string", 42, True,
+            {"choices": None}, {"choices": "malformed"},
+            {"choices": 42}, {"choices": [None]},
+            {"choices": ["bad"]}, {"choices": [{"delta": "text"}]},
+            {"choices": [{"delta": ["text"]}]},
+            {"choices": [{"delta": {"content": 123}}]},
+        )
+        for event in malformed:
+            with self.subTest(event=event):
+                parsed = consume_sse([
+                    "data: " + json.dumps(event) + "\n",
+                    "data: [DONE]\n",
+                ])
+                self.assertTrue(parsed["provider_error"])
+                self.assertFalse(parsed["saw_done"])
+                self.assertEqual(parsed["content"], "")
+
+    def test_valid_role_and_usage_events_remain_compatible(self):
+        parsed = consume_sse([
+            'data: {"choices":[{"delta":{"role":"assistant"}}]}\n',
+            'data: {"choices":[{"finish_reason":"stop"}]}\n',
+            'data: {"choices":[]}\n',
+            'data: {"choices":[{"delta":{"content":"ok"}}]}\n',
+            'data: [DONE]\n',
+        ])
+        self.assertFalse(parsed["provider_error"])
+        self.assertTrue(parsed["saw_done"])
+        self.assertEqual(parsed["content"], "ok")
+
     def test_transcript_assertion_rejects_missing_or_duplicate_turns(self):
         conversation = {
             "messages": [
