@@ -279,3 +279,98 @@ pub(crate) async fn delete_all_long_term_memory_items(
         }
     }
 }
+
+#[cfg(test)]
+mod typed_memory_save_error_tests {
+    use super::memory_save_error_response;
+    use crate::memory::{LongTermMemoryStore, LongTermMemoryWriteError, UnifiedMemory};
+    use axum::{body::to_bytes, http::StatusCode};
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn typed_write_errors_preserve_client_statuses_and_redact_unknown_failures() {
+        let cases = [
+            (
+                LongTermMemoryWriteError::Disabled,
+                StatusCode::CONFLICT,
+                "long_term_memory_disabled",
+            ),
+            (
+                LongTermMemoryWriteError::InvalidItem,
+                StatusCode::BAD_REQUEST,
+                "invalid_memory_item",
+            ),
+            (
+                LongTermMemoryWriteError::InvalidProvenance,
+                StatusCode::BAD_REQUEST,
+                "invalid_memory_provenance",
+            ),
+        ];
+        for (kind, status, code) in cases {
+            let response = memory_save_error_response(kind.into());
+            assert_eq!(response.status(), status);
+            let bytes = to_bytes(response.into_body(), 16_384).await.unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(body["error"]["code"], code);
+        }
+
+        // An unrelated storage failure containing the former match words
+        // must never masquerade as a user 4xx validation failure.
+        let response = memory_save_error_response(anyhow::anyhow!(
+            "storage failed: disabled source conversation secret sentinel"
+        ));
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let bytes = to_bytes(response.into_body(), 16_384).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"]["code"], "memory_write_failed");
+        assert!(!String::from_utf8_lossy(&bytes).contains("secret sentinel"));
+    }
+
+    #[tokio::test]
+    async fn typed_storage_errors_survive_the_async_blocking_pool_boundary() {
+        let memory = Arc::new(UnifiedMemory::new(8_000));
+        let owner = "typed-memory-error-owner".to_owned();
+        let disabled = memory
+            .clone()
+            .save_long_term_memory_item_async(
+                owner.clone(), "key".into(), "value".into(), None, 1.0, None,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            disabled.downcast_ref::<LongTermMemoryWriteError>(),
+            Some(&LongTermMemoryWriteError::Disabled),
+        );
+
+        memory
+            .clone()
+            .set_long_term_memory_enabled_async(owner.clone(), true)
+            .await
+            .unwrap();
+
+        let invalid = memory
+            .clone()
+            .save_long_term_memory_item_async(
+                owner.clone(), "key".into(), "value".into(), None, 2.0, None,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            invalid.downcast_ref::<LongTermMemoryWriteError>(),
+            Some(&LongTermMemoryWriteError::InvalidItem),
+        );
+
+        let provenance = memory
+            .clone()
+            .save_long_term_memory_item_async(
+                owner, "key".into(), "value".into(),
+                Some("missing-conversation".into()), 1.0, None,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            provenance.downcast_ref::<LongTermMemoryWriteError>(),
+            Some(&LongTermMemoryWriteError::InvalidProvenance),
+        );
+    }
+}
