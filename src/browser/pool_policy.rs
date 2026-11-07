@@ -28,6 +28,27 @@ pub(super) fn provider_thread_url_is_same_origin(candidate: &str, provider_home:
     )
 }
 
+/// Replaying into a provider's *previous* remote conversation would mix two
+/// distinct gateway conversations. Some sites redirect their home page into
+/// the last active thread; observing a composer on that page is insufficient
+/// evidence that a fresh conversation was opened.
+///
+/// Only match the two URL-addressable adapters with verified thread path
+/// conventions. Unknown layouts must be verified live before adding rules.
+pub(super) fn landing_is_not_previous_thread(provider_name: &str, actual: &str) -> bool {
+    let Ok(uri) = actual.parse::<axum::http::Uri>() else {
+        return false;
+    };
+    if uri.scheme_str() != Some("https") || uri.authority().is_none() {
+        return false;
+    }
+    match provider_name {
+        "chatgpt" => !uri.path().starts_with("/c/"),
+        "claude" => !uri.path().starts_with("/chat/"),
+        _ => true,
+    }
+}
+
 /// Compare provider thread URLs without requiring byte-for-byte URL equality.
 /// Providers may add a trailing slash, tracking query, or fragment during a
 /// redirect; origin and path still identify the same conversation.
@@ -68,6 +89,29 @@ pub(super) fn provider_thread_navigation_matches(actual: &str, target: &str) -> 
 #[cfg(test)]
 mod provider_thread_navigation_tests {
     use super::{provider_thread_navigation_matches, provider_thread_url_is_same_origin};
+
+    #[test]
+    fn fresh_landing_rejects_chatgpt_and_claude_existing_thread_routes() {
+        use super::landing_is_not_previous_thread;
+
+        assert!(!landing_is_not_previous_thread(
+            "chatgpt",
+            "https://chatgpt.com/c/thread-123?model=gpt",
+        ));
+        assert!(!landing_is_not_previous_thread(
+            "claude",
+            "https://claude.ai/chat/thread-456#message",
+        ));
+        assert!(landing_is_not_previous_thread(
+            "chatgpt",
+            "https://chatgpt.com/"
+        ));
+        assert!(landing_is_not_previous_thread(
+            "claude",
+            "https://claude.ai/new"
+        ));
+        assert!(!landing_is_not_previous_thread("chatgpt", "broken URL"));
+    }
 
     #[test]
     fn thread_navigation_accepts_trailing_slash_query_and_fragment_redirects() {
