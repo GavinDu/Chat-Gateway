@@ -852,6 +852,11 @@ pub async fn run_send(
                     .await;
                 break;
             }
+        } else {
+            // DOM rerendering can temporarily hide the response altogether.
+            // Do not preserve idle ticks or a fast-done signal across this gap.
+            stable_ticks = 0;
+            previous_post_answer_affordance = false;
         }
     }
 
