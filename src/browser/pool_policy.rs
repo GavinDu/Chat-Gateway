@@ -51,7 +51,27 @@ pub(super) fn landing_is_not_previous_thread(provider_name: &str, actual: &str) 
             !path.starts_with("/c/") && !(path.starts_with("/g/") && path.contains("/c/"))
         }
         "claude" => !uri.path().starts_with("/chat/"),
-        _ => true,
+        // Providers without a verified URL-addressable reopen implementation
+        // must replay into a demonstrably fresh composer. In particular,
+        // their home routes can redirect into previous conversations.
+        "gemini" => !uri.path().starts_with("/app/"),
+        "grok" => {
+            !uri.path().starts_with("/c/")
+                && !uri.path().starts_with("/chat/")
+                && !uri.query().is_some_and(|query| {
+                    query
+                        .split('&')
+                        .any(|parameter| parameter.starts_with("conversation="))
+                })
+        }
+        "qwen" => !uri.path().starts_with("/c/"),
+        "mistral" => !uri.path().starts_with("/chat/"),
+        "perplexity" => !uri.path().starts_with("/search/") && !uri.path().starts_with("/page/"),
+        // There is no fixture-verified Meta AI conversation URL convention;
+        // accept only the configured homepage instead of trusting an unknown
+        // redirect into a potentially stale remote thread.
+        "metaai" => uri.path() == "/",
+        _ => false,
     }
 }
 
@@ -129,6 +149,51 @@ mod provider_thread_navigation_tests {
             "https://claude.ai/new"
         ));
         assert!(!landing_is_not_previous_thread("chatgpt", "broken URL"));
+    }
+
+    #[test]
+    fn replay_only_providers_reject_known_existing_thread_routes() {
+        use super::landing_is_not_previous_thread;
+
+        for (provider, previous_thread) in [
+            ("gemini", "https://gemini.google.com/app/abc123"),
+            ("grok", "https://grok.com/c/abc123"),
+            ("grok", "https://grok.com/chat/abc123"),
+            ("grok", "https://grok.com/?conversation=abc123&src=recent"),
+            ("qwen", "https://chat.qwen.ai/c/abc123"),
+            ("mistral", "https://chat.mistral.ai/chat/abc123"),
+            ("perplexity", "https://www.perplexity.ai/search/abc123"),
+            ("perplexity", "https://www.perplexity.ai/page/abc123"),
+            ("metaai", "https://www.meta.ai/chat/abc123"),
+        ] {
+            assert!(
+                !landing_is_not_previous_thread(provider, previous_thread),
+                "{provider} must not replay into an existing thread: {previous_thread}"
+            );
+        }
+    }
+
+    #[test]
+    fn replay_only_providers_accept_fresh_landing_routes() {
+        use super::landing_is_not_previous_thread;
+
+        for (provider, landing) in [
+            ("gemini", "https://gemini.google.com/app"),
+            ("grok", "https://grok.com/"),
+            ("qwen", "https://chat.qwen.ai/"),
+            ("mistral", "https://chat.mistral.ai/"),
+            ("perplexity", "https://www.perplexity.ai/"),
+            ("metaai", "https://www.meta.ai/"),
+        ] {
+            assert!(
+                landing_is_not_previous_thread(provider, landing),
+                "{provider} should allow its fresh landing route: {landing}"
+            );
+        }
+        assert!(!landing_is_not_previous_thread(
+            "unknown",
+            "https://unknown.example/"
+        ));
     }
 
     #[test]
