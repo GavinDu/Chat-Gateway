@@ -200,7 +200,7 @@ fn json_completion_body(
     conversation_id: &str,
     model: &str,
     content: &str,
-    prompt_tokens: usize,
+    prompt_tokens: u64,
 ) -> serde_json::Value {
     let completion_tokens = estimate_tokens(content);
     serde_json::json!({
@@ -241,8 +241,18 @@ mod completion_response_builder_tests {
 
     #[test]
     fn both_transports_keep_identity_and_only_sse_has_streaming_headers() {
-        let json = completion_response_headers("fixture-conversation-123", "chatgpt", "fixture-model", false);
-        let sse = completion_response_headers("fixture-conversation-123", "chatgpt", "fixture-model", true);
+        let json = completion_response_headers(
+            "fixture-conversation-123",
+            "chatgpt",
+            "fixture-model",
+            false,
+        );
+        let sse = completion_response_headers(
+            "fixture-conversation-123",
+            "chatgpt",
+            "fixture-model",
+            true,
+        );
         assert_eq!(json.get("X-Conversation-Id"), sse.get("X-Conversation-Id"));
         assert!(json.get("X-Accel-Buffering").is_none());
         assert!(json.get("Cache-Control").is_none());
