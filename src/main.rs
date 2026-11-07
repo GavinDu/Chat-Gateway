@@ -2521,7 +2521,7 @@ async fn chat_completions(
                             yield Ok::<_, anyhow::Error>(Event::default().data(data.to_string()));
                         }
                         Err(e) => {
-                            tracing::warn!(provider = %provider_c, "provider stream failed: {e}");
+                            tracing::warn!(provider = %provider_c, "provider stream failed; partial response not committed");
                             provider_error_detail = Some(e.to_string());
                             stream_error = Some("provider stream failed; partial response was not committed".to_string());
                             break;
@@ -2630,7 +2630,7 @@ async fn chat_completions(
                 },
             );
             if full.is_empty() {
-                tracing::warn!(provider = %provider_name, "provider failed before output: {e}");
+                tracing::warn!(provider = %provider_name, "provider failed before output; considering fallback");
                 last_err = Some(e);
                 continue;
             }
@@ -2721,10 +2721,10 @@ async fn chat_completions(
         had_provider_error = last_err.is_some(),
         "all eligible provider attempts exhausted"
     );
-    unavailable_provider_response()
+    unavailable_provider_response(last_err.as_deref())
 }
 
-fn unavailable_provider_response() -> Response {
+fn unavailable_provider_response(_last_upstream_error: Option<&str>) -> Response {
     api_error(
         axum::http::StatusCode::BAD_GATEWAY,
         "provider_error",
@@ -2741,10 +2741,9 @@ mod provider_failure_redaction_tests {
     #[tokio::test]
     async fn exhausted_provider_response_does_not_echo_upstream_details() {
         let raw_upstream_error = "cookie=session-secret; Authorization: Bearer sensitive-token";
-        // The handler may retain an upstream diagnostic only for internal
-        // classification. The public response is always a fixed safe message.
-        assert!(!raw_upstream_error.is_empty());
-        let response = unavailable_provider_response();
+        // The public response must never serialize an arbitrary upstream
+        // error, even if it resembles a credential or cookie.
+        let response = unavailable_provider_response(Some(raw_upstream_error));
         assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
         let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
