@@ -6,8 +6,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 from live_provider_canary import (
-    _NoRedirect, assert_turn_history, consume_sse, preflight,
-    read_state, validate_canary_target, write_state,
+    MAX_CONVERSATION_EXPORT_BYTES, MAX_SSE_CONTENT_BYTES,
+    MAX_SSE_LINE_BYTES, MAX_SSE_STREAM_BYTES,
+    _NoRedirect, assert_turn_history, bounded_sse_lines, consume_sse,
+    fetch_conversation, preflight, read_state, validate_canary_target, write_state,
 )
 
 
@@ -41,6 +43,61 @@ class ConsumeSseTests(unittest.TestCase):
         ])
         self.assertEqual(result["content"], "partial")
         self.assertFalse(result["saw_done"])
+
+    def test_stream_reader_rejects_oversized_line_before_full_allocation(self):
+        class OversizedResponse:
+            def readline(self, maximum):
+                self_requested_limit = MAX_SSE_LINE_BYTES + 1
+                assert maximum == self_requested_limit
+                return b"x" * maximum
+
+        with self.assertRaisesRegex(RuntimeError, "canary_sse_line_too_large"):
+            consume_sse(bounded_sse_lines(OversizedResponse()))
+
+    def test_stream_rejects_cumulative_output_even_when_individual_lines_are_small(self):
+        heartbeat = ": " + "x" * (MAX_SSE_LINE_BYTES - 3) + "\n"
+        self.assertEqual(len(heartbeat), MAX_SSE_LINE_BYTES)
+        with self.assertRaisesRegex(RuntimeError, "canary_sse_output_too_large"):
+            consume_sse([heartbeat] * (MAX_SSE_STREAM_BYTES // len(heartbeat) + 1))
+
+    def test_stream_rejects_unbounded_provider_content(self):
+        chunk = 'data: ' + json.dumps({
+            "choices": [{"delta": {"content": "x" * 65_000}}]
+        }) + "\n"
+        self.assertLess(len(chunk), MAX_SSE_LINE_BYTES)
+        self.assertGreater(3 * 65_000, MAX_SSE_CONTENT_BYTES)
+        with self.assertRaisesRegex(RuntimeError, "canary_sse_content_too_large"):
+            consume_sse([chunk, chunk, chunk, "data: [DONE]\n"])
+
+    def test_conversation_export_limits_bytes_and_rejects_invalid_shapes(self):
+        class Response:
+            status = 200
+            def __init__(self, payload):
+                self.payload = payload
+            def __enter__(self):
+                return self
+            def __exit__(self, *_):
+                return False
+            def read(self, maximum):
+                assert maximum == MAX_CONVERSATION_EXPORT_BYTES + 1
+                return self.payload[:maximum]
+
+        class Opener:
+            def __init__(self, payload):
+                self.payload = payload
+            def open(self, _request, timeout):
+                return Response(self.payload)
+
+        endpoint = "http://127.0.0.1:8080"
+        for payload, category in (
+            (b"x" * (MAX_CONVERSATION_EXPORT_BYTES + 1), "conversation_export_too_large"),
+            (b"[]", "conversation_export_invalid"),
+            (b"\xff", "conversation_export_failed"),
+        ):
+            with self.subTest(category=category), patch(
+                "live_provider_canary.urllib.request.build_opener", return_value=Opener(payload)
+            ), self.assertRaisesRegex(RuntimeError, category):
+                fetch_conversation(endpoint, "", "synthetic-conversation", 5)
 
     def test_transcript_assertion_rejects_missing_or_duplicate_turns(self):
         conversation = {
