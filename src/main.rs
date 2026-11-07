@@ -52,7 +52,7 @@ use config::AppConfig;
 use context::{ContextBuilder, ContextPlan, ThreadSyncState};
 use memory::{ChatMessage, ConversationStore, LongTermMemoryStore, ProviderThread, UnifiedMemory};
 use request_security::{
-    is_loopback_authority, login_origin_is_same_authority, remote_gateway_origin,
+    local_request_authority_is_safe, login_origin_is_same_authority, remote_gateway_origin,
     remote_request_is_allowed, validate_remote_gateway_config, RemoteProxyTrust,
 };
 use router::ProviderRouter;
@@ -491,10 +491,7 @@ async fn protect_login_api_for_origin(
                 is_relay_api && relay::relay_request_origin_is_allowed(path, headers),
             )
     } else {
-        headers
-            .get(axum::http::header::HOST)
-            .and_then(|value| value.to_str().ok())
-            .is_some_and(is_loopback_authority)
+        local_request_authority_is_safe(headers)
     };
 
     if !authority_is_safe
@@ -3770,6 +3767,37 @@ mod login_security_middleware_http_tests {
         )
         .await;
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn rejects_duplicate_local_host_and_origin_at_real_http_boundary() {
+        let duplicate_host = request(
+            "/login/api/status",
+            &[
+                ("host", "127.0.0.1:8080"),
+                ("host", "attacker.example:8080"),
+            ],
+        )
+        .await;
+        assert_eq!(duplicate_host.status(), StatusCode::FORBIDDEN);
+
+        let duplicate_origin = request(
+            "/login/api/status",
+            &[
+                ("host", "127.0.0.1:8080"),
+                ("origin", "http://127.0.0.1:8080"),
+                ("origin", "https://attacker.example"),
+            ],
+        )
+        .await;
+        assert_eq!(duplicate_origin.status(), StatusCode::FORBIDDEN);
+
+        let same_host_twice = request(
+            "/health",
+            &[("host", "localhost:8080"), ("host", "localhost:8080")],
+        )
+        .await;
+        assert_eq!(same_host_twice.status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]
