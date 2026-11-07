@@ -39,6 +39,7 @@ try {
   ...(process.env.CHAT_GATEWAY_CHROMIUM_PATH?{executablePath:process.env.CHAT_GATEWAY_CHROMIUM_PATH}:{}),
   ignoreDefaultArgs:['--disable-extensions'],args:['--disable-extensions-except='+join(temp,'extension'),'--load-extension='+join(temp,'extension')],
  });
+ context.on('response',async response=>{if(response.url()===base+'/relay/v1/status'){const headers=await response.request().allHeaders();console.log('Provider status HTTP:',response.status(),'Origin:',headers.origin||'(absent)');}});
  const worker=context.serviceWorkers()[0]||await context.waitForEvent('serviceworker');
  const id=new URL(worker.url()).host;
  const popup=await context.newPage();await popup.goto('chrome-extension://'+id+'/popup.html');
@@ -53,7 +54,7 @@ try {
  await approval.getByText('Connection approved.',{exact:false}).waitFor();
  const reopened=await context.newPage();await reopened.goto('chrome-extension://'+id+'/popup.html');
  await reopened.locator('#linked:not([hidden])').waitFor({timeout:20000});
- await reopened.locator('#status li').first().waitFor();
+ try {await reopened.locator('#status li').first().waitFor();} catch(error) {console.log('Provider dashboard message:',await reopened.locator('#message').innerText());throw error;}
  assert.equal(await reopened.locator('#status li').count(),8);
  console.log('PASS real Chromium extension URL-only approval, popup closure and provider dashboard');
 } finally {
