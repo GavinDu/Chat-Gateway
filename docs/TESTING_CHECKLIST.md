@@ -28,3 +28,5 @@ Docker key-volume access and HTTP authentication work together.
 - [ ] Show provider statuses inside the extension and refresh them while open.
 - [ ] Connect an already signed-in provider and sync its existing session; with no session, open the official provider site and sync cookie changes after sign-in.
 - [ ] Keep permission denial, logout/expired session, disabled provider, and unavailable gateway visible without claiming cookies prove a verified login.
+
+- [ ] Start through the real Docker helper using an owner-only (`0600`) host config; confirm the nonroot gateway reads its private config volume and the host file remains `0600`.

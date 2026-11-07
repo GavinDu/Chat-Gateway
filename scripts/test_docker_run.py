@@ -145,6 +145,7 @@ raise SystemExit(1 if os.environ.get("CURL_FAIL") == "1" else 0)
             bin_dir, calls = self.make_tools(root)
             config = root / "config.yaml"
             config.write_text("providers: []\\n", encoding="utf-8")
+            config.chmod(0o600)
             env = os.environ.copy()
             env.update({
                 "PATH": f"{bin_dir}:{env.get('PATH', '')}",
@@ -169,6 +170,10 @@ raise SystemExit(1 if os.environ.get("CURL_FAIL") == "1" else 0)
 
             self.assertIn("127.0.0.1:18080:18080", gateway_run)
             self.assertFalse(any("0.0.0.0" in arg for arg in gateway_run))
+            self.assertEqual(config.stat().st_mode & 0o777, 0o600)
+            self.assertIn("type=volume,source=chat-gateway-config,target=/run/config,readonly", gateway_run)
+            self.assertIn("/run/config/config.yaml", gateway_run)
+            self.assertFalse(any("type=bind,source=" + str(config) in arg for arg in gateway_run))
             self.assertIn("CHAT_GATEWAY_SESSION_STORE=vault", gateway_run)
             self.assertIn("CHAT_GATEWAY_VAULT_KEY_FILE=/run/secrets/vault.key", gateway_run)
             self.assertIn(

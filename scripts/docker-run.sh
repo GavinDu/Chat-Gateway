@@ -7,6 +7,7 @@ CONTAINER="${CHAT_GATEWAY_CONTAINER:-chat-gateway}"
 DATA_VOLUME="${CHAT_GATEWAY_DATA_VOLUME:-chat-gateway-data}"
 SESSION_VOLUME="${CHAT_GATEWAY_SESSION_VOLUME:-chat-gateway-sessions}"
 KEY_VOLUME="${CHAT_GATEWAY_KEY_VOLUME:-chat-gateway-vault-key}"
+CONFIG_VOLUME="${CHAT_GATEWAY_CONFIG_VOLUME:-chat-gateway-config}"
 NETWORK="${CHAT_GATEWAY_NETWORK:-chat-gateway-local}"
 PORT="${PORT:-8080}"
 CONFIG="${CHAT_GATEWAY_CONFIG:-$ROOT/config.yaml}"
@@ -31,6 +32,7 @@ Environment:
   PORT                         Published loopback port (default: 8080)
   CHAT_GATEWAY_EXTENSION_ID    Chrome extension ID from chrome://extensions
   CHAT_GATEWAY_CONFIG          Config file (default: ./config.yaml)
+  CHAT_GATEWAY_CONFIG_VOLUME  Private config volume (default: chat-gateway-config)
   CHAT_GATEWAY_IMAGE           Image tag (default: chat-gateway-rs:local)
   CHAT_GATEWAY_BUILD_PLATFORM  Optional target platform (for example linux/arm64)
   CHAT_GATEWAY_BUILD_TARGET    Optional Dockerfile target (for example builder)
@@ -108,11 +110,12 @@ ensure_volumes_and_key() {
   docker volume create "$DATA_VOLUME" >/dev/null
   docker volume create "$SESSION_VOLUME" >/dev/null
   docker volume create "$KEY_VOLUME" >/dev/null
+  docker volume create "$CONFIG_VOLUME" >/dev/null
   docker network inspect "$NETWORK" >/dev/null 2>&1 || docker network create "$NETWORK" >/dev/null
 
   # Generate the 256-bit vault key inside a dedicated Docker volume. The
   # gateway mounts this volume read-only and reads the key from a 0600 file.
-  docker run --rm \
+  docker run --rm --network none \
     --mount "type=volume,source=$KEY_VOLUME,target=/vault" \
     alpine:3.22 sh -eu -c '
       umask 077
@@ -133,6 +136,22 @@ ensure_volumes_and_key() {
     ' >/dev/null
 }
 
+copy_private_config() {
+  # Transfer through Docker stdin so an owner-only host config never needs to
+  # become world-readable or be accessible through the VM's host bind mounts.
+  docker run --rm --interactive --network none \
+    --mount "type=volume,source=$CONFIG_VOLUME,target=/config" \
+    alpine:3.22 sh -eu -c '
+      umask 077
+      chmod 700 /config
+      chown 65532:65532 /config
+      cat > /config/config.yaml.tmp
+      chmod 600 /config/config.yaml.tmp
+      chown 65532:65532 /config/config.yaml.tmp
+      mv /config/config.yaml.tmp /config/config.yaml
+    ' < "$CONFIG" >/dev/null
+}
+
 container_exists() {
   docker container inspect "$CONTAINER" >/dev/null 2>&1
 }
@@ -150,6 +169,7 @@ start_gateway() {
   fi
 
   ensure_volumes_and_key
+  copy_private_config
   if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
     bash "$0" build
   fi
@@ -164,7 +184,8 @@ start_gateway() {
     -e "CHAT_GATEWAY_DOCKER_LOCAL_BIND=1"
     -e "CHAT_GATEWAY_SESSION_STORE=vault"
     -e "CHAT_GATEWAY_VAULT_KEY_FILE=/run/secrets/vault.key"
-    --mount "type=bind,source=$CONFIG,target=/config.yaml,readonly"
+    --label "chat-gateway.config-source=$CONFIG"
+    --mount "type=volume,source=$CONFIG_VOLUME,target=/run/config,readonly"
     --mount "type=volume,source=$DATA_VOLUME,target=/app/data"
     --mount "type=volume,source=$SESSION_VOLUME,target=/app/sessions"
     --mount "type=volume,source=$KEY_VOLUME,target=/run/secrets,readonly"
@@ -172,7 +193,7 @@ start_gateway() {
   if [[ -n "$EXTENSION_ID" ]]; then
     args+=(-e "CHAT_GATEWAY_EXTENSION_ID=$EXTENSION_ID")
   fi
-  args+=("$IMAGE" --config /config.yaml)
+  args+=("$IMAGE" --config /run/config/config.yaml)
   docker "${args[@]}" >/dev/null
 
   local startup_timeout="${CHAT_GATEWAY_STARTUP_TIMEOUT_SECONDS:-60}"
