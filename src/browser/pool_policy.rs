@@ -43,7 +43,13 @@ pub(super) fn landing_is_not_previous_thread(provider_name: &str, actual: &str) 
         return false;
     }
     match provider_name {
-        "chatgpt" => !uri.path().starts_with("/c/"),
+        // ChatGPT custom-GPT threads may be nested under /g/<gpt>/c/<id>.
+        // A home-page redirect to one of these is still a previous remote
+        // conversation and must not receive a fresh gateway conversation.
+        "chatgpt" => {
+            let path = uri.path();
+            !path.starts_with("/c/") && !(path.starts_with("/g/") && path.contains("/c/"))
+        }
         "claude" => !uri.path().starts_with("/chat/"),
         _ => true,
     }
@@ -101,6 +107,18 @@ mod provider_thread_navigation_tests {
         assert!(!landing_is_not_previous_thread(
             "claude",
             "https://claude.ai/chat/thread-456#message",
+        ));
+        assert!(!landing_is_not_previous_thread(
+            "chatgpt",
+            "https://chatgpt.com/g/g-my-gpt/c/previous-thread?model=gpt#latest",
+        ));
+        assert!(!landing_is_not_previous_thread(
+            "chatgpt",
+            "https://chatgpt.com/g/g-my-gpt/c/previous-thread/",
+        ));
+        assert!(landing_is_not_previous_thread(
+            "chatgpt",
+            "https://chatgpt.com/g/g-my-gpt",
         ));
         assert!(landing_is_not_previous_thread(
             "chatgpt",
