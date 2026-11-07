@@ -341,7 +341,7 @@ test("token-bound logout never follows a newly paired gateway", async () => {
     () => api.relayFetch("/relay/v1/session/chatgpt", {method:"DELETE",body:"{}"}, {
       gateway:"http://127.0.0.1:8080",token:"install-old"
     }),
-    /Gateway connection changed during provider sync/
+    /Provider consent or gateway connection changed during sync/
   );
   assert.equal(api.fetchCalls.length, 0);
 });
