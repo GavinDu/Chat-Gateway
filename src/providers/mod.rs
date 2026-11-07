@@ -1080,31 +1080,56 @@ mod response_completion_tests {
         };
         let stable = initial.clone();
         assert!(final_probe_confirms_completion(
-            initial.text.as_deref().unwrap(), initial.count, &stable, DoneSignal::StopControlDisappeared, true, true,
+            initial.text.as_deref().unwrap(),
+            initial.count,
+            &stable,
+            DoneSignal::StopControlDisappeared,
+            true,
+            true,
         ));
 
         let mut late_token = stable.clone();
         late_token.text = Some("first part and more".to_owned());
         assert!(!final_probe_confirms_completion(
-            initial.text.as_deref().unwrap(), initial.count, &late_token, DoneSignal::StopControlDisappeared, true, true,
+            initial.text.as_deref().unwrap(),
+            initial.count,
+            &late_token,
+            DoneSignal::StopControlDisappeared,
+            true,
+            true,
         ));
 
         let mut new_node = stable.clone();
         new_node.count += 1;
         assert!(!final_probe_confirms_completion(
-            initial.text.as_deref().unwrap(), initial.count, &new_node, DoneSignal::StableResponseText, false, false,
+            initial.text.as_deref().unwrap(),
+            initial.count,
+            &new_node,
+            DoneSignal::StableResponseText,
+            false,
+            false,
         ));
 
         let mut resumed = stable.clone();
         resumed.streaming = true;
         assert!(!final_probe_confirms_completion(
-            initial.text.as_deref().unwrap(), initial.count, &resumed, DoneSignal::StableResponseText, true, false,
+            initial.text.as_deref().unwrap(),
+            initial.count,
+            &resumed,
+            DoneSignal::StableResponseText,
+            true,
+            false,
         ));
 
         let mut gone = stable.clone();
         gone.text = None;
         assert!(!final_probe_confirms_completion(
-            initial.text.as_deref().unwrap(), initial.count, &gone, DoneSignal::StableResponseText, false, false,
+            initial.text.as_deref().unwrap(),
+            initial.count,
+            &gone,
+            DoneSignal::StableResponseText,
+            false,
+            false,
         ));
     }
 
@@ -1122,12 +1147,22 @@ mod response_completion_tests {
         let mut final_probe = initial.clone();
         final_probe.post_answer_affordance = false;
         assert!(!final_probe_confirms_completion(
-            initial.text.as_deref().unwrap(), initial.count, &final_probe, DoneSignal::StopControlDisappeared, true, true,
+            initial.text.as_deref().unwrap(),
+            initial.count,
+            &final_probe,
+            DoneSignal::StopControlDisappeared,
+            true,
+            true,
         ));
         // Providers without a validated fast-done signal may still finish
         // after the full configured fallback grace.
         assert!(final_probe_confirms_completion(
-            initial.text.as_deref().unwrap(), initial.count, &final_probe, DoneSignal::StableResponseText, true, false,
+            initial.text.as_deref().unwrap(),
+            initial.count,
+            &final_probe,
+            DoneSignal::StableResponseText,
+            true,
+            false,
         ));
     }
 
