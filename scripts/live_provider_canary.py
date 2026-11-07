@@ -60,8 +60,8 @@ def preflight(base_url: str, api_key: str, timeout: int) -> dict:
     required = {}
     for provider in CORE_PROVIDERS:
         model = os.environ.get(f"CANARY_{provider.upper()}_MODEL")
-        if not model or not model.startswith(provider + "/"):
-            raise RuntimeError(f"CANARY_{provider.upper()}_MODEL_missing_or_invalid")
+        if not model:
+            raise RuntimeError(f"CANARY_{provider.upper()}_MODEL_missing")
         required[provider] = model
 
     for endpoint, accept in (("/health", "application/json"), ("/v1/models", "application/json")):
@@ -87,10 +87,12 @@ def preflight(base_url: str, api_key: str, timeout: int) -> dict:
         if endpoint == "/v1/models":
             try:
                 listing = json.loads(body.decode("utf-8"))
-                ids = {item.get("id") for item in listing["data"] if isinstance(item, dict)}
+                ids = {(item.get("id"), item.get("owned_by"))
+                       for item in listing["data"] if isinstance(item, dict)}
             except (ValueError, KeyError, TypeError):
                 raise RuntimeError("canary_preflight_invalid_models_response") from None
-            missing = [provider for provider, model in required.items() if model not in ids]
+            missing = [provider for provider, model in required.items()
+                       if (model, provider) not in ids]
             if missing:
                 # Print only provider names; model IDs can contain local account metadata.
                 raise RuntimeError("canary_preflight_models_missing_" + "_".join(missing))
@@ -164,7 +166,7 @@ def request_turn(base_url: str, api_key: str, model: str, expected_provider: str
     )
     started = time.monotonic()
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with urllib.request.build_opener(_NoRedirect()).open(request, timeout=timeout) as response:
             returned_conversation_id = response.headers.get("X-Conversation-Id")
             returned_provider = response.headers.get("X-Gateway-Provider", "").lower()
             parsed = consume_sse(response, started)
@@ -202,7 +204,7 @@ def fetch_conversation(base_url: str, api_key: str, conversation_id: str, timeou
         method="GET",
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with urllib.request.build_opener(_NoRedirect()).open(request, timeout=timeout) as response:
             if response.status != 200:
                 raise RuntimeError(f"conversation_export_http_status_{response.status}")
             return json.loads(response.read().decode("utf-8"))
