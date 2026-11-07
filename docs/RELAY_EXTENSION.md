@@ -33,9 +33,9 @@ and a separately reviewed allowlist update.
 - **Enabled in gateway** indicates configuration, not successful authentication.
 - **Session saved** means an encrypted session snapshot exists.
 - **Browser cookies present** does not prove an active login.
-- **Login verified** / **Login needed** reflect the gateway's available embedded
-  browser observation. In the normal Docker setup, a live observation may not be
-  available; **Login unverified** is expected in that case.
+- **Login needed** also uses the gateway's runtime session state, so an expired or missing session can be shown without opening the old login dashboard.
+- **Login verified** requires an observed authenticated login. A saved session, cookies or a routable provider alone do not prove login; **Login unverified** is shown when there is no such observation.
+- **Gateway check unavailable; retry** indicates a degraded runtime check, rather than claiming the account is signed out.
 
 The relay does not scrape passwords, bypass provider security controls, or
 promise that a saved web session will keep working indefinitely.

@@ -32,7 +32,7 @@ async function refreshStatus() {
     const auth = item.authentication === "verified" ? "Login verified"
       : item.authentication === "needs_login" ? "Login needed"
       : "Login unverified";
-    status.textContent = [enabled, linked, browser, auth].join(" · ");
+    status.textContent = [enabled, linked, browser, auth, ...(item.availability === "degraded" ? ["Gateway check unavailable; retry"] : [])].join(" · ");
     li.append(status);
 
     const openButton = document.createElement("button");

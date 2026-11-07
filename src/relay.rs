@@ -688,6 +688,19 @@ fn authenticated_request_with_origin(
     Ok(())
 }
 
+fn provider_authentication_status(
+    observed: Option<bool>,
+    state: crate::provider_state::ProviderSessionState,
+) -> &'static str {
+    match observed {
+        Some(true) => "verified",
+        Some(false) => "needs_login",
+        None if state == crate::provider_state::ProviderSessionState::NeedsLogin => "needs_login",
+        // Routability alone (including public model discovery) is not proof of login.
+        None => "unknown",
+    }
+}
+
 pub async fn status(State(app): State<Arc<crate::AppState>>, headers: HeaderMap) -> Response {
     if let Err(response) = authenticated_request(&app, &headers) {
         return *response;
@@ -726,16 +739,14 @@ pub async fn status(State(app): State<Arc<crate::AppState>>, headers: HeaderMap)
             .iter()
             .find(|item| item.provider == provider)
             .and_then(|item| item.logged_in);
-        let authentication = match observed {
-            Some(true) => "verified",
-            Some(false) => "needs_login",
-            None => "unknown",
-        };
+        let lifecycle = app.provider_sessions.status(provider).state;
+        let authentication = provider_authentication_status(observed, lifecycle);
         providers.push(serde_json::json!({
             "provider": provider,
             "linked": session_present,
             "enabled": enabled,
             "authentication": authentication,
+            "availability": lifecycle.as_str(),
         }));
     }
     Json(serde_json::json!({"ok":true,"providers":providers,"vault_mode":std::env::var("CHAT_GATEWAY_SESSION_STORE").as_deref()==Ok("vault")})).into_response()
@@ -904,6 +915,21 @@ mod tests {
             let mut headers = HeaderMap::new();
             headers.insert(header::ORIGIN, HeaderValue::from_static(origin));
             assert_eq!(requested_extension_id(&headers).is_some(), allowed);
+        }
+    }
+
+    #[test]
+    fn provider_status_uses_runtime_login_failures_without_claiming_readiness_is_authentication() {
+        use crate::provider_state::ProviderSessionState::{Degraded, NeedsLogin, Ready, Unknown};
+        for (observed, state, expected) in [
+            (None, NeedsLogin, "needs_login"),
+            (None, Ready, "unknown"),
+            (None, Degraded, "unknown"),
+            (None, Unknown, "unknown"),
+            (Some(true), Ready, "verified"),
+            (Some(false), Ready, "needs_login"),
+        ] {
+            assert_eq!(provider_authentication_status(observed, state), expected);
         }
     }
 
