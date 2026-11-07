@@ -17,6 +17,7 @@ function messageWithLink(text, url, label) {
 }
 
 function pendingApprovalUrl(pending) {
+  if (!/^[a-f0-9]{64}$/.test(pending.request_id)) throw new Error("Invalid pending approval request.");
   return normalizeGateway(pending.gateway) + "/relay/approve/" + pending.request_id;
 }
 
@@ -26,8 +27,20 @@ function showPendingApproval(pending) {
 
 async function openExtensionTab(url) {
   if (typeof chrome.tabs?.create !== "function") return false;
-  await chrome.tabs.create({url});
-  return true;
+  try {
+    await chrome.tabs.create({url});
+    return true;
+  } catch {
+    // Some extension hosts expose tabs but cannot open them. Preserve a
+    // clickable link so the user can still complete local approval.
+    return false;
+  }
+}
+
+function showGatewayConnection(connected) {
+  $("pairing").hidden = connected;
+  $("linked").hidden = !connected;
+  $("gateway").disabled = connected;
 }
 
 async function refreshStatus() {
@@ -35,8 +48,7 @@ async function refreshStatus() {
   const response = await relayFetch("/relay/v1/status", {method:"POST",body:"{}"});
   if (response.status === 401 || response.status === 403) {
     await chrome.storage.local.remove("token");
-    $("pairing").hidden = false;
-    $("linked").hidden = true;
+    showGatewayConnection(false);
     throw new Error("Gateway connection expired or was revoked. Choose Connect to gateway to approve it again.");
   }
   if (!response.ok) throw new Error("Status request failed (" + response.status + ").");
@@ -64,35 +76,35 @@ async function refreshStatus() {
     status.textContent = [enabled, linked, browser, auth, ...(item.availability === "degraded" ? ["Gateway check unavailable; retry"] : [])].join(" · ");
     li.append(status);
 
-    const openButton = document.createElement("button");
-    openButton.type = "button";
-    openButton.className = "secondary provider-action";
-    openButton.textContent = "Open login";
-    openButton.addEventListener("click", () => openProviderLogin(item.provider).catch(error => message(error.message)));
-    li.append(openButton);
+    const actions = document.createElement("div");
+    actions.className = "provider-actions";
 
     const linkButton = document.createElement("button");
     linkButton.type = "button";
     linkButton.className = "provider-action";
-    linkButton.textContent = item.linked ? "Sync session" : "Connect account";
+    linkButton.textContent = !item.linked ? "Log in / Connect"
+      : item.authentication === "needs_login" ? "Re-login / Sync" : "Sync session";
     linkButton.disabled = item.enabled === false;
-    linkButton.addEventListener("click", () => {
-      $("provider").value = item.provider;
-      $("link").click();
-    });
-    li.append(linkButton);
+    linkButton.addEventListener("click", () => connectProvider(item.provider).catch(error => message(error.message)));
+    actions.append(linkButton);
+
+    const openButton = document.createElement("button");
+    openButton.type = "button";
+    openButton.className = "secondary provider-action";
+    openButton.textContent = "Open website";
+    openButton.addEventListener("click", () => openProviderLogin(item.provider).catch(error => message(error.message)));
+    actions.append(openButton);
 
     if (item.linked) {
-      const unlinkButton = document.createElement("button");
-      unlinkButton.type = "button";
-      unlinkButton.className = "danger provider-action";
-      unlinkButton.textContent = "Unlink";
-      unlinkButton.addEventListener("click", () => {
-        $("provider").value = item.provider;
-        $("unlink").click();
-      });
-      li.append(unlinkButton);
+      const logoutButton = document.createElement("button");
+      logoutButton.type = "button";
+      logoutButton.className = "quiet-danger provider-action";
+      logoutButton.textContent = "Log out";
+      logoutButton.title = "Remove the gateway session and stop cookie resync. Does not sign out from the official website.";
+      logoutButton.addEventListener("click", () => logoutProvider(item.provider).catch(error => message(error.message)));
+      actions.append(logoutButton);
     }
+    li.append(actions);
     return li;
   }));
   $("status").replaceChildren(...items);
@@ -122,8 +134,7 @@ async function initialize() {
   const stored = await chrome.storage.local.get(["gateway","token"]);
   if (stored.gateway) $("gateway").value = stored.gateway;
   showConnectionMode();
-  $("pairing").hidden = Boolean(stored.token);
-  $("linked").hidden = !stored.token;
+  showGatewayConnection(Boolean(stored.token));
   if (stored.token) {
     try { await refreshStatus(); } catch (error) { message(error.message); }
   }
@@ -137,6 +148,16 @@ $("pair").addEventListener("click", async () => {
     if (remote && !/^[0-9]{8}$/.test(code)) throw new Error("Enter the fresh 8-digit code from your private remote gateway.");
     const granted = await chrome.permissions.request({origins:[gateway + "/*"]});
     if (!granted) throw new Error("Gateway permission was not granted.");
+    // A popup closure must not strand a valid approval. Reopen the same page
+    // instead of repeatedly creating and invalidating requests.
+    if (!remote) {
+      const {pendingConnection} = await chrome.storage.local.get(["pendingConnection"]);
+      if (pendingConnection?.gateway === gateway && Date.now() < pendingConnection.expires) {
+        if (!await openExtensionTab(pendingApprovalUrl(pendingConnection))) showPendingApproval(pendingConnection);
+        else message("Approve the pending connection in the local tab, then return here.");
+        return;
+      }
+    }
     const response = await fetch(gateway + (remote ? "/relay/v1/pair" : "/relay/v1/connect/request"), {
       method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(remote ? {code} : {}), cache:"no-store"
     });
@@ -167,66 +188,62 @@ $("pair").addEventListener("click", async () => {
   } catch (error) { message(error.message); }
 });
 
-$("open-login").addEventListener("click", async () => {
-  try { await openProviderLogin($("provider").value); } catch (error) { message(error.message); }
-});
-
-$("link").addEventListener("click", async () => {
+// Linking consents to automatic updates from this provider. The browser only
+// sends cookies for domains the user has explicitly granted permission to.
+async function connectProvider(provider) {
+  const domains = PROVIDERS[provider];
+  if (!domains) throw new Error("Unsupported provider.");
+  const patterns = domains.flatMap(domain => ["https://" + domain + "/*", "https://*." + domain + "/*"]);
+  if (!await chrome.permissions.request({origins:patterns})) {
+    throw new Error("Provider permissions were not granted.");
+  }
+  const snapshot = await providerCookieSnapshot(provider);
+  const stored = await chrome.storage.local.get(["linkedProviders"]);
+  const prior = stored.linkedProviders || [];
+  await chrome.storage.local.set({linkedProviders:Array.from(new Set([...prior,provider]))});
+  if (snapshot.cookies.length === 0) {
+    await openProviderLogin(provider);
+    message("Sign in on the official " + provider + " website. The gateway will sync this provider after its cookies become available.");
+    return;
+  }
   try {
-    const provider = $("provider").value;
-    const patterns = PROVIDERS[provider].flatMap(domain => ["https://" + domain + "/*", "https://*." + domain + "/*"]);
-    const granted = await chrome.permissions.request({origins:patterns});
-    if (!granted) throw new Error("Provider permissions were not granted.");
-    const snapshot = await providerCookieSnapshot(provider);
-    const stored = await chrome.storage.local.get(["linkedProviders"]);
-    await chrome.storage.local.set({linkedProviders:Array.from(new Set([...(stored.linkedProviders || []),provider]))});
-    if (snapshot.cookies.length === 0) {
-      await openProviderLogin(provider);
-      message("Sign in on the provider website. This account will sync automatically when session cookies become available.");
-      return;
-    }
-    if (!(stored.linkedProviders || []).includes(provider)) {
-      // The worker owns this sync so opening the provider tab can close the
-      // popup without cancelling the transfer. Cookies alone do not prove login.
-      chrome.runtime.sendMessage({type:"sync-provider",provider}).catch(() => {});
-      await openProviderLogin(provider);
-      message("Use your existing provider session or sign in there. This account syncs automatically.");
-      return;
-    }
-    const response = await relayFetch("/relay/v1/session/" + encodeURIComponent(provider), {method:"POST",body:JSON.stringify(snapshot)});
-    if (!response.ok) throw new Error("Gateway rejected session import (" + response.status + "). Ensure vault mode is enabled and provider domains are allowed.");
-    const linkedProviders = Array.from(new Set([...(stored.linkedProviders || []),provider]));
-    await chrome.storage.local.set({linkedProviders});
-    message("Connected " + provider + ". Existing browser session synced; future cookie changes sync automatically.");
-    await refreshStatus();
-  } catch (error) { message(error.message); }
-});
+    const response = await relayFetch("/relay/v1/session/" + encodeURIComponent(provider), {
+      method:"POST",body:JSON.stringify(snapshot)
+    });
+    if (!response.ok) throw new Error("Gateway rejected " + provider + " session import (" + response.status + "). Check vault mode and provider permissions.");
+  } catch (error) {
+    // An unsuccessful first connection must not silently opt this provider
+    // into future automatic uploads.
+    await chrome.storage.local.set({linkedProviders:prior});
+    throw error;
+  }
+  await refreshStatus();
+  message("Saved " + provider + " to the gateway. Verify the login status; saved cookies alone do not confirm authentication.");
+}
+
+async function logoutProvider(provider) {
+  if (!PROVIDERS[provider]) throw new Error("Unsupported provider.");
+  if (!confirm("Log out " + provider + " from Chat Gateway and stop automatic sync? This does not sign you out on the provider website. You can reconnect later.")) return;
+  // The service worker queues logout behind in-flight cookie syncs, then
+  // revokes the persisted gateway snapshot. No website cookies are deleted.
+  const result = await chrome.runtime.sendMessage({type:"logout-provider",provider});
+  if (!result?.ok) throw new Error(result?.error || "Provider logout could not complete. Retry before reconnecting.");
+  await refreshStatus();
+  message("Logged out " + provider + " from Chat Gateway. Your website login is unchanged. Choose Log in / Connect to reconnect.");
+}
 
 $("refresh").addEventListener("click", async () => {
   try { await refreshStatus(); message("Status refreshed."); } catch (error) { message(error.message); }
 });
 
 
-$("unlink").addEventListener("click", async () => {
-  try {
-    const provider = $("provider").value;
-    if (!confirm("Remove the saved " + provider + " session from Chat-Gateway?")) return;
-    const response = await relayFetch("/relay/v1/session/" + encodeURIComponent(provider), {method:"DELETE",body:"{}"});
-    if (!response.ok) throw new Error("Could not unlink " + provider + ".");
-    const stored = await chrome.storage.local.get(["linkedProviders"]);
-    await chrome.storage.local.set({linkedProviders:(stored.linkedProviders || []).filter(value => value !== provider)});
-    message("Unlinked " + provider + ". The gateway cleared the persisted session, embedded-browser cookies, and origin localStorage.");
-    await refreshStatus();
-  } catch (error) { message(error.message); }
-});
-
 $("unpair").addEventListener("click", async () => {
   try {
     const response = await relayFetch("/relay/v1/unpair",{method:"POST",body:"{}"});
     if (!response.ok) throw new Error("Could not revoke the install token.");
     await chrome.storage.local.remove(["token","linkedProviders"]);
-    $("pairing").hidden = false; $("linked").hidden = true;
-    message("Extension unpaired. Provider vault entries remain; unlink them individually before unpairing if you want them deleted.");
+    showGatewayConnection(false);
+    message("Gateway disconnected. Saved provider sessions remain in the gateway vault. Reconnect to manage them.");
   } catch (error) { message(error.message); }
 });
 
@@ -238,8 +255,7 @@ async function updateConnection() {
     const result = await chrome.runtime.sendMessage({type:"poll-connection"});
     if (result?.error) message(result.error);
     const {token, pendingConnection} = await chrome.storage.local.get(["token","pendingConnection"]);
-    $("pairing").hidden = Boolean(token);
-    $("linked").hidden = !token;
+    showGatewayConnection(Boolean(token));
     if (token) await refreshStatus();
     else if (pendingConnection) showPendingApproval(pendingConnection);
   } catch (error) { message(error.message); }
