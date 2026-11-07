@@ -101,6 +101,11 @@ async function providerCookieSnapshot(provider) {
       }
     }
   }
+  // Chrome permissions may be revoked while asynchronous cookie reads are
+  // pending. Never return collected session material after consent changes.
+  if (!await chrome.permissions.contains({origins:requiredOrigins})) {
+    throw new Error("Provider host permissions were revoked during cookie collection.");
+  }
   const deduped = new Map(all.map(cookie => [cookie.domain + "\n" + cookie.path + "\n" + cookie.name, cookie]));
   return {cookies:Array.from(deduped.values()), local_storage:{}, ts:new Date().toISOString()};
 }
@@ -118,6 +123,15 @@ async function syncProvider(provider) {
   // Missing permissions or an expired browser session must not overwrite a
   // previously valid gateway session with an empty snapshot.
   if (snapshot.cookies.length === 0) return;
+  // Storage reads also await; recheck host consent at the final upload
+  // boundary rather than relying only on the snapshot-time checks.
+  const domains = PROVIDERS[provider];
+  const requiredOrigins = domains.flatMap(domain => [
+    "https://" + domain + "/*", "https://*." + domain + "/*"
+  ]);
+  if (!await chrome.permissions.contains({origins:requiredOrigins})) {
+    throw new Error("Provider host permissions were revoked before session sync.");
+  }
   const response = await relayFetch("/relay/v1/session/" + encodeURIComponent(provider), {
     method:"POST", body:JSON.stringify(snapshot)
   }, {gateway, token, provider});
