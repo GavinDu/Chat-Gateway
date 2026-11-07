@@ -152,6 +152,20 @@ impl ChatService {
         self.backend.send_stream(request).await
     }
 
+    /// A backend may stall *before* it returns a stream receiver (for example
+    /// while its command queue is saturated). Bound admission as well as event
+    /// collection; dropping the pending future cancels the admission attempt.
+    pub async fn stream_with_timeout(
+        &self,
+        request: BackendRequest,
+        max_wait: Duration,
+    ) -> std::result::Result<mpsc::Receiver<Result<ChatEvent, GatewayError>>, GatewayError> {
+        match tokio::time::timeout(max_wait, self.stream(request)).await {
+            Ok(result) => result,
+            Err(_) => Err(GatewayError::timeout("provider submission timed out")),
+        }
+    }
+
     /// Consume a provider stream for a non-SSE response using the same event
     /// semantics as the streaming path. The caller supplies the attempt start
     /// instant so TTFT includes backend startup and first-event wait.
