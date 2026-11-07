@@ -4785,9 +4785,11 @@ mod real_chat_router_scripted_backend_tests {
     async fn real_router_session_health_uses_typed_errors_not_upstream_text() {
         let (app, state) = fixture(
             &["chatgpt"],
-            vec![ScriptedSend::Events(vec![Err(GatewayError::provider_failure(
-                "provider returned the words session expired but did not signal auth expiry",
-            ))])],
+            vec![ScriptedSend::Events(vec![Err(
+                GatewayError::provider_failure(
+                    "provider returned the words session expired but did not signal auth expiry",
+                ),
+            )])],
             None,
         );
         let failed = send(app, false, "chatgpt/fake-model", "typed_failure_001").await;
@@ -4799,9 +4801,9 @@ mod real_chat_router_scripted_backend_tests {
 
         let (app, state) = fixture(
             &["chatgpt"],
-            vec![ScriptedSend::Events(vec![Err(GatewayError::session_expired(
-                "opaque message without authentication keywords",
-            ))])],
+            vec![ScriptedSend::Events(vec![Err(
+                GatewayError::session_expired("opaque message without authentication keywords"),
+            )])],
             None,
         );
         let failed = send(app, false, "chatgpt/fake-model", "typed_auth_expiry_001").await;
