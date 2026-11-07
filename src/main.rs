@@ -2512,8 +2512,12 @@ async fn chat_completions(
                     Some(item) => Some(item),
                     None => rx.recv().await,
                 } {
-                    match accumulator.push(item) {
-                        chat_service::StreamUpdate::Delta(content) => {
+                    let update = accumulator.push(item);
+                    let done_after_delta =
+                        matches!(&update, chat_service::StreamUpdate::CompleteWithDelta(_));
+                    match update {
+                        chat_service::StreamUpdate::Delta(content)
+                        | chat_service::StreamUpdate::CompleteWithDelta(content) => {
                             let data = serde_json::json!({
                                 "id": format!("chatcmpl-{}", &conv_stream[..8]),
                                 "object": "chat.completion.chunk",
@@ -2522,6 +2526,9 @@ async fn chat_completions(
                                 "choices": [{ "delta": { "content": content }, "index": 0, "finish_reason": null }],
                             });
                             yield Ok::<_, anyhow::Error>(Event::default().data(data.to_string()));
+                            if done_after_delta {
+                                break;
+                            }
                         }
                         chat_service::StreamUpdate::Complete => break,
                         chat_service::StreamUpdate::Failed => {
@@ -4287,7 +4294,7 @@ mod initial_stream_chunk_tests {
         assert!(usable_initial_stream_chunk("first token", false));
         assert!(!usable_initial_stream_chunk("", false));
         assert!(!usable_initial_stream_chunk("", true));
-        assert!(!usable_initial_stream_chunk("content marked done", true));
+        assert!(usable_initial_stream_chunk("content marked done", true));
     }
 }
 
