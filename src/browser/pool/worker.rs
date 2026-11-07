@@ -298,7 +298,11 @@ pub(super) fn browser_thread(
                                         .await;
                                     return;
                                 }
-                                if pool_policy::provider_send_requires_navigation(&page.url(), target_url, thread_url.is_some()) {
+                                if pool_policy::provider_send_requires_navigation(
+                                    &page.url(),
+                                    target_url,
+                                    thread_url.is_some(),
+                                ) {
                                     if chunks.is_closed() { return; }
                                     let target_literal = serde_json::to_string(target_url)
                                         .expect("provider URL serialization cannot fail");
