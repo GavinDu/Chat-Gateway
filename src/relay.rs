@@ -599,18 +599,19 @@ fn authenticated_request_with_origin(
         )));
     }
     // Proxies and HTTP stacks can disagree about whether the first or last
-    // duplicate security header wins. Each relay credential field must appear
-    // exactly once before authentication and nonce replay checks can proceed.
+    // duplicate security header wins. Reject duplicates before authentication
+    // or nonce replay checks, while preserving existing missing-credential
+    // error responses for backward-compatible clients.
     for name in [
         header::AUTHORIZATION.as_str(),
         "x-relay-timestamp",
         "x-relay-nonce",
     ] {
-        if headers.get_all(name).iter().count() != 1 {
+        if headers.get_all(name).iter().count() > 1 {
             return Err(Box::new(json_error(
                 StatusCode::BAD_REQUEST,
                 "relay_auth_headers_ambiguous",
-                "exactly one authorization, timestamp, and nonce header is required",
+                "duplicate relay authentication headers are not permitted",
             )));
         }
     }
@@ -1137,6 +1138,23 @@ mod tests {
         // nonce. Re-trying with a single copy must still succeed.
         let valid = valid_auth_headers(token, "abcdef0123456789abcdef0123456789");
         assert!(authenticated_request_with_origin(&state, &valid, true).is_ok());
+    }
+
+    #[test]
+    fn missing_relay_credentials_keep_their_existing_response_statuses() {
+        let token = "paired-install-token";
+        let state = relay_state_with_token(Some(token));
+        for (name, expected) in [
+            (header::AUTHORIZATION.as_str(), StatusCode::UNAUTHORIZED),
+            ("x-relay-timestamp", StatusCode::UNAUTHORIZED),
+            ("x-relay-nonce", StatusCode::BAD_REQUEST),
+        ] {
+            let mut headers = valid_auth_headers(token, "abcdef0123456789abcdef0123456789");
+            headers.remove(name);
+            let response = authenticated_request_with_origin(&state, &headers, true)
+                .expect_err("missing required relay credential must be rejected");
+            assert_eq!(response.status(), expected, "{name}");
+        }
     }
 
     #[test]
