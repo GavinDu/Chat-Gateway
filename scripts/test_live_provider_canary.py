@@ -99,6 +99,21 @@ class ConsumeSseTests(unittest.TestCase):
             ), self.assertRaisesRegex(RuntimeError, category):
                 fetch_conversation(endpoint, "", "synthetic-conversation", 5)
 
+    def test_malformed_utf8_sse_fails_closed_without_claiming_done(self):
+        valid = b'data: {"choices":[{"delta":{"content":"partial"}}]}\\n'
+        invalid = b'data: {"choices":[{"delta":{"content":"\\xff"}}]}\\n'
+        parsed = consume_sse([valid, invalid, b"data: [DONE]\\n"])
+        self.assertTrue(parsed["provider_error"])
+        self.assertFalse(parsed["saw_done"])
+        self.assertEqual(parsed["content"], "partial")
+
+    def test_valid_multibyte_utf8_content_is_preserved(self):
+        event = 'data: {"choices":[{"delta":{"content":"你好"}}]}\\n'.encode("utf-8")
+        parsed = consume_sse([event, b"data: [DONE]\\n"])
+        self.assertFalse(parsed["provider_error"])
+        self.assertTrue(parsed["saw_done"])
+        self.assertEqual(parsed["content"], "你好")
+
     def test_valid_json_wrong_sse_event_shapes_fail_with_sanitized_status(self):
         # Valid JSON can still have shapes that would otherwise crash the
         # live owner-account canary with an unhandled AttributeError/TypeError.
