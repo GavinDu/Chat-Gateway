@@ -124,6 +124,7 @@ jobs:
           CHAT_GATEWAY_IMAGE: chat-gateway-rs:arm64-link-builder
           CHAT_GATEWAY_BUILD_PLATFORM: linux/arm64
           CHAT_GATEWAY_BUILD_TARGET: builder
+          CHAT_GATEWAY_BUILD_CACHE_FROM: type=gha,scope=chat-gateway-arm64-2gb
         run: |
           pwd
           bash scripts/docker-run.sh build
