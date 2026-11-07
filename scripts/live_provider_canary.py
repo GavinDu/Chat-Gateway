@@ -140,7 +140,13 @@ def consume_sse(lines: Iterable[str], started_at: float | None = None) -> dict:
         received_bytes += line_size
         if received_bytes > MAX_SSE_STREAM_BYTES:
             raise RuntimeError("canary_sse_output_too_large")
-        line = raw_line.decode("utf-8", "replace") if isinstance(raw_line, bytes) else raw_line
+        try:
+            line = raw_line.decode("utf-8") if isinstance(raw_line, bytes) else raw_line
+        except UnicodeDecodeError:
+            # UTF-8 replacement characters could hide a truncated or altered
+            # content delta and yield a false-positive continuity assertion.
+            provider_error = True
+            break
         if not line.startswith("data:"):
             continue
         data = line[5:].strip()
