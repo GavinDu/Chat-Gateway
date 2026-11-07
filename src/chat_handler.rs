@@ -35,8 +35,7 @@ async fn finalize_provider_attempt(
     let persist_error = if stream_failed {
         None
     } else {
-        state.provider_sessions.record_success(telemetry.provider);
-        persist_completed_turn(
+        match persist_completed_turn(
             state,
             owner_key_id,
             conversation_id,
@@ -46,7 +45,15 @@ async fn finalize_provider_attempt(
             model,
         )
         .await
-        .err()
+        {
+            Ok(()) => {
+                // Provider success is visible only after the completed turn
+                // has been committed; a failed write is a gateway error.
+                state.provider_sessions.record_success(telemetry.provider);
+                None
+            }
+            Err(error) => Some(error),
+        }
     };
     let total_ms = telemetry.request_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
     record_provider_outcome(
