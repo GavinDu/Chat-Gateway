@@ -8,7 +8,11 @@ const flush = () => new Promise(resolve => setImmediate(resolve));
 
 test("logout waits for pending imports and prevents automatic re-link", async () => {
   const listeners = [];
-  const state = {linkedProviders:["metaai"]};
+  const state = {
+    gateway:"http://127.0.0.1:8080",
+    token:"install-old",
+    linkedProviders:["metaai"]
+  };
   const calls = [];
   let completeSync;
   const sandbox = {
