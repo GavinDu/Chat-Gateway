@@ -220,3 +220,39 @@ test("pending provider consent never carries over to a different gateway install
   assert.deepEqual(Array.from(f.values.linkedProviders),["claude"]);
   assert.equal(f.messages.filter(m=>m.type==="sync-provider").length,0);
 });
+
+test("failed old-install sync does not revoke consent on a newly paired gateway", async () => {
+  const f = fixture({connected:true,linked:false,cookies:true});
+  await settle();
+  const originalSend = f.context.chrome.runtime.sendMessage;
+  f.context.chrome.runtime.sendMessage = async message => {
+    if (message.type === "sync-provider") {
+      f.values.gateway = "https://new-gateway.example";
+      f.values.token = "d".repeat(64);
+      f.values.linkedProviders = ["metaai"];
+      return {ok:false,error:"old install rejected"};
+    }
+    return originalSend(message);
+  };
+  await assert.rejects(
+    () => f.context.connectProviderForTest("metaai"),
+    /old install rejected/
+  );
+  assert.equal(f.values.gateway, "https://new-gateway.example");
+  assert.deepEqual(Array.from(f.values.linkedProviders), ["metaai"]);
+});
+
+test("failed first-time sync rolls back consent only on the same gateway install", async () => {
+  const f = fixture({connected:true,linked:false,cookies:true});
+  await settle();
+  const originalSend = f.context.chrome.runtime.sendMessage;
+  f.context.chrome.runtime.sendMessage = async message => {
+    if (message.type === "sync-provider") return {ok:false,error:"import rejected"};
+    return originalSend(message);
+  };
+  await assert.rejects(
+    () => f.context.connectProviderForTest("metaai"),
+    /import rejected/
+  );
+  assert.deepEqual(Array.from(f.values.linkedProviders), []);
+});
