@@ -5,3 +5,14 @@ body{font:14px system-ui,sans-serif;width:340px;margin:0;color:#1f2937;backgroun
 #status .provider-detail{color:#475569;font-size:11px;line-height:1.4;margin:5px 0}
 #status button.provider-action{width:auto;display:inline-block;font-size:11px;padding:6px 8px;margin:3px 4px 2px 0}
 #status button:disabled{opacity:0.5;cursor:not-allowed}
+
+.dashboard-toolbar{display:flex;justify-content:space-between;align-items:center;gap:8px;margin:12px 0}
+.dashboard-toolbar strong{font-size:13px}
+button.compact{width:auto;font-size:11px;padding:6px 9px;margin:0}
+button.quiet-danger{background:transparent;border:1px solid #b91c1c;color:#991b1b}
+#status .provider-actions{display:flex;align-items:center;flex-wrap:wrap;gap:4px;margin-top:7px}
+#status .provider-actions button.provider-action{margin:0}
+#status .provider-actions .quiet-danger{margin-left:auto}
+#status .provider-detail{overflow-wrap:anywhere}
+button:focus-visible,a:focus-visible{outline:2px solid #1d4ed8;outline-offset:2px}
+button:disabled{opacity:.5;cursor:not-allowed}
