@@ -32,6 +32,27 @@ pub struct LongTermMemoryItem {
     pub expires_at: Option<i64>,
 }
 
+/// Stable storage validation categories for long-term memory writes.
+/// HTTP error mapping must not depend on matching arbitrary error text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LongTermMemoryWriteError {
+    InvalidItem,
+    Disabled,
+    InvalidProvenance,
+}
+
+impl std::fmt::Display for LongTermMemoryWriteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::InvalidItem => "invalid long-term memory item",
+            Self::Disabled => "long-term memory is disabled",
+            Self::InvalidProvenance => "source conversation is not owned by this API key",
+        })
+    }
+}
+
+impl std::error::Error for LongTermMemoryWriteError {}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Conversation {
     pub id: String,
@@ -1228,7 +1249,7 @@ impl UnifiedMemory {
             || !confidence.is_finite()
             || !(0.0..=1.0).contains(&confidence)
         {
-            anyhow::bail!("invalid long-term memory item");
+            return Err(LongTermMemoryWriteError::InvalidItem.into());
         }
         let now = unix_timestamp();
         let mut connection = self.lock()?;
@@ -1242,7 +1263,7 @@ impl UnifiedMemory {
             .optional()?
             .unwrap_or(false);
         if !enabled {
-            anyhow::bail!("long-term memory is disabled");
+            return Err(LongTermMemoryWriteError::Disabled.into());
         }
         if let Some(source_id) = source_conversation_id {
             let source_owner: Option<String> = tx
@@ -1253,7 +1274,7 @@ impl UnifiedMemory {
                 )
                 .optional()?;
             if source_owner.as_deref() != Some(owner_key_id) {
-                anyhow::bail!("source conversation is not owned by this API key");
+                return Err(LongTermMemoryWriteError::InvalidProvenance.into());
             }
         }
         tx.execute(
