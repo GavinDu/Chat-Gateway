@@ -152,11 +152,9 @@ impl ChatService {
         self.backend.send_stream(request).await
     }
 
-    /// Bound provider admission as well as response collection. A browser
-    /// worker or backend that never acknowledges submission cannot keep an
-    /// HTTP request and the exclusive provider slot occupied indefinitely.
-    /// Dropping the in-flight send future on timeout preserves cancellation
-    /// for backends that support it; no partial turn is committed.
+    /// A backend may stall *before* it returns a stream receiver (for example
+    /// while its command queue is saturated). Bound admission as well as event
+    /// collection; dropping the pending future cancels the admission attempt.
     pub async fn stream_with_timeout(
         &self,
         request: BackendRequest,
