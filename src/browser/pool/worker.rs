@@ -282,6 +282,20 @@ pub(super) fn browser_thread(
                                     let navigation = tokio::time::timeout(Duration::from_secs(15), async {
                                         loop {
                                             let current_url = page.url();
+                                            // An app may redirect its landing URL to the user's
+                                            // previous conversation. Fail closed immediately
+                                            // rather than append this gateway conversation to
+                                            // somebody else's existing remote thread.
+                                            if thread_url.is_none()
+                                                && pool_policy::provider_thread_url_is_same_origin(
+                                                    &current_url, provider.login_url(),
+                                                )
+                                                && !pool_policy::landing_is_not_previous_thread(
+                                                    adapter.name(), &current_url,
+                                                )
+                                            {
+                                                break false;
+                                            }
                                             let arrived = if thread_url.is_some() {
                                                 pool_policy::provider_thread_navigation_matches(&current_url, target_url)
                                             } else {
@@ -293,13 +307,18 @@ pub(super) fn browser_thread(
                                                 )
                                             };
                                             if arrived {
-                                                break;
+                                                break true;
                                             }
                                             tokio::time::sleep(Duration::from_millis(50)).await;
                                         }
                                     }).await;
-                                    if navigation.is_err() {
-                                        let _ = chunks.send(Err(anyhow::anyhow!("provider thread navigation timed out"))).await;
+                                    if !matches!(navigation, Ok(true)) {
+                                        let reason = if matches!(navigation, Ok(false)) {
+                                            "provider landing redirected to an existing conversation; refusing cross-thread send"
+                                        } else {
+                                            "provider thread navigation timed out"
+                                        };
+                                        let _ = chunks.send(Err(anyhow::anyhow!(reason))).await;
                                         return;
                                     }
                                 }
