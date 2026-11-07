@@ -179,18 +179,10 @@ mod wire_chat_message_contract_tests {
             ("function_call", serde_json::json!({"name": "go", "arguments": "{}"})),
             ("audio", serde_json::json!({"id": "a"})),
         ] {
-            let request = serde_json::json!({
+            let mut request = serde_json::json!({
                 "model": "auto",
-                "messages": [{
-                    "role": "assistant",
-                    "content": "text",
-                    field: value
-                }]
+                "messages": [{"role": "assistant", "content": "text"}]
             });
-            // serde_json::json! object expressions do not interpolate keys
-            // unless supplied through a Map, so build the field explicitly.
-            let mut request = request;
-            request["messages"][0].as_object_mut().unwrap().remove("field");
             request["messages"][0]
                 .as_object_mut()
                 .unwrap()
