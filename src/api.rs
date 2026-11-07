@@ -77,6 +77,15 @@ pub(crate) fn validate_chat_req(req: &ChatReq) -> Result<(), (&'static str, Stri
             format!("messages may contain at most {MAX_MESSAGES} entries"),
         ));
     }
+    // The rendered conversation wrapper is nonempty even when every actual
+    // message is blank. Reject an empty payload before provider admission;
+    // otherwise an empty request can be sent to a live browser session.
+    if !req.messages.iter().any(|message| !message.content.trim().is_empty()) {
+        return Err((
+            "empty_prompt",
+            "at least one message must contain non-whitespace text".to_string(),
+        ));
+    }
     let mut total_content_bytes = 0usize;
     for (index, message) in req.messages.iter().enumerate() {
         if message.content.len() > MAX_MESSAGE_BYTES {
@@ -260,6 +269,41 @@ mod wire_chat_message_contract_tests {
             super::validate_chat_req(&request).unwrap_err().0,
             "invalid_model"
         );
+    }
+
+    #[test]
+    fn rejects_all_empty_or_whitespace_chat_messages_before_provider_dispatch() {
+        for messages in [
+            serde_json::json!([{"role": "user", "content": ""}]),
+            serde_json::json!([
+                {"role": "system", "content": " \t"},
+                {"role": "user", "content": "\n"}
+            ]),
+        ] {
+            let request: ChatReq = serde_json::from_value(serde_json::json!({
+                "model": "auto",
+                "messages": messages
+            }))
+            .unwrap();
+            assert_eq!(
+                super::validate_chat_req(&request).unwrap_err().0,
+                "empty_prompt"
+            );
+        }
+    }
+
+    #[test]
+    fn mixed_empty_history_and_nonempty_current_turn_remain_supported() {
+        let request: ChatReq = serde_json::from_value(serde_json::json!({
+            "model": "auto",
+            "messages": [
+                {"role": "system", "content": ""},
+                {"role": "assistant", "content": " \t"},
+                {"role": "user", "content": "A real request"}
+            ]
+        }))
+        .unwrap();
+        assert!(super::validate_chat_req(&request).is_ok());
     }
 
     #[test]
