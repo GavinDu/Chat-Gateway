@@ -598,6 +598,22 @@ fn authenticated_request_with_origin(
             "the configured browser extension origin is required",
         )));
     }
+    // Proxies and HTTP stacks can disagree about whether the first or last
+    // duplicate security header wins. Each relay credential field must appear
+    // exactly once before authentication and nonce replay checks can proceed.
+    for name in [
+        header::AUTHORIZATION.as_str(),
+        "x-relay-timestamp",
+        "x-relay-nonce",
+    ] {
+        if headers.get_all(name).iter().count() != 1 {
+            return Err(Box::new(json_error(
+                StatusCode::BAD_REQUEST,
+                "relay_auth_headers_ambiguous",
+                "exactly one authorization, timestamp, and nonce header is required",
+            )));
+        }
+    }
     let authorization = headers
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok());
@@ -1098,6 +1114,29 @@ mod tests {
             HeaderValue::from_static("-9223372036854775808"),
         );
         assert!(authenticated_request_with_origin(&state, &headers, true).is_err());
+    }
+
+    #[test]
+    fn duplicate_relay_security_headers_fail_closed_before_nonce_is_consumed() {
+        let token = "paired-install-token";
+        let state = relay_state_with_token(Some(token));
+        for name in [
+            header::AUTHORIZATION.as_str(),
+            "x-relay-timestamp",
+            "x-relay-nonce",
+        ] {
+            let mut headers = valid_auth_headers(token, "abcdef0123456789abcdef0123456789");
+            let repeated = headers.get(name).unwrap().clone();
+            headers.append(name, repeated);
+            let response = authenticated_request_with_origin(&state, &headers, true)
+                .expect_err("even identical duplicate relay security headers must be rejected");
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{name}");
+        }
+
+        // A rejected ambiguous request must not burn its otherwise unused
+        // nonce. Re-trying with a single copy must still succeed.
+        let valid = valid_auth_headers(token, "abcdef0123456789abcdef0123456789");
+        assert!(authenticated_request_with_origin(&state, &valid, true).is_ok());
     }
 
     #[test]
