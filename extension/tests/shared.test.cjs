@@ -25,7 +25,7 @@ function loadShared(cookieFixtures = [], hasAllPermissions = true, storageValues
       permissions: {
         contains: async ({origins}) => {
           if (hooks.onPermissionCheck) await hooks.onPermissionCheck(origins, storageValues);
-          return hasAllPermissions;
+          return hooks.hasPermissions ? hooks.hasPermissions(origins, storageValues) : hasAllPermissions;
         }
       },
       storage: { local: { get: async () => storageValues } }
@@ -266,4 +266,47 @@ test("late consent revocation during relay permission check blocks cookie upload
   });
   await assert.rejects(() => api.syncProvider("chatgpt"), /consent or gateway connection changed/);
   assert.equal(api.fetchCalls.length, 0);
+});
+
+test("revoked provider permission during cookie collection prevents any snapshot", async () => {
+  const state = {permissionGranted:true};
+  const api = loadShared([
+    {name:"session",value:"synthetic-only",domain:".chatgpt.com",path:"/",secure:true}
+  ], true, state, {
+    onCookieRead: () => { state.permissionGranted = false; },
+    hasPermissions: origins => origins.every(origin => origin.startsWith("https://"))
+      ? state.permissionGranted : true
+  });
+  await assert.rejects(
+    () => api.providerCookieSnapshot("chatgpt"),
+    /permissions were revoked during cookie collection/
+  );
+  assert.ok(api.getCookieReads() > 0);
+  assert.equal(api.fetchCalls.length, 0);
+});
+
+test("revoked provider permission at upload boundary blocks previously captured cookies", async () => {
+  let providerChecks = 0;
+  const state = {
+    gateway:"http://127.0.0.1:8080",
+    token:"relay-secret",
+    linkedProviders:["chatgpt"]
+  };
+  const api = loadShared([
+    {name:"session",value:"synthetic-only",domain:".chatgpt.com",path:"/",secure:true}
+  ], true, state, {
+    hasPermissions: origins => {
+      if (origins.every(origin => origin.startsWith("https://"))) {
+        providerChecks += 1;
+        return providerChecks < 3;
+      }
+      return true;
+    }
+  });
+  await assert.rejects(
+    () => api.syncProvider("chatgpt"),
+    /permissions were revoked before session sync/
+  );
+  assert.equal(providerChecks, 3);
+  assert.equal(api.fetchCalls.length, 0, "revoked consent must block credential uploads");
 });
