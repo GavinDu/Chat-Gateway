@@ -80,7 +80,11 @@ pub(crate) fn validate_chat_req(req: &ChatReq) -> Result<(), (&'static str, Stri
     // The rendered conversation wrapper is nonempty even when every actual
     // message is blank. Reject an empty payload before provider admission;
     // otherwise an empty request can be sent to a live browser session.
-    if !req.messages.iter().any(|message| !message.content.trim().is_empty()) {
+    if !req
+        .messages
+        .iter()
+        .any(|message| !message.content.trim().is_empty())
+    {
         return Err((
             "empty_prompt",
             "at least one message must contain non-whitespace text".to_string(),
