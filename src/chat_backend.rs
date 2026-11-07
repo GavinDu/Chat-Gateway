@@ -1,6 +1,8 @@
 //! Canonical chat execution contract independent of the browser engine.
 use crate::{
-    browser::pool::{BrowserWorkerUnavailableError, ProviderBusyError, ProviderSessionExpiredError},
+    browser::pool::{
+        BrowserWorkerUnavailableError, ProviderBusyError, ProviderSessionExpiredError,
+    },
     providers::ProviderChunk,
 };
 use anyhow::Result;
