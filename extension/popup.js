@@ -269,7 +269,10 @@ $("unpair").addEventListener("click", async () => {
   try {
     const response = await relayFetch("/relay/v1/unpair",{method:"POST",body:"{}"});
     if (!response.ok) throw new Error("Could not revoke the install token.");
-    await chrome.storage.local.remove(["token","linkedProviders"]);
+    // A stale approval should not be able to silently reconnect a gateway
+    // after the user explicitly revoked this install.
+    await chrome.storage.local.remove(["token","linkedProviders","pendingConnection"]);
+    await chrome.alarms?.clear?.("relay-connection");
     showGatewayConnection(false);
     message("Gateway disconnected. Saved provider sessions remain in the gateway vault. Reconnect to manage them.");
   } catch (error) { message(error.message); }
