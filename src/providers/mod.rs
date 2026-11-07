@@ -564,11 +564,11 @@ pub async fn run_send(
         }
         Err(_) => {
             let _ = chunks
-                .send(Err(anyhow::anyhow!(
-                    "provider '{}' timed out while submitting the prompt after {:?}",
+                .send(Err(anyhow::Error::new(common::ProviderTimeoutError::new(
                     adapter.name(),
-                    timeout
-                )))
+                    timeout,
+                    common::ProviderTimeoutPhase::Submission,
+                ))))
                 .await;
             return;
         }
@@ -599,11 +599,11 @@ pub async fn run_send(
             // A timeout is not a successful completion. Propagate a typed
             // provider error so the API won't commit a partial/empty turn.
             let _ = chunks
-                .send(Err(anyhow::anyhow!(
-                    "provider '{}' did not complete within {:?}",
+                .send(Err(anyhow::Error::new(common::ProviderTimeoutError::new(
                     adapter.name(),
-                    timeout
-                )))
+                    timeout,
+                    common::ProviderTimeoutPhase::Generation,
+                ))))
                 .await;
             break;
         }
