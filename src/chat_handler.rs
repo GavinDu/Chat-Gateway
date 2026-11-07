@@ -317,9 +317,8 @@ fn plan_provider_send(
     token_budget: usize,
     replay_prompt: &str,
 ) -> (String, Option<String>) {
-    let saved_thread = saved_thread.filter(|thread| {
-        is_reopenable_provider_thread_url(provider, &thread.thread_url)
-    });
+    let saved_thread = saved_thread
+        .filter(|thread| is_reopenable_provider_thread_url(provider, &thread.thread_url));
     let supports_reopen = providers::ADAPTERS
         .iter()
         .find(|spec| spec.id == provider)
@@ -346,9 +345,7 @@ fn plan_provider_send(
             context::render_prompt(&messages),
             saved_thread.map(|thread| thread.thread_url),
         ),
-        ContextPlan::Replay { preamble, .. } => {
-            (format!("{preamble}\n{replay_prompt}"), None)
-        }
+        ContextPlan::Replay { preamble, .. } => (format!("{preamble}\n{replay_prompt}"), None),
     }
 }
 
@@ -921,12 +918,7 @@ mod provider_send_planner_tests {
         }
     }
 
-    fn saved_thread(
-        provider: &str,
-        model: &str,
-        url: &str,
-        marker: &str,
-    ) -> ProviderThread {
+    fn saved_thread(provider: &str, model: &str, url: &str, marker: &str) -> ProviderThread {
         ProviderThread {
             conversation_id: "conversation-123".to_owned(),
             provider: provider.to_owned(),
@@ -960,7 +952,10 @@ mod provider_send_planner_tests {
             1000,
             "bounded canonical transcript",
         );
-        assert_eq!(thread_url.as_deref(), Some("https://chatgpt.com/c/thread_123"));
+        assert_eq!(
+            thread_url.as_deref(),
+            Some("https://chatgpt.com/c/thread_123")
+        );
         assert!(prompt.contains("new question"));
         assert!(!prompt.contains("old answer"));
     }
@@ -975,10 +970,30 @@ mod provider_send_planner_tests {
         ];
         let marker = transcript_marker(&history);
         let inputs = [
-            saved_thread("chatgpt", "chatgpt/test", "https://chatgpt.com/c/thread_123", "stale"),
-            saved_thread("chatgpt", "chatgpt/other", "https://chatgpt.com/c/thread_123", &marker),
-            saved_thread("chatgpt", "chatgpt/test", "https://evil.example/c/thread_123", &marker),
-            saved_thread("claude", "chatgpt/test", "https://chatgpt.com/c/thread_123", &marker),
+            saved_thread(
+                "chatgpt",
+                "chatgpt/test",
+                "https://chatgpt.com/c/thread_123",
+                "stale",
+            ),
+            saved_thread(
+                "chatgpt",
+                "chatgpt/other",
+                "https://chatgpt.com/c/thread_123",
+                &marker,
+            ),
+            saved_thread(
+                "chatgpt",
+                "chatgpt/test",
+                "https://evil.example/c/thread_123",
+                &marker,
+            ),
+            saved_thread(
+                "claude",
+                "chatgpt/test",
+                "https://chatgpt.com/c/thread_123",
+                &marker,
+            ),
         ];
         for thread in inputs {
             let (prompt, thread_url) = plan_provider_send(
@@ -990,7 +1005,10 @@ mod provider_send_planner_tests {
                 1000,
                 "bounded canonical transcript",
             );
-            assert!(thread_url.is_none(), "replay must never reuse a stale remote thread");
+            assert!(
+                thread_url.is_none(),
+                "replay must never reuse a stale remote thread"
+            );
             assert!(prompt.contains("CONVERSATION_CONTEXT_BEGIN"));
             assert!(prompt.contains("bounded canonical transcript"));
         }
