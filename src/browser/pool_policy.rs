@@ -59,14 +59,14 @@ pub(super) fn landing_is_not_previous_thread(provider_name: &str, actual: &str) 
             !uri.path().starts_with("/c/")
                 && !uri.path().starts_with("/chat/")
                 && !uri.query().is_some_and(|query| {
-                    query.split('&').any(|parameter| parameter.starts_with("conversation="))
+                    query
+                        .split('&')
+                        .any(|parameter| parameter.starts_with("conversation="))
                 })
         }
         "qwen" => !uri.path().starts_with("/c/"),
         "mistral" => !uri.path().starts_with("/chat/"),
-        "perplexity" => {
-            !uri.path().starts_with("/search/") && !uri.path().starts_with("/page/")
-        }
+        "perplexity" => !uri.path().starts_with("/search/") && !uri.path().starts_with("/page/"),
         // There is no fixture-verified Meta AI conversation URL convention;
         // accept only the configured homepage instead of trusting an unknown
         // redirect into a potentially stale remote thread.
@@ -191,7 +191,8 @@ mod provider_thread_navigation_tests {
             );
         }
         assert!(!landing_is_not_previous_thread(
-            "unknown", "https://unknown.example/"
+            "unknown",
+            "https://unknown.example/"
         ));
     }
 
