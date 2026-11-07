@@ -371,6 +371,8 @@ pub(crate) mod test_support {
         Delay(Duration, Vec<Result<ChatEvent, GatewayError>>),
         /// Keep the response idle until the consumer drops it.
         Hold(oneshot::Sender<()>),
+        /// Emit first content then hold the stream; notify on client drop.
+        PartialThenHold(ChatEvent, oneshot::Sender<()>),
     }
 
     pub(crate) struct ScriptedBackend {
@@ -439,6 +441,16 @@ pub(crate) mod test_support {
                     let (tx, rx) = mpsc::channel::<Result<ChatEvent, GatewayError>>(1);
                     tokio::spawn(async move {
                         tx.closed().await;
+                        let _ = cancelled.send(());
+                    });
+                    Ok(rx)
+                }
+                ScriptedSend::PartialThenHold(first, cancelled) => {
+                    let (tx, rx) = mpsc::channel(1);
+                    tokio::spawn(async move {
+                        if tx.send(Ok(first)).await.is_ok() {
+                            tx.closed().await;
+                        }
                         let _ = cancelled.send(());
                     });
                     Ok(rx)
