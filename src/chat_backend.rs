@@ -1,11 +1,11 @@
 //! Canonical chat execution contract independent of the browser engine.
+use crate::providers::common::ProviderTimeoutError;
 use crate::{
     browser::pool::{
         BrowserWorkerUnavailableError, ProviderBusyError, ProviderSessionExpiredError,
     },
     providers::ProviderChunk,
 };
-use crate::providers::common::ProviderTimeoutError;
 use anyhow::Result;
 use std::{error::Error, fmt};
 use tokio::sync::mpsc;
