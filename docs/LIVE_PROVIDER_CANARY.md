@@ -6,13 +6,15 @@ It sends short synthetic prompts through the OpenAI-compatible endpoint.
 
 ## Configure
 
-Set the gateway endpoint, an API key accepted by the gateway, and the exact
-model IDs exposed by your local `/v1/models` endpoint. Model IDs should include
-the provider prefix used by routing (for example, `chatgpt/<configured-id>`).
+Run this against a clean **main-branch** installation. Set the gateway
+endpoint and the exact model IDs exposed by its `/v1/models` endpoint, including
+each model's `owned_by` provider. No provider API keys are needed: the canary
+uses browser-linked provider sessions. A gateway API key is different from a
+provider API key and is needed only when your gateway API authentication is enabled.
 
 ```sh
 export CHAT_GATEWAY_URL=http://127.0.0.1:8080
-export CHAT_GATEWAY_API_KEY='...'
+export CHAT_GATEWAY_API_KEY='...'  # omit if local gateway API auth is disabled
 export CANARY_CHATGPT_MODEL='chatgpt/<model-id>'
 export CANARY_CLAUDE_MODEL='claude/<model-id>'
 export CANARY_GEMINI_MODEL='gemini/<model-id>'
@@ -23,6 +25,32 @@ export CHAT_GATEWAY_CANARY_STATE=/tmp/chat-gateway-live-canary-state.json
 ```
 
 Do not commit these values or put the API key in command-line arguments.
+
+If the gateway has **no API key configured** and listens on loopback, you may
+explicitly opt into keyless local canary requests:
+
+```sh
+unset CHAT_GATEWAY_API_KEY
+export CHAT_GATEWAY_LOCAL_CANARY_NO_API_KEY=1
+```
+
+This override is valid only for loopback HTTP. It is rejected for HTTPS/remote
+origins, and an API-authenticated gateway will still reject unauthenticated
+requests. Never disable gateway authentication on a public deployment.
+
+First perform a **read-only preflight**. It checks gateway health and that all
+four configured model IDs appear under the correct provider in `/v1/models`,
+without submitting any provider prompts or saving credentials:
+
+```sh
+python3 scripts/live_provider_canary.py --phase preflight
+```
+
+A preflight failure prints a sanitized error category; fix the missing model,
+authorization or gateway health before running the live phases. The preflight
+does **not** prove that browser sessions are authenticated; check the extension's
+provider status and the real live run for that. Every phase repeats preflight
+before sending a synthetic marker.
 
 ## Run the restart and provider-switch sequence
 

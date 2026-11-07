@@ -16,10 +16,94 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+import urllib.parse
 from pathlib import Path
 from typing import Iterable
 
 CORE_PHASE_TWO = ("claude", "gemini", "grok")
+CORE_PROVIDERS = ("chatgpt", *CORE_PHASE_TWO)
+
+
+def gateway_headers(api_key: str, accept: str) -> dict[str, str]:
+    headers = {"Accept": accept}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    return headers
+
+
+def validate_canary_target(base_url: str, api_key: str, local_no_key: bool) -> None:
+    """Keep real-account checks on an explicit gateway origin, not a redirect URL."""
+    try:
+        target = urllib.parse.urlsplit(base_url)
+        port = target.port  # Force validation of malformed ports.
+    except ValueError:
+        raise RuntimeError("invalid_gateway_url") from None
+    local = target.hostname in {"127.0.0.1", "localhost", "::1"}
+    if (
+        target.scheme not in ("http", "https")
+        or not target.netloc
+        or target.username is not None
+        or target.password is not None
+        or target.path not in ("", "/")
+        or target.query
+        or target.fragment
+        or port == 0
+        or (target.scheme == "http" and not local)
+    ):
+        raise RuntimeError("invalid_gateway_url")
+    if not api_key and not (local_no_key and local and target.scheme == "http"):
+        raise RuntimeError("CHAT_GATEWAY_API_KEY_not_set")
+
+
+def preflight(base_url: str, api_key: str, timeout: int) -> dict:
+    """Read-only readiness gate. No provider prompt, content or session material."""
+    required = {}
+    for provider in CORE_PROVIDERS:
+        model = os.environ.get(f"CANARY_{provider.upper()}_MODEL")
+        if not model:
+            raise RuntimeError(f"CANARY_{provider.upper()}_MODEL_missing")
+        required[provider] = model
+
+    for endpoint, accept in (("/health", "application/json"), ("/v1/models", "application/json")):
+        request = urllib.request.Request(
+            base_url.rstrip("/") + endpoint,
+            headers=gateway_headers(api_key, accept),
+            method="GET",
+        )
+        # Redirects could forward bearer credentials. Do not follow any
+        # redirect from the configured origin, including a redirect to login.
+        opener = urllib.request.build_opener(_NoRedirect())
+        try:
+            with opener.open(request, timeout=timeout) as response:
+                if response.status != 200:
+                    raise RuntimeError("canary_preflight_http_status_" + str(response.status))
+                body = response.read(262_145)
+                if len(body) > 262_144:
+                    raise RuntimeError("canary_preflight_response_too_large")
+        except urllib.error.HTTPError as error:
+            raise RuntimeError("canary_preflight_http_status_" + str(error.code)) from None
+        except (urllib.error.URLError, OSError, TimeoutError):
+            raise RuntimeError("canary_preflight_gateway_unreachable") from None
+        if endpoint == "/v1/models":
+            try:
+                listing = json.loads(body.decode("utf-8"))
+                ids = {(item.get("id"), item.get("owned_by"))
+                       for item in listing["data"] if isinstance(item, dict)}
+            except (ValueError, KeyError, TypeError):
+                raise RuntimeError("canary_preflight_invalid_models_response") from None
+            missing = [provider for provider, model in required.items()
+                       if (model, provider) not in ids]
+            if missing:
+                # Print only provider names; model IDs can contain local account metadata.
+                raise RuntimeError("canary_preflight_models_missing_" + "_".join(missing))
+    return {"phase": "preflight", "status": "passed",
+            "providers": list(CORE_PROVIDERS), "prompts_sent": 0}
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
 
 
 def consume_sse(lines: Iterable[str], started_at: float | None = None) -> dict:
@@ -70,11 +154,8 @@ def request_turn(base_url: str, api_key: str, model: str, expected_provider: str
         "stream": True,
         "messages": [{"role": "user", "content": prompt}],
     }).encode("utf-8")
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-        "Accept": "text/event-stream",
-    }
+    headers = gateway_headers(api_key, "text/event-stream")
+    headers["Content-Type"] = "application/json"
     if conversation_id:
         headers["X-Conversation-Id"] = conversation_id
     request = urllib.request.Request(
@@ -85,7 +166,7 @@ def request_turn(base_url: str, api_key: str, model: str, expected_provider: str
     )
     started = time.monotonic()
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with urllib.request.build_opener(_NoRedirect()).open(request, timeout=timeout) as response:
             returned_conversation_id = response.headers.get("X-Conversation-Id")
             returned_provider = response.headers.get("X-Gateway-Provider", "").lower()
             parsed = consume_sse(response, started)
@@ -119,11 +200,11 @@ def request_turn(base_url: str, api_key: str, model: str, expected_provider: str
 def fetch_conversation(base_url: str, api_key: str, conversation_id: str, timeout: int) -> dict:
     request = urllib.request.Request(
         base_url.rstrip("/") + "/v1/conversations/" + conversation_id,
-        headers={"Authorization": f"Bearer {api_key}", "Accept": "application/json"},
+        headers=gateway_headers(api_key, "application/json"),
         method="GET",
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with urllib.request.build_opener(_NoRedirect()).open(request, timeout=timeout) as response:
             if response.status != 200:
                 raise RuntimeError(f"conversation_export_http_status_{response.status}")
             return json.loads(response.read().decode("utf-8"))
@@ -225,8 +306,15 @@ def run_phase(phase: str) -> dict:
         "/tmp/chat-gateway-live-canary-state.json",
     ))
     timeout = int(os.environ.get("CHAT_GATEWAY_CANARY_TIMEOUT", "180"))
-    if not api_key:
-        raise RuntimeError("CHAT_GATEWAY_API_KEY_not_set")
+    local_no_key = os.environ.get("CHAT_GATEWAY_LOCAL_CANARY_NO_API_KEY") == "1"
+    validate_canary_target(base_url, api_key, local_no_key)
+    if timeout < 1 or timeout > 600:
+        raise RuntimeError("canary_timeout_out_of_range")
+    if phase == "preflight":
+        return preflight(base_url, api_key, timeout)
+    # Fail before the first synthetic prompt if the four-provider prerequisites
+    # are not all met. After restart, repeat this read-only readiness gate.
+    preflight(base_url, api_key, timeout)
 
     results = []
     if phase == "before-restart":
@@ -341,7 +429,7 @@ def run_phase(phase: str) -> dict:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--phase", required=True,
-                        choices=("before-restart", "after-restart"))
+                        choices=("preflight", "before-restart", "after-restart"))
     args = parser.parse_args()
     try:
         report = run_phase(args.phase)
