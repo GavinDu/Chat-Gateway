@@ -316,9 +316,9 @@ fn replace_pending_approval(
     let requested_id = requested_extension_id(headers).unwrap_or_default();
     // A second extension must not be able to cancel another extension's
     // unexpired approval. Only the same extension can explicitly restart.
-    if pending.as_ref().is_some_and(|current|
+    if pending.as_ref().is_some_and(|current| {
         current.expires > Instant::now() && current.extension_id != requested_id
-    ) {
+    }) {
         return Err(Box::new(json_error(
             StatusCode::CONFLICT,
             "approval_pending",
@@ -978,10 +978,7 @@ mod tests {
         assert_eq!(current.id, new_id);
         assert_eq!(current.poll_secret, new_secret);
         assert!(!current.approved);
-        assert_eq!(
-            current.extension_id,
-            "abcdefghijklmnopabcdefghijklmnop"
-        );
+        assert_eq!(current.extension_id, "abcdefghijklmnopabcdefghijklmnop");
         assert!(current.expires > Instant::now());
     }
 
