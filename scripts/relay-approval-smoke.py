@@ -40,6 +40,7 @@ assert request(path, origin=None, headers={'Sec-Fetch-Mode': 'navigate', 'Sec-Fe
 status, headers, html = request(path, origin=None, headers={'Sec-Fetch-Mode': 'navigate', 'Sec-Fetch-Dest': 'document'})
 assert status == 200
 assert headers.get('Cache-Control') == 'no-store'
+assert headers.get('Referrer-Policy') == 'same-origin'
 assert "frame-ancestors 'none'" in headers['Content-Security-Policy']
 csrf = re.search(r'name="csrf" value="([a-f0-9]{64})"', html).group(1)
 assert request(path, {'csrf': csrf}, origin=None, form=True)[0] == 403

@@ -383,7 +383,7 @@ pub async fn approval_page(
                 header::CONTENT_SECURITY_POLICY,
                 "default-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
             ),
-            (header::REFERRER_POLICY, "no-referrer"),
+            (header::REFERRER_POLICY, "same-origin"),
         ],
         Html(html),
     )
