@@ -241,10 +241,14 @@ async function connectProvider(provider, openLogin = false) {
   } catch (error) {
     // A failed first connection must not opt this provider into background
     // uploads. Leave prior consent unchanged on an existing connection.
-    const latest = await chrome.storage.local.get(["linkedProviders"]);
-    await chrome.storage.local.set({
-      linkedProviders:(latest.linkedProviders || []).filter(value => value !== provider || prior.includes(provider))
-    });
+    const latest = await chrome.storage.local.get(["gateway", "token", "linkedProviders"]);
+    // A delayed old-install failure must not revoke consent granted by a
+    // newly paired gateway. Roll back only the install that initiated sync.
+    if (latest.gateway === connection.gateway && latest.token === connection.token) {
+      await chrome.storage.local.set({
+        linkedProviders:(latest.linkedProviders || []).filter(value => value !== provider || prior.includes(provider))
+      });
+    }
     throw error;
   }
   await refreshStatus();
