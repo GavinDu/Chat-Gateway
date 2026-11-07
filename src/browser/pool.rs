@@ -827,7 +827,12 @@ fn provider_landing_navigation_ready(
         ))
     }
 
-    if origin(actual) != origin(target) {
+    if origin(actual) != origin(target)
+        || !pool_policy::landing_is_not_previous_thread(adapter.name(), actual)
+    {
+        // A provider's home page can redirect to an old remote thread while
+        // still displaying a composer. Do not replay unrelated gateway
+        // history into that page: require a genuinely fresh landing route.
         return false;
     }
     adapter
