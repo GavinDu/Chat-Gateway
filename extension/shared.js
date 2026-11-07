@@ -54,7 +54,9 @@ async function relayFetch(path, options = {}) {
   headers.set("X-Relay-Nonce", randomHex());
   if (token) headers.set("Authorization", "Bearer " + token);
   if (options.body) headers.set("Content-Type", "application/json");
-  return fetch(localGateway + path, {...options, headers, cache:"no-store"});
+  // Fail closed on HTTP redirects: a 307/308 could replay the provider
+  // cookie snapshot body to a different origin before CORS responds.
+  return fetch(localGateway + path, {...options, headers, cache:"no-store", redirect:"error"});
 }
 
 async function providerCookieSnapshot(provider) {

@@ -89,6 +89,17 @@ test("relayFetch supports an HTTPS gateway without weakening the HTTP loopback r
   assert.equal(api.fetchCalls[0].url, "https://gateway.example.com/relay/v1/status");
   assert.equal(api.fetchCalls[0].options.headers.get("Authorization"), "Bearer relay-secret");
   assert.equal(api.fetchCalls[0].options.cache, "no-store");
+  assert.equal(api.fetchCalls[0].options.redirect, "error");
+});
+
+test("a caller cannot override the no-redirect policy on credentialed relay requests", async () => {
+  const api = loadShared([], true, {
+    gateway: "https://gateway.example.com",
+    token: "relay-secret"
+  });
+  await api.relayFetch("/relay/v1/status", {method:"POST", body:"{}", redirect:"follow"});
+  assert.equal(api.fetchCalls.length, 1);
+  assert.equal(api.fetchCalls[0].options.redirect, "error");
 });
 
 test("provider cookie snapshot excludes cookies outside that provider's domain roots", async () => {
@@ -149,6 +160,7 @@ test("linked provider sync sends its cookie snapshot only to the configured loca
   assert.equal(body.cookies.length, 1);
   assert.equal(body.cookies[0].value, "session-secret");
   assert.equal(api.fetchCalls[0].options.cache, "no-store");
+  assert.equal(api.fetchCalls[0].options.redirect, "error");
 });
 
 test("two linked providers sync only their own cookie domains", async () => {
