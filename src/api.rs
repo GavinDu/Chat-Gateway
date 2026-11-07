@@ -1,6 +1,6 @@
 pub(crate) mod health;
 
-use crate::{context, memory::ChatMessage};
+use crate::{chat_backend::Role, context, memory::ChatMessage};
 use axum::{response::IntoResponse, Json};
 use std::collections::HashMap;
 
@@ -84,10 +84,7 @@ pub(crate) fn validate_chat_req(req: &ChatReq) -> Result<(), (&'static str, Stri
                 ),
             ));
         }
-        if !matches!(
-            message.role.as_str(),
-            "system" | "developer" | "user" | "assistant" | "tool"
-        ) {
+        if Role::from_wire(&message.role).is_none() {
             return Err((
                 "invalid_message_role",
                 format!("messages[{index}].role '{}' is not supported", message.role),
@@ -210,5 +207,26 @@ mod wire_chat_message_contract_tests {
             }]
         });
         assert!(serde_json::from_value::<ChatReq>(request).is_err());
+    }
+
+    #[test]
+    fn typed_roles_accept_only_exact_supported_wire_values() {
+        for role in ["system", "developer", "user", "assistant", "tool"] {
+            let request: ChatReq = serde_json::from_value(serde_json::json!({
+                "model": "auto",
+                "messages": [{"role": role, "content": "hello"}]
+            }))
+            .unwrap();
+            assert!(super::validate_chat_req(&request).is_ok(), "{role}");
+        }
+        for role in ["User", "assistant ", "function", ""] {
+            let request: ChatReq = serde_json::from_value(serde_json::json!({
+                "model": "auto",
+                "messages": [{"role": role, "content": "hello"}]
+            }))
+            .unwrap();
+            let error = super::validate_chat_req(&request).unwrap_err();
+            assert_eq!(error.0, "invalid_message_role", "{role}");
+        }
     }
 }
