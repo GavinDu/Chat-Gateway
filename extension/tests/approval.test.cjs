@@ -59,3 +59,32 @@ test('410 for the current approval clears only that request',async()=>{
   await assert.rejects(api.poll(),/Connection approval unavailable/);
   assert.equal(api.values.pendingConnection,undefined);
 });
+
+test('late successful response cannot exchange a replaced approval secret',async()=>{
+  let release;
+  const barrier=new Promise(resolve=>{release=resolve;});
+  const api=load(200,{token:'c'.repeat(64)},Date.now()+300000,()=>barrier);
+  const running=api.poll();
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(api.calls.length,1);
+  const original=api.values.pendingConnection;
+  api.values.pendingConnection={...original,poll_secret:'d'.repeat(64)};
+  release();
+  await running;
+  assert.equal(api.values.token,undefined,'stale success must not persist a new token');
+  assert.equal(api.values.pendingConnection.poll_secret,'d'.repeat(64));
+});
+
+test('late successful response cannot approve an expired request',async()=>{
+  let release;
+  const barrier=new Promise(resolve=>{release=resolve;});
+  const api=load(200,{token:'c'.repeat(64)},Date.now()+300000,()=>barrier);
+  const running=api.poll();
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(api.calls.length,1);
+  api.values.pendingConnection.expires=Date.now()-1;
+  release();
+  await assert.rejects(running,/expired/);
+  assert.equal(api.values.token,undefined,'expired approval must not become a connection');
+  assert.equal(api.values.pendingConnection,undefined);
+});

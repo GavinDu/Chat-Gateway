@@ -100,7 +100,8 @@ async function clearPendingApprovalIfCurrent(pending) {
   const {pendingConnection: current} = await chrome.storage.local.get(["pendingConnection"]);
   if (current?.request_id !== pending.request_id ||
       current?.gateway !== pending.gateway ||
-      current?.poll_secret !== pending.poll_secret) return false;
+      current?.poll_secret !== pending.poll_secret ||
+      current?.expires !== pending.expires) return false;
   await chrome.storage.local.remove("pendingConnection");
   await chrome.alarms?.clear?.("relay-connection");
   return true;
@@ -127,7 +128,17 @@ async function completePendingConnection() {
   const data = await response.json();
   if (!/^[a-f0-9]{64}$/.test(data.token)) throw new Error("Invalid connection token.");
   const latest = await chrome.storage.local.get(["pendingConnection","gateway","linkedProviders"]);
-  if (latest.pendingConnection?.request_id !== pending.request_id || latest.pendingConnection?.gateway !== gateway) return;
+  const current = latest.pendingConnection;
+  // A prior approval response is not valid for a renewed request, even if a
+  // request ID is reused. Fence the successful exchange to the full secret
+  // and expiry identity rather than just its public ID and origin.
+  if (current?.request_id !== pending.request_id || current?.gateway !== gateway ||
+      current?.poll_secret !== pending.poll_secret || current?.expires !== pending.expires) return;
+  // A slow network response cannot extend the five-minute approval window.
+  if (Date.now() >= current.expires) {
+    await clearPendingApprovalIfCurrent(current);
+    throw new Error("Connection approval expired. Choose Connect to gateway again.");
+  }
   const linkedProviders = latest.gateway === gateway ? (latest.linkedProviders || []) : [];
   await chrome.storage.local.set({gateway, token:data.token, linkedProviders});
   await chrome.storage.local.remove("pendingConnection");
