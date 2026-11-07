@@ -44,9 +44,7 @@ pub async fn recv_with_deadline(
 ) -> Option<Result<ChatEvent, GatewayError>> {
     match tokio::time::timeout_at(deadline, events.recv()).await {
         Ok(item) => item,
-        Err(_) => Some(Err(GatewayError::timeout(
-            "provider completion timed out",
-        ))),
+        Err(_) => Some(Err(GatewayError::timeout("provider completion timed out"))),
     }
 }
 
@@ -238,8 +236,8 @@ mod tests {
             }))
             .await
             .unwrap();
-        let deadline = tokio::time::Instant::from_std(started)
-            + std::time::Duration::from_millis(15);
+        let deadline =
+            tokio::time::Instant::from_std(started) + std::time::Duration::from_millis(15);
         let mut accumulator = ResponseAccumulator::new(started);
         let first = recv_with_deadline(&mut receiver, deadline).await.unwrap();
         assert_eq!(
