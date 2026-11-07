@@ -15,6 +15,12 @@ function load(status, data, expires = Date.now() + 300000) {
   vm.runInContext(fs.readFileSync(require.resolve('../background.js'),'utf8')+'\nglobalThis.poll = pollConnection;', context);
   return {values,calls,poll:context.poll};
 }
+test('pending approval polling refuses redirects that could leak the secret',async()=>{
+  const api=load(202,{pending:true});
+  await api.poll();
+  assert.equal(api.calls.length,1);
+  assert.equal(api.calls[0].options.redirect,'error');
+});
 test('pending local approval never stores a token',async()=>{
   const api=load(202,{pending:true});await api.poll();assert.equal(api.values.token,undefined);assert.ok(api.values.pendingConnection);
 });
