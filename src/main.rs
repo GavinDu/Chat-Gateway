@@ -2373,9 +2373,11 @@ async fn chat_completions(
             continue;
         }
 
+        let provider_started = Instant::now();
+        let provider_timeout = std::time::Duration::from_secs(provider_cfg.timeout_seconds);
         let mut rx = match state
             .chat_service
-            .stream(BackendRequest {
+            .stream_with_timeout(BackendRequest {
                 provider: match ProviderId::new(provider_name.clone()) {
                     Some(provider) => provider,
                     None => {
@@ -2389,7 +2391,7 @@ async fn chat_completions(
                 model: provider_model.clone(),
                 has_history: has_history && thread_url.is_some(),
                 thread_url,
-            })
+            }, provider_timeout)
             .await
         {
             Ok(rx) => rx,
@@ -2407,21 +2409,30 @@ async fn chat_completions(
                         .provider_sessions
                         .record_error(&provider_name, &e.to_string());
                 }
+                record_provider_outcome(
+                    &state.metrics,
+                    ProviderOutcome {
+                        request_id: &request_id,
+                        provider: &provider_name,
+                        outcome: "error",
+                        queue_ms,
+                        ttft_ms: None,
+                        provider_work_ms: provider_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+                        total_ms: request_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+                    },
+                );
                 last_err = Some(e.to_string());
                 continue;
             }
         };
-        let provider_started = Instant::now();
 
         let mut first_stream_chunk: Option<chat_backend::ChatEvent> = None;
         if req.stream {
-            let first_chunk_timeout = std::time::Duration::from_secs(
-                state
-                    .cfg
-                    .provider(&provider_name)
-                    .map(|provider| provider.timeout_seconds)
-                    .unwrap_or(120),
-            );
+            // Submission and first content consume the same absolute attempt
+            // budget. A slow admission must not reset the first-token clock.
+            let first_chunk_timeout =
+                chat_service::completion_deadline(provider_started, provider_timeout)
+                    .saturating_duration_since(tokio::time::Instant::now());
             let first = match first_event(&mut rx, first_chunk_timeout).await {
                 FirstEvent::Chunk(chunk) => chunk,
                 FirstEvent::EmptyCompletion => {
