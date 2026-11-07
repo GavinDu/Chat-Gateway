@@ -112,6 +112,18 @@ pub(super) fn provider_thread_navigation_matches(actual: &str, target: &str) -> 
     )
 }
 
+/// Fresh sends must reload the provider's landing page, even if its URL is
+/// already the configured home: an SPA can retain previous conversation state
+/// behind that same URL. Only a verified, addressable saved thread may reuse
+/// the currently loaded document without a navigation.
+pub(super) fn provider_send_requires_navigation(
+    current_url: &str,
+    target_url: &str,
+    reopening_saved_thread: bool,
+) -> bool {
+    !reopening_saved_thread || current_url != target_url
+}
+
 #[cfg(test)]
 mod provider_thread_navigation_tests {
     use super::{provider_thread_navigation_matches, provider_thread_url_is_same_origin};
@@ -193,6 +205,43 @@ mod provider_thread_navigation_tests {
         assert!(!landing_is_not_previous_thread(
             "unknown",
             "https://unknown.example/"
+        ));
+    }
+
+    #[test]
+    fn fresh_send_always_navigates_even_on_provider_home_url() {
+        use super::provider_send_requires_navigation;
+
+        assert!(provider_send_requires_navigation(
+            "https://chatgpt.com/",
+            "https://chatgpt.com/",
+            false,
+        ));
+        assert!(provider_send_requires_navigation(
+            "https://claude.ai/new",
+            "https://claude.ai/new",
+            false,
+        ));
+        assert!(provider_send_requires_navigation(
+            "https://chatgpt.com/c/old",
+            "https://chatgpt.com/",
+            false,
+        ));
+    }
+
+    #[test]
+    fn addressable_saved_thread_only_skips_navigation_on_exact_loaded_url() {
+        use super::provider_send_requires_navigation;
+
+        assert!(!provider_send_requires_navigation(
+            "https://chatgpt.com/c/saved",
+            "https://chatgpt.com/c/saved",
+            true,
+        ));
+        assert!(provider_send_requires_navigation(
+            "https://chatgpt.com/c/other",
+            "https://chatgpt.com/c/saved",
+            true,
         ));
     }
 
