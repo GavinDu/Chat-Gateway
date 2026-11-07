@@ -2405,7 +2405,7 @@ async fn chat_completions(
                 if !retryable_worker_error {
                     state
                         .provider_sessions
-                        .record_error(&provider_name, &e.to_string());
+                        .record_gateway_error(&provider_name, &e);
                 }
                 last_err = Some(e.to_string());
                 continue;
@@ -2449,6 +2449,9 @@ async fn chat_completions(
                         provider_started,
                         request_started,
                     );
+                    state
+                        .provider_sessions
+                        .record_gateway_error(&provider_name, &error);
                     last_err = Some(message);
                     continue;
                 }
@@ -2560,8 +2563,8 @@ async fn chat_completions(
                 let ttft_ms = collected
                     .first_event_elapsed
                     .map(|elapsed| elapsed.as_millis().min(u64::MAX as u128) as u64);
-                let provider_error_detail = collected.error.as_ref().map(ToString::to_string);
-                let stream_error = collected.error.map(|error| {
+                let provider_gateway_error = collected.error;
+                let stream_error = provider_gateway_error.as_ref().map(|error| {
                     if error.message == chat_service::INCOMPLETE_PROVIDER_STREAM {
                         "provider stream closed before terminal completion; partial response was not committed".to_owned()
                     } else {
@@ -2603,11 +2606,13 @@ async fn chat_completions(
                     },
                 );
                 if let Some(message) = stream_error {
-                    // Preserve sanitized session-expiry state for routing and health reporting.
-                    state_c.provider_sessions.record_error(
-                        &provider_c,
-                        provider_error_detail.as_deref().unwrap_or(&message),
-                    );
+                    // Only typed provider authentication failures require
+                    // re-login. Never infer that from arbitrary upstream text.
+                    if let Some(error) = provider_gateway_error.as_ref() {
+                        state_c
+                            .provider_sessions
+                            .record_gateway_error(&provider_c, error);
+                    }
                     let error = serde_json::json!({
                         "error": { "message": message, "type": "provider_error", "code": "stream_failed" }
                     });
@@ -2660,14 +2665,17 @@ async fn chat_completions(
             )
             .await;
         let full = collected.content;
-        let failed = collected.error.map(|error| error.to_string());
+        let failed = collected.error;
         let ttft_ms = collected
             .first_event_elapsed
             .map(|elapsed| elapsed.as_millis().min(u64::MAX as u128) as u64);
         let provider_work_ms = provider_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
         let total_ms = request_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
         if let Some(e) = failed {
-            state.provider_sessions.record_error(&provider_name, &e);
+            state
+                .provider_sessions
+                .record_gateway_error(&provider_name, &e);
+            let message = e.to_string();
             record_provider_outcome(
                 &state.metrics,
                 ProviderOutcome {
@@ -2682,7 +2690,7 @@ async fn chat_completions(
             );
             if full.is_empty() {
                 tracing::warn!(provider = %provider_name, "provider failed before output; considering fallback");
-                last_err = Some(e);
+                last_err = Some(message);
                 continue;
             }
             tracing::warn!(provider = %provider_name, "provider failed after partial output");
