@@ -80,7 +80,7 @@ pub(crate) fn start_background_workers(state: &Arc<AppState>) {
                 // generate recurring authentication warnings. A future import
                 // is picked up by the next scheduled verification.
                 match crate::session::load_session_file(&provider_name) {
-                    Ok(Some(_)) => {},
+                    Ok(Some(_)) => {}
                     Ok(None) => {
                         tokio::time::sleep(Duration::from_secs(60 + jitter_seconds)).await;
                         continue;
