@@ -57,6 +57,60 @@ fn prepare_chat_request(
     })
 }
 
+/// Resolve and authorize the provider candidates before acquiring a worker
+/// permit. In particular, a failed affinity read or an empty API-key allowlist
+/// must never fall through to a different provider.
+async fn resolve_chat_candidates(
+    state: &AppState,
+    owner_key_id: &str,
+    model: &str,
+    conversation_id: Option<&str>,
+    auth_context: Option<&Extension<AuthKeyContext>>,
+) -> Result<(Vec<String>, String), Box<Response>> {
+    let mut candidates = state
+        .router
+        .resolve_for_owner_async(owner_key_id, model, conversation_id, state.memory.clone())
+        .await
+        .map_err(|_| {
+            tracing::error!(conversation_id = ?conversation_id, "provider affinity read failed");
+            Box::new(api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                "memory_read_failed",
+                "conversation routing state could not be read safely",
+            ))
+        })?;
+    let original_candidate_count = candidates.len();
+    if let Some(Extension(context)) = auth_context {
+        if let Some(allowed) = &context.provider_allowlist {
+            candidates.retain(|provider| allowed.iter().any(|item| item == provider));
+            if candidates.is_empty() && original_candidate_count > 0 {
+                return Err(Box::new(api_error(
+                    StatusCode::FORBIDDEN,
+                    "authentication_error",
+                    "provider_not_allowed",
+                    "the API key is not allowed to use the requested provider",
+                )));
+            }
+        }
+    }
+    let provider_model = model
+        .split_once('/')
+        .map(|(_, model)| model)
+        .unwrap_or(model)
+        .to_owned();
+    tracing::info!(model, ?candidates, conv = ?conversation_id, "routing request");
+    if candidates.is_empty() {
+        return Err(Box::new(api_error(
+            StatusCode::NOT_FOUND,
+            "invalid_request_error",
+            "model_not_found",
+            format!("model '{model}' is not configured for an enabled provider; use /v1/models or model='auto'"),
+        )));
+    }
+    Ok((candidates, provider_model))
+}
+
 /// The metrics timestamp is measured after the durable write for both JSON
 /// and SSE. Provider work time is captured before that write, so the two
 /// measurements remain distinct.
@@ -214,60 +268,18 @@ pub(super) async fn run(
         );
     }
 
-    let router = state.router.clone();
-    let routing_memory = state.memory.clone();
-    let routing_owner = owner_key_id.clone();
-    let routing_model = req.model.clone();
-    let routing_conversation_id = conversation_id.clone();
-    let mut candidates = match router
-        .resolve_for_owner_async(
-            &routing_owner,
-            &routing_model,
-            routing_conversation_id.as_deref(),
-            routing_memory,
-        )
-        .await
+    let (candidates, provider_model) = match resolve_chat_candidates(
+        &state,
+        &owner_key_id,
+        &req.model,
+        conversation_id.as_deref(),
+        auth_context.as_ref(),
+    )
+    .await
     {
-        Ok(candidates) => candidates,
-        Err(_) => {
-            tracing::error!(conversation_id = ?conversation_id, "provider affinity read failed");
-            return api_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "server_error",
-                "memory_read_failed",
-                "conversation routing state could not be read safely",
-            );
-        }
+        Ok(result) => result,
+        Err(response) => return *response,
     };
-    let original_candidate_count = candidates.len();
-    if let Some(Extension(context)) = &auth_context {
-        if let Some(allowed) = &context.provider_allowlist {
-            candidates.retain(|provider| allowed.iter().any(|item| item == provider));
-            if candidates.is_empty() && original_candidate_count > 0 {
-                return api_error(
-                    StatusCode::FORBIDDEN,
-                    "authentication_error",
-                    "provider_not_allowed",
-                    "the API key is not allowed to use the requested provider",
-                );
-            }
-        }
-    }
-    let provider_model = req
-        .model
-        .split_once('/')
-        .map(|(_, model)| model)
-        .unwrap_or(req.model.as_str())
-        .to_string();
-    tracing::info!(model = %req.model, ?candidates, conv = ?conversation_id, "routing request");
-    if candidates.is_empty() {
-        return api_error(
-            axum::http::StatusCode::NOT_FOUND,
-            "invalid_request_error",
-            "model_not_found",
-            format!("model '{}' is not configured for an enabled provider; use /v1/models or model='auto'", req.model),
-        );
-    }
 
     let candidate_count = candidates.len();
     let mut busy_count = 0usize;
