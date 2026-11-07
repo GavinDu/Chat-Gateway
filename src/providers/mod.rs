@@ -357,6 +357,12 @@ impl ResponseDeltaTracker {
             self.baseline = None;
             return DeltaObservation::Delta(delta);
         }
+        // A provider may replace a partially rendered answer with shorter
+        // text during a DOM re-render. Treat that as an unstable snapshot,
+        // never as evidence that the previously emitted content is complete.
+        if text.len() < self.last_len {
+            return DeltaObservation::InvalidBoundary;
+        }
         if text.len() > self.last_len {
             if !text.is_char_boundary(self.last_len) {
                 return DeltaObservation::InvalidBoundary;
@@ -652,7 +658,14 @@ pub async fn run_send(
 
         if let Some(txt) = probe.text {
             match tracker.observe(&txt) {
-                DeltaObservation::NoText | DeltaObservation::InvalidBoundary => continue,
+                DeltaObservation::NoText | DeltaObservation::InvalidBoundary => {
+                    // Only consecutive, valid response snapshots can accrue
+                    // completion confidence. A transient empty/shrunk view
+                    // invalidates both the idle grace and fast-done signal.
+                    stable_ticks = 0;
+                    previous_post_answer_affordance = false;
+                    continue;
+                }
                 DeltaObservation::WaitingForNewResponse => {
                     // Some providers reuse a response node and can return the
                     // exact same text on consecutive turns. Once a generation
@@ -949,6 +962,23 @@ mod response_completion_tests {
     use std::time::Duration;
 
     const DEFAULT_POLL_TICK: Duration = Duration::from_millis(350);
+
+    #[test]
+    fn shortened_or_missing_response_cannot_be_mistaken_for_stable_completion() {
+        use super::{DeltaObservation, ResponseDeltaTracker};
+        let mut tracker = ResponseDeltaTracker::new(None);
+        assert_eq!(
+            tracker.observe("long partial response"),
+            DeltaObservation::Delta("long partial response".to_owned())
+        );
+        assert_eq!(tracker.observe("short"), DeltaObservation::InvalidBoundary);
+        assert_eq!(tracker.observe(""), DeltaObservation::NoText);
+        assert_eq!(
+            tracker.observe("long partial response"),
+            DeltaObservation::Stable,
+            "only the original full snapshot may be considered stable"
+        );
+    }
 
     #[test]
     fn stable_text_requires_conservative_idle_grace() {
