@@ -2505,11 +2505,14 @@ async fn chat_completions(
             let conv_stream = new_conv_id.clone();
             let request_started_c = request_started;
             let provider_started_c = provider_started;
+            let completion_timeout_c = std::time::Duration::from_secs(provider_cfg.timeout_seconds);
             let queue_ms_c = queue_ms;
             let request_id_c = request_id.clone();
             let sse_stream = async_stream::stream! {
                 let _permit = permit;
                 let mut accumulator = chat_service::ResponseAccumulator::new(provider_started_c);
+                let completion_deadline =
+                    chat_service::completion_deadline(provider_started_c, completion_timeout_c);
                 // OpenAI-compatible clients expect the assistant role on the
                 // first stream chunk, before content deltas.
                 let role = serde_json::json!({
@@ -2525,7 +2528,7 @@ async fn chat_completions(
                 let mut pending: Option<Result<chat_backend::ChatEvent, chat_backend::GatewayError>> = Some(Ok(first_chunk));
                 while let Some(item) = match pending.take() {
                     Some(item) => Some(item),
-                    None => rx.recv().await,
+                    None => chat_service::recv_with_deadline(&mut rx, completion_deadline).await,
                 } {
                     let update = accumulator.push(item);
                     let done_after_delta =
@@ -2648,7 +2651,14 @@ async fn chat_completions(
 
         // Non-streaming: retry another provider only if no response bytes were
         // emitted. A partial response is an error, never a successful turn.
-        let collected = state.chat_service.collect(rx, provider_started).await;
+        let collected = state
+            .chat_service
+            .collect_with_timeout(
+                rx,
+                provider_started,
+                std::time::Duration::from_secs(provider_cfg.timeout_seconds),
+            )
+            .await;
         let full = collected.content;
         let failed = collected.error.map(|error| error.to_string());
         let ttft_ms = collected

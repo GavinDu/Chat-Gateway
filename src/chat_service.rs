@@ -28,6 +28,27 @@ pub struct CollectedResponse {
 pub const INCOMPLETE_PROVIDER_STREAM: &str = "provider stream closed before terminal completion";
 pub const EMPTY_PROVIDER_RESPONSE: &str = "provider completed without response content";
 
+/// Convert a provider timeout into one absolute deadline, failing closed
+/// on an unrepresentably large configured duration instead of panicking.
+pub fn completion_deadline(started: Instant, max_wait: Duration) -> tokio::time::Instant {
+    tokio::time::Instant::from_std(started)
+        .checked_add(max_wait)
+        .unwrap_or_else(tokio::time::Instant::now)
+}
+
+/// A fixed end-to-end completion deadline: an already-started stream must not
+/// indefinitely hold a provider permit after its first delta. Both SSE and
+/// JSON consumers use this helper, and the caller drops the receiver on error.
+pub async fn recv_with_deadline(
+    events: &mut mpsc::Receiver<Result<ChatEvent, GatewayError>>,
+    deadline: tokio::time::Instant,
+) -> Option<Result<ChatEvent, GatewayError>> {
+    match tokio::time::timeout_at(deadline, events.recv()).await {
+        Ok(item) => item,
+        Err(_) => Some(Err(GatewayError::timeout("provider completion timed out"))),
+    }
+}
+
 /// The event reducer is shared by SSE and JSON responses. Persistence is
 /// permitted only after `Complete`; a partial response is never committed.
 #[derive(Debug, PartialEq, Eq)]
@@ -134,13 +155,46 @@ impl ChatService {
     /// Consume a provider stream for a non-SSE response using the same event
     /// semantics as the streaming path. The caller supplies the attempt start
     /// instant so TTFT includes backend startup and first-event wait.
+    #[cfg(test)] // Unbounded collection is retained only for isolated reducer tests.
     pub async fn collect(
+        &self,
+        events: mpsc::Receiver<Result<ChatEvent, GatewayError>>,
+        attempt_started: Instant,
+    ) -> CollectedResponse {
+        self.collect_inner(events, attempt_started, None).await
+    }
+
+    /// Use the configured provider completion deadline in production. A
+    /// backend that keeps the channel open without a terminal event must not
+    /// hang an HTTP request forever. Dropping the receiver also cancels the
+    /// producer through the existing backend cancellation contract.
+    pub async fn collect_with_timeout(
+        &self,
+        events: mpsc::Receiver<Result<ChatEvent, GatewayError>>,
+        attempt_started: Instant,
+        max_wait: Duration,
+    ) -> CollectedResponse {
+        self.collect_inner(events, attempt_started, Some(max_wait))
+            .await
+    }
+
+    async fn collect_inner(
         &self,
         mut events: mpsc::Receiver<Result<ChatEvent, GatewayError>>,
         attempt_started: Instant,
+        max_wait: Option<Duration>,
     ) -> CollectedResponse {
         let mut accumulator = ResponseAccumulator::new(attempt_started);
-        while let Some(item) = events.recv().await {
+        let deadline = max_wait.map(|budget| completion_deadline(attempt_started, budget));
+        loop {
+            let next = if let Some(deadline) = deadline {
+                recv_with_deadline(&mut events, deadline).await
+            } else {
+                events.recv().await
+            };
+            let Some(item) = next else {
+                break;
+            };
             if !matches!(accumulator.push(item), StreamUpdate::Delta(_)) {
                 break;
             }
@@ -280,6 +334,115 @@ mod tests {
             .expect("test receiver remains open");
             Ok(rx)
         }
+    }
+
+    #[tokio::test]
+    async fn streaming_deadline_returns_typed_error_after_first_content() {
+        use super::{recv_with_deadline, ResponseAccumulator, StreamUpdate};
+        let (sender, mut receiver) = mpsc::channel(2);
+        let started = std::time::Instant::now();
+        sender
+            .send(Ok(ChatEvent {
+                content: "partial stream".to_owned(),
+                done: false,
+            }))
+            .await
+            .unwrap();
+        let deadline =
+            tokio::time::Instant::from_std(started) + std::time::Duration::from_millis(15);
+        let mut accumulator = ResponseAccumulator::new(started);
+        let first = recv_with_deadline(&mut receiver, deadline).await.unwrap();
+        assert_eq!(
+            accumulator.push(first),
+            StreamUpdate::Delta("partial stream".to_owned())
+        );
+        let timeout = recv_with_deadline(&mut receiver, deadline).await.unwrap();
+        assert_eq!(accumulator.push(timeout), StreamUpdate::Failed);
+        let collected = accumulator.finish();
+        assert_eq!(collected.content, "partial stream");
+        assert_eq!(
+            collected.error.as_ref().unwrap().kind,
+            crate::chat_backend::GatewayErrorKind::Timeout
+        );
+        drop(receiver);
+        assert!(sender.is_closed());
+    }
+
+    #[tokio::test]
+    async fn collect_deadline_rejects_silent_open_backend_and_cancels_receiver() {
+        let service = ChatService::new(Arc::new(FakeBackend));
+        let (sender, rx) = mpsc::channel(2);
+        let result = service
+            .collect_with_timeout(
+                rx,
+                std::time::Instant::now(),
+                std::time::Duration::from_millis(15),
+            )
+            .await;
+        assert!(result.content.is_empty());
+        assert_eq!(
+            result.error.as_ref().unwrap().kind,
+            crate::chat_backend::GatewayErrorKind::Timeout
+        );
+        assert!(
+            sender.is_closed(),
+            "timed-out receiver should cancel producer"
+        );
+    }
+
+    #[tokio::test]
+    async fn collect_deadline_preserves_partial_content_as_failed_not_committable() {
+        let service = ChatService::new(Arc::new(FakeBackend));
+        let (sender, rx) = mpsc::channel(2);
+        sender
+            .send(Ok(ChatEvent {
+                content: "partial answer".to_owned(),
+                done: false,
+            }))
+            .await
+            .unwrap();
+        let result = service
+            .collect_with_timeout(
+                rx,
+                std::time::Instant::now(),
+                std::time::Duration::from_millis(15),
+            )
+            .await;
+        assert_eq!(result.content, "partial answer");
+        assert_eq!(
+            result.error.as_ref().unwrap().kind,
+            crate::chat_backend::GatewayErrorKind::Timeout
+        );
+        assert!(sender.is_closed(), "partial timeout should cancel producer");
+    }
+
+    #[tokio::test]
+    async fn collect_deadline_allows_prompt_terminal_completion() {
+        let service = ChatService::new(Arc::new(FakeBackend));
+        let (sender, rx) = mpsc::channel(2);
+        sender
+            .send(Ok(ChatEvent {
+                content: "complete".to_owned(),
+                done: false,
+            }))
+            .await
+            .unwrap();
+        sender
+            .send(Ok(ChatEvent {
+                content: String::new(),
+                done: true,
+            }))
+            .await
+            .unwrap();
+        let result = service
+            .collect_with_timeout(
+                rx,
+                std::time::Instant::now(),
+                std::time::Duration::from_secs(2),
+            )
+            .await;
+        assert_eq!(result.content, "complete");
+        assert!(result.error.is_none());
     }
 
     #[tokio::test]
