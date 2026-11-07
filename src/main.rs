@@ -4749,6 +4749,46 @@ mod real_chat_router_scripted_backend_tests {
     }
 
     #[tokio::test]
+    async fn real_router_client_drop_cancels_sse_and_releases_provider_permit() {
+        let (cancelled_tx, cancelled_rx) = tokio::sync::oneshot::channel();
+        let (app, state) = fixture(
+            &["chatgpt"],
+            vec![ScriptedSend::PartialThenHold(
+                ChatEvent {
+                    content: "partial first delta".to_owned(),
+                    done: false,
+                },
+                cancelled_tx,
+            )],
+            None,
+        );
+        let response = send(app, true, "chatgpt/fake-model", "router_drop_sse_001").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        // The handler prefetched first content, then returned the real SSE
+        // response. Simulate client disconnect before a terminal [DONE].
+        drop(response);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            cancelled_rx,
+        )
+        .await
+        .expect("client drop should close backend receiver")
+        .expect("scripted backend should observe cancellation");
+        let _reacquired = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            state.pool.acquire("chatgpt"),
+        )
+        .await
+        .expect("client cancellation must release browser permit")
+        .expect("provider permit should be available again");
+        assert!(state
+            .memory
+            .conversation_messages_for_owner("local", "router_drop_sse_001")
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
     async fn real_router_interleaved_conversations_never_send_other_threads_context() {
         let (app, state, backend) = fixture_with_backend(
             &["chatgpt"],
