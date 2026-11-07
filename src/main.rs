@@ -2670,6 +2670,9 @@ async fn chat_completions(
             &req.model,
         )
         .await;
+        // Total gateway latency includes the durable write, not just provider
+        // output. Use the same post-commit timing boundary as the SSE path.
+        let total_ms = request_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
         record_provider_outcome(
             &state.metrics,
             ProviderOutcome {
