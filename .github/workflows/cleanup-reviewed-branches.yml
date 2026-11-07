@@ -28,6 +28,12 @@ jobs:
                 sha: "7ffcf0de93475e60e50ad246ae3ad32d7ef8b2d7",
                 mergedPr: 683,
               },
+              // Exact P0 #684 canary head, merged after all required CI passed.
+              {
+                name: "fix/p0-live-canary-preflight-20261107",
+                sha: "75aa8cc9eb5365fc3672bd17410c69cb89304af0",
+                mergedPr: 684,
+              },
               // The only change on this branch is already documented in main.
               {
                 name: "docs/adapter-canary-runbook",
@@ -37,6 +43,10 @@ jobs:
               // Remove this housekeeping branch only if its own PR merged.
               {
                 name: "chore/delete-reviewed-branches-20261107",
+                mergedPrHead: true,
+              },
+              {
+                name: "chore/auto-delete-merged-pr-heads-20261107",
                 mergedPrHead: true,
               },
             ];
@@ -101,8 +111,16 @@ jobs:
               } else {
                 throw new Error("Unreviewed cleanup candidate: " + candidate.name);
               }
-              await github.rest.git.deleteRef({
-                owner, repo, ref: "heads/" + candidate.name,
-              });
-              core.info("Deleted reviewed branch: " + candidate.name);
+              try {
+                await github.rest.git.deleteRef({
+                  owner, repo, ref: "heads/" + candidate.name,
+                });
+                core.info("Deleted reviewed branch: " + candidate.name);
+              } catch (error) {
+                if (error.status === 404) {
+                  core.info("Already deleted by concurrent cleanup: " + candidate.name);
+                  continue;
+                }
+                throw error;
+              }
             }

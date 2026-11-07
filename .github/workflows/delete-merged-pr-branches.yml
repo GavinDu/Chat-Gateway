@@ -1,0 +1,62 @@
+name: Delete merged PR branches
+on:
+  pull_request:
+    types: [closed]
+
+permissions:
+  contents: write
+
+jobs:
+  delete-merged-head:
+    # No checkout or untrusted PR code is executed. Only merged same-repo
+    # branches targeting main are eligible for deletion.
+    if: >-
+      github.repository == 'GavinDu/Chat-Gateway' &&
+      github.event.pull_request.merged == true &&
+      github.event.pull_request.base.ref == 'main' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete exact merged head, never a changed or protected branch
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const pr = context.payload.pull_request;
+            const name = pr.head.ref;
+            const sha = pr.head.sha;
+            if (!pr.merged || pr.base.ref !== "main" ||
+                pr.head.repo?.full_name !== owner + "/" + repo ||
+                !name || name === "main" || !sha) {
+              core.warning("Not a merged same-repository feature branch.");
+              return;
+            }
+            let ref;
+            try {
+              ref = await github.rest.git.getRef({
+                owner, repo, ref: "heads/" + name,
+              });
+            } catch (error) {
+              if (error.status === 404) {
+                core.info("Feature branch already deleted: " + name);
+                return;
+              }
+              throw error;
+            }
+            // Never remove new commits added to a branch after its PR merged.
+            if (ref.data.object.sha !== sha) {
+              core.warning("Branch advanced after merge, retained: " + name);
+              return;
+            }
+            try {
+              await github.rest.git.deleteRef({
+                owner, repo, ref: "heads/" + name,
+              });
+              core.info("Deleted merged PR branch: " + name);
+            } catch (error) {
+              if (error.status === 404) {
+                core.info("Already deleted by another cleanup: " + name);
+                return;
+              }
+              throw error;
+            }
