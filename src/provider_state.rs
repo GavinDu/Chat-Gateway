@@ -243,9 +243,7 @@ mod tests {
         let registry = ProviderSessionRegistry::default();
         registry.record_gateway_error(
             "false-expiry",
-            &GatewayError::provider_failure(
-                "upstream said session expired: cookie=secret-value",
-            ),
+            &GatewayError::provider_failure("upstream said session expired: cookie=secret-value"),
         );
         let degraded = registry.status("false-expiry");
         assert_eq!(degraded.state, ProviderSessionState::Degraded);
