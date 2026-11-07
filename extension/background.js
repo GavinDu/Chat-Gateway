@@ -19,17 +19,31 @@ function queueProviderSync(provider) {
   return queueProviderTask(provider, () => syncProvider(provider));
 }
 function logoutProviderFromRelay(provider) {
+  // Bind logout to the install present when the user clicked. An earlier
+  // provider sync may still be queued while a fresh gateway is paired.
+  const connectionAtClick = chrome.storage.local.get(["gateway", "token"]);
   return queueProviderTask(provider, async () => {
-    // Opt out before revocation; even if the gateway request fails, do not
+    const expected = await connectionAtClick;
+    if (!expected.gateway || !expected.token) {
+      throw new Error("Gateway connection missing; reconnect before provider logout.");
+    }
+    const current = await chrome.storage.local.get(["gateway", "token", "linkedProviders"]);
+    if (current.gateway !== expected.gateway || current.token !== expected.token) {
+      throw new Error("Gateway connection changed before provider logout. Retry on the new connection.");
+    }
+    // Opt out before revocation; even if gateway deletion fails, do not
     // upload more cookies until the user explicitly reconnects this provider.
-    const {linkedProviders = []} = await chrome.storage.local.get(["linkedProviders"]);
+    const linkedProviders = current.linkedProviders || [];
     await chrome.storage.local.set({linkedProviders:linkedProviders.filter(value => value !== provider)});
+    // A re-pair during the awaited storage write must never redirect the
+    // DELETE request to a different gateway or a newly issued install token.
     const response = await relayFetch("/relay/v1/session/" + encodeURIComponent(provider), {
       method:"DELETE",body:"{}"
-    });
+    }, {gateway:expected.gateway,token:expected.token});
     if (!response.ok) throw new Error("Gateway logout failed (" + response.status + "). Auto sync is paused; retry logout.");
   });
 }
+
 chrome.cookies.onChanged.addListener(({cookie}) => {
   const domains = Object.entries(PROVIDERS);
   const host = cookie.domain.replace(/^\./, "").toLowerCase();
