@@ -27,6 +27,21 @@ pub struct CollectedResponse {
 /// Keep this constant shared by JSON and SSE consumers.
 pub const INCOMPLETE_PROVIDER_STREAM: &str = "provider stream closed before terminal completion";
 
+/// A fixed end-to-end completion deadline: an already-started stream must not
+/// indefinitely hold a provider permit after its first delta. Both SSE and
+/// JSON consumers use this helper, and the caller drops the receiver on error.
+pub async fn recv_with_deadline(
+    events: &mut mpsc::Receiver<Result<ChatEvent, GatewayError>>,
+    deadline: tokio::time::Instant,
+) -> Option<Result<ChatEvent, GatewayError>> {
+    match tokio::time::timeout_at(deadline, events.recv()).await {
+        Ok(item) => item,
+        Err(_) => Some(Err(GatewayError::timeout(
+            "provider completion timed out",
+        ))),
+    }
+}
+
 /// The event reducer is shared by SSE and JSON responses. Persistence is
 /// permitted only after `Complete`; a partial response is never committed.
 #[derive(Debug, PartialEq, Eq)]
@@ -148,14 +163,7 @@ impl ChatService {
             max_wait.map(|budget| tokio::time::Instant::from_std(attempt_started) + budget);
         loop {
             let next = if let Some(deadline) = deadline {
-                match tokio::time::timeout_at(deadline, events.recv()).await {
-                    Ok(item) => item,
-                    Err(_) => {
-                        accumulator
-                            .push(Err(GatewayError::timeout("provider completion timed out")));
-                        break;
-                    }
-                }
+                recv_with_deadline(&mut events, deadline).await
             } else {
                 events.recv().await
             };
@@ -209,6 +217,38 @@ mod tests {
             .expect("test receiver remains open");
             Ok(rx)
         }
+    }
+
+    #[tokio::test]
+    async fn streaming_deadline_returns_typed_error_after_first_content() {
+        use super::{recv_with_deadline, ResponseAccumulator, StreamUpdate};
+        let (sender, mut receiver) = mpsc::channel(2);
+        let started = std::time::Instant::now();
+        sender
+            .send(Ok(ChatEvent {
+                content: "partial stream".to_owned(),
+                done: false,
+            }))
+            .await
+            .unwrap();
+        let deadline = tokio::time::Instant::from_std(started)
+            + std::time::Duration::from_millis(15);
+        let mut accumulator = ResponseAccumulator::new(started);
+        let first = recv_with_deadline(&mut receiver, deadline).await.unwrap();
+        assert_eq!(
+            accumulator.push(first),
+            StreamUpdate::Delta("partial stream".to_owned())
+        );
+        let timeout = recv_with_deadline(&mut receiver, deadline).await.unwrap();
+        assert_eq!(accumulator.push(timeout), StreamUpdate::Failed);
+        let collected = accumulator.finish();
+        assert_eq!(collected.content, "partial stream");
+        assert_eq!(
+            collected.error.as_ref().unwrap().kind,
+            crate::chat_backend::GatewayErrorKind::Timeout
+        );
+        drop(receiver);
+        assert!(sender.is_closed());
     }
 
     #[tokio::test]
