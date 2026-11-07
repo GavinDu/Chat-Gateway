@@ -387,10 +387,7 @@ pub(crate) mod test_support {
 
     #[async_trait::async_trait]
     impl ChatBackend for ScriptedBackend {
-        async fn models(
-            &self,
-            provider: ProviderId,
-        ) -> Result<Vec<String>, GatewayError> {
+        async fn models(&self, provider: ProviderId) -> Result<Vec<String>, GatewayError> {
             Ok(vec![format!("{}-test-model", provider.as_str())])
         }
 
