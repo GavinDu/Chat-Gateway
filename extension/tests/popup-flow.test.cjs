@@ -4,7 +4,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
 
-function loadPopup() {
+function loadPopup({failCookieDomain = null, includeSecondProvider = false} = {}) {
   const elements = new Map();
   const chromeCalls = [];
   const values = {gateway:"http://127.0.0.1:8080",linkedProviders:[]};
@@ -44,17 +44,23 @@ function loadPopup() {
     setInterval(){},
     normalizeGateway: v=>v,
     PROVIDER_LOGIN_URLS:{metaai:"https://www.meta.ai/"},
-    PROVIDERS:{metaai:["meta.ai"]},
+    PROVIDERS:{metaai:["meta.ai"],claude:["claude.ai"]},
     providerCookieSnapshot:async()=>({cookies:[{name:"token",value:"test-only"}]}),
     relayFetch:async()=>({ok:true,status:200,json:async()=>({
-      providers:[{provider:"metaai",enabled:true,linked:server.linked,authentication:server.linked?"unknown":"needs_login",availability:"unknown"}],
+      providers:[
+        {provider:"metaai",enabled:true,linked:server.linked,authentication:server.linked?"unknown":"needs_login",availability:"unknown"},
+        ...(includeSecondProvider ? [{provider:"claude",enabled:true,linked:false,authentication:"needs_login",availability:"unknown"}] : []),
+      ],
       vault_mode:true,
     })}),
     fetch:async()=>({ok:true,json:async()=>({request_id:"a".repeat(64),poll_secret:"b".repeat(64)})}),
     chrome:{
       tabs:{async create({url}) {chromeCalls.push("tab:"+url);}},
       permissions:{request:async()=>true,contains:async()=>true},
-      cookies:{getAll:async()=>[{name:"token",value:"test-only"}]},
+      cookies:{getAll:async({domain})=>{
+        if(domain===failCookieDomain)throw new Error("simulated browser API failure");
+        return [{name:"token",value:"test-only"}];
+      }},
       runtime,
       alarms:{create:async()=>{},clear:async()=>{}},
       storage:{local:{
@@ -99,4 +105,17 @@ test("connected dashboard exposes login and small logout, then allows reconnecti
   assert.equal(popup.server.linked,true);
   assert.ok(popup.chromeCalls.includes("logout-provider:metaai"));
   assert.equal(popup.chromeCalls.filter(x=>x==="sync-provider:metaai").length,2);
+});
+
+test("provider dashboard keeps healthy providers actionable when one cookie probe rejects",async()=>{
+  const popup=loadPopup({failCookieDomain:"meta.ai",includeSecondProvider:true});
+  await popup.controls.refreshStatus();
+  const [failed,healthy]=popup.elements.get("status").children;
+  assert.equal(failed.children[0].textContent,"metaai");
+  assert.match(failed.children[1].textContent,/Browser cookie check unavailable/);
+  assert.equal(healthy.children[0].textContent,"claude");
+  assert.match(healthy.children[1].textContent,/Browser cookies present/);
+  const buttons=healthy.children.find(child=>child.className==="provider-actions").children;
+  assert.equal(buttons.find(button=>button.textContent==="Log in / Connect").disabled,false);
+  assert.ok(buttons.some(button=>button.textContent==="Open website"));
 });
