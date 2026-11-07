@@ -1,6 +1,35 @@
 const $ = id => document.getElementById(id);
 function message(text) { $("message").textContent = text; }
 
+// Some extension runtimes do not expose the tabs API in popups. In that case,
+// keep a clickable link available instead of leaving a pending approval that
+// the operator cannot open. The URL comes only from validated gateway/provider
+// origins; links never include credentials or polling secrets.
+function messageWithLink(text, url, label) {
+  const target = $("message");
+  target.textContent = text + " ";
+  const link = document.createElement("a");
+  link.href = url;
+  link.target = "_blank";
+  link.rel = "noopener noreferrer";
+  link.textContent = label;
+  target.append(link);
+}
+
+function pendingApprovalUrl(pending) {
+  return normalizeGateway(pending.gateway) + "/relay/approve/" + pending.request_id;
+}
+
+function showPendingApproval(pending) {
+  messageWithLink("Waiting for local approval.", pendingApprovalUrl(pending), "Open approval page");
+}
+
+async function openExtensionTab(url) {
+  if (typeof chrome.tabs?.create !== "function") return false;
+  await chrome.tabs.create({url});
+  return true;
+}
+
 async function refreshStatus() {
   // Privileged extension GETs can omit Origin; POST preserves the origin-bound relay protocol.
   const response = await relayFetch("/relay/v1/status", {method:"POST",body:"{}"});
@@ -73,8 +102,11 @@ async function refreshStatus() {
 async function openProviderLogin(provider) {
   const url = PROVIDER_LOGIN_URLS[provider];
   if (!url) throw new Error("This provider is not yet supported by Chat-Gateway.");
-  await chrome.tabs.create({url});
-  message("Use your existing provider session or sign in on the provider website. Connected accounts sync automatically; credentials and MFA stay there.");
+  if (await openExtensionTab(url)) {
+    message("Use your existing provider session or sign in on the provider website. Connected accounts sync automatically; credentials and MFA stay there.");
+  } else {
+    messageWithLink("Your browser cannot open a tab automatically.", url, "Open provider website");
+  }
 }
 
 function showConnectionMode() {
@@ -116,16 +148,22 @@ $("pair").addEventListener("click", async () => {
       if (!/^[a-f0-9]{64}$/.test(data.token)) throw new Error("Invalid connection response.");
       await chrome.storage.local.set({gateway,token:data.token,linkedProviders:[]});
       await chrome.storage.local.remove("pendingConnection");
-      await chrome.alarms.clear("relay-connection");
+      await chrome.alarms?.clear?.("relay-connection");
       $("code").value = "";
       await updateConnection();
       return;
     }
     if (!/^[a-f0-9]{64}$/.test(data.request_id) || !/^[a-f0-9]{64}$/.test(data.poll_secret)) throw new Error("Invalid connection response.");
     await chrome.storage.local.set({pendingConnection:{gateway, ...data, expires:Date.now()+300000}});
-    await chrome.alarms.create("relay-connection", {periodInMinutes:1});
-    await chrome.tabs.create({url:gateway + "/relay/approve/" + data.request_id});
-    message("Approve the connection in the local tab, then return here.");
+    // The popup itself polls every five seconds. Alarms are only a background
+    // convenience, not a prerequisite for local approval.
+    await chrome.alarms?.create?.("relay-connection", {periodInMinutes:1});
+    const pending = {gateway, ...data};
+    if (await openExtensionTab(pendingApprovalUrl(pending))) {
+      message("Approve the connection in the local tab, then return here.");
+    } else {
+      showPendingApproval(pending);
+    }
   } catch (error) { message(error.message); }
 });
 
@@ -203,7 +241,7 @@ async function updateConnection() {
     $("pairing").hidden = Boolean(token);
     $("linked").hidden = !token;
     if (token) await refreshStatus();
-    else if (pendingConnection) message("Waiting for your approval in the local gateway tab.");
+    else if (pendingConnection) showPendingApproval(pendingConnection);
   } catch (error) { message(error.message); }
   finally { checkingConnection = false; }
 }
