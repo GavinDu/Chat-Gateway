@@ -57,6 +57,14 @@ try {
  try {await reopened.locator('#status li').first().waitFor();} catch(error) {console.log('Provider dashboard message:',await reopened.locator('#message').innerText());throw error;}
  assert.equal(await reopened.locator('#status li').count(),8);
  console.log('PASS real Chromium extension URL-only approval, popup closure and provider dashboard');
+ // An upgraded legacy installation may retain a token but have no learned ID.
+ // Fail closed and offer owner approval instead of trapping the popup on 403.
+ await rm(join(temp,'sessions/relay-extension-id'));
+ await reopened.locator('#pairing:not([hidden])').waitFor({timeout:15000});
+ assert.equal(await reopened.locator('#linked').isVisible(),false);
+ const stored=await worker.evaluate(()=>chrome.storage.local.get(['token']));
+ assert.equal(Boolean(stored.token),false);
+ console.log('PASS missing or revoked identity prompts fresh local approval without exposing a token');
 } finally {
  await context?.close();
  if(gateway&&gateway.exitCode===null){

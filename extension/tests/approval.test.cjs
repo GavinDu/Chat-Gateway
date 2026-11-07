@@ -27,3 +27,8 @@ test('expired request never reaches the gateway',async()=>{
 test('malformed token is never persisted',async()=>{
   const api=load(200,{token:'bad'});await assert.rejects(api.poll,/Invalid connection token/);assert.equal(api.values.token,undefined);
 });
+
+test('reapproval keeps provider consent only for the same gateway',async()=>{
+  const same=load(200,{token:'c'.repeat(64)});same.values.gateway='http://127.0.0.1:8080';same.values.linkedProviders=['chatgpt'];await same.poll();assert.deepEqual(Array.from(same.values.linkedProviders),['chatgpt']);
+  const other=load(200,{token:'c'.repeat(64)});other.values.gateway='https://other.example';other.values.linkedProviders=['chatgpt'];await other.poll();assert.deepEqual(Array.from(other.values.linkedProviders),[]);
+});

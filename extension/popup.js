@@ -4,7 +4,7 @@ function message(text) { $("message").textContent = text; }
 async function refreshStatus() {
   // Privileged extension GETs can omit Origin; POST preserves the origin-bound relay protocol.
   const response = await relayFetch("/relay/v1/status", {method:"POST",body:"{}"});
-  if (response.status === 401) {
+  if (response.status === 401 || response.status === 403) {
     await chrome.storage.local.remove("token");
     $("pairing").hidden = false;
     $("linked").hidden = true;
