@@ -505,7 +505,10 @@ mod tests {
     #[test]
     fn planner_replays_when_branch_has_no_common_prefix() {
         let history = vec![m("user", "old question"), m("assistant", "old answer")];
-        let incoming = vec![m("user", "replacement question")];
+        let incoming = vec![
+            m("user", "replacement question"),
+            m("assistant", "replacement answer"),
+        ];
         let thread = super::ThreadSyncState {
             provider: "chatgpt".to_string(),
             thread_url: "https://chatgpt.com/c/thread-1".to_string(),
