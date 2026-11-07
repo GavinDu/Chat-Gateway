@@ -2698,17 +2698,10 @@ async fn chat_completions(
     }
 
     if candidate_count > 0 && busy_count == candidate_count {
-        let mut response = api_error(
-            axum::http::StatusCode::TOO_MANY_REQUESTS,
-            "server_error",
-            "provider_busy",
-            "all eligible providers are busy; retry shortly",
-        );
-        response.headers_mut().insert(
-            axum::http::header::RETRY_AFTER,
-            axum::http::HeaderValue::from_static("1"),
-        );
-        return response;
+        // The typed backend boundary preserves the historical OpenAI error
+        // code, message, and Retry-After without duplicating HTTP rendering.
+        return chat_backend::GatewayError::provider_busy("provider slots exhausted")
+            .into_response();
     }
 
     // The final attempt error may originate from a provider HTML page, a
