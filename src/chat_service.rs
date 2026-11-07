@@ -29,10 +29,7 @@ pub const INCOMPLETE_PROVIDER_STREAM: &str = "provider stream closed before term
 
 /// Convert a provider timeout into one absolute deadline, failing closed
 /// on an unrepresentably large configured duration instead of panicking.
-pub fn completion_deadline(
-    started: Instant,
-    max_wait: Duration,
-) -> tokio::time::Instant {
+pub fn completion_deadline(started: Instant, max_wait: Duration) -> tokio::time::Instant {
     tokio::time::Instant::from_std(started)
         .checked_add(max_wait)
         .unwrap_or_else(tokio::time::Instant::now)
