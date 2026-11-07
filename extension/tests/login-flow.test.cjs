@@ -107,7 +107,7 @@ test("connected gateway displays provider card and starts official website login
   assert.equal(buttons[0].textContent,"Log in / Connect");
   assert.equal(buttons.some(button=>button.textContent==="Log out"),false);
   await buttons[0].click();
-  assert.deepEqual(f.values.linkedProviders,["metaai"]);
+  assert.deepEqual(Array.from(f.values.linkedProviders),["metaai"]);
   assert.equal(f.openedTabs.at(-1),"https://www.meta.ai/");
   assert.equal(f.network.filter(x=>x.uri==="/relay/v1/session/metaai").length,0);
 });
@@ -124,7 +124,7 @@ test("provider login sync exposes compact Log out and permits reconnect", async 
   assert.match(logout.className,/quiet-danger/);
   await logout.click();
   assert.equal(f.messages.at(-1).type,"logout-provider");
-  assert.deepEqual(f.values.linkedProviders,[]);
+  assert.deepEqual(Array.from(f.values.linkedProviders),[]);
   assert.equal(providerButtons(f)[0].textContent,"Log in / Connect");
   await providerButtons(f)[0].click();
   assert.equal(f.network.filter(x=>x.uri==="/relay/v1/session/metaai" && x.method==="POST").length,2);
