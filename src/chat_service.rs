@@ -114,6 +114,7 @@ impl ChatService {
     /// Consume a provider stream for a non-SSE response using the same event
     /// semantics as the streaming path. The caller supplies the attempt start
     /// instant so TTFT includes backend startup and first-event wait.
+    #[cfg(test)] // Unbounded collection is retained only for isolated reducer tests.
     pub async fn collect(
         &self,
         events: mpsc::Receiver<Result<ChatEvent, GatewayError>>,
