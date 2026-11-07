@@ -56,10 +56,7 @@ impl ResponseAccumulator {
 
     /// Process a backend event exactly once, without depending on the
     /// transport's rendering or persistence policy.
-    pub fn push(
-        &mut self,
-        event: std::result::Result<ChatEvent, GatewayError>,
-    ) -> StreamUpdate {
+    pub fn push(&mut self, event: std::result::Result<ChatEvent, GatewayError>) -> StreamUpdate {
         debug_assert!(!self.finished, "terminal backend event processed twice");
         match event {
             Ok(event) if event.done => {
@@ -86,9 +83,7 @@ impl ResponseAccumulator {
     /// terminal events are errors even if content has already been emitted.
     pub fn finish(mut self) -> CollectedResponse {
         if !self.saw_done && self.collected.error.is_none() {
-            self.collected.error = Some(GatewayError::provider_failure(
-                INCOMPLETE_PROVIDER_STREAM,
-            ));
+            self.collected.error = Some(GatewayError::provider_failure(INCOMPLETE_PROVIDER_STREAM));
         }
         self.collected
     }
@@ -311,28 +306,42 @@ mod tests {
         use super::{ResponseAccumulator, StreamUpdate};
         let start = std::time::Instant::now();
         let scripted = vec![
-            Ok(ChatEvent { content: String::new(), done: false }),
-            Ok(ChatEvent { content: "first".to_owned(), done: false }),
-            Ok(ChatEvent { content: " second".to_owned(), done: false }),
-            Ok(ChatEvent { content: String::new(), done: true }),
+            Ok(ChatEvent {
+                content: String::new(),
+                done: false,
+            }),
+            Ok(ChatEvent {
+                content: "first".to_owned(),
+                done: false,
+            }),
+            Ok(ChatEvent {
+                content: " second".to_owned(),
+                done: false,
+            }),
+            Ok(ChatEvent {
+                content: String::new(),
+                done: true,
+            }),
         ];
         let (tx, rx) = mpsc::channel(8);
         for item in scripted.iter().cloned() {
             tx.send(item).await.unwrap();
         }
         drop(tx);
-        let json = ChatService::new(Arc::new(FakeBackend)).collect(rx, start).await;
+        let json = ChatService::new(Arc::new(FakeBackend))
+            .collect(rx, start)
+            .await;
         let mut sse = ResponseAccumulator::new(start);
-        let emitted: Vec<StreamUpdate> = scripted
-            .into_iter()
-            .map(|item| sse.push(item))
-            .collect();
-        assert_eq!(emitted, vec![
-            StreamUpdate::Delta(String::new()),
-            StreamUpdate::Delta("first".to_owned()),
-            StreamUpdate::Delta(" second".to_owned()),
-            StreamUpdate::Complete,
-        ]);
+        let emitted: Vec<StreamUpdate> = scripted.into_iter().map(|item| sse.push(item)).collect();
+        assert_eq!(
+            emitted,
+            vec![
+                StreamUpdate::Delta(String::new()),
+                StreamUpdate::Delta("first".to_owned()),
+                StreamUpdate::Delta(" second".to_owned()),
+                StreamUpdate::Complete,
+            ]
+        );
         let streamed = sse.finish();
         assert_eq!(streamed.content, json.content);
         assert!(streamed.error.is_none());
@@ -358,21 +367,30 @@ mod tests {
                 tx.send(item).await.unwrap();
             }
             drop(tx);
-            let json = ChatService::new(Arc::new(FakeBackend)).collect(rx, start).await;
+            let json = ChatService::new(Arc::new(FakeBackend))
+                .collect(rx, start)
+                .await;
             let mut sse = ResponseAccumulator::new(start);
             let last = scripted.into_iter().map(|item| sse.push(item)).last();
-            assert_eq!(last, Some(if missing_done {
-                StreamUpdate::Delta("partial".to_owned())
-            } else {
-                StreamUpdate::Failed
-            }));
+            assert_eq!(
+                last,
+                Some(if missing_done {
+                    StreamUpdate::Delta("partial".to_owned())
+                } else {
+                    StreamUpdate::Failed
+                })
+            );
             let streamed = sse.finish();
             assert_eq!(streamed.content, "partial");
             assert_eq!(streamed.content, json.content);
             assert_eq!(streamed.error, json.error);
             assert_eq!(
                 streamed.error.unwrap().message,
-                if missing_done { INCOMPLETE_PROVIDER_STREAM } else { "backend failure" }
+                if missing_done {
+                    INCOMPLETE_PROVIDER_STREAM
+                } else {
+                    "backend failure"
+                }
             );
         }
     }
