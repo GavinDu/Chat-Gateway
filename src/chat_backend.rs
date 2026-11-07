@@ -21,6 +21,31 @@ pub struct ChatRequest {
 /// Compatibility alias retained while the HTTP handler migrates.
 pub type BackendRequest = ChatRequest;
 
+/// Canonical text-message role accepted by the OpenAI-compatible API.
+/// This preserves the current browser-backed wire contract while making role
+/// handling explicit for future provider-native adapters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Role {
+    System,
+    Developer,
+    User,
+    Assistant,
+    Tool,
+}
+
+impl Role {
+    pub fn from_wire(value: &str) -> Option<Self> {
+        match value {
+            "system" => Some(Self::System),
+            "developer" => Some(Self::Developer),
+            "user" => Some(Self::User),
+            "assistant" => Some(Self::Assistant),
+            "tool" => Some(Self::Tool),
+            _ => None,
+        }
+    }
+}
+
 /// Stable provider identity used by routing, metrics, and backend diagnostics.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ProviderId(String);
