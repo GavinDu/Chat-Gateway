@@ -19,7 +19,14 @@ function loadPopup() {
       click(){this.handlers.click?.();},
     };
   }
-  function byId(id) { if(!elements.has(id))elements.set(id,node()); return elements.get(id); }
+  function byId(id) {
+    if(!elements.has(id)) {
+      const element=node();
+      if(id==="gateway")element.value="http://127.0.0.1:8080";
+      elements.set(id,element);
+    }
+    return elements.get(id);
+  }
   const runtime = { async sendMessage(request) {
     chromeCalls.push(request.type + ":" + (request.provider||""));
     if(request.type==="logout-provider") {
