@@ -1084,7 +1084,10 @@ mod completion_response_builder_tests {
         assert_eq!(role["choices"][0]["delta"]["role"], "assistant");
         assert_eq!(content["choices"][0]["delta"]["content"], "fixture output");
         assert_eq!(role["choices"][0]["finish_reason"], serde_json::Value::Null);
-        assert_eq!(content["choices"][0]["finish_reason"], serde_json::Value::Null);
+        assert_eq!(
+            content["choices"][0]["finish_reason"],
+            serde_json::Value::Null
+        );
         assert_eq!(finish["choices"][0]["delta"], serde_json::json!({}));
         assert_eq!(finish["choices"][0]["finish_reason"], "stop");
     }
