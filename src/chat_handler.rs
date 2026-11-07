@@ -354,10 +354,7 @@ fn plan_provider_send(
 /// once, and retains typed session-expiry/challenge information when present.
 fn classify_initial_stream_event(
     first: FirstEvent,
-) -> Result<
-    chat_backend::ChatEvent,
-    (String, Option<chat_backend::GatewayError>),
-> {
+) -> Result<chat_backend::ChatEvent, (String, Option<chat_backend::GatewayError>)> {
     match first {
         FirstEvent::Chunk(chunk) => Ok(chunk),
         FirstEvent::EmptyCompletion => Err((
@@ -369,10 +366,7 @@ fn classify_initial_stream_event(
             "provider stream closed before first output".to_owned(),
             None,
         )),
-        FirstEvent::Timeout => Err((
-            "provider timed out before first output".to_owned(),
-            None,
-        )),
+        FirstEvent::Timeout => Err(("provider timed out before first output".to_owned(), None)),
     }
 }
 
