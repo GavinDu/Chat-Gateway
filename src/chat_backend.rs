@@ -345,11 +345,14 @@ impl ChatBackend for crate::browser::pool::ObscuraPool {
     }
 
     fn capabilities(&self) -> BackendCapabilities {
+        // The browser backend accepts thread URL handles; the selected
+        // provider adapter must also advertise UrlAddressable before the
+        // chat handler may resume a thread instead of replaying context.
         BackendCapabilities {
             streaming: true,
             model_selection: true,
             system_role: false,
-            addressable_threads: false,
+            addressable_threads: true,
         }
     }
 

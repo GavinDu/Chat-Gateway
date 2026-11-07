@@ -61,6 +61,9 @@ pub(super) fn fixture_with_memory(
             .collect(),
     });
     let pool = ObscuraPool::for_scripted_backend_tests(cfg.clone());
+    // Thread handles are supported by the browser backend itself, but the
+    // individual adapter catalog still gates which providers may use them.
+    assert!(crate::chat_backend::ChatBackend::capabilities(pool.as_ref()).addressable_threads);
     let (relay, _) = relay::RelayState::new().unwrap();
     let backend = Arc::new(ScriptedBackend::new(scripted));
     let state = Arc::new(AppState {
