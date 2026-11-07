@@ -2382,7 +2382,8 @@ async fn chat_completions(
                         Some(provider) => provider,
                         None => {
                             last_err = Some(
-                                "provider router returned an invalid provider identifier".to_owned(),
+                                "provider router returned an invalid provider identifier"
+                                    .to_owned(),
                             );
                             continue;
                         }
@@ -5086,13 +5087,12 @@ mod real_chat_router_scripted_backend_tests {
             .expect("provider admission must be bounded");
             assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
             assert!(started.elapsed() < std::time::Duration::from_secs(3));
-            assert!(tokio::time::timeout(
-                std::time::Duration::from_secs(1),
-                cancel_rx,
-            )
-            .await
-            .expect("pending backend send must be cancelled")
-            .is_err());
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_secs(1), cancel_rx,)
+                    .await
+                    .expect("pending backend send must be cancelled")
+                    .is_err()
+            );
             let _slot = tokio::time::timeout(
                 std::time::Duration::from_secs(2),
                 state.pool.acquire("chatgpt"),
