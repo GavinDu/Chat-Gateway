@@ -365,6 +365,8 @@ pub(crate) mod test_support {
     pub(crate) enum ScriptedSend {
         /// A backend rejected admission before a response stream exists.
         Reject(GatewayError),
+        /// Hold admission itself until the caller cancels the pending future.
+        HangOnAdmission(oneshot::Sender<()>),
         /// Emit events in order, including incomplete or errored streams.
         Events(Vec<Result<ChatEvent, GatewayError>>),
         /// Simulate delayed first content without blocking the HTTP worker.
@@ -412,6 +414,12 @@ pub(crate) mod test_support {
                 .expect("each test request needs a scripted backend response");
             match scripted {
                 ScriptedSend::Reject(error) => Err(error),
+                ScriptedSend::HangOnAdmission(cancelled) => {
+                    // Retain the sender inside this future: a rejected or
+                    // timed-out HTTP request drops it, notifying the test.
+                    let _cancelled = cancelled;
+                    std::future::pending().await
+                }
                 ScriptedSend::Events(events) => {
                     let (tx, rx) = mpsc::channel(events.len().max(1));
                     for event in events {

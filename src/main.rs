@@ -2373,23 +2373,28 @@ async fn chat_completions(
             continue;
         }
 
+        let provider_started = Instant::now();
         let mut rx = match state
             .chat_service
-            .stream(BackendRequest {
-                provider: match ProviderId::new(provider_name.clone()) {
-                    Some(provider) => provider,
-                    None => {
-                        last_err = Some(
-                            "provider router returned an invalid provider identifier".to_owned(),
-                        );
-                        continue;
-                    }
+            .stream_with_timeout(
+                BackendRequest {
+                    provider: match ProviderId::new(provider_name.clone()) {
+                        Some(provider) => provider,
+                        None => {
+                            last_err = Some(
+                                "provider router returned an invalid provider identifier"
+                                    .to_owned(),
+                            );
+                            continue;
+                        }
+                    },
+                    prompt: provider_prompt.clone(),
+                    model: provider_model.clone(),
+                    has_history: has_history && thread_url.is_some(),
+                    thread_url,
                 },
-                prompt: provider_prompt.clone(),
-                model: provider_model.clone(),
-                has_history: has_history && thread_url.is_some(),
-                thread_url,
-            })
+                std::time::Duration::from_secs(provider_cfg.timeout_seconds),
+            )
             .await
         {
             Ok(rx) => rx,
@@ -2407,21 +2412,23 @@ async fn chat_completions(
                         .provider_sessions
                         .record_gateway_error(&provider_name, &e);
                 }
+                state.metrics.record_provider_timings(
+                    &provider_name,
+                    "error",
+                    queue_ms,
+                    None,
+                    provider_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+                    request_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+                );
                 last_err = Some(e.to_string());
                 continue;
             }
         };
-        let provider_started = Instant::now();
 
         let mut first_stream_chunk: Option<chat_backend::ChatEvent> = None;
         if req.stream {
-            let first_chunk_timeout = std::time::Duration::from_secs(
-                state
-                    .cfg
-                    .provider(&provider_name)
-                    .map(|provider| provider.timeout_seconds)
-                    .unwrap_or(120),
-            );
+            let first_chunk_timeout = std::time::Duration::from_secs(provider_cfg.timeout_seconds)
+                .saturating_sub(provider_started.elapsed());
             let first = match first_event(&mut rx, first_chunk_timeout).await {
                 FirstEvent::Chunk(chunk) => chunk,
                 FirstEvent::EmptyCompletion => {
@@ -5098,6 +5105,49 @@ mod real_chat_router_scripted_backend_tests {
             .unwrap();
         assert_eq!(after.len(), 4);
         assert_eq!(after[3].content, "recovered answer");
+    }
+
+    #[tokio::test]
+    async fn real_router_bounds_backend_admission_and_releases_provider_slot() {
+        for (stream, conversation) in [
+            (false, "router_admission_json_001"),
+            (true, "router_admission_sse_001"),
+        ] {
+            let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+            let (app, state, backend) = fixture_with_backend(
+                &["chatgpt"],
+                vec![ScriptedSend::HangOnAdmission(cancel_tx)],
+                None,
+            );
+            let started = Instant::now();
+            let response = tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                send(app, stream, "chatgpt/fake-model", conversation),
+            )
+            .await
+            .expect("provider admission must be bounded");
+            assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+            assert!(started.elapsed() < std::time::Duration::from_secs(3));
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_secs(1), cancel_rx,)
+                    .await
+                    .expect("pending backend send must be cancelled")
+                    .is_err()
+            );
+            let _slot = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                state.pool.acquire("chatgpt"),
+            )
+            .await
+            .expect("admission timeout must release provider permit")
+            .expect("provider slot must be available again");
+            assert_eq!(backend.observed_requests().await.len(), 1);
+            assert!(state
+                .memory
+                .conversation_messages_for_owner("local", conversation)
+                .unwrap()
+                .is_empty());
+        }
     }
 
     #[tokio::test]
