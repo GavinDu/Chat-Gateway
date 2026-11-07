@@ -2521,7 +2521,7 @@ async fn chat_completions(
                             yield Ok::<_, anyhow::Error>(Event::default().data(data.to_string()));
                         }
                         Err(e) => {
-                            tracing::warn!(provider = %provider_c, "provider stream failed: {e}");
+                            tracing::warn!(provider = %provider_c, "provider stream failed; partial response not committed");
                             provider_error_detail = Some(e.to_string());
                             stream_error = Some("provider stream failed; partial response was not committed".to_string());
                             break;
@@ -2630,7 +2630,7 @@ async fn chat_completions(
                 },
             );
             if full.is_empty() {
-                tracing::warn!(provider = %provider_name, "provider failed before output: {e}");
+                tracing::warn!(provider = %provider_name, "provider failed before output; considering fallback");
                 last_err = Some(e);
                 continue;
             }
@@ -2711,12 +2711,50 @@ async fn chat_completions(
         return response;
     }
 
+    // The final attempt error may originate from a provider HTML page, a
+    // browser driver, or a transient transport failure. Never echo it back
+    // to the API client, since it can contain account/session metadata or
+    // credentials. The request ID and per-provider outcome metrics provide
+    // safe correlation without exposing raw upstream diagnostics.
+    tracing::warn!(
+        request_id = %request_id,
+        had_provider_error = last_err.is_some(),
+        "all eligible provider attempts exhausted"
+    );
+    unavailable_provider_response(last_err.as_deref())
+}
+
+fn unavailable_provider_response(_last_upstream_error: Option<&str>) -> Response {
     api_error(
         axum::http::StatusCode::BAD_GATEWAY,
         "provider_error",
         "provider_unavailable",
-        format!("all providers failed: {:?}", last_err),
+        "all configured providers failed; check provider session status",
     )
+}
+
+#[cfg(test)]
+mod provider_failure_redaction_tests {
+    use super::*;
+    use axum::body::to_bytes;
+
+    #[tokio::test]
+    async fn exhausted_provider_response_does_not_echo_upstream_details() {
+        let raw_upstream_error = "cookie=session-secret; Authorization: Bearer sensitive-token";
+        // The public response must never serialize an arbitrary upstream
+        // error, even if it resembles a credential or cookie.
+        let response = unavailable_provider_response(Some(raw_upstream_error));
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"]["code"], "provider_unavailable");
+        assert_eq!(
+            json["error"]["message"],
+            "all configured providers failed; check provider session status"
+        );
+        assert!(!String::from_utf8_lossy(&body).contains("session-secret"));
+        assert!(!String::from_utf8_lossy(&body).contains("sensitive-token"));
+    }
 }
 
 // Returning a ready-to-send Axum response keeps validation errors consistent at the handler boundary.
