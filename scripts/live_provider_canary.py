@@ -151,17 +151,34 @@ def consume_sse(lines: Iterable[str], started_at: float | None = None) -> dict:
             continue
         try:
             event = json.loads(data)
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, UnicodeDecodeError):
             provider_error = True
             break
-        if event.get("error") is not None:
+        # Even syntactically valid JSON is untrusted network data. Produce the
+        # same sanitized provider failure as invalid JSON, not an AttributeError
+        # traceback that bypasses the canary's structured result contract.
+        if not isinstance(event, dict) or event.get("error") is not None:
             provider_error = True
             break
-        choices = event.get("choices") or []
+        choices = event.get("choices", [])
+        if not isinstance(choices, list):
+            provider_error = True
+            break
         if not choices:
-            continue
-        delta = choices[0].get("delta") or {}
+            continue  # OpenAI-style usage-only or heartbeat event.
+        if not isinstance(choices[0], dict):
+            provider_error = True
+            break
+        delta = choices[0].get("delta")
+        if delta is None:
+            continue  # Completion/usage event without a content delta.
+        if not isinstance(delta, dict):
+            provider_error = True
+            break
         piece = delta.get("content")
+        if piece is not None and not isinstance(piece, str):
+            provider_error = True
+            break
         if isinstance(piece, str) and piece:
             content_bytes += len(piece.encode("utf-8"))
             if content_bytes > MAX_SSE_CONTENT_BYTES:
