@@ -2600,7 +2600,14 @@ async fn chat_completions(
 
         // Non-streaming: retry another provider only if no response bytes were
         // emitted. A partial response is an error, never a successful turn.
-        let collected = state.chat_service.collect(rx, provider_started).await;
+        let collected = state
+            .chat_service
+            .collect_with_timeout(
+                rx,
+                provider_started,
+                std::time::Duration::from_secs(provider_cfg.timeout_seconds),
+            )
+            .await;
         let full = collected.content;
         let failed = collected.error.map(|error| error.to_string());
         let ttft_ms = collected
