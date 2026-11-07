@@ -214,6 +214,9 @@ pub(super) fn browser_thread(
                                     Ok(true) => provider_sessions.record_success(provider.name()),
                                     // No chat input is inconclusive, not evidence of expiry.
                                     Ok(false) => {}
+                                    Err(error) if error.downcast_ref::<ProviderSessionExpiredError>().is_some() => {
+                                        provider_sessions.record_needs_login(provider.name());
+                                    }
                                     Err(_) => provider_sessions.record_probe_failure(provider.name()),
                                 }
                             }
