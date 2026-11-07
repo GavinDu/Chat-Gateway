@@ -5066,6 +5066,50 @@ mod real_chat_router_scripted_backend_tests {
     }
 
     #[tokio::test]
+    async fn real_router_bounds_backend_admission_and_releases_provider_slot() {
+        for (stream, conversation) in [
+            (false, "router_admission_json_001"),
+            (true, "router_admission_sse_001"),
+        ] {
+            let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+            let (app, state, backend) = fixture_with_backend(
+                &["chatgpt"],
+                vec![ScriptedSend::HangOnAdmission(cancel_tx)],
+                None,
+            );
+            let started = Instant::now();
+            let response = tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                send(app, stream, "chatgpt/fake-model", conversation),
+            )
+            .await
+            .expect("provider admission must be bounded");
+            assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+            assert!(started.elapsed() < std::time::Duration::from_secs(3));
+            assert!(tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                cancel_rx,
+            )
+            .await
+            .expect("pending backend send must be cancelled")
+            .is_err());
+            let _slot = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                state.pool.acquire("chatgpt"),
+            )
+            .await
+            .expect("admission timeout must release provider permit")
+            .expect("provider slot must be available again");
+            assert_eq!(backend.observed_requests().await.len(), 1);
+            assert!(state
+                .memory
+                .conversation_messages_for_owner("local", conversation)
+                .unwrap()
+                .is_empty());
+        }
+    }
+
+    #[tokio::test]
     async fn real_router_busy_provider_returns_retry_after_and_no_commit() {
         let (app, state) = fixture(&["chatgpt"], vec![], None);
         let _held = state.pool.acquire("chatgpt").await.unwrap();
