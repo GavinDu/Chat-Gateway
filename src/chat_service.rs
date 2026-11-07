@@ -250,10 +250,7 @@ mod tests {
             })]),
         ])));
         let error = match service
-            .stream_with_timeout(
-                scripted_request(),
-                std::time::Duration::from_millis(20),
-            )
+            .stream_with_timeout(scripted_request(), std::time::Duration::from_millis(20))
             .await
         {
             Ok(_) => panic!("delayed admission must not hold the caller indefinitely"),
