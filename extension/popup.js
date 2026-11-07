@@ -26,15 +26,21 @@ function showPendingApproval(pending) {
 }
 
 async function openExtensionTab(url) {
-  if (typeof chrome.tabs?.create !== "function") return false;
   try {
-    await chrome.tabs.create({url});
-    return true;
+    if (typeof chrome.tabs?.create === "function") {
+      await chrome.tabs.create({url});
+      return true;
+    }
+    // Some extension popup hosts omit the tabs API entirely.
+    // A direct user gesture may still allow opening a new browser tab.
+    if (typeof window.open === "function") {
+      const opened = window.open(url, "_blank", "noopener,noreferrer");
+      if (opened) return true;
+    }
   } catch {
-    // Some extension hosts expose tabs but cannot open them. Preserve a
-    // clickable link so the user can still complete local approval.
-    return false;
+    // Preserve a clickable link when automatic navigation is blocked.
   }
+  return false;
 }
 
 function showGatewayConnection(connected) {
@@ -203,18 +209,22 @@ async function connectProvider(provider) {
   await chrome.storage.local.set({linkedProviders:Array.from(new Set([...prior,provider]))});
   if (snapshot.cookies.length === 0) {
     await openProviderLogin(provider);
-    message("Sign in on the official " + provider + " website. The gateway will sync this provider after its cookies become available.");
+    // openProviderLogin already provides a manual clickable link when a tab
+    // cannot open; do not overwrite that link with a second status message.
     return;
   }
   try {
-    const response = await relayFetch("/relay/v1/session/" + encodeURIComponent(provider), {
-      method:"POST",body:JSON.stringify(snapshot)
-    });
-    if (!response.ok) throw new Error("Gateway rejected " + provider + " session import (" + response.status + "). Check vault mode and provider permissions.");
+    // The service worker serializes imports and logout per provider. Never
+    // send a manual import in parallel with a logout request.
+    const result = await chrome.runtime.sendMessage({type:"sync-provider",provider});
+    if (!result?.ok) throw new Error(result?.error || ("Gateway could not sync " + provider));
   } catch (error) {
-    // An unsuccessful first connection must not silently opt this provider
-    // into future automatic uploads.
-    await chrome.storage.local.set({linkedProviders:prior});
+    // A failed first connection must not opt this provider into background
+    // uploads. Leave prior consent unchanged on an existing connection.
+    const latest = await chrome.storage.local.get(["linkedProviders"]);
+    await chrome.storage.local.set({
+      linkedProviders:(latest.linkedProviders || []).filter(value => value !== provider || prior.includes(provider))
+    });
     throw error;
   }
   await refreshStatus();
