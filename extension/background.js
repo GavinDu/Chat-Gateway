@@ -40,7 +40,7 @@ async function resyncLinkedProviders() {
 }
 
 function scheduleLinkedProviderResync() {
-  chrome.alarms?.create("relay-session-refresh", {periodInMinutes:5});
+  chrome.alarms?.create?.("relay-session-refresh", {periodInMinutes:5});
   pollConnection().catch(() => {});
   resyncLinkedProviders().catch(() => {
     // Do not log provider session material or relay credentials.
@@ -66,7 +66,7 @@ async function completePendingConnection() {
   if (!pending) return;
   if (Date.now() >= pending.expires) {
     await chrome.storage.local.remove("pendingConnection");
-    await chrome.alarms.clear("relay-connection");
+    await chrome.alarms?.clear?.("relay-connection");
     throw new Error("Connection approval expired. Choose Connect to gateway again.");
   }
   const gateway = normalizeGateway(pending.gateway);
@@ -87,10 +87,10 @@ async function completePendingConnection() {
   const linkedProviders = latest.gateway === gateway ? (latest.linkedProviders || []) : [];
   await chrome.storage.local.set({gateway, token:data.token, linkedProviders});
   await chrome.storage.local.remove("pendingConnection");
-  await chrome.alarms.clear("relay-connection");
+  await chrome.alarms?.clear?.("relay-connection");
   resyncLinkedProviders().catch(() => {});
 }
-chrome.alarms?.onAlarm.addListener(alarm => {
+chrome.alarms?.onAlarm?.addListener?.(alarm => {
   if (alarm.name === "relay-connection") pollConnection().catch(() => {});
   if (alarm.name === "relay-session-refresh") scheduleLinkedProviderResync();
 });
