@@ -219,49 +219,6 @@ fn json_completion_body(
     })
 }
 
-#[cfg(test)]
-mod completion_response_builder_tests {
-    use super::*;
-
-    #[test]
-    fn json_response_preserves_usage_and_conversation_identity() {
-        let conversation_id = "fixture-conversation-123";
-        let content = "Hello from a fixture";
-        let body = json_completion_body(conversation_id, "fixture-model", content, 11);
-        assert_eq!(body["id"], "chatcmpl-fixture-");
-        assert_eq!(body["conversation_id"], conversation_id);
-        assert_eq!(body["model"], "fixture-model");
-        assert_eq!(body["choices"][0]["message"]["content"], content);
-        assert_eq!(body["choices"][0]["finish_reason"], "stop");
-        assert_eq!(body["usage"]["prompt_tokens"], 11);
-        assert_eq!(body["usage"]["completion_tokens"], estimate_tokens(content));
-        assert_eq!(body["usage"]["total_tokens"], 11 + estimate_tokens(content));
-        assert_eq!(body["x_usage_estimated"], true);
-    }
-
-    #[test]
-    fn both_transports_keep_identity_and_only_sse_has_streaming_headers() {
-        let json = completion_response_headers(
-            "fixture-conversation-123",
-            "chatgpt",
-            "fixture-model",
-            false,
-        );
-        let sse = completion_response_headers(
-            "fixture-conversation-123",
-            "chatgpt",
-            "fixture-model",
-            true,
-        );
-        assert_eq!(json.get("X-Conversation-Id"), sse.get("X-Conversation-Id"));
-        assert!(json.get("X-Accel-Buffering").is_none());
-        assert!(json.get("Cache-Control").is_none());
-        assert_eq!(sse.get("Content-Type").unwrap(), "text/event-stream");
-        assert_eq!(sse.get("Cache-Control").unwrap(), "no-cache");
-        assert_eq!(sse.get("X-Accel-Buffering").unwrap(), "no");
-    }
-}
-
 pub(super) async fn run(
     state: Arc<AppState>,
     headers: HeaderMap,
@@ -892,4 +849,47 @@ pub(super) async fn run(
         "all eligible provider attempts exhausted"
     );
     unavailable_provider_response(last_err.as_deref())
+}
+
+#[cfg(test)]
+mod completion_response_builder_tests {
+    use super::*;
+
+    #[test]
+    fn json_response_preserves_usage_and_conversation_identity() {
+        let conversation_id = "fixture-conversation-123";
+        let content = "Hello from a fixture";
+        let body = json_completion_body(conversation_id, "fixture-model", content, 11);
+        assert_eq!(body["id"], "chatcmpl-fixture-");
+        assert_eq!(body["conversation_id"], conversation_id);
+        assert_eq!(body["model"], "fixture-model");
+        assert_eq!(body["choices"][0]["message"]["content"], content);
+        assert_eq!(body["choices"][0]["finish_reason"], "stop");
+        assert_eq!(body["usage"]["prompt_tokens"], 11);
+        assert_eq!(body["usage"]["completion_tokens"], estimate_tokens(content));
+        assert_eq!(body["usage"]["total_tokens"], 11 + estimate_tokens(content));
+        assert_eq!(body["x_usage_estimated"], true);
+    }
+
+    #[test]
+    fn both_transports_keep_identity_and_only_sse_has_streaming_headers() {
+        let json = completion_response_headers(
+            "fixture-conversation-123",
+            "chatgpt",
+            "fixture-model",
+            false,
+        );
+        let sse = completion_response_headers(
+            "fixture-conversation-123",
+            "chatgpt",
+            "fixture-model",
+            true,
+        );
+        assert_eq!(json.get("X-Conversation-Id"), sse.get("X-Conversation-Id"));
+        assert!(json.get("X-Accel-Buffering").is_none());
+        assert!(json.get("Cache-Control").is_none());
+        assert_eq!(sse.get("Content-Type").unwrap(), "text/event-stream");
+        assert_eq!(sse.get("Cache-Control").unwrap(), "no-cache");
+        assert_eq!(sse.get("X-Accel-Buffering").unwrap(), "no");
+    }
 }
