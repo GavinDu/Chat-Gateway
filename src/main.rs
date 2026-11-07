@@ -2383,7 +2383,8 @@ async fn chat_completions(
                         Some(provider) => provider,
                         None => {
                             last_err = Some(
-                                "provider router returned an invalid provider identifier".to_owned(),
+                                "provider router returned an invalid provider identifier"
+                                    .to_owned(),
                             );
                             continue;
                         }
@@ -4812,7 +4813,10 @@ mod real_chat_router_scripted_backend_tests {
             .conversation_messages_for_owner("local", "router_admission_timeout_001")
             .unwrap();
         assert_eq!(persisted.len(), 2);
-        assert_eq!(persisted[1].content, "synthetic fallback after admission timeout");
+        assert_eq!(
+            persisted[1].content,
+            "synthetic fallback after admission timeout"
+        );
     }
 
     #[tokio::test]
