@@ -91,7 +91,10 @@ async function refreshStatus() {
     linkButton.textContent = !item.linked ? "Log in / Connect"
       : item.authentication === "needs_login" ? "Re-login / Sync" : "Sync session";
     linkButton.disabled = item.enabled === false;
-    linkButton.addEventListener("click", () => connectProvider(item.provider).catch(error => message(error.message)));
+    linkButton.addEventListener("click", () => connectProvider(
+      item.provider,
+      !item.linked || item.authentication === "needs_login"
+    ).catch(error => message(error.message)));
     actions.append(linkButton);
 
     const openButton = document.createElement("button");
@@ -197,7 +200,7 @@ $("pair").addEventListener("click", async () => {
 
 // Linking consents to automatic updates from this provider. The browser only
 // sends cookies for domains the user has explicitly granted permission to.
-async function connectProvider(provider) {
+async function connectProvider(provider, openLogin = false) {
   const domains = PROVIDERS[provider];
   if (!domains) throw new Error("Unsupported provider.");
   const patterns = domains.flatMap(domain => ["https://" + domain + "/*", "https://*." + domain + "/*"]);
@@ -229,7 +232,14 @@ async function connectProvider(provider) {
     throw error;
   }
   await refreshStatus();
-  message("Saved " + provider + " to the gateway. Verify the login status; saved cookies alone do not confirm authentication.");
+  // Log in / Connect and Re-login must open the official provider page even
+  // when old cookies exist. Their presence does not prove authentication.
+  // An explicit Sync session on an already-linked account remains tab-free.
+  if (openLogin) {
+    await openProviderLogin(provider);
+  } else {
+    message("Saved " + provider + " to the gateway. Verify the login status; saved cookies alone do not confirm authentication.");
+  }
 }
 
 async function logoutProvider(provider) {
