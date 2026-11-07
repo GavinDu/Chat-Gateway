@@ -4,7 +4,7 @@ const vm = require("node:vm");
 const fs = require("node:fs");
 const path = require("node:path");
 
-function fixture({connected = false, linked = false, cookies = true} = {}) {
+function fixture({connected = false, linked = false, cookies = true, authentication = "unknown"} = {}) {
   const nodes = new Map();
   const values = connected ? {gateway:"http://127.0.0.1:8080", token:"c".repeat(64)} : {};
   const network = [], openedTabs = [], messages = [];
@@ -62,7 +62,7 @@ function fixture({connected = false, linked = false, cookies = true} = {}) {
     relayFetch:async (uri, opts)=>{
       network.push({uri,method:opts.method});
       if (uri === "/relay/v1/status") return {ok:true,status:200,json:async()=>({
-        providers:[{provider:"metaai",enabled:true,linked,authentication:"unknown",availability:"unknown"}],
+        providers:[{provider:"metaai",enabled:true,linked,authentication,availability:"unknown"}],
         vault_mode:true,
       })};
       if (uri === "/relay/v1/session/metaai" && opts.method === "POST") {
@@ -144,4 +144,35 @@ test("provider logout does not attempt to sign out from the official site", asyn
   await logout.click();
   assert.equal(f.openedTabs.length,0);
   assert.ok(f.messages.some(message => message.type === "logout-provider"));
+});
+
+test("Log in / Connect opens the provider website even with existing cookies", async () => {
+  const f = fixture({connected:true,linked:false,cookies:true});
+  await settle();
+  await f.context.refreshStatusForTest();
+  assert.equal(providerButtons(f)[0].textContent,"Log in / Connect");
+  await providerButtons(f)[0].click();
+  assert.equal(f.openedTabs.at(-1),"https://www.meta.ai/");
+  assert.equal(f.network.filter(x=>x.uri==="/relay/v1/session/metaai").length,1,
+    "existing cookies are imported before login is opened");
+});
+
+test("Re-login / Sync opens the provider website when authentication expired", async () => {
+  const f = fixture({connected:true,linked:true,cookies:true,authentication:"needs_login"});
+  await settle();
+  await f.context.refreshStatusForTest();
+  assert.equal(providerButtons(f)[0].textContent,"Re-login / Sync");
+  await providerButtons(f)[0].click();
+  assert.equal(f.openedTabs.at(-1),"https://www.meta.ai/");
+  assert.equal(f.messages.filter(x=>x.type==="sync-provider").length,1);
+});
+
+test("Sync session stays in the extension without opening a new tab", async () => {
+  const f = fixture({connected:true,linked:true,cookies:true,authentication:"verified"});
+  await settle();
+  await f.context.refreshStatusForTest();
+  assert.equal(providerButtons(f)[0].textContent,"Sync session");
+  await providerButtons(f)[0].click();
+  assert.equal(f.openedTabs.length,0);
+  assert.equal(f.messages.filter(x=>x.type==="sync-provider").length,1);
 });
