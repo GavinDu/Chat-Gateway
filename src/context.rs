@@ -72,19 +72,25 @@ impl ContextBuilder {
         budget: usize,
     ) -> ContextPlan {
         let delta = messages_after_overlap(history, incoming);
-        // A request that shares only a prefix with the durable transcript and
-        // then branches cannot safely continue the provider-side thread: that
-        // thread still contains the abandoned suffix. Replay the gateway's
-        // canonical transcript instead of appending onto divergent history.
-        let has_divergent_branch = {
-            let common_prefix = history
-                .iter()
-                .zip(incoming)
-                .take_while(|(stored, incoming)| stored == incoming)
-                .count();
-            common_prefix < history.len() && common_prefix < incoming.len()
-        };
-        let thread_is_current = !has_divergent_branch
+        // Resume a remote thread only for a provable append to the canonical
+        // transcript. A truncated prefix must not be treated as a new turn,
+        // even when its text happens to be an old user message. Both clients
+        // that resend the entire transcript and clients that send only the
+        // next user message are supported, but arbitrary branches replay.
+        let common_prefix = history
+            .iter()
+            .zip(incoming)
+            .take_while(|(stored, incoming)| stored == incoming)
+            .count();
+        let full_transcript_extension =
+            !history.is_empty() && common_prefix == history.len() && incoming.len() > history.len();
+        let single_user_followup = incoming.len() == 1
+            && incoming[0].role == "user"
+            && history
+                .last()
+                .is_some_and(|message| message.role == "assistant");
+        let has_safe_append = full_transcript_extension || single_user_followup;
+        let thread_is_current = has_safe_append
             && thread.is_some_and(|state| {
                 supports_reopen
                     && state.provider == current_provider
@@ -414,6 +420,59 @@ mod tests {
     }
 
     #[test]
+    fn planner_accepts_a_single_new_user_message_as_safe_delta() {
+        let history = vec![m("user", "old question"), m("assistant", "old answer")];
+        let incoming = vec![m("user", "new question")];
+        let thread = super::ThreadSyncState {
+            provider: "chatgpt".to_string(),
+            thread_url: "https://chatgpt.com/c/thread-1".to_string(),
+            synced_through_message_id: Some("current-marker".to_string()),
+            last_stored_message_id: Some("current-marker".to_string()),
+        };
+        assert_eq!(
+            ContextBuilder::plan(&history, &incoming, "chatgpt", Some(&thread), true, 1000),
+            super::ContextPlan::Delta { messages: incoming }
+        );
+    }
+
+    #[test]
+    fn planner_replays_a_truncated_prefix_instead_of_resending_old_messages() {
+        let history = vec![
+            m("user", "old question"),
+            m("assistant", "old answer"),
+            m("user", "another question"),
+            m("assistant", "another answer"),
+        ];
+        let incoming = vec![history[0].clone(), history[1].clone()];
+        let thread = super::ThreadSyncState {
+            provider: "chatgpt".to_string(),
+            thread_url: "https://chatgpt.com/c/thread-1".to_string(),
+            synced_through_message_id: Some("current-marker".to_string()),
+            last_stored_message_id: Some("current-marker".to_string()),
+        };
+        assert!(matches!(
+            ContextBuilder::plan(&history, &incoming, "chatgpt", Some(&thread), true, 1000),
+            super::ContextPlan::Replay { .. }
+        ));
+    }
+
+    #[test]
+    fn planner_replays_a_multi_message_divergent_branch_even_if_thread_is_current() {
+        let history = vec![m("user", "first"), m("assistant", "first answer")];
+        let incoming = vec![m("user", "different"), m("assistant", "other answer")];
+        let thread = super::ThreadSyncState {
+            provider: "chatgpt".to_string(),
+            thread_url: "https://chatgpt.com/c/thread-1".to_string(),
+            synced_through_message_id: Some("current-marker".to_string()),
+            last_stored_message_id: Some("current-marker".to_string()),
+        };
+        assert!(matches!(
+            ContextBuilder::plan(&history, &incoming, "chatgpt", Some(&thread), true, 1000),
+            super::ContextPlan::Replay { .. }
+        ));
+    }
+
+    #[test]
     fn planner_replays_when_incoming_transcript_branches_from_stored_history() {
         let history = vec![
             m("user", "first question"),
@@ -446,7 +505,10 @@ mod tests {
     #[test]
     fn planner_replays_when_branch_has_no_common_prefix() {
         let history = vec![m("user", "old question"), m("assistant", "old answer")];
-        let incoming = vec![m("user", "replacement question")];
+        let incoming = vec![
+            m("user", "replacement question"),
+            m("assistant", "replacement answer"),
+        ];
         let thread = super::ThreadSyncState {
             provider: "chatgpt".to_string(),
             thread_url: "https://chatgpt.com/c/thread-1".to_string(),
