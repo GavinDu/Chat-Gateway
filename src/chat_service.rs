@@ -503,8 +503,10 @@ pub enum FirstEvent {
     Timeout,
 }
 
-pub(crate) fn usable_initial_stream_chunk(content: &str, done: bool) -> bool {
-    !done && !content.is_empty()
+pub(crate) fn usable_initial_stream_chunk(content: &str, _done: bool) -> bool {
+    // A provider may send its complete response in one terminal event. Treat
+    // nonempty final content as the first meaningful chunk, not an empty reply.
+    !content.is_empty()
 }
 
 /// Wait for the first meaningful event without allowing an empty stream to
@@ -563,6 +565,23 @@ mod first_event_tests {
         .unwrap();
         let event = first_event(&mut rx, Duration::from_secs(1)).await;
         assert!(matches!(event, FirstEvent::Chunk(chunk) if chunk.content == "answer"));
+    }
+
+    #[tokio::test]
+    async fn terminal_event_with_content_is_a_valid_first_stream_chunk() {
+        let (tx, mut rx) = mpsc::channel(1);
+        tx.send(Ok(ChatEvent {
+            content: "complete answer".into(),
+            done: true,
+        }))
+        .await
+        .unwrap();
+
+        let event = first_event(&mut rx, Duration::from_secs(1)).await;
+        assert!(matches!(
+            event,
+            FirstEvent::Chunk(chunk) if chunk.done && chunk.content == "complete answer"
+        ));
     }
 
     #[tokio::test]
