@@ -35,7 +35,7 @@ try {
  }
  assert.ok(ready,'gateway health');
  context=await chromium.launchPersistentContext(join(temp,'profile'),{
-  headless:true,chromiumSandbox:true,
+  channel:"chromium",headless:true,chromiumSandbox:true,
   ...(process.env.CHAT_GATEWAY_CHROMIUM_PATH?{executablePath:process.env.CHAT_GATEWAY_CHROMIUM_PATH}:{}),
   ignoreDefaultArgs:['--disable-extensions'],args:['--disable-extensions-except='+join(temp,'extension'),'--load-extension='+join(temp,'extension')],
  });
