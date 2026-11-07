@@ -307,6 +307,38 @@ fn random_capability() -> Result<String, Box<Response>> {
 // Local approval is a short-lived, single-use exchange. The extension receives
 // only the polling capability; the approval CSRF value is delivered exclusively
 // to a top-level local browser navigation, with framing and caching disabled.
+// A new user-initiated request replaces an abandoned request, invalidating its
+// poll secret and approval URL. It never approves an extension automatically.
+fn replace_pending_approval(
+    pending: &mut Option<PendingApproval>,
+    headers: &HeaderMap,
+) -> Result<(String, String), Box<Response>> {
+    let requested_id = requested_extension_id(headers).unwrap_or_default();
+    // A second extension must not be able to cancel another extension's
+    // unexpired approval. Only the same extension can explicitly restart.
+    if pending.as_ref().is_some_and(|current| {
+        current.expires > Instant::now() && current.extension_id != requested_id
+    }) {
+        return Err(Box::new(json_error(
+            StatusCode::CONFLICT,
+            "approval_pending",
+            "another extension has an unexpired approval request",
+        )));
+    }
+    let id = random_capability()?;
+    let csrf = random_capability()?;
+    let poll_secret = random_capability()?;
+    *pending = Some(PendingApproval {
+        id: id.clone(),
+        csrf,
+        poll_secret: poll_secret.clone(),
+        extension_id: requested_id,
+        expires: Instant::now() + Duration::from_secs(300),
+        approved: false,
+    });
+    Ok((id, poll_secret))
+}
+
 pub async fn connect_request(
     State(app): State<Arc<crate::AppState>>,
     headers: HeaderMap,
@@ -323,32 +355,12 @@ pub async fn connect_request(
     let Ok(mut pending) = app.relay.approval.lock() else {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
-    if pending
-        .as_ref()
-        .is_some_and(|request| request.expires > Instant::now())
-    {
-        return json_error(
-            StatusCode::CONFLICT,
-            "approval_pending",
-            "an approval request is already pending; finish it or wait five minutes",
-        );
+    match replace_pending_approval(&mut pending, &headers) {
+        Ok((id, poll_secret)) => {
+            Json(serde_json::json!({"request_id":id,"poll_secret":poll_secret})).into_response()
+        }
+        Err(response) => *response,
     }
-    let (Ok(id), Ok(csrf), Ok(poll_secret)) = (
-        random_capability(),
-        random_capability(),
-        random_capability(),
-    ) else {
-        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-    };
-    *pending = Some(PendingApproval {
-        id: id.clone(),
-        csrf,
-        poll_secret: poll_secret.clone(),
-        extension_id: requested_extension_id(&headers).unwrap_or_default(),
-        expires: Instant::now() + Duration::from_secs(300),
-        approved: false,
-    });
-    Json(serde_json::json!({"request_id":id,"poll_secret":poll_secret})).into_response()
 }
 
 pub async fn approval_page(
@@ -943,6 +955,52 @@ mod tests {
             assert_eq!(approval_navigation_is_allowed(&headers), allowed);
         }
         assert!(!approval_navigation_is_allowed(&HeaderMap::new()));
+    }
+
+    #[test]
+    fn reconnect_replaces_stale_approval_without_reusing_capabilities() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("chrome-extension://abcdefghijklmnopabcdefghijklmnop"),
+        );
+        let mut pending = None;
+        let (old_id, old_secret) = replace_pending_approval(&mut pending, &headers).unwrap();
+        let old_csrf = pending.as_ref().unwrap().csrf.clone();
+        // Even an approved but not yet claimed request must not authorize
+        // the replacement request: each connection needs local approval.
+        pending.as_mut().unwrap().approved = true;
+        let (new_id, new_secret) = replace_pending_approval(&mut pending, &headers).unwrap();
+        let current = pending.as_ref().unwrap();
+        assert_ne!(old_id, new_id);
+        assert_ne!(old_secret, new_secret);
+        assert_ne!(old_csrf, current.csrf);
+        assert_eq!(current.id, new_id);
+        assert_eq!(current.poll_secret, new_secret);
+        assert!(!current.approved);
+        assert_eq!(current.extension_id, "abcdefghijklmnopabcdefghijklmnop");
+        assert!(current.expires > Instant::now());
+    }
+
+    #[test]
+    fn reconnect_cannot_displace_another_extension_approval() {
+        let mut original = HeaderMap::new();
+        original.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("chrome-extension://abcdefghijklmnopabcdefghijklmnop"),
+        );
+        let mut other = HeaderMap::new();
+        other.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("chrome-extension://bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+        );
+        let mut pending = None;
+        let (first_id, first_secret) = replace_pending_approval(&mut pending, &original).unwrap();
+        assert!(replace_pending_approval(&mut pending, &other).is_err());
+        assert_eq!(pending.as_ref().unwrap().id, first_id);
+        assert_eq!(pending.as_ref().unwrap().poll_secret, first_secret);
+        pending.as_mut().unwrap().expires = Instant::now() - Duration::from_secs(1);
+        assert!(replace_pending_approval(&mut pending, &other).is_ok());
     }
 
     #[test]

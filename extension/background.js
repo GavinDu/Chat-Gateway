@@ -1,6 +1,35 @@
 importScripts("shared.js");
 
 const debounceTimers = new Map();
+
+// Serialize each provider's automatic imports with logout so a delayed cookie
+// refresh cannot recreate a vault session after the user disconnects it.
+const providerTasks = new Map();
+function queueProviderTask(provider, work) {
+  const prior = providerTasks.get(provider) || Promise.resolve();
+  const pending = prior.catch(() => {}).then(work);
+  providerTasks.set(provider, pending);
+  pending.then(
+    () => { if (providerTasks.get(provider) === pending) providerTasks.delete(provider); },
+    () => { if (providerTasks.get(provider) === pending) providerTasks.delete(provider); }
+  );
+  return pending;
+}
+function queueProviderSync(provider) {
+  return queueProviderTask(provider, () => syncProvider(provider));
+}
+function logoutProviderFromRelay(provider) {
+  return queueProviderTask(provider, async () => {
+    // Opt out before revocation; even if the gateway request fails, do not
+    // upload more cookies until the user explicitly reconnects this provider.
+    const {linkedProviders = []} = await chrome.storage.local.get(["linkedProviders"]);
+    await chrome.storage.local.set({linkedProviders:linkedProviders.filter(value => value !== provider)});
+    const response = await relayFetch("/relay/v1/session/" + encodeURIComponent(provider), {
+      method:"DELETE",body:"{}"
+    });
+    if (!response.ok) throw new Error("Gateway logout failed (" + response.status + "). Auto sync is paused; retry logout.");
+  });
+}
 chrome.cookies.onChanged.addListener(({cookie}) => {
   const domains = Object.entries(PROVIDERS);
   const host = cookie.domain.replace(/^\./, "").toLowerCase();
@@ -10,7 +39,7 @@ chrome.cookies.onChanged.addListener(({cookie}) => {
     const timer = setTimeout(() => {
       if (debounceTimers.get(provider) !== timer) return;
       debounceTimers.delete(provider);
-      syncProvider(provider).catch(() => {
+      queueProviderSync(provider).catch(() => {
         // Never log cookie material or relay credentials. The popup can surface status on demand.
       });
     }, 750);
@@ -24,7 +53,11 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
   if (message?.type === "sync-provider" && PROVIDERS[message.provider]) {
-    syncProvider(message.provider).then(() => sendResponse({ok:true})).catch(error => sendResponse({ok:false,error:error.message}));
+    queueProviderSync(message.provider).then(() => sendResponse({ok:true})).catch(error => sendResponse({ok:false,error:error.message}));
+    return true;
+  }
+  if (message?.type === "logout-provider" && PROVIDERS[message.provider]) {
+    logoutProviderFromRelay(message.provider).then(() => sendResponse({ok:true})).catch(error => sendResponse({ok:false,error:error.message}));
     return true;
   }
 });
@@ -35,12 +68,12 @@ async function resyncLinkedProviders() {
   // Startup restoration is best-effort: providers remain independently usable
   // if one domain is unavailable, and no session material is written to logs.
   await Promise.allSettled(
-    [...new Set(linkedProviders)].filter(provider => PROVIDERS[provider]).map(syncProvider)
+    [...new Set(linkedProviders)].filter(provider => PROVIDERS[provider]).map(queueProviderSync)
   );
 }
 
 function scheduleLinkedProviderResync() {
-  chrome.alarms?.create("relay-session-refresh", {periodInMinutes:5});
+  chrome.alarms?.create?.("relay-session-refresh", {periodInMinutes:5});
   pollConnection().catch(() => {});
   resyncLinkedProviders().catch(() => {
     // Do not log provider session material or relay credentials.
@@ -66,7 +99,7 @@ async function completePendingConnection() {
   if (!pending) return;
   if (Date.now() >= pending.expires) {
     await chrome.storage.local.remove("pendingConnection");
-    await chrome.alarms.clear("relay-connection");
+    await chrome.alarms?.clear?.("relay-connection");
     throw new Error("Connection approval expired. Choose Connect to gateway again.");
   }
   const gateway = normalizeGateway(pending.gateway);
@@ -87,10 +120,10 @@ async function completePendingConnection() {
   const linkedProviders = latest.gateway === gateway ? (latest.linkedProviders || []) : [];
   await chrome.storage.local.set({gateway, token:data.token, linkedProviders});
   await chrome.storage.local.remove("pendingConnection");
-  await chrome.alarms.clear("relay-connection");
+  await chrome.alarms?.clear?.("relay-connection");
   resyncLinkedProviders().catch(() => {});
 }
-chrome.alarms?.onAlarm.addListener(alarm => {
+chrome.alarms?.onAlarm?.addListener?.(alarm => {
   if (alarm.name === "relay-connection") pollConnection().catch(() => {});
   if (alarm.name === "relay-session-refresh") scheduleLinkedProviderResync();
 });

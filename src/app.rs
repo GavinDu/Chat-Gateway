@@ -76,6 +76,24 @@ pub(crate) fn start_background_workers(state: &Arc<AppState>) {
         tokio::spawn(async move {
             // Probe once immediately at startup; subsequent checks remain staggered.
             loop {
+                // Providers that have not been linked via the relay should not
+                // generate recurring authentication warnings. A future import
+                // is picked up by the next scheduled verification.
+                match crate::session::load_session_file(&provider_name) {
+                    Ok(Some(_)) => {}
+                    Ok(None) => {
+                        tokio::time::sleep(Duration::from_secs(60 + jitter_seconds)).await;
+                        continue;
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            provider = %provider_name,
+                            "periodic session verification skipped: stored session unavailable"
+                        );
+                        tokio::time::sleep(Duration::from_secs(60 + jitter_seconds)).await;
+                        continue;
+                    }
+                }
                 match pool.verify_session(&provider_name).await {
                     Ok(true) => provider_sessions.record_success(&provider_name),
                     // A false result means the page is not warmed yet, not that

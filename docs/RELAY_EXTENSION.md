@@ -8,8 +8,9 @@ cookies are sensitive bearer credentials.
 
 1. Start the local Docker gateway and load the extension in Chrome.
 2. In the extension, enter the relay URL, normally `http://127.0.0.1:8080`.
-3. Choose **Connect to gateway** and approve the local confirmation tab once.
-4. Return to the extension. Its connection and approved identity are remembered across restarts.
+3. Choose **Connect to gateway**. The extension opens a local approval tab; if the browser cannot open tabs from the popup, choose the **Open approval page** link instead.
+4. Approve the request on the gateway page, then return to the extension. It switches automatically to the provider-status dashboard when the approval is redeemed.
+5. If the popup closes while approval is pending, choose **Connect to gateway** again to reopen the same pending approval rather than creating a duplicate. Its connection and approved identity are remembered across restarts.
 
 No local pairing code or separate provider login dashboard is required. An explicit
 `CHAT_GATEWAY_EXTENSION_ID` still pins the installation to that ID. Private remote
@@ -18,9 +19,12 @@ is deliberately restricted to local gateways.
 
 ## Connect or reauthenticate a provider
 
-1. Choose **Connect account** in that provider's status row and grant its browser permissions.
-2. Existing browser cookies sync in the background, and the official provider website opens once to reuse its signed-in session or complete sign-in and MFA. Later refreshes do not open extra tabs.
-3. Cookie changes sync automatically after sign-in; provider status refreshes in the popup. Use **Sync session** for a manual refresh or **Unlink** to remove the saved session.
+1. Once the gateway is connected, the extension displays a card for each provider with its gateway and authentication status.
+2. For an unlinked provider choose **Log in / Connect** and grant its browser host permissions. If browser cookies exist, the gateway imports them immediately. Otherwise the extension opens the official provider website (or provides an **Open provider website** link), where you can sign in and complete MFA.
+3. Future cookie changes sync automatically for that consented provider. Use **Sync session** for a manual refresh, **Open website** to sign in again, or **Re-login / Sync** when runtime status indicates that login is needed.
+4. After linking, a small **Log out** button revokes that provider's saved gateway session and disables automatic cookie resync. The next **Log in / Connect** explicitly re-enables it. Logging out from Chat Gateway does **not** sign out your Chrome profile on the provider's website.
+
+Use **Disconnect gateway** to revoke the extension's gateway authorization without deleting provider vault records. Disconnecting the gateway and logging out a provider are intentionally separate actions.
 
 The gateway must already have the relevant provider adapter **enabled in
 `config.yaml`**, and your use must comply with that provider's applicable

@@ -17,21 +17,14 @@
       <button id="pair">Connect to gateway</button>
     </section>
     <section id="linked" hidden>
-      <label>Provider
-        <select id="provider">
-          <option value="chatgpt">ChatGPT</option><option value="claude">Claude</option>
-          <option value="gemini">Gemini</option><option value="qwen">Qwen</option>
-          <option value="metaai">Meta AI</option><option value="grok">Grok</option>
-          <option value="mistral">Mistral</option><option value="perplexity">Perplexity</option>
-        </select>
-      </label>
-      <button id="open-login" class="secondary">Open provider website</button>
-      <button id="link">Connect / sync selected provider</button>
-      <button id="refresh" class="secondary">Refresh status</button>
-      <button id="unlink" class="danger">Unlink selected provider</button>
-      <p class="small">Saved sessions are not proof of active authentication. Existing browser sessions sync automatically after you connect an account. Sign-in, MFA and CAPTCHA stay on the official provider website. Adding unsupported adapters requires a gateway code update.</p>
+      <div class="dashboard-toolbar">
+        <strong>Gateway connected</strong>
+        <button id="refresh" class="secondary compact">Refresh status</button>
+      </div>
+      <p class="small">Connect an account below, then sign in at its official website if needed. Saved cookies do not prove an active login. MFA and passwords stay with the provider.</p>
       <ul id="status"></ul>
-      <button id="unpair" class="danger">Unpair this extension</button>
+      <button id="unpair" class="quiet-danger compact">Disconnect gateway</button>
+      <p class="small">Disconnecting the extension retains provider vault sessions. Use each provider's Log out button to remove a saved session and stop automatic resync.</p>
     </section>
     <p id="message" role="status" aria-live="polite"></p>
     <p class="small">Local-only MVP. Keep the gateway bound to loopback. Use encrypted vault mode with a stable key before linking sessions.</p>
