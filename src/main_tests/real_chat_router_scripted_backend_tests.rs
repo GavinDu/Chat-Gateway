@@ -293,6 +293,58 @@ async fn real_router_stream_has_role_delta_done_and_durable_turn() {
 }
 
 #[tokio::test]
+async fn real_router_persistence_failure_is_an_error_for_json_and_sse() {
+    for stream in [false, true] {
+        let memory = Arc::new(UnifiedMemory::new(8_000));
+        // No existing conversation is read, so this fixture fails at the
+        // completed-turn write *after* the scripted provider returned success.
+        memory.drop_conversations_table_for_test().unwrap();
+        let (app, _, backend) = fixture_with_memory(
+            &["chatgpt"],
+            vec![response_events("synthetic upstream completion")],
+            None,
+            memory,
+        );
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "model": "chatgpt/fake-model",
+                            "stream": stream,
+                            "messages": [{"role": "user", "content": "synthetic prompt"}]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(backend.observed_requests().await.len(), 1);
+        let expected_status = if stream {
+            StatusCode::OK
+        } else {
+            StatusCode::INTERNAL_SERVER_ERROR
+        };
+        assert_eq!(response.status(), expected_status);
+        let body = to_bytes(response.into_body(), 65_536).await.unwrap();
+        let content = String::from_utf8(body.to_vec()).unwrap();
+        assert!(content.contains("memory_persistence_failed"));
+        if stream {
+            // Content may have already streamed; no successful terminal
+            // completion or durable-turn acknowledgement may follow it.
+            assert!(content.contains("data: [DONE]"));
+            assert!(!content.contains(r#""finish_reason":"stop""#));
+        } else {
+            assert!(!content.contains("synthetic upstream completion"));
+        }
+    }
+}
+
+#[tokio::test]
 async fn real_router_stream_error_sends_error_event_without_committing_turn() {
     let (app, state) = fixture(
         &["chatgpt"],
