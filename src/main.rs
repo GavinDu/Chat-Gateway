@@ -3111,42 +3111,9 @@ mod conversation_id_tests {
 #[cfg(test)]
 mod http_api_regression_tests {
     use super::*;
-    use axum::{
-        body::{to_bytes, Body},
-        routing::post,
-    };
-    use std::{
-        path::PathBuf,
-        sync::{
-            atomic::{AtomicUsize, Ordering},
-            Arc,
-        },
-    };
+    use axum::body::{to_bytes, Body};
+    use std::{path::PathBuf, sync::Arc};
     use tower::ServiceExt;
-
-    async fn validation_endpoint(
-        body: Result<axum::body::Bytes, axum::extract::rejection::BytesRejection>,
-    ) -> Response {
-        let body = match body {
-            Ok(body) => body,
-            Err(_) => {
-                return api_error(
-                    StatusCode::PAYLOAD_TOO_LARGE,
-                    "invalid_request_error",
-                    "request_too_large",
-                    "request body exceeds the 1 MiB limit",
-                );
-            }
-        };
-        match parse_and_validate_chat_req(&body) {
-            Ok(request) => Json(serde_json::json!({
-                "accepted": true,
-                "model": request.model,
-            }))
-            .into_response(),
-            Err(response) => response,
-        }
-    }
 
     async fn export_endpoint(
         State(memory): State<Arc<UnifiedMemory>>,
@@ -3209,7 +3176,6 @@ mod http_api_regression_tests {
                 get(|| async { api::health::readiness_response(1, true, 0) }),
             )
             .route("/v1/conversations", get(list_endpoint))
-            .route("/v1/chat/completions", post(validation_endpoint))
             .route(
                 "/v1/conversations/:conversation_id/export.md",
                 get(export_markdown_endpoint),
@@ -3223,33 +3189,15 @@ mod http_api_regression_tests {
             .layer(middleware::from_fn(attach_request_id))
     }
 
+    fn real_chat_app() -> Router {
+        let (router, _) =
+            super::real_chat_router_scripted_backend_tests::fixture(&["chatgpt"], vec![], None);
+        router.layer(middleware::from_fn(attach_request_id))
+    }
+
     async fn json_body(response: Response) -> serde_json::Value {
         let bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
         serde_json::from_slice(&bytes).unwrap()
-    }
-
-    async fn context_test_endpoint(
-        State((memory, provider_calls)): State<(Arc<UnifiedMemory>, Arc<AtomicUsize>)>,
-        Json(payload): Json<serde_json::Value>,
-    ) -> Response {
-        let conversation_id = payload.get("conversation_id").and_then(|v| v.as_str());
-        let messages = payload
-            .get("messages")
-            .cloned()
-            .and_then(|value| serde_json::from_value::<Vec<ChatMessage>>(value).ok())
-            .unwrap_or_default();
-        match read_conversation_context(&memory, conversation_id, &messages) {
-            Ok((prompt, _, has_history)) => {
-                provider_calls.fetch_add(1, Ordering::SeqCst);
-                Json(serde_json::json!({
-                    "accepted": true,
-                    "prompt": prompt,
-                    "has_history": has_history
-                }))
-                .into_response()
-            }
-            Err(_) => conversation_context_read_error(conversation_id),
-        }
     }
 
     #[tokio::test]
@@ -3334,20 +3282,24 @@ mod http_api_regression_tests {
     async fn http_memory_read_failure_returns_structured_error_without_provider_call() {
         let memory = Arc::new(UnifiedMemory::new(8000));
         memory.drop_conversations_table_for_test().unwrap();
-        let provider_calls = Arc::new(AtomicUsize::new(0));
-        let app = Router::new()
-            .route("/v1/context-test", post(context_test_endpoint))
-            .with_state((memory, provider_calls.clone()))
-            .layer(middleware::from_fn(attach_request_id));
+        let (app, _, backend) =
+            super::real_chat_router_scripted_backend_tests::fixture_with_memory(
+                &["chatgpt"],
+                vec![],
+                None,
+                memory,
+            );
+        let app = app.layer(middleware::from_fn(attach_request_id));
 
         let response = app
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/v1/context-test")
+                    .uri("/v1/chat/completions")
                     .header("content-type", "application/json")
+                    .header("X-Conversation-Id", "conversation_123")
                     .body(Body::from(
-                        r#"{"conversation_id":"conversation_123","messages":[{"role":"user","content":"hello"}]}"#,
+                        r#"{"model":"auto","messages":[{"role":"user","content":"hello"}]}"#,
                     ))
                     .unwrap(),
             )
@@ -3358,7 +3310,7 @@ mod http_api_regression_tests {
         assert!(response.headers().contains_key("x-request-id"));
         let body = json_body(response).await;
         assert_eq!(body["error"]["code"], "memory_read_failed");
-        assert_eq!(provider_calls.load(Ordering::SeqCst), 0);
+        assert!(backend.observed_requests().await.is_empty());
     }
 
     #[tokio::test]
@@ -3398,8 +3350,7 @@ mod http_api_regression_tests {
 
     #[tokio::test]
     async fn http_chat_validation_returns_structured_openai_errors_without_provider_access() {
-        let memory = Arc::new(UnifiedMemory::new(8000));
-        let response = app(memory.clone())
+        let response = real_chat_app()
             .oneshot(
                 Request::builder()
                     .method("POST")
@@ -3418,7 +3369,7 @@ mod http_api_regression_tests {
         assert_eq!(body["error"]["type"], "invalid_request_error");
         assert_eq!(body["error"]["code"], "unsupported_parameter");
 
-        let response = app(memory)
+        let response = real_chat_app()
             .oneshot(
                 Request::builder()
                     .method("POST")
@@ -3435,9 +3386,8 @@ mod http_api_regression_tests {
 
     #[tokio::test]
     async fn oversized_chat_body_keeps_structured_error_and_request_id() {
-        let memory = Arc::new(UnifiedMemory::new(8000));
         let oversized = "x".repeat(1024 * 1024 + 1);
-        let response = app(memory)
+        let response = real_chat_app()
             .oneshot(
                 Request::builder()
                     .method("POST")
@@ -4639,7 +4589,7 @@ mod real_chat_router_scripted_backend_tests {
         }
     }
 
-    fn fixture(
+    pub(super) fn fixture(
         providers: &[&str],
         scripted: Vec<ScriptedSend>,
         allowed: Option<Vec<String>>,
@@ -4652,6 +4602,15 @@ mod real_chat_router_scripted_backend_tests {
         providers: &[&str],
         scripted: Vec<ScriptedSend>,
         allowed: Option<Vec<String>>,
+    ) -> (Router, Arc<AppState>, Arc<ScriptedBackend>) {
+        fixture_with_memory(providers, scripted, allowed, Arc::new(UnifiedMemory::new(8_000)))
+    }
+
+    pub(super) fn fixture_with_memory(
+        providers: &[&str],
+        scripted: Vec<ScriptedSend>,
+        allowed: Option<Vec<String>>,
+        memory: Arc<UnifiedMemory>,
     ) -> (Router, Arc<AppState>, Arc<ScriptedBackend>) {
         let cfg = Arc::new(AppConfig {
             server: config::ServerConfig::default(),
@@ -4671,7 +4630,7 @@ mod real_chat_router_scripted_backend_tests {
             cfg: cfg.clone(),
             pool: pool.clone(),
             chat_service: ChatService::new(backend.clone()),
-            memory: Arc::new(UnifiedMemory::new(8_000)),
+            memory,
             router: ProviderRouter::new(cfg),
             models_cache: Arc::new(RwLock::new(HashMap::new())),
             relay: Arc::new(relay),
