@@ -4511,6 +4511,15 @@ mod real_chat_router_scripted_backend_tests {
         scripted: Vec<ScriptedSend>,
         allowed: Option<Vec<String>>,
     ) -> (Router, Arc<AppState>) {
+        let (app, state, _) = fixture_with_backend(providers, scripted, allowed);
+        (app, state)
+    }
+
+    fn fixture_with_backend(
+        providers: &[&str],
+        scripted: Vec<ScriptedSend>,
+        allowed: Option<Vec<String>>,
+    ) -> (Router, Arc<AppState>, Arc<ScriptedBackend>) {
         let cfg = Arc::new(AppConfig {
             server: config::ServerConfig::default(),
             memory: config::MemoryConfig::default(),
@@ -4524,10 +4533,11 @@ mod real_chat_router_scripted_backend_tests {
         });
         let pool = ObscuraPool::for_scripted_backend_tests(cfg.clone());
         let (relay, _) = relay::RelayState::new().unwrap();
+        let backend = Arc::new(ScriptedBackend::new(scripted));
         let state = Arc::new(AppState {
             cfg: cfg.clone(),
             pool: pool.clone(),
-            chat_service: ChatService::new(Arc::new(ScriptedBackend::new(scripted))),
+            chat_service: ChatService::new(backend.clone()),
             memory: Arc::new(UnifiedMemory::new(8_000)),
             router: ProviderRouter::new(cfg),
             models_cache: Arc::new(RwLock::new(HashMap::new())),
@@ -4548,7 +4558,7 @@ mod real_chat_router_scripted_backend_tests {
                 provider_allowlist: Some(provider_allowlist),
             }));
         }
-        (app, state)
+        (app, state, backend)
     }
 
     fn response_events(content: &str) -> ScriptedSend {
@@ -4565,6 +4575,16 @@ mod real_chat_router_scripted_backend_tests {
     }
 
     async fn send(app: Router, stream: bool, model: &str, conversation: &str) -> Response {
+        send_prompt(app, stream, model, conversation, "synthetic prompt").await
+    }
+
+    async fn send_prompt(
+        app: Router,
+        stream: bool,
+        model: &str,
+        conversation: &str,
+        prompt: &str,
+    ) -> Response {
         app.oneshot(
             Request::builder()
                 .method("POST")
@@ -4575,7 +4595,7 @@ mod real_chat_router_scripted_backend_tests {
                     serde_json::json!({
                         "model": model,
                         "stream": stream,
-                        "messages": [{"role":"user","content":"synthetic prompt"}]
+                        "messages": [{"role":"user","content":prompt}]
                     })
                     .to_string(),
                 ))
@@ -4726,6 +4746,51 @@ mod real_chat_router_scripted_backend_tests {
                 .len(),
             2
         );
+    }
+
+    #[tokio::test]
+    async fn real_router_interleaved_conversations_never_send_other_threads_context() {
+        let (app, state, backend) = fixture_with_backend(
+            &["chatgpt"],
+            vec![
+                response_events("answer A1"),
+                response_events("answer B1"),
+                response_events("answer A2"),
+                response_events("answer B2"),
+            ],
+            None,
+        );
+        let a = "router_context_a_001";
+        let b = "router_context_b_001";
+        for (id, prompt) in [
+            (a, "SYNTHETIC_PRIVATE_MARKER_A_314"),
+            (b, "SYNTHETIC_PRIVATE_MARKER_B_159"),
+            (a, "repeat the first A marker"),
+            (b, "repeat the first B marker"),
+        ] {
+            let response = send_prompt(
+                app.clone(),
+                false,
+                "chatgpt/fake-model",
+                id,
+                prompt,
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+        let requests = backend.observed_requests().await;
+        assert_eq!(requests.len(), 4);
+        assert!(requests[2].prompt.contains("SYNTHETIC_PRIVATE_MARKER_A_314"));
+        assert!(!requests[2].prompt.contains("SYNTHETIC_PRIVATE_MARKER_B_159"));
+        assert!(requests[3].prompt.contains("SYNTHETIC_PRIVATE_MARKER_B_159"));
+        assert!(!requests[3].prompt.contains("SYNTHETIC_PRIVATE_MARKER_A_314"));
+        for conversation in [a, b] {
+            let messages = state
+                .memory
+                .conversation_messages_for_owner("local", conversation)
+                .unwrap();
+            assert_eq!(messages.len(), 4);
+        }
     }
 
     #[tokio::test]
