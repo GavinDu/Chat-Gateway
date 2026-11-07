@@ -330,14 +330,16 @@ enum DeltaObservation {
 /// boundary. Baseline text is from the previous answer on a reused page.
 struct ResponseDeltaTracker {
     baseline: Option<String>,
-    last_len: usize,
+    // A byte count alone cannot detect same-length DOM rewrites. Keep the
+    // last emitted snapshot to require append-only growth before completion.
+    last_text: String,
 }
 
 impl ResponseDeltaTracker {
     fn new(baseline: Option<String>) -> Self {
         Self {
             baseline,
-            last_len: 0,
+            last_text: String::new(),
         }
     }
 
@@ -353,22 +355,20 @@ impl ResponseDeltaTracker {
                 .strip_prefix(baseline.as_str())
                 .map(str::to_string)
                 .unwrap_or_else(|| text.to_string());
-            self.last_len = text.len();
+            self.last_text = text.to_owned();
             self.baseline = None;
             return DeltaObservation::Delta(delta);
         }
-        // A provider may replace a partially rendered answer with shorter
-        // text during a DOM re-render. Treat that as an unstable snapshot,
-        // never as evidence that the previously emitted content is complete.
-        if text.len() < self.last_len {
+        // A provider may replace or shorten partially rendered DOM text
+        // without increasing its length. Never treat such rewrites as stable,
+        // or append an unrelated suffix to already-streamed content. Retain
+        // the last valid snapshot so a transient rerender can recover.
+        if !text.starts_with(&self.last_text) {
             return DeltaObservation::InvalidBoundary;
         }
-        if text.len() > self.last_len {
-            if !text.is_char_boundary(self.last_len) {
-                return DeltaObservation::InvalidBoundary;
-            }
-            let delta = text[self.last_len..].to_string();
-            self.last_len = text.len();
+        if text.len() > self.last_text.len() {
+            let delta = text[self.last_text.len()..].to_string();
+            self.last_text = text.to_owned();
             return DeltaObservation::Delta(delta);
         }
         DeltaObservation::Stable
@@ -944,6 +944,40 @@ mod response_delta_tracker_tests {
         assert_eq!(
             tracker.observe("new answer"),
             DeltaObservation::Delta("new answer".to_string())
+        );
+    }
+
+    #[test]
+    fn same_length_dom_rewrite_is_not_a_stable_response() {
+        let mut tracker = ResponseDeltaTracker::new(None);
+        assert_eq!(
+            tracker.observe("alpha"),
+            DeltaObservation::Delta("alpha".to_string())
+        );
+        assert_eq!(tracker.observe("bravo"), DeltaObservation::InvalidBoundary);
+        assert_eq!(tracker.observe("bravo"), DeltaObservation::InvalidBoundary);
+        // Only the original append-only text can resume a valid stream.
+        assert_eq!(
+            tracker.observe("alpha!"),
+            DeltaObservation::Delta("!".to_string())
+        );
+        assert_eq!(tracker.observe("alpha!"), DeltaObservation::Stable);
+    }
+
+    #[test]
+    fn longer_dom_rewrite_must_not_append_suffix_to_prior_output() {
+        let mut tracker = ResponseDeltaTracker::new(None);
+        assert_eq!(
+            tracker.observe("short"),
+            DeltaObservation::Delta("short".to_string())
+        );
+        assert_eq!(
+            tracker.observe("rewritten answer"),
+            DeltaObservation::InvalidBoundary
+        );
+        assert_eq!(
+            tracker.observe("short answer"),
+            DeltaObservation::Delta(" answer".to_string())
         );
     }
 
