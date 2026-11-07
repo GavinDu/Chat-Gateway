@@ -152,10 +152,102 @@ impl ChatService {
 #[cfg(test)]
 mod tests {
     use super::ChatService;
-    use crate::chat_backend::{BackendRequest, ChatBackend, ChatEvent, GatewayError, ProviderId};
+    use crate::chat_backend::{
+        test_support::{ScriptedBackend, ScriptedSend},
+        BackendRequest, ChatBackend, ChatEvent, GatewayError, GatewayErrorKind, ProviderId,
+    };
     use anyhow::Result;
     use std::sync::Arc;
     use tokio::sync::mpsc;
+
+    fn scripted_request() -> BackendRequest {
+        BackendRequest {
+            provider: ProviderId::new("chatgpt").unwrap(),
+            prompt: "fixture prompt".to_owned(),
+            model: "test-model".to_owned(),
+            has_history: false,
+            thread_url: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn scriptable_backend_distinguishes_admission_rejection_and_midstream_failure() {
+        let service = ChatService::new(Arc::new(ScriptedBackend::new(vec![
+            ScriptedSend::Reject(GatewayError::provider_busy("provider occupied")),
+            ScriptedSend::Events(vec![
+                Ok(ChatEvent {
+                    content: "partial answer".into(),
+                    done: false,
+                }),
+                Err(GatewayError::provider_failure("provider disconnected")),
+            ]),
+        ])));
+
+        let rejected = match service.stream(scripted_request()).await {
+            Ok(_) => panic!("busy admission must fail before a stream exists"),
+            Err(error) => error,
+        };
+        assert_eq!(rejected.kind, GatewayErrorKind::ProviderBusy);
+        assert!(rejected.is_retryable());
+
+        let response = service
+            .stream(scripted_request())
+            .await
+            .expect("second scripted send starts");
+        let collected = service.collect(response, std::time::Instant::now()).await;
+        assert_eq!(collected.content, "partial answer");
+        assert_eq!(
+            collected.error.unwrap().kind,
+            GatewayErrorKind::ProviderFailure
+        );
+    }
+
+    #[tokio::test]
+    async fn scriptable_backend_models_delayed_content_and_idle_cancellation() {
+        use std::time::Duration;
+        use tokio::sync::oneshot;
+        let (cancelled_tx, cancelled_rx) = oneshot::channel();
+        let service = ChatService::new(Arc::new(ScriptedBackend::new(vec![
+            ScriptedSend::Delay(
+                Duration::from_millis(40),
+                vec![
+                    Ok(ChatEvent {
+                        content: "delayed".into(),
+                        done: false,
+                    }),
+                    Ok(ChatEvent {
+                        content: String::new(),
+                        done: true,
+                    }),
+                ],
+            ),
+            ScriptedSend::Hold(cancelled_tx),
+        ])));
+
+        let mut delayed = service.stream(scripted_request()).await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(5), delayed.recv())
+                .await
+                .is_err(),
+            "delayed first content should not be mistaken for immediate completion"
+        );
+        let first = tokio::time::timeout(Duration::from_secs(1), delayed.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.content, "delayed");
+        assert!(!first.done);
+        assert!(delayed.recv().await.unwrap().unwrap().done);
+        drop(delayed);
+
+        let idle = service.stream(scripted_request()).await.unwrap();
+        drop(idle);
+        tokio::time::timeout(Duration::from_secs(1), cancelled_rx)
+            .await
+            .expect("dropping an idle provider stream must cancel the sender")
+            .expect("scripted sender should observe cancellation");
+    }
 
     struct FakeBackend;
 
