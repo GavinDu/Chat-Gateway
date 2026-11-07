@@ -56,6 +56,18 @@ impl RemoteProxyTrust {
     }
 }
 
+/// Local login/relay controls require exactly one loopback Host and at most
+/// one Origin. Even a matching first value cannot authorize a request when
+/// conflicting duplicated headers could be interpreted differently downstream.
+pub(crate) fn local_request_authority_is_safe(headers: &HeaderMap) -> bool {
+    headers.get_all(axum::http::header::HOST).iter().count() == 1
+        && headers.get_all(axum::http::header::ORIGIN).iter().count() <= 1
+        && headers
+            .get(axum::http::header::HOST)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(is_loopback_authority)
+}
+
 /// Validate the Origin/Host pair used by local login and relay endpoints.
 /// Requiring an explicit loopback authority prevents DNS-rebinding hostnames
 /// from passing a simple same-origin comparison.
@@ -279,6 +291,27 @@ mod tests {
                 false
             ));
         }
+    }
+
+    #[test]
+    fn rejects_ambiguous_local_host_and_origin_even_if_first_value_is_safe() {
+        let mut base = HeaderMap::new();
+        base.insert("host", "127.0.0.1:8080".parse().unwrap());
+        base.insert("origin", "http://127.0.0.1:8080".parse().unwrap());
+        assert!(local_request_authority_is_safe(&base));
+
+        let mut duplicate_host = base.clone();
+        duplicate_host.append("host", "attacker.example:8080".parse().unwrap());
+        assert!(!local_request_authority_is_safe(&duplicate_host));
+        let mut duplicate_origin = base.clone();
+        duplicate_origin.append("origin", "http://attacker.example".parse().unwrap());
+        assert!(!local_request_authority_is_safe(&duplicate_origin));
+
+        let mut no_origin = HeaderMap::new();
+        no_origin.insert("host", "127.0.0.1:8080".parse().unwrap());
+        assert!(local_request_authority_is_safe(&no_origin));
+        no_origin.append("host", "127.0.0.1:8080".parse().unwrap());
+        assert!(!local_request_authority_is_safe(&no_origin));
     }
 
     #[test]
