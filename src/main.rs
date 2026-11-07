@@ -4773,10 +4773,18 @@ mod real_chat_router_scripted_backend_tests {
         }
         let requests = backend.observed_requests().await;
         assert_eq!(requests.len(), 4);
-        assert!(requests[2].prompt.contains("SYNTHETIC_PRIVATE_MARKER_A_314"));
-        assert!(!requests[2].prompt.contains("SYNTHETIC_PRIVATE_MARKER_B_159"));
-        assert!(requests[3].prompt.contains("SYNTHETIC_PRIVATE_MARKER_B_159"));
-        assert!(!requests[3].prompt.contains("SYNTHETIC_PRIVATE_MARKER_A_314"));
+        assert!(requests[2]
+            .prompt
+            .contains("SYNTHETIC_PRIVATE_MARKER_A_314"));
+        assert!(!requests[2]
+            .prompt
+            .contains("SYNTHETIC_PRIVATE_MARKER_B_159"));
+        assert!(requests[3]
+            .prompt
+            .contains("SYNTHETIC_PRIVATE_MARKER_B_159"));
+        assert!(!requests[3]
+            .prompt
+            .contains("SYNTHETIC_PRIVATE_MARKER_A_314"));
         for conversation in [a, b] {
             let messages = state
                 .memory
