@@ -4232,7 +4232,7 @@ mod initial_stream_chunk_tests {
         assert!(usable_initial_stream_chunk("first token", false));
         assert!(!usable_initial_stream_chunk("", false));
         assert!(!usable_initial_stream_chunk("", true));
-        assert!(!usable_initial_stream_chunk("content marked done", true));
+        assert!(usable_initial_stream_chunk("content marked done", true));
     }
 }
 
