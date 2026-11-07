@@ -22,6 +22,13 @@ from typing import Iterable
 
 CORE_PHASE_TWO = ("claude", "gemini", "grok")
 CORE_PROVIDERS = ("chatgpt", *CORE_PHASE_TWO)
+# Cap untrusted provider/network output in the owner-account canary runner.
+# A canary expects a short marker, not arbitrary multi-megabyte text.
+MAX_SSE_LINE_BYTES = 65_536
+MAX_SSE_STREAM_BYTES = 2_097_152
+MAX_SSE_CONTENT_BYTES = 131_072
+MAX_CONVERSATION_EXPORT_BYTES = 1_048_576
+
 
 
 def gateway_headers(api_key: str, accept: str) -> dict[str, str]:
@@ -106,13 +113,33 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 
+def bounded_sse_lines(response) -> Iterable[bytes]:
+    """Use a bounded readline: iterating an HTTPResponse can allocate an unbounded line."""
+    while True:
+        line = response.readline(MAX_SSE_LINE_BYTES + 1)
+        if not line:
+            return
+        if len(line) > MAX_SSE_LINE_BYTES:
+            raise RuntimeError("canary_sse_line_too_large")
+        yield line
+
+
 def consume_sse(lines: Iterable[str], started_at: float | None = None) -> dict:
     content: list[str] = []
     first_content_ms = None
     started = time.monotonic() if started_at is None else started_at
     saw_done = False
     provider_error = False
+    received_bytes = 0
+    content_bytes = 0
     for raw_line in lines:
+        line_size = (len(raw_line) if isinstance(raw_line, bytes)
+                     else len(raw_line.encode("utf-8")))
+        if line_size > MAX_SSE_LINE_BYTES:
+            raise RuntimeError("canary_sse_line_too_large")
+        received_bytes += line_size
+        if received_bytes > MAX_SSE_STREAM_BYTES:
+            raise RuntimeError("canary_sse_output_too_large")
         line = raw_line.decode("utf-8", "replace") if isinstance(raw_line, bytes) else raw_line
         if not line.startswith("data:"):
             continue
@@ -124,18 +151,38 @@ def consume_sse(lines: Iterable[str], started_at: float | None = None) -> dict:
             continue
         try:
             event = json.loads(data)
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, UnicodeDecodeError):
             provider_error = True
             break
-        if event.get("error") is not None:
+        # Even syntactically valid JSON is untrusted network data. Produce the
+        # same sanitized provider failure as invalid JSON, not an AttributeError
+        # traceback that bypasses the canary's structured result contract.
+        if not isinstance(event, dict) or event.get("error") is not None:
             provider_error = True
             break
-        choices = event.get("choices") or []
+        choices = event.get("choices", [])
+        if not isinstance(choices, list):
+            provider_error = True
+            break
         if not choices:
-            continue
-        delta = choices[0].get("delta") or {}
+            continue  # OpenAI-style usage-only or heartbeat event.
+        if not isinstance(choices[0], dict):
+            provider_error = True
+            break
+        delta = choices[0].get("delta")
+        if delta is None:
+            continue  # Completion/usage event without a content delta.
+        if not isinstance(delta, dict):
+            provider_error = True
+            break
         piece = delta.get("content")
+        if piece is not None and not isinstance(piece, str):
+            provider_error = True
+            break
         if isinstance(piece, str) and piece:
+            content_bytes += len(piece.encode("utf-8"))
+            if content_bytes > MAX_SSE_CONTENT_BYTES:
+                raise RuntimeError("canary_sse_content_too_large")
             if first_content_ms is None:
                 first_content_ms = int((time.monotonic() - started) * 1000)
             content.append(piece)
@@ -169,7 +216,7 @@ def request_turn(base_url: str, api_key: str, model: str, expected_provider: str
         with urllib.request.build_opener(_NoRedirect()).open(request, timeout=timeout) as response:
             returned_conversation_id = response.headers.get("X-Conversation-Id")
             returned_provider = response.headers.get("X-Gateway-Provider", "").lower()
-            parsed = consume_sse(response, started)
+            parsed = consume_sse(bounded_sse_lines(response), started)
             status = response.status
     except urllib.error.HTTPError as error:
         raise RuntimeError(f"http_status_{error.code}") from None
@@ -207,10 +254,16 @@ def fetch_conversation(base_url: str, api_key: str, conversation_id: str, timeou
         with urllib.request.build_opener(_NoRedirect()).open(request, timeout=timeout) as response:
             if response.status != 200:
                 raise RuntimeError(f"conversation_export_http_status_{response.status}")
-            return json.loads(response.read().decode("utf-8"))
+            body = response.read(MAX_CONVERSATION_EXPORT_BYTES + 1)
+            if len(body) > MAX_CONVERSATION_EXPORT_BYTES:
+                raise RuntimeError("conversation_export_too_large")
+            parsed = json.loads(body.decode("utf-8"))
+            if not isinstance(parsed, dict):
+                raise RuntimeError("conversation_export_invalid")
+            return parsed
     except urllib.error.HTTPError as error:
         raise RuntimeError(f"conversation_export_http_status_{error.code}") from None
-    except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError):
+    except (urllib.error.URLError, TimeoutError, OSError, UnicodeDecodeError, json.JSONDecodeError):
         raise RuntimeError("conversation_export_failed") from None
 
 
