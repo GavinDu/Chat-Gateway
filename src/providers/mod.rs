@@ -25,6 +25,37 @@ pub struct ProviderChunk {
     pub done: bool,
 }
 
+/// Browser-side challenge signal. Keep a typed error all the way through
+/// the backend mapping rather than classifying provider-controlled text.
+#[derive(Debug)]
+pub struct ProviderChallengeError {
+    provider: String,
+}
+
+impl ProviderChallengeError {
+    pub fn new(provider: &str) -> Self {
+        Self {
+            provider: provider.to_owned(),
+        }
+    }
+}
+
+impl std::fmt::Display for ProviderChallengeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "provider '{}' disabled after challenge page detection; manual review required",
+            self.provider
+        )
+    }
+}
+
+impl std::error::Error for ProviderChallengeError {}
+
+fn provider_challenge_error(provider: &str) -> anyhow::Error {
+    anyhow::Error::new(ProviderChallengeError::new(provider))
+}
+
 /// Primary selectors for an adapter (diagnostics + readiness reporting).
 // Selector metadata is retained for upcoming adapter contract/readiness diagnostics.
 #[allow(dead_code)]
@@ -532,10 +563,7 @@ pub async fn run_send(
             "challenge page detected; manual review required",
         );
         let _ = chunks
-            .send(Err(anyhow::anyhow!(
-                "provider '{}' disabled after challenge page detection; manual review required",
-                adapter.name()
-            )))
+            .send(Err(provider_challenge_error(adapter.name())))
             .await;
         return;
     }
@@ -626,10 +654,7 @@ pub async fn run_send(
                 "challenge page detected; manual review required",
             );
             let _ = chunks
-                .send(Err(anyhow::anyhow!(
-                    "provider '{}' disabled after challenge page detection; manual review required",
-                    adapter.name()
-                )))
+                .send(Err(provider_challenge_error(adapter.name())))
                 .await;
             return;
         }
@@ -705,10 +730,7 @@ pub async fn run_send(
                                 "challenge page detected; manual review required",
                             );
                             let _ = chunks
-                                .send(Err(anyhow::anyhow!(
-                                    "provider '{}' disabled after challenge page detection; manual review required",
-                                    adapter.name()
-                                )))
+                                .send(Err(provider_challenge_error(adapter.name())))
                                 .await;
                             return;
                         }
@@ -820,10 +842,7 @@ pub async fn run_send(
                         "challenge page detected; manual review required",
                     );
                     let _ = chunks
-                        .send(Err(anyhow::anyhow!(
-                            "provider '{}' disabled after challenge page detection; manual review required",
-                            adapter.name()
-                        )))
+                        .send(Err(provider_challenge_error(adapter.name())))
                         .await;
                     return;
                 }
