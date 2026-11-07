@@ -59,9 +59,7 @@ pub(crate) fn validate_chat_req(req: &ChatReq) -> Result<(), (&'static str, Stri
     // The caller-controlled model name is also rendered in OpenAI response
     // metadata and provider headers. Reject control characters and oversized
     // identifiers before routing or touching a browser-backed provider.
-    if req.model.len() > MAX_MODEL_ID_BYTES
-        || req.model.chars().any(char::is_control)
-    {
+    if req.model.len() > MAX_MODEL_ID_BYTES || req.model.chars().any(char::is_control) {
         return Err((
             "invalid_model",
             "model must be at most 256 bytes and contain no control characters".to_string(),
@@ -225,8 +223,8 @@ mod wire_chat_message_contract_tests {
     fn rejects_oversized_or_control_character_model_identifiers() {
         for model in [
             "m".repeat(257),
-            "chatgpt/\\r\\nX-Injected: yes".replace("\\r", "\r").replace("\\n", "\n"),
-            "claude/\\u{0000}".replace("\\u{0000}", "\u0000"),
+            "chatgpt/\r\nX-Injected: yes".to_owned(),
+            "claude/\u{0000}".to_owned(),
         ] {
             let request: ChatReq = serde_json::from_value(serde_json::json!({
                 "model": model,
@@ -240,7 +238,12 @@ mod wire_chat_message_contract_tests {
 
     #[test]
     fn accepts_normal_provider_model_ids_and_enforces_utf8_byte_bound() {
-        for model in ["auto", "chatgpt/gpt-4o", "claude/sonnet-4.5", "m".repeat(256).as_str()] {
+        for model in [
+            "auto".to_owned(),
+            "chatgpt/gpt-4o".to_owned(),
+            "claude/sonnet-4.5".to_owned(),
+            "m".repeat(256),
+        ] {
             let request: ChatReq = serde_json::from_value(serde_json::json!({
                 "model": model,
                 "messages": [{"role": "user", "content": "hello"}]
