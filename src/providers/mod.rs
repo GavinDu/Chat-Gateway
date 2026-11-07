@@ -410,6 +410,36 @@ fn probe_has_challenge(probe: &common::ResponseProbe) -> bool {
     .any(|marker| lower_url.contains(marker))
 }
 
+/// Completion is a two-snapshot decision. A new token, DOM node, or resumed
+/// streaming indicator between the idle poll and the final challenge check
+/// invalidates completion. Otherwise a provider can append text just after
+/// the last delta and have the gateway commit a truncated turn.
+fn final_probe_confirms_completion(
+    initial_text: &str,
+    initial_count: usize,
+    final_probe: &common::ResponseProbe,
+    done_signal: DoneSignal,
+    saw_streaming: bool,
+    confirmed_post_answer_affordance: bool,
+) -> bool {
+    if final_probe.streaming
+        || final_probe.text.as_deref() != Some(initial_text)
+        || final_probe.count != initial_count
+    {
+        return false;
+    }
+    // A fast explicit-done path must not accept a final snapshot in which the
+    // completed-answer control has disappeared. Otherwise use the configured
+    // conservative fallback as before.
+    if done_signal == DoneSignal::StopControlDisappeared
+        && saw_streaming
+        && confirmed_post_answer_affordance
+    {
+        return final_probe.post_answer_affordance;
+    }
+    true
+}
+
 /// Generic send + stream-poll loop shared by all adapters. Poll response
 /// text at the configured interval and finish only after a conservative
 /// time-based idle grace period with no streaming indicator, or at timeout.
@@ -669,6 +699,19 @@ pub async fn run_send(
                                 .await;
                             return;
                         }
+                        if !final_probe_confirms_completion(
+                            &txt,
+                            probe.count,
+                            &final_probe,
+                            done_signal,
+                            saw_streaming,
+                            confirmed_post_answer_affordance,
+                        ) {
+                            // Continue polling rather than emitting the old
+                            // answer or an incomplete terminal event.
+                            stable_ticks = 0;
+                            continue;
+                        }
                         if let Some(answer) = &identical_answer_fallback {
                             let answer = if let Some(re) = &citation_re {
                                 re.replace_all(answer, "").to_string()
@@ -770,6 +813,17 @@ pub async fn run_send(
                         )))
                         .await;
                     return;
+                }
+                if !final_probe_confirms_completion(
+                    &txt,
+                    probe.count,
+                    &final_probe,
+                    done_signal,
+                    saw_streaming,
+                    confirmed_post_answer_affordance,
+                ) {
+                    stable_ticks = 0;
+                    continue;
                 }
                 if let Some(last_delta_at) = last_delta_at {
                     metrics.record_provider_tail(
@@ -1009,6 +1063,106 @@ mod response_completion_tests {
             true,
             DEFAULT_POLL_TICK,
             Duration::from_millis(15_000),
+        ));
+    }
+
+    #[test]
+    fn final_probe_rejects_late_tokens_new_nodes_and_resumed_streaming() {
+        use super::final_probe_confirms_completion;
+        use crate::providers::common::ResponseProbe;
+
+        let initial = ResponseProbe {
+            text: Some("first part".to_owned()),
+            count: 3,
+            streaming: false,
+            post_answer_affordance: true,
+            ..ResponseProbe::default()
+        };
+        let stable = initial.clone();
+        assert!(final_probe_confirms_completion(
+            initial.text.as_deref().unwrap(),
+            initial.count,
+            &stable,
+            DoneSignal::StopControlDisappeared,
+            true,
+            true,
+        ));
+
+        let mut late_token = stable.clone();
+        late_token.text = Some("first part and more".to_owned());
+        assert!(!final_probe_confirms_completion(
+            initial.text.as_deref().unwrap(),
+            initial.count,
+            &late_token,
+            DoneSignal::StopControlDisappeared,
+            true,
+            true,
+        ));
+
+        let mut new_node = stable.clone();
+        new_node.count += 1;
+        assert!(!final_probe_confirms_completion(
+            initial.text.as_deref().unwrap(),
+            initial.count,
+            &new_node,
+            DoneSignal::StableResponseText,
+            false,
+            false,
+        ));
+
+        let mut resumed = stable.clone();
+        resumed.streaming = true;
+        assert!(!final_probe_confirms_completion(
+            initial.text.as_deref().unwrap(),
+            initial.count,
+            &resumed,
+            DoneSignal::StableResponseText,
+            true,
+            false,
+        ));
+
+        let mut gone = stable.clone();
+        gone.text = None;
+        assert!(!final_probe_confirms_completion(
+            initial.text.as_deref().unwrap(),
+            initial.count,
+            &gone,
+            DoneSignal::StableResponseText,
+            false,
+            false,
+        ));
+    }
+
+    #[test]
+    fn explicit_done_final_probe_requires_persistent_post_answer_affordance() {
+        use super::final_probe_confirms_completion;
+        use crate::providers::common::ResponseProbe;
+
+        let initial = ResponseProbe {
+            text: Some("complete response".into()),
+            count: 1,
+            post_answer_affordance: true,
+            ..ResponseProbe::default()
+        };
+        let mut final_probe = initial.clone();
+        final_probe.post_answer_affordance = false;
+        assert!(!final_probe_confirms_completion(
+            initial.text.as_deref().unwrap(),
+            initial.count,
+            &final_probe,
+            DoneSignal::StopControlDisappeared,
+            true,
+            true,
+        ));
+        // Providers without a validated fast-done signal may still finish
+        // after the full configured fallback grace.
+        assert!(final_probe_confirms_completion(
+            initial.text.as_deref().unwrap(),
+            initial.count,
+            &final_probe,
+            DoneSignal::StableResponseText,
+            true,
+            false,
         ));
     }
 
