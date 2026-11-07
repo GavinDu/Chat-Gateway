@@ -3770,6 +3770,40 @@ mod login_security_middleware_http_tests {
     }
 
     #[tokio::test]
+    async fn rejects_duplicate_local_host_and_origin_at_real_http_boundary() {
+        let duplicate_host = request(
+            "/login/api/status",
+            &[
+                ("host", "127.0.0.1:8080"),
+                ("host", "attacker.example:8080"),
+            ],
+        )
+        .await;
+        assert_eq!(duplicate_host.status(), StatusCode::FORBIDDEN);
+
+        let duplicate_origin = request(
+            "/login/api/status",
+            &[
+                ("host", "127.0.0.1:8080"),
+                ("origin", "http://127.0.0.1:8080"),
+                ("origin", "https://attacker.example"),
+            ],
+        )
+        .await;
+        assert_eq!(duplicate_origin.status(), StatusCode::FORBIDDEN);
+
+        let same_host_twice = request(
+            "/health",
+            &[
+                ("host", "localhost:8080"),
+                ("host", "localhost:8080"),
+            ],
+        )
+        .await;
+        assert_eq!(same_host_twice.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
     async fn allows_matching_loopback_origin_and_originless_local_clients() {
         let matching = request(
             "/login/api/status",
