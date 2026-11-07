@@ -375,13 +375,19 @@ pub(crate) mod test_support {
 
     pub(crate) struct ScriptedBackend {
         sends: Mutex<VecDeque<ScriptedSend>>,
+        requests: Mutex<Vec<ChatRequest>>,
     }
 
     impl ScriptedBackend {
         pub(crate) fn new(sends: Vec<ScriptedSend>) -> Self {
             Self {
                 sends: Mutex::new(sends.into()),
+                requests: Mutex::new(Vec::new()),
             }
+        }
+
+        pub(crate) async fn observed_requests(&self) -> Vec<ChatRequest> {
+            self.requests.lock().await.clone()
         }
     }
 
@@ -393,8 +399,9 @@ pub(crate) mod test_support {
 
         async fn send_stream(
             &self,
-            _request: ChatRequest,
+            request: ChatRequest,
         ) -> Result<mpsc::Receiver<Result<ChatEvent, GatewayError>>, GatewayError> {
+            self.requests.lock().await.push(request);
             let scripted = self
                 .sends
                 .lock()
