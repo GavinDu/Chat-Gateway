@@ -4768,14 +4768,7 @@ mod real_chat_router_scripted_backend_tests {
             (a, "repeat the first A marker"),
             (b, "repeat the first B marker"),
         ] {
-            let response = send_prompt(
-                app.clone(),
-                false,
-                "chatgpt/fake-model",
-                id,
-                prompt,
-            )
-            .await;
+            let response = send_prompt(app.clone(), false, "chatgpt/fake-model", id, prompt).await;
             assert_eq!(response.status(), StatusCode::OK);
         }
         let requests = backend.observed_requests().await;
