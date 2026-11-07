@@ -349,6 +349,27 @@ fn plan_provider_send(
     }
 }
 
+/// Classify first-stream admission without duplicating metrics and session
+/// recording in each failure branch. The caller records each failed attempt
+/// once, and retains typed session-expiry/challenge information when present.
+fn classify_initial_stream_event(
+    first: FirstEvent,
+) -> Result<chat_backend::ChatEvent, (String, Option<chat_backend::GatewayError>)> {
+    match first {
+        FirstEvent::Chunk(chunk) => Ok(chunk),
+        FirstEvent::EmptyCompletion => Err((
+            "provider completed without output before stream started".to_owned(),
+            None,
+        )),
+        FirstEvent::Error(error) => Err((error.to_string(), Some(error))),
+        FirstEvent::Closed => Err((
+            "provider stream closed before first output".to_owned(),
+            None,
+        )),
+        FirstEvent::Timeout => Err(("provider timed out before first output".to_owned(), None)),
+    }
+}
+
 pub(super) async fn run(
     state: Arc<AppState>,
     headers: HeaderMap,
@@ -587,24 +608,11 @@ pub(super) async fn run(
         if req.stream {
             let first_chunk_timeout = std::time::Duration::from_secs(provider_cfg.timeout_seconds)
                 .saturating_sub(provider_started.elapsed());
-            let first = match first_event(&mut rx, first_chunk_timeout).await {
-                FirstEvent::Chunk(chunk) => chunk,
-                FirstEvent::EmptyCompletion => {
-                    let error = "provider completed without output before stream started";
-                    record_attempt_error(
-                        &state.provider_sessions,
-                        &state.metrics,
-                        &provider_name,
-                        error,
-                        queue_ms,
-                        provider_started,
-                        request_started,
-                    );
-                    last_err = Some(error.to_string());
-                    continue;
-                }
-                FirstEvent::Error(error) => {
-                    let message = error.to_string();
+            let first = match classify_initial_stream_event(
+                first_event(&mut rx, first_chunk_timeout).await,
+            ) {
+                Ok(chunk) => chunk,
+                Err((message, gateway_error)) => {
                     record_attempt_error(
                         &state.provider_sessions,
                         &state.metrics,
@@ -614,42 +622,12 @@ pub(super) async fn run(
                         provider_started,
                         request_started,
                     );
-                    state
-                        .provider_sessions
-                        .record_gateway_error(&provider_name, &error);
+                    if let Some(error) = gateway_error.as_ref() {
+                        state
+                            .provider_sessions
+                            .record_gateway_error(&provider_name, error);
+                    }
                     last_err = Some(message);
-                    continue;
-                }
-                FirstEvent::Closed => {
-                    let error = "provider stream closed before first output";
-                    record_attempt_error(
-                        &state.provider_sessions,
-                        &state.metrics,
-                        &provider_name,
-                        error,
-                        queue_ms,
-                        provider_started,
-                        request_started,
-                    );
-                    last_err = Some(error.to_string());
-                    continue;
-                }
-                FirstEvent::Timeout => {
-                    let error = "provider timed out before first output";
-                    let provider_work_ms =
-                        provider_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
-                    let total_ms =
-                        request_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
-                    state.provider_sessions.record_error(&provider_name, error);
-                    state.metrics.record_provider_timings(
-                        &provider_name,
-                        "error",
-                        queue_ms,
-                        None,
-                        provider_work_ms,
-                        total_ms,
-                    );
-                    last_err = Some(error.to_string());
                     continue;
                 }
             };
@@ -905,6 +883,50 @@ pub(super) async fn run(
         "all eligible provider attempts exhausted"
     );
     unavailable_provider_response(last_err.as_deref())
+}
+
+#[cfg(test)]
+mod first_stream_admission_tests {
+    use super::*;
+
+    #[test]
+    fn first_stream_classifier_preserves_success_and_typed_errors() {
+        let chunk = chat_backend::ChatEvent {
+            content: "hello".to_owned(),
+            done: false,
+        };
+        assert_eq!(
+            classify_initial_stream_event(FirstEvent::Chunk(chunk.clone())).unwrap(),
+            chunk,
+        );
+        let timeout = chat_backend::GatewayError::timeout("provider timed out");
+        let (message, typed) =
+            classify_initial_stream_event(FirstEvent::Error(timeout.clone())).unwrap_err();
+        assert_eq!(message, "provider timed out");
+        assert_eq!(typed, Some(timeout));
+    }
+
+    #[test]
+    fn first_stream_classifier_keeps_stable_failure_reasons() {
+        for (event, expected) in [
+            (
+                FirstEvent::EmptyCompletion,
+                "provider completed without output before stream started",
+            ),
+            (
+                FirstEvent::Closed,
+                "provider stream closed before first output",
+            ),
+            (
+                FirstEvent::Timeout,
+                "provider timed out before first output",
+            ),
+        ] {
+            let (message, typed) = classify_initial_stream_event(event).unwrap_err();
+            assert_eq!(message, expected);
+            assert!(typed.is_none());
+        }
+    }
 }
 
 #[cfg(test)]
