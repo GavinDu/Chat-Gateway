@@ -106,7 +106,8 @@ async function completePendingConnection() {
   if (!await chrome.permissions.contains({origins:[gateway + "/*"]})) throw new Error("Gateway permission is missing.");
   const response = await fetch(gateway + "/relay/v1/connect/poll", {
     method:"POST", headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({request_id:pending.request_id,poll_secret:pending.poll_secret}), cache:"no-store"
+    body:JSON.stringify({request_id:pending.request_id,poll_secret:pending.poll_secret}),
+    cache:"no-store", redirect:"error"
   });
   if (response.status === 202) return;
   if (!response.ok) {
