@@ -52,7 +52,7 @@ use config::AppConfig;
 use context::{ContextBuilder, ContextPlan, ThreadSyncState};
 use memory::{ChatMessage, ConversationStore, LongTermMemoryStore, ProviderThread, UnifiedMemory};
 use request_security::{
-    is_loopback_authority, login_origin_is_same_authority, remote_gateway_origin,
+    local_request_authority_is_safe, login_origin_is_same_authority, remote_gateway_origin,
     remote_request_is_allowed, validate_remote_gateway_config, RemoteProxyTrust,
 };
 use router::ProviderRouter;
@@ -491,10 +491,7 @@ async fn protect_login_api_for_origin(
                 is_relay_api && relay::relay_request_origin_is_allowed(path, headers),
             )
     } else {
-        headers
-            .get(axum::http::header::HOST)
-            .and_then(|value| value.to_str().ok())
-            .is_some_and(is_loopback_authority)
+        local_request_authority_is_safe(headers)
     };
 
     if !authority_is_safe
