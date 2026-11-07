@@ -371,6 +371,9 @@ pub(crate) mod test_support {
         Events(Vec<Result<ChatEvent, GatewayError>>),
         /// Simulate delayed first content without blocking the HTTP worker.
         Delay(Duration, Vec<Result<ChatEvent, GatewayError>>),
+        /// Simulate a backend that holds request admission open before
+        /// returning its event channel. A caller timeout drops this future.
+        DelayAdmission(Duration, Vec<Result<ChatEvent, GatewayError>>),
         /// Keep the response idle until the consumer drops it.
         Hold(oneshot::Sender<()>),
         /// Emit first content then hold the stream; notify on client drop.
@@ -443,6 +446,16 @@ pub(crate) mod test_support {
                             }
                         }
                     });
+                    Ok(rx)
+                }
+                ScriptedSend::DelayAdmission(delay, events) => {
+                    tokio::time::sleep(delay).await;
+                    let (tx, rx) = mpsc::channel(events.len().max(1));
+                    for event in events {
+                        tx.send(event)
+                            .await
+                            .expect("scripted receiver is still held by this function");
+                    }
                     Ok(rx)
                 }
                 ScriptedSend::Hold(cancelled) => {

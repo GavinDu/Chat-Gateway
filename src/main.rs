@@ -4822,6 +4822,34 @@ mod real_chat_router_scripted_backend_tests {
     }
 
     #[tokio::test]
+    async fn real_router_fails_over_after_admission_deadline_without_commit() {
+        let (app, state, backend) = fixture_with_backend(
+            &["chatgpt", "claude"],
+            vec![
+                ScriptedSend::DelayAdmission(std::time::Duration::from_secs(3), vec![]),
+                response_events("synthetic fallback after admission timeout"),
+            ],
+            None,
+        );
+        let response = send(app, false, "auto", "router_admission_timeout_001").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["X-Gateway-Provider"], "claude");
+        let requests = backend.observed_requests().await;
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].provider.as_str(), "chatgpt");
+        assert_eq!(requests[1].provider.as_str(), "claude");
+        let persisted = state
+            .memory
+            .conversation_messages_for_owner("local", "router_admission_timeout_001")
+            .unwrap();
+        assert_eq!(persisted.len(), 2);
+        assert_eq!(
+            persisted[1].content,
+            "synthetic fallback after admission timeout"
+        );
+    }
+
+    #[tokio::test]
     async fn real_router_partial_json_error_never_commits_transcript() {
         let (app, state) = fixture(
             &["chatgpt"],
