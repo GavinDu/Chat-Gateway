@@ -4662,8 +4662,8 @@ mod real_chat_router_scripted_backend_tests {
         assert_eq!(response.headers()["content-type"], "text/event-stream");
         let body = to_bytes(response.into_body(), 65_536).await.unwrap();
         let content = String::from_utf8(body.to_vec()).unwrap();
-        assert!(content.contains("\\"role\\":\\"assistant\\""));
-        assert!(content.contains("\\"content\\":\\"stream answer\\""));
+        assert!(content.contains(r#""role":"assistant""#));
+        assert!(content.contains(r#""content":"stream answer""#));
         assert!(content.contains("data: [DONE]"));
         assert_eq!(
             state
