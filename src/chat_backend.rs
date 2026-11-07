@@ -1,4 +1,5 @@
 //! Canonical chat execution contract independent of the browser engine.
+use crate::providers::common::ProviderTimeoutError;
 use crate::{
     browser::pool::{
         BrowserWorkerUnavailableError, ProviderBusyError, ProviderSessionExpiredError,
@@ -311,6 +312,9 @@ fn map_backend_error(error: anyhow::Error) -> GatewayError {
     {
         return GatewayError::backend_unavailable("browser worker is temporarily unavailable");
     }
+    if error.downcast_ref::<ProviderTimeoutError>().is_some() {
+        return GatewayError::timeout("provider request timed out");
+    }
     GatewayError::provider_failure(error.to_string())
 }
 
@@ -591,6 +595,21 @@ mod tests {
         let ordinary = super::map_backend_error(anyhow::anyhow!("provider rejected request"));
         assert_eq!(ordinary.kind, GatewayErrorKind::ProviderFailure);
         assert!(!ordinary.is_retryable());
+        for phase in [
+            crate::providers::common::ProviderTimeoutPhase::Submission,
+            crate::providers::common::ProviderTimeoutPhase::Generation,
+        ] {
+            let timed_out = super::map_backend_error(anyhow::Error::new(
+                crate::providers::common::ProviderTimeoutError::new(
+                    "chatgpt",
+                    std::time::Duration::from_secs(5),
+                    phase,
+                ),
+            ));
+            assert_eq!(timed_out.kind, GatewayErrorKind::Timeout);
+            assert!(timed_out.is_retryable());
+            assert_eq!(timed_out.message, "provider request timed out");
+        }
     }
 
     #[tokio::test]
