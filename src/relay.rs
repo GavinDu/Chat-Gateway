@@ -313,6 +313,18 @@ fn replace_pending_approval(
     pending: &mut Option<PendingApproval>,
     headers: &HeaderMap,
 ) -> Result<(String, String), Box<Response>> {
+    let requested_id = requested_extension_id(headers).unwrap_or_default();
+    // A second extension must not be able to cancel another extension's
+    // unexpired approval. Only the same extension can explicitly restart.
+    if pending.as_ref().is_some_and(|current|
+        current.expires > Instant::now() && current.extension_id != requested_id
+    ) {
+        return Err(Box::new(json_error(
+            StatusCode::CONFLICT,
+            "approval_pending",
+            "another extension has an unexpired approval request",
+        )));
+    }
     let id = random_capability()?;
     let csrf = random_capability()?;
     let poll_secret = random_capability()?;
@@ -320,7 +332,7 @@ fn replace_pending_approval(
         id: id.clone(),
         csrf,
         poll_secret: poll_secret.clone(),
-        extension_id: requested_extension_id(headers).unwrap_or_default(),
+        extension_id: requested_id,
         expires: Instant::now() + Duration::from_secs(300),
         approved: false,
     });
@@ -971,6 +983,27 @@ mod tests {
             "abcdefghijklmnopabcdefghijklmnop"
         );
         assert!(current.expires > Instant::now());
+    }
+
+    #[test]
+    fn reconnect_cannot_displace_another_extension_approval() {
+        let mut original = HeaderMap::new();
+        original.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("chrome-extension://abcdefghijklmnopabcdefghijklmnop"),
+        );
+        let mut other = HeaderMap::new();
+        other.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("chrome-extension://bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+        );
+        let mut pending = None;
+        let (first_id, first_secret) = replace_pending_approval(&mut pending, &original).unwrap();
+        assert!(replace_pending_approval(&mut pending, &other).is_err());
+        assert_eq!(pending.as_ref().unwrap().id, first_id);
+        assert_eq!(pending.as_ref().unwrap().poll_secret, first_secret);
+        pending.as_mut().unwrap().expires = Instant::now() - Duration::from_secs(1);
+        assert!(replace_pending_approval(&mut pending, &other).is_ok());
     }
 
     #[test]
