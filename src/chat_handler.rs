@@ -35,7 +35,11 @@ async fn finalize_provider_attempt(
     let persist_error = if telemetry.stream_failed {
         None
     } else {
-        match persist_completed_turn(
+        // Backend/session health is independent of the gateway's durable
+        // write. A storage failure must be counted as a gateway error without
+        // incorrectly degrading a provider that returned valid completion.
+        state.provider_sessions.record_success(telemetry.provider);
+        persist_completed_turn(
             state,
             owner_key_id,
             conversation_id,
@@ -45,15 +49,7 @@ async fn finalize_provider_attempt(
             model,
         )
         .await
-        {
-            Ok(()) => {
-                // Provider success is visible only after the completed turn
-                // has been committed; a failed write is a gateway error.
-                state.provider_sessions.record_success(telemetry.provider);
-                None
-            }
-            Err(error) => Some(error),
-        }
+        .err()
     };
     let total_ms = telemetry
         .request_started
