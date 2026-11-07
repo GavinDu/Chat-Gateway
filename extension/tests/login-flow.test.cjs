@@ -40,7 +40,10 @@ function fixture({connected = false, linked = false, cookies = true} = {}) {
         linked = false;
         values.linkedProviders = (values.linkedProviders || []).filter(value => value !== message.provider);
       }
-      if (message.type === "sync-provider") linked = true;
+      if (message.type === "sync-provider") {
+        linked = true;
+        network.push({uri:"/relay/v1/session/" + message.provider,method:"POST"});
+      }
       return {ok:true};
     }},
   };
