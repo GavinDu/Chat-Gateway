@@ -40,6 +40,7 @@ function fixture({connected = false, linked = false, cookies = true} = {}) {
         linked = false;
         values.linkedProviders = (values.linkedProviders || []).filter(value => value !== message.provider);
       }
+      if (message.type === "sync-provider") linked = true;
       return {ok:true};
     }},
   };
@@ -117,7 +118,7 @@ test("provider login sync exposes compact Log out and permits reconnect", async 
   await settle();
   await f.context.refreshStatusForTest();
   await providerButtons(f)[0].click();
-  assert.equal(f.network.filter(x=>x.uri==="/relay/v1/session/metaai" && x.method==="POST").length,1);
+  assert.equal(f.messages.filter(x=>x.type==="sync-provider" && x.provider==="metaai").length,1);
   const buttons = providerButtons(f);
   const logout = buttons.find(button=>button.textContent==="Log out");
   assert.ok(logout,"linked provider must expose small logout");
@@ -127,7 +128,7 @@ test("provider login sync exposes compact Log out and permits reconnect", async 
   assert.deepEqual(Array.from(f.values.linkedProviders),[]);
   assert.equal(providerButtons(f)[0].textContent,"Log in / Connect");
   await providerButtons(f)[0].click();
-  assert.equal(f.network.filter(x=>x.uri==="/relay/v1/session/metaai" && x.method==="POST").length,2);
+  assert.equal(f.messages.filter(x=>x.type==="sync-provider" && x.provider==="metaai").length,2);
 });
 
 test("provider logout does not attempt to sign out from the official site", async () => {
