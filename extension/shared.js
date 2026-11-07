@@ -60,7 +60,7 @@ async function relayFetch(path, options = {}, expectedConnection = null) {
   if (expectedConnection) {
     const latest = await chrome.storage.local.get(["gateway", "token", "linkedProviders"]);
     if (latest.gateway !== gateway || latest.token !== token ||
-        !latest.linkedProviders?.includes(expectedConnection.provider)) {
+        (expectedConnection.provider && !latest.linkedProviders?.includes(expectedConnection.provider))) {
       throw new Error("Provider consent or gateway connection changed during sync.");
     }
   }
