@@ -333,7 +333,12 @@ mod typed_memory_save_error_tests {
         let disabled = memory
             .clone()
             .save_long_term_memory_item_async(
-                owner.clone(), "key".into(), "value".into(), None, 1.0, None,
+                owner.clone(),
+                "key".into(),
+                "value".into(),
+                None,
+                1.0,
+                None,
             )
             .await
             .unwrap_err();
@@ -351,7 +356,12 @@ mod typed_memory_save_error_tests {
         let invalid = memory
             .clone()
             .save_long_term_memory_item_async(
-                owner.clone(), "key".into(), "value".into(), None, 2.0, None,
+                owner.clone(),
+                "key".into(),
+                "value".into(),
+                None,
+                2.0,
+                None,
             )
             .await
             .unwrap_err();
@@ -363,8 +373,12 @@ mod typed_memory_save_error_tests {
         let provenance = memory
             .clone()
             .save_long_term_memory_item_async(
-                owner, "key".into(), "value".into(),
-                Some("missing-conversation".into()), 1.0, None,
+                owner,
+                "key".into(),
+                "value".into(),
+                Some("missing-conversation".into()),
+                1.0,
+                None,
             )
             .await
             .unwrap_err();
