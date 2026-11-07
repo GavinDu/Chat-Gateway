@@ -144,15 +144,15 @@ impl ChatService {
         max_wait: Option<Duration>,
     ) -> CollectedResponse {
         let mut accumulator = ResponseAccumulator::new(attempt_started);
-        let deadline = max_wait.map(|budget| tokio::time::Instant::from_std(attempt_started) + budget);
+        let deadline =
+            max_wait.map(|budget| tokio::time::Instant::from_std(attempt_started) + budget);
         loop {
             let next = if let Some(deadline) = deadline {
                 match tokio::time::timeout_at(deadline, events.recv()).await {
                     Ok(item) => item,
                     Err(_) => {
-                        accumulator.push(Err(GatewayError::timeout(
-                            "provider completion timed out",
-                        )));
+                        accumulator
+                            .push(Err(GatewayError::timeout("provider completion timed out")));
                         break;
                     }
                 }
@@ -227,7 +227,10 @@ mod tests {
             result.error.as_ref().unwrap().kind,
             crate::chat_backend::GatewayErrorKind::Timeout
         );
-        assert!(sender.is_closed(), "timed-out receiver should cancel producer");
+        assert!(
+            sender.is_closed(),
+            "timed-out receiver should cancel producer"
+        );
     }
 
     #[tokio::test]
