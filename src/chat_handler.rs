@@ -7,6 +7,56 @@
 //! scripted-backend tests.
 use super::*;
 
+/// Only syntactically and semantically valid requests proceed to memory or
+/// provider access. This same boundary applies to JSON and SSE requests.
+struct PreparedChatRequest {
+    req: ChatReq,
+    owner_key_id: String,
+    conversation_id: Option<String>,
+}
+
+fn prepare_chat_request(
+    headers: &HeaderMap,
+    auth_context: Option<&Extension<AuthKeyContext>>,
+    body: Result<axum::body::Bytes, axum::extract::rejection::BytesRejection>,
+) -> Result<PreparedChatRequest, Box<Response>> {
+    // Bytes extraction happens before the handler; preserve the structured
+    // OpenAI error envelope on oversized payloads.
+    let body = body.map_err(|_| Box::new(oversized_chat_body_error()))?;
+    let req = parse_and_validate_chat_req(&body).map_err(Box::new)?;
+    let owner_key_id = auth_context
+        .map(|Extension(context)| context.key_id.as_str())
+        .unwrap_or("local")
+        .to_owned();
+    let conversation_id = match headers.get("X-Conversation-Id") {
+        None => None,
+        Some(value) => {
+            let value = value.to_str().map_err(|_| {
+                Box::new(api_error(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request_error",
+                    "invalid_conversation_id",
+                    "X-Conversation-Id must be a valid ASCII identifier",
+                ))
+            })?;
+            if !valid_conversation_id(value) {
+                return Err(Box::new(api_error(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request_error",
+                    "invalid_conversation_id",
+                    "X-Conversation-Id must be 8-128 ASCII letters, digits, '_' or '-'",
+                )));
+            }
+            Some(value.to_owned())
+        }
+    };
+    Ok(PreparedChatRequest {
+        req,
+        owner_key_id,
+        conversation_id,
+    })
+}
+
 /// The metrics timestamp is measured after the durable write for both JSON
 /// and SSE. Provider work time is captured before that write, so the two
 /// measurements remain distinct.
@@ -83,50 +133,13 @@ pub(super) async fn run(
         .unwrap_or("unknown")
         .to_owned();
     let request_started = Instant::now();
-    let body = match body {
-        Ok(body) => body,
-        Err(_) => {
-            // Bytes extraction happens before the handler body runs. Catch the
-            // rejection explicitly so oversized payloads keep the public API
-            // error envelope instead of Axum's default rejection body.
-            return oversized_chat_body_error();
-        }
-    };
-    let req = match parse_and_validate_chat_req(&body) {
-        Ok(req) => req,
-        Err(response) => return response,
-    };
-
-    let owner_key_id = auth_context
-        .as_ref()
-        .map(|Extension(context)| context.key_id.as_str())
-        .unwrap_or("local")
-        .to_owned();
-
-    let conversation_id = match headers.get("X-Conversation-Id") {
-        None => None,
-        Some(value) => {
-            let value = match value.to_str() {
-                Ok(value) => value,
-                Err(_) => {
-                    return api_error(
-                        axum::http::StatusCode::BAD_REQUEST,
-                        "invalid_request_error",
-                        "invalid_conversation_id",
-                        "X-Conversation-Id must be a valid ASCII identifier",
-                    )
-                }
-            };
-            if !valid_conversation_id(value) {
-                return api_error(
-                    axum::http::StatusCode::BAD_REQUEST,
-                    "invalid_request_error",
-                    "invalid_conversation_id",
-                    "X-Conversation-Id must be 8-128 ASCII letters, digits, '_' or '-'",
-                );
-            }
-            Some(value.to_string())
-        }
+    let PreparedChatRequest {
+        req,
+        owner_key_id,
+        conversation_id,
+    } = match prepare_chat_request(&headers, auth_context.as_ref(), body) {
+        Ok(prepared) => prepared,
+        Err(response) => return *response,
     };
 
     let memory_egress_policy = match memory_egress::MemoryEgressPolicy::from_env() {
