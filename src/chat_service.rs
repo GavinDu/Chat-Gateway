@@ -152,6 +152,22 @@ impl ChatService {
         self.backend.send_stream(request).await
     }
 
+    /// Bound provider admission as well as response collection. A browser
+    /// worker or backend that never acknowledges submission cannot keep an
+    /// HTTP request and the exclusive provider slot occupied indefinitely.
+    /// Dropping the in-flight send future on timeout preserves cancellation
+    /// for backends that support it; no partial turn is committed.
+    pub async fn stream_with_timeout(
+        &self,
+        request: BackendRequest,
+        max_wait: Duration,
+    ) -> std::result::Result<mpsc::Receiver<Result<ChatEvent, GatewayError>>, GatewayError> {
+        match tokio::time::timeout(max_wait, self.stream(request)).await {
+            Ok(result) => result,
+            Err(_) => Err(GatewayError::timeout("provider submission timed out")),
+        }
+    }
+
     /// Consume a provider stream for a non-SSE response using the same event
     /// semantics as the streaming path. The caller supplies the attempt start
     /// instant so TTFT includes backend startup and first-event wait.
