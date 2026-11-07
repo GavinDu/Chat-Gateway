@@ -19,7 +19,7 @@ is deliberately restricted to local gateways.
 ## Connect or reauthenticate a provider
 
 1. Choose **Connect account** in that provider's status row and grant its browser permissions.
-2. An existing browser session is synced immediately. If there are no session cookies, the official provider website opens for sign-in and MFA.
+2. Existing browser cookies sync in the background, and the official provider website opens once to reuse its signed-in session or complete sign-in and MFA. Later refreshes do not open extra tabs.
 3. Cookie changes sync automatically after sign-in; provider status refreshes in the popup. Use **Sync session** for a manual refresh or **Unlink** to remove the saved session.
 
 The gateway must already have the relevant provider adapter **enabled in

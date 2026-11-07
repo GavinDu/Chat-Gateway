@@ -74,7 +74,7 @@ async function openProviderLogin(provider) {
   const url = PROVIDER_LOGIN_URLS[provider];
   if (!url) throw new Error("This provider is not yet supported by Chat-Gateway.");
   await chrome.tabs.create({url});
-  message("Sign in on the provider website. Connected accounts sync automatically; credentials and MFA stay on that website.");
+  message("Use your existing provider session or sign in on the provider website. Connected accounts sync automatically; credentials and MFA stay there.");
 }
 
 function showConnectionMode() {
@@ -145,6 +145,14 @@ $("link").addEventListener("click", async () => {
     if (snapshot.cookies.length === 0) {
       await openProviderLogin(provider);
       message("Sign in on the provider website. This account will sync automatically when session cookies become available.");
+      return;
+    }
+    if (!(stored.linkedProviders || []).includes(provider)) {
+      // The worker owns this sync so opening the provider tab can close the
+      // popup without cancelling the transfer. Cookies alone do not prove login.
+      chrome.runtime.sendMessage({type:"sync-provider",provider}).catch(() => {});
+      await openProviderLogin(provider);
+      message("Use your existing provider session or sign in there. This account syncs automatically.");
       return;
     }
     const response = await relayFetch("/relay/v1/session/" + encodeURIComponent(provider), {method:"POST",body:JSON.stringify(snapshot)});

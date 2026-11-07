@@ -77,9 +77,10 @@ extension keeps its connection across restarts. An explicit
 `CHAT_GATEWAY_EXTENSION_ID` can still pin the installation to one ID.
 
 Provider status appears in the extension and refreshes automatically. Choose
-**Connect account** for a provider and grant its required permissions. An existing
-browser session is synced immediately; otherwise its official website opens for
-sign-in, including any password, passkey, MFA or CAPTCHA. Later cookie changes
+**Connect account** for a provider and grant its required permissions. On the first
+connection, existing browser cookies sync in the background and the official
+website opens to reuse its signed-in session or complete sign-in, including any
+password, passkey, MFA or CAPTCHA. Subsequent refreshes do not open extra tabs. Later cookie changes
 sync automatically. Provider sessions are encrypted in the gateway's vault;
 passwords and MFA values remain on the provider website. A saved session or
 browser cookies are shown separately from a verified login.
