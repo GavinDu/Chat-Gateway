@@ -701,13 +701,27 @@ fn provider_authentication_status(
     }
 }
 
+async fn optional_login_observations(
+    observations: impl std::future::Future<
+        Output = anyhow::Result<Vec<crate::browser::pool::LoginActiveInfo>>,
+    >,
+) -> Vec<crate::browser::pool::LoginActiveInfo> {
+    // Provider probes share the browser thread and can block its command queue.
+    // The dashboard can still report saved sessions and cached lifecycle state.
+    tokio::time::timeout(Duration::from_millis(500), observations)
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .unwrap_or_default()
+}
+
 pub async fn status(State(app): State<Arc<crate::AppState>>, headers: HeaderMap) -> Response {
     if let Err(response) = authenticated_request(&app, &headers) {
         return *response;
     }
     // A Docker installation may not have an embedded login worker. Keep the
     // saved-session dashboard available and treat live verification as unknown.
-    let active = app.pool.login_status_all().await.unwrap_or_default();
+    let active = optional_login_observations(app.pool.login_status_all()).await;
     let mut providers = Vec::new();
     for provider in [
         "qwen",
@@ -884,6 +898,36 @@ pub async fn preflight(uri: Uri, headers: HeaderMap) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn dashboard_remains_available_when_browser_observations_stall_or_fail() {
+        let stalled = std::future::pending();
+        let observations =
+            tokio::time::timeout(Duration::from_secs(2), optional_login_observations(stalled))
+                .await
+                .expect("dashboard must not wait for a stalled browser worker");
+        assert!(observations.is_empty());
+        let failed =
+            optional_login_observations(async { Err(anyhow::anyhow!("worker stopped")) }).await;
+        assert!(failed.is_empty());
+    }
+
+    #[tokio::test]
+    async fn dashboard_keeps_available_live_login_observations() {
+        let observations = optional_login_observations(async {
+            Ok(vec![crate::browser::pool::LoginActiveInfo {
+                provider: "chatgpt".into(),
+                url: "https://chatgpt.com/".into(),
+                title: String::new(),
+                logged_in: Some(true),
+                input_found: true,
+                state: "ready".into(),
+            }])
+        })
+        .await;
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].logged_in, Some(true));
+    }
 
     #[test]
     fn approval_requires_top_level_navigation_not_script_or_frame() {
