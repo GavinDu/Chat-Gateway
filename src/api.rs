@@ -188,7 +188,8 @@ mod wire_chat_message_contract_tests {
                 .unwrap()
                 .insert(field.to_owned(), value);
             let error = serde_json::from_value::<ChatReq>(request)
-                .expect_err("unsupported message attributes must not vanish");
+                .err()
+                .expect("unsupported message attributes must not vanish");
             assert!(
                 error.to_string().contains(field),
                 "missing unsupported field name {field}"
