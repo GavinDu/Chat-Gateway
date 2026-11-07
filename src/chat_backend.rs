@@ -373,6 +373,7 @@ pub(crate) mod test_support {
         Delay(Duration, Vec<Result<ChatEvent, GatewayError>>),
         /// Simulate a backend that holds request admission open before
         /// returning its event channel. A caller timeout drops this future.
+        /// Unlike Delay, the stream receiver does not yet exist.
         DelayAdmission(Duration, Vec<Result<ChatEvent, GatewayError>>),
         /// Keep the response idle until the consumer drops it.
         Hold(oneshot::Sender<()>),
