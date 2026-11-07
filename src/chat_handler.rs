@@ -303,6 +303,52 @@ async fn prepare_chat_context(
     })
 }
 
+/// The pure provider-context decision is shared by JSON and SSE attempts.
+///
+/// A delta is allowed only for a validated, reopenable thread whose exact
+/// provider, model and durable transcript marker still match. Otherwise
+/// return an isolated bounded replay and never navigate the old thread.
+fn plan_provider_send(
+    provider: &str,
+    model: &str,
+    stored_messages: &[ChatMessage],
+    incoming_messages: &[ChatMessage],
+    saved_thread: Option<ProviderThread>,
+    token_budget: usize,
+    replay_prompt: &str,
+) -> (String, Option<String>) {
+    let saved_thread = saved_thread
+        .filter(|thread| is_reopenable_provider_thread_url(provider, &thread.thread_url));
+    let supports_reopen = providers::ADAPTERS
+        .iter()
+        .find(|spec| spec.id == provider)
+        .is_some_and(|spec| matches!(spec.threads, providers::ThreadSupport::UrlAddressable))
+        && saved_thread
+            .as_ref()
+            .is_some_and(|thread| thread.model.as_deref() == Some(model));
+    let last_marker = transcript_marker(stored_messages);
+    let thread_state = saved_thread.as_ref().map(|thread| ThreadSyncState {
+        provider: thread.provider.clone(),
+        thread_url: thread.thread_url.clone(),
+        synced_through_message_id: thread.synced_through_message_id.clone(),
+        last_stored_message_id: Some(last_marker),
+    });
+    match ContextBuilder::plan(
+        stored_messages,
+        incoming_messages,
+        provider,
+        thread_state.as_ref(),
+        supports_reopen,
+        token_budget,
+    ) {
+        ContextPlan::Delta { messages } => (
+            context::render_prompt(&messages),
+            saved_thread.map(|thread| thread.thread_url),
+        ),
+        ContextPlan::Replay { preamble, .. } => (format!("{preamble}\n{replay_prompt}"), None),
+    }
+}
+
 pub(super) async fn run(
     state: Arc<AppState>,
     headers: HeaderMap,
@@ -445,9 +491,7 @@ pub(super) async fn run(
                     )
                     .await
                 {
-                    Ok(thread) => thread.filter(|thread| {
-                        is_reopenable_provider_thread_url(&provider_name, &thread.thread_url)
-                    }),
+                    Ok(thread) => thread,
                     Err(_) => {
                         return api_error(
                             StatusCode::INTERNAL_SERVER_ERROR,
@@ -460,35 +504,15 @@ pub(super) async fn run(
             }
             None => None,
         };
-        let supports_reopen = providers::ADAPTERS
-            .iter()
-            .find(|spec| spec.id == provider_name)
-            .is_some_and(|spec| matches!(spec.threads, providers::ThreadSupport::UrlAddressable))
-            && saved_thread
-                .as_ref()
-                .is_some_and(|thread| thread.model.as_deref() == Some(req.model.as_str()));
-        let last_marker = transcript_marker(&stored_messages);
-        let thread_state = saved_thread.as_ref().map(|thread| ThreadSyncState {
-            provider: thread.provider.clone(),
-            thread_url: thread.thread_url.clone(),
-            synced_through_message_id: thread.synced_through_message_id.clone(),
-            last_stored_message_id: Some(last_marker),
-        });
-        let send_plan = ContextBuilder::plan(
+        let (mut provider_prompt, thread_url) = plan_provider_send(
+            &provider_name,
+            &req.model,
             &stored_messages,
             &req.messages,
-            &provider_name,
-            thread_state.as_ref(),
-            supports_reopen,
+            saved_thread,
             context_token_budget,
+            &prompt,
         );
-        let (mut provider_prompt, thread_url) = match send_plan {
-            ContextPlan::Delta { messages } => (
-                context::render_prompt(&messages),
-                saved_thread.map(|thread| thread.thread_url),
-            ),
-            ContextPlan::Replay { preamble, .. } => (format!("{preamble}\n{prompt}"), None),
-        };
 
         // Enforce data-handling policy at the last gateway boundary before
         // provider-specific submission. Current-turn content and local
@@ -881,6 +905,114 @@ pub(super) async fn run(
         "all eligible provider attempts exhausted"
     );
     unavailable_provider_response(last_err.as_deref())
+}
+
+#[cfg(test)]
+mod provider_send_planner_tests {
+    use super::*;
+
+    fn m(role: &str, content: &str) -> ChatMessage {
+        ChatMessage {
+            role: role.to_owned(),
+            content: content.to_owned(),
+        }
+    }
+
+    fn saved_thread(provider: &str, model: &str, url: &str, marker: &str) -> ProviderThread {
+        ProviderThread {
+            conversation_id: "conversation-123".to_owned(),
+            provider: provider.to_owned(),
+            thread_url: url.to_owned(),
+            synced_through_message_id: Some(marker.to_owned()),
+            model: Some(model.to_owned()),
+            updated_at: 0,
+        }
+    }
+
+    #[test]
+    fn synchronized_chatgpt_followup_uses_only_new_message_on_saved_thread() {
+        let history = vec![m("user", "old question"), m("assistant", "old answer")];
+        let incoming = vec![
+            m("user", "old question"),
+            m("assistant", "old answer"),
+            m("user", "new question"),
+        ];
+        let marker = transcript_marker(&history);
+        let (prompt, thread_url) = plan_provider_send(
+            "chatgpt",
+            "chatgpt/test",
+            &history,
+            &incoming,
+            Some(saved_thread(
+                "chatgpt",
+                "chatgpt/test",
+                "https://chatgpt.com/c/thread_123",
+                &marker,
+            )),
+            1000,
+            "bounded canonical transcript",
+        );
+        assert_eq!(
+            thread_url.as_deref(),
+            Some("https://chatgpt.com/c/thread_123")
+        );
+        assert!(prompt.contains("new question"));
+        assert!(!prompt.contains("old answer"));
+    }
+
+    #[test]
+    fn stale_marker_changed_model_or_invalid_thread_replays_without_reopen() {
+        let history = vec![m("user", "old question"), m("assistant", "old answer")];
+        let incoming = vec![
+            m("user", "old question"),
+            m("assistant", "old answer"),
+            m("user", "new question"),
+        ];
+        let marker = transcript_marker(&history);
+        let inputs = [
+            saved_thread(
+                "chatgpt",
+                "chatgpt/test",
+                "https://chatgpt.com/c/thread_123",
+                "stale",
+            ),
+            saved_thread(
+                "chatgpt",
+                "chatgpt/other",
+                "https://chatgpt.com/c/thread_123",
+                &marker,
+            ),
+            saved_thread(
+                "chatgpt",
+                "chatgpt/test",
+                "https://evil.example/c/thread_123",
+                &marker,
+            ),
+            saved_thread(
+                "claude",
+                "chatgpt/test",
+                "https://chatgpt.com/c/thread_123",
+                &marker,
+            ),
+        ];
+        for thread in inputs {
+            let (prompt, thread_url) = plan_provider_send(
+                "chatgpt",
+                "chatgpt/test",
+                &history,
+                &incoming,
+                Some(thread),
+                1000,
+                "bounded canonical transcript",
+            );
+            assert!(
+                thread_url.is_none(),
+                "replay must never reuse a stale remote thread"
+            );
+            assert!(prompt.contains("CONVERSATION_CONTEXT_BEGIN"));
+            assert!(prompt.contains("bounded canonical transcript"));
+        }
+    }
 }
 
 #[cfg(test)]
