@@ -1550,11 +1550,32 @@ fn is_reopenable_provider_thread_url(provider: &str, value: &str) -> bool {
         return false;
     };
     let location = format!("/{location}");
+    // A generic prefix like /c/ is not a remote conversation identity.
+    // Treat only an exact, nonempty ID segment as safely reopenable; a URL
+    // without an ID may redirect back into another warm provider thread.
+    let path = location
+        .split(['?', '#'])
+        .next()
+        .unwrap_or_default()
+        .trim_end_matches('/');
+    let has_thread_id = |prefix: &str| {
+        path.strip_prefix(prefix)
+            .is_some_and(|id| !id.is_empty() && !id.contains('/'))
+    };
     match provider {
         "chatgpt" => {
-            location.starts_with("/c/") || (location.starts_with("/g/") && location.contains("/c/"))
+            has_thread_id("/c/")
+                || path
+                    .strip_prefix("/g/")
+                    .and_then(|path| path.split_once("/c/"))
+                    .is_some_and(|(gpt, thread)| {
+                        !gpt.is_empty()
+                            && !gpt.contains('/')
+                            && !thread.is_empty()
+                            && !thread.contains('/')
+                    })
         }
-        "claude" => location.starts_with("/chat/") && location.len() > "/chat/".len(),
+        "claude" => has_thread_id("/chat/"),
         "gemini" => location.starts_with("/app/") && location.len() > "/app/".len(),
         "grok" => {
             location.starts_with("/c/")
@@ -4204,7 +4225,10 @@ mod provider_thread_url_tests {
     fn reopenable_thread_urls_match_the_supported_provider_paths() {
         let supported = [
             ("chatgpt", "https://chatgpt.com/c/123"),
+            ("chatgpt", "https://chatgpt.com/c/123/?model=default"),
+            ("chatgpt", "https://chatgpt.com/g/g-123/c/thread-456"),
             ("claude", "https://claude.ai/chat/123"),
+            ("claude", "https://claude.ai/chat/123?source=sidebar"),
         ];
         for (provider, url) in supported {
             assert!(
@@ -4234,6 +4258,16 @@ mod provider_thread_url_tests {
             ("perplexity", "https://perplexity.ai/"),
             ("chatgpt", "https://chatgpt.com.attacker.invalid/c/123"),
             ("claude", "https://attacker.invalid/chat/123"),
+            ("chatgpt", "https://chatgpt.com/c/"),
+            ("chatgpt", "https://chatgpt.com/c/?source=sidebar"),
+            ("chatgpt", "https://chatgpt.com/c/#fragment"),
+            ("chatgpt", "https://chatgpt.com/c/123/extra"),
+            ("chatgpt", "https://chatgpt.com/g/g-123/c/"),
+            ("chatgpt", "https://chatgpt.com/g//c/thread-123"),
+            ("chatgpt", "https://chatgpt.com/g/g-123/c/thread-123/extra"),
+            ("claude", "https://claude.ai/chat/"),
+            ("claude", "https://claude.ai/chat/?source=sidebar"),
+            ("claude", "https://claude.ai/chat/123/extra"),
         ];
         for (provider, url) in invalid {
             assert!(
