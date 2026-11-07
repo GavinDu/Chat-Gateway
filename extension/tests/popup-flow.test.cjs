@@ -62,7 +62,7 @@ function loadPopup({failCookieDomain = null, includeSecondProvider = false} = {}
         return [{name:"token",value:"test-only"}];
       }},
       runtime,
-      alarms:{create:async()=>{},clear:async()=>{}},
+      alarms:{create:async()=>{},clear:async name=>{chromeCalls.push("alarm-clear:"+name);}},
       storage:{local:{
         async get(keys){return Object.fromEntries(keys.map(k=>[k,values[k]]));},
         async set(next){Object.assign(values,next);},
@@ -118,4 +118,22 @@ test("provider dashboard keeps healthy providers actionable when one cookie prob
   const buttons=healthy.children.find(child=>child.className==="provider-actions").children;
   assert.equal(buttons.find(button=>button.textContent==="Log in / Connect").disabled,false);
   assert.ok(buttons.some(button=>button.textContent==="Open website"));
+});
+
+test("explicit gateway disconnect removes pending approval and stops polling",async()=>{
+  const popup=loadPopup();
+  await Promise.resolve();
+  popup.values.token="c".repeat(64);
+  popup.values.linkedProviders=["metaai"];
+  popup.values.pendingConnection={
+    gateway:"http://127.0.0.1:8080",
+    request_id:"a".repeat(64),
+    poll_secret:"b".repeat(64),
+    expires:Date.now()+300000
+  };
+  await popup.elements.get("unpair").handlers.click();
+  assert.equal(popup.values.token,undefined);
+  assert.equal(popup.values.pendingConnection,undefined);
+  assert.deepEqual(Array.from(popup.values.linkedProviders||[]),[]);
+  assert.ok(popup.chromeCalls.includes("alarm-clear:relay-connection"));
 });
