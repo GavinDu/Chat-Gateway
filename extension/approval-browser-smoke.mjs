@@ -43,7 +43,7 @@ try {
  const worker=context.serviceWorkers()[0]||await context.waitForEvent('serviceworker');
  const id=new URL(worker.url()).host;
  const popup=await context.newPage();await popup.goto('chrome-extension://'+id+'/popup.html');
- assert.equal(await popup.locator('#code').count(),0);
+ assert.equal(await popup.locator('#code').isVisible(),false);
  await popup.locator('#gateway').fill(base);
  const approvalTab=context.waitForEvent('page');
  await popup.locator('#pair').click();

@@ -2,7 +2,8 @@ const $ = id => document.getElementById(id);
 function message(text) { $("message").textContent = text; }
 
 async function refreshStatus() {
-  const response = await relayFetch("/relay/v1/status");
+  // Privileged extension GETs can omit Origin; POST preserves the origin-bound relay protocol.
+  const response = await relayFetch("/relay/v1/status", {method:"POST",body:"{}"});
   if (response.status === 401) {
     await chrome.storage.local.remove("token");
     $("pairing").hidden = false;
@@ -76,9 +77,19 @@ async function openProviderLogin(provider) {
   message("Sign in on the provider website. Connected accounts sync automatically; credentials and MFA stay on that website.");
 }
 
+function showConnectionMode() {
+  const remote = $("gateway").value.trim().startsWith("https://");
+  $("remote-pairing").hidden = !remote;
+  $("connection-help").textContent = remote
+    ? "Private remote gateways use their existing one-time pairing code. Local approval is available for local gateways."
+    : "Connect once, approve locally, then your extension reconnects automatically.";
+}
+$("gateway").addEventListener("input", showConnectionMode);
+
 async function initialize() {
   const stored = await chrome.storage.local.get(["gateway","token"]);
   if (stored.gateway) $("gateway").value = stored.gateway;
+  showConnectionMode();
   $("pairing").hidden = Boolean(stored.token);
   $("linked").hidden = !stored.token;
   if (stored.token) {
@@ -89,16 +100,27 @@ async function initialize() {
 $("pair").addEventListener("click", async () => {
   try {
     const gateway = normalizeGateway($("gateway").value);
-    if (!gateway.startsWith("http://")) throw new Error("One-click approval requires a local HTTP gateway.");
+    const remote = gateway.startsWith("https://");
+    const code = remote ? $("code").value.trim() : "";
+    if (remote && !/^[0-9]{8}$/.test(code)) throw new Error("Enter the fresh 8-digit code from your private remote gateway.");
     const granted = await chrome.permissions.request({origins:[gateway + "/*"]});
     if (!granted) throw new Error("Gateway permission was not granted.");
-    const response = await fetch(gateway + "/relay/v1/connect/request", {
-      method:"POST", headers:{"Content-Type":"application/json"}, body:"{}", cache:"no-store"
+    const response = await fetch(gateway + (remote ? "/relay/v1/pair" : "/relay/v1/connect/request"), {
+      method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(remote ? {code} : {}), cache:"no-store"
     });
-    if (!response.ok) throw new Error(response.status === 409
+    if (!response.ok) throw new Error(remote ? "Remote pairing failed. Check the gateway and request a fresh pairing code." : response.status === 409
       ? "An approval is already pending. Finish it in the local approval tab or retry in five minutes."
       : "Could not request approval. Check the gateway URL and configured extension ID.");
     const data = await response.json();
+    if (remote) {
+      if (!/^[a-f0-9]{64}$/.test(data.token)) throw new Error("Invalid connection response.");
+      await chrome.storage.local.set({gateway,token:data.token,linkedProviders:[]});
+      await chrome.storage.local.remove("pendingConnection");
+      await chrome.alarms.clear("relay-connection");
+      $("code").value = "";
+      await updateConnection();
+      return;
+    }
     if (!/^[a-f0-9]{64}$/.test(data.request_id) || !/^[a-f0-9]{64}$/.test(data.poll_secret)) throw new Error("Invalid connection response.");
     await chrome.storage.local.set({pendingConnection:{gateway, ...data, expires:Date.now()+300000}});
     await chrome.alarms.create("relay-connection", {periodInMinutes:1});

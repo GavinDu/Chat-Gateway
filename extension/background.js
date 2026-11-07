@@ -82,6 +82,8 @@ async function completePendingConnection() {
   }
   const data = await response.json();
   if (!/^[a-f0-9]{64}$/.test(data.token)) throw new Error("Invalid connection token.");
+  const latest = await chrome.storage.local.get(["pendingConnection"]);
+  if (latest.pendingConnection?.request_id !== pending.request_id || latest.pendingConnection?.gateway !== gateway) return;
   await chrome.storage.local.set({gateway, token:data.token, linkedProviders:[]});
   await chrome.storage.local.remove("pendingConnection");
   await chrome.alarms.clear("relay-connection");

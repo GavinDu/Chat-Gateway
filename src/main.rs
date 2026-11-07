@@ -267,8 +267,8 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let (relay_state, pairing_code) = relay::RelayState::new()?;
-    println!("Browser relay pairing code (single use, expires in 10 minutes): {pairing_code}");
+    let (relay_state, _legacy_pairing_code) = relay::RelayState::new()?;
+    println!("Browser relay: connect from the extension and approve locally.");
     let state = Arc::new(AppState {
         cfg: cfg.clone(),
         pool: pool.clone(),
@@ -358,7 +358,7 @@ async fn main() -> anyhow::Result<()> {
             "/relay/v1/pairing-code/rotate",
             post(relay::rotate_pairing_code),
         )
-        .route("/relay/v1/status", get(relay::status))
+        .route("/relay/v1/status", get(relay::status).post(relay::status))
         .route(
             "/relay/v1/session/:provider",
             post(relay::import_session).delete(relay::unlink),

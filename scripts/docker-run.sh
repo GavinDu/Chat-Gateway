@@ -198,7 +198,8 @@ start_gateway() {
   if [[ -z "$EXTENSION_ID" ]]; then
     echo "Connect from the extension and approve locally to remember its ID. CHAT_GATEWAY_EXTENSION_ID can optionally pin it."
   fi
-  echo "Pairing code: run '$0 pairing-code' (generates a fresh, single-use code)."
+  echo "Connect from the extension using http://127.0.0.1:$PORT and approve the local confirmation tab."
+  echo "Legacy pairing code (optional): run '$0 pairing-code'."
 }
 
 case "${1:-}" in

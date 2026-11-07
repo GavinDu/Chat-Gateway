@@ -12,7 +12,8 @@
     <p class="warning">Only link provider accounts you are authorized to use. Passwords and MFA are never collected. Session cookies are bearer credentials.</p>
     <label>Local gateway URL <input id="gateway" value="http://127.0.0.1:8080" spellcheck="false"></label>
     <section id="pairing">
-      <p>Connect once, approve locally, then your extension reconnects automatically.</p>
+      <p id="connection-help">Connect once, approve locally, then your extension reconnects automatically.</p>
+      <label id="remote-pairing" hidden>Remote gateway pairing code <input id="code" inputmode="numeric" maxlength="8" autocomplete="one-time-code"></label>
       <button id="pair">Connect to gateway</button>
     </section>
     <section id="linked" hidden>

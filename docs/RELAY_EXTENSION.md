@@ -4,29 +4,23 @@ The relay is intended for accounts you are authorized to access. Provider
 passwords and MFA codes remain on each provider's official website; browser
 cookies are sensitive bearer credentials.
 
-## Pair the extension
+## Connect the extension
 
-1. Start the local Docker gateway with `CHAT_GATEWAY_EXTENSION_ID` set to the
-   32-character ID shown in `chrome://extensions`.
-2. In the extension, enter the exact gateway origin, normally
-   `http://127.0.0.1:8080`. The local Docker default is **8080**, not 3000.
-3. Generate a fresh, single-use code using
-   `./scripts/docker-run.sh pairing-code` with an up-to-date rebuilt gateway.
-   Re-running the command invalidates any previous unused code.
-4. Enter the eight-digit code promptly and select **Pair extension**.
+1. Start the local Docker gateway and load the extension in Chrome.
+2. In the extension, enter the relay URL, normally `http://127.0.0.1:8080`.
+3. Choose **Connect to gateway** and approve the local confirmation tab once.
+4. Return to the extension. Its connection and approved identity are remembered across restarts.
 
-The one-time code expires after ten minutes and has a maximum of five failed
-attempts. Never paste it or any session material into a public issue.
+No local pairing code or separate provider login dashboard is required. An explicit
+`CHAT_GATEWAY_EXTENSION_ID` still pins the installation to that ID. Private remote
+HTTPS deployments retain their existing code-based pairing protocol; local approval
+is deliberately restricted to local gateways.
 
-## Add or reauthenticate a supported provider
+## Connect or reauthenticate a provider
 
-1. In the extension, select one of the eight configured providers.
-2. Select **Add provider / Open login**, then complete login and any MFA on the
-   provider's official site in Chrome.
-3. Return to the extension and select **Review permissions & link**. Grant only
-   the provider host permissions actually required.
-4. Refresh the status dashboard. To update changed cookies choose **Sync
-   session**; to remove saved credentials choose **Unlink**.
+1. Choose **Connect account** in that provider's status row and grant its browser permissions.
+2. An existing browser session is synced immediately. If there are no session cookies, the official provider website opens for sign-in and MFA.
+3. Cookie changes sync automatically after sign-in; provider status refreshes in the popup. Use **Sync session** for a manual refresh or **Unlink** to remove the saved session.
 
 The gateway must already have the relevant provider adapter **enabled in
 `config.yaml`**, and your use must comply with that provider's applicable
