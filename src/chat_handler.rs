@@ -69,12 +69,7 @@ async fn resolve_chat_candidates(
 ) -> Result<(Vec<String>, String), Box<Response>> {
     let mut candidates = state
         .router
-        .resolve_for_owner_async(
-            owner_key_id,
-            model,
-            conversation_id,
-            state.memory.clone(),
-        )
+        .resolve_for_owner_async(owner_key_id, model, conversation_id, state.memory.clone())
         .await
         .map_err(|_| {
             tracing::error!(conversation_id = ?conversation_id, "provider affinity read failed");
