@@ -1,6 +1,49 @@
 use obscura_core::Page;
 use std::time::Duration;
 
+/// The distinct browser timeout phases are preserved as typed errors.
+#[derive(Debug, Clone, Copy)]
+pub enum ProviderTimeoutPhase {
+    Submission,
+    Generation,
+}
+
+#[derive(Debug)]
+pub struct ProviderTimeoutError {
+    provider: String,
+    timeout: Duration,
+    phase: ProviderTimeoutPhase,
+}
+
+impl ProviderTimeoutError {
+    pub fn new(provider: &str, timeout: Duration, phase: ProviderTimeoutPhase) -> Self {
+        Self {
+            provider: provider.to_owned(),
+            timeout,
+            phase,
+        }
+    }
+}
+
+impl std::fmt::Display for ProviderTimeoutError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.phase {
+            ProviderTimeoutPhase::Submission => write!(
+                f,
+                "provider '{}' timed out while submitting the prompt after {:?}",
+                self.provider, self.timeout
+            ),
+            ProviderTimeoutPhase::Generation => write!(
+                f,
+                "provider '{}' did not complete within {:?}",
+                self.provider, self.timeout
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ProviderTimeoutError {}
+
 /// Static per-provider selector/URL data. Each adapter is a SelectorSet
 /// plus the shared interaction logic in this module (ported from v1's
 /// per-adapter discover/send bodies, re-expressed in the real obscura
