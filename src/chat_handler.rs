@@ -219,7 +219,6 @@ fn json_completion_body(
     })
 }
 
-
 struct PreparedChatContext {
     memory_egress_policy: memory_egress::MemoryEgressPolicy,
     personal_memory_items: Vec<memory_egress::PersonalMemoryItem>,
