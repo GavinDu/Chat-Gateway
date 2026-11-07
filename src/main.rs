@@ -4832,6 +4832,116 @@ mod real_chat_router_scripted_backend_tests {
     }
 
     #[tokio::test]
+    async fn real_router_provider_switch_replays_bounded_canonical_history() {
+        let (app, state, backend) = fixture_with_backend(
+            &["chatgpt", "claude"],
+            vec![
+                response_events("synthetic answer from chatgpt"),
+                response_events("synthetic answer from claude"),
+            ],
+            None,
+        );
+        let conversation = "router_handoff_001";
+        let first = send_prompt(
+            app.clone(),
+            false,
+            "chatgpt/fake-model",
+            conversation,
+            "SYNTHETIC_HANDOFF_MARKER_123",
+        )
+        .await;
+        assert_eq!(first.status(), StatusCode::OK);
+        let second = send_prompt(
+            app,
+            false,
+            "claude/fake-model",
+            conversation,
+            "Please continue after the provider switch",
+        )
+        .await;
+        assert_eq!(second.status(), StatusCode::OK);
+
+        let requests = backend.observed_requests().await;
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].provider.as_str(), "chatgpt");
+        assert_eq!(requests[1].provider.as_str(), "claude");
+        assert!(requests[1].prompt.contains("SYNTHETIC_HANDOFF_MARKER_123"));
+        assert!(requests[1].prompt.contains("synthetic answer from chatgpt"));
+        assert!(requests[1]
+            .prompt
+            .contains("Please continue after the provider switch"));
+        let persisted = state
+            .memory
+            .conversation_messages_for_owner("local", conversation)
+            .unwrap();
+        assert_eq!(persisted.len(), 4);
+        assert_eq!(persisted[3].content, "synthetic answer from claude");
+    }
+
+    #[tokio::test]
+    async fn real_router_failed_handoff_never_advances_canonical_transcript() {
+        let (app, state, backend) = fixture_with_backend(
+            &["chatgpt", "claude"],
+            vec![
+                response_events("first committed answer"),
+                ScriptedSend::Events(vec![
+                    Ok(ChatEvent {
+                        content: "partial discarded answer".to_owned(),
+                        done: false,
+                    }),
+                    Err(GatewayError::provider_failure("synthetic interrupted send")),
+                ]),
+                response_events("recovered answer"),
+            ],
+            None,
+        );
+        let conversation = "router_failed_handoff_001";
+        let first = send_prompt(
+            app.clone(),
+            false,
+            "chatgpt/fake-model",
+            conversation,
+            "SYNTHETIC_FIRST_TURN",
+        )
+        .await;
+        assert_eq!(first.status(), StatusCode::OK);
+        let failed = send_prompt(
+            app.clone(),
+            false,
+            "claude/fake-model",
+            conversation,
+            "SYNTHETIC_UNCOMMITTED_TURN",
+        )
+        .await;
+        assert_eq!(failed.status(), StatusCode::BAD_GATEWAY);
+        let before = state
+            .memory
+            .conversation_messages_for_owner("local", conversation)
+            .unwrap();
+        assert_eq!(before.len(), 2, "failed handoff must not commit a turn");
+
+        let recovered = send_prompt(
+            app,
+            false,
+            "chatgpt/fake-model",
+            conversation,
+            "SYNTHETIC_RECOVERED_TURN",
+        )
+        .await;
+        assert_eq!(recovered.status(), StatusCode::OK);
+        let requests = backend.observed_requests().await;
+        assert_eq!(requests.len(), 3);
+        assert!(!requests[2].prompt.contains("SYNTHETIC_UNCOMMITTED_TURN"));
+        assert!(!requests[2].prompt.contains("partial discarded answer"));
+        let after = state
+            .memory
+            .conversation_messages_for_owner("local", conversation)
+            .unwrap();
+        assert_eq!(after.len(), 4);
+        assert_eq!(after[3].content, "recovered answer");
+    }
+
+    #[tokio::test]
     async fn real_router_busy_provider_returns_retry_after_and_no_commit() {
         let (app, state) = fixture(&["chatgpt"], vec![], None);
         let _held = state.pool.acquire("chatgpt").await.unwrap();
