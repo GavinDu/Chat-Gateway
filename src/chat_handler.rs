@@ -175,6 +175,83 @@ async fn finalize_provider_attempt(
     persist_error
 }
 
+/// Keep JSON and SSE response headers in one place so the two transports
+/// cannot silently diverge on conversation identity and provider metadata.
+fn completion_response_headers(
+    conversation_id: &str,
+    provider: &str,
+    provider_model: &str,
+    streaming: bool,
+) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert("X-Conversation-Id", conversation_id.parse().unwrap());
+    if streaming {
+        headers.insert("Content-Type", "text/event-stream".parse().unwrap());
+        headers.insert("Cache-Control", "no-cache".parse().unwrap());
+        headers.insert("X-Accel-Buffering", "no".parse().unwrap());
+    }
+    add_gateway_headers(&mut headers, provider, provider_model);
+    headers
+}
+
+/// Pure response construction: the live handler controls persistence and
+/// success metrics, while this helper only renders the OpenAI JSON envelope.
+fn json_completion_body(
+    conversation_id: &str,
+    model: &str,
+    content: &str,
+    prompt_tokens: usize,
+) -> serde_json::Value {
+    let completion_tokens = estimate_tokens(content);
+    serde_json::json!({
+        "id": format!("chatcmpl-{}", &conversation_id[..8]),
+        "object": "chat.completion",
+        "created": chrono::Utc::now().timestamp(),
+        "model": model,
+        "choices": [{ "message": { "role": "assistant", "content": content }, "finish_reason": "stop", "index": 0 }],
+        "usage": {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens
+        },
+        "x_usage_estimated": true,
+        "conversation_id": conversation_id,
+    })
+}
+
+#[cfg(test)]
+mod completion_response_builder_tests {
+    use super::*;
+
+    #[test]
+    fn json_response_preserves_usage_and_conversation_identity() {
+        let conversation_id = "fixture-conversation-123";
+        let content = "Hello from a fixture";
+        let body = json_completion_body(conversation_id, "fixture-model", content, 11);
+        assert_eq!(body["id"], "chatcmpl-fixture-");
+        assert_eq!(body["conversation_id"], conversation_id);
+        assert_eq!(body["model"], "fixture-model");
+        assert_eq!(body["choices"][0]["message"]["content"], content);
+        assert_eq!(body["choices"][0]["finish_reason"], "stop");
+        assert_eq!(body["usage"]["prompt_tokens"], 11);
+        assert_eq!(body["usage"]["completion_tokens"], estimate_tokens(content));
+        assert_eq!(body["usage"]["total_tokens"], 11 + estimate_tokens(content));
+        assert_eq!(body["x_usage_estimated"], true);
+    }
+
+    #[test]
+    fn both_transports_keep_identity_and_only_sse_has_streaming_headers() {
+        let json = completion_response_headers("fixture-conversation-123", "chatgpt", "fixture-model", false);
+        let sse = completion_response_headers("fixture-conversation-123", "chatgpt", "fixture-model", true);
+        assert_eq!(json.get("X-Conversation-Id"), sse.get("X-Conversation-Id"));
+        assert!(json.get("X-Accel-Buffering").is_none());
+        assert!(json.get("Cache-Control").is_none());
+        assert_eq!(sse.get("Content-Type").unwrap(), "text/event-stream");
+        assert_eq!(sse.get("Cache-Control").unwrap(), "no-cache");
+        assert_eq!(sse.get("X-Accel-Buffering").unwrap(), "no");
+    }
+}
+
 pub(super) async fn run(
     state: Arc<AppState>,
     headers: HeaderMap,
@@ -696,12 +773,8 @@ pub(super) async fn run(
                 }
                 yield Ok(Event::default().data("[DONE]"));
             };
-            let mut resp_headers = axum::http::HeaderMap::new();
-            resp_headers.insert("X-Conversation-Id", new_conv_id.parse().unwrap());
-            resp_headers.insert("Content-Type", "text/event-stream".parse().unwrap());
-            resp_headers.insert("Cache-Control", "no-cache".parse().unwrap());
-            resp_headers.insert("X-Accel-Buffering", "no".parse().unwrap());
-            add_gateway_headers(&mut resp_headers, &provider_name, &provider_model_c);
+            let resp_headers =
+                completion_response_headers(&new_conv_id, &provider_name, &provider_model_c, true);
             return (resp_headers, Sse::new(sse_stream)).into_response();
         }
 
@@ -780,25 +853,14 @@ pub(super) async fn run(
                 "conversation could not be persisted",
             );
         }
-        let prompt_tokens = estimate_tokens(&provider_prompt);
-        let completion_tokens = estimate_tokens(&full);
-        let body = serde_json::json!({
-            "id": format!("chatcmpl-{}", &new_conv_id[..8]),
-            "object": "chat.completion",
-            "created": chrono::Utc::now().timestamp(),
-            "model": req.model,
-            "choices": [{ "message": { "role": "assistant", "content": full }, "finish_reason": "stop", "index": 0 }],
-            "usage": {
-                "prompt_tokens": prompt_tokens,
-                "completion_tokens": completion_tokens,
-                "total_tokens": prompt_tokens + completion_tokens
-            },
-            "x_usage_estimated": true,
-            "conversation_id": new_conv_id,
-        });
-        let mut resp_headers = axum::http::HeaderMap::new();
-        resp_headers.insert("X-Conversation-Id", new_conv_id.parse().unwrap());
-        add_gateway_headers(&mut resp_headers, &provider_name, &provider_model);
+        let body = json_completion_body(
+            &new_conv_id,
+            &req.model,
+            &full,
+            estimate_tokens(&provider_prompt),
+        );
+        let resp_headers =
+            completion_response_headers(&new_conv_id, &provider_name, &provider_model, false);
         return (resp_headers, Json(body)).into_response();
     }
 
