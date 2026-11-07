@@ -7,6 +7,70 @@
 //! scripted-backend tests.
 use super::*;
 
+/// The metrics timestamp is measured after the durable write for both JSON
+/// and SSE. Provider work time is captured before that write, so the two
+/// measurements remain distinct.
+struct AttemptTelemetry<'a> {
+    request_id: &'a str,
+    provider: &'a str,
+    queue_ms: u64,
+    ttft_ms: Option<u64>,
+    provider_work_ms: u64,
+    request_started: Instant,
+    stream_failed: bool,
+}
+
+/// One completion boundary for both transports: never record a successful
+/// gateway operation until the assistant turn is durable. A failed stream
+/// neither writes the partial turn nor marks the provider session healthy.
+async fn finalize_provider_attempt(
+    state: &AppState,
+    owner_key_id: &str,
+    conversation_id: &str,
+    user_messages: &[ChatMessage],
+    assistant_content: &str,
+    model: &str,
+    telemetry: AttemptTelemetry<'_>,
+) -> Option<anyhow::Error> {
+    let persist_error = if telemetry.stream_failed {
+        None
+    } else {
+        // Backend/session health is independent of the gateway's durable
+        // write. A storage failure must be counted as a gateway error without
+        // incorrectly degrading a provider that returned valid completion.
+        state.provider_sessions.record_success(telemetry.provider);
+        persist_completed_turn(
+            state,
+            owner_key_id,
+            conversation_id,
+            user_messages.to_vec(),
+            assistant_content.to_owned(),
+            telemetry.provider,
+            model,
+        )
+        .await
+        .err()
+    };
+    let total_ms = telemetry
+        .request_started
+        .elapsed()
+        .as_millis()
+        .min(u64::MAX as u128) as u64;
+    record_provider_outcome(
+        &state.metrics,
+        ProviderOutcome {
+            request_id: telemetry.request_id,
+            provider: telemetry.provider,
+            outcome: completed_chat_outcome(telemetry.stream_failed, persist_error.is_some()),
+            queue_ms: telemetry.queue_ms,
+            ttft_ms: telemetry.ttft_ms,
+            provider_work_ms: telemetry.provider_work_ms,
+            total_ms,
+        },
+    );
+    persist_error
+}
+
 pub(super) async fn run(
     state: Arc<AppState>,
     headers: HeaderMap,
@@ -549,38 +613,24 @@ pub(super) async fn run(
                 });
 
                 let provider_work_ms = provider_started_c.elapsed().as_millis().min(u64::MAX as u128) as u64;
-                // Persist before reporting a successful gateway operation.
-                // An SSE stream may have emitted content, but no successful
-                // terminal completion can be claimed until its turn is durable.
-                let persist_error = if stream_error.is_none() {
-                    state_c.provider_sessions.record_success(&provider_c);
-                    persist_completed_turn(
-                        &state_c,
-                        &owner_key_id_c,
-                        &conv_stream,
-                        windowed_c.clone(),
-                        full.clone(),
-                        &provider_c,
-                        &model_c,
-                    )
-                    .await
-                    .err()
-                } else {
-                    None
-                };
-                let total_ms = request_started_c.elapsed().as_millis().min(u64::MAX as u128) as u64;
-                record_provider_outcome(
-                    &state_c.metrics,
-                    ProviderOutcome {
+                let persist_error = finalize_provider_attempt(
+                    &state_c,
+                    &owner_key_id_c,
+                    &conv_stream,
+                    &windowed_c,
+                    &full,
+                    &model_c,
+                    AttemptTelemetry {
                         request_id: &request_id_c,
                         provider: &provider_c,
-                        outcome: completed_chat_outcome(stream_error.is_some(), persist_error.is_some()),
                         queue_ms: queue_ms_c,
                         ttft_ms,
                         provider_work_ms,
-                        total_ms,
+                        request_started: request_started_c,
+                        stream_failed: stream_error.is_some(),
                     },
-                );
+                )
+                .await;
                 if let Some(message) = stream_error {
                     // Only typed provider authentication failures require
                     // re-login. Never infer that from arbitrary upstream text.
@@ -678,33 +728,25 @@ pub(super) async fn run(
             );
         }
 
-        state.provider_sessions.record_success(&provider_name);
-        let persist_result = persist_completed_turn(
+        let persist_error = finalize_provider_attempt(
             &state,
             &owner_key_id,
             &new_conv_id,
-            windowed.clone(),
-            full.clone(),
-            &provider_name,
+            &windowed,
+            &full,
             &req.model,
-        )
-        .await;
-        // Total gateway latency includes the durable write, not just provider
-        // output. Use the same post-commit timing boundary as the SSE path.
-        let total_ms = request_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
-        record_provider_outcome(
-            &state.metrics,
-            ProviderOutcome {
+            AttemptTelemetry {
                 request_id: &request_id,
                 provider: &provider_name,
-                outcome: completed_chat_outcome(false, persist_result.is_err()),
                 queue_ms,
                 ttft_ms,
                 provider_work_ms,
-                total_ms,
+                request_started,
+                stream_failed: false,
             },
-        );
-        if let Err(error) = persist_result {
+        )
+        .await;
+        if let Some(error) = persist_error {
             tracing::error!(conversation_id = %new_conv_id, %error, "conversation persistence failed");
             return api_error(
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
