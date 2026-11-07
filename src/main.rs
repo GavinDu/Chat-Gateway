@@ -1569,9 +1569,7 @@ fn is_reopenable_provider_thread_url(provider: &str, value: &str) -> bool {
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
     };
-    let has_thread_id = |prefix: &str| {
-        path.strip_prefix(prefix).is_some_and(valid_thread_segment)
-    };
+    let has_thread_id = |prefix: &str| path.strip_prefix(prefix).is_some_and(valid_thread_segment);
     match provider {
         "chatgpt" => {
             has_thread_id("/c/")
