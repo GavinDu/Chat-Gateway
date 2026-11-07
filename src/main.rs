@@ -2476,8 +2476,7 @@ async fn chat_completions(
             let request_id_c = request_id.clone();
             let sse_stream = async_stream::stream! {
                 let _permit = permit;
-                let mut full = String::new();
-                let mut ttft_ms: Option<u64> = None;
+                let mut accumulator = chat_service::ResponseAccumulator::new(provider_started_c);
                 // OpenAI-compatible clients expect the assistant role on the
                 // first stream chunk, before content deltas.
                 let role = serde_json::json!({
@@ -2488,50 +2487,44 @@ async fn chat_completions(
                     "choices": [{ "delta": { "role": "assistant" }, "index": 0, "finish_reason": null }],
                 });
                 yield Ok::<_, anyhow::Error>(Event::default().data(role.to_string()));
-                let mut stream_error: Option<String> = None;
-                // A provider stream is successful only when its explicit terminal
-                // event is observed. Channel closure alone can indicate a worker
-                // crash or truncated response and must never commit partial output.
-                let mut saw_terminal_completion = false;
-                // Keep the raw detail only for internal session-state classification;
-                // client-facing stream errors remain generic and never expose it.
-                let mut provider_error_detail: Option<String> = None;
+                // The same terminal-aware reducer drives both SSE and JSON
+                // responses, including TTFT, partial errors, and channel closure.
                 let mut pending: Option<Result<chat_backend::ChatEvent, chat_backend::GatewayError>> = Some(Ok(first_chunk));
                 while let Some(item) = match pending.take() {
                     Some(item) => Some(item),
                     None => rx.recv().await,
                 } {
-                    match item {
-                        Ok(c) => {
-                            if c.done {
-                                saw_terminal_completion = true;
-                                break;
-                            }
-                            if ttft_ms.is_none() {
-                                ttft_ms = Some(provider_started_c.elapsed().as_millis().min(u64::MAX as u128) as u64);
-                            }
-                            full.push_str(&c.content);
+                    match accumulator.push(item) {
+                        chat_service::StreamUpdate::Delta(content) => {
                             let data = serde_json::json!({
                                 "id": format!("chatcmpl-{}", &conv_stream[..8]),
                                 "object": "chat.completion.chunk",
                                 "created": chrono::Utc::now().timestamp(),
                                 "model": model_c,
-                                "choices": [{ "delta": { "content": c.content }, "index": 0, "finish_reason": null }],
+                                "choices": [{ "delta": { "content": content }, "index": 0, "finish_reason": null }],
                             });
                             yield Ok::<_, anyhow::Error>(Event::default().data(data.to_string()));
                         }
-                        Err(e) => {
+                        chat_service::StreamUpdate::Complete => break,
+                        chat_service::StreamUpdate::Failed => {
                             tracing::warn!(provider = %provider_c, "provider stream failed; partial response not committed");
-                            provider_error_detail = Some(e.to_string());
-                            stream_error = Some("provider stream failed; partial response was not committed".to_string());
                             break;
                         }
                     }
                 }
-                if !saw_terminal_completion && stream_error.is_none() {
-                    provider_error_detail = Some("provider stream closed before terminal completion".to_owned());
-                    stream_error = Some("provider stream closed before terminal completion; partial response was not committed".to_owned());
-                }
+                let collected = accumulator.finish();
+                let full = collected.content;
+                let ttft_ms = collected
+                    .first_event_elapsed
+                    .map(|elapsed| elapsed.as_millis().min(u64::MAX as u128) as u64);
+                let provider_error_detail = collected.error.as_ref().map(ToString::to_string);
+                let stream_error = collected.error.map(|error| {
+                    if error.message == chat_service::INCOMPLETE_PROVIDER_STREAM {
+                        "provider stream closed before terminal completion; partial response was not committed".to_owned()
+                    } else {
+                        "provider stream failed; partial response was not committed".to_owned()
+                    }
+                });
 
                 let provider_work_ms = provider_started_c.elapsed().as_millis().min(u64::MAX as u128) as u64;
                 let total_ms = request_started_c.elapsed().as_millis().min(u64::MAX as u128) as u64;
