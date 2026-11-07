@@ -2,11 +2,11 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const vm = require('node:vm');
 const fs = require('node:fs');
-function load(status, data, expires = Date.now() + 300000) {
+function load(status, data, expires = Date.now() + 300000, beforeResponse = null) {
   const values = {pendingConnection:{gateway:'http://127.0.0.1:8080',request_id:'a'.repeat(64),poll_secret:'b'.repeat(64),expires}};
   const calls = [];
   const context = {Map, Set, Promise, Date, normalizeGateway:v=>v, PROVIDERS:{}, importScripts(){}, setTimeout, clearTimeout,
-    fetch:async (url, options)=>{calls.push({url,options});return {status,ok:status===200||status===202,json:async()=>data};},
+    fetch:async (url, options)=>{calls.push({url,options});if(beforeResponse)await beforeResponse();return {status,ok:status===200||status===202,json:async()=>data};},
     chrome:{cookies:{onChanged:{addListener(){}}},permissions:{contains:async()=>true},
       runtime:{onMessage:{addListener(){}},onInstalled:{addListener(){}},onStartup:{addListener(){}}},
       alarms:{onAlarm:{addListener(){}},clear:async()=>{}},
@@ -37,4 +37,25 @@ test('malformed token is never persisted',async()=>{
 test('reapproval keeps provider consent only for the same gateway',async()=>{
   const same=load(200,{token:'c'.repeat(64)});same.values.gateway='http://127.0.0.1:8080';same.values.linkedProviders=['chatgpt'];await same.poll();assert.deepEqual(Array.from(same.values.linkedProviders),['chatgpt']);
   const other=load(200,{token:'c'.repeat(64)});other.values.gateway='https://other.example';other.values.linkedProviders=['chatgpt'];await other.poll();assert.deepEqual(Array.from(other.values.linkedProviders),[]);
+});
+
+test('stale 410 poll never clears a replacement pending approval',async()=>{
+  let release;
+  const barrier=new Promise(resolve=>{release=resolve;});
+  const api=load(410,{},Date.now()+300000,()=>barrier);
+  const old=api.values.pendingConnection;
+  const running=api.poll();
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(api.calls.length,1,'the old request must be in flight');
+  const replacement={...old,request_id:'d'.repeat(64),poll_secret:'e'.repeat(64)};
+  api.values.pendingConnection=replacement;
+  release();
+  await assert.rejects(running,/Connection approval unavailable/);
+  assert.equal(api.values.pendingConnection.request_id,replacement.request_id);
+  assert.equal(api.values.pendingConnection.poll_secret,replacement.poll_secret);
+});
+test('410 for the current approval clears only that request',async()=>{
+  const api=load(410,{});
+  await assert.rejects(api.poll(),/Connection approval unavailable/);
+  assert.equal(api.values.pendingConnection,undefined);
 });

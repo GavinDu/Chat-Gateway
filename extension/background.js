@@ -94,12 +94,22 @@ async function pollConnection() {
   connectionPoll = completePendingConnection();
   try { await connectionPoll; } finally { connectionPoll = undefined; }
 }
+// A request can be replaced from the popup while this worker is awaiting the
+// gateway. Never let an older poll clear a newer approval request or its alarm.
+async function clearPendingApprovalIfCurrent(pending) {
+  const {pendingConnection: current} = await chrome.storage.local.get(["pendingConnection"]);
+  if (current?.request_id !== pending.request_id ||
+      current?.gateway !== pending.gateway ||
+      current?.poll_secret !== pending.poll_secret) return false;
+  await chrome.storage.local.remove("pendingConnection");
+  await chrome.alarms?.clear?.("relay-connection");
+  return true;
+}
 async function completePendingConnection() {
   const {pendingConnection: pending} = await chrome.storage.local.get(["pendingConnection"]);
   if (!pending) return;
   if (Date.now() >= pending.expires) {
-    await chrome.storage.local.remove("pendingConnection");
-    await chrome.alarms?.clear?.("relay-connection");
+    await clearPendingApprovalIfCurrent(pending);
     throw new Error("Connection approval expired. Choose Connect to gateway again.");
   }
   const gateway = normalizeGateway(pending.gateway);
@@ -111,7 +121,7 @@ async function completePendingConnection() {
   });
   if (response.status === 202) return;
   if (!response.ok) {
-    if (response.status === 410) await chrome.storage.local.remove("pendingConnection");
+    if (response.status === 410) await clearPendingApprovalIfCurrent(pending);
     throw new Error("Connection approval unavailable. Connect again from the extension.");
   }
   const data = await response.json();
