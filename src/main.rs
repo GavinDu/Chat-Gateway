@@ -4587,13 +4587,20 @@ mod real_chat_router_scripted_backend_tests {
 
     #[tokio::test]
     async fn real_router_json_success_commits_one_canonical_turn() {
-        let (app, state) = fixture(&["chatgpt"], vec![response_events("synthetic answer")], None);
+        let (app, state) = fixture(
+            &["chatgpt"],
+            vec![response_events("synthetic answer")],
+            None,
+        );
         let response = send(app, false, "chatgpt/fake-model", "router_json_001").await;
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response.headers()["X-Gateway-Provider"], "chatgpt");
         let body = to_bytes(response.into_body(), 65_536).await.unwrap();
         let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(payload["choices"][0]["message"]["content"], "synthetic answer");
+        assert_eq!(
+            payload["choices"][0]["message"]["content"],
+            "synthetic answer"
+        );
         let messages = state
             .memory
             .conversation_messages_for_owner("local", "router_json_001")
