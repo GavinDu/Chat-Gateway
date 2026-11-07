@@ -347,7 +347,7 @@ fn plan_provider_send(
             saved_thread.map(|thread| thread.thread_url),
         ),
         ContextPlan::Replay { preamble, .. } => {
-            (format!("{preamble}\\n{replay_prompt}"), None)
+            (format!("{preamble}\n{replay_prompt}"), None)
         }
     }
 }
