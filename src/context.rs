@@ -86,7 +86,9 @@ impl ContextBuilder {
             !history.is_empty() && common_prefix == history.len() && incoming.len() > history.len();
         let single_user_followup = incoming.len() == 1
             && incoming[0].role == "user"
-            && history.last().is_some_and(|message| message.role == "assistant");
+            && history
+                .last()
+                .is_some_and(|message| message.role == "assistant");
         let has_safe_append = full_transcript_extension || single_user_followup;
         let thread_is_current = has_safe_append
             && thread.is_some_and(|state| {
