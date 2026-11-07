@@ -1,0 +1,95 @@
+const test = require("node:test");
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
+const vm = require("node:vm");
+
+function loadPopup() {
+  const elements = new Map();
+  const chromeCalls = [];
+  const values = {gateway:"http://127.0.0.1:8080",linkedProviders:[]};
+  const server = {linked:false};
+  function node() {
+    return {
+      children:[], textContent:"", value:"", hidden:false, disabled:false,
+      handlers:{},
+      append(...children){this.children.push(...children);},
+      replaceChildren(...children){this.children = children;},
+      addEventListener(type,fn){this.handlers[type]=fn;},
+      click(){this.handlers.click?.();},
+    };
+  }
+  function byId(id) { if(!elements.has(id))elements.set(id,node()); return elements.get(id); }
+  const runtime = { async sendMessage(request) {
+    chromeCalls.push(request.type + ":" + (request.provider||""));
+    if(request.type==="logout-provider") {
+      server.linked=false;
+      values.linkedProviders=values.linkedProviders.filter(p=>p!==request.provider);
+    }
+    if(request.type==="sync-provider") server.linked=true;
+    return {ok:true};
+  }};
+  const context = {
+    Promise, Date, Set, Array,
+    confirm:()=>true,
+    document:{getElementById:byId,createElement:node},
+    window:{addEventListener(){}},
+    setInterval(){},
+    normalizeGateway: v=>v,
+    PROVIDER_LOGIN_URLS:{metaai:"https://www.meta.ai/"},
+    PROVIDERS:{metaai:["meta.ai"]},
+    providerCookieSnapshot:async()=>({cookies:[{name:"token",value:"test-only"}]}),
+    relayFetch:async()=>({ok:true,status:200,json:async()=>({
+      providers:[{provider:"metaai",enabled:true,linked:server.linked,authentication:server.linked?"unknown":"needs_login",availability:"unknown"}],
+      vault_mode:true,
+    })}),
+    fetch:async()=>({ok:true,json:async()=>({request_id:"a".repeat(64),poll_secret:"b".repeat(64)})}),
+    chrome:{
+      tabs:{async create({url}) {chromeCalls.push("tab:"+url);}},
+      permissions:{request:async()=>true,contains:async()=>true},
+      cookies:{getAll:async()=>[{name:"token",value:"test-only"}]},
+      runtime,
+      alarms:{create:async()=>{},clear:async()=>{}},
+      storage:{local:{
+        async get(keys){return Object.fromEntries(keys.map(k=>[k,values[k]]));},
+        async set(next){Object.assign(values,next);},
+        async remove(keys){for(const k of Array.isArray(keys)?keys:[keys])delete values[k];},
+      }},
+    },
+  };
+  vm.createContext(context);
+  vm.runInContext(fs.readFileSync(path.join(__dirname,"..","popup.js"),"utf8")+
+    "\nglobalThis.testControls={refreshStatus,connectProvider,logoutProvider};",context);
+  return {values,server,elements,chromeCalls,controls:context.testControls};
+}
+
+test("Connect to gateway opens local approval page automatically",async()=>{
+  const popup=loadPopup();
+  await popup.elements.get("pair").handlers.click();
+  assert.ok(popup.chromeCalls.includes("tab:http://127.0.0.1:8080/relay/approve/"+"a".repeat(64)));
+  assert.equal(popup.values.pendingConnection.request_id,"a".repeat(64));
+});
+
+test("connected dashboard exposes login and small logout, then allows reconnection",async()=>{
+  const popup=loadPopup();
+  await popup.controls.refreshStatus();
+  let row=popup.elements.get("status").children[0];
+  let buttons=row.children.find(n=>n.className==="provider-actions").children;
+  assert.ok(buttons.some(b=>b.textContent==="Log in / Connect"));
+  assert.equal(buttons.some(b=>b.textContent==="Log out"),false);
+  await popup.controls.connectProvider("metaai");
+  assert.equal(popup.server.linked,true);
+  await popup.controls.refreshStatus();
+  row=popup.elements.get("status").children[0];
+  buttons=row.children.find(n=>n.className==="provider-actions").children;
+  assert.ok(buttons.some(b=>b.textContent==="Log out"));
+  const logout=buttons.find(b=>b.textContent==="Log out");
+  assert.equal(logout.className,"quiet-danger provider-action");
+  await popup.controls.logoutProvider("metaai");
+  assert.equal(popup.server.linked,false);
+  assert.deepEqual(Array.from(popup.values.linkedProviders),[]);
+  await popup.controls.connectProvider("metaai");
+  assert.equal(popup.server.linked,true);
+  assert.ok(popup.chromeCalls.includes("logout-provider:metaai"));
+  assert.equal(popup.chromeCalls.filter(x=>x==="sync-provider:metaai").length,2);
+});
