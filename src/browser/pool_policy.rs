@@ -48,9 +48,8 @@ pub(super) fn landing_is_not_previous_thread(provider_name: &str, actual: &str) 
         // conversation and must not receive a fresh gateway conversation.
         "chatgpt" => {
             let path = uri.path();
-            !path.starts_with("/c/")
-                && !(path.starts_with("/g/") && path.contains("/c/"))
-        },
+            !path.starts_with("/c/") && !(path.starts_with("/g/") && path.contains("/c/"))
+        }
         "claude" => !uri.path().starts_with("/chat/"),
         _ => true,
     }
