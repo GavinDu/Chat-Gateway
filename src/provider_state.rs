@@ -1,4 +1,5 @@
 //! Per-gateway provider session lifecycle state.
+use crate::chat_backend::{GatewayError, GatewayErrorKind};
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
@@ -94,6 +95,26 @@ impl ProviderSessionRegistry {
         }
     }
 
+    /// Classify canonical backend errors by type, never by upstream text.
+    /// Busy/caller/memory errors cannot make an otherwise healthy linked
+    /// provider appear logged out. Only a typed authentication failure can
+    /// force re-login; other provider failures enter a bounded cooldown.
+    pub fn record_gateway_error(&self, provider: &str, error: &GatewayError) {
+        match error.kind {
+            GatewayErrorKind::SessionExpired | GatewayErrorKind::Challenge => {
+                self.record_needs_login(provider);
+            }
+            GatewayErrorKind::InvalidRequest
+            | GatewayErrorKind::ModelNotFound
+            | GatewayErrorKind::ProviderBusy
+            | GatewayErrorKind::Memory => {}
+            GatewayErrorKind::Timeout
+            | GatewayErrorKind::ProviderFailure
+            | GatewayErrorKind::BackendUnavailable => self.record_probe_failure(provider),
+        }
+    }
+
+    /// Legacy string classification for diagnostics outside the typed backend.
     pub fn record_error(&self, provider: &str, error: &str) {
         let expired = indicates_expired_session(error);
         let retry_after = if expired {
@@ -215,6 +236,52 @@ mod tests {
             ProviderSessionState::Ready
         );
         assert_eq!(registry.status("provider").last_error, None);
+    }
+
+    #[test]
+    fn typed_errors_never_infer_auth_expiry_from_untrusted_messages() {
+        let registry = ProviderSessionRegistry::default();
+        registry.record_gateway_error(
+            "false-expiry",
+            &GatewayError::provider_failure("upstream said session expired: cookie=secret-value"),
+        );
+        let degraded = registry.status("false-expiry");
+        assert_eq!(degraded.state, ProviderSessionState::Degraded);
+        assert!(degraded.retry_after.is_some());
+        assert!(!degraded.last_error.unwrap().contains("secret-value"));
+
+        registry.record_gateway_error(
+            "auth-expired",
+            &GatewayError::session_expired("arbitrary sensitive upstream text"),
+        );
+        let expired = registry.status("auth-expired");
+        assert_eq!(expired.state, ProviderSessionState::NeedsLogin);
+        assert_eq!(expired.retry_after, None);
+
+        registry.record_gateway_error(
+            "challenge",
+            &GatewayError::challenge("challenge from provider"),
+        );
+        assert_eq!(
+            registry.status("challenge").state,
+            ProviderSessionState::NeedsLogin
+        );
+    }
+
+    #[test]
+    fn busy_caller_and_memory_errors_do_not_degrade_a_healthy_session() {
+        let registry = ProviderSessionRegistry::default();
+        let provider = "healthy";
+        registry.record_success(provider);
+        for error in [
+            GatewayError::provider_busy("busy"),
+            GatewayError::typed(GatewayErrorKind::InvalidRequest, "bad request", false),
+            GatewayError::typed(GatewayErrorKind::ModelNotFound, "unknown model", false),
+            GatewayError::typed(GatewayErrorKind::Memory, "store unavailable", false),
+        ] {
+            registry.record_gateway_error(provider, &error);
+            assert_eq!(registry.status(provider).state, ProviderSessionState::Ready);
+        }
     }
 
     #[test]
