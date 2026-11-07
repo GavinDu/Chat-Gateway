@@ -95,13 +95,21 @@ mod provider_thread_navigation_tests {
         use super::landing_is_not_previous_thread;
 
         assert!(!landing_is_not_previous_thread(
-            "chatgpt", "https://chatgpt.com/c/thread-123?model=gpt",
+            "chatgpt",
+            "https://chatgpt.com/c/thread-123?model=gpt",
         ));
         assert!(!landing_is_not_previous_thread(
-            "claude", "https://claude.ai/chat/thread-456#message",
+            "claude",
+            "https://claude.ai/chat/thread-456#message",
         ));
-        assert!(landing_is_not_previous_thread("chatgpt", "https://chatgpt.com/"));
-        assert!(landing_is_not_previous_thread("claude", "https://claude.ai/new"));
+        assert!(landing_is_not_previous_thread(
+            "chatgpt",
+            "https://chatgpt.com/"
+        ));
+        assert!(landing_is_not_previous_thread(
+            "claude",
+            "https://claude.ai/new"
+        ));
         assert!(!landing_is_not_previous_thread("chatgpt", "broken URL"));
     }
 
