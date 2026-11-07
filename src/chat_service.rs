@@ -49,7 +49,6 @@ pub async fn recv_with_deadline(
     }
 }
 
-
 /// The event reducer is shared by SSE and JSON responses. Persistence is
 /// permitted only after `Complete`; a partial response is never committed.
 #[derive(Debug, PartialEq, Eq)]
