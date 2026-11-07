@@ -3794,10 +3794,7 @@ mod login_security_middleware_http_tests {
 
         let same_host_twice = request(
             "/health",
-            &[
-                ("host", "localhost:8080"),
-                ("host", "localhost:8080"),
-            ],
+            &[("host", "localhost:8080"), ("host", "localhost:8080")],
         )
         .await;
         assert_eq!(same_host_twice.status(), StatusCode::FORBIDDEN);
