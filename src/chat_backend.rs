@@ -583,7 +583,10 @@ mod tests {
         ));
         assert_eq!(challenge.kind, GatewayErrorKind::Challenge);
         assert!(!challenge.is_retryable());
-        assert_eq!(challenge.message, "provider challenge requires manual review");
+        assert_eq!(
+            challenge.message,
+            "provider challenge requires manual review"
+        );
 
         let ordinary = super::map_backend_error(anyhow::anyhow!("provider rejected request"));
         assert_eq!(ordinary.kind, GatewayErrorKind::ProviderFailure);
