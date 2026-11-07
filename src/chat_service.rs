@@ -241,6 +241,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn delayed_backend_admission_times_out_and_next_request_can_succeed() {
+        let service = ChatService::new(Arc::new(ScriptedBackend::new(vec![
+            ScriptedSend::DelayAdmission(std::time::Duration::from_secs(2), vec![]),
+            ScriptedSend::Events(vec![Ok(ChatEvent {
+                content: "recovered".into(),
+                done: true,
+            })]),
+        ])));
+        let error = match service
+            .stream_with_timeout(
+                scripted_request(),
+                std::time::Duration::from_millis(20),
+            )
+            .await
+        {
+            Ok(_) => panic!("delayed admission must not hold the caller indefinitely"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind, GatewayErrorKind::Timeout);
+        assert!(error.is_retryable());
+        let rx = service
+            .stream_with_timeout(scripted_request(), std::time::Duration::from_secs(1))
+            .await
+            .expect("subsequent request must still be admitted");
+        let result = service
+            .collect_with_timeout(
+                rx,
+                std::time::Instant::now(),
+                std::time::Duration::from_secs(1),
+            )
+            .await;
+        assert_eq!(result.content, "recovered");
+        assert!(result.error.is_none());
+    }
+
+    #[tokio::test]
     async fn scriptable_backend_distinguishes_admission_rejection_and_midstream_failure() {
         let service = ChatService::new(Arc::new(ScriptedBackend::new(vec![
             ScriptedSend::Reject(GatewayError::provider_busy("provider occupied")),
