@@ -298,6 +298,25 @@ pub(super) fn browser_thread(
                                         .await;
                                     return;
                                 }
+                                // When the URL already equals the provider home, a
+                                // fresh send still needs a new document. Otherwise the
+                                // old SPA composer can pass the readiness check before
+                                // a same-address navigation actually reloads.
+                                let prior_document_time_origin =
+                                    if thread_url.is_none() && page.url() == target_url {
+                                        let origin = page.evaluate("performance.timeOrigin").as_f64();
+                                        match origin {
+                                            Some(value) if value.is_finite() => Some(value),
+                                            _ => {
+                                                let _ = chunks.send(Err(anyhow::anyhow!(
+                                                    "could not establish fresh browser navigation boundary"
+                                                ))).await;
+                                                return;
+                                            }
+                                        }
+                                    } else {
+                                        None
+                                    };
                                 if pool_policy::provider_send_requires_navigation(
                                     &page.url(),
                                     target_url,
@@ -311,6 +330,16 @@ pub(super) fn browser_thread(
                                         &chunks,
                                         tokio::time::timeout(Duration::from_secs(15), async {
                                         loop {
+                                            if let Some(previous_origin) = prior_document_time_origin {
+                                                let now = page.evaluate("performance.timeOrigin").as_f64();
+                                                if !pool_policy::fresh_document_navigation_confirmed(
+                                                    previous_origin,
+                                                    now,
+                                                ) {
+                                                    tokio::time::sleep(Duration::from_millis(50)).await;
+                                                    continue;
+                                                }
+                                            }
                                             let current_url = page.url();
                                             // An app may redirect its landing URL to the user's
                                             // previous conversation. Fail closed immediately
