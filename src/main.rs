@@ -1559,10 +1559,17 @@ fn is_reopenable_provider_thread_url(provider: &str, value: &str) -> bool {
         .next()
         .unwrap_or_default()
         .trim_end_matches('/');
-    let has_thread_id = |prefix: &str| {
-        path.strip_prefix(prefix)
-            .is_some_and(|id| !id.is_empty() && !id.contains('/'))
+    // A persisted URL is untrusted storage input. Do not treat dot segments,
+    // encoded separators or encoded query delimiters as a provider thread ID:
+    // browser URL normalization could navigate somewhere other than the
+    // expected conversation while Delta-mode assumes the prior thread.
+    let valid_thread_segment = |id: &str| {
+        !id.is_empty()
+            && id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
     };
+    let has_thread_id = |prefix: &str| path.strip_prefix(prefix).is_some_and(valid_thread_segment);
     match provider {
         "chatgpt" => {
             has_thread_id("/c/")
@@ -1570,10 +1577,7 @@ fn is_reopenable_provider_thread_url(provider: &str, value: &str) -> bool {
                     .strip_prefix("/g/")
                     .and_then(|path| path.split_once("/c/"))
                     .is_some_and(|(gpt, thread)| {
-                        !gpt.is_empty()
-                            && !gpt.contains('/')
-                            && !thread.is_empty()
-                            && !thread.contains('/')
+                        valid_thread_segment(gpt) && valid_thread_segment(thread)
                     })
         }
         "claude" => has_thread_id("/chat/"),
@@ -3173,6 +3177,15 @@ mod provider_thread_url_tests {
             ("chatgpt", "https://chatgpt.com/c/?source=sidebar"),
             ("chatgpt", "https://chatgpt.com/c/#fragment"),
             ("chatgpt", "https://chatgpt.com/c/123/extra"),
+            ("chatgpt", "https://chatgpt.com/c/.."),
+            ("chatgpt", "https://chatgpt.com/c/%2e%2e"),
+            ("chatgpt", "https://chatgpt.com/c/%2fprivate"),
+            ("chatgpt", "https://chatgpt.com/c/thread%3Fother"),
+            ("chatgpt", "https://chatgpt.com/g/../c/thread-123"),
+            ("chatgpt", "https://chatgpt.com/g/g-123/c/%2f"),
+            ("claude", "https://claude.ai/chat/.."),
+            ("claude", "https://claude.ai/chat/%2e%2e"),
+            ("claude", "https://claude.ai/chat/thread%2fother"),
             ("chatgpt", "https://chatgpt.com/g/g-123/c/"),
             ("chatgpt", "https://chatgpt.com/g//c/thread-123"),
             ("chatgpt", "https://chatgpt.com/g/g-123/c/thread-123/extra"),
