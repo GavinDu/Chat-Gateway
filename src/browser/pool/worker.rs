@@ -851,7 +851,10 @@ mod queued_send_cancellation_tests {
         })
         .await;
         assert_eq!(output, None);
-        assert!(!ran.get(), "abandoned command must not execute its operation");
+        assert!(
+            !ran.get(),
+            "abandoned command must not execute its operation"
+        );
     }
 
     #[tokio::test]
