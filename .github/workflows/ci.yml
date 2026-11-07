@@ -50,6 +50,8 @@ jobs:
         run: node browser-login/http-smoke.mjs target/debug/chat-gateway-rs
       - name: Sandboxed browser acceptance over an actual temporary SSH connection
         run: node browser-login/smoke.mjs target/debug/chat-gateway-rs --through-ssh
+      - name: Real extension local approval and provider dashboard
+        run: node extension/approval-browser-smoke.mjs target/debug/chat-gateway-rs
 
   docker-build:
     runs-on: ubuntu-latest
@@ -122,6 +124,7 @@ jobs:
           CHAT_GATEWAY_IMAGE: chat-gateway-rs:arm64-link-builder
           CHAT_GATEWAY_BUILD_PLATFORM: linux/arm64
           CHAT_GATEWAY_BUILD_TARGET: builder
+          CHAT_GATEWAY_BUILD_CACHE_FROM: type=gha,scope=chat-gateway-arm64-2gb
         run: |
           pwd
           bash scripts/docker-run.sh build

@@ -73,3 +73,11 @@ Use the [testing checklist](TESTING_CHECKLIST.md) for release and pairing accept
 
 Follow the required branch, CI, MCP sandbox, merge, main E2E, and install order
 in [DEVELOPMENT_WORKFLOW.md](DEVELOPMENT_WORKFLOW.md).
+
+The Docker helper keeps the host config owner-only and transfers it over stdin
+into a dedicated `chat-gateway-config` volume. The gateway mounts that volume
+read-only; its config is owned by UID 65532 with mode `0600`. It does not require
+relaxing the private host file's permissions or sharing macOS temporary paths.
+Set `CHAT_GATEWAY_CONFIG_VOLUME` with the other volume overrides when running
+multiple isolated gateways. CI starts the real helper with a `0600` config to
+cover the nonroot UID and private-config path, as well as relay acceptance.

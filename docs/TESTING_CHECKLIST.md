@@ -19,3 +19,14 @@ The Docker runtime smoke automatically invokes the real pairing-code helper and
 checks rotation/invalidation/single-use on both x86 and ARM64 CI, and through the
 main-only local release E2E runner. Parser fixtures alone cannot establish that
 Docker key-volume access and HTTP authentication work together.
+
+## Local extension approval and automatic refresh
+
+- [ ] Connect with the local relay URL; approve once in the local confirmation tab, without entering a pairing code.
+- [ ] Reject approval page fetches from scripts/frames, wrong Origin, wrong CSRF capability, expired requests, and token-exchange replay. Polling before approval must not return a token.
+- [ ] Close and reopen the popup during approval; confirm it completes and reconnects after browser/gateway restarts.
+- [ ] Show provider statuses inside the extension and refresh them while open.
+- [ ] Connect an already signed-in provider and sync its existing session; with no session, open the official provider site and sync cookie changes after sign-in.
+- [ ] Keep permission denial, logout/expired session, disabled provider, and unavailable gateway visible without claiming cookies prove a verified login.
+
+- [ ] Start through the real Docker helper using an owner-only (`0600`) host config; confirm the nonroot gateway reads its private config volume and the host file remains `0600`.

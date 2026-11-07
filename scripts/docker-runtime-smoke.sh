@@ -10,56 +10,43 @@ NAME="chat-gateway-ci-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-1}-$$"
 # Colima shares the user home, but not macOS /var/folders (default TMPDIR).
 # Keep local scratch files in a location available to the Docker VM.
 TMP="$(mktemp -d "${HOME:?HOME is required}/.chat-gateway-smoke.XXXXXXXX")"
-KEY_VOLUME="$NAME-pairing-key"
-KEY_VOLUME_CREATED=0
-CONTAINER_CREATED=0
+KEY_VOLUME="$NAME-key"
+CONFIG_VOLUME="$NAME-config"
+DATA_VOLUME="$NAME-data"
+SESSION_VOLUME="$NAME-sessions"
+NETWORK="$NAME-network"
 cleanup() {
-  if [[ "$CONTAINER_CREATED" == "1" ]]; then
-    docker rm -f "$NAME" >/dev/null 2>&1 || true
-  fi
-  if [[ "$KEY_VOLUME_CREATED" == "1" ]]; then
-    docker volume rm "$KEY_VOLUME" >/dev/null 2>&1 || true
-  fi
+  docker rm -f "$NAME" >/dev/null 2>&1 || true
+  docker volume rm "$KEY_VOLUME" "$CONFIG_VOLUME" "$DATA_VOLUME" "$SESSION_VOLUME" >/dev/null 2>&1 || true
+  docker network rm "$NETWORK" >/dev/null 2>&1 || true
   rm -rf "$TMP"
 }
 trap cleanup EXIT
 
 command -v docker >/dev/null 2>&1
 command -v curl >/dev/null 2>&1
-command -v openssl >/dev/null 2>&1
 command -v python3 >/dev/null 2>&1
 
-# Use the same Docker-volume-backed key path as the real pairing-code helper.
-# The throwaway key is sent over stdin, never included in Docker arguments/logs.
-PAIRING_ADMIN_KEY="$(openssl rand -hex 32)"
-docker volume create "$KEY_VOLUME" >/dev/null
-KEY_VOLUME_CREATED=1
-printf '%s' "$PAIRING_ADMIN_KEY" | docker run --rm --interactive \
-  --mount "type=volume,source=$KEY_VOLUME,target=/vault" \
-  alpine:3.22 sh -eu -c 'umask 077; cat > /vault/pairing-admin.key; chown 65532:65532 /vault/pairing-admin.key'
-VAULT_KEY="$(openssl rand -hex 32)"
-docker run --detach \
-  --name "$NAME" \
-  --publish 127.0.0.1::8080 \
-  --log-driver none \
-  --mount "type=volume,source=$KEY_VOLUME,target=/run/secrets,readonly" \
-  --tmpfs /app/data:rw,nosuid,nodev,noexec,uid=65532,gid=65532,mode=0700 \
-  --tmpfs /app/sessions:rw,nosuid,nodev,noexec,uid=65532,gid=65532,mode=0700 \
-  --tmpfs /app/browser:rw,nosuid,nodev,noexec,uid=65532,gid=65532,mode=0700 \
-  --tmpfs /app/home:rw,nosuid,nodev,noexec,uid=65532,gid=65532,mode=0700 \
-  --env HOME=/app/home \
-  --env PORT=8080 \
-  --env TOKIO_WORKER_THREADS=2 \
-  --env CHAT_GATEWAY_DOCKER_LOCAL_BIND=1 \
-  --env CHAT_GATEWAY_EXTENSION_ID=abcdefghijklmnopabcdefghijklmnop \
-  --env CHAT_GATEWAY_SESSION_STORE=vault \
-  --env "CHAT_GATEWAY_VAULT_KEY=$VAULT_KEY" \
-  --env CHAT_GATEWAY_MEMORY_PATH=/app/data/conversations.sqlite3 \
-  "$IMAGE" --config /config.example.yaml >/dev/null
-CONTAINER_CREATED=1
-unset VAULT_KEY
-
-BINDING="$(docker port "$NAME" 8080/tcp)"
+# Exercise the actual start helper with an owner-only host config. Direct
+# docker-run fixtures missed the nonroot/host-UID config mount failure.
+cp "$ROOT/config.example.yaml" "$TMP/config.yaml"
+chmod 600 "$TMP/config.yaml"
+PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')"
+export PORT CHAT_GATEWAY_IMAGE="$IMAGE" CHAT_GATEWAY_CONTAINER="$NAME"
+export CHAT_GATEWAY_DATA_VOLUME="$DATA_VOLUME" CHAT_GATEWAY_SESSION_VOLUME="$SESSION_VOLUME"
+export CHAT_GATEWAY_KEY_VOLUME="$KEY_VOLUME" CHAT_GATEWAY_CONFIG_VOLUME="$CONFIG_VOLUME"
+export CHAT_GATEWAY_NETWORK="$NETWORK" CHAT_GATEWAY_CONFIG="$TMP/config.yaml"
+export CHAT_GATEWAY_EXTENSION_ID=abcdefghijklmnopabcdefghijklmnop
+bash "$ROOT/scripts/docker-run.sh" start > "$TMP/start.log" 2>&1 || {
+  cat "$TMP/start.log" >&2
+  exit 1
+}
+# Verify that the helper did not weaken host-config permissions.
+python3 - "$TMP/config.yaml" <<'CONFIGPY'
+import os, stat, sys
+assert stat.S_IMODE(os.stat(sys.argv[1]).st_mode) == 0o600
+CONFIGPY
+BINDING="$(docker port "$NAME" "$PORT/tcp")"
 if [[ ! "$BINDING" =~ ^127\.0\.0\.1:([0-9]{1,5})$ ]]; then
   echo "Docker published a non-loopback or malformed port binding" >&2
   exit 1
@@ -122,7 +109,6 @@ rotate() {
 }
 old_code="$(rotate)"
 new_code="$(rotate)"
-unset PAIRING_ADMIN_KEY
 [[ "$old_code" =~ ^[0-9]{8}$ && "$new_code" =~ ^[0-9]{8}$ ]] || { echo "Invalid rotated pairing code" >&2; exit 1; }
 try_pair() {
   curl --silent --show-error --max-time 5 -o "$TMP/pair.body" -w '%{http_code}' \
@@ -135,6 +121,8 @@ new_status="$(try_pair "$new_code")"
 test "$new_status" = "200" || { echo "New pairing code was not accepted" >&2; exit 1; }
 replay_status="$(try_pair "$new_code")"
 test "$replay_status" = "401" || { echo "Pairing code could be replayed" >&2; exit 1; }
+
+python3 "$ROOT/scripts/relay-approval-smoke.py" "$ORIGIN" abcdefghijklmnopabcdefghijklmnop
 
 docker stop --time 30 "$NAME" >/dev/null
 EXIT_CODE="$(docker inspect --format '{{.State.ExitCode}}' "$NAME")"

@@ -66,31 +66,28 @@ passed as an environment value.
 bash scripts/docker-run.sh init
 # Edit config.yaml: enable only the providers you are authorized to use.
 bash scripts/docker-run.sh build
-CHAT_GATEWAY_EXTENSION_ID=<your-unpacked-extension-id> bash scripts/docker-run.sh start
+bash scripts/docker-run.sh start
 bash scripts/docker-run.sh logs
 ```
 
-The extension ID is shown in Chrome at `chrome://extensions` after loading
-the repository's `extension/` directory with Developer mode enabled. Set it
-before starting the gateway; the relay accepts only that exact extension
-origin. Generate a new one-time pairing code for every pairing attempt;
-it expires after ten minutes, is single-use, and any previous code is
-invalidated whenever a new one is issued:
+Load the repository's `extension/` directory from `chrome://extensions`. In its popup,
+enter `http://127.0.0.1:8080`, choose **Connect to gateway**, and approve the local
+confirmation tab once. The gateway remembers the approved extension ID, and the
+extension keeps its connection across restarts. An explicit
+`CHAT_GATEWAY_EXTENSION_ID` can still pin the installation to one ID.
 
-```bash
-bash scripts/docker-run.sh pairing-code
-```
+Provider status appears in the extension and refreshes automatically. Choose
+**Connect account** for a provider and grant its required permissions. On the first
+connection, existing browser cookies sync in the background and the official
+website opens to reuse its signed-in session or complete sign-in, including any
+password, passkey, MFA or CAPTCHA. Subsequent refreshes do not open extra tabs. Later cookie changes
+sync automatically. Provider sessions are encrypted in the gateway's vault;
+passwords and MFA values remain on the provider website. A saved session or
+browser cookies are shown separately from a verified login.
 
-Open the extension popup, set gateway URL to
-`http://127.0.0.1:8080`, enter the pairing code, and pair. Then sign in
-normally in your host browser (including provider username/password, passkey,
-MFA, and human CAPTCHA/challenge flows), open the extension popup, choose the
-provider, and select **Review permissions & link**. The extension reads the
-provider's allowed cookies from that browser profile and sends them directly
-to the loopback gateway over the paired relay. The gateway encrypts the
-provider-scoped session into its Docker session volume and refreshes the
-embedded Obscura page. Passwords and MFA codes are not collected by Chat
-Gateway.
+A pairing code is not needed for local approval. The legacy
+`bash scripts/docker-run.sh pairing-code` command remains available for compatible
+clients and explicitly configured private remote gateways.
 
 For example, `bash scripts/docker-run.sh login chatgpt` opens the provider's
 normal sign-in page in the host browser. Supported provider arguments are

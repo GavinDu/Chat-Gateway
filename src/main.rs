@@ -267,8 +267,12 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let (relay_state, pairing_code) = relay::RelayState::new()?;
-    println!("Browser relay pairing code (single use, expires in 10 minutes): {pairing_code}");
+    let (relay_state, legacy_pairing_code) = relay::RelayState::new()?;
+    if remote_gateway_origin()?.is_some() {
+        println!("Private remote relay pairing code (single use, expires in 10 minutes): {legacy_pairing_code}");
+    } else {
+        println!("Browser relay: connect from the extension and approve locally.");
+    }
     let state = Arc::new(AppState {
         cfg: cfg.clone(),
         pool: pool.clone(),
@@ -347,12 +351,18 @@ async fn main() -> anyhow::Result<()> {
         .route("/login/api/:provider/view", get(login_view))
         .route("/login/api/:provider/act", post(login_act))
         .route("/relay/v1/pair", post(relay::pair))
+        .route("/relay/v1/connect/request", post(relay::connect_request))
+        .route("/relay/v1/connect/poll", post(relay::connect_poll))
+        .route(
+            "/relay/approve/:id",
+            get(relay::approval_page).post(relay::approve_connection),
+        )
         // Local operator administration, not a provider or extension endpoint.
         .route(
             "/relay/v1/pairing-code/rotate",
             post(relay::rotate_pairing_code),
         )
-        .route("/relay/v1/status", get(relay::status))
+        .route("/relay/v1/status", get(relay::status).post(relay::status))
         .route(
             "/relay/v1/session/:provider",
             post(relay::import_session).delete(relay::unlink),
@@ -451,7 +461,7 @@ async fn protect_login_api_for_origin(
     let origin_is_safe = if is_pairing_admin {
         !origin_present && remote_origin.is_none()
     } else if is_relay_api {
-        relay::relay_origin_is_allowed(headers)
+        relay::relay_request_origin_is_allowed(path, headers)
     } else if let Some((expected_origin, _)) = remote_origin.as_ref() {
         !origin_present
             || headers
@@ -478,7 +488,7 @@ async fn protect_login_api_for_origin(
                 headers,
                 origin,
                 authority,
-                is_relay_api && relay::relay_origin_is_allowed(headers),
+                is_relay_api && relay::relay_request_origin_is_allowed(path, headers),
             )
     } else {
         headers
@@ -505,11 +515,12 @@ async fn protect_login_api_for_origin(
             .into_response();
     }
 
-    let allowed_relay_origin = if is_relay_api && relay::relay_origin_is_allowed(headers) {
-        headers.get(axum::http::header::ORIGIN).cloned()
-    } else {
-        None
-    };
+    let allowed_relay_origin =
+        if is_relay_api && relay::relay_request_origin_is_allowed(path, headers) {
+            headers.get(axum::http::header::ORIGIN).cloned()
+        } else {
+            None
+        };
     // Consume the edge credential at the boundary, before handlers/logging.
     req.headers_mut().remove("x-chat-gateway-proxy-key");
     let mut response = next.run(req).await;
@@ -1084,7 +1095,7 @@ fn authorize_api_request(
     path: &str,
     method: &axum::http::Method,
 ) -> Result<Option<AuthKeyContext>, AuthFailure> {
-    if path.starts_with("/relay/v1/") {
+    if path.starts_with("/relay/v1/") || path.starts_with("/relay/approve/") {
         // Relay handlers enforce a separate extension-origin + install-token protocol.
         return Ok(None);
     }
