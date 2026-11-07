@@ -3,7 +3,7 @@ use crate::{
     browser::pool::{
         BrowserWorkerUnavailableError, ProviderBusyError, ProviderSessionExpiredError,
     },
-    providers::ProviderChunk,
+    providers::{ProviderChallengeError, ProviderChunk},
 };
 use anyhow::Result;
 use std::{error::Error, fmt};
@@ -299,6 +299,9 @@ fn map_backend_error(error: anyhow::Error) -> GatewayError {
     {
         return GatewayError::session_expired("provider session expired; re-login required");
     }
+    if error.downcast_ref::<ProviderChallengeError>().is_some() {
+        return GatewayError::challenge("provider challenge requires manual review");
+    }
     if error.downcast_ref::<ProviderBusyError>().is_some() {
         return GatewayError::provider_busy("provider is busy; retry shortly");
     }
@@ -574,6 +577,13 @@ mod tests {
         assert_eq!(busy.kind, GatewayErrorKind::ProviderBusy);
         assert!(busy.is_retryable());
         assert_eq!(busy.message, "provider is busy; retry shortly");
+
+        let challenge = super::map_backend_error(anyhow::Error::new(
+            crate::providers::ProviderChallengeError::new("chatgpt"),
+        ));
+        assert_eq!(challenge.kind, GatewayErrorKind::Challenge);
+        assert!(!challenge.is_retryable());
+        assert_eq!(challenge.message, "provider challenge requires manual review");
 
         let ordinary = super::map_backend_error(anyhow::anyhow!("provider rejected request"));
         assert_eq!(ordinary.kind, GatewayErrorKind::ProviderFailure);
