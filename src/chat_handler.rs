@@ -219,6 +219,90 @@ fn json_completion_body(
     })
 }
 
+struct PreparedChatContext {
+    memory_egress_policy: memory_egress::MemoryEgressPolicy,
+    personal_memory_items: Vec<memory_egress::PersonalMemoryItem>,
+    context_token_budget: usize,
+    prompt: String,
+    windowed: Vec<ChatMessage>,
+    has_history: bool,
+    stored_messages: Vec<ChatMessage>,
+}
+
+/// Prepare one immutable, owner-scoped context snapshot before provider
+/// routing or admission. Both optional personal-memory reads and canonical
+/// transcript reads fail closed; no provider is touched on a failed read.
+async fn prepare_chat_context(
+    state: &AppState,
+    owner_key_id: &str,
+    conversation_id: Option<&str>,
+    incoming_messages: &[ChatMessage],
+) -> Result<PreparedChatContext, Box<Response>> {
+    let memory_egress_policy = memory_egress::MemoryEgressPolicy::from_env().map_err(|_| {
+        Box::new(api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "server_error",
+            "memory_egress_policy_invalid",
+            "provider memory egress policy is invalid",
+        ))
+    })?;
+
+    // Do not reserve memory context tokens when no provider is authorized
+    // to receive personal items. Disabled personal memory requires no read.
+    let retrieved_memory = if !memory_egress_policy
+        .allowed_personal_memory_providers()
+        .is_empty()
+    {
+        state
+            .memory
+            .clone()
+            .retrieve_long_term_memory_items_async(owner_key_id.to_owned(), 20)
+            .await
+            .map_err(|_| {
+                Box::new(api_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "server_error",
+                    "memory_read_failed",
+                    "long-term memory could not be read safely",
+                ))
+            })?
+    } else {
+        Vec::new()
+    };
+    let (personal_memory_items, memory_tokens) =
+        budget_personal_memory_items(retrieved_memory, 512);
+    let context_token_budget = 8000usize.saturating_sub(memory_tokens);
+
+    let (prompt, windowed, has_history, stored_messages) =
+        read_conversation_context_with_transcript_for_owner(
+            state.memory.clone(),
+            owner_key_id.to_owned(),
+            conversation_id.map(str::to_owned),
+            incoming_messages.to_vec(),
+            context_token_budget,
+        )
+        .await
+        .map_err(|_| Box::new(conversation_context_read_error(conversation_id)))?;
+    if prompt.is_empty() {
+        return Err(Box::new(api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            "empty_prompt",
+            "prompt must not be empty",
+        )));
+    }
+
+    Ok(PreparedChatContext {
+        memory_egress_policy,
+        personal_memory_items,
+        context_token_budget,
+        prompt,
+        windowed,
+        has_history,
+        stored_messages,
+    })
+}
+
 pub(super) async fn run(
     state: Arc<AppState>,
     headers: HeaderMap,
@@ -240,77 +324,25 @@ pub(super) async fn run(
         Err(response) => return *response,
     };
 
-    let memory_egress_policy = match memory_egress::MemoryEgressPolicy::from_env() {
-        Ok(policy) => policy,
-        Err(_) => {
-            return api_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "server_error",
-                "memory_egress_policy_invalid",
-                "provider memory egress policy is invalid",
-            )
-        }
+    let PreparedChatContext {
+        memory_egress_policy,
+        personal_memory_items,
+        context_token_budget,
+        prompt,
+        windowed,
+        has_history,
+        stored_messages,
+    } = match prepare_chat_context(
+        &state,
+        &owner_key_id,
+        conversation_id.as_deref(),
+        &req.messages,
+    )
+    .await
+    {
+        Ok(prepared) => prepared,
+        Err(response) => return *response,
     };
-
-    // The default-deny policy should not reduce transcript context when no
-    // provider is authorized to receive personal memory.
-    let personal_memory_egress_enabled = !memory_egress_policy
-        .allowed_personal_memory_providers()
-        .is_empty();
-
-    // Retrieve personal memory only when the owner opted in. Read errors fail
-    // closed rather than silently changing the prompt. Reserve a fixed portion
-    // of the context budget before assembling transcript history.
-    let retrieved_memory = if personal_memory_egress_enabled {
-        match state
-            .memory
-            .clone()
-            .retrieve_long_term_memory_items_async(owner_key_id.clone(), 20)
-            .await
-        {
-            Ok(items) => items,
-            _ => {
-                return api_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "server_error",
-                    "memory_read_failed",
-                    "long-term memory could not be read safely",
-                );
-            }
-        }
-    } else {
-        Vec::new()
-    };
-    let (personal_memory_items, memory_tokens) =
-        budget_personal_memory_items(retrieved_memory, 512);
-    let context_token_budget = 8000usize.saturating_sub(memory_tokens);
-
-    // Read all context-dependent memory before any provider request. A read
-    // failure must not degrade into an empty prompt or an unauthenticated turn.
-    let (context_prompt, windowed, has_history, stored_messages) =
-        match read_conversation_context_with_transcript_for_owner(
-            state.memory.clone(),
-            owner_key_id.clone(),
-            conversation_id.clone(),
-            req.messages.clone(),
-            context_token_budget,
-        )
-        .await
-        {
-            Ok(context) => context,
-            Err(_error) => {
-                return conversation_context_read_error(conversation_id.as_deref());
-            }
-        };
-    let prompt = context_prompt;
-    if prompt.is_empty() {
-        return api_error(
-            axum::http::StatusCode::BAD_REQUEST,
-            "invalid_request_error",
-            "empty_prompt",
-            "prompt must not be empty",
-        );
-    }
 
     let (candidates, provider_model) = match resolve_chat_candidates(
         &state,
