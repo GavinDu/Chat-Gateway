@@ -4,7 +4,7 @@ const fs = require("node:fs");
 const vm = require("node:vm");
 const { webcrypto } = require("node:crypto");
 
-function loadShared(cookieFixtures = [], hasAllPermissions = true, storageValues = {}) {
+function loadShared(cookieFixtures = [], hasAllPermissions = true, storageValues = {}, hooks = {}) {
   let cookieReads = 0;
   const fetchCalls = [];
   const context = {
@@ -16,10 +16,17 @@ function loadShared(cookieFixtures = [], hasAllPermissions = true, storageValues
       cookies: {
         // Return the full fixture set to simulate a permissive/misbehaving
         // browser API; providerCookieSnapshot must still enforce its own scope.
-        getAll: async () => { cookieReads += 1; return cookieFixtures; }
+        getAll: async () => {
+          cookieReads += 1;
+          if (hooks.onCookieRead) await hooks.onCookieRead(storageValues);
+          return cookieFixtures;
+        }
       },
       permissions: {
-        contains: async () => hasAllPermissions
+        contains: async ({origins}) => {
+          if (hooks.onPermissionCheck) await hooks.onPermissionCheck(origins, storageValues);
+          return hasAllPermissions;
+        }
       },
       storage: { local: { get: async () => storageValues } }
     }
@@ -204,5 +211,59 @@ test("unlinked provider sync does not read or transmit cookies", async () => {
   await api.syncProvider("chatgpt");
 
   assert.equal(api.getCookieReads(), 0);
+  assert.equal(api.fetchCalls.length, 0);
+});
+
+test("provider sync never uploads old cookies to a newly paired gateway", async () => {
+  const storage = {
+    gateway: "http://127.0.0.1:8080",
+    token: "old-install-token",
+    linkedProviders: ["chatgpt"]
+  };
+  const api = loadShared([
+    {name:"session",value:"synthetic-cookie",domain:".chatgpt.com",path:"/",secure:true}
+  ], true, storage, {
+    onCookieRead: () => {
+      storage.gateway = "https://new-gateway.example";
+      storage.token = "new-install-token";
+      storage.linkedProviders = ["chatgpt"];
+    }
+  });
+  await api.syncProvider("chatgpt");
+  assert.equal(api.fetchCalls.length, 0,
+    "a pending old-pairing snapshot must not be sent to a newly paired gateway");
+});
+
+test("provider unlink during a cookie read prevents stale background uploads", async () => {
+  const storage = {
+    gateway: "http://127.0.0.1:8080",
+    token: "old-install-token",
+    linkedProviders: ["chatgpt"]
+  };
+  const api = loadShared([
+    {name:"session",value:"synthetic-cookie",domain:".chatgpt.com",path:"/",secure:true}
+  ], true, storage, {
+    onCookieRead: () => { storage.linkedProviders = []; }
+  });
+  await api.syncProvider("chatgpt");
+  assert.equal(api.fetchCalls.length, 0);
+});
+
+test("late consent revocation during relay permission check blocks cookie upload", async () => {
+  const storage = {
+    gateway: "http://127.0.0.1:8080",
+    token: "old-install-token",
+    linkedProviders: ["chatgpt"]
+  };
+  const api = loadShared([
+    {name:"session",value:"synthetic-cookie",domain:".chatgpt.com",path:"/",secure:true}
+  ], true, storage, {
+    onPermissionCheck: origins => {
+      if (origins.some(origin => origin.startsWith("http://127.0.0.1"))) {
+        storage.linkedProviders = [];
+      }
+    }
+  });
+  await assert.rejects(() => api.syncProvider("chatgpt"), /consent or gateway connection changed/);
   assert.equal(api.fetchCalls.length, 0);
 });

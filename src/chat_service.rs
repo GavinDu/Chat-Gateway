@@ -26,6 +26,7 @@ pub struct CollectedResponse {
 /// A channel closing without an explicit terminal event is never success.
 /// Keep this constant shared by JSON and SSE consumers.
 pub const INCOMPLETE_PROVIDER_STREAM: &str = "provider stream closed before terminal completion";
+pub const EMPTY_PROVIDER_RESPONSE: &str = "provider completed without response content";
 
 /// Convert a provider timeout into one absolute deadline, failing closed
 /// on an unrepresentably large configured duration instead of panicking.
@@ -48,11 +49,15 @@ pub async fn recv_with_deadline(
     }
 }
 
+
 /// The event reducer is shared by SSE and JSON responses. Persistence is
 /// permitted only after `Complete`; a partial response is never committed.
 #[derive(Debug, PartialEq, Eq)]
 pub enum StreamUpdate {
     Delta(String),
+    /// A terminal provider event may also contain the final response text.
+    /// SSE must emit that final delta before the completion marker.
+    CompleteWithDelta(String),
     Complete,
     Failed,
 }
@@ -83,7 +88,15 @@ impl ResponseAccumulator {
             Ok(event) if event.done => {
                 self.saw_done = true;
                 self.finished = true;
-                StreamUpdate::Complete
+                if event.content.is_empty() {
+                    StreamUpdate::Complete
+                } else {
+                    if self.collected.first_event_elapsed.is_none() {
+                        self.collected.first_event_elapsed = Some(self.attempt_started.elapsed());
+                    }
+                    self.collected.content.push_str(&event.content);
+                    StreamUpdate::CompleteWithDelta(event.content)
+                }
             }
             Ok(event) => {
                 if !event.content.is_empty() && self.collected.first_event_elapsed.is_none() {
@@ -103,8 +116,16 @@ impl ResponseAccumulator {
     /// Finalize after an explicit done/error or a closed channel. Missing
     /// terminal events are errors even if content has already been emitted.
     pub fn finish(mut self) -> CollectedResponse {
-        if !self.saw_done && self.collected.error.is_none() {
-            self.collected.error = Some(GatewayError::provider_failure(INCOMPLETE_PROVIDER_STREAM));
+        if self.collected.error.is_none() {
+            if !self.saw_done {
+                self.collected.error =
+                    Some(GatewayError::provider_failure(INCOMPLETE_PROVIDER_STREAM));
+            } else if self.collected.content.is_empty() {
+                // Streaming already rejects an empty completion at first-event
+                // admission. JSON must not persist that same empty response.
+                self.collected.error =
+                    Some(GatewayError::provider_failure(EMPTY_PROVIDER_RESPONSE));
+            }
         }
         self.collected
     }
@@ -186,10 +207,102 @@ impl ChatService {
 #[cfg(test)]
 mod tests {
     use super::ChatService;
-    use crate::chat_backend::{BackendRequest, ChatBackend, ChatEvent, GatewayError, ProviderId};
+    use crate::chat_backend::{
+        test_support::{ScriptedBackend, ScriptedSend},
+        BackendRequest, ChatBackend, ChatEvent, GatewayError, GatewayErrorKind, ProviderId,
+    };
     use anyhow::Result;
     use std::sync::Arc;
     use tokio::sync::mpsc;
+
+    fn scripted_request() -> BackendRequest {
+        BackendRequest {
+            provider: ProviderId::new("chatgpt").unwrap(),
+            prompt: "fixture prompt".to_owned(),
+            model: "test-model".to_owned(),
+            has_history: false,
+            thread_url: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn scriptable_backend_distinguishes_admission_rejection_and_midstream_failure() {
+        let service = ChatService::new(Arc::new(ScriptedBackend::new(vec![
+            ScriptedSend::Reject(GatewayError::provider_busy("provider occupied")),
+            ScriptedSend::Events(vec![
+                Ok(ChatEvent {
+                    content: "partial answer".into(),
+                    done: false,
+                }),
+                Err(GatewayError::provider_failure("provider disconnected")),
+            ]),
+        ])));
+
+        let rejected = match service.stream(scripted_request()).await {
+            Ok(_) => panic!("busy admission must fail before a stream exists"),
+            Err(error) => error,
+        };
+        assert_eq!(rejected.kind, GatewayErrorKind::ProviderBusy);
+        assert!(rejected.is_retryable());
+
+        let response = service
+            .stream(scripted_request())
+            .await
+            .expect("second scripted send starts");
+        let collected = service.collect(response, std::time::Instant::now()).await;
+        assert_eq!(collected.content, "partial answer");
+        assert_eq!(
+            collected.error.unwrap().kind,
+            GatewayErrorKind::ProviderFailure
+        );
+    }
+
+    #[tokio::test]
+    async fn scriptable_backend_models_delayed_content_and_idle_cancellation() {
+        use std::time::Duration;
+        use tokio::sync::oneshot;
+        let (cancelled_tx, cancelled_rx) = oneshot::channel();
+        let service = ChatService::new(Arc::new(ScriptedBackend::new(vec![
+            ScriptedSend::Delay(
+                Duration::from_millis(40),
+                vec![
+                    Ok(ChatEvent {
+                        content: "delayed".into(),
+                        done: false,
+                    }),
+                    Ok(ChatEvent {
+                        content: String::new(),
+                        done: true,
+                    }),
+                ],
+            ),
+            ScriptedSend::Hold(cancelled_tx),
+        ])));
+
+        let mut delayed = service.stream(scripted_request()).await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(5), delayed.recv())
+                .await
+                .is_err(),
+            "delayed first content should not be mistaken for immediate completion"
+        );
+        let first = tokio::time::timeout(Duration::from_secs(1), delayed.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.content, "delayed");
+        assert!(!first.done);
+        assert!(delayed.recv().await.unwrap().unwrap().done);
+        drop(delayed);
+
+        let idle = service.stream(scripted_request()).await.unwrap();
+        drop(idle);
+        tokio::time::timeout(Duration::from_secs(1), cancelled_rx)
+            .await
+            .expect("dropping an idle provider stream must cancel the sender")
+            .expect("scripted sender should observe cancellation");
+    }
 
     struct FakeBackend;
 
@@ -391,6 +504,11 @@ mod tests {
 
         let collected = service.collect(rx, std::time::Instant::now()).await;
         assert!(collected.content.is_empty());
+        assert_eq!(
+            collected.error.unwrap().message,
+            super::EMPTY_PROVIDER_RESPONSE,
+            "an empty terminal event must not commit a successful JSON turn"
+        );
         assert!(
             collected.first_event_elapsed.is_none(),
             "empty heartbeat events must not be reported as TTFT"
@@ -514,6 +632,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn terminal_content_is_not_lost_in_json_or_sse() {
+        use super::{ResponseAccumulator, StreamUpdate};
+
+        for (events, expected) in [
+            (
+                vec![ChatEvent {
+                    content: "only terminal content".to_owned(),
+                    done: true,
+                }],
+                "only terminal content",
+            ),
+            (
+                vec![
+                    ChatEvent {
+                        content: "first".to_owned(),
+                        done: false,
+                    },
+                    ChatEvent {
+                        content: " final".to_owned(),
+                        done: true,
+                    },
+                ],
+                "first final",
+            ),
+        ] {
+            let started = std::time::Instant::now();
+            let (tx, rx) = mpsc::channel(4);
+            for event in &events {
+                tx.send(Ok(event.clone())).await.unwrap();
+            }
+            drop(tx);
+            let json = ChatService::new(Arc::new(FakeBackend))
+                .collect(rx, started)
+                .await;
+
+            let mut sse = ResponseAccumulator::new(started);
+            let updates: Vec<_> = events
+                .into_iter()
+                .map(|event| sse.push(Ok(event)))
+                .collect();
+            assert!(matches!(
+                updates.last(),
+                Some(StreamUpdate::CompleteWithDelta(_))
+            ));
+            let streamed = sse.finish();
+            assert_eq!(json.content, expected);
+            assert_eq!(streamed.content, expected);
+            assert!(json.error.is_none());
+            assert!(streamed.error.is_none());
+            assert!(json.first_event_elapsed.is_some());
+            assert!(streamed.first_event_elapsed.is_some());
+        }
+    }
+
+    #[tokio::test]
     async fn same_reducer_fails_closed_for_midstream_error_and_channel_close() {
         use super::{ResponseAccumulator, StreamUpdate, INCOMPLETE_PROVIDER_STREAM};
         for missing_done in [true, false] {
@@ -600,8 +773,10 @@ pub enum FirstEvent {
     Timeout,
 }
 
-pub(crate) fn usable_initial_stream_chunk(content: &str, done: bool) -> bool {
-    !done && !content.is_empty()
+pub(crate) fn usable_initial_stream_chunk(content: &str, _done: bool) -> bool {
+    // A provider may send its complete response in one terminal event. Treat
+    // nonempty final content as the first meaningful chunk, not an empty reply.
+    !content.is_empty()
 }
 
 /// Wait for the first meaningful event without allowing an empty stream to
@@ -660,6 +835,23 @@ mod first_event_tests {
         .unwrap();
         let event = first_event(&mut rx, Duration::from_secs(1)).await;
         assert!(matches!(event, FirstEvent::Chunk(chunk) if chunk.content == "answer"));
+    }
+
+    #[tokio::test]
+    async fn terminal_event_with_content_is_a_valid_first_stream_chunk() {
+        let (tx, mut rx) = mpsc::channel(1);
+        tx.send(Ok(ChatEvent {
+            content: "complete answer".into(),
+            done: true,
+        }))
+        .await
+        .unwrap();
+
+        let event = first_event(&mut rx, Duration::from_secs(1)).await;
+        assert!(matches!(
+            event,
+            FirstEvent::Chunk(chunk) if chunk.done && chunk.content == "complete answer"
+        ));
     }
 
     #[tokio::test]

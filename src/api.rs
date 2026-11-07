@@ -7,6 +7,7 @@ use std::collections::HashMap;
 #[derive(serde::Deserialize)]
 pub(crate) struct ChatReq {
     pub(crate) model: String,
+    #[serde(deserialize_with = "deserialize_chat_messages")]
     pub(crate) messages: Vec<ChatMessage>,
     #[serde(default)]
     pub(crate) stream: bool,
@@ -16,6 +17,32 @@ pub(crate) struct ChatReq {
     // unsupported_parameter error instead of misreporting them as malformed JSON.
     #[serde(flatten)]
     pub(crate) unsupported_fields: HashMap<String, serde_json::Value>,
+}
+
+/// Only canonical text messages are supported by browser adapters. Parsing
+/// directly into the persistence type would silently discard unrecognized
+/// OpenAI message fields such as tool_calls, tool_call_id, name, or refusal.
+/// Reject them at the wire boundary rather than claim a successful send after
+/// dropping their semantics. The stored ChatMessage schema remains unchanged.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireTextMessage {
+    role: String,
+    content: String,
+}
+
+fn deserialize_chat_messages<'de, D>(deserializer: D) -> Result<Vec<ChatMessage>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let messages = <Vec<WireTextMessage> as serde::Deserialize>::deserialize(deserializer)?;
+    Ok(messages
+        .into_iter()
+        .map(|message| ChatMessage {
+            role: message.role,
+            content: message.content,
+        })
+        .collect())
 }
 
 /// Validate request semantics separately from JSON decoding so the contract
@@ -119,4 +146,69 @@ pub(crate) fn api_error(
         })),
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod wire_chat_message_contract_tests {
+    use super::ChatReq;
+
+    #[test]
+    fn canonical_text_messages_across_supported_roles_still_deserialize() {
+        let request: ChatReq = serde_json::from_value(serde_json::json!({
+            "model": "auto",
+            "messages": [
+                {"role": "system", "content": "instructions"},
+                {"role": "developer", "content": "guidance"},
+                {"role": "user", "content": "hello"},
+                {"role": "assistant", "content": "hi"},
+                {"role": "tool", "content": "plain text result"}
+            ]
+        }))
+        .unwrap();
+        assert_eq!(request.messages.len(), 5);
+        assert_eq!(request.messages[2].content, "hello");
+    }
+
+    #[test]
+    fn rejects_message_metadata_that_cannot_be_preserved_by_browser_backend() {
+        for (field, value) in [
+            ("tool_calls", serde_json::json!([])),
+            ("tool_call_id", serde_json::json!("call_123")),
+            ("name", serde_json::json!("tool_name")),
+            ("refusal", serde_json::json!("no")),
+            (
+                "function_call",
+                serde_json::json!({"name": "go", "arguments": "{}"}),
+            ),
+            ("audio", serde_json::json!({"id": "a"})),
+        ] {
+            let mut request = serde_json::json!({
+                "model": "auto",
+                "messages": [{"role": "assistant", "content": "text"}]
+            });
+            request["messages"][0]
+                .as_object_mut()
+                .unwrap()
+                .insert(field.to_owned(), value);
+            let error = serde_json::from_value::<ChatReq>(request)
+                .err()
+                .expect("unsupported message attributes must not vanish");
+            assert!(
+                error.to_string().contains(field),
+                "missing unsupported field name {field}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_multimodal_content_instead_of_flattening_it_into_text() {
+        let request = serde_json::json!({
+            "model": "auto",
+            "messages": [{
+                "role": "user",
+                "content": [{"type": "text", "text": "hello"}]
+            }]
+        });
+        assert!(serde_json::from_value::<ChatReq>(request).is_err());
+    }
 }

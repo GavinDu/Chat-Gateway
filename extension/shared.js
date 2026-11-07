@@ -39,8 +39,16 @@ function randomHex(bytes = 16) {
   return Array.from(value, byte => byte.toString(16).padStart(2, "0")).join("");
 }
 
-async function relayFetch(path, options = {}) {
+async function relayFetch(path, options = {}, expectedConnection = null) {
   const {gateway, token} = await chrome.storage.local.get(["gateway", "token"]);
+  // Cookie snapshots must never switch destinations after they were collected.
+  // This also protects a caller that re-pairs while a browser cookie read is
+  // pending: a new install token is not consent to upload the old snapshot.
+  if (expectedConnection && (
+    gateway !== expectedConnection.gateway || token !== expectedConnection.token
+  )) {
+    throw new Error("Gateway connection changed during provider sync; retry linking.");
+  }
   if (!gateway) throw new Error("Set the local gateway URL first.");
   // Treat browser storage as untrusted: a stale or tampered gateway value must
   // never redirect provider cookies or the relay token to a remote origin.
@@ -48,6 +56,13 @@ async function relayFetch(path, options = {}) {
   const hasGatewayPermission = await chrome.permissions.contains({origins:[localGateway + "/*"]});
   if (!hasGatewayPermission) {
     throw new Error("Gateway host permission is missing. Re-pair and grant access only to the configured gateway origin.");
+  }
+  if (expectedConnection) {
+    const latest = await chrome.storage.local.get(["gateway", "token", "linkedProviders"]);
+    if (latest.gateway !== gateway || latest.token !== token ||
+        !latest.linkedProviders?.includes(expectedConnection.provider)) {
+      throw new Error("Provider consent or gateway connection changed during sync.");
+    }
   }
   const headers = new Headers(options.headers || {});
   headers.set("X-Relay-Timestamp", String(Math.floor(Date.now() / 1000)));
@@ -94,11 +109,17 @@ async function syncProvider(provider) {
   const {gateway, token, linkedProviders = []} = await chrome.storage.local.get(["gateway", "token", "linkedProviders"]);
   if (!gateway || !token || !linkedProviders.includes(provider)) return;
   const snapshot = await providerCookieSnapshot(provider);
+  // A permission/cookie read can await long enough for unpair, re-pair or
+  // explicit provider unlink. Re-check ownership and consent immediately
+  // before preparing the upload, and bind the relay fetch to that snapshot.
+  const current = await chrome.storage.local.get(["gateway", "token", "linkedProviders"]);
+  if (current.gateway !== gateway || current.token !== token ||
+      !current.linkedProviders?.includes(provider)) return;
   // Missing permissions or an expired browser session must not overwrite a
   // previously valid gateway session with an empty snapshot.
   if (snapshot.cookies.length === 0) return;
   const response = await relayFetch("/relay/v1/session/" + encodeURIComponent(provider), {
     method:"POST", body:JSON.stringify(snapshot)
-  });
+  }, {gateway, token, provider});
   if (!response.ok) throw new Error("Gateway rejected session update (" + response.status + "). Check vault mode and provider permissions.");
 }
