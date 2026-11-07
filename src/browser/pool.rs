@@ -892,10 +892,23 @@ fn classify_session_probe(is_login_page: bool, input_found: bool) -> Result<bool
     if pool_policy::session_probe_requires_login(is_login_page, input_found) {
         return Err(anyhow::Error::new(ProviderSessionExpiredError));
     }
-    if !pool_policy::session_probe_page_healthy(is_login_page, input_found) {
-        anyhow::bail!("session verification failed: chat input not found");
+    // Missing chat controls can mean an unloaded page, a provider redesign,
+    // or a challenge screen. It is not proof that cookies have expired.
+    // Preserve the saved session and report the probe as inconclusive.
+    Ok(pool_policy::session_probe_page_healthy(is_login_page, input_found))
+}
+
+#[cfg(test)]
+mod inconclusive_session_probe_tests {
+    use super::{classify_session_probe, ProviderSessionExpiredError};
+
+    #[test]
+    fn missing_chat_input_is_inconclusive_not_an_expired_session() {
+        assert!(!classify_session_probe(false, false).unwrap());
+        assert!(classify_session_probe(false, true).unwrap());
+        let expired = classify_session_probe(true, false).unwrap_err();
+        assert!(expired.downcast_ref::<ProviderSessionExpiredError>().is_some());
     }
-    Ok(true)
 }
 
 fn build_login_view(
