@@ -27,6 +27,17 @@ pub struct CollectedResponse {
 /// Keep this constant shared by JSON and SSE consumers.
 pub const INCOMPLETE_PROVIDER_STREAM: &str = "provider stream closed before terminal completion";
 
+/// Convert a provider timeout into one absolute deadline, failing closed
+/// on an unrepresentably large configured duration instead of panicking.
+pub fn completion_deadline(
+    started: Instant,
+    max_wait: Duration,
+) -> tokio::time::Instant {
+    tokio::time::Instant::from_std(started)
+        .checked_add(max_wait)
+        .unwrap_or_else(tokio::time::Instant::now)
+}
+
 /// A fixed end-to-end completion deadline: an already-started stream must not
 /// indefinitely hold a provider permit after its first delta. Both SSE and
 /// JSON consumers use this helper, and the caller drops the receiver on error.
@@ -159,8 +170,7 @@ impl ChatService {
         max_wait: Option<Duration>,
     ) -> CollectedResponse {
         let mut accumulator = ResponseAccumulator::new(attempt_started);
-        let deadline =
-            max_wait.map(|budget| tokio::time::Instant::from_std(attempt_started) + budget);
+        let deadline = max_wait.map(|budget| completion_deadline(attempt_started, budget));
         loop {
             let next = if let Some(deadline) = deadline {
                 recv_with_deadline(&mut events, deadline).await
