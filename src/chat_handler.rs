@@ -194,6 +194,24 @@ fn completion_response_headers(
     headers
 }
 
+/// Render the common OpenAI SSE chunk envelope once for role, content and
+/// terminal deltas. Keeping identity and creation metadata in one place
+/// prevents transport-specific edits from changing only one chunk shape.
+fn sse_completion_chunk(
+    conversation_id: &str,
+    model: &str,
+    delta: serde_json::Value,
+    finish_reason: Option<&str>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "id": format!("chatcmpl-{}", &conversation_id[..8]),
+        "object": "chat.completion.chunk",
+        "created": chrono::Utc::now().timestamp(),
+        "model": model,
+        "choices": [{ "delta": delta, "index": 0, "finish_reason": finish_reason }],
+    })
+}
+
 /// Pure response construction: the live handler controls persistence and
 /// success metrics, while this helper only renders the OpenAI JSON envelope.
 fn json_completion_body(
@@ -661,13 +679,12 @@ pub(super) async fn run(
                     chat_service::completion_deadline(provider_started_c, completion_timeout_c);
                 // OpenAI-compatible clients expect the assistant role on the
                 // first stream chunk, before content deltas.
-                let role = serde_json::json!({
-                    "id": format!("chatcmpl-{}", &conv_stream[..8]),
-                    "object": "chat.completion.chunk",
-                    "created": chrono::Utc::now().timestamp(),
-                    "model": model_c,
-                    "choices": [{ "delta": { "role": "assistant" }, "index": 0, "finish_reason": null }],
-                });
+                let role = sse_completion_chunk(
+                    &conv_stream,
+                    &model_c,
+                    serde_json::json!({ "role": "assistant" }),
+                    None,
+                );
                 yield Ok::<_, anyhow::Error>(Event::default().data(role.to_string()));
                 // The same terminal-aware reducer drives both SSE and JSON
                 // responses, including TTFT, partial errors, and channel closure.
@@ -682,13 +699,12 @@ pub(super) async fn run(
                     match update {
                         chat_service::StreamUpdate::Delta(content)
                         | chat_service::StreamUpdate::CompleteWithDelta(content) => {
-                            let data = serde_json::json!({
-                                "id": format!("chatcmpl-{}", &conv_stream[..8]),
-                                "object": "chat.completion.chunk",
-                                "created": chrono::Utc::now().timestamp(),
-                                "model": model_c,
-                                "choices": [{ "delta": { "content": content }, "index": 0, "finish_reason": null }],
-                            });
+                            let data = sse_completion_chunk(
+                                &conv_stream,
+                                &model_c,
+                                serde_json::json!({ "content": content }),
+                                None,
+                            );
                             yield Ok::<_, anyhow::Error>(Event::default().data(data.to_string()));
                             if done_after_delta {
                                 break;
@@ -757,19 +773,18 @@ pub(super) async fn run(
                         return;
                     }
                     let completion_tokens = estimate_tokens(&full);
-                    let finish = serde_json::json!({
-                        "id": format!("chatcmpl-{}", &conv_stream[..8]),
-                        "object": "chat.completion.chunk",
-                        "created": chrono::Utc::now().timestamp(),
-                        "model": model_c,
-                        "choices": [{ "delta": {}, "index": 0, "finish_reason": "stop" }],
-                        "usage": {
-                            "prompt_tokens": prompt_tokens_c,
-                            "completion_tokens": completion_tokens,
-                            "total_tokens": prompt_tokens_c + completion_tokens
-                        },
-                        "x_usage_estimated": true,
+                    let mut finish = sse_completion_chunk(
+                        &conv_stream,
+                        &model_c,
+                        serde_json::json!({}),
+                        Some("stop"),
+                    );
+                    finish["usage"] = serde_json::json!({
+                        "prompt_tokens": prompt_tokens_c,
+                        "completion_tokens": completion_tokens,
+                        "total_tokens": prompt_tokens_c + completion_tokens,
                     });
+                    finish["x_usage_estimated"] = serde_json::json!(true);
                     yield Ok(Event::default().data(finish.to_string()));
                 }
                 yield Ok(Event::default().data("[DONE]"));
@@ -1040,6 +1055,42 @@ mod provider_send_planner_tests {
 #[cfg(test)]
 mod completion_response_builder_tests {
     use super::*;
+
+    #[test]
+    fn sse_role_content_and_terminal_chunks_share_identity_and_openai_shape() {
+        let conversation = "fixture-conversation-123";
+        let model = "fixture-model";
+        let role = sse_completion_chunk(
+            conversation,
+            model,
+            serde_json::json!({ "role": "assistant" }),
+            None,
+        );
+        let content = sse_completion_chunk(
+            conversation,
+            model,
+            serde_json::json!({ "content": "fixture output" }),
+            None,
+        );
+        let finish = sse_completion_chunk(conversation, model, serde_json::json!({}), Some("stop"));
+
+        for chunk in [&role, &content, &finish] {
+            assert_eq!(chunk["id"], "chatcmpl-fixture-");
+            assert_eq!(chunk["model"], model);
+            assert_eq!(chunk["object"], "chat.completion.chunk");
+            assert_eq!(chunk["choices"][0]["index"], 0);
+            assert!(chunk["created"].as_i64().is_some());
+        }
+        assert_eq!(role["choices"][0]["delta"]["role"], "assistant");
+        assert_eq!(content["choices"][0]["delta"]["content"], "fixture output");
+        assert_eq!(role["choices"][0]["finish_reason"], serde_json::Value::Null);
+        assert_eq!(
+            content["choices"][0]["finish_reason"],
+            serde_json::Value::Null
+        );
+        assert_eq!(finish["choices"][0]["delta"], serde_json::json!({}));
+        assert_eq!(finish["choices"][0]["finish_reason"], "stop");
+    }
 
     #[test]
     fn json_response_preserves_usage_and_conversation_identity() {
