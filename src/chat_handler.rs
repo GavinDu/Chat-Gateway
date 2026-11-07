@@ -17,6 +17,7 @@ struct AttemptTelemetry<'a> {
     ttft_ms: Option<u64>,
     provider_work_ms: u64,
     request_started: Instant,
+    stream_failed: bool,
 }
 
 /// One completion boundary for both transports: never record a successful
@@ -30,9 +31,8 @@ async fn finalize_provider_attempt(
     assistant_content: &str,
     model: &str,
     telemetry: AttemptTelemetry<'_>,
-    stream_failed: bool,
 ) -> Option<anyhow::Error> {
-    let persist_error = if stream_failed {
+    let persist_error = if telemetry.stream_failed {
         None
     } else {
         match persist_completed_turn(
@@ -61,7 +61,7 @@ async fn finalize_provider_attempt(
         ProviderOutcome {
             request_id: telemetry.request_id,
             provider: telemetry.provider,
-            outcome: completed_chat_outcome(stream_failed, persist_error.is_some()),
+            outcome: completed_chat_outcome(telemetry.stream_failed, persist_error.is_some()),
             queue_ms: telemetry.queue_ms,
             ttft_ms: telemetry.ttft_ms,
             provider_work_ms: telemetry.provider_work_ms,
@@ -627,8 +627,8 @@ pub(super) async fn run(
                         ttft_ms,
                         provider_work_ms,
                         request_started: request_started_c,
+                        stream_failed: stream_error.is_some(),
                     },
-                    stream_error.is_some(),
                 )
                 .await;
                 if let Some(message) = stream_error {
@@ -742,8 +742,8 @@ pub(super) async fn run(
                 ttft_ms,
                 provider_work_ms,
                 request_started,
+                stream_failed: false,
             },
-            false,
         )
         .await;
         if let Some(error) = persist_error {
