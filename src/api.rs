@@ -256,7 +256,10 @@ mod wire_chat_message_contract_tests {
             "messages": [{"role": "user", "content": "hello"}]
         }))
         .unwrap();
-        assert_eq!(super::validate_chat_req(&request).unwrap_err().0, "invalid_model");
+        assert_eq!(
+            super::validate_chat_req(&request).unwrap_err().0,
+            "invalid_model"
+        );
     }
 
     #[test]
