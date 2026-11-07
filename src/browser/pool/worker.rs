@@ -5,6 +5,20 @@
 //! command delivery remain in the parent pool module.
 use super::*;
 
+/// Cancel an in-flight provider operation as soon as its downstream receiver
+/// disappears. The biased order checks disconnect first when both branches
+/// are ready, avoiding even an immediately-ready stale navigation/model step.
+async fn send_unless_disconnected<T>(
+    chunks: &mpsc::Sender<Result<ProviderChunk>>,
+    operation: impl std::future::Future<Output = T>,
+) -> Option<T> {
+    tokio::select! {
+        biased;
+        _ = chunks.closed() => None,
+        output = operation => Some(output),
+    }
+}
+
 pub(super) fn browser_thread(
     cfg: Arc<AppConfig>,
     mut cmd_rx: mpsc::Receiver<Command>,
@@ -245,6 +259,10 @@ pub(super) fn browser_thread(
                             });
                         }
                         Command::Send { provider, prompt, model, has_history, thread_url, timeout, completion_idle, provider_guard, chunks } => {
+                            // A request can be cancelled while waiting in the
+                            // worker command queue. Never navigate a page for
+                            // an abandoned sender after that admission timeout.
+                            if chunks.is_closed() { continue; }
                             let Some(page) = pages.borrow().get(&provider).cloned() else {
                                 let _ = chunks.send(Err(anyhow::anyhow!("provider page not warmed"))).await;
                                 continue;
@@ -260,7 +278,12 @@ pub(super) fn browser_thread(
                             let request_metrics = metrics.clone();
                             let send_session_write_tracker = session_write_tracker.clone();
                             tokio::task::spawn_local(async move {
-                                let _guard = lock.lock().await;
+                                let Some(_guard) = send_unless_disconnected(&chunks, lock.lock()).await else {
+                                    return;
+                                };
+                                // A queued request may have been cancelled
+                                // while another send owned the page lock.
+                                if chunks.is_closed() { return; }
                                 // Reopen only a validated provider-owned thread. Otherwise return
                                 // to the provider landing page to avoid cross-conversation reuse.
                                 // Navigating the current page avoids leaking one tab per conversation.
@@ -276,10 +299,13 @@ pub(super) fn browser_thread(
                                     return;
                                 }
                                 if page.url() != target_url {
+                                    if chunks.is_closed() { return; }
                                     let target_literal = serde_json::to_string(target_url)
                                         .expect("provider URL serialization cannot fail");
                                     let _ = page.evaluate(&format!("window.location.href = {target_literal}; true"));
-                                    let navigation = tokio::time::timeout(Duration::from_secs(15), async {
+                                    let Some(navigation) = send_unless_disconnected(
+                                        &chunks,
+                                        tokio::time::timeout(Duration::from_secs(15), async {
                                         loop {
                                             let current_url = page.url();
                                             // An app may redirect its landing URL to the user's
@@ -311,7 +337,10 @@ pub(super) fn browser_thread(
                                             }
                                             tokio::time::sleep(Duration::from_millis(50)).await;
                                         }
-                                    }).await;
+                                    }),
+                                    ).await else {
+                                        return;
+                                    };
                                     if !matches!(navigation, Ok(true)) {
                                         let reason = if matches!(navigation, Ok(false)) {
                                             "provider landing redirected to an existing conversation; refusing cross-thread send"
@@ -327,6 +356,7 @@ pub(super) fn browser_thread(
                                 // distinct session_expired error so the API
                                 // can report it and the router can skip
                                 // this provider.
+                                if chunks.is_closed() { return; }
                                 if let Err(e) = providers::common::check_session(provider.name(), &page) {
                                     let _ = chunks.send(Err(e)).await;
                                     return;
@@ -337,11 +367,20 @@ pub(super) fn browser_thread(
                                 // Failure fails the attempt so the router
                                 // can try the next provider.
                                 if !has_history {
-                                    if let Err(e) = adapter.select_model(&page, &model).await {
+                                    let Some(model_selection) = send_unless_disconnected(
+                                        &chunks,
+                                        adapter.select_model(&page, &model),
+                                    ).await else {
+                                        return;
+                                    };
+                                    if let Err(e) = model_selection {
                                         let _ = chunks.send(Err(e)).await;
                                         return;
                                     }
                                 }
+                                // A disconnected client must not start a send
+                                // or generate a new saved provider session.
+                                if chunks.is_closed() { return; }
 
                                 // Observe completion while forwarding chunks. Only a
                                 // successful done chunk triggers a session snapshot;
@@ -795,4 +834,50 @@ pub(super) fn browser_thread(
             }).await;
         });
     })
+}
+
+#[cfg(test)]
+mod queued_send_cancellation_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn already_disconnected_consumer_prevents_any_queued_side_effect() {
+        let (tx, rx) = mpsc::channel::<Result<ProviderChunk>>(1);
+        drop(rx);
+        let ran = std::cell::Cell::new(false);
+        let output = send_unless_disconnected(&tx, async {
+            ran.set(true);
+            7
+        })
+        .await;
+        assert_eq!(output, None);
+        assert!(!ran.get(), "abandoned command must not execute its operation");
+    }
+
+    #[tokio::test]
+    async fn disconnect_interrupts_in_progress_provider_wait() {
+        let (tx, rx) = mpsc::channel::<Result<ProviderChunk>>(1);
+        let (started_tx, started_rx) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            send_unless_disconnected(&tx, async {
+                let _ = started_tx.send(());
+                std::future::pending::<()>().await
+            })
+            .await
+        });
+        started_rx.await.unwrap();
+        drop(rx);
+        let output = tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("disconnection must cancel a blocked provider operation")
+            .unwrap();
+        assert_eq!(output, None);
+    }
+
+    #[tokio::test]
+    async fn connected_consumer_allows_provider_operation() {
+        let (tx, _rx) = mpsc::channel::<Result<ProviderChunk>>(1);
+        let output = send_unless_disconnected(&tx, async { 7 }).await;
+        assert_eq!(output, Some(7));
+    }
 }
