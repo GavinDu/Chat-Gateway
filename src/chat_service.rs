@@ -32,6 +32,9 @@ pub const INCOMPLETE_PROVIDER_STREAM: &str = "provider stream closed before term
 #[derive(Debug, PartialEq, Eq)]
 pub enum StreamUpdate {
     Delta(String),
+    /// A terminal provider event may also contain the final response text.
+    /// SSE must emit that final delta before the completion marker.
+    CompleteWithDelta(String),
     Complete,
     Failed,
 }
@@ -62,7 +65,15 @@ impl ResponseAccumulator {
             Ok(event) if event.done => {
                 self.saw_done = true;
                 self.finished = true;
-                StreamUpdate::Complete
+                if event.content.is_empty() {
+                    StreamUpdate::Complete
+                } else {
+                    if self.collected.first_event_elapsed.is_none() {
+                        self.collected.first_event_elapsed = Some(self.attempt_started.elapsed());
+                    }
+                    self.collected.content.push_str(&event.content);
+                    StreamUpdate::CompleteWithDelta(event.content)
+                }
             }
             Ok(event) => {
                 if !event.content.is_empty() && self.collected.first_event_elapsed.is_none() {
@@ -348,6 +359,61 @@ mod tests {
         assert!(json.error.is_none());
         assert!(streamed.first_event_elapsed.is_some());
         assert!(json.first_event_elapsed.is_some());
+    }
+
+    #[tokio::test]
+    async fn terminal_content_is_not_lost_in_json_or_sse() {
+        use super::{ResponseAccumulator, StreamUpdate};
+
+        for (events, expected) in [
+            (
+                vec![ChatEvent {
+                    content: "only terminal content".to_owned(),
+                    done: true,
+                }],
+                "only terminal content",
+            ),
+            (
+                vec![
+                    ChatEvent {
+                        content: "first".to_owned(),
+                        done: false,
+                    },
+                    ChatEvent {
+                        content: " final".to_owned(),
+                        done: true,
+                    },
+                ],
+                "first final",
+            ),
+        ] {
+            let started = std::time::Instant::now();
+            let (tx, rx) = mpsc::channel(4);
+            for event in &events {
+                tx.send(Ok(event.clone())).await.unwrap();
+            }
+            drop(tx);
+            let json = ChatService::new(Arc::new(FakeBackend))
+                .collect(rx, started)
+                .await;
+
+            let mut sse = ResponseAccumulator::new(started);
+            let updates: Vec<_> = events
+                .into_iter()
+                .map(|event| sse.push(Ok(event)))
+                .collect();
+            assert!(matches!(
+                updates.last(),
+                Some(StreamUpdate::CompleteWithDelta(_))
+            ));
+            let streamed = sse.finish();
+            assert_eq!(json.content, expected);
+            assert_eq!(streamed.content, expected);
+            assert!(json.error.is_none());
+            assert!(streamed.error.is_none());
+            assert!(json.first_event_elapsed.is_some());
+            assert!(streamed.first_event_elapsed.is_some());
+        }
     }
 
     #[tokio::test]
