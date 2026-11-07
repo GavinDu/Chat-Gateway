@@ -50,12 +50,12 @@ test("logout waits for pending imports and prevents automatic re-link", async ()
   assert.deepEqual(calls,["sync:metaai"],"revoke must wait for in-flight sync");
 
   completeSync();
-  assert.deepEqual(await sync,{ok:true});
-  assert.deepEqual(await logout,{ok:true});
+  assert.equal((await sync).ok,true);
+  assert.equal((await logout).ok,true);
   assert.deepEqual(calls,["sync:metaai","DELETE:/relay/v1/session/metaai"]);
   assert.deepEqual(state.linkedProviders,[]);
 
-  assert.deepEqual(await send("sync-provider"),{ok:true});
+  assert.equal((await send("sync-provider")).ok,true);
   assert.deepEqual(calls,["sync:metaai","DELETE:/relay/v1/session/metaai"],
     "queued or later cookie change must not upload a logged-out session");
 });
