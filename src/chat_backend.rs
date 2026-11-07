@@ -198,7 +198,7 @@ impl axum::response::IntoResponse for GatewayError {
                 StatusCode::TOO_MANY_REQUESTS,
                 "server_error",
                 "provider_busy",
-                "provider is busy; retry shortly",
+                "all eligible providers are busy; retry shortly",
             ),
             GatewayErrorKind::SessionExpired => (
                 StatusCode::UNAUTHORIZED,
