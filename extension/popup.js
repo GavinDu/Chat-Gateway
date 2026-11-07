@@ -165,7 +165,8 @@ $("pair").addEventListener("click", async () => {
       }
     }
     const response = await fetch(gateway + (remote ? "/relay/v1/pair" : "/relay/v1/connect/request"), {
-      method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(remote ? {code} : {}), cache:"no-store"
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body:JSON.stringify(remote ? {code} : {}), cache:"no-store", redirect:"error"
     });
     if (!response.ok) throw new Error(remote ? "Remote pairing failed. Check the gateway and request a fresh pairing code." : response.status === 409
       ? "An approval is already pending. Finish it in the local approval tab or retry in five minutes."
