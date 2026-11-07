@@ -51,9 +51,19 @@ pub(crate) fn validate_chat_req(req: &ChatReq) -> Result<(), (&'static str, Stri
     const MAX_MESSAGES: usize = 256;
     const MAX_MESSAGE_BYTES: usize = 128 * 1024;
     const MAX_TOTAL_CONTENT_BYTES: usize = 512 * 1024;
+    const MAX_MODEL_ID_BYTES: usize = 256;
 
     if req.model.trim().is_empty() {
         return Err(("model_required", "model must not be empty".to_string()));
+    }
+    // The caller-controlled model name is also rendered in OpenAI response
+    // metadata and provider headers. Reject control characters and oversized
+    // identifiers before routing or touching a browser-backed provider.
+    if req.model.len() > MAX_MODEL_ID_BYTES || req.model.chars().any(char::is_control) {
+        return Err((
+            "invalid_model",
+            "model must be at most 256 bytes and contain no control characters".to_string(),
+        ));
     }
     if req.messages.is_empty() {
         return Err((
@@ -207,6 +217,49 @@ mod wire_chat_message_contract_tests {
             }]
         });
         assert!(serde_json::from_value::<ChatReq>(request).is_err());
+    }
+
+    #[test]
+    fn rejects_oversized_or_control_character_model_identifiers() {
+        for model in [
+            "m".repeat(257),
+            "chatgpt/\r\nX-Injected: yes".to_owned(),
+            "claude/\u{0000}".to_owned(),
+        ] {
+            let request: ChatReq = serde_json::from_value(serde_json::json!({
+                "model": model,
+                "messages": [{"role": "user", "content": "hello"}]
+            }))
+            .unwrap();
+            let error = super::validate_chat_req(&request).unwrap_err();
+            assert_eq!(error.0, "invalid_model");
+        }
+    }
+
+    #[test]
+    fn accepts_normal_provider_model_ids_and_enforces_utf8_byte_bound() {
+        for model in [
+            "auto".to_owned(),
+            "chatgpt/gpt-4o".to_owned(),
+            "claude/sonnet-4.5".to_owned(),
+            "m".repeat(256),
+        ] {
+            let request: ChatReq = serde_json::from_value(serde_json::json!({
+                "model": model,
+                "messages": [{"role": "user", "content": "hello"}]
+            }))
+            .unwrap();
+            assert!(super::validate_chat_req(&request).is_ok());
+        }
+        let request: ChatReq = serde_json::from_value(serde_json::json!({
+            "model": "é".repeat(129),
+            "messages": [{"role": "user", "content": "hello"}]
+        }))
+        .unwrap();
+        assert_eq!(
+            super::validate_chat_req(&request).unwrap_err().0,
+            "invalid_model"
+        );
     }
 
     #[test]
