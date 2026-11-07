@@ -23,6 +23,72 @@ pub struct CollectedResponse {
     pub error: Option<GatewayError>,
 }
 
+/// A channel closing without an explicit terminal event is never success.
+/// Keep this constant shared by JSON and SSE consumers.
+pub const INCOMPLETE_PROVIDER_STREAM: &str = "provider stream closed before terminal completion";
+
+/// The event reducer is shared by SSE and JSON responses. Persistence is
+/// permitted only after `Complete`; a partial response is never committed.
+#[derive(Debug, PartialEq, Eq)]
+pub enum StreamUpdate {
+    Delta(String),
+    Complete,
+    Failed,
+}
+
+#[derive(Debug)]
+pub struct ResponseAccumulator {
+    attempt_started: Instant,
+    collected: CollectedResponse,
+    finished: bool,
+    saw_done: bool,
+}
+
+impl ResponseAccumulator {
+    pub fn new(attempt_started: Instant) -> Self {
+        Self {
+            attempt_started,
+            collected: CollectedResponse::default(),
+            finished: false,
+            saw_done: false,
+        }
+    }
+
+    /// Process a backend event exactly once, without depending on the
+    /// transport's rendering or persistence policy.
+    pub fn push(&mut self, event: std::result::Result<ChatEvent, GatewayError>) -> StreamUpdate {
+        debug_assert!(!self.finished, "terminal backend event processed twice");
+        match event {
+            Ok(event) if event.done => {
+                self.saw_done = true;
+                self.finished = true;
+                StreamUpdate::Complete
+            }
+            Ok(event) => {
+                if !event.content.is_empty() && self.collected.first_event_elapsed.is_none() {
+                    self.collected.first_event_elapsed = Some(self.attempt_started.elapsed());
+                }
+                self.collected.content.push_str(&event.content);
+                StreamUpdate::Delta(event.content)
+            }
+            Err(error) => {
+                self.finished = true;
+                self.collected.error = Some(error);
+                StreamUpdate::Failed
+            }
+        }
+    }
+
+    /// Finalize after an explicit done/error or a closed channel. Missing
+    /// terminal events are errors even if content has already been emitted.
+    pub fn finish(mut self) -> CollectedResponse {
+        if !self.saw_done && self.collected.error.is_none() {
+            self.collected.error = Some(GatewayError::provider_failure(INCOMPLETE_PROVIDER_STREAM));
+        }
+        self.collected
+    }
+}
+
 impl ChatService {
     pub fn new(backend: Arc<dyn ChatBackend>) -> Self {
         Self { backend }
@@ -53,39 +119,13 @@ impl ChatService {
         mut events: mpsc::Receiver<Result<ChatEvent, GatewayError>>,
         attempt_started: Instant,
     ) -> CollectedResponse {
-        let mut collected = CollectedResponse::default();
-        let mut saw_terminal_completion = false;
+        let mut accumulator = ResponseAccumulator::new(attempt_started);
         while let Some(item) = events.recv().await {
-            match item {
-                Ok(event) if event.done => {
-                    saw_terminal_completion = true;
-                    break;
-                }
-                Ok(event) => {
-                    // TTFT is the time to the first actual content, not an
-                    // empty heartbeat or metadata-only event.
-                    if !event.content.is_empty() {
-                        if collected.first_event_elapsed.is_none() {
-                            collected.first_event_elapsed = Some(attempt_started.elapsed());
-                        }
-                        collected.content.push_str(&event.content);
-                    }
-                }
-                Err(error) => {
-                    collected.error = Some(error);
-                    break;
-                }
+            if !matches!(accumulator.push(item), StreamUpdate::Delta(_)) {
+                break;
             }
         }
-        if !saw_terminal_completion && collected.error.is_none() {
-            // A closed channel is not equivalent to a provider's explicit
-            // terminal event. Treat it as a failed (possibly partial) turn so
-            // callers never persist truncated output as a successful answer.
-            collected.error = Some(GatewayError::provider_failure(
-                "provider stream closed before terminal completion",
-            ));
-        }
-        collected
+        accumulator.finish()
     }
 }
 
@@ -259,6 +299,100 @@ mod tests {
         assert_eq!(collected.content, "partial answer");
         let error = collected.error.expect("missing terminal event must fail");
         assert!(error.message.contains("closed before terminal completion"));
+    }
+
+    #[tokio::test]
+    async fn same_reducer_drives_json_collection_and_sse_success() {
+        use super::{ResponseAccumulator, StreamUpdate};
+        let start = std::time::Instant::now();
+        let scripted = vec![
+            Ok(ChatEvent {
+                content: String::new(),
+                done: false,
+            }),
+            Ok(ChatEvent {
+                content: "first".to_owned(),
+                done: false,
+            }),
+            Ok(ChatEvent {
+                content: " second".to_owned(),
+                done: false,
+            }),
+            Ok(ChatEvent {
+                content: String::new(),
+                done: true,
+            }),
+        ];
+        let (tx, rx) = mpsc::channel(8);
+        for item in scripted.iter().cloned() {
+            tx.send(item).await.unwrap();
+        }
+        drop(tx);
+        let json = ChatService::new(Arc::new(FakeBackend))
+            .collect(rx, start)
+            .await;
+        let mut sse = ResponseAccumulator::new(start);
+        let emitted: Vec<StreamUpdate> = scripted.into_iter().map(|item| sse.push(item)).collect();
+        assert_eq!(
+            emitted,
+            vec![
+                StreamUpdate::Delta(String::new()),
+                StreamUpdate::Delta("first".to_owned()),
+                StreamUpdate::Delta(" second".to_owned()),
+                StreamUpdate::Complete,
+            ]
+        );
+        let streamed = sse.finish();
+        assert_eq!(streamed.content, json.content);
+        assert!(streamed.error.is_none());
+        assert!(json.error.is_none());
+        assert!(streamed.first_event_elapsed.is_some());
+        assert!(json.first_event_elapsed.is_some());
+    }
+
+    #[tokio::test]
+    async fn same_reducer_fails_closed_for_midstream_error_and_channel_close() {
+        use super::{ResponseAccumulator, StreamUpdate, INCOMPLETE_PROVIDER_STREAM};
+        for missing_done in [true, false] {
+            let start = std::time::Instant::now();
+            let mut scripted = vec![Ok(ChatEvent {
+                content: "partial".to_owned(),
+                done: false,
+            })];
+            if !missing_done {
+                scripted.push(Err(GatewayError::provider_failure("backend failure")));
+            }
+            let (tx, rx) = mpsc::channel(8);
+            for item in scripted.iter().cloned() {
+                tx.send(item).await.unwrap();
+            }
+            drop(tx);
+            let json = ChatService::new(Arc::new(FakeBackend))
+                .collect(rx, start)
+                .await;
+            let mut sse = ResponseAccumulator::new(start);
+            let last = scripted.into_iter().map(|item| sse.push(item)).last();
+            assert_eq!(
+                last,
+                Some(if missing_done {
+                    StreamUpdate::Delta("partial".to_owned())
+                } else {
+                    StreamUpdate::Failed
+                })
+            );
+            let streamed = sse.finish();
+            assert_eq!(streamed.content, "partial");
+            assert_eq!(streamed.content, json.content);
+            assert_eq!(streamed.error, json.error);
+            assert_eq!(
+                streamed.error.unwrap().message,
+                if missing_done {
+                    INCOMPLETE_PROVIDER_STREAM
+                } else {
+                    "backend failure"
+                }
+            );
+        }
     }
 
     #[tokio::test]
