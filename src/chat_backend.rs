@@ -1,6 +1,6 @@
 //! Canonical chat execution contract independent of the browser engine.
 use crate::{
-    browser::pool::{BrowserWorkerUnavailableError, ProviderSessionExpiredError},
+    browser::pool::{BrowserWorkerUnavailableError, ProviderBusyError, ProviderSessionExpiredError},
     providers::ProviderChunk,
 };
 use anyhow::Result;
@@ -205,6 +205,9 @@ fn map_backend_error(error: anyhow::Error) -> GatewayError {
     {
         return GatewayError::session_expired("provider session expired; re-login required");
     }
+    if error.downcast_ref::<ProviderBusyError>().is_some() {
+        return GatewayError::provider_busy("provider is busy; retry shortly");
+    }
     if error
         .downcast_ref::<BrowserWorkerUnavailableError>()
         .is_some_and(BrowserWorkerUnavailableError::is_retryable)
@@ -288,7 +291,9 @@ mod tests {
         BackendCapabilities, BackendId, ChatBackend, ChatEvent, ChatRequest, GatewayError,
         GatewayErrorKind, ProviderChunk, ProviderId,
     };
-    use crate::browser::pool::{BrowserWorkerUnavailableError, ProviderSessionExpiredError};
+    use crate::browser::pool::{
+        BrowserWorkerUnavailableError, ProviderBusyError, ProviderSessionExpiredError,
+    };
     use anyhow::Result;
     use std::sync::Arc;
     use tokio::sync::mpsc;
@@ -340,6 +345,11 @@ mod tests {
             super::map_backend_error(anyhow::Error::new(BrowserWorkerUnavailableError));
         assert_eq!(unavailable.kind, GatewayErrorKind::BackendUnavailable);
         assert!(unavailable.is_retryable());
+
+        let busy = super::map_backend_error(anyhow::Error::new(ProviderBusyError));
+        assert_eq!(busy.kind, GatewayErrorKind::ProviderBusy);
+        assert!(busy.is_retryable());
+        assert_eq!(busy.message, "provider is busy; retry shortly");
 
         let ordinary = super::map_backend_error(anyhow::anyhow!("provider rejected request"));
         assert_eq!(ordinary.kind, GatewayErrorKind::ProviderFailure);
