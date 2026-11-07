@@ -4767,10 +4767,7 @@ mod real_chat_router_scripted_backend_tests {
         // The handler prefetched first content, then returned the real SSE
         // response. Simulate client disconnect before a terminal [DONE].
         drop(response);
-        tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            cancelled_rx,
-        )
+        tokio::time::timeout(std::time::Duration::from_secs(2), cancelled_rx)
         .await
         .expect("client drop should close backend receiver")
         .expect("scripted backend should observe cancellation");
