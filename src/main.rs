@@ -1949,6 +1949,16 @@ struct ProviderOutcome<'a> {
     total_ms: u64,
 }
 
+/// Classify the entire gateway operation, including durable turn commit.
+/// Provider text alone is not successful API completion if persistence fails.
+fn completed_chat_outcome(stream_failed: bool, persistence_failed: bool) -> &'static str {
+    if stream_failed || persistence_failed {
+        "error"
+    } else {
+        "success"
+    }
+}
+
 fn record_provider_outcome(
     metrics_registry: &metrics::MetricsRegistry,
     outcome: ProviderOutcome<'_>,
@@ -2219,6 +2229,27 @@ async fn chat_completions(
                 continue;
             }
         };
+        // Fail closed on provider data policy before charging pacing quota or
+        // taking its exclusive browser permit. Thread lookup and context
+        // planning intentionally remain UNDER the permit to serialize
+        // concurrent sends to the same remote provider thread.
+        if memory_egress_policy
+            .authorize(
+                &provider_name,
+                memory_egress::ProviderDataClass::CurrentTurn,
+            )
+            .is_err()
+            || memory_egress_policy
+                .authorize(
+                    &provider_name,
+                    memory_egress::ProviderDataClass::ConversationContext,
+                )
+                .is_err()
+        {
+            last_err = Some("provider data-handling policy denied request".to_owned());
+            continue;
+        }
+
         // Reserve/wait for the provider's pacing slot before taking its
         // exclusive browser permit. Otherwise a long interval blocks every
         // other caller behind a permit that is not doing useful work.
@@ -2312,22 +2343,6 @@ async fn chat_completions(
         // transcript context are distinct from optional personal long-term
         // memory. The typed egress policy filters retrieved items for each
         // candidate before rendering them into that provider's prompt.
-        if memory_egress_policy
-            .authorize(
-                &provider_name,
-                memory_egress::ProviderDataClass::CurrentTurn,
-            )
-            .is_err()
-            || memory_egress_policy
-                .authorize(
-                    &provider_name,
-                    memory_egress::ProviderDataClass::ConversationContext,
-                )
-                .is_err()
-        {
-            last_err = Some("provider data-handling policy denied request".to_owned());
-            continue;
-        }
         if memory_egress_policy
             .append_personal_memory_to_prompt(
                 &provider_name,
@@ -2527,13 +2542,32 @@ async fn chat_completions(
                 });
 
                 let provider_work_ms = provider_started_c.elapsed().as_millis().min(u64::MAX as u128) as u64;
+                // Persist before reporting a successful gateway operation.
+                // An SSE stream may have emitted content, but no successful
+                // terminal completion can be claimed until its turn is durable.
+                let persist_error = if stream_error.is_none() {
+                    state_c.provider_sessions.record_success(&provider_c);
+                    persist_completed_turn(
+                        &state_c,
+                        &owner_key_id_c,
+                        &conv_stream,
+                        windowed_c.clone(),
+                        full.clone(),
+                        &provider_c,
+                        &model_c,
+                    )
+                    .await
+                    .err()
+                } else {
+                    None
+                };
                 let total_ms = request_started_c.elapsed().as_millis().min(u64::MAX as u128) as u64;
                 record_provider_outcome(
                     &state_c.metrics,
                     ProviderOutcome {
                         request_id: &request_id_c,
                         provider: &provider_c,
-                        outcome: if stream_error.is_some() { "error" } else { "success" },
+                        outcome: completed_chat_outcome(stream_error.is_some(), persist_error.is_some()),
                         queue_ms: queue_ms_c,
                         ttft_ms,
                         provider_work_ms,
@@ -2551,18 +2585,7 @@ async fn chat_completions(
                     });
                     yield Ok(Event::default().data(error.to_string()));
                 } else {
-                    state_c.provider_sessions.record_success(&provider_c);
-                    if let Err(error) = persist_completed_turn(
-                        &state_c,
-                        &owner_key_id_c,
-                        &conv_stream,
-                        windowed_c.clone(),
-                        full.clone(),
-                        &provider_c,
-                        &model_c,
-                    )
-                    .await
-                    {
+                    if let Some(error) = persist_error {
                         tracing::error!(conversation_id = %conv_stream, %error, "conversation persistence failed after stream");
                         let error = serde_json::json!({
                             "error": { "message": "conversation could not be persisted", "type": "server_error", "code": "memory_persistence_failed" }
@@ -2637,19 +2660,7 @@ async fn chat_completions(
         }
 
         state.provider_sessions.record_success(&provider_name);
-        record_provider_outcome(
-            &state.metrics,
-            ProviderOutcome {
-                request_id: &request_id,
-                provider: &provider_name,
-                outcome: "success",
-                queue_ms,
-                ttft_ms,
-                provider_work_ms,
-                total_ms,
-            },
-        );
-        if let Err(error) = persist_completed_turn(
+        let persist_result = persist_completed_turn(
             &state,
             &owner_key_id,
             &new_conv_id,
@@ -2658,8 +2669,23 @@ async fn chat_completions(
             &provider_name,
             &req.model,
         )
-        .await
-        {
+        .await;
+        // Total gateway latency includes the durable write, not just provider
+        // output. Use the same post-commit timing boundary as the SSE path.
+        let total_ms = request_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+        record_provider_outcome(
+            &state.metrics,
+            ProviderOutcome {
+                request_id: &request_id,
+                provider: &provider_name,
+                outcome: completed_chat_outcome(false, persist_result.is_err()),
+                queue_ms,
+                ttft_ms,
+                provider_work_ms,
+                total_ms,
+            },
+        );
+        if let Err(error) = persist_result {
             tracing::error!(conversation_id = %new_conv_id, %error, "conversation persistence failed");
             return api_error(
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -4478,5 +4504,18 @@ mod personal_memory_budget_tests {
         );
         assert!(none.is_empty());
         assert_eq!(used, 0);
+    }
+}
+
+#[cfg(test)]
+mod gateway_completion_outcome_tests {
+    use super::completed_chat_outcome;
+
+    #[test]
+    fn gateway_success_requires_stream_and_persistence_success() {
+        assert_eq!(completed_chat_outcome(false, false), "success");
+        assert_eq!(completed_chat_outcome(true, false), "error");
+        assert_eq!(completed_chat_outcome(false, true), "error");
+        assert_eq!(completed_chat_outcome(true, true), "error");
     }
 }
