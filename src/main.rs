@@ -3282,13 +3282,12 @@ mod http_api_regression_tests {
     async fn http_memory_read_failure_returns_structured_error_without_provider_call() {
         let memory = Arc::new(UnifiedMemory::new(8000));
         memory.drop_conversations_table_for_test().unwrap();
-        let (app, _, backend) =
-            super::real_chat_router_scripted_backend_tests::fixture_with_memory(
-                &["chatgpt"],
-                vec![],
-                None,
-                memory,
-            );
+        let (app, _, backend) = super::real_chat_router_scripted_backend_tests::fixture_with_memory(
+            &["chatgpt"],
+            vec![],
+            None,
+            memory,
+        );
         let app = app.layer(middleware::from_fn(attach_request_id));
 
         let response = app
@@ -4603,7 +4602,12 @@ mod real_chat_router_scripted_backend_tests {
         scripted: Vec<ScriptedSend>,
         allowed: Option<Vec<String>>,
     ) -> (Router, Arc<AppState>, Arc<ScriptedBackend>) {
-        fixture_with_memory(providers, scripted, allowed, Arc::new(UnifiedMemory::new(8_000)))
+        fixture_with_memory(
+            providers,
+            scripted,
+            allowed,
+            Arc::new(UnifiedMemory::new(8_000)),
+        )
     }
 
     pub(super) fn fixture_with_memory(
