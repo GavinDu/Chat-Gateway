@@ -55,7 +55,11 @@ async fn finalize_provider_attempt(
             Err(error) => Some(error),
         }
     };
-    let total_ms = telemetry.request_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+    let total_ms = telemetry
+        .request_started
+        .elapsed()
+        .as_millis()
+        .min(u64::MAX as u128) as u64;
     record_provider_outcome(
         &state.metrics,
         ProviderOutcome {
