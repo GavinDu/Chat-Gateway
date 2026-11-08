@@ -43,7 +43,9 @@ mod request_security;
 mod router;
 mod session;
 
-use api::{add_gateway_headers, api_error, estimate_tokens, validate_chat_req, ChatReq};
+#[cfg(test)]
+use api::add_gateway_headers;
+use api::{api_error, estimate_tokens, validate_chat_req, ChatReq};
 use app::shutdown_signal;
 use app_state::{AppState, AuthKeyContext};
 use browser::pool::ObscuraPool;
