@@ -212,8 +212,7 @@ pub(super) async fn run(
         // taking its exclusive browser permit. Thread lookup and context
         // planning intentionally remain UNDER the permit to serialize
         // concurrent sends to the same remote provider thread.
-        if chat_service::authorize_candidate_context(&memory_egress_policy, &provider_name)
-            .is_err()
+        if chat_service::authorize_candidate_context(&memory_egress_policy, &provider_name).is_err()
         {
             last_err = Some("provider data-handling policy denied request".to_owned());
             continue;
@@ -228,7 +227,10 @@ pub(super) async fn run(
         {
             Ok(permit) => permit,
             Err(error) => {
-                if error.downcast_ref::<browser::pool::ProviderBusyError>().is_some() {
+                if error
+                    .downcast_ref::<browser::pool::ProviderBusyError>()
+                    .is_some()
+                {
                     busy_count += 1;
                 }
                 last_err = Some(error.to_string());
