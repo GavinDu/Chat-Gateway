@@ -1,5 +1,6 @@
 pub(crate) mod health;
 pub(crate) mod ops;
+pub(crate) mod models;
 
 use crate::{chat_backend::Role, context, memory::ChatMessage};
 use axum::{response::IntoResponse, Json};
