@@ -369,6 +369,6 @@ mod tests {
 
     #[test]
     fn labels_are_escaped() {
-        assert_eq!(escape_label("a\\b\"c\nd"), "a\\\\b\\"c\\nd");
+        assert_eq!(escape_label("a\\b\"c\nd"), "a\\\\b\\\"c\\nd");
     }
 }
