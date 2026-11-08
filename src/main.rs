@@ -47,7 +47,7 @@ use app::shutdown_signal;
 use app_state::{AppState, AuthKeyContext};
 use browser::pool::ObscuraPool;
 use chat_backend::{BackendRequest, ProviderId};
-use chat_service::{first_event, ChatService};
+use chat_service::{first_event, record_attempt_error, ChatService};
 #[cfg(test)]
 use chat_service::FirstEvent;
 use cli::Cli;
@@ -1995,32 +1995,6 @@ async fn read_conversation_context_with_transcript_for_owner(
     memory
         .build_context_with_transcript(owner_key_id, conversation_id, messages, token_budget)
         .await
-}
-
-fn record_attempt_error(
-    provider_sessions: &provider_state::ProviderSessionRegistry,
-    metrics_registry: &metrics::MetricsRegistry,
-    provider: &str,
-    typed_error: Option<&chat_backend::GatewayError>,
-    queue_ms: u64,
-    provider_started: Instant,
-    request_started: Instant,
-) {
-    let provider_work_ms = provider_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
-    let total_ms = request_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
-    // Provider text is untrusted; it must not decide whether the account needs
-    // login. An absent typed error is a generic failed attempt, never an
-    // inferred authentication failure from substrings in a page or exception.
-    let generic_failure = chat_backend::GatewayError::provider_failure("provider attempt failed");
-    provider_sessions.record_gateway_error(provider, typed_error.unwrap_or(&generic_failure));
-    metrics_registry.record_provider_timings(
-        provider,
-        "error",
-        queue_ms,
-        None,
-        provider_work_ms,
-        total_ms,
-    );
 }
 
 /// Keep provider timing metrics and completion logs identical for streaming
