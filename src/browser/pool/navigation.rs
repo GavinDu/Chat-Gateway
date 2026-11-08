@@ -27,30 +27,6 @@ pub(super) fn thread_navigation_snapshot_ready(actual: &str, target: &str, compo
     composer_ready && pool_policy::provider_thread_navigation_matches(actual, target)
 }
 
-#[cfg(test)]
-mod provider_reopen_composer_tests {
-    use super::thread_navigation_snapshot_ready;
-
-    #[test]
-    fn saved_thread_reopen_needs_matching_path_and_ready_composer() {
-        assert!(!thread_navigation_snapshot_ready(
-            "https://chatgpt.com/c/saved",
-            "https://chatgpt.com/c/saved",
-            false,
-        ));
-        assert!(!thread_navigation_snapshot_ready(
-            "https://chatgpt.com/c/old",
-            "https://chatgpt.com/c/saved",
-            true,
-        ));
-        assert!(thread_navigation_snapshot_ready(
-            "https://chatgpt.com/c/saved/?source=redirect",
-            "https://chatgpt.com/c/saved",
-            true,
-        ));
-    }
-}
-
 /// Landing pages can canonicalize the provider root to an app route. Accept
 /// that redirect only on the same origin and only after the adapter composer
 /// is present; thread URLs use the stricter path comparison above.
@@ -90,3 +66,26 @@ pub(super) fn provider_landing_navigation_ready(
         .any(|selector| page.query_selector(selector).is_some())
 }
 
+#[cfg(test)]
+mod provider_reopen_composer_tests {
+    use super::thread_navigation_snapshot_ready;
+
+    #[test]
+    fn saved_thread_reopen_needs_matching_path_and_ready_composer() {
+        assert!(!thread_navigation_snapshot_ready(
+            "https://chatgpt.com/c/saved",
+            "https://chatgpt.com/c/saved",
+            false,
+        ));
+        assert!(!thread_navigation_snapshot_ready(
+            "https://chatgpt.com/c/old",
+            "https://chatgpt.com/c/saved",
+            true,
+        ));
+        assert!(thread_navigation_snapshot_ready(
+            "https://chatgpt.com/c/saved/?source=redirect",
+            "https://chatgpt.com/c/saved",
+            true,
+        ));
+    }
+}
