@@ -378,27 +378,6 @@ fn plan_provider_send(
     }
 }
 
-/// Classify first-stream admission without duplicating metrics and session
-/// recording in each failure branch. The caller records each failed attempt
-/// once, and retains typed session-expiry/challenge information when present.
-fn classify_initial_stream_event(
-    first: FirstEvent,
-) -> Result<chat_backend::ChatEvent, (String, Option<chat_backend::GatewayError>)> {
-    match first {
-        FirstEvent::Chunk(chunk) => Ok(chunk),
-        FirstEvent::EmptyCompletion => Err((
-            "provider completed without output before stream started".to_owned(),
-            None,
-        )),
-        FirstEvent::Error(error) => Err((error.to_string(), Some(error))),
-        FirstEvent::Closed => Err((
-            "provider stream closed before first output".to_owned(),
-            None,
-        )),
-        FirstEvent::Timeout => Err(("provider timed out before first output".to_owned(), None)),
-    }
-}
-
 pub(super) async fn run(
     state: Arc<AppState>,
     headers: HeaderMap,
@@ -637,7 +616,7 @@ pub(super) async fn run(
         if req.stream {
             let first_chunk_timeout = std::time::Duration::from_secs(provider_cfg.timeout_seconds)
                 .saturating_sub(provider_started.elapsed());
-            let first = match classify_initial_stream_event(
+            let first = match chat_service::classify_initial_stream_event(
                 first_event(&mut rx, first_chunk_timeout).await,
             ) {
                 Ok(chunk) => chunk,
@@ -952,12 +931,12 @@ mod first_stream_admission_tests {
             done: false,
         };
         assert_eq!(
-            classify_initial_stream_event(FirstEvent::Chunk(chunk.clone())).unwrap(),
+            chat_service::classify_initial_stream_event(FirstEvent::Chunk(chunk.clone())).unwrap(),
             chunk,
         );
         let timeout = chat_backend::GatewayError::timeout("provider timed out");
         let (message, typed) =
-            classify_initial_stream_event(FirstEvent::Error(timeout.clone())).unwrap_err();
+            chat_service::classify_initial_stream_event(FirstEvent::Error(timeout.clone())).unwrap_err();
         assert_eq!(message, "provider timed out");
         assert_eq!(typed, Some(timeout));
     }
@@ -978,7 +957,7 @@ mod first_stream_admission_tests {
                 "provider timed out before first output",
             ),
         ] {
-            let (message, typed) = classify_initial_stream_event(event).unwrap_err();
+            let (message, typed) = chat_service::classify_initial_stream_event(event).unwrap_err();
             assert_eq!(message, expected);
             assert!(typed.is_none());
         }
