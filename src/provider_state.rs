@@ -82,6 +82,16 @@ impl ProviderSessionRegistry {
         );
     }
 
+    /// An operator reset allows the next request to probe the provider again;
+    /// it does not claim that a browser session has been authenticated.
+    pub fn reset_for_retry(&self, provider: &str) -> anyhow::Result<()> {
+        self.states
+            .lock()
+            .map_err(|_| anyhow::anyhow!("provider state unavailable"))?
+            .remove(provider);
+        Ok(())
+    }
+
     pub fn record_success(&self, provider: &str) {
         if let Ok(mut map) = self.states.lock() {
             map.insert(
@@ -319,6 +329,20 @@ mod tests {
             second.status("provider").state,
             ProviderSessionState::Unknown
         );
+    }
+
+    #[test]
+    fn admin_retry_reset_does_not_falsely_claim_authenticated_session() {
+        let registry = ProviderSessionRegistry::default();
+        registry.record_needs_login("provider");
+        assert!(!registry.is_routable("provider"));
+        registry.reset_for_retry("provider").unwrap();
+        assert_eq!(
+            registry.status("provider").state,
+            ProviderSessionState::Unknown
+        );
+        assert!(registry.is_routable("provider"));
+        assert!(registry.status("provider").last_error.is_none());
     }
 
     #[test]
