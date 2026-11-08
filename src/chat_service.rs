@@ -46,7 +46,7 @@ fn completed_chat_outcome(stream_failed: bool, persistence_failed: bool) -> &'st
 
 pub(crate) fn record_provider_outcome(
     metrics_registry: &crate::metrics::MetricsRegistry,
-    pub(crate) outcome: ProviderOutcome<'_>,
+    outcome: ProviderOutcome<'_>,
 ) {
     metrics_registry.record_provider_timings(
         outcome.provider,
