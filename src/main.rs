@@ -44,7 +44,7 @@ mod session;
 
 use api::{add_gateway_headers, api_error, estimate_tokens, validate_chat_req, ChatReq};
 use app::shutdown_signal;
-use app_state::{AppState, AuthKeyContext};
+use app_state::{AppState, AuthKeyContext, ProviderEligibilityMode};
 use browser::pool::ObscuraPool;
 use chat_backend::{BackendRequest, ProviderId};
 #[cfg(test)]
@@ -1938,12 +1938,32 @@ fn build_model_list(cfg: &AppConfig, cache: &HashMap<String, Vec<String>>) -> se
     serde_json::json!({ "object": "list", "data": data })
 }
 
+fn retain_model_owners(
+    model_list: &mut serde_json::Value,
+    available: impl Fn(&str) -> bool,
+) {
+    if let Some(models) = model_list
+        .get_mut("data")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        models.retain(|model| {
+            model
+                .get("owned_by")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(&available)
+        });
+    }
+}
+
 async fn models(
     State(state): State<Arc<AppState>>,
     auth_context: Option<Extension<AuthKeyContext>>,
 ) -> impl IntoResponse {
     let cache = state.models_cache.read().await;
     let mut model_list = build_model_list(&state.cfg, &cache);
+    retain_model_owners(&mut model_list, |provider| {
+        state.provider_eligible(provider, ProviderEligibilityMode::ReadOnly)
+    });
     if let Some(Extension(context)) = auth_context {
         if let Some(allowed) = context.provider_allowlist {
             if let Some(models) = model_list
@@ -2161,6 +2181,21 @@ mod model_list_tests {
             daily_request_cap: 100,
             models: models.iter().map(|model| (*model).to_owned()).collect(),
         }
+    }
+
+    #[test]
+    fn model_list_omits_providers_that_are_not_currently_routable() {
+        let mut list = serde_json::json!({
+            "object": "list",
+            "data": [
+                { "id": "chatgpt-model", "owned_by": "chatgpt" },
+                { "id": "claude-model", "owned_by": "claude" },
+                { "id": "unowned-model" }
+            ]
+        });
+        retain_model_owners(&mut list, |provider| provider == "chatgpt");
+        assert_eq!(list["data"].as_array().unwrap().len(), 1);
+        assert_eq!(list["data"][0]["id"], "chatgpt-model");
     }
 
     #[test]
