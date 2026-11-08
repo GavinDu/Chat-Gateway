@@ -14,7 +14,7 @@ import time
 import urllib.error
 import urllib.request
 
-from provider_concurrency_benchmark import parse_sse
+from provider_concurrency_benchmark import bounded_sse_lines, parse_sse
 from provider_bench import _NoRedirect, validate_benchmark_target
 
 
@@ -28,7 +28,7 @@ def percentile(values: list[int], p: float) -> int | None:
 def consume_sse(response, started: float) -> tuple[int | None, bool, bool, bool]:
     # Both benchmark tools must reject content plus [DONE] without a
     # successful final finish_reason; the gateway emits [DONE] on failures too.
-    return parse_sse(response, started)
+    return parse_sse(bounded_sse_lines(response), started)
 
 
 def parse_step(value: str) -> tuple[str, str]:
