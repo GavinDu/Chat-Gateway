@@ -110,4 +110,3 @@ fn parse_and_validate_chat_req(body: &[u8]) -> Result<ChatReq, Response> {
     })?;
     Ok(req)
 }
-
