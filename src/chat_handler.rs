@@ -553,9 +553,9 @@ pub(super) async fn run(
                 .provider_sessions
                 .record_gateway_error(&provider_name, &e);
             let message = e.to_string();
-            record_provider_outcome(
+            chat_service::record_provider_outcome(
                 &state.metrics,
-                ProviderOutcome {
+                chat_service::ProviderOutcome {
                     request_id: &request_id,
                     provider: &provider_name,
                     outcome: "error",

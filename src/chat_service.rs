@@ -6,13 +6,12 @@ use crate::chat_backend::{BackendRequest, ChatBackend, ChatEvent, GatewayError};
 use crate::{
     api::api_error,
     app_state::{AppState, AuthKeyContext},
-    budget_personal_memory_items, completed_chat_outcome,
+    budget_personal_memory_items,
     context::{self, ContextBuilder, ContextPlan, ThreadSyncState},
     conversation_context_read_error, is_reopenable_provider_thread_url,
     memory::{ChatMessage, LongTermMemoryStore, ProviderThread},
     memory_egress, persist_completed_turn, providers,
-    read_conversation_context_with_transcript_for_owner, record_provider_outcome,
-    transcript_marker, ProviderOutcome,
+    read_conversation_context_with_transcript_for_owner, transcript_marker,
 };
 use anyhow::Result;
 use axum::{extract::Extension, http::StatusCode, response::Response};
@@ -21,6 +20,56 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::sync::mpsc;
+
+/// Keep provider timing metrics and completion logs identical for streaming
+/// and non-streaming requests. State transitions remain at the call site
+/// because stream errors carry additional session-expiry classification.
+pub(crate) struct ProviderOutcome<'a> {
+    pub(crate) request_id: &'a str,
+    pub(crate) provider: &'a str,
+    pub(crate) outcome: &'a str,
+    pub(crate) queue_ms: u64,
+    pub(crate) ttft_ms: Option<u64>,
+    pub(crate) provider_work_ms: u64,
+    pub(crate) total_ms: u64,
+}
+
+/// Classify the entire gateway operation, including durable turn commit.
+/// Provider text alone is not successful API completion if persistence fails.
+pub(crate) fn completed_chat_outcome(
+    stream_failed: bool,
+    persistence_failed: bool,
+) -> &'static str {
+    if stream_failed || persistence_failed {
+        "error"
+    } else {
+        "success"
+    }
+}
+
+pub(crate) fn record_provider_outcome(
+    metrics_registry: &crate::metrics::MetricsRegistry,
+    outcome: ProviderOutcome<'_>,
+) {
+    metrics_registry.record_provider_timings(
+        outcome.provider,
+        outcome.outcome,
+        outcome.queue_ms,
+        outcome.ttft_ms,
+        outcome.provider_work_ms,
+        outcome.total_ms,
+    );
+    tracing::info!(
+        request_id = %outcome.request_id,
+        provider = %outcome.provider,
+        queue_ms = outcome.queue_ms,
+        ttft_ms = ?outcome.ttft_ms,
+        provider_work_ms = outcome.provider_work_ms,
+        total_ms = outcome.total_ms,
+        outcome = outcome.outcome,
+        "provider request completed"
+    );
+}
 
 pub struct ChatService {
     backend: Arc<dyn ChatBackend>,
