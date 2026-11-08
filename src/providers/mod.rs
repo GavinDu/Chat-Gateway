@@ -487,11 +487,7 @@ const COMPLETION_IDLE_TICKS: u32 = 43; // 15-second grace at the default 350ms p
 #[cfg(test)]
 const EXPLICIT_DONE_IDLE_TICKS: u32 = 3; // One-second grace at the default poll tick.
 
-fn confirm_consecutive_signal(
-    previous: bool,
-    current: bool,
-    saw_absent_since_send: bool,
-) -> bool {
+fn confirm_consecutive_signal(previous: bool, current: bool, saw_absent_since_send: bool) -> bool {
     // A copy/feedback button left over from the previous answer must not
     // count as the terminal affordance for the new generation.
     saw_absent_since_send && previous && current
