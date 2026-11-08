@@ -190,26 +190,14 @@ pub(super) async fn run(
         {
             Ok(rx) => rx,
             Err(e) => {
-                let retryable_worker_error = e.is_retryable();
-                tracing::debug!(
-                    provider = %provider_name,
-                    retryable = retryable_worker_error,
-                    "provider send failed"
-                );
-                // Worker loss is an infrastructure failure, not evidence that
-                // the provider's authentication session has expired.
-                if !retryable_worker_error {
-                    state
-                        .provider_sessions
-                        .record_gateway_error(&provider_name, &e);
-                }
-                state.metrics.record_provider_timings(
+                chat_service::record_backend_admission_error(
+                    &state.provider_sessions,
+                    &state.metrics,
                     &provider_name,
-                    "error",
+                    &e,
                     queue_ms,
-                    None,
-                    provider_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
-                    request_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+                    provider_started,
+                    request_started,
                 );
                 last_err = Some(e.to_string());
                 continue;
