@@ -66,10 +66,13 @@ python3 scripts/provider_concurrency_benchmark.py \
 ```
 
 Use a non-sensitive test account and prompt. The harness validates the
-gateway's provider identity header and SSE terminal event. Output contains
+gateway's provider identity header and a successful SSE `finish_reason: stop`
+followed by `[DONE]`. The HTTP client refuses redirects and rejects non-local
+cleartext gateway targets. Output contains
 aggregate timing/failure counts only; it does not print prompts, response text,
-cookies or credentials. RSS values are snapshots before and after the sweep,
-not peak RSS. Run at least three times per machine/session state and keep
+cookies or credentials. With `--pid`, RSS includes before/after snapshots and a best-effort sampled
+peak at 50 ms intervals for the **gateway process only**. These are not the
+browser page-process RSS measurements required to close #144. Run at least three times per machine/session state and keep
 provider-specific results separate. A nonzero exit indicates one or more
 failed requests; do not silently discard failures when comparing latency.
 
@@ -77,8 +80,11 @@ failed requests; do not silently discard failures when comparing latency.
 
 Measure first-request latency after changing providers separately from a
 same-provider follow-up. Supply an ordered sequence with explicit provider/model
-pairs. Each provider retains its own conversation ID within a repetition, so
-returning to a provider measures a follow-up on its existing gateway thread.
+pairs. All steps in one repetition reuse the **same gateway conversation ID**
+across providers, including after an unsuccessful step; a new conversation
+starts for each repetition. This measures gateway-level handoffs rather than
+unrelated per-provider conversations. Upstream thread reopen still needs
+separate authenticated verification.
 
 ```sh
 CHAT_GATEWAY_API_KEY=<local-api-key> \
@@ -87,6 +93,7 @@ python3 scripts/provider_switch_benchmark.py \
   --step claude=<claude-model> \
   --step chatgpt=<chatgpt-model> \
   --step gemini=<gemini-model> \
+  --step gemini=<gemini-model> \
   --repeat 3
 ```
 
@@ -94,7 +101,9 @@ The report separates initial provider requests, first requests after a provider
 switch, and same-provider follow-ups. It includes p50/p95 TTFT and total latency
 plus failure counts. It never prints prompts, response text, credentials or
 conversation IDs. Run only against deliberately enabled, authenticated
-providers; compare like-for-like model and session conditions. Failed requests
+providers; compare like-for-like model and session conditions. Use consecutive
+same-provider steps to measure actual same-provider follow-up latency.
+Failed requests
 make the command exit nonzero and are not silently dropped from the failure
 report.
 
