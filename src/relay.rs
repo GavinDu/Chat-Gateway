@@ -761,6 +761,7 @@ pub async fn status(State(app): State<Arc<crate::AppState>>, headers: HeaderMap)
         "grok",
         "mistral",
         "perplexity",
+        "manus",
     ] {
         let session_present = match crate::session::load_session_file(provider) {
             Ok(session) => session.is_some(),
