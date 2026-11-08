@@ -643,7 +643,7 @@ mod tests {
         let metrics = crate::metrics::MetricsRegistry::default();
         let provider = "chatgpt";
         sessions.record_success(provider);
-        let now = Instant::now();
+        let now = std::time::Instant::now();
         super::record_backend_admission_error(
             &sessions,
             &metrics,
