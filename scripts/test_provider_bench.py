@@ -102,8 +102,16 @@ class ProviderBenchmarkLiveSecurityTests(unittest.TestCase):
 
         content = b'data: {"choices":[{"delta":{"content":"first"}}]}\n'
         done = b"data: [DONE]\n"
-        ttft = consume_live_benchmark_sse(FakeResponse([content, done]), 0)
+        stop = b'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n'
+        ttft = consume_live_benchmark_sse(FakeResponse([content, stop, done]), 0)
         self.assertGreaterEqual(ttft, 0)
+        with self.assertRaisesRegex(RuntimeError, "benchmark_incomplete_stream"):
+            consume_live_benchmark_sse(FakeResponse([content, done]), 0)
+        with self.assertRaisesRegex(RuntimeError, "benchmark_provider_stream_failed"):
+            length = b'data: {"choices":[{"delta":{},"finish_reason":"length"}]}\n'
+            consume_live_benchmark_sse(FakeResponse([content, length, done]), 0)
+        with self.assertRaisesRegex(RuntimeError, "benchmark_invalid_stream_event"):
+            consume_live_benchmark_sse(FakeResponse([content, b"data: null\n", stop, done]), 0)
         with self.assertRaisesRegex(RuntimeError, "benchmark_incomplete_stream"):
             consume_live_benchmark_sse(FakeResponse([content]), 0)
         with self.assertRaisesRegex(RuntimeError, "benchmark_provider_stream_failed"):

@@ -46,6 +46,7 @@ def consume_live_benchmark_sse(response, started):
     """Return TTFT only for a complete successful stream; never store content."""
     first_content_delta = None
     saw_done = False
+    saw_terminal_stop = False
     consumed_bytes = 0
     while True:
         line = response.readline(MAX_SSE_LINE_BYTES + 1)
@@ -72,12 +73,20 @@ def consume_live_benchmark_sse(response, started):
             raise RuntimeError("benchmark_invalid_stream_event")
         if event.get("error") is not None:
             raise RuntimeError("benchmark_provider_stream_failed")
+        choices = event.get("choices")
+        if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+            raise RuntimeError("benchmark_invalid_stream_event")
+        finish_reason = choices[0].get("finish_reason")
+        if finish_reason is not None:
+            if finish_reason != "stop":
+                raise RuntimeError("benchmark_provider_stream_failed")
+            saw_terminal_stop = True
         if first_content_delta is None and has_content_delta(line):
             first_content_delta = time.perf_counter()
 
     if first_content_delta is None:
         raise RuntimeError("endpoint completed without a streamed content delta")
-    if not saw_done:
+    if not saw_done or not saw_terminal_stop:
         raise RuntimeError("benchmark_incomplete_stream")
     return (first_content_delta - started) * 1000
 
