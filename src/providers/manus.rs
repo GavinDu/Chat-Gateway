@@ -37,7 +37,7 @@ pub const SELECTORS: SelectorSet = SelectorSet {
         "div.markdown-body",
         "div.prose",
     ],
-    model_keywords: "manus|lite|max|agent|chat",
+    model_keywords: "manus|lite|max",
     model_pairs: &[],
 };
 
