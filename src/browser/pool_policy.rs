@@ -118,7 +118,7 @@ pub(super) fn landing_is_not_previous_thread(provider_name: &str, actual: &str) 
         "perplexity" => !uri.path().starts_with("/search/") && !uri.path().starts_with("/page/"),
         // Manus task URLs are /app/<id>. Only /app is treated as a fresh
         // composer; other paths require live verification before replay.
-        "manus" => matches!(uri.path(), "/app" | "/app/"),
+        "manus" => matches!(uri.path(), "/app" | "/app/") && uri.query().is_none(),
         // There is no fixture-verified Meta AI conversation URL convention;
         // accept only the configured homepage instead of trusting an unknown
         // redirect into a potentially stale remote thread.
@@ -248,6 +248,7 @@ mod provider_thread_navigation_tests {
             ("perplexity", "https://www.perplexity.ai/page/abc123"),
             ("manus", "https://manus.im/app/existing-task"),
             ("manus", "https://manus.im/app/other/route"),
+            ("manus", "https://manus.im/app?task_id=existing"),
             ("metaai", "https://www.meta.ai/chat/abc123"),
         ] {
             assert!(
