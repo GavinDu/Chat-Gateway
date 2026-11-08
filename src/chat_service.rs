@@ -130,6 +130,34 @@ impl ResponseAccumulator {
     }
 }
 
+/// Record one failed provider admission at the backend-neutral service boundary.
+/// Session state derives only from a typed error, never upstream text.
+pub(crate) fn record_attempt_error(
+    provider_sessions: &crate::provider_state::ProviderSessionRegistry,
+    metrics_registry: &crate::metrics::MetricsRegistry,
+    provider: &str,
+    typed_error: Option<&GatewayError>,
+    queue_ms: u64,
+    provider_started: Instant,
+    request_started: Instant,
+) {
+    let provider_work_ms = provider_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+    let total_ms = request_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+    // Provider text is untrusted; it must not decide whether the account needs
+    // login. An absent typed error is a generic failed attempt, never an
+    // inferred authentication failure from substrings in a page or exception.
+    let generic_failure = GatewayError::provider_failure("provider attempt failed");
+    provider_sessions.record_gateway_error(provider, typed_error.unwrap_or(&generic_failure));
+    metrics_registry.record_provider_timings(
+        provider,
+        "error",
+        queue_ms,
+        None,
+        provider_work_ms,
+        total_ms,
+    );
+}
+
 impl ChatService {
     pub fn new(backend: Arc<dyn ChatBackend>) -> Self {
         Self { backend }
