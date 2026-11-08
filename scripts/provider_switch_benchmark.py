@@ -104,6 +104,44 @@ def summarize(values: list[int]) -> dict:
             "p95_ms": percentile(values, 95)}
 
 
+def measure_sequence(base_url: str, api_key: str, steps: list[tuple[str, str]],
+                     repeats: int, timeout: int) -> tuple[dict[str, list[int]], dict[str, int]]:
+    """Measure true gateway handoffs: all providers share ONE conversation per repeat.
+
+    A failed step must not replace a previously confirmed conversation ID.
+    Each repetition begins with a fresh gateway conversation.
+    """
+    categories = {
+        "initial_provider_request": [],
+        "after_provider_switch": [],
+        "same_provider_follow_up": [],
+    }
+    failures: dict[str, int] = {}
+    for repetition in range(repeats):
+        conversation_id: str | None = None
+        previous_provider = None
+        for index, (provider, model) in enumerate(steps):
+            result = request_turn(
+                base_url, api_key, provider, model, conversation_id,
+                repetition * len(steps) + index, timeout,
+            )
+            if not result["ok"]:
+                failure = result["failure"]
+                failures[f"{provider}:{failure}"] = failures.get(f"{provider}:{failure}", 0) + 1
+            else:
+                conversation_id = result["conversation_id"]
+                category = latency_category(previous_provider, provider)
+                categories[category].append(result["ttft_ms"])
+                categories[category + "_total"] = categories.get(category + "_total", [])
+                categories[category + "_total"].append(result["total_ms"])
+            # Classification follows the requested sequence, not successful
+            # completions. A failed step must not make the next provider look
+            # like an initial request or a same-provider follow-up.
+            previous_provider = provider
+
+    return categories, failures
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--step", action="append", type=parse_step, required=True,
@@ -119,35 +157,9 @@ def main() -> int:
     if args.repeat < 1 or args.timeout < 1 or len(args.step) < 2:
         parser.error("--repeat and --timeout must be positive; at least two --step values are required")
 
-    categories = {
-        "initial_provider_request": [],
-        "after_provider_switch": [],
-        "same_provider_follow_up": [],
-    }
-    failures: dict[str, int] = {}
-    for repetition in range(args.repeat):
-        conversation_ids: dict[str, str] = {}
-        previous_provider = None
-        for index, (provider, model) in enumerate(args.step):
-            existing_conversation = conversation_ids.get(provider)
-            result = request_turn(
-                args.base_url, api_key, provider, model, existing_conversation,
-                repetition * len(args.step) + index, args.timeout,
-            )
-            if not result["ok"]:
-                failure = result["failure"]
-                failures[f"{provider}:{failure}"] = failures.get(f"{provider}:{failure}", 0) + 1
-            else:
-                conversation_ids[provider] = result["conversation_id"]
-                category = latency_category(previous_provider, provider)
-                categories[category].append(result["ttft_ms"])
-                categories[category + "_total"] = categories.get(category + "_total", [])
-                categories[category + "_total"].append(result["total_ms"])
-            # Classification follows the requested sequence, not successful
-            # completions. A failed step must not make the next provider look
-            # like an initial request or a same-provider follow-up.
-            previous_provider = provider
-
+    categories, failures = measure_sequence(
+        args.base_url, api_key, args.step, args.repeat, args.timeout
+    )
     report = {
         "sequence": [provider for provider, _ in args.step],
         "repetitions": args.repeat,
