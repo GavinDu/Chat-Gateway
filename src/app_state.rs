@@ -28,6 +28,8 @@ pub(crate) struct AppState {
     /// Typed provider authentication and availability lifecycle.
     pub(crate) provider_sessions: ProviderSessionRegistry,
     pub(crate) metrics: crate::metrics::MetricsRegistry,
+    /// Independent local-browser login tickets, revocations and shutdown.
+    pub(crate) embedded_login: Arc<crate::embedded_login::EmbeddedLoginRuntime>,
 }
 
 /// A read-only eligibility probe must not consume a degraded provider's
