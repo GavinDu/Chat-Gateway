@@ -209,6 +209,7 @@ pub fn validate_navigation_url_for_provider(provider: &str, url: &str) -> anyhow
         "grok" => &["grok.com", "x.com", "twitter.com", "x.ai"],
         "mistral" => &["mistral.ai"],
         "perplexity" => &["perplexity.ai"],
+        "manus" => &["manus.im"],
         _ => anyhow::bail!("unknown provider for login navigation"),
     };
     let allowed = provider_domains
@@ -337,6 +338,8 @@ mod navigation_validation_tests {
     #[test]
     fn provider_navigation_allows_own_domain_and_common_sso() {
         assert!(validate_navigation_url_for_provider("chatgpt", "https://chatgpt.com/").is_ok());
+        assert!(validate_navigation_url_for_provider("manus", "https://manus.im/app").is_ok());
+        assert!(validate_navigation_url_for_provider("manus", "https://api.manus.im/").is_ok());
         assert!(validate_navigation_url_for_provider(
             "chatgpt",
             "https://accounts.google.com/o/oauth2/"
@@ -352,6 +355,8 @@ mod navigation_validation_tests {
     #[test]
     fn provider_navigation_rejects_other_provider_and_arbitrary_domains() {
         assert!(validate_navigation_url_for_provider("chatgpt", "https://claude.ai/").is_err());
+        assert!(validate_navigation_url_for_provider("manus", "https://manus.im.evil.example/").is_err());
+        assert!(validate_navigation_url_for_provider("manus", "https://claude.ai/").is_err());
         assert!(
             validate_navigation_url_for_provider("chatgpt", "https://attacker.example.org/")
                 .is_err()
