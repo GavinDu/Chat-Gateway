@@ -819,6 +819,29 @@ pub enum FirstEvent {
     Timeout,
 }
 
+/// Keep first-event failure semantics within the transport-independent
+/// service. The HTTP handler records each classified failure once and
+/// preserves the typed auth/challenge error when an upstream event carried it.
+/// Empty terminal events, closed streams and timeouts remain distinct failover
+/// reasons, without interpreting untrusted provider response text.
+pub(crate) fn classify_initial_stream_event(
+    first: FirstEvent,
+) -> std::result::Result<ChatEvent, (String, Option<GatewayError>)> {
+    match first {
+        FirstEvent::Chunk(chunk) => Ok(chunk),
+        FirstEvent::EmptyCompletion => Err((
+            "provider completed without output before stream started".to_owned(),
+            None,
+        )),
+        FirstEvent::Error(error) => Err((error.to_string(), Some(error))),
+        FirstEvent::Closed => Err((
+            "provider stream closed before first output".to_owned(),
+            None,
+        )),
+        FirstEvent::Timeout => Err(("provider timed out before first output".to_owned(), None)),
+    }
+}
+
 pub(crate) fn usable_initial_stream_chunk(content: &str, _done: bool) -> bool {
     // A provider may send its complete response in one terminal event. Treat
     // nonempty final content as the first meaningful chunk, not an empty reply.
