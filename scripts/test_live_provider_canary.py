@@ -19,6 +19,7 @@ class ConsumeSseTests(unittest.TestCase):
             'data: {"choices":[{"delta":{"role":"assistant"}}]}\n',
             'data: {"choices":[{"delta":{"content":"marker-"}}]}\n',
             'data: {"choices":[{"delta":{"content":"ok"}}]}\n',
+            'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n',
             'data: [DONE]\n',
         ]
         result = consume_sse(events)
@@ -36,6 +37,34 @@ class ConsumeSseTests(unittest.TestCase):
                 started_at=10.0,
             )
         self.assertEqual(result["first_content_ms"], 250)
+
+    def test_done_without_successful_stop_is_never_a_canary_pass(self):
+        prefix = ['data: {"choices":[{"delta":{"content":"partial"}}]}\n']
+        done = ['data: [DONE]\n']
+        incomplete = consume_sse(prefix + done)
+        self.assertTrue(incomplete["saw_done"])
+        self.assertTrue(incomplete["provider_error"])
+        self.assertEqual(incomplete["content"], "partial")
+
+        for reason in ("length", "content_filter", "tool_calls"):
+            with self.subTest(reason=reason):
+                truncated = consume_sse(
+                    prefix + ['data: ' + json.dumps({
+                        "choices": [{"delta": {}, "finish_reason": reason}]
+                    }) + '\n'] + done
+                )
+                self.assertTrue(truncated["provider_error"])
+                self.assertFalse(truncated["saw_done"])
+
+    def test_explicit_stop_followed_by_done_is_successful(self):
+        completed = consume_sse([
+            'data: {"choices":[{"delta":{"content":"complete"}}]}\n',
+            'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n',
+            'data: [DONE]\n',
+        ])
+        self.assertEqual(completed["content"], "complete")
+        self.assertTrue(completed["saw_done"])
+        self.assertFalse(completed["provider_error"])
 
     def test_missing_done_is_not_success(self):
         result = consume_sse([
@@ -109,7 +138,8 @@ class ConsumeSseTests(unittest.TestCase):
 
     def test_valid_multibyte_utf8_content_is_preserved(self):
         event = 'data: {"choices":[{"delta":{"content":"你好"}}]}\n'.encode("utf-8")
-        parsed = consume_sse([event, b"data: [DONE]\n"])
+        stop = b'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n'
+        parsed = consume_sse([event, stop, b"data: [DONE]\n"])
         self.assertFalse(parsed["provider_error"])
         self.assertTrue(parsed["saw_done"])
         self.assertEqual(parsed["content"], "你好")
@@ -138,9 +168,9 @@ class ConsumeSseTests(unittest.TestCase):
     def test_valid_role_and_usage_events_remain_compatible(self):
         parsed = consume_sse([
             'data: {"choices":[{"delta":{"role":"assistant"}}]}\n',
+            'data: {"choices":[{"delta":{"content":"ok"}}]}\n',
             'data: {"choices":[{"finish_reason":"stop"}]}\n',
             'data: {"choices":[]}\n',
-            'data: {"choices":[{"delta":{"content":"ok"}}]}\n',
             'data: [DONE]\n',
         ])
         self.assertFalse(parsed["provider_error"])
