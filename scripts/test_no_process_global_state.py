@@ -30,14 +30,11 @@ def disallowed_statics(source):
     return findings
 
 
-# Existing process globals are tracked as explicit migration debt. The guard
-# rejects new mutable statics rather than failing on known pre-existing code.
-# RESTART_TEST_SPAWNS is test-only; embedded_login's entries need a follow-up
-# owner-scoped runtime migration before removing them from this baseline.
-KNOWN_LEGACY_GLOBALS = {
+# The only permitted mutable static is a counter inside a #[cfg(test)]
+# supervisor test module. Production code has no exception: in particular,
+# interactive login tickets and shutdown live in per-gateway AppState.
+TEST_ONLY_STATIC_ALLOWLIST = {
     ("src/browser/pool/supervisor.rs", "RESTART_TEST_SPAWNS"),
-    ("src/embedded_login.rs", "REGISTRY"),
-    ("src/embedded_login.rs", "CHANNEL"),
 }
 
 
@@ -53,12 +50,12 @@ class ProcessStatePolicyTests(unittest.TestCase):
             for _, declaration in disallowed_statics(path.read_text(encoding="utf-8")):
                 name = declaration.split(":", 1)[0].split()[-1]
                 found.add((relative_path, name))
-        unexpected = found - KNOWN_LEGACY_GLOBALS
+        unexpected = found - TEST_ONLY_STATIC_ALLOWLIST
         self.assertEqual(
             unexpected,
             set(),
             "New mutable process-global Rust state is forbidden; move it "
-            "into AppState/ProviderRuntime. Legacy entries may be removed.",
+            "into AppState/ProviderRuntime. The sole test-only exception may be removed.",
         )
 
     def test_guard_recognizes_legacy_globals_but_allows_immutable_statics(self):
