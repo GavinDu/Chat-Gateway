@@ -1,10 +1,10 @@
 //! Model discovery and provider-availability filtering.
+#[cfg(test)]
+use crate::config;
 use crate::{
     app_state::{AppState, AuthKeyContext, ProviderEligibilityMode},
     config::AppConfig,
 };
-#[cfg(test)]
-use crate::config;
 use axum::{
     extract::{Extension, State},
     response::IntoResponse,
