@@ -493,6 +493,32 @@ async fn run_browser(
 mod tests {
     use super::*;
     #[test]
+    fn login_ticket_and_shutdown_state_are_isolated_per_gateway() {
+        let first = EmbeddedLoginRuntime::default();
+        let second = EmbeddedLoginRuntime::default();
+        let now = Instant::now();
+        first
+            .registry
+            .lock()
+            .unwrap()
+            .tickets
+            .insert("ticket".to_owned(), ("chatgpt".to_owned(), now + TTL));
+        assert!(first
+            .registry
+            .lock()
+            .unwrap()
+            .consume("ticket", "chatgpt", now));
+        assert!(!second
+            .registry
+            .lock()
+            .unwrap()
+            .consume("ticket", "chatgpt", now));
+        first.shutdown.send_replace(true);
+        assert!(*first.shutdown.borrow());
+        assert!(!*second.shutdown.borrow());
+    }
+
+    #[test]
     fn ephemeral_profile_is_private_and_removed_on_failure_drop() {
         use std::os::unix::fs::PermissionsExt;
         let path;
