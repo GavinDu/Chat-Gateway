@@ -30,12 +30,8 @@ def disallowed_statics(source):
     return findings
 
 
-# The only permitted mutable static is a counter inside a #[cfg(test)]
-# supervisor test module. Production code has no exception: in particular,
-# interactive login tickets and shutdown live in per-gateway AppState.
-TEST_ONLY_STATIC_ALLOWLIST = {
-    ("src/browser/pool/supervisor.rs", "RESTART_TEST_SPAWNS"),
-}
+# No mutable globals are allowed, even in #[cfg(test)] modules. All
+# browser restart, login ticket, session and metrics state is instance owned.
 
 
 class ProcessStatePolicyTests(unittest.TestCase):
@@ -50,12 +46,11 @@ class ProcessStatePolicyTests(unittest.TestCase):
             for _, declaration in disallowed_statics(path.read_text(encoding="utf-8")):
                 name = declaration.split(":", 1)[0].split()[-1]
                 found.add((relative_path, name))
-        unexpected = found - TEST_ONLY_STATIC_ALLOWLIST
         self.assertEqual(
-            unexpected,
+            found,
             set(),
-            "New mutable process-global Rust state is forbidden; move it "
-            "into AppState/ProviderRuntime. The sole test-only exception may be removed.",
+            "Mutable process-global Rust state is forbidden; move it "
+            "into AppState/ProviderRuntime, including test-only counters.",
         )
 
     def test_guard_recognizes_legacy_globals_but_allows_immutable_statics(self):
