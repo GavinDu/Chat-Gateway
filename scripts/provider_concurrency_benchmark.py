@@ -27,10 +27,16 @@ def percentile(values: list[int], p: float) -> int | None:
     return ordered[index]
 
 
-def parse_sse(lines, request_started: float) -> tuple[int | None, bool, bool]:
+def parse_sse(lines, request_started: float) -> tuple[int | None, bool, bool, bool]:
+    """A benchmark success requires the actual stop chunk, not only [DONE].
+
+    Partial or errored provider streams may still end with [DONE]; accepting
+    only that sentinel can underreport failure rates and distort tail metrics.
+    """
     first_token_ms = None
     saw_done = False
     provider_error = False
+    saw_finish_stop = False
     for raw in lines:
         line = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else raw
         if not line.startswith("data:"):
@@ -46,16 +52,32 @@ def parse_sse(lines, request_started: float) -> tuple[int | None, bool, bool]:
         except json.JSONDecodeError:
             provider_error = True
             break
-        if event.get("error") is not None:
+        if not isinstance(event, dict) or event.get("error") is not None:
             provider_error = True
             break
-        choices = event.get("choices") or []
+        choices = event.get("choices", [])
+        if not isinstance(choices, list):
+            provider_error = True
+            break
         if choices:
-            delta = choices[0].get("delta") or {}
+            choice = choices[0]
+            if not isinstance(choice, dict):
+                provider_error = True
+                break
+            finish_reason = choice.get("finish_reason")
+            if finish_reason is not None:
+                if finish_reason != "stop":
+                    provider_error = True
+                    break
+                saw_finish_stop = True
+            delta = choice.get("delta") or {}
+            if not isinstance(delta, dict):
+                provider_error = True
+                break
             content = delta.get("content")
             if isinstance(content, str) and content and first_token_ms is None:
                 first_token_ms = int((time.monotonic() - request_started) * 1000)
-    return first_token_ms, saw_done, provider_error
+    return first_token_ms, saw_done, provider_error, saw_finish_stop
 
 
 def process_rss_kb(pid: int | None) -> int | None:
@@ -98,7 +120,7 @@ def one_request(base_url: str, api_key: str, provider: str, model: str,
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             actual_provider = response.headers.get("X-Gateway-Provider", "").lower()
-            ttft_ms, saw_done, provider_error = parse_sse(response, started)
+            ttft_ms, saw_done, provider_error, saw_finish_stop = parse_sse(response, started)
             status = response.status
     except urllib.error.HTTPError as error:
         return {"ok": False, "failure": f"http_{error.code}"}
@@ -115,6 +137,8 @@ def one_request(base_url: str, api_key: str, provider: str, model: str,
         return {"ok": False, "failure": "missing_first_token"}
     if not saw_done:
         return {"ok": False, "failure": "missing_sse_done"}
+    if not saw_finish_stop:
+        return {"ok": False, "failure": "missing_terminal_finish"}
     return {"ok": True, "ttft_ms": ttft_ms, "total_ms": total_ms}
 
 
