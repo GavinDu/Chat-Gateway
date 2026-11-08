@@ -152,8 +152,8 @@ impl MetricsRegistry {
 
 fn escape_label(value: &str) -> String {
     value
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
+        .replace('\\', "\\\")
+        .replace('"', "\\"")
         .replace('\n', "\\n")
 }
 
@@ -309,10 +309,10 @@ mod tests {
             "# TYPE gateway_browser_worker_restarts_total counter\n",
             "gateway_browser_worker_restarts_total 0\n",
             "# TYPE gateway_provider_session_state gauge\n",
-            "gateway_provider_session_state{provider=\\"chatgpt\\",state=\\"unknown\\"} 0\n",
-            "gateway_provider_session_state{provider=\\"chatgpt\\",state=\\"ready\\"} 1\n",
-            "gateway_provider_session_state{provider=\\"chatgpt\\",state=\\"needs_login\\"} 0\n",
-            "gateway_provider_session_state{provider=\\"chatgpt\\",state=\\"degraded\\"} 0\n",
+            "gateway_provider_session_state{provider=\"chatgpt\",state=\"unknown\"} 0\n",
+            "gateway_provider_session_state{provider=\"chatgpt\",state=\"ready\"} 1\n",
+            "gateway_provider_session_state{provider=\"chatgpt\",state=\"needs_login\"} 0\n",
+            "gateway_provider_session_state{provider=\"chatgpt\",state=\"degraded\"} 0\n",
         );
         assert_eq!(actual, expected);
     }
@@ -369,6 +369,6 @@ mod tests {
 
     #[test]
     fn labels_are_escaped() {
-        assert_eq!(escape_label("a\\b\"c\nd"), "a\\\\b\\\"c\\nd");
+        assert_eq!(escape_label("a\\b\"c\nd"), "a\\\\b\\"c\\nd");
     }
 }
