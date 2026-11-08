@@ -15,10 +15,22 @@ function queueProviderTask(provider, work) {
   );
   return pending;
 }
+// Keep one trailing refresh per provider. It reads the latest cookie snapshot
+// when it starts, rather than replaying every rotation behind a slow import.
+const queuedProviderSyncs = new Map();
 function queueProviderSync(provider) {
-  return queueProviderTask(provider, () => syncProvider(provider));
+  const queued = queuedProviderSyncs.get(provider);
+  if (queued) return queued;
+  const pending = queueProviderTask(provider, () => {
+    if (queuedProviderSyncs.get(provider) === pending) queuedProviderSyncs.delete(provider);
+    return syncProvider(provider);
+  });
+  queuedProviderSyncs.set(provider, pending);
+  return pending;
 }
 function logoutProviderFromRelay(provider) {
+  // Later sync requests belong after this logout barrier.
+  queuedProviderSyncs.delete(provider);
   // Bind logout to the install present when the user clicked. An earlier
   // provider sync may still be queued while a fresh gateway is paired.
   const connectionAtClick = chrome.storage.local.get(["gateway", "token"]);

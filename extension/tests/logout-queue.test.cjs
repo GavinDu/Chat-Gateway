@@ -49,17 +49,27 @@ test("logout waits for pending imports and prevents automatic re-link", async ()
   const sync = send("sync-provider");
   await flush();
   assert.deepEqual(calls,["sync:metaai"]);
+  const trailing = send("sync-provider");
+  const coalesced = send("sync-provider");
   const logout = send("logout-provider");
+  const afterLogout = send("sync-provider");
   await flush();
   assert.deepEqual(calls,["sync:metaai"],"revoke must wait for in-flight sync");
 
   completeSync();
   assert.equal((await sync).ok,true);
+  await flush();
+  assert.deepEqual(calls,["sync:metaai","sync:metaai"],
+    "the single trailing import must precede logout");
+  completeSync();
+  assert.equal((await trailing).ok,true);
+  assert.equal((await coalesced).ok,true);
   assert.equal((await logout).ok,true);
-  assert.deepEqual(calls,["sync:metaai","DELETE:/relay/v1/session/metaai"]);
+  assert.equal((await afterLogout).ok,true);
+  assert.deepEqual(calls,["sync:metaai","sync:metaai","DELETE:/relay/v1/session/metaai"]);
   assert.deepEqual(state.linkedProviders,[]);
 
   assert.equal((await send("sync-provider")).ok,true);
-  assert.deepEqual(calls,["sync:metaai","DELETE:/relay/v1/session/metaai"],
+  assert.deepEqual(calls,["sync:metaai","sync:metaai","DELETE:/relay/v1/session/metaai"],
     "queued or later cookie change must not upload a logged-out session");
 });
