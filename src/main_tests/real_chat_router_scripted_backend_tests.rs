@@ -74,6 +74,7 @@ pub(super) fn fixture_with_memory(
         router: ProviderRouter::new(cfg),
         models_cache: Arc::new(RwLock::new(HashMap::new())),
         relay: Arc::new(relay),
+        embedded_login: Arc::new(embedded_login::EmbeddedLoginRuntime::default()),
         provider_guard: pool.provider_guard(),
         provider_sessions: pool.provider_sessions(),
         metrics: pool.metrics(),
