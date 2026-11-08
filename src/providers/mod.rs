@@ -1341,6 +1341,7 @@ mod thread_support_tests {
         for provider in [
             Provider::Gemini,
             Provider::Grok,
+            Provider::Manus,
             Provider::Qwen,
             Provider::Mistral,
             Provider::Perplexity,
