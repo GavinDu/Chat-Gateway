@@ -290,7 +290,9 @@ pub async fn stream(
     let Some(token) = protocol.strip_prefix("cg-login.") else {
         return error(StatusCode::UNAUTHORIZED, "invalid_browser_ticket");
     };
-    let accepted = app.embedded_login.registry
+    let accepted = app
+        .embedded_login
+        .registry
         .lock()
         .map(|mut r| r.consume(token, &provider, Instant::now()))
         .unwrap_or(false);
