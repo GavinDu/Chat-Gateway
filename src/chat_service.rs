@@ -6,9 +6,9 @@ use crate::chat_backend::{BackendRequest, ChatBackend, ChatEvent, GatewayError};
 use crate::{
     api::api_error,
     app_state::{AppState, AuthKeyContext},
-    budget_personal_memory_items, completed_chat_outcome, context::{ContextBuilder, ContextPlan, ThreadSyncState},
+    budget_personal_memory_items, completed_chat_outcome, context::{self, ContextBuilder, ContextPlan, ThreadSyncState},
     conversation_context_read_error, is_reopenable_provider_thread_url,
-    memory::{ChatMessage, ProviderThread}, memory_egress, persist_completed_turn, providers,
+    memory::{ChatMessage, LongTermMemoryStore, ProviderThread}, memory_egress, persist_completed_turn, providers,
     read_conversation_context_with_transcript_for_owner, record_provider_outcome,
     transcript_marker, ProviderOutcome,
 };
@@ -378,7 +378,7 @@ pub(crate) async fn prepare_chat_context(
 pub(crate) fn plan_provider_send(
     provider: &str,
     model: &str,
-    pub(crate) stored_messages: &[ChatMessage],
+    stored_messages: &[ChatMessage],
     incoming_messages: &[ChatMessage],
     saved_thread: Option<ProviderThread>,
     token_budget: usize,
