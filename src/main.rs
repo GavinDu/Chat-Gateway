@@ -1938,10 +1938,7 @@ fn build_model_list(cfg: &AppConfig, cache: &HashMap<String, Vec<String>>) -> se
     serde_json::json!({ "object": "list", "data": data })
 }
 
-fn retain_model_owners(
-    model_list: &mut serde_json::Value,
-    available: impl Fn(&str) -> bool,
-) {
+fn retain_model_owners(model_list: &mut serde_json::Value, available: impl Fn(&str) -> bool) {
     if let Some(models) = model_list
         .get_mut("data")
         .and_then(serde_json::Value::as_array_mut)
