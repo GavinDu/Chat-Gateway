@@ -168,6 +168,8 @@ raise SystemExit(1 if os.environ.get("CURL_FAIL") == "1" else 0)
             invocations = [json.loads(line) for line in calls.read_text(encoding="utf-8").splitlines()]
             gateway_run = next(args for args in invocations if args[:2] == ["run", "-d"])
 
+            self.assertEqual(gateway_run[gateway_run.index("--memory") + 1], "4g")
+            self.assertEqual(gateway_run[gateway_run.index("--memory-swap") + 1], "4g")
             self.assertIn("127.0.0.1:18080:18080", gateway_run)
             self.assertFalse(any("0.0.0.0" in arg for arg in gateway_run))
             self.assertEqual(config.stat().st_mode & 0o777, 0o600)

@@ -1156,7 +1156,7 @@ async fn ensure_private_session_dir(path: &Path) -> Result<()> {
     }
     Ok(())
 }
-fn session_state_hash(file: &SessionFile) -> Result<String> {
+pub(crate) fn session_state_hash(file: &SessionFile) -> Result<String> {
     // Ignore ts and normalize ordering so a cookie jar with unchanged values
     // produces the same fingerprint across snapshots.
     let local_storage: BTreeMap<&String, &String> = file.local_storage.iter().collect();

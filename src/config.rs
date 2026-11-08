@@ -80,6 +80,10 @@ impl Default for MemoryConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ObscuraConfig {
+    #[serde(default = "default_cached_provider_pages")]
+    pub max_cached_provider_pages: usize,
+    #[serde(default)]
+    pub discover_models_on_startup: bool,
     #[serde(default = "default_true")]
     pub stealth: bool,
     /// Optional user-agent override for the embedded browser. Match a value
@@ -92,9 +96,15 @@ pub struct ObscuraConfig {
     pub storage_dir: Option<String>,
 }
 
+fn default_cached_provider_pages() -> usize {
+    2
+}
+
 impl Default for ObscuraConfig {
     fn default() -> Self {
         Self {
+            max_cached_provider_pages: default_cached_provider_pages(),
+            discover_models_on_startup: false,
             stealth: true,
             user_agent: None,
             storage_dir: None,
@@ -204,6 +214,9 @@ impl AppConfig {
             "perplexity",
             "manus",
         ];
+        if !(1..=9).contains(&self.obscura.max_cached_provider_pages) {
+            anyhow::bail!("obscura.max_cached_provider_pages must be between 1 and 9");
+        }
         let mut auth_key_names = HashSet::new();
         for key in &self.auth.keys {
             if !auth_key_names.insert(key.name.trim().to_ascii_lowercase()) {
@@ -537,5 +550,23 @@ mod tests {
 
         let bad_provider = config("auth:\n  keys:\n    - name: local-client\n      secret_hash: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n      scopes: [chat]\n      provider_allowlist: [unknown]\n");
         assert!(bad_provider.validate().is_err());
+    }
+}
+
+#[cfg(test)]
+mod browser_resource_limits_tests {
+    use super::*;
+    #[test]
+    fn browser_defaults_bound_cached_pages_and_do_not_eagerly_discover_apps() {
+        let cfg: AppConfig = serde_yaml::from_str("{}").unwrap();
+        assert_eq!(cfg.obscura.max_cached_provider_pages, 2);
+        assert!(!cfg.obscura.discover_models_on_startup);
+        for capacity in [0, 10] {
+            let cfg: AppConfig = serde_yaml::from_str(&format!(
+                "obscura:\n  max_cached_provider_pages: {capacity}\n"
+            ))
+            .unwrap();
+            assert!(cfg.validate().is_err());
+        }
     }
 }

@@ -12,6 +12,8 @@ NETWORK="${CHAT_GATEWAY_NETWORK:-chat-gateway-local}"
 PORT="${PORT:-8080}"
 CONFIG="${CHAT_GATEWAY_CONFIG:-$ROOT/config.yaml}"
 EXTENSION_ID="${CHAT_GATEWAY_EXTENSION_ID:-}"
+MEMORY_LIMIT="${CHAT_GATEWAY_MEMORY_LIMIT:-4g}"
+MEMORY_SWAP_LIMIT="${CHAT_GATEWAY_MEMORY_SWAP_LIMIT:-4g}"
 
 usage() {
   cat <<'EOF'
@@ -33,6 +35,8 @@ Environment:
   CHAT_GATEWAY_EXTENSION_ID    Chrome extension ID from chrome://extensions
   CHAT_GATEWAY_CONFIG          Config file (default: ./config.yaml)
   CHAT_GATEWAY_CONFIG_VOLUME  Private config volume (default: chat-gateway-config)
+  CHAT_GATEWAY_MEMORY_LIMIT    Runtime memory ceiling (default: 4g)
+  CHAT_GATEWAY_MEMORY_SWAP_LIMIT Memory + swap ceiling (default: 4g)
   CHAT_GATEWAY_IMAGE           Image tag (default: chat-gateway-rs:local)
   CHAT_GATEWAY_BUILD_PLATFORM  Optional target platform (for example linux/arm64)
   CHAT_GATEWAY_BUILD_TARGET    Optional Dockerfile target (for example builder)
@@ -179,6 +183,7 @@ start_gateway() {
 
   local args=(
     run -d --name "$CONTAINER" --restart unless-stopped --network "$NETWORK"
+    --memory "$MEMORY_LIMIT" --memory-swap "$MEMORY_SWAP_LIMIT"
     -p "127.0.0.1:$PORT:$PORT"
     -e "PORT=$PORT"
     -e "CHAT_GATEWAY_DOCKER_LOCAL_BIND=1"

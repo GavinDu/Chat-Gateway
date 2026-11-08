@@ -40,7 +40,7 @@ impl SiteAdapter for MistralAdapter {
         common::discover_models(page, &SELECTORS, &self.cfg.models).await
     }
 
-    async fn send_prompt(&self, page: &Page, prompt: &str) -> Result<()> {
+    async fn send_prompt(&self, page: &mut Page, prompt: &str) -> Result<()> {
         common::send_prompt(page, &SELECTORS, prompt).await
     }
 

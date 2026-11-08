@@ -275,9 +275,19 @@ mod response_probe_tests {
     }
 }
 
+/// Advance browser tasks while preserving the configured wall-clock poll
+/// interval. settle is a maximum budget and may return immediately when idle;
+/// counting those fast returns as elapsed ticks would truncate responses.
+pub async fn drive_page(page: &mut Page, duration: Duration) {
+    let deadline = tokio::time::Instant::now() + duration;
+    page.settle(duration.as_millis().max(1).min(u64::MAX as u128) as u64)
+        .await;
+    tokio::time::sleep_until(deadline).await;
+}
+
 /// Wait until any of the selectors matches (polls query_selector).
 pub async fn wait_for_selector(
-    page: &Page,
+    page: &mut Page,
     selectors: &[&str],
     timeout_ms: u64,
 ) -> anyhow::Result<()> {
@@ -286,7 +296,7 @@ pub async fn wait_for_selector(
         if selectors.iter().any(|sel| element_exists(page, sel)) {
             return Ok(());
         }
-        tokio::time::sleep(Duration::from_millis(150)).await;
+        drive_page(page, Duration::from_millis(150)).await;
     }
     anyhow::bail!("timeout waiting for {:?}", selectors)
 }
@@ -320,13 +330,20 @@ pub fn click_first(page: &Page, selectors: &[&str]) -> anyhow::Result<()> {
 pub async fn human_type(page: &Page, selectors: &[&str], text: &str) -> anyhow::Result<()> {
     click_first(page, selectors)?;
     tokio::time::sleep(Duration::from_millis(80)).await;
+    let selector = selectors
+        .iter()
+        .copied()
+        .find(|selector| element_exists(page, selector))
+        .ok_or_else(|| anyhow::anyhow!("provider input disappeared before typing"))?;
+    let selector_js = serde_json::to_string(selector)?;
     let text_js = serde_json::to_string(text)?;
     let js = format!(
-        "(function() {{ var el = document.activeElement; if (!el) return false; if (el.tagName === 'TEXTAREA') {{ try {{ var setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set; setter.call(el, {text}); }} catch (e) {{ el.value = {text}; }} el.dispatchEvent(new InputEvent('input', {{ bubbles: true, inputType: 'insertText', data: {text} }})); el.dispatchEvent(new Event('change', {{ bubbles: true }})); return true; }} try {{ document.execCommand('selectAll', false, null); }} catch (e) {{}} var ok = false; try {{ ok = document.execCommand('insertText', false, {text}); }} catch (e) {{}} if (!ok) {{ if ('value' in el) {{ el.value = {text}; }} else {{ el.textContent = {text}; }} }} el.dispatchEvent(new InputEvent('input', {{ bubbles: true, inputType: 'insertText', data: {text} }})); el.dispatchEvent(new Event('change', {{ bubbles: true }})); return true; }})()",
-        text = text_js
+        "(function() {{ var el = document.querySelector({selector}); if (!el) return false; el.focus(); if (el.tagName === 'TEXTAREA') {{ try {{ var setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set; setter.call(el, {text}); }} catch (e) {{ el.value = {text}; }} el.dispatchEvent(new InputEvent('input', {{ bubbles: true, inputType: 'insertText', data: {text} }})); el.dispatchEvent(new Event('change', {{ bubbles: true }})); return true; }} try {{ document.execCommand('selectAll', false, null); }} catch (e) {{}} var ok = false; try {{ ok = document.execCommand('insertText', false, {text}); }} catch (e) {{}} if (!ok) {{ if ('value' in el) {{ el.value = {text}; }} else {{ el.textContent = {text}; }} }} el.dispatchEvent(new InputEvent('input', {{ bubbles: true, inputType: 'insertText', data: {text} }})); el.dispatchEvent(new Event('change', {{ bubbles: true }})); return true; }})()",
+        text = text_js,
+        selector = selector_js,
     );
     if page.evaluate(&js).as_bool() != Some(true) {
-        anyhow::bail!("typing via document.activeElement failed");
+        anyhow::bail!("typing into the provider input failed");
     }
     Ok(())
 }
@@ -352,7 +369,7 @@ pub fn press_enter(page: &Page, selector: &str) -> anyhow::Result<()> {
 /// dispatch Enter on the input (Go's send fallback). Returns true when
 /// a button was clicked, false when Enter was used.
 pub async fn click_send_or_enter(
-    page: &Page,
+    page: &mut Page,
     send_selectors: &[&str],
     input_selector: &str,
     timeout_ms: u64,
@@ -369,11 +386,21 @@ pub async fn click_send_or_enter(
                 return Ok(true);
             }
         }
-        tokio::time::sleep(Duration::from_millis(150)).await;
+        drive_page(page, Duration::from_millis(150)).await;
     }
     // Do not report a successful fallback when Enter could not be dispatched.
     press_enter(page, input_selector)?;
     Ok(false)
+}
+
+fn matching_model_labels(labels: Vec<String>, keywords: &str) -> anyhow::Result<Vec<String>> {
+    let matcher = regex::RegexBuilder::new(keywords)
+        .case_insensitive(true)
+        .build()?;
+    Ok(normalize_model_labels(labels)
+        .into_iter()
+        .filter(|label| matcher.is_match(label))
+        .collect())
 }
 
 /// Login/session-expiry detection, Go concept in Rust form (Rust v1 had
@@ -396,7 +423,10 @@ pub fn is_login_page(page: &Page) -> bool {
 
 pub fn check_session(provider: &str, page: &Page) -> anyhow::Result<()> {
     if is_login_page(page) {
-        anyhow::bail!("session_expired: {provider} session expired, re-login required");
+        let _ = provider;
+        return Err(anyhow::Error::new(
+            crate::browser::pool::ProviderSessionExpiredError,
+        ));
     }
     Ok(())
 }
@@ -459,7 +489,7 @@ pub fn normalize_model_labels(labels: Vec<String>) -> Vec<String> {
 /// selection was attempted and every pair missed, so the caller can
 /// fail the attempt and let the router try the next provider.
 pub async fn select_model(
-    page: &Page,
+    page: &mut Page,
     pairs: &[(&str, &str)],
     model: &str,
     default_aliases: &[String],
@@ -485,14 +515,14 @@ pub async fn select_model(
                     hit = true;
                     break;
                 }
-                tokio::time::sleep(Duration::from_millis(150)).await;
+                drive_page(page, Duration::from_millis(150)).await;
             }
             hit
         };
         if !found {
             continue;
         }
-        tokio::time::sleep(Duration::from_millis(400)).await;
+        drive_page(page, Duration::from_millis(400)).await;
         let opt_js = serde_json::to_string(options)?;
         let js = format!(
             "(function() {{ var els = document.querySelectorAll({}); for (var i = 0; i < els.length; i++) {{ var t = (els[i].innerText || els[i].textContent || ''); if (t.toLowerCase().indexOf({}) !== -1) {{ els[i].click(); return t; }} }} return null; }})()",
@@ -500,7 +530,7 @@ pub async fn select_model(
         );
         let v = page.evaluate(&js);
         if !v.is_null() {
-            tokio::time::sleep(Duration::from_millis(300)).await;
+            drive_page(page, Duration::from_millis(300)).await;
             return Ok(());
         }
         // Miss: Escape (synthetic, as with Enter — no keyboard API),
@@ -570,12 +600,12 @@ pub async fn discover_models(
     cfg_models: &[String],
 ) -> anyhow::Result<Vec<String>> {
     page.goto(set.url).await?;
-    tokio::time::sleep(Duration::from_millis(1200)).await;
+    drive_page(page, Duration::from_millis(1200)).await;
 
     // Try to open model picker without sending message
     for sel in set.picker {
         if click_first(page, &[sel]).is_ok() {
-            tokio::time::sleep(Duration::from_millis(600)).await;
+            drive_page(page, Duration::from_millis(600)).await;
             break;
         }
     }
@@ -593,7 +623,7 @@ pub async fn discover_models(
     let discovered: Vec<String> =
         serde_json::from_value(page.evaluate(&format!("({})()", js_fn))).unwrap_or_default();
     // Go discovery normalization as a post-processing step (see above).
-    let discovered = normalize_model_labels(discovered);
+    let discovered = matching_model_labels(discovered, set.model_keywords)?;
 
     if discovered.is_empty() {
         Ok(cfg_models.to_vec())
@@ -612,13 +642,13 @@ pub async fn discover_models(
 
 /// Wait for the input, type the prompt, click send (v1 send steps 1-3;
 /// the response stream is polled by providers::run_send).
-pub async fn send_prompt(page: &Page, set: &SelectorSet, prompt: &str) -> anyhow::Result<()> {
+pub async fn send_prompt(page: &mut Page, set: &SelectorSet, prompt: &str) -> anyhow::Result<()> {
     // 1. Wait for input ready
     wait_for_selector(page, set.input, 15000).await?;
 
     // 2. Focus + clear + type (Obscura stealth is built in)
     human_type(page, set.input, prompt).await?;
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    drive_page(page, Duration::from_millis(200)).await;
 
     // 3. Send: button click, with Go's Enter fallback when no send
     // button appears within the 5s send budget. The input selector is
@@ -696,5 +726,61 @@ mod text_selector_tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod browser_event_loop_tests {
+    #[tokio::test]
+    async fn delayed_composer_is_observed_by_selector_wait() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        page.goto("data:text/html,<html><body><script>globalThis.fixtureLoaded=true</script></body></html>")
+            .await
+            .unwrap();
+        assert_eq!(
+            page.evaluate("globalThis.fixtureLoaded"),
+            serde_json::json!(true)
+        );
+        assert_eq!(page.evaluate("(() => { setTimeout(() => { const input = document.createElement('textarea'); input.setAttribute('id', 'delayed'); document.body.appendChild(input); }, 20); return true; })()"), serde_json::json!(true));
+        super::wait_for_selector(&mut page, &["#delayed"], 600)
+            .await
+            .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod idle_browser_wait_tests {
+    #[tokio::test]
+    async fn idle_browser_pump_retains_the_poll_grace_instead_of_busy_spinning() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        page.goto("data:text/html,<script>globalThis.ready=true</script>")
+            .await
+            .unwrap();
+        let started = std::time::Instant::now();
+        super::drive_page(&mut page, std::time::Duration::from_millis(100)).await;
+        assert!(started.elapsed() >= std::time::Duration::from_millis(100));
+    }
+}
+
+#[cfg(test)]
+mod discovered_label_tests {
+    #[test]
+    fn a_model_keyword_in_later_ui_text_does_not_advertise_the_heading_as_a_model() {
+        let labels = vec![
+            "Where should we start?\nGemini".into(),
+            "Gemini 2.0 Flash".into(),
+        ];
+        assert_eq!(
+            super::matching_model_labels(labels, "gemini|flash").unwrap(),
+            vec!["Gemini 2.0 Flash"]
+        );
     }
 }

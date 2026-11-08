@@ -70,6 +70,20 @@ pub struct MetricsRegistry {
 }
 
 impl MetricsRegistry {
+    /// Historical successful completions in this gateway process, independent
+    /// of whether a page probe currently sees an input.
+    pub fn has_successful_chat(&self, provider: &str) -> bool {
+        self.data
+            .lock()
+            .ok()
+            .and_then(|data| {
+                data.provider_outcomes
+                    .get(&(provider.to_owned(), "success".to_owned()))
+                    .copied()
+            })
+            .unwrap_or(0)
+            > 0
+    }
     pub fn record_http_request(&self, route: &str, status: u16, duration_ms: u64) {
         if let Ok(mut data) = self.data.lock() {
             *data.requests.entry((route.to_owned(), status)).or_default() += 1;
@@ -399,5 +413,20 @@ mod tests {
     #[test]
     fn labels_are_escaped() {
         assert_eq!(escape_label("a\\b\"c\nd"), "a\\\\b\\\"c\\nd");
+    }
+}
+
+#[cfg(test)]
+mod verified_chat_tests {
+    use super::*;
+    #[test]
+    fn configured_models_or_failed_requests_do_not_establish_successful_chat() {
+        let metrics = MetricsRegistry::default();
+        assert!(!metrics.has_successful_chat("grok"));
+        metrics.record_provider_timings("grok", "error", 0, None, 10, 10);
+        assert!(!metrics.has_successful_chat("grok"));
+        metrics.record_provider_timings("grok", "success", 0, Some(1), 10, 10);
+        assert!(metrics.has_successful_chat("grok"));
+        assert!(!metrics.has_successful_chat("mistral"));
     }
 }

@@ -25,9 +25,81 @@ impl PageSession {
         page.goto(provider.login_url()).await?;
         cookie_restore?;
         if let Some(file) = session_file {
-            session::restore_local_storage(page, file)?;
-            page.goto(provider.login_url()).await?;
+            if !file.local_storage.is_empty() {
+                session::restore_local_storage(page, file)?;
+                page.goto(provider.login_url()).await?;
+            }
         }
         Ok(())
+    }
+}
+
+/// Timestamp-only / ordering-only cookie events must not recreate a provider
+/// page. A failed activation is never cached and is retried on the next sync.
+pub(super) async fn activate_if_changed<F, Fut>(
+    applied: &std::cell::RefCell<std::collections::HashMap<Provider, String>>,
+    provider: Provider,
+    snapshot: &session::SessionFile,
+    activate: F,
+) -> Result<bool>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<()>>,
+{
+    let fingerprint = session::session_state_hash(snapshot)?;
+    if applied.borrow().get(&provider) == Some(&fingerprint) {
+        return Ok(false);
+    }
+    activate().await?;
+    applied.borrow_mut().insert(provider, fingerprint);
+    Ok(true)
+}
+
+#[cfg(test)]
+mod activation_tests {
+    use super::*;
+    #[tokio::test]
+    async fn identical_snapshots_do_not_reload_and_failed_activation_can_retry() {
+        let applied = std::cell::RefCell::new(std::collections::HashMap::new());
+        let mut file: session::SessionFile = serde_json::from_value(serde_json::json!({
+            "cookies":[{"name":"synthetic","value":"one","domain":"grok.com","path":"/","secure":true,"http_only":true}],
+            "local_storage":{}, "ts":"before"
+        })).unwrap();
+        let calls = std::cell::Cell::new(0);
+        let apply = || async {
+            calls.set(calls.get() + 1);
+            Ok(())
+        };
+        assert!(activate_if_changed(&applied, Provider::Grok, &file, apply)
+            .await
+            .unwrap());
+        for _ in 0..30 {
+            file.ts = "later".into();
+            assert!(!activate_if_changed(&applied, Provider::Grok, &file, apply)
+                .await
+                .unwrap());
+        }
+        assert_eq!(calls.get(), 1);
+        file.cookies[0].value = "rotated".into();
+        assert!(
+            activate_if_changed(&applied, Provider::Grok, &file, || async {
+                anyhow::bail!("synthetic activation failure")
+            })
+            .await
+            .is_err()
+        );
+        assert!(activate_if_changed(&applied, Provider::Grok, &file, apply)
+            .await
+            .unwrap());
+        assert_eq!(calls.get(), 2);
+        applied.borrow_mut().remove(&Provider::Grok);
+        assert!(activate_if_changed(&applied, Provider::Grok, &file, apply)
+            .await
+            .unwrap());
+        assert_eq!(
+            calls.get(),
+            3,
+            "unlink/new login invalidates activation idempotency"
+        );
     }
 }

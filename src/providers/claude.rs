@@ -34,7 +34,7 @@ impl SiteAdapter for ClaudeAdapter {
         SELECTORS.model_pairs
     }
 
-    async fn select_model(&self, page: &Page, model: &str) -> Result<()> {
+    async fn select_model(&self, page: &mut Page, model: &str) -> Result<()> {
         common::select_model(page, SELECTORS.model_pairs, model, &self.cfg.models).await
     }
     fn strip_citations(&self) -> bool {
@@ -45,7 +45,7 @@ impl SiteAdapter for ClaudeAdapter {
         common::discover_models(page, &SELECTORS, &self.cfg.models).await
     }
 
-    async fn send_prompt(&self, page: &Page, prompt: &str) -> Result<()> {
+    async fn send_prompt(&self, page: &mut Page, prompt: &str) -> Result<()> {
         common::send_prompt(page, &SELECTORS, prompt).await
     }
 
