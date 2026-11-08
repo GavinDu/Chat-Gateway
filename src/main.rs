@@ -298,6 +298,10 @@ async fn main() -> anyhow::Result<()> {
             "/v1/admin/memory-egress-policy",
             get(memory_egress_policy_status),
         )
+        .route(
+            "/v1/admin/providers/:provider/reset",
+            post(reset_provider_for_retry),
+        )
         .route("/v1/models", get(models))
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/conversations", get(list_conversations))
@@ -971,6 +975,39 @@ mod login_action_payload_tests {
 /// Readiness requires at least one enabled provider whose session is not known
 /// to be expired; providers marked `needs_login` do not count as routable.
 /// Return the effective memory-egress policy without exposing memory values.
+/// A manual operator retry releases challenge/session circuit breakers but does
+/// not assert that a provider login is healthy. Requires a configured admin key.
+async fn reset_provider_for_retry(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(provider): axum::extract::Path<String>,
+) -> Response {
+    if state.cfg.provider(&provider).is_none() {
+        return api_error(
+            StatusCode::NOT_FOUND,
+            "invalid_request_error",
+            "provider_not_found",
+            "provider does not exist",
+        );
+    }
+    if state.provider_guard.reset_challenge(&provider).is_err()
+        || state.provider_sessions.reset_for_retry(&provider).is_err()
+    {
+        return api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "server_error",
+            "provider_reset_failed",
+            "provider state could not be reset safely",
+        );
+    }
+    tracing::info!(provider = %provider, "operator reset provider for retry");
+    Json(serde_json::json!({
+        "provider": provider,
+        "session_state": "unknown",
+        "challenge_disabled": false,
+    }))
+    .into_response()
+}
+
 async fn memory_egress_policy_status() -> Response {
     match memory_egress::MemoryEgressPolicy::from_env() {
         Ok(policy) => Json(serde_json::json!({
@@ -1123,7 +1160,7 @@ fn authorize_api_request(
     let admin_route = path.starts_with("/login")
         || path.starts_with("/relay/")
         || path == "/metrics"
-        || path == "/v1/admin/memory-egress-policy"
+        || path.starts_with("/v1/admin/")
         || path.starts_with("/v1/memory/")
         || path == "/v1/conversations"
         || path.contains("/provider-threads/")
@@ -1144,12 +1181,15 @@ async fn authenticate_api_key(
     mut req: Request<Body>,
     next: Next,
 ) -> Response {
-    if req.uri().path().starts_with("/login/api/") && auth.keys.is_empty() {
+    if (req.uri().path().starts_with("/login/api/")
+        || req.uri().path().starts_with("/v1/admin/providers/"))
+        && auth.keys.is_empty()
+    {
         return api_error(
             StatusCode::FORBIDDEN,
             "authentication_error",
             "owner_authorization_required",
-            "browser controls require a configured admin API key",
+            "provider and browser controls require a configured admin API key",
         );
     }
     // The shell contains no private data. Browser WebSockets cannot set a
@@ -1228,6 +1268,28 @@ async fn authenticate_api_key(
 mod embedded_owner_auth_tests {
     use super::*;
     use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn operator_provider_reset_is_forbidden_without_admin_key_configuration() {
+        let app = Router::new()
+            .route(
+                "/v1/admin/providers/:provider/reset",
+                post(|| async { StatusCode::OK }),
+            )
+            .layer(middleware::from_fn_with_state(
+                config::AuthConfig::default(),
+                authenticate_api_key,
+            ));
+        let request = Request::builder()
+            .method(axum::http::Method::POST)
+            .uri("/v1/admin/providers/chatgpt/reset")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            app.oneshot(request).await.unwrap().status(),
+            StatusCode::FORBIDDEN,
+        );
+    }
 
     #[tokio::test]
     async fn duplicate_api_authorization_is_rejected_before_auth_policy() {
@@ -2929,6 +2991,27 @@ mod api_key_auth_tests {
             ),
             Err(AuthFailure::InsufficientScope)
         );
+    }
+
+    #[test]
+    fn operator_reset_route_requires_admin_scope() {
+        let path = "/v1/admin/providers/chatgpt/reset";
+        assert_eq!(
+            authorize_api_request(
+                &auth(&["chat"]),
+                Some("Bearer test-secret"),
+                path,
+                &axum::http::Method::POST,
+            ),
+            Err(AuthFailure::InsufficientScope)
+        );
+        assert!(authorize_api_request(
+            &auth(&["admin"]),
+            Some("Bearer test-secret"),
+            path,
+            &axum::http::Method::POST,
+        )
+        .is_ok());
     }
 
     #[test]
