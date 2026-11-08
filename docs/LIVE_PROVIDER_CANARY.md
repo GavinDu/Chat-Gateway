@@ -76,14 +76,16 @@ before sending a synthetic marker.
    ```
 
    Claude, Gemini and Grok must each recover the marker through the same
-   conversation ID. A missing marker, missing SSE `[DONE]`, empty response,
+   conversation ID. A missing marker, missing SSE `[DONE]`, missing successful terminal
+   `finish_reason: stop`, empty response,
    provider error, HTTP error or timeout fails the run. The local state file is
    deleted after a fully successful second phase.
 
 ## Interpreting the report
 
 - `ttft_ms` is measured to the first non-empty content delta.
-- `total_ms` includes the complete streamed turn through terminal `[DONE]`.
+- `total_ms` includes the complete streamed turn through successful
+  `finish_reason: stop` and terminal `[DONE]`.
 - `failure_category` is intentionally sanitized; provider response bodies,
   prompts, cookies, authorization headers and response text are not emitted.
 - A passing report is evidence for that specific run/account/session, not a
