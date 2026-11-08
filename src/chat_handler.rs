@@ -194,7 +194,8 @@ struct JsonAttempt<'a> {
     completion_timeout: std::time::Duration,
     queue_ms: u64,
     prompt_tokens: u64,
-    receiver: tokio::sync::mpsc::Receiver<Result<chat_backend::ChatEvent, chat_backend::GatewayError>>,
+    receiver:
+        tokio::sync::mpsc::Receiver<Result<chat_backend::ChatEvent, chat_backend::GatewayError>>,
 }
 
 async fn json_provider_response(attempt: JsonAttempt<'_>) -> std::result::Result<Response, String> {
