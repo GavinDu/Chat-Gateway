@@ -163,6 +163,53 @@ async fn real_router_json_success_commits_one_canonical_turn() {
 }
 
 #[tokio::test]
+async fn real_router_terminal_event_with_content_matches_json_and_sse() {
+    // A backend may put all response text in its terminal event. Both
+    // transports must emit it exactly once and persist the same turn.
+    for stream in [false, true] {
+        let conversation = if stream {
+            "router_terminal_stream_001"
+        } else {
+            "router_terminal_json_001"
+        };
+        let (app, state) = fixture(
+            &["chatgpt"],
+            vec![ScriptedSend::Events(vec![Ok(ChatEvent {
+                content: "single terminal answer".to_owned(),
+                done: true,
+            })])],
+            None,
+        );
+        let response = send(app, stream, "chatgpt/fake-model", conversation).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 65_536).await.unwrap();
+        if stream {
+            let sse = String::from_utf8(body.to_vec()).unwrap();
+            assert_eq!(
+                sse.matches("\\"content\\":\\"single terminal answer\\"").count(),
+                1,
+                "the terminal event's text must be sent only once"
+            );
+            assert!(sse.contains("data: [DONE]"));
+            assert!(sse.contains("\\"finish_reason\\":\\"stop\\""));
+        } else {
+            let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(
+                payload["choices"][0]["message"]["content"],
+                "single terminal answer"
+            );
+        }
+        let messages = state
+            .memory
+            .conversation_messages_for_owner("local", conversation)
+            .unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].content, "synthetic prompt");
+        assert_eq!(messages[1].content, "single terminal answer");
+    }
+}
+
+#[tokio::test]
 async fn real_router_fails_over_on_backend_admission_error_before_output() {
     let (app, state) = fixture(
         &["chatgpt", "claude"],
