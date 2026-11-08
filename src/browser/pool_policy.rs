@@ -28,6 +28,33 @@ pub(super) fn provider_thread_url_is_same_origin(candidate: &str, provider_home:
     )
 }
 
+/// A provider landing URL with a conversation selector is not a fresh
+/// composer, even when its path is the homepage. This check is deliberately
+/// provider-agnostic: an unknown query-based redirect must not mix the
+/// gateway's replay with an existing remote conversation.
+fn landing_query_selects_existing_thread(uri: &axum::http::Uri) -> bool {
+    uri.query().is_some_and(|query| {
+        query.split('&').any(|parameter| {
+            let name = parameter.split('=').next().unwrap_or_default();
+            let name = name.to_ascii_lowercase().replace("%5f", "_");
+            // Reject ambiguous encoded keys instead of guessing whether
+            // they select a remote conversation.
+            name.contains('%')
+                || matches!(
+                    name.as_str(),
+                    "conversation"
+                        | "conversation_id"
+                        | "conversationid"
+                        | "thread"
+                        | "thread_id"
+                        | "threadid"
+                        | "chat_id"
+                        | "chatid"
+                )
+        })
+    })
+}
+
 /// Replaying into a provider's *previous* remote conversation would mix two
 /// distinct gateway conversations. Some sites redirect their home page into
 /// the last active thread; observing a composer on that page is insufficient
@@ -40,6 +67,9 @@ pub(super) fn landing_is_not_previous_thread(provider_name: &str, actual: &str) 
         return false;
     };
     if uri.scheme_str() != Some("https") || uri.authority().is_none() {
+        return false;
+    }
+    if landing_query_selects_existing_thread(&uri) {
         return false;
     }
     match provider_name {
@@ -193,6 +223,43 @@ mod provider_thread_navigation_tests {
                 !landing_is_not_previous_thread(provider, previous_thread),
                 "{provider} must not replay into an existing thread: {previous_thread}"
             );
+        }
+    }
+
+    #[test]
+    fn query_based_thread_redirects_are_never_fresh_conversations() {
+        use super::landing_is_not_previous_thread;
+
+        for (provider, url) in [
+            ("grok", "https://grok.com/?conversation_id=old-thread"),
+            ("grok", "https://grok.com/?Conversation=old-thread"),
+            (
+                "gemini",
+                "https://gemini.google.com/app?thread_id=old-thread",
+            ),
+            ("chatgpt", "https://chatgpt.com/?chatId=old-thread"),
+            (
+                "claude",
+                "https://claude.ai/new?conversation%5Fid=old-thread",
+            ),
+            ("qwen", "https://chat.qwen.ai/?thread=old-thread"),
+            ("mistral", "https://chat.mistral.ai/?chat_id=old-thread"),
+            (
+                "perplexity",
+                "https://www.perplexity.ai/?thread%69d=old-thread",
+            ),
+        ] {
+            assert!(
+                !landing_is_not_previous_thread(provider, url),
+                "{provider} must not replay into a query-selected thread: {url}"
+            );
+        }
+        for (provider, url) in [
+            ("grok", "https://grok.com/?source=home"),
+            ("chatgpt", "https://chatgpt.com/?model=auto"),
+            ("claude", "https://claude.ai/new?utm_source=app"),
+        ] {
+            assert!(landing_is_not_previous_thread(provider, url));
         }
     }
 
