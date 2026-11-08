@@ -1,7 +1,9 @@
 //! Non-streaming JSON completion lifecycle, retry boundary, and durable commit.
 use super::*;
 
-pub(super) async fn json_provider_response(attempt: JsonAttempt<'_>) -> std::result::Result<Response, String> {
+pub(super) async fn json_provider_response(
+    attempt: JsonAttempt<'_>,
+) -> std::result::Result<Response, String> {
     let JsonAttempt {
         state,
         owner_key_id,
