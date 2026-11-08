@@ -57,7 +57,7 @@ status, _, content = request('/relay/v1/status', headers={
     'X-Relay-Timestamp': str(int(time.time())),
     'X-Relay-Nonce': secrets.token_hex(16),
 })
-assert status == 200 and len(json.loads(content)['providers']) == 8
+assert status == 200 and len(json.loads(content)['providers']) == 9
 print('Local approval smoke passed: navigation, Origin, CSRF, pre-approval polling, replay rejection and authenticated provider status.')
 
 status, _, content = request('/relay/v1/status', {}, headers={
@@ -65,5 +65,5 @@ status, _, content = request('/relay/v1/status', {}, headers={
     'X-Relay-Timestamp': str(int(time.time())),
     'X-Relay-Nonce': secrets.token_hex(16),
 })
-assert status == 200 and len(json.loads(content)['providers']) == 8
+assert status == 200 and len(json.loads(content)['providers']) == 9
 print('Origin-bound status POST and legacy GET both passed.')
