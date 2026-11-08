@@ -85,6 +85,20 @@ impl ProviderGuard {
         }
     }
 
+    /// Explicit owner reset of the challenge circuit breaker. The pacing and
+    /// daily-request budgets are deliberately retained so a reset cannot
+    /// bypass provider rate limits.
+    pub fn reset_challenge(&self, provider: &str) -> anyhow::Result<()> {
+        let mut budgets = self
+            .budgets
+            .lock()
+            .map_err(|_| anyhow::anyhow!("provider guard unavailable"))?;
+        if let Some(budget) = budgets.get_mut(provider) {
+            budget.disabled_reason = None;
+        }
+        Ok(())
+    }
+
     pub fn provider_disabled_reason(&self, provider: &str) -> Option<&'static str> {
         self.budgets
             .lock()
@@ -193,6 +207,19 @@ mod tests {
             "https://example.test/chat",
             "Welcome back. How can I help?"
         ));
+    }
+
+    #[tokio::test]
+    async fn admin_challenge_reset_keeps_daily_request_quota() {
+        let guard = ProviderGuard::default();
+        guard.disable_provider("provider", "challenge page detected");
+        assert!(guard.provider_disabled_reason("provider").is_some());
+        guard.reset_challenge("provider").unwrap();
+        assert_eq!(guard.provider_disabled_reason("provider"), None);
+        guard.wait_for_request_slot("provider", 1, 1).await.unwrap();
+        assert!(guard.wait_for_request_slot("provider", 1, 1).await.is_err());
+        guard.reset_challenge("provider").unwrap();
+        assert!(guard.wait_for_request_slot("provider", 1, 1).await.is_err());
     }
 
     #[test]
