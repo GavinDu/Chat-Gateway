@@ -14,7 +14,6 @@ use anyhow::Result;
 use async_trait::async_trait;
 use obscura_core::Page;
 use std::collections::HashMap;
-use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
@@ -140,12 +139,12 @@ pub trait SiteAdapter: Send + Sync {
     /// (Rust v1 behavior — no selection). Providers with pair data
     /// delegate to common::select_model; failure fails the attempt so
     /// the router can try the next provider.
-    async fn select_model(&self, _page: &Page, _model: &str) -> Result<()> {
+    async fn select_model(&self, _page: &mut Page, _model: &str) -> Result<()> {
         Ok(())
     }
 
     /// Wait for the input, type the prompt, click send.
-    async fn send_prompt(&self, page: &Page, prompt: &str) -> Result<()>;
+    async fn send_prompt(&self, page: &mut Page, prompt: &str) -> Result<()>;
 
     /// Current full text of the (last) response, if present.
     fn response_text(&self, page: &Page) -> Option<String>;
@@ -559,7 +558,7 @@ pub struct ProviderSendPolicy {
 
 pub async fn run_send(
     adapter: Arc<dyn SiteAdapter>,
-    page: Rc<Page>,
+    page: &mut Page,
     prompt: String,
     timeout: Duration,
     poll_tick: Duration,
@@ -571,7 +570,7 @@ pub async fn run_send(
         provider_guard,
         metrics,
     } = policy;
-    if crate::provider_guard::is_challenge_page(&page) {
+    if crate::provider_guard::is_challenge_page(page) {
         provider_guard.disable_provider(
             adapter.name(),
             "challenge page detected; manual review required",
@@ -588,7 +587,7 @@ pub async fn run_send(
     // started at 0); this fixes that stale-text bug while keeping
     // Rust v1's 350ms / stability / indicator completion.
     let done_signal = adapter.done_signal();
-    let baseline_probe = adapter.response_probe(&page, true);
+    let baseline_probe = adapter.response_probe(page, true);
     let baseline_response_count = baseline_probe.count;
     let baseline = baseline_probe.text.filter(|t| !t.is_empty());
     let identical_answer_fallback = baseline.clone();
@@ -598,7 +597,7 @@ pub async fn run_send(
     // polling; otherwise a stuck selector/input action can hang indefinitely
     // before the existing polling timeout even starts.
     let start = Instant::now();
-    match tokio::time::timeout(timeout, adapter.send_prompt(&page, &prompt)).await {
+    match tokio::time::timeout(timeout, adapter.send_prompt(page, &prompt)).await {
         Ok(Ok(())) => {}
         Ok(Err(error)) => {
             let _ = chunks.send(Err(error)).await;
@@ -630,7 +629,7 @@ pub async fn run_send(
 
     loop {
         if chunks.is_closed() {
-            adapter.cancel_generation(page.as_ref());
+            adapter.cancel_generation(page);
             tracing::debug!(
                 provider = adapter.name(),
                 "client disconnected; requested generation stop"
@@ -651,13 +650,13 @@ pub async fn run_send(
             break;
         }
 
-        tokio::time::sleep(poll_tick).await;
+        common::drive_page(page, poll_tick).await;
         let poll_started = Instant::now();
         poll_count = poll_count.saturating_add(1);
         // Body text extraction is expensive on large pages; keep URL checks on every
         // tick, but inspect challenge text every five polls (~1.75 seconds).
         let check_body_challenge = should_check_body_challenge(poll_count);
-        let probe = adapter.response_probe(&page, check_body_challenge);
+        let probe = adapter.response_probe(page, check_body_challenge);
         metrics.record_browser_poll(
             adapter.name(),
             1,
@@ -738,7 +737,7 @@ pub async fn run_send(
                         // Sample the full body immediately before completion, even
                         // when this poll is not one of the periodic body checks.
                         let final_probe_started = Instant::now();
-                        let final_probe = adapter.response_probe(&page, true);
+                        let final_probe = adapter.response_probe(page, true);
                         metrics.record_browser_poll(
                             adapter.name(),
                             1,
@@ -784,7 +783,7 @@ pub async fn run_send(
                                 .await
                                 .is_err()
                             {
-                                adapter.cancel_generation(page.as_ref());
+                                adapter.cancel_generation(page);
                                 return;
                             }
                         }
@@ -821,7 +820,7 @@ pub async fn run_send(
                             .await
                             .is_err()
                     {
-                        adapter.cancel_generation(page.as_ref());
+                        adapter.cancel_generation(page);
                         return; // receiver gone
                     }
                     continue;
@@ -850,7 +849,7 @@ pub async fn run_send(
                 // A final full-body check closes the gap between periodic
                 // sampling and declaring the provider turn complete.
                 let final_probe_started = Instant::now();
-                let final_probe = adapter.response_probe(&page, true);
+                let final_probe = adapter.response_probe(page, true);
                 metrics.record_browser_poll(
                     adapter.name(),
                     1,
@@ -1505,5 +1504,79 @@ mod completion_pause_regression_tests {
             POLL,
             Duration::from_millis(15_000),
         ));
+    }
+}
+
+#[cfg(test)]
+mod live_dom_send_tests {
+    use super::*;
+    #[tokio::test]
+    async fn real_adapter_observes_asynchronous_response_in_the_pinned_browser() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body><script>globalThis.fixtureLoaded=true</script><form>
+          <textarea id="prompt-textarea"></textarea>
+          <button type="button" data-testid="send-button">Send</button>
+        </form></body></html>"#;
+        let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        assert_eq!(
+            page.evaluate(
+                r#"(() => {
+          document.querySelector('button').addEventListener('click', () => {
+            globalThis.fixtureClicked = true;
+            setTimeout(() => {
+              globalThis.fixtureTimerFired = true;
+              const outer = document.createElement('div');
+              outer.setAttribute('data-message-author-role', 'assistant');
+              const text = document.createElement('div'); text.setAttribute('class', 'markdown');
+              text.textContent = document.getElementById('prompt-textarea').value;
+              outer.appendChild(text); document.body.appendChild(outer);
+            }, 30);
+          });
+          return true;
+        })()"#
+            ),
+            serde_json::json!(true)
+        );
+        let adapter = Arc::new(chatgpt::ChatGPTAdapter {
+            cfg: serde_yaml::from_str("name: chatgpt\nmodels: [gpt]").unwrap(),
+        });
+        let (tx, mut rx) = mpsc::channel(32);
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            run_send(
+                adapter,
+                &mut page,
+                "SYNTHETIC_ASYNC_OK".into(),
+                Duration::from_secs(4),
+                Duration::from_millis(50),
+                ProviderSendPolicy {
+                    completion_idle: Duration::from_millis(100),
+                    provider_guard: crate::provider_guard::ProviderGuard::default(),
+                    metrics: crate::metrics::MetricsRegistry::default(),
+                },
+                tx,
+            ),
+        )
+        .await
+        .unwrap();
+        let diagnostics = page.evaluate("[globalThis.fixtureClicked, globalThis.fixtureTimerFired, document.querySelectorAll('.markdown').length, document.getElementById('prompt-textarea').value, document.body.textContent]");
+        let mut text = String::new();
+        let mut done = false;
+        while let Some(chunk) = rx.recv().await {
+            let chunk = chunk.unwrap_or_else(|error| {
+                panic!("synthetic browser error: {error}; state={diagnostics}")
+            });
+            text.push_str(&chunk.content);
+            done |= chunk.done;
+        }
+        assert_eq!(text, "SYNTHETIC_ASYNC_OK");
+        assert!(done);
     }
 }

@@ -117,12 +117,30 @@ together: encrypted session files cannot be recovered without the matching
 key volume. Do not remove the key volume while retaining session data.
 The published gateway port is host-loopback-only; never widen it.
 
+The embedded browser keeps up to two cached provider pages by default
+(`obscura.max_cached_provider_pages`, range 1–9). Other enabled providers open
+on demand; idle pages are evicted and restored from the encrypted session vault
+when needed. Browser-driving operations are serialized to bound transient heaps;
+chat admission waits use the configured provider queue timeout. The Docker
+helper also applies a 4 GiB runtime memory ceiling (including swap) so a runaway
+page cannot consume the entire host VM. Override with
+`CHAT_GATEWAY_MEMORY_LIMIT` and `CHAT_GATEWAY_MEMORY_SWAP_LIMIT` when deploying
+with a different measured memory budget. Background
+model-picker discovery is disabled by default. These settings reduce repeated
+SPA loads and memory pressure without deleting saved sessions.
+
+`/health` reports session observations separately from
+`successful_chat_observed`, which records whether a completed chat has been
+observed for that provider in this gateway process. `ready` / routable state
+alone does not establish successful chat. A background composer probe does not
+clear a recorded failed-chat cooldown.
+
 ## API (OpenAI compatible)
 
 - `GET /health` - status + configured providers
 - `GET /v1/models` - configured aliases + discovered catalog (discovery
-  runs in the background at startup; picker labels are read without
-  sending a message, failures fall back to the configured aliases)
+  is opt-in with `obscura.discover_models_on_startup: true`; configured aliases
+  remain available without loading every provider app)
 - `POST /v1/chat/completions` - streaming (SSE) or JSON
 
 ```bash

@@ -55,10 +55,12 @@ pub(crate) async fn refresh_models(state: &Arc<AppState>) {
 /// These tasks are deliberately centralized so startup wiring stays in main.
 pub(crate) fn start_background_workers(state: &Arc<AppState>) {
     // Model discovery reads provider pickers without sending messages.
-    let state_for_models = state.clone();
-    tokio::spawn(async move {
-        refresh_models(&state_for_models).await;
-    });
+    if state.cfg.obscura.discover_models_on_startup {
+        let state_for_models = state.clone();
+        tokio::spawn(async move {
+            refresh_models(&state_for_models).await;
+        });
+    }
 
     // Verify idle provider sessions on the browser worker. Each probe is
     // read-only and serialized by the provider page lock; stagger providers
@@ -95,7 +97,7 @@ pub(crate) fn start_background_workers(state: &Arc<AppState>) {
                     }
                 }
                 match pool.verify_session(&provider_name).await {
-                    Ok(true) => provider_sessions.record_success(&provider_name),
+                    Ok(true) => provider_sessions.record_probe_success(&provider_name),
                     // A false result means the page is not warmed yet, not that
                     // the provider session is invalid. Leave routing state unchanged.
                     Ok(false) => {}

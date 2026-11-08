@@ -32,6 +32,25 @@ async fn session_refresh_permit<'a>(
     }
 }
 
+async fn ensure_provider_page(
+    browser: &obscura_core::Browser,
+    pages: &SharedPages,
+    provider: Provider,
+) -> Result<bool> {
+    if pages.borrow().contains_key(&provider) {
+        return Ok(false);
+    }
+    let mut page = browser_factory::new_page(browser).await?;
+    crate::browser::network_tap::attach_provider_network_tap(&mut page, provider);
+    let snapshot = session::load_session_file(provider.name())?;
+    if let Err(error) = PageSession::open(browser, &mut page, provider, snapshot.as_ref()).await {
+        session::clear_provider_cookies(browser, provider.name())?;
+        return Err(error);
+    }
+    pages.borrow_mut().insert(provider, Rc::new(page));
+    Ok(true)
+}
+
 pub(super) fn browser_thread(
     cfg: Arc<AppConfig>,
     mut cmd_rx: mpsc::Receiver<Command>,
@@ -71,8 +90,11 @@ pub(super) fn browser_thread(
                 // read them and Complete can swap a login page in as the
                 // warm page. Every borrow is short (no await while a
                 // borrow is held) — map entries are cloned out first.
-                let pages: Rc<RefCell<HashMap<Provider, Rc<obscura_core::Page>>>> =
-                    Rc::new(RefCell::new(HashMap::new()));
+                let pages = Rc::new(RefCell::new(ProviderPageCache::new(cfg.obscura.max_cached_provider_pages)));
+                // Serializing browser-driving work bounds transient pages and V8
+                // heaps while other HTTP/status work remains independently runnable.
+                let operation_gate = Rc::new(tokio::sync::Mutex::new(()));
+                let applied_imports: Rc<RefCell<HashMap<Provider, String>>> = Rc::new(RefCell::new(HashMap::new()));
                 let locks: Rc<RefCell<HashMap<Provider, Rc<tokio::sync::Mutex<()>>>>> =
                     Rc::new(RefCell::new(HashMap::new()));
                 // Login delegate UI state (see src/login.rs).
@@ -81,9 +103,14 @@ pub(super) fn browser_thread(
                 let login_meta: Rc<RefCell<HashMap<Provider, LoginMeta>>> =
                     Rc::new(RefCell::new(HashMap::new()));
 
-                // Pre-warm one persistent page per enabled provider
-                for pcfg in &cfg.providers {
-                    if !pcfg.enabled { continue; }
+                // Every enabled provider has a lock even when its page is cold.
+                for pcfg in cfg.providers.iter().filter(|pcfg| pcfg.enabled) {
+                    if let Some(provider) = Provider::from_name(&pcfg.name) {
+                        locks.borrow_mut().insert(provider, Rc::new(tokio::sync::Mutex::new(())));
+                    }
+                }
+                // Keep only a bounded working set; other providers open on demand.
+                for pcfg in cfg.providers.iter().filter(|pcfg| pcfg.enabled).take(cfg.obscura.max_cached_provider_pages) {
                     let Some(provider) = Provider::from_name(&pcfg.name) else { continue };
                     match super::browser_factory::new_page(&browser).await {
                         Ok(mut page) => {
@@ -121,10 +148,9 @@ pub(super) fn browser_thread(
                                 }
                             };
                             if restore_failed {
-                                // A partially restored session is never usable. Clear both
-                                // persistence layers and invalidate the snapshot before allowing
-                                // an interactive re-login. If cleanup fails, do not publish the
-                                // page into the provider pool.
+                                // Do not publish a partially restored page. Clear runtime
+                                // state, retaining the encrypted snapshot: a load/transport
+                                // failure does not establish expired credentials.
                                 let cleanup = (|| -> Result<()> {
                                     session::clear_provider_cookies(&browser, provider.name())?;
                                     let cleared = page.evaluate(
@@ -133,7 +159,6 @@ pub(super) fn browser_thread(
                                     if cleared != serde_json::Value::Bool(true) {
                                         anyhow::bail!("provider localStorage cleanup failed");
                                     }
-                                    session::delete_session_snapshot(provider.name())?;
                                     Ok(())
                                 })();
                                 if let Err(error) = cleanup {
@@ -145,16 +170,10 @@ pub(super) fn browser_thread(
                                     );
                                     continue;
                                 }
-                                if let Err(error) = page.goto(provider.login_url()).await {
-                                    provider_sessions.record_probe_failure(provider.name());
-                                    tracing::error!(
-                                        provider = %pcfg.name,
-                                        %error,
-                                        "could not reload provider after clearing partial session; page withheld"
-                                    );
-                                    continue;
-                                }
-                                provider_sessions.record_needs_login(provider.name());
+                                provider_sessions.record_probe_failure(provider.name());
+                                tracing::warn!(provider = %pcfg.name,
+                                    "provider warm-up failed; page withheld and saved session retained");
+                                continue;
                             } else {
                                 // Verify the restored session before publishing this page as
                                 // usable. Expired credentials are revoked from disk and from
@@ -224,33 +243,9 @@ pub(super) fn browser_thread(
                 worker_ready.store(true, Ordering::Release);
                 let _ = ready_tx.send(Ok(()));
 
-                // Probe each warmed provider page independently. A small stable
-                // per-provider offset avoids synchronized bursts across providers.
-                for provider in pages.borrow().keys().copied().collect::<Vec<_>>() {
-                    let Some(page) = pages.borrow().get(&provider).cloned() else { continue };
-                    let Some(lock) = locks.borrow().get(&provider).cloned() else { continue };
-                    let Some(adapter) = registry.get(&provider).cloned() else { continue };
-                    let provider_sessions = provider_sessions.clone();
-                    tokio::task::spawn_local(async move {
-                        let jitter = provider.name().bytes().map(u64::from).sum::<u64>() % 21;
-                        tokio::time::sleep(Duration::from_secs(30 + jitter)).await;
-                        loop {
-                            {
-                                let _guard = lock.lock().await;
-                                match verify_session_page(provider, &page, adapter.as_ref()) {
-                                    Ok(true) => provider_sessions.record_success(provider.name()),
-                                    // No chat input is inconclusive, not evidence of expiry.
-                                    Ok(false) => {}
-                                    Err(error) if error.downcast_ref::<ProviderSessionExpiredError>().is_some() => {
-                                        provider_sessions.record_needs_login(provider.name());
-                                    }
-                                    Err(_) => provider_sessions.record_probe_failure(provider.name()),
-                                }
-                            }
-                            tokio::time::sleep(Duration::from_secs(60 + jitter)).await;
-                        }
-                    });
-                }
+                // app::start_background_workers probes the current cache entry
+                // under its provider lock. Do not retain startup pages in a second
+                // periodic task after refresh has replaced or evicted them.
 
                 while let Some(cmd) = cmd_rx.recv().await {
                     match cmd {
@@ -261,7 +256,9 @@ pub(super) fn browser_thread(
                         Command::Discover { provider, reply } => {
                             let browser = browser.clone();
                             let registry = registry.clone();
+                            let operation_gate = operation_gate.clone();
                             tokio::task::spawn_local(async move {
+                                let _operation = operation_gate.lock().await;
                                 let res: Result<Vec<String>> = async {
                                     let adapter = registry.get(&provider).cloned()
                                         .ok_or_else(|| anyhow::anyhow!("provider not enabled"))?;
@@ -276,27 +273,45 @@ pub(super) fn browser_thread(
                             // worker command queue. Never navigate a page for
                             // an abandoned sender after that admission timeout.
                             if chunks.is_closed() { continue; }
-                            let Some(page) = pages.borrow().get(&provider).cloned() else {
-                                let _ = chunks.send(Err(anyhow::anyhow!("provider page not warmed"))).await;
-                                continue;
-                            };
+                            let pages = pages.clone();
+                            let operation_gate = operation_gate.clone();
+                            let applied_imports = applied_imports.clone();
                             let Some(lock) = locks.borrow().get(&provider).cloned() else { continue };
                             let Some(adapter) = registry.get(&provider).cloned() else {
                                 let _ = chunks.send(Err(anyhow::anyhow!("provider not enabled"))).await;
                                 continue;
                             };
+                            let operation_queue_timeout = Duration::from_secs(
+                                cfg.provider(provider.name()).map(|config| config.queue_timeout_seconds).unwrap_or(30));
                             let browser_for_save = browser.clone();
                             let provider_name = provider.name().to_string();
                             let poll_tick = gateway_poll_tick;
                             let request_metrics = metrics.clone();
                             let send_session_write_tracker = session_write_tracker.clone();
                             tokio::task::spawn_local(async move {
+                                let Some(operation) = send_unless_disconnected(&chunks,
+                                    tokio::time::timeout(operation_queue_timeout, operation_gate.lock())).await else { return; };
+                                let _operation = match operation {
+                                    Ok(guard) => guard,
+                                    Err(_) => { let _ = chunks.send(Err(anyhow::Error::new(ProviderBusyError))).await; return; }
+                                };
                                 let Some(_guard) = send_unless_disconnected(&chunks, lock.lock()).await else {
                                     return;
                                 };
                                 // A queued request may have been cancelled
                                 // while another send owned the page lock.
                                 if chunks.is_closed() { return; }
+                                applied_imports.borrow_mut().remove(&provider);
+                                let Some(opened) = send_unless_disconnected(&chunks,
+                                    ensure_provider_page(&browser_for_save, &pages, provider)).await else { return; };
+                                let just_opened = match opened {
+                                    Ok(opened) => opened,
+                                    Err(error) => { let _ = chunks.send(Err(error)).await; return; }
+                                };
+                                let mut page = match PageLease::take(&pages, provider) {
+                                    Ok(page) => page,
+                                    Err(error) => { let _ = chunks.send(Err(error)).await; return; }
+                                };
                                 // Reopen only a validated provider-owned thread. Otherwise return
                                 // to the provider landing page to avoid cross-conversation reuse.
                                 // Navigating the current page avoids leaking one tab per conversation.
@@ -311,96 +326,45 @@ pub(super) fn browser_thread(
                                         .await;
                                     return;
                                 }
-                                // When the URL already equals the provider home, a
-                                // fresh send still needs a new document. Otherwise the
-                                // old SPA composer can pass the readiness check before
-                                // a same-address navigation actually reloads.
-                                let prior_document_time_origin =
-                                    if thread_url.is_none() && page.url() == target_url {
-                                        let origin = page.evaluate("performance.timeOrigin").as_f64();
-                                        match origin {
-                                            Some(value) if value.is_finite() => Some(value),
-                                            _ => {
-                                                let _ = chunks.send(Err(anyhow::anyhow!(
-                                                    "could not establish fresh browser navigation boundary"
-                                                ))).await;
-                                                return;
-                                            }
-                                        }
-                                    } else {
-                                        None
-                                    };
-                                if pool_policy::provider_send_requires_navigation(
-                                    &page.url(),
-                                    target_url,
-                                    thread_url.is_some(),
+                                if (!just_opened || thread_url.is_some()) && pool_policy::provider_send_requires_navigation(
+                                    &page.url(), target_url, thread_url.is_some(),
                                 ) {
-                                    if chunks.is_closed() { return; }
-                                    let target_literal = serde_json::to_string(target_url)
-                                        .expect("provider URL serialization cannot fail");
-                                    let _ = page.evaluate(&format!("window.location.href = {target_literal}; true"));
-                                    let Some(navigation) = send_unless_disconnected(
-                                        &chunks,
-                                        tokio::time::timeout(Duration::from_secs(15), async {
-                                        loop {
-                                            if let Some(previous_origin) = prior_document_time_origin {
-                                                let now = page.evaluate("performance.timeOrigin").as_f64();
-                                                if !pool_policy::fresh_document_navigation_confirmed(
-                                                    previous_origin,
-                                                    now,
-                                                ) {
-                                                    tokio::time::sleep(Duration::from_millis(50)).await;
-                                                    continue;
-                                                }
-                                            }
-                                            let current_url = page.url();
-                                            // An app may redirect its landing URL to the user's
-                                            // previous conversation. Fail closed immediately
-                                            // rather than append this gateway conversation to
-                                            // somebody else's existing remote thread.
-                                            if thread_url.is_none()
-                                                && pool_policy::provider_thread_url_is_same_origin(
-                                                    &current_url, provider.login_url(),
-                                                )
-                                                && !pool_policy::landing_is_not_previous_thread(
-                                                    adapter.name(), &current_url,
-                                                )
-                                            {
-                                                break false;
-                                            }
-                                            let arrived = if thread_url.is_some() {
-                                                provider_thread_navigation_ready(
-                                                    &current_url,
-                                                    target_url,
-                                                    &page,
-                                                    adapter.as_ref(),
-                                                )
-                                            } else {
-                                                provider_landing_navigation_ready(
-                                                    &current_url,
-                                                    target_url,
-                                                    &page,
-                                                    adapter.as_ref(),
-                                                )
-                                            };
-                                            if arrived {
-                                                break true;
-                                            }
-                                            tokio::time::sleep(Duration::from_millis(50)).await;
-                                        }
-                                    }),
-                                    ).await else {
-                                        return;
-                                    };
-                                    if !matches!(navigation, Ok(true)) {
-                                        let reason = if matches!(navigation, Ok(false)) {
-                                            "provider landing redirected to an existing conversation; refusing cross-thread send"
-                                        } else {
-                                            "provider thread navigation timed out"
-                                        };
-                                        let _ = chunks.send(Err(anyhow::anyhow!(reason))).await;
+                                    let Some(navigation) = send_unless_disconnected(&chunks,
+                                        navigation::navigate_provider_document(&mut page, target_url, Duration::from_secs(30))).await else { return; };
+                                    if let Err(error) = navigation {
+                                        let _ = chunks.send(Err(error)).await;
                                         return;
                                     }
+                                }
+                                if let Err(error) = providers::common::check_session(provider.name(), &page) {
+                                    let _ = chunks.send(Err(error)).await;
+                                    return;
+                                }
+                                if crate::provider_guard::is_challenge_page(&page) {
+                                    provider_guard.disable_provider(provider.name(), "challenge page detected; manual review required");
+                                    let _ = chunks.send(Err(anyhow::Error::new(providers::ProviderChallengeError::new(provider.name())))).await;
+                                    return;
+                                }
+                                let Some(composer) = send_unless_disconnected(&chunks,
+                                    providers::common::wait_for_selector(&mut page, adapter.selector_set().input, 15_000)).await else { return; };
+                                if let Err(error) = composer {
+                                    let _ = chunks.send(Err(error)).await;
+                                    return;
+                                }
+                                let ready = if thread_url.is_some() {
+                                    provider_thread_navigation_ready(&page.url(), target_url, &page, adapter.as_ref())
+                                } else {
+                                    provider_landing_navigation_ready(&page.url(), target_url, &page, adapter.as_ref())
+                                };
+                                if !ready {
+                                    let reason = if thread_url.is_none()
+                                        && !pool_policy::landing_is_not_previous_thread(adapter.name(), &page.url()) {
+                                        "provider landing redirected to an existing conversation; refusing cross-thread send"
+                                    } else {
+                                        "provider composer unavailable after navigation"
+                                    };
+                                    let _ = chunks.send(Err(anyhow::anyhow!(reason))).await;
+                                    return;
                                 }
                                 // Login/session-expiry detection (Go concept,
                                 // Rust form — Rust v1 had none): fail with a
@@ -420,7 +384,7 @@ pub(super) fn browser_thread(
                                 if !has_history {
                                     let Some(model_selection) = send_unless_disconnected(
                                         &chunks,
-                                        adapter.select_model(&page, &model),
+                                        adapter.select_model(&mut page, &model),
                                     ).await else {
                                         return;
                                     };
@@ -467,12 +431,12 @@ pub(super) fn browser_thread(
                                     }
                                     let _ = completion_tx.send(completed);
                                 });
-                                let page_for_save = page.clone();
-                                tokio::select! {
-                                    _ = cancel_send.notified() => return,
+                                let cancel_adapter = adapter.clone();
+                                let cancelled = tokio::select! {
+                                    _ = cancel_send.notified() => true,
                                     _ = providers::run_send(
                                         adapter,
-                                        page,
+                                        &mut page,
                                         prompt,
                                         timeout,
                                         poll_tick,
@@ -482,7 +446,12 @@ pub(super) fn browser_thread(
                                             metrics: request_metrics,
                                         },
                                         save_tx,
-                                    ) => {}
+                                    ) => false
+                                };
+                                if cancelled {
+                                    cancel_adapter.cancel_generation(&page);
+                                    providers::common::drive_page(&mut page, Duration::from_millis(100)).await;
+                                    return;
                                 }
                                 // Save only after the send loop has finished and while
                                 // this provider's page lock is still held. A cancelled send
@@ -490,7 +459,7 @@ pub(super) fn browser_thread(
                                 if completion_rx.await.unwrap_or(false) {
                                     if let Err(error) = session::save_session_if_changed(
                                         &browser_for_save,
-                                        &page_for_save,
+                                        &page,
                                         &provider_name,
                                         &send_session_write_tracker,
                                     ).await {
@@ -500,10 +469,16 @@ pub(super) fn browser_thread(
                             });
                         }
                         Command::CurrentUrl { provider, reply } => {
-                            let result = pages.borrow().get(&provider)
-                                .map(|page| page.url())
-                                .ok_or_else(|| anyhow::anyhow!("provider page not warmed"));
-                            let _ = reply.send(result);
+                            let pages = pages.clone();
+                            let lock = locks.borrow().get(&provider).cloned();
+                            tokio::task::spawn_local(async move {
+                                let result = if let Some(lock) = lock {
+                                    let _guard = lock.lock().await;
+                                    pages.borrow().get(&provider).map(|page| page.url())
+                                        .ok_or_else(|| anyhow::anyhow!("provider page is cold"))
+                                } else { Err(anyhow::anyhow!("provider is not enabled")) };
+                                let _ = reply.send(result);
+                            });
                         }
                         Command::VerifySession { provider, reply } => {
                             let pages = pages.clone();
@@ -529,7 +504,9 @@ pub(super) fn browser_thread(
                             let browser = browser.clone();
                             let registry = registry.clone();
                             let adapter_session_write_tracker = session_write_tracker.clone();
+                            let operation_gate = operation_gate.clone();
                             tokio::task::spawn_local(async move {
+                                let _operation = operation_gate.lock().await;
                                 let mut report = TestAdapterReport::default();
                                 let finish = |report: TestAdapterReport| {
                                     let _ = reply.send(Ok(report));
@@ -571,7 +548,7 @@ pub(super) fn browser_thread(
                                     finish(report);
                                     return;
                                 }
-                                tokio::time::sleep(Duration::from_millis(1200)).await;
+                                providers::common::drive_page(&mut page, Duration::from_millis(1200)).await;
                                 // Phase 0 — session check.
                                 if providers::common::is_login_page(&page) {
                                     report.errors.push("session expired: re-login required before running --test-adapter".to_string());
@@ -590,7 +567,7 @@ pub(super) fn browser_thread(
                                 ];
                                 report.probe = providers::common::probe_selector_groups(&page, &sets);
                                 // Phase 1 — input (20s, Go's budget).
-                                let input_sel = match providers::common::wait_for_selector(&page, sets[0].1, 20000).await {
+                                let input_sel = match providers::common::wait_for_selector(&mut page, sets[0].1, 20000).await {
                                     Ok(()) => sets[0].1.iter().copied().find(|s| page.query_selector(s).is_some()).unwrap_or(sets[0].1[0]),
                                     Err(e) => {
                                         report.errors.push(format!("input: {e}"));
@@ -609,7 +586,7 @@ pub(super) fn browser_thread(
                                 tokio::time::sleep(Duration::from_millis(400)).await;
                                 let baseline = adapter.response_text(&page).filter(|t| !t.is_empty());
                                 // Phase 3 — send button or Enter (5s).
-                                match providers::common::click_send_or_enter(&page, sets[1].1, input_sel, 5000).await {
+                                match providers::common::click_send_or_enter(&mut page, sets[1].1, input_sel, 5000).await {
                                     Ok(clicked) => report.send_clicked = clicked,
                                     Err(e) => {
                                         report.errors.push(format!("send: {e}"));
@@ -623,7 +600,7 @@ pub(super) fn browser_thread(
                                 // exposes no observer hook, so snapshot
                                 // polling (the run_send technique) is the
                                 // engine equivalent.
-                                tokio::time::sleep(Duration::from_millis(1500)).await;
+                                providers::common::drive_page(&mut page, Duration::from_millis(1500)).await;
                                 let deadline = std::time::Instant::now() + Duration::from_secs(45);
                                 while std::time::Instant::now() < deadline {
                                     if let Some(t) = adapter.response_text(&page) {
@@ -632,7 +609,7 @@ pub(super) fn browser_thread(
                                             break;
                                         }
                                     }
-                                    tokio::time::sleep(Duration::from_millis(300)).await;
+                                    providers::common::drive_page(&mut page, Duration::from_millis(300)).await;
                                 }
                                 if !report.response_token {
                                     report.errors.push("response: no token within 45s".to_string());
@@ -646,17 +623,25 @@ pub(super) fn browser_thread(
                         }
                         Command::RefreshSession { provider, mut reply } => {
                             if reply.is_closed() { continue; }
+                            let operation_gate = operation_gate.clone();
+                            let applied_imports = applied_imports.clone();
+                            let provider_sessions = provider_sessions.clone();
                             let browser = browser.clone();
                             let pages = pages.clone();
                             let locks = locks.clone();
                             tokio::task::spawn_local(async move {
                                 let res: Result<()> = async {
+                                    let Some(_operation) = session_refresh_permit(&mut reply, &operation_gate).await else { return Ok(()); };
                                     let lock = locks.borrow().get(&provider).cloned()
                                         .ok_or_else(|| anyhow::anyhow!("provider page lock missing"))?;
                                     let Some(_guard) = session_refresh_permit(&mut reply, &lock).await else {
                                         return Ok(());
                                     };
                                     if reply.is_closed() { return Ok(()); }
+                                    let file = session::load_session_file(provider.name())?
+                                        .ok_or_else(|| anyhow::anyhow!("imported provider session is missing"))?;
+                                    let activated = page_session::activate_if_changed(&applied_imports, provider, &file, || async {
+                                    pages.borrow_mut().remove(&provider);
                                     let mut page = super::browser_factory::new_page(&browser).await?;
                                     page.goto(provider.login_url()).await?;
                                     let storage_cleared = page.evaluate(
@@ -666,12 +651,14 @@ pub(super) fn browser_thread(
                                         anyhow::bail!("provider localStorage could not be cleared");
                                     }
                                     session::clear_provider_cookies(&browser, provider.name())?;
-                                    let file = session::load_session_file(provider.name())?
-                                        .ok_or_else(|| anyhow::anyhow!("imported provider session is missing"))?;
                                     PageSession::open(&browser, &mut page, provider, Some(&file)).await?;
                                     pages.borrow_mut().insert(provider, Rc::new(page));
                                     Ok(())
+                                    }).await?;
+                                    if activated { provider_sessions.record_session_import(provider.name()); }
+                                    Ok(())
                                 }.await;
+                                if res.is_err() { provider_sessions.record_probe_failure(provider.name()); }
                                 let _ = reply.send(res);
                             });
                         }
@@ -681,11 +668,15 @@ pub(super) fn browser_thread(
                             let locks = locks.clone();
                             let login_pages = login_pages.clone();
                             let login_meta = login_meta.clone();
+                            let operation_gate = operation_gate.clone();
+                            let applied_imports = applied_imports.clone();
                             tokio::task::spawn_local(async move {
+                                let _operation = operation_gate.lock().await;
                                 let res: Result<bool> = async {
                                     let lock = locks.borrow().get(&provider).cloned()
                                         .unwrap_or_else(|| Rc::new(tokio::sync::Mutex::new(())));
                                     let _guard = lock.lock().await;
+                                    applied_imports.borrow_mut().remove(&provider);
                                     let mut page = super::browser_factory::new_page(&browser).await?;
                                     page.goto(provider.login_url()).await?;
                                     let storage_cleared = page.evaluate(
@@ -709,7 +700,9 @@ pub(super) fn browser_thread(
                             let browser = browser.clone();
                             let login_pages = login_pages.clone();
                             let login_meta = login_meta.clone();
+                            let operation_gate = operation_gate.clone();
                             tokio::task::spawn_local(async move {
+                                let _operation = operation_gate.lock().await;
                                 sweep_login_pages(&login_pages, &login_meta);
                                 // A fresh login page per start (Go used an
                                 // isolated temp profile for the same
@@ -743,6 +736,7 @@ pub(super) fn browser_thread(
                             let login_pages = login_pages.clone();
                             let login_meta = login_meta.clone();
                             let login_session_write_tracker = session_write_tracker.clone();
+                            let applied_imports = applied_imports.clone();
                             tokio::task::spawn_local(async move {
                                 sweep_login_pages(&login_pages, &login_meta);
                                 let res: Result<LoginCompleted> = async {
@@ -759,6 +753,7 @@ pub(super) fn browser_thread(
                                     let lock = locks.borrow().get(&provider).cloned()
                                         .unwrap_or_else(|| Rc::new(tokio::sync::Mutex::new(())));
                                     let _guard = lock.lock().await;
+                                    applied_imports.borrow_mut().remove(&provider);
                                     // Same format/path as every other save:
                                     // sessions/<provider>.json via
                                     // session::save_session (cookies from

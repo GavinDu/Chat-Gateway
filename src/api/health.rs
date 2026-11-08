@@ -23,6 +23,7 @@ pub(crate) async fn health(State(state): State<Arc<AppState>>) -> impl IntoRespo
                 "priority": p.priority,
                 "models": p.models,
                 "session_state": session.state.as_str(),
+                "successful_chat_observed": state.metrics.has_successful_chat(&p.name),
                 "last_session_error": session.last_error,
                 "challenge_disabled": challenge_disabled_reason.is_some(),
                 "challenge_disabled_reason": challenge_disabled_reason,
@@ -32,7 +33,7 @@ pub(crate) async fn health(State(state): State<Arc<AppState>>) -> impl IntoRespo
     Json(serde_json::json!({
         "status": "ok",
         "engine": "obscura-native (embedded)",
-        "sessions_loaded": "sessions/<provider>.json (restored at warm-up)",
+        "sessions_loaded": "sessions/<provider> (restored on demand)",
         "providers": providers,
     }))
 }

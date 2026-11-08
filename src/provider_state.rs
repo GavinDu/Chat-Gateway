@@ -92,6 +92,36 @@ impl ProviderSessionRegistry {
         Ok(())
     }
 
+    /// New credentials permit a login retry, but do not erase a failed chat
+    /// merely because the extension rotated unrelated provider cookies.
+    pub fn record_session_import(&self, provider: &str) {
+        if let Ok(mut map) = self.states.lock() {
+            if map
+                .get(provider)
+                .is_some_and(|status| status.state == ProviderSessionState::Degraded)
+            {
+                return;
+            }
+            map.remove(provider);
+        }
+    }
+
+    /// A visible composer cannot clear a failed chat attempt or explicit unlink.
+    pub fn record_probe_success(&self, provider: &str) {
+        if let Ok(mut map) = self.states.lock() {
+            let status = map
+                .entry(provider.to_owned())
+                .or_insert(ProviderSessionStatus {
+                    state: ProviderSessionState::Ready,
+                    last_error: None,
+                    retry_after: None,
+                });
+            if status.state == ProviderSessionState::Unknown {
+                status.state = ProviderSessionState::Ready;
+            }
+        }
+    }
+
     pub fn record_success(&self, provider: &str) {
         if let Ok(mut map) = self.states.lock() {
             map.insert(
@@ -355,5 +385,33 @@ mod tests {
         assert_eq!(ProviderSessionState::Ready.as_str(), "ready");
         assert_eq!(ProviderSessionState::NeedsLogin.as_str(), "needs_login");
         assert_eq!(ProviderSessionState::Degraded.as_str(), "degraded");
+    }
+}
+
+#[cfg(test)]
+mod probe_outcome_tests {
+    use super::*;
+    #[test]
+    fn composer_probe_cannot_erase_chat_failure_or_explicit_unlink() {
+        let registry = ProviderSessionRegistry::default();
+        registry.record_gateway_error(
+            "chatgpt",
+            &GatewayError::typed(GatewayErrorKind::ProviderFailure, "synthetic", true),
+        );
+        let failed = registry.status("chatgpt");
+        registry.record_probe_success("chatgpt");
+        registry.record_session_import("chatgpt");
+        assert_eq!(registry.status("chatgpt"), failed);
+        registry.record_unlinked("grok");
+        registry.record_probe_success("grok");
+        assert_eq!(
+            registry.status("grok").state,
+            ProviderSessionState::NeedsLogin
+        );
+        registry.record_success("chatgpt");
+        assert_eq!(
+            registry.status("chatgpt").state,
+            ProviderSessionState::Ready
+        );
     }
 }

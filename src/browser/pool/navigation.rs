@@ -114,3 +114,41 @@ mod provider_reopen_composer_tests {
         ));
     }
 }
+
+/// Unlike assigning window.location through evaluate, goto actually consumes
+/// navigation work in the pinned browser and creates a fresh document.
+pub(super) async fn navigate_provider_document(
+    page: &mut obscura_core::Page,
+    target: &str,
+    timeout: std::time::Duration,
+) -> anyhow::Result<()> {
+    tokio::time::timeout(timeout, page.goto(target))
+        .await
+        .map_err(|_| anyhow::anyhow!("provider document navigation timed out"))??;
+    Ok(())
+}
+
+#[cfg(test)]
+mod real_navigation_tests {
+    #[tokio::test]
+    async fn same_address_navigation_replaces_the_previous_document() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let url = "data:text/html,<textarea id='composer'></textarea>";
+        super::navigate_provider_document(&mut page, url, std::time::Duration::from_secs(2))
+            .await
+            .unwrap();
+        page.evaluate("globalThis.oldDocumentMarker = true");
+        super::navigate_provider_document(&mut page, url, std::time::Duration::from_secs(2))
+            .await
+            .unwrap();
+        assert_eq!(
+            page.evaluate("typeof oldDocumentMarker"),
+            serde_json::json!("undefined")
+        );
+        assert!(page.query_selector("#composer").is_some());
+    }
+}

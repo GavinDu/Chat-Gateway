@@ -183,17 +183,6 @@ pub(super) fn provider_send_requires_navigation(
     !reopening_saved_thread || current_url != target_url
 }
 
-/// Before reusing a document after a same-URL fresh-chat navigation, require
-/// a *different* document load timestamp. The address and composer may look
-/// unchanged while the previous SPA document is still active.
-pub(super) fn fresh_document_navigation_confirmed(
-    initial_time_origin: f64,
-    observed_time_origin: Option<f64>,
-) -> bool {
-    initial_time_origin.is_finite()
-        && observed_time_origin.is_some_and(|time| time.is_finite() && time != initial_time_origin)
-}
-
 #[cfg(test)]
 mod provider_thread_navigation_tests {
     use super::{provider_thread_navigation_matches, provider_thread_url_is_same_origin};
@@ -356,17 +345,6 @@ mod provider_thread_navigation_tests {
             "https://chatgpt.com/c/saved",
             true,
         ));
-    }
-
-    #[test]
-    fn same_url_fresh_navigation_requires_a_distinct_document_time_origin() {
-        use super::fresh_document_navigation_confirmed;
-
-        assert!(!fresh_document_navigation_confirmed(1000.5, Some(1000.5)));
-        assert!(!fresh_document_navigation_confirmed(1000.5, None));
-        assert!(!fresh_document_navigation_confirmed(1000.5, Some(f64::NAN)));
-        assert!(!fresh_document_navigation_confirmed(f64::NAN, Some(2000.5)));
-        assert!(fresh_document_navigation_confirmed(1000.5, Some(2000.5)));
     }
 
     #[test]

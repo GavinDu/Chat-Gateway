@@ -24,6 +24,8 @@ mod diagnostics;
 mod login_helpers;
 #[path = "pool/navigation.rs"]
 mod navigation;
+#[path = "pool/page_cache.rs"]
+mod page_cache;
 #[path = "pool/page_session.rs"]
 mod page_session;
 #[path = "pool/supervisor.rs"]
@@ -37,6 +39,7 @@ use login_helpers::{
     build_login_view, login_active_info, sweep_login_pages, touch_login_meta, LoginMeta,
 };
 use navigation::{provider_landing_navigation_ready, provider_thread_navigation_ready};
+use page_cache::{PageLease, ProviderPageCache, SharedPages};
 use page_session::PageSession;
 use supervisor::{
     closed_command_channel, effective_session_pool_size, join_finished_worker,
