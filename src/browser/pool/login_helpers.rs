@@ -4,7 +4,12 @@ use crate::{
     login::{self, LoginView},
     providers::{self, Provider},
 };
-use std::{cell::RefCell, collections::HashMap, rc::Rc, time::{Duration, Instant}};
+use std::{
+    cell::RefCell,
+    collections::HashMap,
+    rc::Rc,
+    time::{Duration, Instant},
+};
 
 /// Bookkeeping for one active login page. last_seen drives the
 /// abandoned-login sweep (Go swept after 35s of no client contact for
