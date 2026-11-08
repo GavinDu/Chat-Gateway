@@ -20,30 +20,67 @@ class ProviderConcurrencyBenchmarkTests(unittest.TestCase):
         lines = [
             'data: {"choices":[{"delta":{"role":"assistant"}}]}',
             'data: {"choices":[{"delta":{"content":"hello"}}]}',
+            'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
             'data: [DONE]',
         ]
-        ttft, done, error = parse_sse(lines, started)
+        ttft, done, error, finished = parse_sse(lines, started)
         self.assertIsNotNone(ttft)
         self.assertGreaterEqual(ttft, 0)
         self.assertTrue(done)
         self.assertFalse(error)
+        self.assertTrue(finished)
 
     def test_sse_rejects_provider_error_and_missing_done(self):
         import time
         started = time.monotonic()
-        ttft, done, error = parse_sse(
+        ttft, done, error, finished = parse_sse(
             ['data: {"error":{"message":"redacted"}}'], started
         )
         self.assertIsNone(ttft)
         self.assertFalse(done)
         self.assertTrue(error)
+        self.assertFalse(finished)
 
-        ttft, done, error = parse_sse(
+        ttft, done, error, finished = parse_sse(
             ['data: {"choices":[{"delta":{"content":"hello"}}]}'], started
         )
         self.assertIsNotNone(ttft)
         self.assertFalse(done)
         self.assertFalse(error)
+        self.assertFalse(finished)
+
+    def test_sse_detects_done_without_successful_terminal_chunk(self):
+        import time
+        started = time.monotonic()
+        prefix = ['data: {"choices":[{"delta":{"content":"hello"}}]}']
+        for suffix in [
+            ['data: [DONE]'],
+            ['data: {"error":{"code":"stream_failed"}}', 'data: [DONE]'],
+        ]:
+            ttft, done, error, finished = parse_sse(prefix + suffix, started)
+            self.assertIsNotNone(ttft)
+            self.assertFalse(finished)
+            self.assertTrue(error or done)
+
+        ttft, done, error, finished = parse_sse(
+            prefix + ['data: {"choices":[{"delta":{},"finish_reason":"length"}]}',
+                      'data: [DONE]'], started
+        )
+        self.assertTrue(error)
+        self.assertFalse(finished)
+
+    def test_malformed_sse_events_fail_without_exposing_provider_text(self):
+        import time
+        started = time.monotonic()
+        for malformed in ['null', '[]', '{"choices":"not-an-array"}',
+                          '{"choices":[null]}', '{"choices":[{"delta":5}]}']:
+            ttft, done, error, finished = parse_sse(
+                ['data: ' + malformed], started
+            )
+            self.assertIsNone(ttft)
+            self.assertFalse(done)
+            self.assertTrue(error)
+            self.assertFalse(finished)
 
 
 if __name__ == "__main__":
