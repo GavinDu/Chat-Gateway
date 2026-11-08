@@ -281,57 +281,36 @@ pub(super) async fn run(
         tracing::debug!(provider = %provider_name, queue_ms = permit.queue_ms, "acquired provider slot");
         let queue_ms = permit.queue_ms.min(u64::MAX as u128) as u64;
 
-        let saved_thread = match conversation_id.as_deref() {
-            Some(id) => {
-                match state
-                    .memory
-                    .clone()
-                    .get_provider_thread_async(
-                        owner_key_id.clone(),
-                        id.to_owned(),
-                        provider_name.clone(),
-                    )
-                    .await
-                {
-                    Ok(thread) => thread,
-                    Err(_) => {
-                        return api_error(
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            "server_error",
-                            "memory_read_failed",
-                            "provider thread state could not be read safely",
-                        )
-                    }
+        let (provider_prompt, thread_url) =
+            match chat_service::prepare_candidate_prompt(chat_service::CandidatePromptRequest {
+                state: &state,
+                owner_key_id: &owner_key_id,
+                conversation_id: conversation_id.as_deref(),
+                provider: &provider_name,
+                model: &req.model,
+                stored_messages: &stored_messages,
+                incoming_messages: &req.messages,
+                token_budget: context_token_budget,
+                replay_prompt: &prompt,
+                policy: &memory_egress_policy,
+                personal_memory_items: &personal_memory_items,
+            })
+            .await
+            {
+                Ok(prepared) => prepared,
+                Err(chat_service::CandidatePromptError::UnreadableThreadState) => {
+                    return api_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "server_error",
+                        "memory_read_failed",
+                        "provider thread state could not be read safely",
+                    );
                 }
-            }
-            None => None,
-        };
-        let (mut provider_prompt, thread_url) = chat_service::plan_provider_send(
-            &provider_name,
-            &req.model,
-            &stored_messages,
-            &req.messages,
-            saved_thread,
-            context_token_budget,
-            &prompt,
-        );
-
-        // Enforce data-handling policy at the last gateway boundary before
-        // provider-specific submission. Current-turn content and local
-        // transcript context are distinct from optional personal long-term
-        // memory. The typed egress policy filters retrieved items for each
-        // candidate before rendering them into that provider's prompt.
-        if memory_egress_policy
-            .append_personal_memory_to_prompt(
-                &provider_name,
-                &mut provider_prompt,
-                &personal_memory_items,
-            )
-            .is_err()
-        {
-            last_err = Some("provider memory egress policy denied request".to_owned());
-            continue;
-        }
+                Err(chat_service::CandidatePromptError::MemoryEgressDenied) => {
+                    last_err = Some("provider memory egress policy denied request".to_owned());
+                    continue;
+                }
+            };
 
         let provider_started = Instant::now();
         let mut rx = match state
