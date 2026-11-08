@@ -831,6 +831,10 @@ pub async fn import_session(
                 )
             }
         },
+        Err(error) if error.downcast_ref::<crate::session::ConflictingCookieScopes>().is_some() => {
+            json_error(StatusCode::UNPROCESSABLE_ENTITY, "cookie_scope_conflict",
+                "session contains cookie scopes this gateway cannot preserve; existing saved session was kept; try the dedicated login browser")
+        }
         Err(error) => {
             tracing::warn!(provider, error = %error, "browser relay session import rejected");
             json_error(

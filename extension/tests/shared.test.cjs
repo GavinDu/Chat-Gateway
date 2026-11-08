@@ -11,7 +11,7 @@ function loadShared(cookieFixtures = [], hasAllPermissions = true, storageValues
     URL,
     Headers,
     crypto: webcrypto,
-    fetch: async (url, options) => { fetchCalls.push({url, options}); return {ok:true, status:200}; },
+    fetch: async (url, options) => { fetchCalls.push({url, options}); return hooks.fetchResponse || {ok:true, status:200}; },
     chrome: {
       cookies: {
         // Return the full fixture set to simulate a permissive/misbehaving
@@ -367,4 +367,20 @@ test("token-bound logout never follows a newly paired gateway", async () => {
     /Provider consent or gateway connection changed during sync/
   );
   assert.equal(api.fetchCalls.length, 0);
+});
+
+
+test("conflicting cookie scopes report preserved session and dedicated login guidance", async () => {
+  const api=loadShared([{name:"fixture",value:"dummy",domain:"google.com",path:"/",secure:true,httpOnly:true}],true,
+    {gateway:"http://127.0.0.1:8080",token:"fixture-token",linkedProviders:["gemini"]},
+    {fetchResponse:{ok:false,status:422,json:async()=>({error:{code:"cookie_scope_conflict",message:"private upstream data"}})}});
+  await assert.rejects(()=>api.syncProvider("gemini"), e=> e.message.includes("saved session was kept") && e.message.includes("dedicated login browser") && !e.message.includes("private upstream data"));
+  assert.equal(api.fetchCalls.length,1);
+});
+
+test("unknown unprocessable-session errors retain generic guidance without forwarding text", async () => {
+  const api=loadShared([{name:"fixture",value:"dummy",domain:"google.com",path:"/",secure:true,httpOnly:true}],true,
+    {gateway:"http://127.0.0.1:8080",token:"fixture-token",linkedProviders:["gemini"]},
+    {fetchResponse:{ok:false,status:422,json:async()=>({error:{code:"other",message:"private upstream data"}})}});
+  await assert.rejects(()=>api.syncProvider("gemini"), e=> e.message.includes("Gateway rejected session update (422)") && !e.message.includes("private upstream data"));
 });
