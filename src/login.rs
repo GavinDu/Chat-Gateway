@@ -355,7 +355,10 @@ mod navigation_validation_tests {
     #[test]
     fn provider_navigation_rejects_other_provider_and_arbitrary_domains() {
         assert!(validate_navigation_url_for_provider("chatgpt", "https://claude.ai/").is_err());
-        assert!(validate_navigation_url_for_provider("manus", "https://manus.im.evil.example/").is_err());
+        assert!(
+            validate_navigation_url_for_provider("manus", "https://manus.im.evil.example/")
+                .is_err()
+        );
         assert!(validate_navigation_url_for_provider("manus", "https://claude.ai/").is_err());
         assert!(
             validate_navigation_url_for_provider("chatgpt", "https://attacker.example.org/")
