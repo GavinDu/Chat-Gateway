@@ -13,7 +13,7 @@ pub struct ChatGPTAdapter {
 pub const SELECTORS: SelectorSet = SelectorSet {
     url: "https://chatgpt.com",
     picker: &["button[data-testid=\"model-switcher\"]", "text:button=ChatGPT", "div#model-switcher"],
-    input: &["#prompt-textarea", "div#prompt-textarea[contenteditable=\"true\"]", "textarea[data-id=\"root\"]"],
+    input: &["#prompt-textarea", "div#prompt-textarea[contenteditable=\"true\"]", "textarea[data-id=\"root\"]", "textarea#mobile-composer-prompt[name=\"prompt\"]"],
     send: &["button[data-testid=\"send-button\"]", "button[aria-label=\"Send prompt\"]"],
     response: &["div[data-message-author-role=\"assistant\"] div.markdown", "article div.markdown", "div[data-message-id] div.markdown"],
     model_keywords: "chatgpt|gpt|o1|o3|o4",

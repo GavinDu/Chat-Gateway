@@ -68,8 +68,15 @@ pub(super) fn build_login_view(
                 .any(|s| page.query_selector(s).is_some())
         })
         .unwrap_or(false);
-    let (state, logged_in) = login::login_state(is_login, input_found);
-    let (title, fields, buttons, snapshot) = login::parse_view(page.evaluate(login::VIEW_SCRIPT));
+    let view_data = page.evaluate(login::VIEW_SCRIPT);
+    // Public composers may coexist with sign-in controls. They establish
+    // readiness, not account authentication; failed view evaluation is unknown.
+    let auth_controls_present = view_data
+        .get("auth_controls_present")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(true);
+    let (state, logged_in) = login::login_state(is_login, input_found, auth_controls_present);
+    let (title, fields, buttons, snapshot) = login::parse_view(view_data);
     LoginView {
         provider: provider.name().to_string(),
         active: true,
