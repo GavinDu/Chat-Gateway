@@ -66,6 +66,31 @@ class ConsumeSseTests(unittest.TestCase):
         self.assertTrue(completed["saw_done"])
         self.assertFalse(completed["provider_error"])
 
+    def test_terminal_stop_is_last_nonempty_choice_event(self):
+        first = 'data: {"choices":[{"delta":{"content":"complete"}}]}\n'
+        stop = 'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n'
+        for trailing in (
+            'data: {"choices":[{"delta":{"content":"extra"}}]}\n',
+            'data: {"choices":[{"delta":{"role":"assistant"}}]}\n',
+            'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n',
+        ):
+            with self.subTest(trailing=trailing):
+                result = consume_sse([first, stop, trailing, 'data: [DONE]\n'])
+                self.assertTrue(result["provider_error"])
+                self.assertFalse(result["saw_done"])
+                self.assertEqual(result["content"], "complete")
+
+    def test_usage_only_after_terminal_stop_still_allowed(self):
+        result = consume_sse([
+            'data: {"choices":[{"delta":{"content":"complete"}}]}\n',
+            'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n',
+            'data: {"choices":[],"usage":{"total_tokens":3}}\n',
+            'data: [DONE]\n',
+        ])
+        self.assertTrue(result["saw_done"])
+        self.assertFalse(result["provider_error"])
+        self.assertEqual(result["content"], "complete")
+
     def test_missing_done_is_not_success(self):
         result = consume_sse([
             'data: {"choices":[{"delta":{"content":"partial"}}]}\n',

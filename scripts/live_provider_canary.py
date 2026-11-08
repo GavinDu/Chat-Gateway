@@ -177,6 +177,12 @@ def consume_sse(lines: Iterable[str], started_at: float | None = None) -> dict:
             break
         if not choices:
             continue  # OpenAI-style usage-only or heartbeat event.
+        if saw_terminal_stop:
+            # The stop event ends the provider response. A later role, delta
+            # or repeated stop is a malformed stream, not a successful canary.
+            # Usage-only events (empty choices) may still follow a stop.
+            provider_error = True
+            break
         if not isinstance(choices[0], dict):
             provider_error = True
             break
