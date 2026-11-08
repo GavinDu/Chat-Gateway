@@ -26,7 +26,8 @@ struct StreamingAttempt {
     queue_ms: u64,
     prompt_tokens: u64,
     permit: browser::pool::ObscuraPermit,
-    receiver: tokio::sync::mpsc::Receiver<Result<chat_backend::ChatEvent, chat_backend::GatewayError>>,
+    receiver:
+        tokio::sync::mpsc::Receiver<Result<chat_backend::ChatEvent, chat_backend::GatewayError>>,
     first_chunk: chat_backend::ChatEvent,
 }
 
