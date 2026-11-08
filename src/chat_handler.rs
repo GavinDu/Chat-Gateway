@@ -114,81 +114,37 @@ pub(super) async fn run(
     let mut busy_count = 0usize;
     let mut last_err: Option<String> = None;
     for provider_name in candidates {
-        if !state.provider_eligible(&provider_name, ProviderEligibilityMode::ClaimRetry) {
-            last_err = Some(format!("provider '{provider_name}' not currently routable"));
-            continue;
-        }
-        let provider_cfg = match state.cfg.provider(&provider_name) {
-            Some(cfg) => cfg,
-            None => {
-                last_err = Some(format!(
-                    "provider '{provider_name}' configuration disappeared"
-                ));
-                continue;
-            }
-        };
-        // Fail closed on provider data policy before charging pacing quota or
-        // taking its exclusive browser permit. Thread lookup and context
-        // planning intentionally remain UNDER the permit to serialize
-        // concurrent sends to the same remote provider thread.
-        if chat_service::authorize_candidate_context(&memory_egress_policy, &provider_name).is_err()
-        {
-            last_err = Some("provider data-handling policy denied request".to_owned());
-            continue;
-        }
-
-        let permit = match chat_service::acquire_candidate_permit(
-            &state,
-            &provider_name,
-            provider_cfg,
-        )
+        let chat_service::CandidateAttempt {
+            permit,
+            queue_ms,
+            prompt: provider_prompt,
+            thread_url,
+            timeout: provider_timeout,
+        } = match chat_service::prepare_candidate_attempt(chat_service::CandidateAttemptRequest {
+            state: &state,
+            provider: &provider_name,
+            owner_key_id: &owner_key_id,
+            conversation_id: conversation_id.as_deref(),
+            model: &req.model,
+            stored_messages: &stored_messages,
+            incoming_messages: &req.messages,
+            token_budget: context_token_budget,
+            replay_prompt: &prompt,
+            policy: &memory_egress_policy,
+            personal_memory_items: &personal_memory_items,
+        })
         .await
         {
-            Ok(permit) => permit,
-            Err(error) => {
-                if error
-                    .downcast_ref::<browser::pool::ProviderBusyError>()
-                    .is_some()
-                {
+            Ok(attempt) => attempt,
+            Err(chat_service::CandidateAttemptError::Skip { message, busy }) => {
+                if busy {
                     busy_count += 1;
                 }
-                last_err = Some(error.to_string());
+                last_err = Some(message);
                 continue;
             }
+            Err(chat_service::CandidateAttemptError::Fatal(response)) => return response,
         };
-        tracing::debug!(provider = %provider_name, queue_ms = permit.queue_ms, "acquired provider slot");
-        let queue_ms = permit.queue_ms.min(u64::MAX as u128) as u64;
-
-        let (provider_prompt, thread_url) =
-            match chat_service::prepare_candidate_prompt(chat_service::CandidatePromptRequest {
-                state: &state,
-                owner_key_id: &owner_key_id,
-                conversation_id: conversation_id.as_deref(),
-                provider: &provider_name,
-                model: &req.model,
-                stored_messages: &stored_messages,
-                incoming_messages: &req.messages,
-                token_budget: context_token_budget,
-                replay_prompt: &prompt,
-                policy: &memory_egress_policy,
-                personal_memory_items: &personal_memory_items,
-            })
-            .await
-            {
-                Ok(prepared) => prepared,
-                Err(chat_service::CandidatePromptError::UnreadableThreadState) => {
-                    return api_error(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "server_error",
-                        "memory_read_failed",
-                        "provider thread state could not be read safely",
-                    );
-                }
-                Err(chat_service::CandidatePromptError::MemoryEgressDenied) => {
-                    last_err = Some("provider memory egress policy denied request".to_owned());
-                    continue;
-                }
-            };
 
         let provider_started = Instant::now();
         let mut rx = match state
@@ -210,7 +166,7 @@ pub(super) async fn run(
                     has_history: has_history && thread_url.is_some(),
                     thread_url,
                 },
-                std::time::Duration::from_secs(provider_cfg.timeout_seconds),
+                provider_timeout,
             )
             .await
         {
@@ -232,7 +188,7 @@ pub(super) async fn run(
 
         let mut first_stream_chunk: Option<chat_backend::ChatEvent> = None;
         if req.stream {
-            let first_chunk_timeout = std::time::Duration::from_secs(provider_cfg.timeout_seconds)
+            let first_chunk_timeout = provider_timeout
                 .saturating_sub(provider_started.elapsed());
             let first = match chat_service::classify_initial_stream_event(
                 first_event(&mut rx, first_chunk_timeout).await,
@@ -271,7 +227,7 @@ pub(super) async fn run(
                 request_id: request_id.clone(),
                 request_started,
                 provider_started,
-                completion_timeout: std::time::Duration::from_secs(provider_cfg.timeout_seconds),
+                completion_timeout: provider_timeout,
                 queue_ms,
                 prompt_tokens: estimate_tokens(&provider_prompt),
                 permit,
@@ -293,7 +249,7 @@ pub(super) async fn run(
             request_id: &request_id,
             request_started,
             provider_started,
-            completion_timeout: std::time::Duration::from_secs(provider_cfg.timeout_seconds),
+            completion_timeout: provider_timeout,
             queue_ms,
             prompt_tokens: estimate_tokens(&provider_prompt),
             receiver: rx,
