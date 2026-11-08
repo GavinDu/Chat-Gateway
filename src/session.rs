@@ -558,9 +558,9 @@ fn cookie_expiration_header(cookie: &Cookie) -> Result<String> {
     } else {
         cookie.path.as_str()
     };
-    let host_prefix = cookie.name.starts_with("__Host-");
+    let host_prefix = cookie_has_prefix(&cookie.name, "__Host-");
     if (host_prefix && (path != "/" || !cookie.secure))
-        || (cookie.name.starts_with("__Secure-") && !cookie.secure)
+        || (cookie_has_prefix(&cookie.name, "__Secure-") && !cookie.secure)
     {
         anyhow::bail!("provider cookie prefix constraints prevent safe revocation");
     }
@@ -1116,6 +1116,11 @@ fn cookie_domain_allowed(provider: &str, domain: &str) -> bool {
 
 /// Validate cookie fields from disk before interpolating them into a Set-Cookie-style string.
 /// Session files can be stale or manually modified, so domain validation alone is insufficient.
+fn cookie_has_prefix(name: &str, prefix: &str) -> bool {
+    name.get(..prefix.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+}
+
 fn restored_cookie_fields_safe(cookie: &Cookie) -> bool {
     let valid_name = !cookie.name.is_empty()
         && cookie
@@ -1135,7 +1140,10 @@ fn restored_cookie_fields_safe(cookie: &Cookie) -> bool {
             .path
             .bytes()
             .any(|b| b.is_ascii_control() || b == b';');
-    valid_name && valid_value && valid_path
+    let valid_prefix = (!cookie_has_prefix(&cookie.name, "__Host-")
+        || (cookie.secure && cookie.path == "/"))
+        && (!cookie_has_prefix(&cookie.name, "__Secure-") || cookie.secure);
+    valid_name && valid_value && valid_path && valid_prefix
 }
 fn parse_local_storage_snapshot(
     value: serde_json::Value,
@@ -1439,6 +1447,7 @@ mod cookie_restore_result_tests {
 pub fn restore_cookies(browser: &Browser, file: &SessionFile, provider: &str) -> Result<()> {
     let store = browser.cookies();
     let mut failed_writes = 0usize;
+    let mut expected_restores = Vec::new();
     for c in &file.cookies {
         // Session files are local files and may have been edited or created by
         // an older version. Apply the same provider-domain allowlist at restore
@@ -1458,7 +1467,9 @@ pub fn restore_cookies(browser: &Browser, file: &SessionFile, provider: &str) ->
         // Cookie headers contain reusable bearer credentials. Keep the
         // temporary header in zeroizing memory rather than an ordinary String.
         let mut s = Zeroizing::new(format!("{}={}", c.name, c.value));
-        if !c.domain.is_empty() {
+        // __Host- cookies must be restored without a Domain attribute. The
+        // pinned jar silently drops prefix violations even when set() returns Ok.
+        if !c.domain.is_empty() && !cookie_has_prefix(&c.name, "__Host-") {
             s.push_str(&format!("; Domain={}", c.domain));
         }
         s.push_str(&format!(
@@ -1490,11 +1501,28 @@ pub fn restore_cookies(browser: &Browser, file: &SessionFile, provider: &str) ->
         };
         if store.set(&s, &url).is_err() {
             failed_writes += 1;
-            tracing::warn!(
-                provider,
-                cookie = %c.name,
-                "provider session cookie restore failed"
-            );
+            tracing::warn!(provider, "provider session cookie restore failed");
+        } else {
+            expected_restores.push(c);
+        }
+    }
+    // set() only validates the URL; jar policy can silently discard a cookie.
+    // Verify exact persisted fields before claiming that a snapshot is active.
+    // Our Cookie wrapper zeroizes the temporary readback values on drop.
+    let restored: Vec<Cookie> = store.get_all().into_iter().map(Cookie::from).collect();
+    for cookie in expected_restores {
+        if !restored.iter().any(|actual| {
+            actual.name == cookie.name
+                && actual.value == cookie.value
+                && actual
+                    .domain
+                    .trim_start_matches('.')
+                    .eq_ignore_ascii_case(cookie.domain.trim_start_matches('.'))
+                && actual.path == cookie.path
+                && actual.secure == cookie.secure
+                && actual.http_only == cookie.http_only
+        }) {
+            failed_writes += 1;
         }
     }
     ensure_cookie_restore_complete(failed_writes)
@@ -1671,6 +1699,62 @@ mod cookie_scope_tests {
             "value",
             "/safe\r\nInjected: yes"
         )));
+    }
+
+    #[tokio::test]
+    async fn invalid_prefix_cookie_restore_fails_without_credential_details() {
+        let browser = Browser::builder().stealth(false).build().unwrap();
+        for name in [
+            "__Host-synthetic",
+            "__host-synthetic",
+            "__Secure-synthetic",
+            "__secure-synthetic",
+        ] {
+            let mut item = cookie(name, "private-dummy-value", "/");
+            item.secure = false;
+            let file = SessionFile {
+                cookies: vec![item],
+                local_storage: HashMap::new(),
+                ts: "fixture".into(),
+            };
+            let error = restore_cookies(&browser, &file, "chatgpt")
+                .unwrap_err()
+                .to_string();
+            assert_eq!(error, "failed to restore 1 provider session cookie(s)");
+            assert!(browser.cookies().get_all().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn host_prefixed_relay_cookie_survives_restore_without_subdomain_scope() {
+        let browser = Browser::builder().stealth(false).build().unwrap();
+        for name in ["__Host-synthetic", "__host-synthetic", "__hOsT-synthetic"] {
+            let mut item = cookie(name, "dummy", "/");
+            item.domain = "chatgpt.com".into();
+            let file = SessionFile {
+                cookies: vec![item],
+                local_storage: HashMap::new(),
+                ts: "fixture".into(),
+            };
+            restore_cookies(&browser, &file, "chatgpt").unwrap();
+            let at_host = browser
+                .cookies()
+                .get_for_url("https://chatgpt.com/")
+                .unwrap();
+            assert_eq!(
+                at_host.len(),
+                1,
+                "host-prefixed cookie must not be silently discarded"
+            );
+            assert_eq!(at_host[0].value, "dummy");
+            assert!(browser
+                .cookies()
+                .get_for_url("https://child.chatgpt.com/")
+                .unwrap()
+                .is_empty());
+            assert_eq!(clear_provider_cookies(&browser, "chatgpt").unwrap(), 1);
+            assert!(browser.cookies().get_all().is_empty());
+        }
     }
 
     #[tokio::test]

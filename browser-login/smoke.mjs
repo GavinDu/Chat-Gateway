@@ -107,7 +107,7 @@ chromium.launchPersistentContext = async (...args) => {
   return route.fulfill({contentType:'text/html',body:\`<!doctype html><html><body style="margin:0;background:#fff;color:#111;font:20px sans-serif;height:2000px">
   <h1 style="margin:20px">Isolated login fixture</h1>
   <input id="fixture-input" aria-label="Fixture input" style="position:absolute;left:40px;top:100px;width:300px;height:50px">
-  <button id="fixture-save" style="position:absolute;left:40px;top:200px;width:220px;height:50px" onclick="document.cookie='fixture_session=dummy;Path=/;Secure;SameSite=Lax';document.cookie='fixture_quoted='+String.fromCharCode(34)+'synthetic'+String.fromCharCode(34)+';Path=/;Secure;SameSite=Lax';document.body.style.background='#ddffdd'">Create fixture session</button>
+  <button id="fixture-save" style="position:absolute;left:40px;top:200px;width:220px;height:50px" onclick="document.cookie='fixture_session=dummy;Path=/;Secure;SameSite=Lax';document.cookie='__Host-fixture=dummy;Path=/;Secure;SameSite=Lax';document.cookie='fixture_quoted='+String.fromCharCode(34)+'synthetic'+String.fromCharCode(34)+';Path=/;Secure;SameSite=Lax';document.body.style.background='#ddffdd'">Create fixture session</button>
   <a href="/second" style="position:absolute;left:40px;top:290px">Second fixture page</a>
   <button style="position:absolute;left:40px;top:380px;width:220px;height:50px" onclick="window.open('https://accounts.google.com/popup-child?code=fixture','fixture-login')">Open fixture SSO</button>
   \${u.pathname === '/challenge-parent' ? '<iframe src="https://challenges.cloudflare.com/widget"></iframe>' : ''}
@@ -119,6 +119,7 @@ chromium.launchPersistentContext = async (...args) => {
   document.addEventListener('scroll',()=>console.log('fixture-scroll-received'));
   if(document.cookie.includes('fixture_session='))console.log('fixture-restored');else console.log('fixture-clean');
   if(document.cookie.split('; ').includes('fixture_quoted='+String.fromCharCode(34)+'synthetic'+String.fromCharCode(34)))console.log('fixture-quoted-restored');else console.log('fixture-quoted-clean');
+  if(document.cookie.split('; ').includes('__Host-fixture=dummy'))console.log('fixture-host-restored');else console.log('fixture-host-clean');
   if(location.hostname==='accounts.google.com'&&opener)opener.postMessage('fixture-popup','https://chatgpt.com');
   window.addEventListener('message',e=>{if(e.data==='fixture-popup'&&e.origin==='https://accounts.google.com')console.log('fixture-popup-roundtrip')});
   if(location.hostname==='challenges.cloudflare.com')console.log('fixture-challenge-ready');
@@ -127,7 +128,7 @@ chromium.launchPersistentContext = async (...args) => {
  });
  const attach = p => {
   p.on('console', m => {
-   if (/^fixture-(input|backspace|scroll|restored|quoted|ready|click|popup|challenge|escape|clean)/.test(m.text()))
+   if (/^fixture-(input|backspace|scroll|restored|quoted|host|ready|click|popup|challenge|escape|clean)/.test(m.text()))
     void appendFile(${JSON.stringify(join(temp, 'events'))}, m.text()+'\\n');
   });
  };
@@ -370,6 +371,9 @@ chromium.launchPersistentContext = async (...args) => {
   pass('next isolated browser restored cookies through existing encrypted vault');
   await until(() => events().then(s => s.includes('fixture-quoted-restored')), 'quoted cookie exact restore');
   pass('quoted cookie preserved through actual session import, encrypted vault and browser restore');
+  await until(() => events().then(s => s.includes('fixture-host-restored')), 'host cookie exact restore');
+  pass('host-prefixed cookie preserved through actual session import, encrypted vault and browser restore');
+  const hostBeforeRestart = (await events()).split('fixture-host-restored').length;
   const quotedBeforeRestart = (await events()).split('fixture-quoted-restored').length;
   const restoredBeforeRestart = (await events()).split('fixture-restored').length;
   gateway.kill('SIGTERM');
@@ -389,6 +393,8 @@ chromium.launchPersistentContext = async (...args) => {
     'vault restore after actual gateway process restart');
   await until(async () => (await events()).split('fixture-quoted-restored').length > quotedBeforeRestart,
     'quoted cookie restore after actual gateway process restart');
+  await until(async () => (await events()).split('fixture-host-restored').length > hostBeforeRestart,
+    'host cookie restore after actual gateway process restart');
   pass('actual gateway stop/restart restores provider session from the same encrypted vault');
   const revoke = (secret, origin = base) => fetch(base + '/login/api/chatgpt/browser/session',
     { method: 'DELETE', headers: { Authorization: 'Bearer ' + secret, Origin: origin } });
@@ -402,11 +408,14 @@ chromium.launchPersistentContext = async (...args) => {
   await until(async () => !(await readdir(join(temp, 'sessions'))).includes(saved[0]), 'vault deletion confirmed');
   pass('authenticated revocation closes live browser before deleting vault; authorization/CSRF enforced');
   const cleanCount = (await events()).split('fixture-clean').length;
+  const hostCleanCount = (await events()).split('fixture-host-clean').length;
   const quotedCleanCount = (await events()).split('fixture-quoted-clean').length;
   await page.locator('#start-session').click();
   await until(async () => (await events()).split('fixture-clean').length > cleanCount, 'session absent after revocation');
   await until(async () => (await events()).split('fixture-quoted-clean').length > quotedCleanCount,
     'quoted cookie absent after revocation');
+  await until(async () => (await events()).split('fixture-host-clean').length > hostCleanCount,
+    'host cookie absent after revocation');
   pass('fresh login after revocation cannot restore the deleted provider session');
   const crashMark = messages.length;
   await page.locator('#address').fill('https://chatgpt.com/worker-stop');
