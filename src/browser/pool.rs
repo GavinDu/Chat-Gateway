@@ -26,8 +26,8 @@ mod page_session;
 mod supervisor;
 #[path = "pool/worker.rs"]
 mod worker;
-pub use diagnostics::ProviderSessionExpiredError;
 use diagnostics::verify_session_page;
+pub use diagnostics::ProviderSessionExpiredError;
 use navigation::{provider_landing_navigation_ready, provider_thread_navigation_ready};
 use page_session::PageSession;
 use supervisor::{
