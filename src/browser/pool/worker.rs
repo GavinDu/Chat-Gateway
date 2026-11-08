@@ -89,7 +89,7 @@ pub(super) fn browser_thread(
                                     None
                                 }
                             };
-                            let restore_failed = match open_page_with_session(
+                            let restore_failed = match PageSession::open(
                                 &browser,
                                 &mut page,
                                 provider,
@@ -547,7 +547,7 @@ pub(super) fn browser_thread(
                                 if !record_test_adapter_restore_result(
                                     &mut report,
                                     "session restore failed",
-                                    open_page_with_session(
+                                    PageSession::open(
                                         &browser,
                                         &mut page,
                                         provider,
@@ -651,7 +651,7 @@ pub(super) fn browser_thread(
                                     session::clear_provider_cookies(&browser, provider.name())?;
                                     let file = session::load_session_file(provider.name())?
                                         .ok_or_else(|| anyhow::anyhow!("imported provider session is missing"))?;
-                                    open_page_with_session(&browser, &mut page, provider, Some(&file)).await?;
+                                    PageSession::open(&browser, &mut page, provider, Some(&file)).await?;
                                     pages.borrow_mut().insert(provider, Rc::new(page));
                                     Ok(())
                                 }.await;
