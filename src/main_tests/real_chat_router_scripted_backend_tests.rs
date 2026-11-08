@@ -210,6 +210,58 @@ async fn real_router_terminal_event_with_content_matches_json_and_sse() {
 }
 
 #[tokio::test]
+async fn real_router_rejects_duplicate_conversation_id_before_backend_or_storage() {
+    let (app, state, backend) = fixture_with_backend(
+        &["chatgpt"],
+        vec![response_events("this backend must never run")],
+        None,
+    );
+    for (first, second) in [
+        ("router_dup_a_001", "router_dup_b_001"),
+        ("router_dup_a_001", "router_dup_a_001"),
+    ] {
+        let mut request = Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "model":"chatgpt/fake-model",
+                    "messages":[{"role":"user","content":"synthetic prompt"}]
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        request
+            .headers_mut()
+            .append("X-Conversation-Id", first.parse().unwrap());
+        request
+            .headers_mut()
+            .append("X-Conversation-Id", second.parse().unwrap());
+
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), 65_536).await.unwrap();
+        let error: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(error["error"]["code"], "invalid_conversation_id");
+    }
+    assert!(
+        backend.observed_requests().await.is_empty(),
+        "ambiguous routing headers must never reach a provider"
+    );
+    for conversation in ["router_dup_a_001", "router_dup_b_001"] {
+        assert!(
+            state
+                .memory
+                .conversation_messages_for_owner("local", conversation)
+                .unwrap()
+                .is_empty(),
+            "ambiguous routing headers must not persist a conversation"
+        );
+    }
+}
+
+#[tokio::test]
 async fn real_router_fails_over_on_backend_admission_error_before_output() {
     let (app, state) = fixture(
         &["chatgpt", "claude"],
