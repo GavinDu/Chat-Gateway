@@ -122,70 +122,6 @@ async fn resolve_chat_candidates(
     Ok((candidates, provider_model))
 }
 
-/// The metrics timestamp is measured after the durable write for both JSON
-/// and SSE. Provider work time is captured before that write, so the two
-/// measurements remain distinct.
-struct AttemptTelemetry<'a> {
-    request_id: &'a str,
-    provider: &'a str,
-    queue_ms: u64,
-    ttft_ms: Option<u64>,
-    provider_work_ms: u64,
-    request_started: Instant,
-    stream_failed: bool,
-}
-
-/// One completion boundary for both transports: never record a successful
-/// gateway operation until the assistant turn is durable. A failed stream
-/// neither writes the partial turn nor marks the provider session healthy.
-async fn finalize_provider_attempt(
-    state: &AppState,
-    owner_key_id: &str,
-    conversation_id: &str,
-    user_messages: &[ChatMessage],
-    assistant_content: &str,
-    model: &str,
-    telemetry: AttemptTelemetry<'_>,
-) -> Option<anyhow::Error> {
-    let persist_error = if telemetry.stream_failed {
-        None
-    } else {
-        // Backend/session health is independent of the gateway's durable
-        // write. A storage failure must be counted as a gateway error without
-        // incorrectly degrading a provider that returned valid completion.
-        state.provider_sessions.record_success(telemetry.provider);
-        persist_completed_turn(
-            state,
-            owner_key_id,
-            conversation_id,
-            user_messages.to_vec(),
-            assistant_content.to_owned(),
-            telemetry.provider,
-            model,
-        )
-        .await
-        .err()
-    };
-    let total_ms = telemetry
-        .request_started
-        .elapsed()
-        .as_millis()
-        .min(u64::MAX as u128) as u64;
-    record_provider_outcome(
-        &state.metrics,
-        ProviderOutcome {
-            request_id: telemetry.request_id,
-            provider: telemetry.provider,
-            outcome: completed_chat_outcome(telemetry.stream_failed, persist_error.is_some()),
-            queue_ms: telemetry.queue_ms,
-            ttft_ms: telemetry.ttft_ms,
-            provider_work_ms: telemetry.provider_work_ms,
-            total_ms,
-        },
-    );
-    persist_error
-}
-
 /// Keep JSON and SSE response headers in one place so the two transports
 /// cannot silently diverge on conversation identity and provider metadata.
 fn completion_response_headers(
@@ -717,14 +653,14 @@ pub(super) async fn run(
                 });
 
                 let provider_work_ms = provider_started_c.elapsed().as_millis().min(u64::MAX as u128) as u64;
-                let persist_error = finalize_provider_attempt(
+                let persist_error = chat_service::finalize_provider_attempt(
                     &state_c,
                     &owner_key_id_c,
                     &conv_stream,
                     &windowed_c,
                     &full,
                     &model_c,
-                    AttemptTelemetry {
+                    chat_service::AttemptTelemetry {
                         request_id: &request_id_c,
                         provider: &provider_c,
                         queue_ms: queue_ms_c,
@@ -827,14 +763,14 @@ pub(super) async fn run(
             );
         }
 
-        let persist_error = finalize_provider_attempt(
+        let persist_error = chat_service::finalize_provider_attempt(
             &state,
             &owner_key_id,
             &new_conv_id,
             &windowed,
             &full,
             &req.model,
-            AttemptTelemetry {
+            chat_service::AttemptTelemetry {
                 request_id: &request_id,
                 provider: &provider_name,
                 queue_ms,

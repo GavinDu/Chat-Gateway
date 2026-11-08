@@ -3,6 +3,10 @@
 //! The service owns backend dispatch and common event-stream consumption so
 //! streaming and non-streaming handlers share the same provider event contract.
 use crate::chat_backend::{BackendRequest, ChatBackend, ChatEvent, GatewayError};
+use crate::{
+    app_state::AppState, completed_chat_outcome, memory::ChatMessage, persist_completed_turn,
+    record_provider_outcome, ProviderOutcome,
+};
 use anyhow::Result;
 use std::{
     sync::Arc,
@@ -156,6 +160,70 @@ pub(crate) fn record_attempt_error(
         provider_work_ms,
         total_ms,
     );
+}
+
+/// The metrics timestamp is measured after the durable write for both JSON
+/// and SSE. Provider work time is captured before that write, so the two
+/// measurements remain distinct.
+pub(crate) struct AttemptTelemetry<'a> {
+    pub(crate) request_id: &'a str,
+    pub(crate) provider: &'a str,
+    pub(crate) queue_ms: u64,
+    pub(crate) ttft_ms: Option<u64>,
+    pub(crate) provider_work_ms: u64,
+    pub(crate) request_started: Instant,
+    pub(crate) stream_failed: bool,
+}
+
+/// One completion boundary for both transports: never record a successful
+/// gateway operation until the assistant turn is durable. A failed stream
+/// neither writes the partial turn nor marks the provider session healthy.
+pub(crate) async fn finalize_provider_attempt(
+    state: &AppState,
+    owner_key_id: &str,
+    conversation_id: &str,
+    user_messages: &[ChatMessage],
+    assistant_content: &str,
+    model: &str,
+    telemetry: AttemptTelemetry<'_>,
+) -> Option<anyhow::Error> {
+    let persist_error = if telemetry.stream_failed {
+        None
+    } else {
+        // Backend/session health is independent of the gateway's durable
+        // write. A storage failure must be counted as a gateway error without
+        // incorrectly degrading a provider that returned valid completion.
+        state.provider_sessions.record_success(telemetry.provider);
+        persist_completed_turn(
+            state,
+            owner_key_id,
+            conversation_id,
+            user_messages.to_vec(),
+            assistant_content.to_owned(),
+            telemetry.provider,
+            model,
+        )
+        .await
+        .err()
+    };
+    let total_ms = telemetry
+        .request_started
+        .elapsed()
+        .as_millis()
+        .min(u64::MAX as u128) as u64;
+    record_provider_outcome(
+        &state.metrics,
+        ProviderOutcome {
+            request_id: telemetry.request_id,
+            provider: telemetry.provider,
+            outcome: completed_chat_outcome(telemetry.stream_failed, persist_error.is_some()),
+            queue_ms: telemetry.queue_ms,
+            ttft_ms: telemetry.ttft_ms,
+            provider_work_ms: telemetry.provider_work_ms,
+            total_ms,
+        },
+    );
+    persist_error
 }
 
 impl ChatService {
