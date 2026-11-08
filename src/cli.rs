@@ -3,7 +3,7 @@ use clap::Parser;
 #[derive(Parser, Debug)]
 #[command(
     name = "chat-gateway-rs",
-    about = "Chat Gateway v2 - Obscura native, unified memory over 8 providers"
+    about = "Chat Gateway v2 - Obscura native, unified memory over 9 providers"
 )]
 pub struct Cli {
     #[arg(long, default_value = "config.yaml")]

@@ -116,6 +116,9 @@ pub(super) fn landing_is_not_previous_thread(provider_name: &str, actual: &str) 
         "qwen" => !uri.path().starts_with("/c/"),
         "mistral" => !uri.path().starts_with("/chat/"),
         "perplexity" => !uri.path().starts_with("/search/") && !uri.path().starts_with("/page/"),
+        // Manus task URLs are /app/<id>. Only /app is treated as a fresh
+        // composer; other paths require live verification before replay.
+        "manus" => matches!(uri.path(), "/app" | "/app/") && uri.query().is_none(),
         // There is no fixture-verified Meta AI conversation URL convention;
         // accept only the configured homepage instead of trusting an unknown
         // redirect into a potentially stale remote thread.
@@ -243,6 +246,9 @@ mod provider_thread_navigation_tests {
             ("mistral", "https://chat.mistral.ai/chat/abc123"),
             ("perplexity", "https://www.perplexity.ai/search/abc123"),
             ("perplexity", "https://www.perplexity.ai/page/abc123"),
+            ("manus", "https://manus.im/app/existing-task"),
+            ("manus", "https://manus.im/app/other/route"),
+            ("manus", "https://manus.im/app?task_id=existing"),
             ("metaai", "https://www.meta.ai/chat/abc123"),
         ] {
             assert!(
@@ -269,6 +275,7 @@ mod provider_thread_navigation_tests {
                 "https://claude.ai/new?conversation%5Fid=old-thread",
             ),
             ("qwen", "https://chat.qwen.ai/?thread=old-thread"),
+            ("manus", "https://manus.im/app?conversation_id=existing"),
             ("mistral", "https://chat.mistral.ai/?chat_id=old-thread"),
             (
                 "perplexity",
@@ -299,6 +306,8 @@ mod provider_thread_navigation_tests {
             ("qwen", "https://chat.qwen.ai/"),
             ("mistral", "https://chat.mistral.ai/"),
             ("perplexity", "https://www.perplexity.ai/"),
+            ("manus", "https://manus.im/app"),
+            ("manus", "https://manus.im/app/"),
             ("metaai", "https://www.meta.ai/"),
         ] {
             assert!(

@@ -122,6 +122,29 @@ test("provider cookie snapshot excludes cookies outside that provider's domain r
   assert.equal(snapshot.local_storage && Object.keys(snapshot.local_storage).length, 0);
 });
 
+test("Manus relay only collects consented manus.im cookies", async () => {
+  const cookies = [
+    {name:"session",value:"manus-session",domain:".manus.im",path:"/",secure:true,httpOnly:true},
+    {name:"api",value:"manus-api",domain:"api.manus.im",path:"/",secure:true,httpOnly:true},
+    {name:"spoof",value:"evil",domain:".manus.im.evil.example",path:"/",secure:true,httpOnly:true},
+    {name:"other",value:"cross-provider",domain:".chatgpt.com",path:"/",secure:true,httpOnly:true}
+  ];
+  const api = loadShared(cookies);
+  assert.deepEqual(JSON.parse(JSON.stringify(api.PROVIDERS.manus)), ["manus.im"]);
+  const snapshot = await api.providerCookieSnapshot("manus");
+  assert.deepEqual(JSON.parse(JSON.stringify(snapshot.cookies.map(cookie => cookie.name).sort())), ["api", "session"]);
+  assert.equal(snapshot.local_storage && Object.keys(snapshot.local_storage).length, 0);
+});
+
+test("Manus snapshots fail closed without exact host permission", async () => {
+  const api = loadShared([], false);
+  await assert.rejects(
+    () => api.providerCookieSnapshot("manus"),
+    /Missing provider host permissions/
+  );
+  assert.equal(api.getCookieReads(), 0);
+});
+
 test("partial provider host permissions reject cookie snapshot before reading cookies", async () => {
   const api = loadShared([], false);
   await assert.rejects(

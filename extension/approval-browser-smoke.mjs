@@ -67,7 +67,7 @@ try {
  await reopened.evaluate(()=>{restoreConnectionWorker();return updateConnection();});
  await reopened.locator('#linked:not([hidden])').waitFor({timeout:20000});
  try {await reopened.locator('#status li').first().waitFor();} catch(error) {console.log('Provider dashboard message:',await reopened.locator('#message').innerText());throw error;}
- assert.equal(await reopened.locator('#status li').count(),8);
+ assert.equal(await reopened.locator('#status li').count(),9);
  console.log('PASS real Chromium extension URL-only approval, popup closure and provider dashboard');
  // An upgraded legacy installation may retain a token but have no learned ID.
  // Fail closed and offer owner approval instead of trapping the popup on 403.

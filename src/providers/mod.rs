@@ -3,6 +3,7 @@ pub mod claude;
 pub mod common;
 pub mod gemini;
 pub mod grok;
+pub mod manus;
 pub mod metaai;
 pub mod mistral;
 pub mod perplexity;
@@ -67,7 +68,7 @@ pub struct AdapterSelectors {
     pub model_picker: String,
 }
 
-/// The 8 supported providers (v2's enum, kept in providers:: where the
+/// The 9 supported providers (v2's enum, kept in providers:: where the
 /// adapters live; browser::pool re-exports it).
 #[derive(Clone, Copy, Hash, Eq, PartialEq, Debug)]
 pub enum Provider {
@@ -77,6 +78,7 @@ pub enum Provider {
     ChatGPT,
     Gemini,
     Grok,
+    Manus,
     Mistral,
     Perplexity,
 }
@@ -295,6 +297,16 @@ pub const ADAPTERS: &[AdapterSpec] = &[
         DoneSignal::StableResponseText,
         ThreadSupport::None,
         |cfg| Arc::new(grok::GrokAdapter { cfg }),
+    ),
+    adapter_spec(
+        Provider::Manus,
+        "manus",
+        &manus::SELECTORS,
+        false,
+        DoneSignal::StableResponseText,
+        // A Manus task URL is not a verified resumable chat thread.
+        ThreadSupport::None,
+        |cfg| Arc::new(manus::ManusAdapter { cfg }),
     ),
     adapter_spec(
         Provider::Mistral,
@@ -1329,6 +1341,7 @@ mod thread_support_tests {
         for provider in [
             Provider::Gemini,
             Provider::Grok,
+            Provider::Manus,
             Provider::Qwen,
             Provider::Mistral,
             Provider::Perplexity,
@@ -1350,7 +1363,7 @@ mod provider_catalog_contract_tests {
     #[test]
     fn provider_catalog_names_are_unique_and_round_trip_exactly() {
         let providers = Provider::all();
-        assert_eq!(providers.len(), 8, "the public provider catalog changed");
+        assert_eq!(providers.len(), 9, "the public provider catalog changed");
 
         let mut names = HashSet::new();
         for provider in providers {
@@ -1370,7 +1383,7 @@ mod provider_catalog_contract_tests {
 
     #[test]
     fn adapter_table_is_the_single_unique_provider_catalog() {
-        assert_eq!(ADAPTERS.len(), 8);
+        assert_eq!(ADAPTERS.len(), 9);
         let mut ids = HashSet::new();
         let mut urls = HashSet::new();
         for spec in ADAPTERS {

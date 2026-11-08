@@ -47,6 +47,8 @@
     "https://*.mistral.ai/*",
     "https://perplexity.ai/*",
     "https://*.perplexity.ai/*",
+    "https://manus.im/*",
+    "https://*.manus.im/*",
     "https://fbcdn.net/*",
     "https://*.fbcdn.net/*"
   ],

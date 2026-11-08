@@ -202,6 +202,7 @@ impl AppConfig {
             "grok",
             "mistral",
             "perplexity",
+            "manus",
         ];
         let mut auth_key_names = HashSet::new();
         for key in &self.auth.keys {

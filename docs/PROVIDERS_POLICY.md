@@ -41,6 +41,7 @@ for your country and account before enabling a provider.
 | Grok | [Consumer Terms of Service](https://x.ai/legal/terms-of-service) · [SpaceXAI Legal Center](https://x.ai/legal) | Confirm whether the terms for Grok on x.com or the standalone Grok service apply to the account. |
 | Mistral | [Consumer Terms outside the EEA](https://legal.mistral.ai/terms/row-consumer-terms/) · [Legal Center](https://legal.mistral.ai/terms/get-started/) | The reviewed consumer terms restrict extracting content except through permitted product functionality. Obtain clarification before enabling scripted UI extraction. |
 | Perplexity | [Terms of Service](https://www.perplexity.ai/hub/legal/terms-of-service) | Confirm consumer terms and any service-specific terms for the subscribed plan; API terms are separate. |
+| Manus | [Terms of Service](https://manus.im/terms) | Browser integration is disabled by default. Confirm whether scripted web UI use is authorized before enabling; Chat Mode and Agent Mode have different execution semantics. The adapter selectors and task completion behavior still require signed-in validation. |
 
 ## Review record
 

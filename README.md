@@ -1,7 +1,7 @@
 # chat-gateway-rs v2.0.0 - Obscura Native
 
-Rust port of Chat-Gateway with **8 providers**: Qwen, Meta AI, Claude,
-ChatGPT, Gemini, Grok, Mistral, Perplexity.
+Rust port of Chat-Gateway with **9 providers**: Qwen, Meta AI, Claude,
+ChatGPT, Gemini, Grok, Mistral, Perplexity, Manus.
 
 Unified memory layer + OpenAI-compatible API + automatic failover,
 running on the **embedded Obscura engine** (the `obscura` crate linked

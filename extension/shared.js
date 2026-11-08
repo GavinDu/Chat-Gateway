@@ -6,7 +6,8 @@ const PROVIDERS = {
   gemini: ["gemini.google.com", "google.com", "googleusercontent.com"],
   grok: ["grok.com", "x.com", "twitter.com", "x.ai"],
   mistral: ["mistral.ai"],
-  perplexity: ["perplexity.ai"]
+  perplexity: ["perplexity.ai"],
+  manus: ["manus.im"]
 };
 
 const PROVIDER_LOGIN_URLS = Object.freeze({
@@ -17,7 +18,8 @@ const PROVIDER_LOGIN_URLS = Object.freeze({
   metaai: "https://www.meta.ai/",
   grok: "https://grok.com/",
   mistral: "https://chat.mistral.ai/",
-  perplexity: "https://www.perplexity.ai/"
+  perplexity: "https://www.perplexity.ai/",
+  manus: "https://manus.im/app"
 });
 
 function normalizeGateway(value) {

@@ -7,7 +7,8 @@ export const providerDomains = Object.freeze({
   qwen: ['qwen.ai', 'aliyun.com', 'alibabacloud.com'],
   metaai: ['meta.ai', 'meta.com', 'facebook.com'],
   mistral: ['mistral.ai'],
-  perplexity: ['perplexity.ai']
+  perplexity: ['perplexity.ai'],
+  manus: ['manus.im']
 });
 const idps = ['accounts.google.com', 'appleid.apple.com', 'idmsa.apple.com',
   'login.microsoftonline.com', 'login.live.com', 'github.com'];
