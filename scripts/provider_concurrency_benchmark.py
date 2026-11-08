@@ -18,7 +18,9 @@ import time
 import urllib.error
 import urllib.request
 
-from provider_bench import _NoRedirect, validate_benchmark_target
+from provider_bench import (
+    _NoRedirect, MAX_SSE_LINE_BYTES, MAX_SSE_STREAM_BYTES, validate_benchmark_target,
+)
 
 
 def percentile(values: list[int], p: float) -> int | None:
@@ -27,6 +29,24 @@ def percentile(values: list[int], p: float) -> int | None:
     ordered = sorted(values)
     index = max(0, min(len(ordered) - 1, math.ceil((p / 100) * len(ordered)) - 1))
     return ordered[index]
+
+
+def bounded_sse_lines(response):
+    """Bound each HTTP SSE line and the total stream before JSON decoding.
+
+    Returning a malformed sentinel makes the shared parser fail the sample
+    without storing or exposing the upstream response content.
+    """
+    total_bytes = 0
+    while True:
+        line = response.readline(MAX_SSE_LINE_BYTES + 1)
+        if not line:
+            return
+        total_bytes += len(line)
+        if len(line) > MAX_SSE_LINE_BYTES or total_bytes > MAX_SSE_STREAM_BYTES:
+            yield None
+            return
+        yield line
 
 
 def parse_sse(lines, request_started: float) -> tuple[int | None, bool, bool, bool]:
@@ -40,6 +60,9 @@ def parse_sse(lines, request_started: float) -> tuple[int | None, bool, bool, bo
     provider_error = False
     saw_finish_stop = False
     for raw in lines:
+        if not isinstance(raw, (str, bytes)):
+            provider_error = True
+            break
         line = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else raw
         if not line.startswith("data:"):
             continue
@@ -128,7 +151,7 @@ def one_request(base_url: str, api_key: str, provider: str, model: str,
     try:
         with urllib.request.build_opener(_NoRedirect()).open(request, timeout=timeout) as response:
             actual_provider = response.headers.get("X-Gateway-Provider", "").lower()
-            ttft_ms, saw_done, provider_error, saw_finish_stop = parse_sse(response, started)
+            ttft_ms, saw_done, provider_error, saw_finish_stop = parse_sse(bounded_sse_lines(response), started)
             status = response.status
     except urllib.error.HTTPError as error:
         return {"ok": False, "failure": f"http_{error.code}"}
