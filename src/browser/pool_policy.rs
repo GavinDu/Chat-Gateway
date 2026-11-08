@@ -6,26 +6,45 @@ use crate::login;
 /// A persisted provider thread URL must remain on the provider's configured
 /// origin. This prevents stale or corrupted thread metadata from navigating
 /// the authenticated browser page to an unrelated site.
-pub(super) fn provider_thread_url_is_same_origin(candidate: &str, provider_home: &str) -> bool {
-    fn origin(value: &str) -> Option<String> {
-        let without_fragment = value.split('#').next()?;
-        let without_query = without_fragment.split('?').next()?;
-        let (scheme, rest) = without_query.split_once("://")?;
-        let authority = rest.split('/').next()?;
-        if scheme.is_empty() || authority.is_empty() || authority.contains('@') {
-            return None;
-        }
-        Some(format!(
-            "{}://{}",
-            scheme.to_ascii_lowercase(),
-            authority.to_ascii_lowercase()
-        ))
+/// Only absolute HTTPS URLs with unambiguous authorities may identify
+/// authenticated provider pages. Browsers can interpret backslashes or
+/// percent-escaped hostnames differently from a textual origin comparison.
+fn verified_https_provider_uri(value: &str) -> Option<axum::http::Uri> {
+    let without_fragment = value.split('#').next()?;
+    if without_fragment.contains('\\') {
+        return None;
     }
+    let uri = without_fragment.parse::<axum::http::Uri>().ok()?;
+    let authority = uri.authority()?;
+    if uri.scheme_str() != Some("https")
+        || authority
+            .as_str()
+            .bytes()
+            .any(|byte| matches!(byte, b'@' | b'%' | b'\\'))
+    {
+        return None;
+    }
+    Some(uri)
+}
 
-    matches!(
-        (origin(candidate), origin(provider_home)),
-        (Some(candidate), Some(home)) if candidate == home
-    )
+/// A persisted provider thread URL must remain on the provider's configured
+/// HTTPS origin, without ambiguous userinfo or encoded authority spellings.
+pub(super) fn provider_thread_url_is_same_origin(candidate: &str, provider_home: &str) -> bool {
+    let (Some(candidate), Some(home)) = (
+        verified_https_provider_uri(candidate),
+        verified_https_provider_uri(provider_home),
+    ) else {
+        return false;
+    };
+    candidate
+        .authority()
+        .expect("verified URI has an authority")
+        .as_str()
+        .eq_ignore_ascii_case(
+            home.authority()
+                .expect("verified URI has an authority")
+                .as_str(),
+        )
 }
 
 /// A provider landing URL with a conversation selector is not a fresh
@@ -109,37 +128,44 @@ pub(super) fn landing_is_not_previous_thread(provider_name: &str, actual: &str) 
 /// Providers may add a trailing slash, tracking query, or fragment during a
 /// redirect; origin and path still identify the same conversation.
 pub(super) fn provider_thread_navigation_matches(actual: &str, target: &str) -> bool {
-    fn origin_and_path(value: &str) -> Option<(String, String)> {
-        let without_fragment = value.split('#').next()?;
-        let without_query = without_fragment.split('?').next()?;
-        let (scheme, rest) = without_query.split_once("://")?;
-        let (authority, path) = match rest.split_once('/') {
-            Some((authority, path)) => (authority, format!("/{path}")),
-            None => (rest, "/".to_owned()),
-        };
-        if authority.is_empty() || scheme.is_empty() {
-            return None;
-        }
-        let normalized_path = if path.len() > 1 {
-            path.trim_end_matches('/').to_owned()
-        } else {
-            path
-        };
-        Some((
-            format!(
-                "{}://{}",
-                scheme.to_ascii_lowercase(),
-                authority.to_ascii_lowercase()
-            ),
-            normalized_path,
-        ))
+    let (Some(actual), Some(target)) = (
+        verified_https_provider_uri(actual),
+        verified_https_provider_uri(target),
+    ) else {
+        return false;
+    };
+    // A redirect with a query-selected conversation can point at an entirely
+    // different remote thread even when its origin/path match the saved URL.
+    // Tracking queries remain allowed, but ambiguous thread selectors fail closed.
+    if landing_query_selects_existing_thread(&actual)
+        || landing_query_selects_existing_thread(&target)
+    {
+        return false;
     }
 
-    matches!(
-        (origin_and_path(actual), origin_and_path(target)),
-        (Some((actual_origin, actual_path)), Some((target_origin, target_path)))
-            if actual_origin == target_origin && actual_path == target_path
-    )
+    let actual_path = actual.path().trim_end_matches('/');
+    let target_path = target.path().trim_end_matches('/');
+    let actual_path = if actual_path.is_empty() {
+        "/"
+    } else {
+        actual_path
+    };
+    let target_path = if target_path.is_empty() {
+        "/"
+    } else {
+        target_path
+    };
+    actual
+        .authority()
+        .expect("verified URI has an authority")
+        .as_str()
+        .eq_ignore_ascii_case(
+            target
+                .authority()
+                .expect("verified URI has an authority")
+                .as_str(),
+        )
+        && actual_path == target_path
 }
 
 /// Fresh sends must reload the provider's landing page, even if its URL is
@@ -380,6 +406,43 @@ mod provider_thread_navigation_tests {
             "not-a-url",
             "https://chatgpt.com/c/thread-123"
         ));
+    }
+
+    #[test]
+    fn thread_navigation_rejects_query_selected_thread_redirects() {
+        for actual in [
+            "https://chatgpt.com/c/thread-123?conversation_id=different",
+            "https://chatgpt.com/c/thread-123?thread%69d=different",
+            "https://chatgpt.com/c/thread-123?chatId=different",
+        ] {
+            assert!(!provider_thread_navigation_matches(
+                actual,
+                "https://chatgpt.com/c/thread-123"
+            ));
+        }
+        assert!(!provider_thread_navigation_matches(
+            "https://chatgpt.com/c/thread-123",
+            "https://chatgpt.com/c/thread-123?conversation=ambiguous"
+        ));
+    }
+
+    #[test]
+    fn thread_urls_reject_ambiguous_authorities_and_non_https_schemes() {
+        for bad in [
+            "http://chatgpt.com/c/thread-123",
+            "https://chatgpt.com@evil.example/c/thread-123",
+            "https://chatgpt%2ecom/c/thread-123",
+            "https://chatgpt.com\\@evil.example/c/thread-123",
+        ] {
+            assert!(!provider_thread_url_is_same_origin(
+                bad,
+                "https://chatgpt.com/"
+            ));
+            assert!(!provider_thread_navigation_matches(
+                bad,
+                "https://chatgpt.com/c/thread-123"
+            ));
+        }
     }
 }
 
