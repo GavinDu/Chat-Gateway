@@ -219,6 +219,36 @@ pub(crate) fn record_attempt_error(
     );
 }
 
+/// Backend admission failed before an event stream existed. A recoverable
+/// worker/permit error is not evidence that a provider login has expired.
+/// The metrics envelope and redacted state update belong to one service path.
+pub(crate) fn record_backend_admission_error(
+    provider_sessions: &crate::provider_state::ProviderSessionRegistry,
+    metrics_registry: &crate::metrics::MetricsRegistry,
+    provider: &str,
+    error: &GatewayError,
+    queue_ms: u64,
+    provider_started: Instant,
+    request_started: Instant,
+) {
+    tracing::debug!(
+        provider,
+        retryable = error.is_retryable(),
+        "provider send failed before stream admission"
+    );
+    if !error.is_retryable() {
+        provider_sessions.record_gateway_error(provider, error);
+    }
+    metrics_registry.record_provider_timings(
+        provider,
+        "error",
+        queue_ms,
+        None,
+        provider_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+        request_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+    );
+}
+
 /// Fail closed before reserving a pacing slot: current-turn content and
 /// transcript context must independently satisfy the provider egress policy.
 pub(crate) fn authorize_candidate_context(
@@ -604,6 +634,41 @@ mod tests {
         assert!(super::authorize_candidate_context(&policy, "chatgpt").is_ok());
         assert!(super::authorize_candidate_context(&policy, "claude").is_ok());
         assert!(super::authorize_candidate_context(&policy, "unknown-provider").is_err());
+    }
+
+    #[test]
+    fn admission_errors_preserve_typed_auth_state_and_retryable_worker_liveness() {
+        let sessions = crate::provider_state::ProviderSessionRegistry::default();
+        let metrics = crate::metrics::MetricsRegistry::default();
+        let provider = "chatgpt";
+        sessions.record_success(provider);
+        let now = std::time::Instant::now();
+        super::record_backend_admission_error(
+            &sessions,
+            &metrics,
+            provider,
+            &GatewayError::backend_unavailable("synthetic worker failure"),
+            0,
+            now,
+            now,
+        );
+        assert_eq!(
+            sessions.status(provider).state,
+            crate::provider_state::ProviderSessionState::Ready
+        );
+        super::record_backend_admission_error(
+            &sessions,
+            &metrics,
+            provider,
+            &GatewayError::session_expired("synthetic expired session"),
+            0,
+            now,
+            now,
+        );
+        assert_eq!(
+            sessions.status(provider).state,
+            crate::provider_state::ProviderSessionState::NeedsLogin
+        );
     }
 
     fn scripted_request() -> BackendRequest {
