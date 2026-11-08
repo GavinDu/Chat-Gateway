@@ -14,7 +14,7 @@ use serde_json::{json, Value};
 use std::{
     collections::{HashMap, HashSet},
     process::Stdio,
-    sync::{Arc, Mutex, OnceLock},
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 use tokio::io::{AsyncWriteExt, BufReader};
@@ -59,34 +59,45 @@ impl Registry {
             && self.active.insert(provider.to_owned())
     }
 }
-fn registry() -> &'static Mutex<Registry> {
-    static REGISTRY: OnceLock<Mutex<Registry>> = OnceLock::new();
-    REGISTRY.get_or_init(Mutex::default)
+/// Provider tickets and active login sessions belong to one gateway instance.
+pub(crate) struct EmbeddedLoginRuntime {
+    registry: Mutex<Registry>,
+    shutdown: tokio::sync::watch::Sender<bool>,
 }
-fn shutdown_channel() -> &'static tokio::sync::watch::Sender<bool> {
-    static CHANNEL: OnceLock<tokio::sync::watch::Sender<bool>> = OnceLock::new();
-    CHANNEL.get_or_init(|| tokio::sync::watch::channel(false).0)
+
+impl Default for EmbeddedLoginRuntime {
+    fn default() -> Self {
+        Self {
+            registry: Mutex::default(),
+            shutdown: tokio::sync::watch::channel(false).0,
+        }
+    }
 }
-pub async fn shutdown_all() {
-    shutdown_channel().send_replace(true);
+
+pub async fn shutdown_all(runtime: &EmbeddedLoginRuntime) {
+    runtime.shutdown.send_replace(true);
     // Hyper does not drain upgraded WebSockets. Keep the runtime alive until
     // each actor has closed Chromium, waited for its worker and dropped its
     // profile/lease; otherwise dropping Node can strand Chromium profile files.
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
-        if registry().lock().is_ok_and(|r| r.active.is_empty()) {
+        if runtime.registry.lock().is_ok_and(|r| r.active.is_empty()) {
             return;
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
     tracing::warn!("embedded browser shutdown exceeded its cleanup deadline");
 }
-struct Lease(String);
+struct Lease {
+    provider: String,
+    runtime: Arc<EmbeddedLoginRuntime>,
+}
+
 impl Drop for Lease {
     fn drop(&mut self) {
-        if let Ok(mut registry) = registry().lock() {
-            registry.active.remove(&self.0);
-            registry.controls.remove(&self.0);
+        if let Ok(mut registry) = self.runtime.registry.lock() {
+            registry.active.remove(&self.provider);
+            registry.controls.remove(&self.provider);
         }
     }
 }
@@ -182,11 +193,11 @@ pub async fn ticket(
             "embedded_browser_not_packaged",
         );
     }
-    if *shutdown_channel().borrow() {
+    if *app.embedded_login.shutdown.borrow() {
         return error(StatusCode::SERVICE_UNAVAILABLE, "browser_shutting_down");
     }
     let now = Instant::now();
-    let Ok(mut registry) = registry().lock() else {
+    let Ok(mut registry) = app.embedded_login.registry.lock() else {
         return error(StatusCode::SERVICE_UNAVAILABLE, "browser_unavailable");
     };
     registry.tickets.retain(|_, (_, until)| *until > now);
@@ -233,6 +244,20 @@ mod origin_tests {
         assert!(!runtime_supported(Some("unknown"), true));
     }
     #[test]
+    fn embedded_login_runtime_is_isolated_per_gateway_instance() {
+        let first = EmbeddedLoginRuntime::default();
+        let second = EmbeddedLoginRuntime::default();
+        first.registry.lock().unwrap().tickets.insert(
+            "test-ticket".to_owned(),
+            ("chatgpt".to_owned(), Instant::now() + TTL),
+        );
+        assert!(second.registry.lock().unwrap().tickets.is_empty());
+        first.shutdown.send_replace(true);
+        assert!(*first.shutdown.borrow());
+        assert!(!*second.shutdown.borrow());
+    }
+
+    #[test]
     fn browser_controls_require_explicit_matching_origin() {
         let mut headers = HeaderMap::new();
         headers.insert(header::HOST, "127.0.0.1:8099".parse().unwrap());
@@ -265,16 +290,19 @@ pub async fn stream(
     let Some(token) = protocol.strip_prefix("cg-login.") else {
         return error(StatusCode::UNAUTHORIZED, "invalid_browser_ticket");
     };
-    let accepted = registry()
+    let accepted = app.embedded_login.registry
         .lock()
         .map(|mut r| r.consume(token, &provider, Instant::now()))
         .unwrap_or(false);
     if !accepted {
         return error(StatusCode::UNAUTHORIZED, "invalid_browser_ticket");
     }
-    let lease = Lease(provider.clone());
+    let lease = Lease {
+        provider: provider.clone(),
+        runtime: app.embedded_login.clone(),
+    };
     let (cancel, receiver) = tokio::sync::watch::channel(false);
-    if let Ok(mut registry) = registry().lock() {
+    if let Ok(mut registry) = app.embedded_login.registry.lock() {
         if registry.revoking.contains(&provider) {
             return error(StatusCode::CONFLICT, "session_revoking");
         }
@@ -340,7 +368,7 @@ async fn run_browser(
 ) -> anyhow::Result<()> {
     require_vault()?;
     anyhow::ensure!(runtime_available(), "embedded browser runtime not packaged");
-    let mut shutdown = shutdown_channel().subscribe();
+    let mut shutdown = app.embedded_login.shutdown.subscribe();
     anyhow::ensure!(!*shutdown.borrow(), "browser shutting down");
     let p = crate::providers::Provider::from_name(provider)
         .ok_or_else(|| anyhow::anyhow!("unknown provider"))?;
