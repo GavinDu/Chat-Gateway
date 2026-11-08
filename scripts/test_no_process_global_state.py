@@ -32,10 +32,9 @@ def disallowed_statics(source):
 
 # Existing process globals are tracked as explicit migration debt. The guard
 # rejects new mutable statics rather than failing on known pre-existing code.
-# RESTART_TEST_SPAWNS is test-only; embedded_login's entries need a follow-up
-# owner-scoped runtime migration before removing them from this baseline.
+# The test worker's restart counter is now instance-scoped. Embedded
+# login globals will leave this baseline once its runtime migration merges.
 KNOWN_LEGACY_GLOBALS = {
-    ("src/browser/pool/supervisor.rs", "RESTART_TEST_SPAWNS"),
     ("src/embedded_login.rs", "REGISTRY"),
     ("src/embedded_login.rs", "CHANNEL"),
 }
