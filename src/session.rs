@@ -1122,10 +1122,14 @@ fn restored_cookie_fields_safe(cookie: &Cookie) -> bool {
             .name
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b));
+    // The pinned browser jar preserves quotes as opaque value data. Keep
+    // browser-exported values byte-for-byte; stripping or encoding quotes can
+    // invalidate a session. Attribute separators and header controls remain
+    // forbidden before constructing the Set-Cookie-style restore string.
     let valid_value = cookie
         .value
         .bytes()
-        .all(|b| (0x21..=0x7e).contains(&b) && !matches!(b, b'"' | b',' | b';' | b'\\'));
+        .all(|b| (0x21..=0x7e).contains(&b) && !matches!(b, b',' | b';' | b'\\'));
     let valid_path = cookie.path.starts_with('/')
         && !cookie
             .path
@@ -1667,6 +1671,83 @@ mod cookie_scope_tests {
             "value",
             "/safe\r\nInjected: yes"
         )));
+    }
+
+    #[tokio::test]
+    async fn quoted_relay_values_survive_vault_browser_restore_and_revocation() {
+        let browser = Browser::builder().stealth(false).build().unwrap();
+        let values = [
+            r#""synthetic-session""#,
+            r#"prefix"suffix"#,
+            r#"{"id":"synthetic"}"#,
+        ];
+        for provider in ["grok", "mistral"] {
+            let domain = format!(
+                ".{provider}.{}",
+                if provider == "grok" { "com" } else { "ai" }
+            );
+            let cookies = values
+                .iter()
+                .enumerate()
+                .map(|(index, value)| {
+                    let mut item = cookie(&format!("fixture_{index}"), value, "/");
+                    item.domain = domain.clone();
+                    item
+                })
+                .collect();
+            let snapshot = SessionFile {
+                cookies,
+                local_storage: HashMap::new(),
+                ts: "synthetic".to_owned(),
+            };
+            let encrypted = encrypt_session_snapshot(&snapshot, provider, &[0x42; 32]).unwrap();
+            let restored = decrypt_session_snapshot(&encrypted, provider, &[0x42; 32]).unwrap();
+            restore_cookies(&browser, &restored, provider).unwrap();
+            let sent = browser
+                .cookies()
+                .get_for_url(&format!("https://{}/", domain.trim_start_matches('.')))
+                .unwrap();
+            assert_eq!(sent.len(), values.len());
+            for (index, expected) in values.iter().enumerate() {
+                assert_eq!(
+                    sent.iter()
+                        .find(|item| item.name == format!("fixture_{index}"))
+                        .unwrap()
+                        .value,
+                    *expected
+                );
+            }
+        }
+        assert_eq!(
+            clear_provider_cookies(&browser, "grok").unwrap(),
+            values.len()
+        );
+        assert_eq!(
+            browser.cookies().get_all().len(),
+            values.len(),
+            "Grok revocation must preserve Mistral cookies"
+        );
+        assert_eq!(
+            clear_provider_cookies(&browser, "mistral").unwrap(),
+            values.len()
+        );
+        assert!(browser.cookies().get_all().is_empty());
+    }
+
+    #[test]
+    fn quoted_values_still_reject_header_delimiters_and_non_ascii() {
+        for value in [
+            "quote\"; Secure",
+            "quote\",value",
+            "quote\"\\value",
+            "quote\"\r\nInjected: yes",
+            "quote\" value",
+            "quote\"\tvalue",
+            "quote\"\u{7f}value",
+            "quote\"é",
+        ] {
+            assert!(!restored_cookie_fields_safe(&cookie("fixture", value, "/")));
+        }
     }
 
     #[test]
