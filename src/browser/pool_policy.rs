@@ -233,12 +233,21 @@ mod provider_thread_navigation_tests {
         for (provider, url) in [
             ("grok", "https://grok.com/?conversation_id=old-thread"),
             ("grok", "https://grok.com/?Conversation=old-thread"),
-            ("gemini", "https://gemini.google.com/app?thread_id=old-thread"),
+            (
+                "gemini",
+                "https://gemini.google.com/app?thread_id=old-thread",
+            ),
             ("chatgpt", "https://chatgpt.com/?chatId=old-thread"),
-            ("claude", "https://claude.ai/new?conversation%5Fid=old-thread"),
+            (
+                "claude",
+                "https://claude.ai/new?conversation%5Fid=old-thread",
+            ),
             ("qwen", "https://chat.qwen.ai/?thread=old-thread"),
             ("mistral", "https://chat.mistral.ai/?chat_id=old-thread"),
-            ("perplexity", "https://www.perplexity.ai/?thread%69d=old-thread"),
+            (
+                "perplexity",
+                "https://www.perplexity.ai/?thread%69d=old-thread",
+            ),
         ] {
             assert!(
                 !landing_is_not_previous_thread(provider, url),
