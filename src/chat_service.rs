@@ -9,7 +9,7 @@ use crate::{
     budget_personal_memory_items,
     context::{self, ContextBuilder, ContextPlan, ThreadSyncState},
     conversation_context_read_error, is_reopenable_provider_thread_url,
-    memory::{ChatMessage, LongTermMemoryStore, ProviderThread},
+    memory::{ChatMessage, ConversationStore, LongTermMemoryStore, ProviderThread},
     memory_egress, persist_completed_turn, providers,
     read_conversation_context_with_transcript_for_owner, transcript_marker,
 };
@@ -481,6 +481,70 @@ pub(crate) async fn prepare_chat_context(
         has_history,
         stored_messages,
     })
+}
+
+/// The canonical transcript is read once at the request boundary. Each
+/// candidate may still need an owner-scoped, provider-specific thread lookup
+/// under its exclusive permit; a failed read must never become a replay send.
+pub(crate) struct CandidatePromptRequest<'a> {
+    pub(crate) state: &'a AppState,
+    pub(crate) owner_key_id: &'a str,
+    pub(crate) conversation_id: Option<&'a str>,
+    pub(crate) provider: &'a str,
+    pub(crate) model: &'a str,
+    pub(crate) stored_messages: &'a [ChatMessage],
+    pub(crate) incoming_messages: &'a [ChatMessage],
+    pub(crate) token_budget: usize,
+    pub(crate) replay_prompt: &'a str,
+    pub(crate) policy: &'a memory_egress::MemoryEgressPolicy,
+    pub(crate) personal_memory_items: &'a [memory_egress::PersonalMemoryItem],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CandidatePromptError {
+    UnreadableThreadState,
+    MemoryEgressDenied,
+}
+
+/// Prepare only the selected candidate's provider prompt. This must run after
+/// its provider permit is acquired to serialize same-thread remote sends. A
+/// failed thread read or memory egress check cannot fall back to an unsafe
+/// prompt or mutate the stored sync marker.
+pub(crate) async fn prepare_candidate_prompt(
+    request: CandidatePromptRequest<'_>,
+) -> std::result::Result<(String, Option<String>), CandidatePromptError> {
+    let saved_thread = match request.conversation_id {
+        Some(id) => request
+            .state
+            .memory
+            .clone()
+            .get_provider_thread_async(
+                request.owner_key_id.to_owned(),
+                id.to_owned(),
+                request.provider.to_owned(),
+            )
+            .await
+            .map_err(|_| CandidatePromptError::UnreadableThreadState)?,
+        None => None,
+    };
+    let (mut prompt, thread_url) = plan_provider_send(
+        request.provider,
+        request.model,
+        request.stored_messages,
+        request.incoming_messages,
+        saved_thread,
+        request.token_budget,
+        request.replay_prompt,
+    );
+    request
+        .policy
+        .append_personal_memory_to_prompt(
+            request.provider,
+            &mut prompt,
+            request.personal_memory_items,
+        )
+        .map_err(|_| CandidatePromptError::MemoryEgressDenied)?;
+    Ok((prompt, thread_url))
 }
 
 /// The pure provider-context decision is shared by JSON and SSE attempts.
