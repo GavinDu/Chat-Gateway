@@ -77,6 +77,7 @@ pub(super) fn fixture_with_memory(
         provider_guard: pool.provider_guard(),
         provider_sessions: pool.provider_sessions(),
         metrics: pool.metrics(),
+        embedded_login: Arc::new(embedded_login::EmbeddedLoginRuntime::default()),
     });
     // Use the same handler and State extraction as production: no copied
     // validation_endpoint or fake HTTP handler implementation.
