@@ -15,15 +15,21 @@ pub(super) fn effective_session_pool_size(configured: usize) -> usize {
 
 const MAX_BROWSER_WORKER_RESTART_BACKOFF: Duration = Duration::from_secs(30);
 
-pub(super) type BrowserWorkerSpawner = fn(
-    Arc<AppConfig>,
-    mpsc::Receiver<Command>,
-    oneshot::Sender<Result<()>>,
-    Arc<AtomicBool>,
-    ProviderSessionRegistry,
-    MetricsRegistry,
-    SessionWriteTracker,
-) -> std::thread::JoinHandle<()>;
+/// Cloneable factory allows one gateway (or a scripted test) to own worker
+/// restart state without mutable globals shared by other instances.
+pub(super) type BrowserWorkerSpawner = Arc<
+    dyn Fn(
+            Arc<AppConfig>,
+            mpsc::Receiver<Command>,
+            oneshot::Sender<Result<()>>,
+            Arc<AtomicBool>,
+            ProviderSessionRegistry,
+            MetricsRegistry,
+            SessionWriteTracker,
+        ) -> std::thread::JoinHandle<()>
+        + Send
+        + Sync,
+>;
 
 pub(super) fn join_finished_worker(worker: &mut Option<std::thread::JoinHandle<()>>) -> bool {
     let Some(handle) = worker.as_ref() else {
@@ -138,58 +144,63 @@ mod worker_supervisor_tests {
         assert!(!ready.load(Ordering::Acquire));
     }
 
-    static RESTART_TEST_SPAWNS: std::sync::atomic::AtomicUsize =
-        std::sync::atomic::AtomicUsize::new(0);
-
     fn restart_test_worker_spawner(
-        _cfg: Arc<crate::config::AppConfig>,
-        mut commands: tokio::sync::mpsc::Receiver<super::Command>,
-        ready: tokio::sync::oneshot::Sender<anyhow::Result<()>>,
-        worker_ready: Arc<AtomicBool>,
-        _provider_sessions: super::ProviderSessionRegistry,
-        _metrics: super::MetricsRegistry,
-        _session_writes: super::SessionWriteTracker,
-    ) -> std::thread::JoinHandle<()> {
-        let generation = RESTART_TEST_SPAWNS.fetch_add(1, Ordering::SeqCst);
-        std::thread::spawn(move || {
-            let _ready_guard = super::WorkerReadyGuard(worker_ready);
-            let _ = ready.send(Ok(()));
-            if generation == 0 {
-                if let Some(super::Command::Discover { reply, .. }) = commands.blocking_recv() {
-                    drop(reply);
-                }
-                panic!("injected browser worker failure after accepting a request");
-            }
-
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("restart test runtime should build");
-            runtime.block_on(async move {
-                while let Some(command) = commands.recv().await {
-                    match command {
-                        super::Command::Discover { reply, .. } => {
-                            let _ = reply.send(Ok(vec!["recovered-model".to_owned()]));
+        spawns: Arc<std::sync::atomic::AtomicUsize>,
+    ) -> super::BrowserWorkerSpawner {
+        Arc::new(
+            move |
+                _cfg,
+                mut commands,
+                ready,
+                worker_ready,
+                _provider_sessions,
+                _metrics,
+                _session_writes,
+            | {
+                let generation = spawns.fetch_add(1, Ordering::SeqCst);
+                std::thread::spawn(move || {
+                    let _ready_guard = super::WorkerReadyGuard(worker_ready);
+                    let _ = ready.send(Ok(()));
+                    if generation == 0 {
+                        if let Some(super::Command::Discover { reply, .. }) =
+                            commands.blocking_recv()
+                        {
+                            drop(reply);
                         }
-                        super::Command::Shutdown { reply } => {
-                            let _ = reply.send(());
-                            break;
-                        }
-                        _ => {}
+                        panic!("injected browser worker failure after accepting a request");
                     }
-                }
-            });
-        })
+
+                    let runtime = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("restart test runtime should build");
+                    runtime.block_on(async move {
+                        while let Some(command) = commands.recv().await {
+                            match command {
+                                super::Command::Discover { reply, .. } => {
+                                    let _ = reply.send(Ok(vec!["recovered-model".to_owned()]));
+                                }
+                                super::Command::Shutdown { reply } => {
+                                    let _ = reply.send(());
+                                    break;
+                                }
+                                _ => {}
+                            }
+                        }
+                    });
+                })
+            },
+        )
     }
 
     #[tokio::test]
     async fn request_after_worker_panic_succeeds_only_after_replacement_warmup() {
-        RESTART_TEST_SPAWNS.store(0, Ordering::SeqCst);
+        let spawns = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let config: crate::config::AppConfig =
             serde_yaml::from_str("providers: []").expect("empty test config should parse");
         let pool = super::ObscuraPool::new_with_worker_spawner(
             Arc::new(config),
-            restart_test_worker_spawner,
+            restart_test_worker_spawner(spawns.clone()),
         )
         .await
         .expect("pool should start with injected worker");
