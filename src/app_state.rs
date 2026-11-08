@@ -40,7 +40,10 @@ pub(crate) enum ProviderEligibilityMode {
 
 impl AppState {
     pub(crate) fn provider_eligible(&self, provider: &str, mode: ProviderEligibilityMode) -> bool {
-        if !self.pool.worker_alive()
+        // A send may use an injected backend even when the native browser
+        // worker is down. Only read-only readiness/model probes require the
+        // native worker to be alive; backend admission is checked by send().
+        if (matches!(mode, ProviderEligibilityMode::ReadOnly) && !self.pool.worker_alive())
             || !self
                 .cfg
                 .provider(provider)
