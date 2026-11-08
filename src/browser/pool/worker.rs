@@ -583,7 +583,25 @@ pub(super) fn browser_thread(
                                     finish(report);
                                     return;
                                 }
-                                tokio::time::sleep(Duration::from_millis(400)).await;
+                                providers::common::drive_page(&mut page, Duration::from_millis(400)).await;
+                                let input_json = serde_json::to_string(input_sel).unwrap_or_default();
+                                let dummy_json = serde_json::to_string(DUMMY).unwrap_or_default();
+                                report.typed_prompt_retained = page.evaluate(&format!(
+                                    "(()=>{{const el=document.querySelector({input_json});return !!el && String('value' in el?el.value:el.textContent).trim()==={dummy_json}.trim();}})()"
+                                )).as_bool();
+                                // Only fixed, known control names enter diagnostics. Do not
+                                // forward arbitrary upstream labels or input values.
+                                for (label, selector) in [
+                                    ("Send", "button[aria-label=\"Send\"]"),
+                                    ("Send prompt", "button[aria-label=\"Send prompt\"]"),
+                                    ("Send message", "button[aria-label=\"Send message\"]"),
+                                    ("Submit", "button[aria-label=\"Submit\"]"),
+                                    ("Submit prompt", "button[aria-label=\"Submit prompt\"]"),
+                                    ("send-button test id", "button[data-testid=\"send-button\"]"),
+                                    ("composer-submit-button test id", "button[data-testid=\"composer-submit-button\"]"),
+                                ] {
+                                    if page.query_selector(selector).is_some() { report.send_controls.push(label.into()); }
+                                }
                                 let baseline = adapter.response_text(&page).filter(|t| !t.is_empty());
                                 // Phase 3 — send button or Enter (5s).
                                 match providers::common::click_send_or_enter(&mut page, sets[1].1, input_sel, 5000).await {

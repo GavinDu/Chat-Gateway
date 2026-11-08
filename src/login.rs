@@ -58,7 +58,7 @@ pub struct LoginView {
     pub active: bool,
     pub url: Option<String>,
     pub title: Option<String>,
-    /// "idle" | "login_required" | "likely_logged_in" | "active_unknown"
+    /// "idle" | "login_required" | "composer_available" | "active_unknown"
     pub state: String,
     pub logged_in: Option<bool>,
     pub input_found: bool,
@@ -86,23 +86,15 @@ impl LoginView {
     }
 }
 
-/// Best-effort logged-in signal: NOT a guarantee. URL keyword match
-/// (login/signin/sign-in/auth/...) means the provider bounced us to a
-/// login screen; presence of the provider's chat input selector means
-/// a composer is available, including on anonymous provider pages. Either signal alone can mislead (a
-/// logged-out chat page may still render an input; a logged-in user may
-/// sit on an /auth callback URL briefly), so the UI shows both facts
-/// separately and labels the verdict best-effort. Sign-in/up controls keep
-/// the account state unknown even when a public composer is present.
-pub fn login_state(
-    is_login_url: bool,
-    input_found: bool,
-    auth_controls_present: bool,
-) -> (String, Option<bool>) {
+/// A generic composer proves readiness, not account authentication. Public
+/// provider pages can expose it without a logged-in session, even when no
+/// sign-in button is observed. Only a known login URL reports login-required;
+/// successful provider authentication needs a separate account-specific signal.
+pub fn login_state(is_login_url: bool, input_found: bool) -> (String, Option<bool>) {
     if is_login_url {
         ("login_required".to_string(), Some(false))
-    } else if input_found && !auth_controls_present {
-        ("likely_logged_in".to_string(), Some(true))
+    } else if input_found {
+        ("composer_available".to_string(), None)
     } else {
         ("active_unknown".to_string(), None)
     }
@@ -118,16 +110,15 @@ pub const VIEW_SCRIPT: &str = r#"(function(){ try {
     var id=el.id||''; var nm=el.getAttribute('name')||''; var ph=el.getAttribute('placeholder')||''; var lb=el.getAttribute('aria-label')||'';
     var sel=''; if(id) sel='#'+id; else if(nm) sel=tag+'[name="'+nm.replace(/"/g,'')+'"]'; else if(ph) sel=tag+'[placeholder="'+ph.replace(/"/g,'')+'"]'; else sel=tag;
     fields.push({tag:tag, type: el.getAttribute('type')||'', placeholder: ph.slice(0,80), label: lb.slice(0,80), name: nm.slice(0,80), selector: sel}); }
-  var btns=[]; var bs=document.querySelectorAll('button, [role="button"]'); var authControls=bs.length>512;
-  for (var j=0;j<bs.length && j<512;j++){
+  var btns=[]; var bs=document.querySelectorAll('button, [role="button"]');
+  for (var j=0;j<bs.length && btns.length<24;j++){
     var t=(bs[j].innerText||'').trim(); if(!t) t=(bs[j].getAttribute('aria-label')||'').trim();
     t=t.replace(/\s+/g,' ').slice(0,60);
-    if(/^(log ?in|sign ?in|sign ?up)(?:$| to )/i.test(t)) authControls=true;
-    if(t && btns.length<24) btns.push({text:t, index:j});
+    if(t) btns.push({text:t, index:j});
   }
   var snap=''; try{ snap=(document.body?document.body.innerText:'').slice(0,1500); }catch(e){}
-  return {title: document.title||'', fields: fields, buttons: btns, snapshot: snap, auth_controls_present: authControls};
-} catch(e){ return {title:'', fields:[], buttons:[], snapshot:'', auth_controls_present:true}; } })()"#;
+  return {title: document.title||'', fields: fields, buttons: btns, snapshot: snap};
+} catch(e){ return {title:'', fields:[], buttons:[], snapshot:''}; } })()"#;
 
 /// Reject navigation targets that can reach local services or use URL
 /// authority tricks. SSO may use a different public HTTPS hostname, so this
@@ -517,21 +508,20 @@ mod anonymous_composer_view_tests {
             .await
             .unwrap();
         let value = page.evaluate(super::VIEW_SCRIPT);
-        assert_eq!(value["auth_controls_present"], serde_json::json!(true));
         assert!(!value.to_string().contains("PRIVATE_FIXTURE_VALUE"));
         let (_, _, buttons, _) = super::parse_view(value);
         assert!(buttons.iter().any(|button| button.text == "Send message"));
         assert!(buttons.iter().any(|button| button.text == "Log in"));
         assert_eq!(
-            super::login_state(false, true, true),
+            super::login_state(false, true),
+            ("composer_available".into(), None)
+        );
+        assert_eq!(
+            super::login_state(false, false),
             ("active_unknown".into(), None)
         );
         assert_eq!(
-            super::login_state(false, true, false),
-            ("likely_logged_in".into(), Some(true))
-        );
-        assert_eq!(
-            super::login_state(true, true, true),
+            super::login_state(true, true),
             ("login_required".into(), Some(false))
         );
     }
