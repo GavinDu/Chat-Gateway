@@ -23,6 +23,7 @@ mod app_state;
 mod browser;
 pub mod chat_backend;
 mod chat_handler;
+mod chat_render;
 mod chat_service;
 mod cli;
 mod config;
@@ -42,7 +43,9 @@ mod request_security;
 mod router;
 mod session;
 
-use api::{add_gateway_headers, api_error, estimate_tokens, validate_chat_req, ChatReq};
+#[cfg(test)]
+use api::add_gateway_headers;
+use api::{api_error, estimate_tokens, validate_chat_req, ChatReq};
 use app::shutdown_signal;
 use app_state::{AppState, AuthKeyContext, ProviderEligibilityMode};
 use browser::pool::ObscuraPool;
