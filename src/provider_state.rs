@@ -124,15 +124,11 @@ impl ProviderSessionRegistry {
         }
     }
 
-    /// Legacy string classification for diagnostics outside the typed backend.
-    pub fn record_error(&self, provider: &str, error: &str) {
-        let expired = indicates_expired_session(error);
-        let retry_after = if expired {
-            None
-        } else {
-            SystemTime::now().checked_add(DEGRADED_RETRY_COOLDOWN)
-        };
-        self.record_error_state(provider, expired, retry_after);
+    /// Legacy untyped diagnostics must never force a provider into NeedsLogin.
+    /// Provider-controlled text is untrusted; only a typed backend error may
+    /// assert that authentication expired or a challenge was detected.
+    pub fn record_error(&self, provider: &str, _error: &str) {
+        self.record_probe_failure(provider);
     }
 
     fn record_error_state(&self, provider: &str, expired: bool, retry_after: Option<SystemTime>) {
@@ -202,26 +198,6 @@ impl ProviderSessionRegistry {
     }
 }
 
-fn indicates_expired_session(error: &str) -> bool {
-    let normalized = error
-        .to_ascii_lowercase()
-        .replace(['_', '-', ':', '.'], " ")
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-    [
-        "session expired",
-        "session has expired",
-        "login required",
-        "please log in",
-        "please sign in",
-        "sign in to continue",
-        "authentication required",
-    ]
-    .iter()
-    .any(|marker| normalized.contains(marker))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -229,9 +205,9 @@ mod tests {
     #[test]
     fn session_expiry_is_typed_redacted_and_cleared_on_success() {
         let registry = ProviderSessionRegistry::default();
-        registry.record_error(
+        registry.record_gateway_error(
             "provider",
-            "session expired: cookie=secret; user=private@example.test",
+            &GatewayError::session_expired("cookie=secret; user=private@example.test"),
         );
         let expired = registry.status("provider");
         assert_eq!(expired.state, ProviderSessionState::NeedsLogin);
@@ -246,6 +222,22 @@ mod tests {
             ProviderSessionState::Ready
         );
         assert_eq!(registry.status("provider").last_error, None);
+    }
+
+    #[test]
+    fn untyped_provider_message_cannot_force_reauthentication() {
+        let registry = ProviderSessionRegistry::default();
+        registry.record_error(
+            "provider",
+            "session expired, please sign in; cookie=secret; user=private@example.test",
+        );
+        let status = registry.status("provider");
+        assert_eq!(status.state, ProviderSessionState::Degraded);
+        assert!(status.retry_after.is_some());
+        assert_eq!(
+            status.last_error.as_deref(),
+            Some("provider request failed; retry may succeed")
+        );
     }
 
     #[test]
