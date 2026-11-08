@@ -51,7 +51,7 @@ class ProviderSwitchBenchmarkTests(unittest.TestCase):
         self.assertFalse(done)
         self.assertTrue(error)
         self.assertFalse(finished)
-        ttft, done, error = consume_sse(
+        ttft, done, error, finished = consume_sse(
             FakeResponse(['data: {"choices":[{"delta":{"content":"partial"}}]}']), 1.0
         )
         self.assertIsNotNone(ttft)
