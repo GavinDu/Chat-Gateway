@@ -487,8 +487,10 @@ const COMPLETION_IDLE_TICKS: u32 = 43; // 15-second grace at the default 350ms p
 #[cfg(test)]
 const EXPLICIT_DONE_IDLE_TICKS: u32 = 3; // One-second grace at the default poll tick.
 
-fn confirm_consecutive_signal(previous: bool, current: bool) -> bool {
-    previous && current
+fn confirm_consecutive_signal(previous: bool, current: bool, saw_absent_since_send: bool) -> bool {
+    // A copy/feedback button left over from the previous answer must not
+    // count as the terminal affordance for the new generation.
+    saw_absent_since_send && previous && current
 }
 
 fn ticks_for_grace(grace: Duration, poll_tick: Duration) -> u32 {
@@ -610,6 +612,7 @@ pub async fn run_send(
     let mut last_delta_at: Option<Instant> = None;
     let mut saw_streaming = false;
     let mut previous_post_answer_affordance = false;
+    let mut saw_post_answer_affordance_absent = !baseline_probe.post_answer_affordance;
     let mut response_node_detected = false;
     let mut poll_count = 0u32;
 
@@ -675,11 +678,19 @@ pub async fn run_send(
 
         let streaming = probe.streaming;
         saw_streaming |= streaming;
+        if !probe.post_answer_affordance {
+            saw_post_answer_affordance_absent = true;
+        }
+        // Only observations after the stop control disappears count toward
+        // the two-tick terminal signal. Earlier buttons may belong to a
+        // previous response, or coexist with an ongoing generation.
+        let current_completed_affordance = !streaming && probe.post_answer_affordance;
         let confirmed_post_answer_affordance = confirm_consecutive_signal(
             previous_post_answer_affordance,
-            probe.post_answer_affordance,
+            current_completed_affordance,
+            saw_post_answer_affordance_absent,
         );
-        previous_post_answer_affordance = probe.post_answer_affordance;
+        previous_post_answer_affordance = current_completed_affordance;
 
         if let Some(txt) = probe.text {
             match tracker.observe(&txt) {
@@ -1086,10 +1097,41 @@ mod response_completion_tests {
     fn post_answer_affordance_requires_two_consecutive_observations() {
         use super::confirm_consecutive_signal;
 
-        assert!(!confirm_consecutive_signal(false, true));
-        assert!(!confirm_consecutive_signal(true, false));
-        assert!(!confirm_consecutive_signal(false, false));
-        assert!(confirm_consecutive_signal(true, true));
+        assert!(!confirm_consecutive_signal(false, true, true));
+        assert!(!confirm_consecutive_signal(true, false, true));
+        assert!(!confirm_consecutive_signal(false, false, true));
+        assert!(confirm_consecutive_signal(true, true, true));
+        assert!(
+            !confirm_consecutive_signal(true, true, false),
+            "stale buttons already visible before a new send are not a fresh done signal"
+        );
+    }
+
+    #[test]
+    fn ten_second_pause_without_fresh_done_signal_does_not_complete_early() {
+        // A long reasoning/tool pause may remove the streaming indicator.
+        // Without a fresh two-tick post-answer signal, the full fallback
+        // grace must still apply even after the stop button disappears.
+        for tick in 0..=29 {
+            assert!(!completion_ready(
+                tick,
+                false,
+                DoneSignal::StopControlDisappeared,
+                true,
+                false,
+                DEFAULT_POLL_TICK,
+                Duration::from_millis(15_000),
+            ));
+        }
+        assert!(completion_ready(
+            COMPLETION_IDLE_TICKS,
+            false,
+            DoneSignal::StopControlDisappeared,
+            true,
+            false,
+            DEFAULT_POLL_TICK,
+            Duration::from_millis(15_000),
+        ));
     }
 
     #[test]
