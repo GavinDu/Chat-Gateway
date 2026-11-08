@@ -310,7 +310,7 @@ impl ObscuraPool {
     /// Spawn the browser thread (browser build + page warm-up happen
     /// there; call warm_all() to await readiness).
     pub async fn new(cfg: Arc<AppConfig>) -> Result<Arc<Self>> {
-        Self::new_with_worker_spawner(cfg, browser_thread).await
+        Self::new_with_worker_spawner(cfg, Arc::new(browser_thread)).await
     }
 
     async fn new_with_worker_spawner(
