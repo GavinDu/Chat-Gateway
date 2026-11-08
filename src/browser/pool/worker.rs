@@ -356,7 +356,12 @@ pub(super) fn browser_thread(
                                                 break false;
                                             }
                                             let arrived = if thread_url.is_some() {
-                                                pool_policy::provider_thread_navigation_matches(&current_url, target_url)
+                                                provider_thread_navigation_ready(
+                                                    &current_url,
+                                                    target_url,
+                                                    &page,
+                                                    adapter.as_ref(),
+                                                )
                                             } else {
                                                 provider_landing_navigation_ready(
                                                     &current_url,
