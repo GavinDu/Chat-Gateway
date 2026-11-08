@@ -45,13 +45,15 @@ mod router;
 mod session;
 
 #[cfg(test)]
-use api::add_gateway_headers;
-use api::{api_error, estimate_tokens, validate_chat_req, ChatReq};
+use api::{add_gateway_headers, validate_chat_req, ChatReq};
+use api::{api_error, estimate_tokens};
 use app::shutdown_signal;
 use app_state::{AppState, AuthKeyContext, ProviderEligibilityMode};
 use browser::pool::ObscuraPool;
 use chat_backend::{BackendRequest, ProviderId};
-use chat_request::{oversized_chat_body_error, valid_conversation_id};
+#[cfg(test)]
+use chat_request::oversized_chat_body_error;
+use chat_request::valid_conversation_id;
 #[cfg(test)]
 use chat_service::{completed_chat_outcome, FirstEvent};
 use chat_service::{first_event, record_attempt_error, ChatService};
