@@ -18,11 +18,14 @@ use tokio::sync::{mpsc, oneshot, Notify, OwnedSemaphorePermit, Semaphore};
 
 #[path = "pool/navigation.rs"]
 mod navigation;
+#[path = "pool/page_session.rs"]
+mod page_session;
 #[path = "pool/supervisor.rs"]
 mod supervisor;
 #[path = "pool/worker.rs"]
 mod worker;
 use navigation::{provider_landing_navigation_ready, provider_thread_navigation_ready};
+use page_session::PageSession;
 use supervisor::{
     closed_command_channel, effective_session_pool_size, join_finished_worker,
     join_worker_on_shutdown, next_browser_worker_restart_backoff, wait_for_worker_shutdown,
@@ -843,29 +846,6 @@ impl std::fmt::Display for ProviderSessionExpiredError {
 }
 
 impl std::error::Error for ProviderSessionExpiredError {}
-
-/// Restore a provider snapshot using the single canonical warm-up order:
-/// cookies → navigation → localStorage → application reload.
-/// With no snapshot, this only navigates to the provider's login/chat entrypoint.
-async fn open_page_with_session(
-    browser: &obscura_core::Browser,
-    page: &mut obscura_core::Page,
-    provider: Provider,
-    session_file: Option<&session::SessionFile>,
-) -> Result<()> {
-    let cookie_restore = session_file
-        .map(|file| session::restore_cookies(browser, file, provider.name()))
-        .transpose();
-    // Navigate even when cookie import failed so the caller's fail-closed
-    // cleanup can clear origin-scoped localStorage on the provider origin.
-    page.goto(provider.login_url()).await?;
-    cookie_restore?;
-    if let Some(file) = session_file {
-        session::restore_local_storage(page, file)?;
-        page.goto(provider.login_url()).await?;
-    }
-    Ok(())
-}
 
 /// Verify that a warmed provider page still looks like an authenticated chat page.
 /// Call only while holding that provider page's lock so probes never race a send.
