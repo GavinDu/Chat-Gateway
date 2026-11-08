@@ -167,11 +167,18 @@ $("pair").addEventListener("click", async () => {
     // A popup closure must not strand a valid approval. Reopen the same page
     // instead of repeatedly creating and invalidating requests.
     if (!remote) {
-      const {pendingConnection} = await chrome.storage.local.get(["pendingConnection"]);
+      let {pendingConnection} = await chrome.storage.local.get(["pendingConnection"]);
       if (pendingConnection?.gateway === gateway && Date.now() < pendingConnection.expires) {
-        if (!await openExtensionTab(pendingApprovalUrl(pendingConnection))) showPendingApproval(pendingConnection);
-        else message("Approve the pending connection in the local tab, then return here.");
-        return;
+        const checked = await updateConnection();
+        const current = await chrome.storage.local.get(["token", "pendingConnection"]);
+        if (current.token) return;
+        pendingConnection = current.pendingConnection;
+        if (pendingConnection?.gateway === gateway && Date.now() < pendingConnection.expires) {
+          if (!checked) return;
+          if (!await openExtensionTab(pendingApprovalUrl(pendingConnection))) showPendingApproval(pendingConnection);
+          else message("Approve the pending connection in the local tab, then return here.");
+          return;
+        }
       }
     }
     const response = await fetch(gateway + (remote ? "/relay/v1/pair" : "/relay/v1/connect/request"), {
@@ -291,19 +298,27 @@ $("unpair").addEventListener("click", async () => {
   } catch (error) { message(error.message); }
 });
 
-let checkingConnection = false;
+let checkingConnection;
 async function updateConnection() {
-  if (checkingConnection) return;
-  checkingConnection = true;
+  if (checkingConnection) return checkingConnection;
+  checkingConnection = checkConnection();
+  try { return await checkingConnection; }
+  finally { checkingConnection = undefined; }
+}
+async function checkConnection() {
   try {
     const result = await chrome.runtime.sendMessage({type:"poll-connection"});
-    if (result?.error) message(result.error);
     const {token, pendingConnection} = await chrome.storage.local.get(["token","pendingConnection"]);
     showGatewayConnection(Boolean(token));
     if (token) await refreshStatus();
-    else if (pendingConnection) showPendingApproval(pendingConnection);
-  } catch (error) { message(error.message); }
-  finally { checkingConnection = false; }
+    else if (result?.ok !== true) {
+      // Do not hide a failed exchange behind an endless waiting message.
+      // A stale/missing service worker can also return no acknowledgement.
+      message(result?.error || "The connection worker did not respond. Reload Chat Gateway Browser Relay at chrome://extensions, then reconnect.");
+      return false;
+    } else if (pendingConnection) showPendingApproval(pendingConnection);
+    return true;
+  } catch (error) { message(error.message); return false; }
 }
 initialize().then(updateConnection);
 setInterval(updateConnection, 5000);
