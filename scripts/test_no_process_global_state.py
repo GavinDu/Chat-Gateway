@@ -53,12 +53,12 @@ class ProcessStatePolicyTests(unittest.TestCase):
             for _, declaration in disallowed_statics(path.read_text(encoding="utf-8")):
                 name = declaration.split(":", 1)[0].split()[-1]
                 found.add((relative_path, name))
+        unexpected = found - KNOWN_LEGACY_GLOBALS
         self.assertEqual(
-            found,
-            KNOWN_LEGACY_GLOBALS,
-            "Mutable Rust statics differ from the reviewed baseline. "
-            "New entries must move into AppState/ProviderRuntime; remove "
-            "baseline entries when existing globals are migrated.",
+            unexpected,
+            set(),
+            "New mutable process-global Rust state is forbidden; move it "
+            "into AppState/ProviderRuntime. Legacy entries may be removed.",
         )
 
     def test_guard_recognizes_legacy_globals_but_allows_immutable_statics(self):
