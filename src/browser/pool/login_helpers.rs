@@ -8,6 +8,7 @@ use std::{
     cell::RefCell,
     collections::HashMap,
     rc::Rc,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
