@@ -6,7 +6,7 @@ use axum::{
 };
 use std::sync::Arc;
 
-use crate::AppState;
+use crate::{app_state::ProviderEligibilityMode, AppState};
 
 pub(crate) async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let providers = state
@@ -19,6 +19,7 @@ pub(crate) async fn health(State(state): State<Arc<AppState>>) -> impl IntoRespo
             serde_json::json!({
                 "name": p.name,
                 "enabled": p.enabled,
+                "routable": state.provider_eligible(&p.name, ProviderEligibilityMode::ReadOnly),
                 "priority": p.priority,
                 "models": p.models,
                 "session_state": session.state.as_str(),
@@ -82,14 +83,7 @@ pub(crate) async fn readiness(State(state): State<Arc<AppState>>) -> impl IntoRe
         .cfg
         .providers
         .iter()
-        .filter(|p| {
-            p.enabled
-                && state.provider_sessions.is_available(&p.name)
-                && state
-                    .provider_guard
-                    .provider_disabled_reason(&p.name)
-                    .is_none()
-        })
+        .filter(|p| state.provider_eligible(&p.name, ProviderEligibilityMode::ReadOnly))
         .count();
     readiness_response(routable, true, state.pool.worker_generation())
 }
