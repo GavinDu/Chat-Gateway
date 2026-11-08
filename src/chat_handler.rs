@@ -188,15 +188,8 @@ pub(super) async fn run(
     let mut busy_count = 0usize;
     let mut last_err: Option<String> = None;
     for provider_name in candidates {
-        if !state.provider_sessions.is_routable(&provider_name) {
-            last_err = Some(format!("provider '{provider_name}' needs login"));
-            continue;
-        }
-        if let Some(reason) = state
-            .provider_guard
-            .provider_disabled_reason(&provider_name)
-        {
-            last_err = Some(format!("provider '{provider_name}' disabled: {reason}"));
+        if !state.provider_eligible(&provider_name, ProviderEligibilityMode::ClaimRetry) {
+            last_err = Some(format!("provider '{provider_name}' not currently routable"));
             continue;
         }
         let provider_cfg = match state.cfg.provider(&provider_name) {
