@@ -290,10 +290,8 @@ mod tests {
     #[test]
     fn metrics_text_envelope_remains_stable_after_runtime_injection() {
         let registry = MetricsRegistry::default();
-        let actual = registry.render_with_provider_states(&[(
-            "chatgpt".to_owned(),
-            "ready".to_owned(),
-        )]);
+        let actual =
+            registry.render_with_provider_states(&[("chatgpt".to_owned(), "ready".to_owned())]);
         let expected = concat!(
             "# TYPE gateway_http_requests_total counter\n",
             "# TYPE gateway_http_handler_duration_ms histogram\n",
