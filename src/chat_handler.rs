@@ -937,7 +937,7 @@ mod conversation_header_tests {
                 panic!("ambiguous conversation IDs must be rejected before routing");
             };
             assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-            let bytes = axum::body::to_bytes(response.into_body(), 65_536)
+            let bytes = axum::body::to_bytes((*response).into_body(), 65_536)
                 .await
                 .unwrap();
             let error: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
