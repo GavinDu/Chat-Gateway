@@ -281,8 +281,8 @@ pub(super) async fn run(
         tracing::debug!(provider = %provider_name, queue_ms = permit.queue_ms, "acquired provider slot");
         let queue_ms = permit.queue_ms.min(u64::MAX as u128) as u64;
 
-        let (provider_prompt, thread_url) = match chat_service::prepare_candidate_prompt(
-            chat_service::CandidatePromptRequest {
+        let (provider_prompt, thread_url) =
+            match chat_service::prepare_candidate_prompt(chat_service::CandidatePromptRequest {
                 state: &state,
                 owner_key_id: &owner_key_id,
                 conversation_id: conversation_id.as_deref(),
@@ -294,24 +294,23 @@ pub(super) async fn run(
                 replay_prompt: &prompt,
                 policy: &memory_egress_policy,
                 personal_memory_items: &personal_memory_items,
-            },
-        )
-        .await
-        {
-            Ok(prepared) => prepared,
-            Err(chat_service::CandidatePromptError::UnreadableThreadState) => {
-                return api_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "server_error",
-                    "memory_read_failed",
-                    "provider thread state could not be read safely",
-                );
-            }
-            Err(chat_service::CandidatePromptError::MemoryEgressDenied) => {
-                last_err = Some("provider memory egress policy denied request".to_owned());
-                continue;
-            }
-        };
+            })
+            .await
+            {
+                Ok(prepared) => prepared,
+                Err(chat_service::CandidatePromptError::UnreadableThreadState) => {
+                    return api_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "server_error",
+                        "memory_read_failed",
+                        "provider thread state could not be read safely",
+                    );
+                }
+                Err(chat_service::CandidatePromptError::MemoryEgressDenied) => {
+                    last_err = Some("provider memory egress policy denied request".to_owned());
+                    continue;
+                }
+            };
 
         let provider_started = Instant::now();
         let mut rx = match state
