@@ -499,6 +499,7 @@ fn migrate_legacy_snapshot_with_remover(
 /// localStorage export is deliberately disabled until each provider has a
 /// reviewed key allowlist.
 pub fn import_relay_session(provider: &str, file: &SessionFile) -> Result<()> {
+    validate_cookie_scopes(file)?;
     for cookie in &file.cookies {
         cookie.validate_browser_metadata()?;
     }
@@ -1330,6 +1331,32 @@ fn write_session_file_atomically(destination: &Path, serialized: &[u8]) -> Resul
     Ok(())
 }
 
+/// The pinned browser jar indexes cookies by normalized domain, name and path.
+/// Distinct host-only/domain cookies with that identity cannot both survive.
+#[derive(Debug)]
+pub struct ConflictingCookieScopes;
+impl std::fmt::Display for ConflictingCookieScopes {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("session contains conflicting cookie scopes unsupported by this browser")
+    }
+}
+impl std::error::Error for ConflictingCookieScopes {}
+
+fn validate_cookie_scopes(file: &SessionFile) -> Result<()> {
+    let mut identities = std::collections::HashSet::new();
+    for cookie in &file.cookies {
+        let identity = (
+            cookie.name.as_str(),
+            cookie.domain.trim_matches('.').to_ascii_lowercase(),
+            cookie.path.as_str(),
+        );
+        if !identities.insert(identity) {
+            return Err(ConflictingCookieScopes.into());
+        }
+    }
+    Ok(())
+}
+
 fn ensure_cookie_restore_complete(failed_writes: usize) -> Result<()> {
     if failed_writes > 0 {
         anyhow::bail!("failed to restore {failed_writes} provider session cookie(s)");
@@ -1445,6 +1472,7 @@ mod cookie_restore_result_tests {
 /// Restore step 1 (BEFORE goto): put the saved cookies into the browser's
 /// cookie store so the first navigation is already authenticated.
 pub fn restore_cookies(browser: &Browser, file: &SessionFile, provider: &str) -> Result<()> {
+    validate_cookie_scopes(file)?;
     let store = browser.cookies();
     let mut failed_writes = 0usize;
     let mut expected_restores = Vec::new();
@@ -1699,6 +1727,55 @@ mod cookie_scope_tests {
             "value",
             "/safe\r\nInjected: yes"
         )));
+    }
+
+    #[tokio::test]
+    async fn conflicting_cookie_scopes_reject_import_before_vault_access_or_browser_mutation() {
+        let browser = Browser::builder().stealth(false).build().unwrap();
+        browser
+            .cookies()
+            .set("preserved=dummy; Secure; Path=/", "https://google.com/")
+            .unwrap();
+        let mut a = cookie("fixture", "first-private-value", "/");
+        a.domain = ".google.com".into();
+        let mut b = a.clone();
+        b.domain = "google.com".into();
+        b.value = "second-private-value".into();
+        let file = SessionFile {
+            cookies: vec![a, b],
+            local_storage: HashMap::new(),
+            ts: "fixture".into(),
+        };
+        // This must fail before reading any key, replacing a vault or queuing
+        // browser activation, even when vault mode has not been configured.
+        let error = import_relay_session("gemini", &file).unwrap_err();
+        assert!(error.downcast_ref::<ConflictingCookieScopes>().is_some());
+        assert!(!error.to_string().contains("private-value"));
+        assert!(restore_cookies(&browser, &file, "gemini")
+            .unwrap_err()
+            .downcast_ref::<ConflictingCookieScopes>()
+            .is_some());
+        let remaining = browser.cookies().get_all();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].name, "preserved");
+    }
+
+    #[test]
+    fn distinct_cookie_paths_names_and_domains_remain_importable() {
+        let mut a = cookie("fixture", "one", "/");
+        a.domain = ".google.com".into();
+        let mut b = a.clone();
+        b.path = "/nested".into();
+        let mut c = a.clone();
+        c.domain = "gemini.google.com".into();
+        let mut d = a.clone();
+        d.name = "other".into();
+        let file = SessionFile {
+            cookies: vec![a, b, c, d],
+            local_storage: HashMap::new(),
+            ts: "fixture".into(),
+        };
+        validate_cookie_scopes(&file).unwrap();
     }
 
     #[tokio::test]

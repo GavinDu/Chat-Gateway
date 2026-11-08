@@ -137,5 +137,11 @@ async function syncProvider(provider) {
   const response = await relayFetch("/relay/v1/session/" + encodeURIComponent(provider), {
     method:"POST", body:JSON.stringify(snapshot)
   }, {gateway, token, provider});
+  if (!response.ok && response.status === 422) {
+    const failure = await response.json().catch(() => null);
+    if (failure?.error?.code === "cookie_scope_conflict") {
+      throw new Error("This session contains cookie scopes the gateway cannot preserve. Your saved session was kept. Try the gateway's dedicated login browser.");
+    }
+  }
   if (!response.ok) throw new Error("Gateway rejected session update (" + response.status + "). Check vault mode and provider permissions.");
 }
