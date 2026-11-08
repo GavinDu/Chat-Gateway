@@ -43,7 +43,10 @@ pub(super) fn sweep_login_pages(
     }
 }
 
-pub(super) fn touch_login_meta(login_meta: &Rc<RefCell<HashMap<Provider, LoginMeta>>>, provider: Provider) {
+pub(super) fn touch_login_meta(
+    login_meta: &Rc<RefCell<HashMap<Provider, LoginMeta>>>,
+    provider: Provider,
+) {
     if let Some(m) = login_meta.borrow_mut().get_mut(&provider) {
         m.last_seen = Instant::now();
     }
