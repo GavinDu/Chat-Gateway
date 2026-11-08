@@ -159,7 +159,9 @@ fn escape_label(value: &str) -> String {
 
 /// Restrict metric labels to a bounded route vocabulary to avoid cardinality attacks.
 pub fn normalize_route(path: &str) -> String {
-    if path.starts_with("/v1/conversations/") {
+    if path.starts_with("/v1/admin/providers/") && path.ends_with("/reset") {
+        "/v1/admin/providers/:id/reset".to_owned()
+    } else if path.starts_with("/v1/conversations/") {
         "/v1/conversations/:id".to_owned()
     } else if path.starts_with("/login/api/") {
         "/login/api/*".to_owned()
@@ -286,7 +288,39 @@ mod tests {
     }
 
     #[test]
+    fn metrics_text_envelope_remains_stable_after_runtime_injection() {
+        let registry = MetricsRegistry::default();
+        let actual =
+            registry.render_with_provider_states(&[("chatgpt".to_owned(), "ready".to_owned())]);
+        let expected = concat!(
+            "# TYPE gateway_http_requests_total counter\n",
+            "# TYPE gateway_http_handler_duration_ms histogram\n",
+            "# TYPE gateway_provider_queue_duration_ms histogram\n",
+            "# TYPE gateway_provider_ttft_ms histogram\n",
+            "# TYPE gateway_provider_work_duration_ms histogram\n",
+            "# TYPE gateway_provider_tail_ms histogram\n",
+            "# TYPE gateway_chat_total_duration_ms histogram\n",
+            "# TYPE gateway_overhead_ms histogram\n",
+            "# TYPE gateway_poll_tick_ms histogram\n",
+            "# TYPE gateway_poll_evaluations_total counter\n",
+            "# TYPE gateway_provider_requests_total counter\n",
+            "# TYPE gateway_browser_worker_restarts_total counter\n",
+            "gateway_browser_worker_restarts_total 0\n",
+            "# TYPE gateway_provider_session_state gauge\n",
+            "gateway_provider_session_state{provider=\"chatgpt\",state=\"unknown\"} 0\n",
+            "gateway_provider_session_state{provider=\"chatgpt\",state=\"ready\"} 1\n",
+            "gateway_provider_session_state{provider=\"chatgpt\",state=\"needs_login\"} 0\n",
+            "gateway_provider_session_state{provider=\"chatgpt\",state=\"degraded\"} 0\n",
+        );
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
     fn route_labels_have_bounded_cardinality() {
+        assert_eq!(
+            normalize_route("/v1/admin/providers/chatgpt/reset"),
+            "/v1/admin/providers/:id/reset"
+        );
         assert_eq!(
             normalize_route("/v1/conversations/secret-id"),
             "/v1/conversations/:id"
