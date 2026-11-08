@@ -224,6 +224,7 @@ pub fn session_path(provider: &str) -> Result<String> {
         "grok",
         "mistral",
         "perplexity",
+        "manus",
     ];
     if !PROVIDERS.contains(&provider) {
         anyhow::bail!("unsupported provider identifier for session storage");
@@ -238,6 +239,8 @@ mod session_path_tests {
     #[test]
     fn only_registered_provider_names_become_paths() {
         assert_eq!(session_path("chatgpt").unwrap(), "sessions/chatgpt.json");
+        assert_eq!(session_path("manus").unwrap(), "sessions/manus.json");
+        assert!(session_path("../manus").is_err());
         assert_eq!(
             session_path("perplexity").unwrap(),
             "sessions/perplexity.json"
@@ -655,6 +658,7 @@ pub fn list_vault_sessions() -> Result<Vec<VaultSessionInfo>> {
         "grok",
         "mistral",
         "perplexity",
+        "manus",
     ];
     let mut entries = Vec::with_capacity(PROVIDERS.len());
     for provider in PROVIDERS {
@@ -707,6 +711,7 @@ pub fn restore_vault_backup(backup_dir: &str) -> Result<usize> {
         "grok",
         "mistral",
         "perplexity",
+        "manus",
     ];
     let mut backups = Vec::new();
     for provider in PROVIDERS {
@@ -866,6 +871,7 @@ pub fn rotate_vault_key(new_key: &[u8; 32]) -> Result<(usize, String)> {
         "grok",
         "mistral",
         "perplexity",
+        "manus",
     ];
     // A rotation preflight must not migrate any plaintext files before we know
     // every already-encrypted provider record authenticates with the old key.
@@ -1100,6 +1106,7 @@ fn cookie_domain_allowed(provider: &str, domain: &str) -> bool {
         "grok" => &["grok.com", "x.com", "twitter.com", "x.ai"],
         "mistral" => &["mistral.ai"],
         "perplexity" => &["perplexity.ai"],
+        "manus" => &["manus.im"],
         _ => return false,
     };
     allowed
@@ -1682,6 +1689,11 @@ mod cookie_scope_tests {
         assert!(!cookie_domain_allowed("claude", "chatgpt.com"));
         assert!(cookie_domain_allowed("gemini", ".google.com"));
         assert!(!cookie_domain_allowed("gemini", "attacker-google.com"));
+        assert!(cookie_domain_allowed("manus", "manus.im"));
+        assert!(cookie_domain_allowed("manus", ".api.manus.im"));
+        assert!(!cookie_domain_allowed("manus", "manus.im.evil.example"));
+        assert!(!cookie_domain_allowed("manus", "evilmanus.im"));
+        assert!(!cookie_domain_allowed("manus", "chatgpt.com"));
     }
 
     #[test]
