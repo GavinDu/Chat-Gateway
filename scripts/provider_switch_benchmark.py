@@ -15,6 +15,7 @@ import urllib.error
 import urllib.request
 
 from provider_concurrency_benchmark import parse_sse
+from provider_bench import _NoRedirect, validate_benchmark_target
 
 
 def percentile(values: list[int], p: float) -> int | None:
@@ -40,6 +41,12 @@ def parse_step(value: str) -> tuple[str, str]:
 def request_turn(base_url: str, api_key: str, provider: str, model: str,
                  conversation_id: str | None, sequence_number: int,
                  timeout: int) -> dict:
+    # This is a credential-bearing benchmark; never send bearer headers to
+    # an unsafe target or allow redirects to replay them elsewhere.
+    try:
+        validate_benchmark_target(base_url.rstrip("/") + "/v1")
+    except RuntimeError:
+        return {"ok": False, "failure": "invalid_benchmark_endpoint"}
     payload = json.dumps({
         "model": model,
         "stream": True,
@@ -61,7 +68,7 @@ def request_turn(base_url: str, api_key: str, provider: str, model: str,
     )
     started = time.monotonic()
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with urllib.request.build_opener(_NoRedirect()).open(request, timeout=timeout) as response:
             actual_provider = response.headers.get("X-Gateway-Provider", "").lower()
             returned_conversation = response.headers.get("X-Conversation-Id")
             ttft, done, provider_error, finished = consume_sse(response, started)
@@ -156,6 +163,10 @@ def main() -> int:
         parser.error("set CHAT_GATEWAY_API_KEY in the environment")
     if args.repeat < 1 or args.timeout < 1 or len(args.step) < 2:
         parser.error("--repeat and --timeout must be positive; at least two --step values are required")
+    try:
+        validate_benchmark_target(args.base_url.rstrip("/") + "/v1")
+    except RuntimeError:
+        parser.error("--base-url must be a local HTTP or HTTPS gateway root without credentials, query or fragment")
 
     categories, failures = measure_sequence(
         args.base_url, api_key, args.step, args.repeat, args.timeout
