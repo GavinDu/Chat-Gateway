@@ -262,6 +262,125 @@ pub(crate) fn authorize_candidate_context(
     )
 }
 
+/// An admitted candidate owns its permit until the HTTP completion finishes.
+/// All policy and thread-continuity decisions happen before sending to a backend.
+pub(crate) struct CandidateAttemptRequest<'a> {
+    pub(crate) state: &'a AppState,
+    pub(crate) provider: &'a str,
+    pub(crate) owner_key_id: &'a str,
+    pub(crate) conversation_id: Option<&'a str>,
+    pub(crate) model: &'a str,
+    pub(crate) stored_messages: &'a [ChatMessage],
+    pub(crate) incoming_messages: &'a [ChatMessage],
+    pub(crate) token_budget: usize,
+    pub(crate) replay_prompt: &'a str,
+    pub(crate) policy: &'a memory_egress::MemoryEgressPolicy,
+    pub(crate) personal_memory_items: &'a [memory_egress::PersonalMemoryItem],
+}
+
+pub(crate) struct CandidateAttempt {
+    pub(crate) permit: crate::browser::pool::ObscuraPermit,
+    pub(crate) queue_ms: u64,
+    pub(crate) prompt: String,
+    pub(crate) thread_url: Option<String>,
+    pub(crate) timeout: Duration,
+}
+
+pub(crate) enum CandidateAttemptError {
+    Skip { message: String, busy: bool },
+    Fatal(Response),
+}
+
+pub(crate) async fn prepare_candidate_attempt(
+    request: CandidateAttemptRequest<'_>,
+) -> std::result::Result<CandidateAttempt, CandidateAttemptError> {
+    let CandidateAttemptRequest {
+        state,
+        provider,
+        owner_key_id,
+        conversation_id,
+        model,
+        stored_messages,
+        incoming_messages,
+        token_budget,
+        replay_prompt,
+        policy,
+        personal_memory_items,
+    } = request;
+    if !state.provider_eligible(provider, crate::app_state::ProviderEligibilityMode::ClaimRetry) {
+        return Err(CandidateAttemptError::Skip {
+            message: format!("provider '{provider}' not currently routable"),
+            busy: false,
+        });
+    }
+    let Some(config) = state.cfg.provider(provider) else {
+        return Err(CandidateAttemptError::Skip {
+            message: format!("provider '{provider}' configuration disappeared"),
+            busy: false,
+        });
+    };
+    // Reject restricted data egress before consuming pacing quota or a permit.
+    if authorize_candidate_context(policy, provider).is_err() {
+        return Err(CandidateAttemptError::Skip {
+            message: "provider data-handling policy denied request".to_owned(),
+            busy: false,
+        });
+    }
+    let permit = match acquire_candidate_permit(state, provider, config).await {
+        Ok(permit) => permit,
+        Err(error) => {
+            return Err(CandidateAttemptError::Skip {
+                busy: error
+                    .downcast_ref::<crate::browser::pool::ProviderBusyError>()
+                    .is_some(),
+                message: error.to_string(),
+            });
+        }
+    };
+    tracing::debug!(provider, queue_ms = permit.queue_ms, "acquired provider slot");
+    let queue_ms = permit.queue_ms.min(u64::MAX as u128) as u64;
+
+    // Thread planning remains UNDER the permit, serializing same-provider sends.
+    let (prompt, thread_url) = match prepare_candidate_prompt(CandidatePromptRequest {
+        state,
+        owner_key_id,
+        conversation_id,
+        provider,
+        model,
+        stored_messages,
+        incoming_messages,
+        token_budget,
+        replay_prompt,
+        policy,
+        personal_memory_items,
+    })
+    .await
+    {
+        Ok(prepared) => prepared,
+        Err(CandidatePromptError::UnreadableThreadState) => {
+            return Err(CandidateAttemptError::Fatal(api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                "memory_read_failed",
+                "provider thread state could not be read safely",
+            )));
+        }
+        Err(CandidatePromptError::MemoryEgressDenied) => {
+            return Err(CandidateAttemptError::Skip {
+                message: "provider memory egress policy denied request".to_owned(),
+                busy: false,
+            });
+        }
+    };
+    Ok(CandidateAttempt {
+        permit,
+        queue_ms,
+        prompt,
+        thread_url,
+        timeout: Duration::from_secs(config.timeout_seconds),
+    })
+}
+
 /// Reserve request pacing before acquiring the single-page provider permit.
 /// Holding the exclusive permit while waiting on rate limits would block
 /// otherwise useful sends to the same provider.
