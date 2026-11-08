@@ -226,7 +226,10 @@ pub(crate) fn authorize_candidate_context(
     provider: &str,
 ) -> std::result::Result<(), memory_egress::EgressError> {
     policy.authorize(provider, memory_egress::ProviderDataClass::CurrentTurn)?;
-    policy.authorize(provider, memory_egress::ProviderDataClass::ConversationContext)
+    policy.authorize(
+        provider,
+        memory_egress::ProviderDataClass::ConversationContext,
+    )
 }
 
 /// Reserve request pacing before acquiring the single-page provider permit.
