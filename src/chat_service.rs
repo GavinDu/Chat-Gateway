@@ -288,7 +288,7 @@ pub(crate) struct CandidateAttempt {
 
 pub(crate) enum CandidateAttemptError {
     Skip { message: String, busy: bool },
-    Fatal(Response),
+    Fatal(Box<Response>),
 }
 
 pub(crate) async fn prepare_candidate_attempt(
@@ -358,12 +358,12 @@ pub(crate) async fn prepare_candidate_attempt(
     {
         Ok(prepared) => prepared,
         Err(CandidatePromptError::UnreadableThreadState) => {
-            return Err(CandidateAttemptError::Fatal(api_error(
+            return Err(CandidateAttemptError::Fatal(Box::new(api_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "server_error",
                 "memory_read_failed",
                 "provider thread state could not be read safely",
-            )));
+            ))));
         }
         Err(CandidatePromptError::MemoryEgressDenied) => {
             return Err(CandidateAttemptError::Skip {
