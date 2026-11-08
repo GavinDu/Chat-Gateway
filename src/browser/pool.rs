@@ -16,6 +16,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot, Notify, OwnedSemaphorePermit, Semaphore};
 
+#[path = "pool/diagnostics.rs"]
+mod diagnostics;
 #[path = "pool/navigation.rs"]
 mod navigation;
 #[path = "pool/page_session.rs"]
@@ -24,6 +26,8 @@ mod page_session;
 mod supervisor;
 #[path = "pool/worker.rs"]
 mod worker;
+use diagnostics::verify_session_page;
+pub use diagnostics::ProviderSessionExpiredError;
 use navigation::{provider_landing_navigation_ready, provider_thread_navigation_ready};
 use page_session::PageSession;
 use supervisor::{
@@ -832,62 +836,6 @@ fn sweep_login_pages(
 fn touch_login_meta(login_meta: &Rc<RefCell<HashMap<Provider, LoginMeta>>>, provider: Provider) {
     if let Some(m) = login_meta.borrow_mut().get_mut(&provider) {
         m.last_seen = Instant::now();
-    }
-}
-
-/// Typed outcome for a probe that confirms the provider has redirected to login.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ProviderSessionExpiredError;
-
-impl std::fmt::Display for ProviderSessionExpiredError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("provider session requires login")
-    }
-}
-
-impl std::error::Error for ProviderSessionExpiredError {}
-
-/// Verify that a warmed provider page still looks like an authenticated chat page.
-/// Call only while holding that provider page's lock so probes never race a send.
-fn verify_session_page(
-    _provider: Provider,
-    page: &obscura_core::Page,
-    adapter: &dyn providers::SiteAdapter,
-) -> Result<bool> {
-    let is_login_page = providers::common::is_login_page(page);
-    let input_found = adapter
-        .selector_set()
-        .input
-        .iter()
-        .any(|selector| page.query_selector(selector).is_some());
-    classify_session_probe(is_login_page, input_found)
-}
-
-fn classify_session_probe(is_login_page: bool, input_found: bool) -> Result<bool> {
-    if pool_policy::session_probe_requires_login(is_login_page, input_found) {
-        return Err(anyhow::Error::new(ProviderSessionExpiredError));
-    }
-    // Missing chat controls can mean an unloaded page, a provider redesign,
-    // or a challenge screen. It is not proof that cookies have expired.
-    // Preserve the saved session and report the probe as inconclusive.
-    Ok(pool_policy::session_probe_page_healthy(
-        is_login_page,
-        input_found,
-    ))
-}
-
-#[cfg(test)]
-mod inconclusive_session_probe_tests {
-    use super::{classify_session_probe, ProviderSessionExpiredError};
-
-    #[test]
-    fn missing_chat_input_is_inconclusive_not_an_expired_session() {
-        assert!(!classify_session_probe(false, false).unwrap());
-        assert!(classify_session_probe(false, true).unwrap());
-        let expired = classify_session_probe(true, false).unwrap_err();
-        assert!(expired
-            .downcast_ref::<ProviderSessionExpiredError>()
-            .is_some());
     }
 }
 
