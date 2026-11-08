@@ -936,7 +936,8 @@ mod first_stream_admission_tests {
         );
         let timeout = chat_backend::GatewayError::timeout("provider timed out");
         let (message, typed) =
-            chat_service::classify_initial_stream_event(FirstEvent::Error(timeout.clone())).unwrap_err();
+            chat_service::classify_initial_stream_event(FirstEvent::Error(timeout.clone()))
+                .unwrap_err();
         assert_eq!(message, "provider timed out");
         assert_eq!(typed, Some(timeout));
     }
