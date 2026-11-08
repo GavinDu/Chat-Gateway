@@ -148,15 +148,13 @@ mod worker_supervisor_tests {
         spawns: Arc<std::sync::atomic::AtomicUsize>,
     ) -> super::BrowserWorkerSpawner {
         Arc::new(
-            move |
-                _cfg,
-                mut commands,
-                ready,
-                worker_ready,
-                _provider_sessions,
-                _metrics,
-                _session_writes,
-            | {
+            move |_cfg,
+                  mut commands,
+                  ready,
+                  worker_ready,
+                  _provider_sessions,
+                  _metrics,
+                  _session_writes| {
                 let generation = spawns.fetch_add(1, Ordering::SeqCst);
                 std::thread::spawn(move || {
                     let _ready_guard = super::WorkerReadyGuard(worker_ready);
