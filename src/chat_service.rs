@@ -594,6 +594,15 @@ mod tests {
     use std::sync::Arc;
     use tokio::sync::mpsc;
 
+    #[test]
+    fn context_egress_is_checked_for_both_classes_before_admission() {
+        let policy = crate::memory_egress::MemoryEgressPolicy::from_allowlist("")
+            .expect("empty personal-memory allowlist is valid");
+        assert!(super::authorize_candidate_context(&policy, "chatgpt").is_ok());
+        assert!(super::authorize_candidate_context(&policy, "claude").is_ok());
+        assert!(super::authorize_candidate_context(&policy, "unknown-provider").is_err());
+    }
+
     fn scripted_request() -> BackendRequest {
         BackendRequest {
             provider: ProviderId::new("chatgpt").unwrap(),
