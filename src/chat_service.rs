@@ -307,7 +307,10 @@ pub(crate) async fn prepare_candidate_attempt(
         policy,
         personal_memory_items,
     } = request;
-    if !state.provider_eligible(provider, crate::app_state::ProviderEligibilityMode::ClaimRetry) {
+    if !state.provider_eligible(
+        provider,
+        crate::app_state::ProviderEligibilityMode::ClaimRetry,
+    ) {
         return Err(CandidateAttemptError::Skip {
             message: format!("provider '{provider}' not currently routable"),
             busy: false,
@@ -337,7 +340,11 @@ pub(crate) async fn prepare_candidate_attempt(
             });
         }
     };
-    tracing::debug!(provider, queue_ms = permit.queue_ms, "acquired provider slot");
+    tracing::debug!(
+        provider,
+        queue_ms = permit.queue_ms,
+        "acquired provider slot"
+    );
     let queue_ms = permit.queue_ms.min(u64::MAX as u128) as u64;
 
     // Thread planning remains UNDER the permit, serializing same-provider sends.
