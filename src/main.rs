@@ -23,6 +23,7 @@ mod app_state;
 mod browser;
 pub mod chat_backend;
 mod chat_handler;
+mod chat_render;
 mod chat_service;
 mod cli;
 mod config;
