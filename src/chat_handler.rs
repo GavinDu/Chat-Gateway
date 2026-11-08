@@ -227,7 +227,9 @@ async fn json_provider_response(attempt: JsonAttempt<'_>) -> std::result::Result
     let provider_work_ms = provider_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
     let total_ms = request_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
     if let Some(error) = failed {
-        state.provider_sessions.record_gateway_error(provider, &error);
+        state
+            .provider_sessions
+            .record_gateway_error(provider, &error);
         let message = error.to_string();
         chat_service::record_provider_outcome(
             &state.metrics,
