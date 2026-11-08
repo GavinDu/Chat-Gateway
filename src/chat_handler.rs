@@ -6,9 +6,7 @@
 //! extractor stays in `main.rs` and is exercised by the existing real-router
 //! scripted-backend tests.
 use super::*;
-use crate::chat_render::{
-    completion_response_headers, json_completion_body, sse_completion_chunk,
-};
+use crate::chat_render::{completion_response_headers, json_completion_body, sse_completion_chunk};
 
 /// Only syntactically and semantically valid requests proceed to memory or
 /// provider access. This same boundary applies to JSON and SSE requests.
