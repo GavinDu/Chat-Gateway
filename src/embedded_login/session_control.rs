@@ -1,9 +1,12 @@
 use super::*;
-struct Revoking(String);
+struct Revoking {
+    provider: String,
+    runtime: Arc<EmbeddedLoginRuntime>,
+}
 impl Drop for Revoking {
     fn drop(&mut self) {
-        if let Ok(mut registry) = registry().lock() {
-            registry.revoking.remove(&self.0);
+        if let Ok(mut registry) = self.runtime.registry.lock() {
+            registry.revoking.remove(&self.provider);
         }
     }
 }
@@ -40,13 +43,16 @@ pub async fn revoke(
     }
     let guard;
     {
-        let Ok(mut registry) = registry().lock() else {
+        let Ok(mut registry) = app.embedded_login.registry.lock() else {
             return error(StatusCode::SERVICE_UNAVAILABLE, "browser_unavailable");
         };
         if !registry.revoking.insert(provider.clone()) {
             return error(StatusCode::CONFLICT, "session_revoking");
         }
-        guard = Revoking(provider.clone());
+        guard = Revoking {
+            provider: provider.clone(),
+            runtime: app.embedded_login.clone(),
+        };
         registry.tickets.retain(|_, (bound, _)| bound != &provider);
         if let Some(cancel) = registry.controls.get(&provider) {
             cancel.send_replace(true);
@@ -56,7 +62,9 @@ pub async fn revoke(
     // recreate a session after the endpoint has confirmed revocation.
     let stopped = tokio::time::timeout(Duration::from_secs(15), async {
         loop {
-            if registry()
+            if app
+                .embedded_login
+                .registry
                 .lock()
                 .map(|r| !r.active.contains(&provider))
                 .unwrap_or(false)

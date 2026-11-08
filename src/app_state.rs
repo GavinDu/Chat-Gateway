@@ -23,6 +23,8 @@ pub(crate) struct AppState {
     pub(crate) router: ProviderRouter,
     pub(crate) models_cache: Arc<RwLock<HashMap<String, Vec<String>>>>,
     pub(crate) relay: Arc<RelayState>,
+    /// Independent local interactive login admission and cancellation state.
+    pub(crate) embedded_login: Arc<crate::embedded_login::EmbeddedLoginRuntime>,
     /// Per-gateway provider pacing and challenge circuit-breaker state.
     pub(crate) provider_guard: ProviderGuard,
     /// Typed provider authentication and availability lifecycle.

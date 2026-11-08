@@ -3,7 +3,7 @@ use std::{sync::Arc, time::Duration};
 
 /// Stop accepting new connections on SIGINT/SIGTERM and let Axum drain
 /// in-flight requests before the process exits.
-pub(crate) async fn shutdown_signal() {
+pub(crate) async fn shutdown_signal(state: Arc<AppState>) {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{signal, SignalKind};
@@ -27,7 +27,7 @@ pub(crate) async fn shutdown_signal() {
         }
     }
 
-    embedded_login::shutdown_all().await;
+    embedded_login::shutdown_all(&state.embedded_login).await;
     tracing::info!("shutdown signal received; draining in-flight HTTP requests");
 }
 
