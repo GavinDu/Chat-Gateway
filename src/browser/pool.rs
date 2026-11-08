@@ -16,8 +16,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot, Notify, OwnedSemaphorePermit, Semaphore};
 
+#[path = "pool/browser_factory.rs"]
+mod browser_factory;
 #[path = "pool/diagnostics.rs"]
 mod diagnostics;
+#[path = "pool/login_helpers.rs"]
+mod login_helpers;
 #[path = "pool/navigation.rs"]
 mod navigation;
 #[path = "pool/page_session.rs"]
@@ -26,8 +30,12 @@ mod page_session;
 mod supervisor;
 #[path = "pool/worker.rs"]
 mod worker;
+use browser_factory::build_browser;
 use diagnostics::verify_session_page;
 pub use diagnostics::ProviderSessionExpiredError;
+use login_helpers::{
+    build_login_view, login_active_info, sweep_login_pages, touch_login_meta, LoginMeta,
+};
 use navigation::{provider_landing_navigation_ready, provider_thread_navigation_ready};
 use page_session::PageSession;
 use supervisor::{
@@ -240,16 +248,6 @@ pub struct LoginCompleted {
     pub warm_swapped: bool,
     pub warning: Option<String>,
 }
-
-/// Bookkeeping for one active login page. last_seen drives the
-/// abandoned-login sweep (Go swept after 35s of no client contact for
-/// waiting jobs; here the UI polls every 5-8s, so a 30-minute idle
-/// threshold fits a user working through a slow SSO flow).
-struct LoginMeta {
-    last_seen: Instant,
-}
-
-const LOGIN_IDLE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
 /// Record a TestAdapter restore failure and signal that probing must stop.
 fn record_test_adapter_restore_result(
@@ -810,110 +808,6 @@ impl ObscuraPool {
             .map_err(|_| anyhow::anyhow!("browser thread dropped shutdown reply"))?;
         Ok(())
     }
-}
-
-/// Drop login pages idle longer than LOGIN_IDLE_TIMEOUT (Go's
-/// abandoned-job sweep, with a threshold fitted to the UI's 5-8s
-/// polling instead of Go's 35s — a user mid-SSO must not lose the page
-/// between polls).
-fn sweep_login_pages(
-    login_pages: &Rc<RefCell<HashMap<Provider, Rc<obscura_core::Page>>>>,
-    login_meta: &Rc<RefCell<HashMap<Provider, LoginMeta>>>,
-) {
-    let now = Instant::now();
-    let stale: Vec<Provider> = login_meta
-        .borrow()
-        .iter()
-        .filter(|(_, m)| now.duration_since(m.last_seen) > LOGIN_IDLE_TIMEOUT)
-        .map(|(p, _)| *p)
-        .collect();
-    for p in stale {
-        login_pages.borrow_mut().remove(&p);
-        login_meta.borrow_mut().remove(&p);
-    }
-}
-
-fn touch_login_meta(login_meta: &Rc<RefCell<HashMap<Provider, LoginMeta>>>, provider: Provider) {
-    if let Some(m) = login_meta.borrow_mut().get_mut(&provider) {
-        m.last_seen = Instant::now();
-    }
-}
-
-fn build_login_view(
-    provider: Provider,
-    page: &obscura_core::Page,
-    registry: &Rc<HashMap<Provider, Arc<dyn providers::SiteAdapter>>>,
-) -> LoginView {
-    let url = page.url();
-    let is_login = providers::common::is_login_page(page);
-    let input_found = registry
-        .get(&provider)
-        .map(|a| {
-            a.selector_set()
-                .input
-                .iter()
-                .any(|s| page.query_selector(s).is_some())
-        })
-        .unwrap_or(false);
-    let (state, logged_in) = login::login_state(is_login, input_found);
-    let (title, fields, buttons, snapshot) = login::parse_view(page.evaluate(login::VIEW_SCRIPT));
-    LoginView {
-        provider: provider.name().to_string(),
-        active: true,
-        url: Some(url),
-        title: Some(title),
-        state,
-        logged_in,
-        input_found,
-        fields,
-        buttons,
-        snapshot,
-    }
-}
-
-fn login_active_info(
-    provider: Provider,
-    page: &obscura_core::Page,
-    registry: &Rc<HashMap<Provider, Arc<dyn providers::SiteAdapter>>>,
-) -> LoginActiveInfo {
-    let view = build_login_view(provider, page, registry);
-    LoginActiveInfo {
-        provider: provider.name().to_string(),
-        url: view.url.unwrap_or_default(),
-        title: view.title.unwrap_or_default(),
-        logged_in: view.logged_in,
-        input_found: view.input_found,
-        state: view.state,
-    }
-}
-
-fn build_browser(cfg: &AppConfig) -> Result<obscura_core::Browser> {
-    let mut builder = obscura_core::Browser::builder().stealth(cfg.obscura.stealth);
-    if let Some(user_agent) = cfg
-        .obscura
-        .user_agent
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        builder = builder.user_agent(user_agent.to_owned());
-    }
-    let storage = cfg
-        .obscura
-        .storage_dir
-        .clone()
-        .filter(|s| !s.is_empty())
-        .or_else(|| {
-            if cfg.server.chrome_profile_dir.is_empty() {
-                None
-            } else {
-                Some(cfg.server.chrome_profile_dir.clone())
-            }
-        });
-    if let Some(dir) = storage {
-        builder = builder.storage_dir(dir);
-    }
-    Ok(builder.build()?)
 }
 
 struct WorkerReadyGuard(Arc<AtomicBool>);
