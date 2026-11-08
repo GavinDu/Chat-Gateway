@@ -28,6 +28,17 @@ fn prepare_chat_request(
         .map(|Extension(context)| context.key_id.as_str())
         .unwrap_or("local")
         .to_owned();
+    // Duplicate conversation IDs are ambiguous across reverse proxies and
+    // HTTP stacks that disagree about first/last header precedence. Never
+    // route or persist a turn using an arbitrarily selected identifier.
+    if headers.get_all("X-Conversation-Id").iter().count() > 1 {
+        return Err(Box::new(api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            "invalid_conversation_id",
+            "X-Conversation-Id must appear at most once",
+        )));
+    }
     let conversation_id = match headers.get("X-Conversation-Id") {
         None => None,
         Some(value) => {
@@ -898,6 +909,41 @@ pub(super) async fn run(
         "all eligible provider attempts exhausted"
     );
     unavailable_provider_response(last_err.as_deref())
+}
+
+#[cfg(test)]
+mod conversation_header_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn duplicate_conversation_ids_fail_closed_before_provider_dispatch() {
+        for (first, second) in [
+            ("router_dup_001", "router_dup_002"),
+            ("router_dup_001", "router_dup_001"),
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.append(
+                "X-Conversation-Id",
+                axum::http::HeaderValue::from_str(first).unwrap(),
+            );
+            headers.append(
+                "X-Conversation-Id",
+                axum::http::HeaderValue::from_str(second).unwrap(),
+            );
+            let body = axum::body::Bytes::from_static(
+                br#"{"model":"auto","messages":[{"role":"user","content":"synthetic prompt"}]}"#,
+            );
+            let Err(response) = prepare_chat_request(&headers, None, Ok(body)) else {
+                panic!("ambiguous conversation IDs must be rejected before routing");
+            };
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let bytes = axum::body::to_bytes(response.into_body(), 65_536)
+                .await
+                .unwrap();
+            let error: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(error["error"]["code"], "invalid_conversation_id");
+        }
+    }
 }
 
 #[cfg(test)]
