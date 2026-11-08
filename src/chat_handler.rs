@@ -188,8 +188,7 @@ pub(super) async fn run(
 
         let mut first_stream_chunk: Option<chat_backend::ChatEvent> = None;
         if req.stream {
-            let first_chunk_timeout = provider_timeout
-                .saturating_sub(provider_started.elapsed());
+            let first_chunk_timeout = provider_timeout.saturating_sub(provider_started.elapsed());
             let first = match chat_service::classify_initial_stream_event(
                 first_event(&mut rx, first_chunk_timeout).await,
             ) {
