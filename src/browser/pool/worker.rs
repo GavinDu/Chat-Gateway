@@ -19,6 +19,19 @@ async fn send_unless_disconnected<T>(
     }
 }
 
+/// Abandoned refreshes must not wait behind a send and mutate its session later.
+/// Once activation starts, finish it atomically with respect to this lock.
+async fn session_refresh_permit<'a>(
+    reply: &mut oneshot::Sender<Result<()>>,
+    lock: &'a tokio::sync::Mutex<()>,
+) -> Option<tokio::sync::MutexGuard<'a, ()>> {
+    tokio::select! {
+        biased;
+        _ = reply.closed() => None,
+        guard = lock.lock() => Some(guard),
+    }
+}
+
 pub(super) fn browser_thread(
     cfg: Arc<AppConfig>,
     mut cmd_rx: mpsc::Receiver<Command>,
@@ -631,7 +644,8 @@ pub(super) fn browser_thread(
                                 finish(report);
                             });
                         }
-                        Command::RefreshSession { provider, reply } => {
+                        Command::RefreshSession { provider, mut reply } => {
+                            if reply.is_closed() { continue; }
                             let browser = browser.clone();
                             let pages = pages.clone();
                             let locks = locks.clone();
@@ -639,7 +653,10 @@ pub(super) fn browser_thread(
                                 let res: Result<()> = async {
                                     let lock = locks.borrow().get(&provider).cloned()
                                         .ok_or_else(|| anyhow::anyhow!("provider page lock missing"))?;
-                                    let _guard = lock.lock().await;
+                                    let Some(_guard) = session_refresh_permit(&mut reply, &lock).await else {
+                                        return Ok(());
+                                    };
+                                    if reply.is_closed() { return Ok(()); }
                                     let mut page = super::browser_factory::new_page(&browser).await?;
                                     page.goto(provider.login_url()).await?;
                                     let storage_cleared = page.evaluate(
@@ -920,5 +937,55 @@ mod queued_send_cancellation_tests {
         let (tx, _rx) = mpsc::channel::<Result<ProviderChunk>>(1);
         let output = send_unless_disconnected(&tx, async { 7 }).await;
         assert_eq!(output, Some(7));
+    }
+}
+
+#[cfg(test)]
+mod refresh_cancellation_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn disconnected_refresh_does_not_acquire_an_available_lock() {
+        let (mut tx, rx) = oneshot::channel::<Result<()>>();
+        drop(rx);
+        let lock = tokio::sync::Mutex::new(());
+        assert!(session_refresh_permit(&mut tx, &lock).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn queued_refresh_disconnects_without_waiting_for_busy_provider() {
+        let lock = Rc::new(tokio::sync::Mutex::new(()));
+        let held = lock.lock().await;
+        let (mut tx, rx) = oneshot::channel::<Result<()>>();
+        let waiting = session_refresh_permit(&mut tx, &lock);
+        tokio::pin!(waiting);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), &mut waiting)
+                .await
+                .is_err()
+        );
+        drop(rx);
+        assert!(tokio::time::timeout(Duration::from_secs(1), waiting)
+            .await
+            .unwrap()
+            .is_none());
+        drop(held);
+        assert!(lock.try_lock().is_ok());
+    }
+
+    #[tokio::test]
+    async fn connected_refresh_can_activate_after_current_operation_finishes() {
+        let lock = tokio::sync::Mutex::new(());
+        let held = lock.lock().await;
+        let (mut tx, _rx) = oneshot::channel::<Result<()>>();
+        let waiting = session_refresh_permit(&mut tx, &lock);
+        tokio::pin!(waiting);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), &mut waiting)
+                .await
+                .is_err()
+        );
+        drop(held);
+        assert!(waiting.await.is_some());
     }
 }

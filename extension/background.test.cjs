@@ -56,7 +56,7 @@ function loadBackground(linkedProviders, failingProviders = []) {
   };
   const source = fs.readFileSync(path.join(__dirname, "background.js"), "utf8");
   vm.runInNewContext(source, sandbox, { filename: "background.js" });
-  return { calls, listeners, timers, clearedTimers };
+  return { calls, listeners, timers, clearedTimers, sandbox };
 }
 
 function flushAsyncWork() {
@@ -151,4 +151,35 @@ test("rapid cookie rotations coalesce per provider while preserving the other pr
   timers.get(3).callback();
   await flushAsyncWork();
   assert.deepEqual(calls, ["claude", "chatgpt"]);
+});
+
+test("slow provider sync coalesces a cookie burst into one latest trailing snapshot", async () => {
+  const f = loadBackground(["chatgpt", "claude"]);
+  let release;
+  const held = new Promise(resolve => { release = resolve; });
+  const snapshots = [];
+  let version = 1;
+  f.sandbox.syncProvider = async provider => {
+    snapshots.push({provider, version});
+    if (provider === "chatgpt" && snapshots.filter(x => x.provider === "chatgpt").length === 1) {
+      await held;
+    }
+  };
+  const fire = async domain => {
+    f.listeners.cookieChanged[0]({cookie: {domain}});
+    [...f.timers.values()].at(-1).callback();
+    await flushAsyncWork();
+  };
+  await fire(".chatgpt.com");
+  for (version = 2; version <= 20; version++) await fire(".chatgpt.com");
+  version = 20;
+  await fire(".claude.ai");
+  assert.equal(snapshots.filter(x => x.provider === "chatgpt").length, 1);
+  assert.equal(snapshots.filter(x => x.provider === "claude").length, 1,
+    "other providers remain independent");
+  release();
+  for (let i = 0; i < 25; i++) await flushAsyncWork();
+  const chat = snapshots.filter(x => x.provider === "chatgpt");
+  assert.equal(chat.length, 2, "an in-flight import permits only one queued refresh");
+  assert.equal(chat[1].version, 20, "the trailing job reads latest cookie state");
 });

@@ -165,6 +165,20 @@ pub fn normalize_route(path: &str) -> String {
         "/v1/conversations/:id".to_owned()
     } else if path.starts_with("/login/api/") {
         "/login/api/*".to_owned()
+    } else if path.starts_with("/relay/v1/session/") {
+        "/relay/v1/session/:provider".to_owned()
+    } else if path.starts_with("/relay/approve/") {
+        "/relay/approve/:id".to_owned()
+    } else if matches!(
+        path,
+        "/relay/v1/status"
+            | "/relay/v1/connect/request"
+            | "/relay/v1/connect/poll"
+            | "/relay/v1/pair"
+            | "/relay/v1/unpair"
+            | "/relay/v1/pairing-code/rotate"
+    ) {
+        path.to_owned()
     } else if path.starts_with("/relay/") {
         "/relay/*".to_owned()
     } else if matches!(
@@ -329,6 +343,23 @@ mod tests {
             normalize_route("/random/attacker-controlled-path"),
             "/other"
         );
+    }
+
+    #[test]
+    fn relay_diagnostics_distinguish_operations_without_capabilities_or_identifiers() {
+        for (path, label) in [
+            ("/relay/v1/status", "/relay/v1/status"),
+            ("/relay/v1/connect/poll", "/relay/v1/connect/poll"),
+            (
+                "/relay/v1/session/private-provider",
+                "/relay/v1/session/:provider",
+            ),
+            ("/relay/approve/secret-capability", "/relay/approve/:id"),
+            ("/relay/v1/unrecognized-secret", "/relay/*"),
+            ("/relay/v1/status/secret", "/relay/*"),
+        ] {
+            assert_eq!(normalize_route(path), label);
+        }
     }
 
     #[test]

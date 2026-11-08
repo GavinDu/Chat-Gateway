@@ -49,10 +49,10 @@ pub(super) async fn json_provider_response(
             },
         );
         if full.is_empty() {
-            tracing::warn!(provider = %provider, "provider failed before output; considering fallback");
+            tracing::warn!(request_id = %request_id, provider = %provider, error_kind = ?error.kind, retryable = error.retryable, "provider failed before output; considering fallback");
             return Err(message);
         }
-        tracing::warn!(provider = %provider, "provider failed after partial output");
+        tracing::warn!(request_id = %request_id, provider = %provider, error_kind = ?error.kind, retryable = error.retryable, "provider failed after partial output");
         return Ok(api_error(
             StatusCode::BAD_GATEWAY,
             "provider_error",
