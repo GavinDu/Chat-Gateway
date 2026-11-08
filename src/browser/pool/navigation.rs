@@ -40,39 +40,31 @@ pub(super) fn provider_landing_navigation_ready(
     page: &obscura_core::Page,
     adapter: &dyn providers::SiteAdapter,
 ) -> bool {
-    fn origin(value: &str) -> Option<String> {
-        let without_fragment = value.split('#').next()?;
-        let without_query = without_fragment.split('?').next()?;
-        let (scheme, rest) = without_query.split_once("://")?;
-        let authority = rest.split('/').next()?;
-        if scheme.is_empty() || authority.is_empty() {
-            return None;
-        }
-        Some(format!(
-            "{}://{}",
-            scheme.to_ascii_lowercase(),
-            authority.to_ascii_lowercase()
-        ))
-    }
-
-    if origin(actual) != origin(target)
-        || !pool_policy::landing_is_not_previous_thread(adapter.name(), actual)
-    {
-        // A provider's home page can redirect to an old remote thread while
-        // still displaying a composer. Do not replay unrelated gateway
-        // history into that page: require a genuinely fresh landing route.
-        return false;
-    }
-    adapter
+    let composer_ready = adapter
         .selector_set()
         .input
         .iter()
-        .any(|selector| page.query_selector(selector).is_some())
+        .any(|selector| page.query_selector(selector).is_some());
+    landing_navigation_snapshot_ready(actual, target, adapter.name(), composer_ready)
+}
+
+/// The landing readiness decision is intentionally pure so the real browser
+/// path uses the same safe-origin and fresh-thread rules exercised by CI.
+pub(super) fn landing_navigation_snapshot_ready(
+    actual: &str,
+    target: &str,
+    provider: &str,
+    composer_ready: bool,
+) -> bool {
+    composer_ready
+        && pool_policy::provider_thread_url_is_same_origin(actual, target)
+        && pool_policy::landing_is_not_previous_thread(provider, actual)
+
 }
 
 #[cfg(test)]
 mod provider_reopen_composer_tests {
-    use super::thread_navigation_snapshot_ready;
+    use super::{landing_navigation_snapshot_ready, thread_navigation_snapshot_ready};
 
     #[test]
     fn saved_thread_reopen_needs_matching_path_and_ready_composer() {
@@ -90,6 +82,36 @@ mod provider_reopen_composer_tests {
             "https://chatgpt.com/c/saved/?source=redirect",
             "https://chatgpt.com/c/saved",
             true,
+        ));
+    }
+
+    #[test]
+    fn fresh_landing_requires_verified_https_origin_and_fresh_thread() {
+        assert!(landing_navigation_snapshot_ready(
+            "https://chatgpt.com/?utm_source=home",
+            "https://chatgpt.com/",
+            "chatgpt",
+            true,
+        ));
+        for untrusted in [
+            "http://chatgpt.com/",
+            "https://chatgpt.com@evil.example/",
+            "https://chatgpt%2ecom/",
+            "https://chatgpt.com/c/existing",
+            "https://chatgpt.com/?conversation_id=existing",
+        ] {
+            assert!(!landing_navigation_snapshot_ready(
+                untrusted,
+                "https://chatgpt.com/",
+                "chatgpt",
+                true,
+            ));
+        }
+        assert!(!landing_navigation_snapshot_ready(
+            "https://chatgpt.com/",
+            "https://chatgpt.com/",
+            "chatgpt",
+            false,
         ));
     }
 }
