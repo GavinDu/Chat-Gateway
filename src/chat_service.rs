@@ -6,14 +6,16 @@ use crate::chat_backend::{BackendRequest, ChatBackend, ChatEvent, GatewayError};
 use crate::{
     api::api_error,
     app_state::{AppState, AuthKeyContext},
-    budget_personal_memory_items, completed_chat_outcome, context::{self, ContextBuilder, ContextPlan, ThreadSyncState},
+    budget_personal_memory_items, completed_chat_outcome,
+    context::{self, ContextBuilder, ContextPlan, ThreadSyncState},
     conversation_context_read_error, is_reopenable_provider_thread_url,
-    memory::{ChatMessage, LongTermMemoryStore, ProviderThread}, memory_egress, persist_completed_turn, providers,
+    memory::{ChatMessage, LongTermMemoryStore, ProviderThread},
+    memory_egress, persist_completed_turn, providers,
     read_conversation_context_with_transcript_for_owner, record_provider_outcome,
     transcript_marker, ProviderOutcome,
 };
-use axum::{extract::Extension, http::StatusCode, response::Response};
 use anyhow::Result;
+use axum::{extract::Extension, http::StatusCode, response::Response};
 use std::{
     sync::Arc,
     time::{Duration, Instant},
