@@ -4,7 +4,7 @@ const vm = require("node:vm");
 const fs = require("node:fs");
 const path = require("node:path");
 
-function loadPopup() {
+function loadPopup({pollResult = {ok:true}} = {}) {
   const elements = new Map();
   const actions = new Map();
   const values = {};
@@ -38,7 +38,7 @@ function loadPopup() {
       async set(next) { Object.assign(values, next); },
       async remove(keys) { for (const key of Array.isArray(keys) ? keys : [keys]) delete values[key]; },
     }},
-    runtime: { sendMessage: async () => ({ok: true}) },
+    runtime: { sendMessage: async () => pollResult },
     // Intentionally no tabs or alarms API: reproduces reading 'create' of undefined.
   };
   const context = {
@@ -56,7 +56,7 @@ function loadPopup() {
   };
   vm.createContext(context);
   vm.runInContext(fs.readFileSync(path.join(__dirname, "..", "popup.js"), "utf8") +
-    "\nglobalThis.openProviderLoginForTest = openProviderLogin;",context);
+    "\nglobalThis.openProviderLoginForTest = openProviderLogin; globalThis.updateConnectionForTest = updateConnection;",context);
   return {elements,actions,values,requestId,context};
 }
 
@@ -76,4 +76,46 @@ test("provider login offers an explicit safe link when tabs API is missing", asy
   const link = popup.elements.get("message").children.at(-1);
   assert.equal(link.href, "https://www.meta.ai/");
   assert.equal(link.rel, "noopener noreferrer");
+});
+
+
+test("approval exchange errors remain visible instead of being replaced by Waiting", async () => {
+  const popup=loadPopup({pollResult:{ok:false,error:"Gateway permission is missing."}});
+  await popup.actions.get("pair:click")();
+  await popup.context.updateConnectionForTest();
+  assert.equal(popup.elements.get("message").textContent,"Gateway permission is missing.");
+  assert.ok(popup.values.pendingConnection,"a temporary error keeps the approval available for retry");
+});
+
+test("an old or missing worker acknowledgement offers reload instead of indefinite Waiting", async () => {
+  const popup=loadPopup();
+  popup.context.chrome.runtime.sendMessage=async()=>undefined;
+  await popup.actions.get("pair:click")();
+  await popup.context.updateConnectionForTest();
+  assert.match(popup.elements.get("message").textContent,/worker did not respond.*Reload/);
+});
+
+
+test("Connect completes an approved pending exchange before reopening its used page", async () => {
+  const popup=loadPopup();
+  await popup.actions.get("pair:click")();
+  popup.context.chrome.runtime.sendMessage=async()=>{
+    popup.values.token="c".repeat(64);
+    delete popup.values.pendingConnection;
+    return {ok:true};
+  };
+  await popup.actions.get("pair:click")();
+  assert.equal(popup.values.pendingConnection,undefined);
+  assert.equal(popup.elements.get("pairing").hidden,true);
+  assert.equal(popup.elements.get("linked").hidden,false);
+});
+
+
+test("Connect preserves a failed pending check instead of reopening the used approval URL", async () => {
+  const popup=loadPopup({pollResult:{ok:false,error:"Gateway permission is missing."}});
+  await popup.actions.get("pair:click")();
+  const links=popup.elements.get("message").children.length;
+  await popup.actions.get("pair:click")();
+  assert.equal(popup.elements.get("message").textContent,"Gateway permission is missing.");
+  assert.equal(popup.elements.get("message").children.length,links);
 });

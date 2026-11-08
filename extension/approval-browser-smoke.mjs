@@ -52,7 +52,19 @@ try {
  const [response]=await Promise.all([approval.waitForNavigation(),approval.getByRole('button',{name:'Approve connection'}).click()]);
  assert.equal(response.status(),200,'native Chromium form submission must retain a valid Origin');
  await approval.getByText('Connection approved.',{exact:false}).waitFor();
- const reopened=await context.newPage();await reopened.goto('chrome-extension://'+id+'/popup.html');
+ const reopened=await context.newPage();
+ // Simulate a stale worker that does not handle the popup's polling message.
+ // The real approval request, owner confirmation and later exchange stay real.
+ await reopened.addInitScript(() => {
+  const sendMessage=chrome.runtime.sendMessage.bind(chrome.runtime);
+  globalThis.restoreConnectionWorker=()=>{chrome.runtime.sendMessage=sendMessage;};
+  chrome.runtime.sendMessage=async message=>message?.type==='poll-connection'?undefined:sendMessage(message);
+ });
+ await reopened.goto('chrome-extension://'+id+'/popup.html');
+ await reopened.locator('#message').filter({hasText:'connection worker did not respond'}).waitFor();
+ assert.equal(await reopened.locator('#pairing').isVisible(),true);
+ console.log('PASS missing worker acknowledgement is actionable instead of showing endless approval waiting');
+ await reopened.evaluate(()=>{restoreConnectionWorker();return updateConnection();});
  await reopened.locator('#linked:not([hidden])').waitFor({timeout:20000});
  try {await reopened.locator('#status li').first().waitFor();} catch(error) {console.log('Provider dashboard message:',await reopened.locator('#message').innerText());throw error;}
  assert.equal(await reopened.locator('#status li').count(),8);

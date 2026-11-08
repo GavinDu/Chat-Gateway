@@ -72,7 +72,7 @@ pub(super) fn browser_thread(
                 for pcfg in &cfg.providers {
                     if !pcfg.enabled { continue; }
                     let Some(provider) = Provider::from_name(&pcfg.name) else { continue };
-                    match browser.new_page().await {
+                    match super::browser_factory::new_page(&browser).await {
                         Ok(mut page) => {
                             crate::browser::network_tap::attach_provider_network_tap(&mut page, provider);
                             let session_file = match session::load_session_file(&pcfg.name) {
@@ -252,7 +252,7 @@ pub(super) fn browser_thread(
                                 let res: Result<Vec<String>> = async {
                                     let adapter = registry.get(&provider).cloned()
                                         .ok_or_else(|| anyhow::anyhow!("provider not enabled"))?;
-                                    let mut page = browser.new_page().await?;
+                                    let mut page = super::browser_factory::new_page(&browser).await?;
                                     adapter.discover_models(&mut page).await
                                 }.await;
                                 let _ = reply.send(res);
@@ -529,7 +529,7 @@ pub(super) fn browser_thread(
                                 // Fresh page with the saved session applied
                                 // (same warm-up ordering: cookies before
                                 // goto, localStorage after, then re-goto).
-                                let mut page = match browser.new_page().await {
+                                let mut page = match super::browser_factory::new_page(&browser).await {
                                     Ok(p) => p,
                                     Err(e) => {
                                         report.errors.push(format!("open page: {e}"));
@@ -640,7 +640,7 @@ pub(super) fn browser_thread(
                                     let lock = locks.borrow().get(&provider).cloned()
                                         .ok_or_else(|| anyhow::anyhow!("provider page lock missing"))?;
                                     let _guard = lock.lock().await;
-                                    let mut page = browser.new_page().await?;
+                                    let mut page = super::browser_factory::new_page(&browser).await?;
                                     page.goto(provider.login_url()).await?;
                                     let storage_cleared = page.evaluate(
                                         "(()=>{try{localStorage.clear();return true;}catch(_){return false;}})()"
@@ -669,7 +669,7 @@ pub(super) fn browser_thread(
                                     let lock = locks.borrow().get(&provider).cloned()
                                         .unwrap_or_else(|| Rc::new(tokio::sync::Mutex::new(())));
                                     let _guard = lock.lock().await;
-                                    let mut page = browser.new_page().await?;
+                                    let mut page = super::browser_factory::new_page(&browser).await?;
                                     page.goto(provider.login_url()).await?;
                                     let storage_cleared = page.evaluate(
                                         "(()=>{try{localStorage.clear();return true;}catch(_){return false;}})()"
@@ -704,7 +704,7 @@ pub(super) fn browser_thread(
                                 login_pages.borrow_mut().remove(&provider);
                                 login_meta.borrow_mut().remove(&provider);
                                 let res: Result<String> = async {
-                                    let mut page = browser.new_page().await?;
+                                    let mut page = super::browser_factory::new_page(&browser).await?;
                                     page.goto(provider.login_url()).await?;
                                     let url = page.url();
                                     login_pages.borrow_mut().insert(provider, Rc::new(page));
@@ -851,7 +851,7 @@ pub(super) fn browser_thread(
                                             // for SSO hops, which re-drive
                                             // from the URL.
                                             login_pages.borrow_mut().remove(&provider);
-                                            let mut page = browser.new_page().await?;
+                                            let mut page = super::browser_factory::new_page(&browser).await?;
                                             page.goto(&url).await?;
                                             let final_url = page.url();
                                             // A trusted URL may redirect elsewhere. Never leave a
