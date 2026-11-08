@@ -144,48 +144,28 @@ pub(super) async fn run(
         // taking its exclusive browser permit. Thread lookup and context
         // planning intentionally remain UNDER the permit to serialize
         // concurrent sends to the same remote provider thread.
-        if memory_egress_policy
-            .authorize(
-                &provider_name,
-                memory_egress::ProviderDataClass::CurrentTurn,
-            )
-            .is_err()
-            || memory_egress_policy
-                .authorize(
-                    &provider_name,
-                    memory_egress::ProviderDataClass::ConversationContext,
-                )
-                .is_err()
+        if chat_service::authorize_candidate_context(&memory_egress_policy, &provider_name).is_err()
         {
             last_err = Some("provider data-handling policy denied request".to_owned());
             continue;
         }
 
-        // Reserve/wait for the provider's pacing slot before taking its
-        // exclusive browser permit. Otherwise a long interval blocks every
-        // other caller behind a permit that is not doing useful work.
-        if let Err(error) = state
-            .provider_guard
-            .wait_for_request_slot(
-                &provider_name,
-                provider_cfg.min_request_interval_ms,
-                provider_cfg.daily_request_cap,
-            )
-            .await
+        let permit = match chat_service::acquire_candidate_permit(
+            &state,
+            &provider_name,
+            provider_cfg,
+        )
+        .await
         {
-            last_err = Some(error.to_string());
-            continue;
-        }
-
-        let permit = match state.pool.acquire(&provider_name).await {
-            Ok(p) => p,
-            Err(e) => {
-                if e.downcast_ref::<browser::pool::ProviderBusyError>()
+            Ok(permit) => permit,
+            Err(error) => {
+                if error
+                    .downcast_ref::<browser::pool::ProviderBusyError>()
                     .is_some()
                 {
                     busy_count += 1;
                 }
-                last_err = Some(e.to_string());
+                last_err = Some(error.to_string());
                 continue;
             }
         };

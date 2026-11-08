@@ -219,6 +219,38 @@ pub(crate) fn record_attempt_error(
     );
 }
 
+/// Fail closed before reserving a pacing slot: current-turn content and
+/// transcript context must independently satisfy the provider egress policy.
+pub(crate) fn authorize_candidate_context(
+    policy: &memory_egress::MemoryEgressPolicy,
+    provider: &str,
+) -> std::result::Result<(), memory_egress::EgressError> {
+    policy.authorize(provider, memory_egress::ProviderDataClass::CurrentTurn)?;
+    policy.authorize(
+        provider,
+        memory_egress::ProviderDataClass::ConversationContext,
+    )
+}
+
+/// Reserve request pacing before acquiring the single-page provider permit.
+/// Holding the exclusive permit while waiting on rate limits would block
+/// otherwise useful sends to the same provider.
+pub(crate) async fn acquire_candidate_permit(
+    state: &AppState,
+    provider: &str,
+    config: &crate::config::ProviderConfig,
+) -> anyhow::Result<crate::browser::pool::ObscuraPermit> {
+    state
+        .provider_guard
+        .wait_for_request_slot(
+            provider,
+            config.min_request_interval_ms,
+            config.daily_request_cap,
+        )
+        .await?;
+    state.pool.acquire(provider).await
+}
+
 /// The metrics timestamp is measured after the durable write for both JSON
 /// and SSE. Provider work time is captured before that write, so the two
 /// measurements remain distinct.
@@ -564,6 +596,15 @@ mod tests {
     use anyhow::Result;
     use std::sync::Arc;
     use tokio::sync::mpsc;
+
+    #[test]
+    fn context_egress_is_checked_for_both_classes_before_admission() {
+        let policy = crate::memory_egress::MemoryEgressPolicy::from_allowlist("")
+            .expect("empty personal-memory allowlist is valid");
+        assert!(super::authorize_candidate_context(&policy, "chatgpt").is_ok());
+        assert!(super::authorize_candidate_context(&policy, "claude").is_ok());
+        assert!(super::authorize_candidate_context(&policy, "unknown-provider").is_err());
+    }
 
     fn scripted_request() -> BackendRequest {
         BackendRequest {
