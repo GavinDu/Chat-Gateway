@@ -88,6 +88,7 @@ pub(crate) fn oversized_chat_body_error() -> Response {
         "request body exceeds the 1 MiB limit",
     )
 }
+
 // Returning a ready-to-send Axum response keeps validation errors consistent at the handler boundary.
 #[allow(clippy::result_large_err)]
 fn parse_and_validate_chat_req(body: &[u8]) -> Result<ChatReq, Response> {
