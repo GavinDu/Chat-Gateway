@@ -29,13 +29,15 @@ class ProviderSwitchBenchmarkTests(unittest.TestCase):
                 return iter([
                     'data: {"choices":[{"delta":{"role":"assistant"}}]}',
                     'data: {"choices":[{"delta":{"content":"hello"}}]}',
+                    'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
                     "data: [DONE]",
                 ])
-        with patch("provider_switch_benchmark.time.monotonic", side_effect=[1.25]):
-            ttft, done, error = consume_sse(FakeResponse(), 1.0)
+        with patch("provider_concurrency_benchmark.time.monotonic", side_effect=[1.25]):
+            ttft, done, error, finished = consume_sse(FakeResponse(), 1.0)
         self.assertEqual(ttft, 250)
         self.assertTrue(done)
         self.assertFalse(error)
+        self.assertTrue(finished)
 
     def test_sse_rejects_error_and_missing_done(self):
         class FakeResponse:
@@ -43,17 +45,45 @@ class ProviderSwitchBenchmarkTests(unittest.TestCase):
                 self.lines = lines
             def __iter__(self):
                 return iter(self.lines)
-        _, done, error = consume_sse(
+        _, done, error, finished = consume_sse(
             FakeResponse(['data: {"error":{"message":"redacted"}}']), 1.0
         )
         self.assertFalse(done)
         self.assertTrue(error)
-        ttft, done, error = consume_sse(
+        self.assertFalse(finished)
+        ttft, done, error, finished = consume_sse(
             FakeResponse(['data: {"choices":[{"delta":{"content":"partial"}}]}']), 1.0
         )
         self.assertIsNotNone(ttft)
         self.assertFalse(done)
         self.assertFalse(error)
+        self.assertFalse(finished)
+
+    def test_missing_stop_and_truncated_responses_are_not_successful(self):
+        import time
+        class FakeResponse:
+            def __init__(self, lines):
+                self.lines = lines
+            def __iter__(self):
+                return iter(self.lines)
+
+        prefix = ['data: {"choices":[{"delta":{"content":"partial"}}]}']
+        ttft, done, error, finished = consume_sse(
+            FakeResponse(prefix + ['data: [DONE]']), time.monotonic()
+        )
+        self.assertIsNotNone(ttft)
+        self.assertTrue(done)
+        self.assertFalse(error)
+        self.assertFalse(finished)
+
+        ttft, done, error, finished = consume_sse(
+            FakeResponse(prefix +
+                ['data: {"choices":[{"delta":{},"finish_reason":"length"}]}',
+                 'data: [DONE]']), time.monotonic()
+        )
+        self.assertIsNotNone(ttft)
+        self.assertTrue(error)
+        self.assertFalse(finished)
 
 
 if __name__ == "__main__":
