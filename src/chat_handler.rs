@@ -143,7 +143,7 @@ pub(super) async fn run(
                 last_err = Some(message);
                 continue;
             }
-            Err(chat_service::CandidateAttemptError::Fatal(response)) => return response,
+            Err(chat_service::CandidateAttemptError::Fatal(response)) => return *response,
         };
 
         let provider_started = Instant::now();
