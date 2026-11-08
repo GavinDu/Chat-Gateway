@@ -22,12 +22,12 @@ mod navigation;
 mod supervisor;
 #[path = "pool/worker.rs"]
 mod worker;
+use navigation::{provider_landing_navigation_ready, provider_thread_navigation_ready};
 use supervisor::{
     closed_command_channel, effective_session_pool_size, join_finished_worker,
     join_worker_on_shutdown, next_browser_worker_restart_backoff, wait_for_worker_shutdown,
     BrowserWorkerSpawner,
 };
-use navigation::{provider_landing_navigation_ready, provider_thread_navigation_ready};
 use worker::browser_thread;
 
 #[cfg(test)]
