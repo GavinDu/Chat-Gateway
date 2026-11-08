@@ -30,7 +30,6 @@ pub(crate) struct AppState {
     pub(crate) metrics: crate::metrics::MetricsRegistry,
 }
 
-
 /// A read-only eligibility probe must not consume a degraded provider's
 /// one allowed half-open retry. A real dispatch claims that retry atomically.
 #[derive(Clone, Copy)]
@@ -40,14 +39,16 @@ pub(crate) enum ProviderEligibilityMode {
 }
 
 impl AppState {
-    pub(crate) fn provider_eligible(
-        &self,
-        provider: &str,
-        mode: ProviderEligibilityMode,
-    ) -> bool {
+    pub(crate) fn provider_eligible(&self, provider: &str, mode: ProviderEligibilityMode) -> bool {
         if !self.pool.worker_alive()
-            || !self.cfg.provider(provider).is_some_and(|config| config.enabled)
-            || self.provider_guard.provider_disabled_reason(provider).is_some()
+            || !self
+                .cfg
+                .provider(provider)
+                .is_some_and(|config| config.enabled)
+            || self
+                .provider_guard
+                .provider_disabled_reason(provider)
+                .is_some()
         {
             return false;
         }
