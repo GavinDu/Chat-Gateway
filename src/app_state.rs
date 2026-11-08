@@ -29,3 +29,35 @@ pub(crate) struct AppState {
     pub(crate) provider_sessions: ProviderSessionRegistry,
     pub(crate) metrics: crate::metrics::MetricsRegistry,
 }
+
+/// A read-only eligibility probe must not consume a degraded provider's
+/// one allowed half-open retry. A real dispatch claims that retry atomically.
+#[derive(Clone, Copy)]
+pub(crate) enum ProviderEligibilityMode {
+    ReadOnly,
+    ClaimRetry,
+}
+
+impl AppState {
+    pub(crate) fn provider_eligible(&self, provider: &str, mode: ProviderEligibilityMode) -> bool {
+        // A send may use an injected backend even when the native browser
+        // worker is down. Only read-only readiness/model probes require the
+        // native worker to be alive; backend admission is checked by send().
+        if (matches!(mode, ProviderEligibilityMode::ReadOnly) && !self.pool.worker_alive())
+            || !self
+                .cfg
+                .provider(provider)
+                .is_some_and(|config| config.enabled)
+            || self
+                .provider_guard
+                .provider_disabled_reason(provider)
+                .is_some()
+        {
+            return false;
+        }
+        match mode {
+            ProviderEligibilityMode::ReadOnly => self.provider_sessions.is_available(provider),
+            ProviderEligibilityMode::ClaimRetry => self.provider_sessions.is_routable(provider),
+        }
+    }
+}
