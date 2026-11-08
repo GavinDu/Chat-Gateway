@@ -130,6 +130,34 @@ impl ResponseAccumulator {
     }
 }
 
+/// Record one failed provider admission at the backend-neutral service boundary.
+/// Session state derives only from a typed error, never upstream text.
+pub(crate) fn record_attempt_error(
+    provider_sessions: &crate::provider_state::ProviderSessionRegistry,
+    metrics_registry: &crate::metrics::MetricsRegistry,
+    provider: &str,
+    typed_error: Option<&GatewayError>,
+    queue_ms: u64,
+    provider_started: Instant,
+    request_started: Instant,
+) {
+    let provider_work_ms = provider_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+    let total_ms = request_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+    // Provider text is untrusted; it must not decide whether the account needs
+    // login. An absent typed error is a generic failed attempt, never an
+    // inferred authentication failure from substrings in a page or exception.
+    let generic_failure = GatewayError::provider_failure("provider attempt failed");
+    provider_sessions.record_gateway_error(provider, typed_error.unwrap_or(&generic_failure));
+    metrics_registry.record_provider_timings(
+        provider,
+        "error",
+        queue_ms,
+        None,
+        provider_work_ms,
+        total_ms,
+    );
+}
+
 impl ChatService {
     pub fn new(backend: Arc<dyn ChatBackend>) -> Self {
         Self { backend }
@@ -817,6 +845,29 @@ pub enum FirstEvent {
     Error(GatewayError),
     Closed,
     Timeout,
+}
+
+/// Keep first-event failure semantics within the transport-independent
+/// service. The HTTP handler records each classified failure once and
+/// preserves the typed auth/challenge error when an upstream event carried it.
+/// Empty terminal events, closed streams and timeouts remain distinct failover
+/// reasons, without interpreting untrusted provider response text.
+pub(crate) fn classify_initial_stream_event(
+    first: FirstEvent,
+) -> std::result::Result<ChatEvent, (String, Option<GatewayError>)> {
+    match first {
+        FirstEvent::Chunk(chunk) => Ok(chunk),
+        FirstEvent::EmptyCompletion => Err((
+            "provider completed without output before stream started".to_owned(),
+            None,
+        )),
+        FirstEvent::Error(error) => Err((error.to_string(), Some(error))),
+        FirstEvent::Closed => Err((
+            "provider stream closed before first output".to_owned(),
+            None,
+        )),
+        FirstEvent::Timeout => Err(("provider timed out before first output".to_owned(), None)),
+    }
 }
 
 pub(crate) fn usable_initial_stream_chunk(content: &str, _done: bool) -> bool {
