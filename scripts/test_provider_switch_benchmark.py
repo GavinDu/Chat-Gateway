@@ -117,13 +117,15 @@ class ProviderSwitchBenchmarkTests(unittest.TestCase):
 
     def test_sse_measures_first_content_and_terminal(self):
         class FakeResponse:
-            def __iter__(self):
-                return iter([
+            def __init__(self):
+                self.lines = iter([
                     'data: {"choices":[{"delta":{"role":"assistant"}}]}',
                     'data: {"choices":[{"delta":{"content":"hello"}}]}',
                     'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
                     "data: [DONE]",
                 ])
+            def readline(self, maximum):
+                return next(self.lines, "")
         with patch("provider_concurrency_benchmark.time.monotonic", side_effect=[1.25]):
             ttft, done, error, finished = consume_sse(FakeResponse(), 1.0)
         self.assertEqual(ttft, 250)
@@ -134,9 +136,9 @@ class ProviderSwitchBenchmarkTests(unittest.TestCase):
     def test_sse_rejects_error_and_missing_done(self):
         class FakeResponse:
             def __init__(self, lines):
-                self.lines = lines
-            def __iter__(self):
-                return iter(self.lines)
+                self.lines = iter(lines)
+            def readline(self, maximum):
+                return next(self.lines, "")
         _, done, error, finished = consume_sse(
             FakeResponse(['data: {"error":{"message":"redacted"}}']), 1.0
         )
@@ -155,9 +157,9 @@ class ProviderSwitchBenchmarkTests(unittest.TestCase):
         import time
         class FakeResponse:
             def __init__(self, lines):
-                self.lines = lines
-            def __iter__(self):
-                return iter(self.lines)
+                self.lines = iter(lines)
+            def readline(self, maximum):
+                return next(self.lines, "")
 
         prefix = ['data: {"choices":[{"delta":{"content":"partial"}}]}']
         ttft, done, error, finished = consume_sse(
