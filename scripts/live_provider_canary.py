@@ -129,6 +129,7 @@ def consume_sse(lines: Iterable[str], started_at: float | None = None) -> dict:
     first_content_ms = None
     started = time.monotonic() if started_at is None else started_at
     saw_done = False
+    saw_terminal_stop = False
     provider_error = False
     received_bytes = 0
     content_bytes = 0
@@ -152,6 +153,10 @@ def consume_sse(lines: Iterable[str], started_at: float | None = None) -> dict:
         data = line[5:].strip()
         if data == "[DONE]":
             saw_done = True
+            if not saw_terminal_stop:
+                # A failed or truncated gateway stream can still emit [DONE].
+                # Never count it as an authenticated provider canary pass.
+                provider_error = True
             break
         if not data:
             continue
@@ -175,6 +180,12 @@ def consume_sse(lines: Iterable[str], started_at: float | None = None) -> dict:
         if not isinstance(choices[0], dict):
             provider_error = True
             break
+        finish_reason = choices[0].get("finish_reason")
+        if finish_reason is not None:
+            if finish_reason != "stop":
+                provider_error = True
+                break
+            saw_terminal_stop = True
         delta = choices[0].get("delta")
         if delta is None:
             continue  # Completion/usage event without a content delta.
