@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { allowed, allowedDocument, safeAddress, dimensions, providerDomains, vaultDomains, domainMatches } from './policy.mjs';
 
 test('every supported provider has a bounded navigation policy', () => {
-  assert.equal(Object.keys(providerDomains).length, 8);
+  assert.equal(Object.keys(providerDomains).length, 9);
   for (const [provider, hosts] of Object.entries(providerDomains)) {
     assert(allowed(provider, 'https://' + hosts[0] + '/login'));
     for (const bad of ['http://chatgpt.com', 'https://127.0.0.1',
@@ -20,6 +20,17 @@ test('providers cannot navigate into each other', () => {
   assert(!allowed('claude', 'https://chatgpt.com'));
   assert(allowed('chatgpt', 'https://accounts.google.com/signin'));
   assert(!allowed('unknown', 'https://accounts.google.com'));
+});
+test('Manus navigation and vault allow only approved hosts', () => {
+  assert(allowed('manus', 'https://manus.im/app'));
+  assert(allowed('manus', 'https://api.manus.im/'));
+  assert(!allowed('manus', 'https://manus.im.evil.example/app'));
+  assert(!allowed('manus', 'https://evilmanus.im/app'));
+  assert(!allowed('manus', 'https://chatgpt.com/'));
+  assert(!allowed('claude', 'https://manus.im/app'));
+  assert(domainMatches('api.manus.im', vaultDomains.manus));
+  assert(!domainMatches('manus.im.evil.example', vaultDomains.manus));
+  assert(!domainMatches('accounts.google.com', vaultDomains.manus));
 });
 test('bounded integral resize rejects nonfinite and oversized dimensions', () => {
   assert.deepEqual(dimensions(1000, 700), { width: 1000, height: 700 });
