@@ -1362,7 +1362,7 @@ mod provider_catalog_contract_tests {
     #[test]
     fn provider_catalog_names_are_unique_and_round_trip_exactly() {
         let providers = Provider::all();
-        assert_eq!(providers.len(), 8, "the public provider catalog changed");
+        assert_eq!(providers.len(), 9, "the public provider catalog changed");
 
         let mut names = HashSet::new();
         for provider in providers {
