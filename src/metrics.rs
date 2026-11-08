@@ -152,8 +152,8 @@ impl MetricsRegistry {
 
 fn escape_label(value: &str) -> String {
     value
-        .replace('\\', "\\\")
-        .replace('"', "\\"")
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
         .replace('\n', "\\n")
 }
 
