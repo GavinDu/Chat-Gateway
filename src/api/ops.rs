@@ -4,7 +4,12 @@
 //! memory egress policy envelope; routes remain protected by the same middleware.
 use super::api_error;
 use crate::{app_state::AppState, memory_egress};
-use axum::{extract::State, http::StatusCode, response::{IntoResponse, Response}, Json};
+use axum::{
+    extract::State,
+    http::StatusCode,
+    response::{IntoResponse, Response},
+    Json,
+};
 use std::sync::Arc;
 
 pub(crate) async fn memory_egress_policy_status() -> Response {
