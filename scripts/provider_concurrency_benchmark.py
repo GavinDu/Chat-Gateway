@@ -18,6 +18,8 @@ import time
 import urllib.error
 import urllib.request
 
+from provider_bench import _NoRedirect, validate_benchmark_target
+
 
 def percentile(values: list[int], p: float) -> int | None:
     if not values:
@@ -100,6 +102,12 @@ def peak_rss_kb(samples: list[int | None]) -> int | None:
 
 def one_request(base_url: str, api_key: str, provider: str, model: str,
                 timeout: int, sample: int) -> dict:
+    # Reject non-local cleartext and malformed authorities before creating an
+    # authenticated request. Benchmarks are credential-bearing clients.
+    try:
+        validate_benchmark_target(base_url.rstrip("/") + "/v1")
+    except RuntimeError:
+        return {"ok": False, "failure": "invalid_benchmark_endpoint"}
     payload = json.dumps({
         "model": model,
         "stream": True,
@@ -118,7 +126,7 @@ def one_request(base_url: str, api_key: str, provider: str, model: str,
     )
     started = time.monotonic()
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with urllib.request.build_opener(_NoRedirect()).open(request, timeout=timeout) as response:
             actual_provider = response.headers.get("X-Gateway-Provider", "").lower()
             ttft_ms, saw_done, provider_error, saw_finish_stop = parse_sse(response, started)
             status = response.status
@@ -214,6 +222,10 @@ def main() -> int:
         parser.error("--samples and --timeout must be positive")
     if not args.concurrency or any(value < 1 or value > 32 for value in args.concurrency):
         parser.error("--concurrency values must be between 1 and 32")
+    try:
+        validate_benchmark_target(args.base_url.rstrip("/") + "/v1")
+    except RuntimeError:
+        parser.error("--base-url must be a local HTTP or HTTPS gateway root without credentials, query or fragment")
     report = {
         "provider": args.provider,
         "model": args.model,

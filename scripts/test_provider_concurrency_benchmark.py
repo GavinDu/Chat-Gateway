@@ -1,9 +1,45 @@
 import unittest
+import urllib.error
+from unittest.mock import patch
 
-from provider_concurrency_benchmark import parse_sse, peak_rss_kb, percentile
+from provider_concurrency_benchmark import one_request, parse_sse, peak_rss_kb, percentile
+from provider_bench import _NoRedirect
 
 
 class ProviderConcurrencyBenchmarkTests(unittest.TestCase):
+    def test_credential_bearing_requests_do_not_follow_http_redirects(self):
+        with patch("provider_concurrency_benchmark.urllib.request.build_opener") as factory:
+            opener = factory.return_value
+            opener.open.side_effect = urllib.error.HTTPError(
+                "https://private.example/v1/chat/completions", 307,
+                "redirect refused", {}, None
+            )
+            result = one_request(
+                "https://private.example", "synthetic-api-key",
+                "chatgpt", "gpt", 3, 0
+            )
+        self.assertEqual(result, {"ok": False, "failure": "http_307"})
+        self.assertIsInstance(factory.call_args.args[0], _NoRedirect)
+        request = opener.open.call_args.args[0]
+        self.assertEqual(request.full_url, "https://private.example/v1/chat/completions")
+        self.assertEqual(request.get_header("Authorization"), "Bearer synthetic-api-key")
+
+    def test_invalid_benchmark_targets_rejected_before_opening_request(self):
+        with patch("provider_concurrency_benchmark.urllib.request.build_opener") as factory:
+            for url in [
+                "http://private.example",
+                "https://user:password@private.example",
+                "https://private.example/v1",
+                "https://private.example?key=secret",
+                "http://127.0.0.1:8080/#fragment",
+            ]:
+                with self.subTest(url=url):
+                    result = one_request(url, "synthetic-key", "chatgpt", "gpt", 3, 0)
+                    self.assertEqual(
+                        result, {"ok": False, "failure": "invalid_benchmark_endpoint"}
+                    )
+            factory.assert_not_called()
+
     def test_percentile_uses_nearest_rank(self):
         values = [50, 10, 40, 20, 30]
         self.assertEqual(percentile(values, 50), 30)
