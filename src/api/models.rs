@@ -66,7 +66,7 @@ fn retain_model_owners(model_list: &mut serde_json::Value, available: impl Fn(&s
     }
 }
 
-async fn models(
+pub(crate) async fn models(
     State(state): State<Arc<AppState>>,
     auth_context: Option<Extension<AuthKeyContext>>,
 ) -> impl IntoResponse {
