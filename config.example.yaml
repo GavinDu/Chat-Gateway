@@ -93,3 +93,14 @@ providers:
     min_request_interval_ms: 5000
     daily_request_cap: 100
     models: [perplexity, sonar, sonar-pro, sonar-reasoning, pplx-8b, pplx-70b]
+  # Manus agent runs can take significantly longer than chat replies.
+  # Opt in only after reviewing current Manus web automation terms.
+  - name: manus
+    enabled: false
+    priority: 9
+    timeout_seconds: 300
+    queue_timeout_seconds: 30
+    session_pool_size: 1
+    min_request_interval_ms: 5000
+    daily_request_cap: 100
+    models: [manus]
