@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import patch
 
-from provider_switch_benchmark import consume_sse, latency_category, parse_step, percentile, summarize
+from provider_switch_benchmark import consume_sse, latency_category, measure_sequence, parse_step, percentile, summarize
 
 
 class ProviderSwitchBenchmarkTests(unittest.TestCase):
@@ -22,6 +22,63 @@ class ProviderSwitchBenchmarkTests(unittest.TestCase):
         self.assertEqual(latency_category(None, "chatgpt"), "initial_provider_request")
         self.assertEqual(latency_category("chatgpt", "claude"), "after_provider_switch")
         self.assertEqual(latency_category("claude", "claude"), "same_provider_follow_up")
+
+    def test_switches_and_followups_reuse_one_conversation_per_repetition(self):
+        observed = []
+
+        def fake_turn(base_url, api_key, provider, model, conversation_id, number, timeout):
+            observed.append((provider, conversation_id))
+            return {
+                "ok": True,
+                "conversation_id": conversation_id or f"synthetic-conversation-{number // 3}",
+                "ttft_ms": 10,
+                "total_ms": 25,
+            }
+
+        with patch("provider_switch_benchmark.request_turn", side_effect=fake_turn):
+            categories, failures = measure_sequence(
+                "http://127.0.0.1:8080", "synthetic-key",
+                [("chatgpt", "gpt"), ("claude", "sonnet"), ("chatgpt", "gpt")],
+                2, 5,
+            )
+        self.assertEqual(observed, [
+            ("chatgpt", None),
+            ("claude", "synthetic-conversation-0"),
+            ("chatgpt", "synthetic-conversation-0"),
+            ("chatgpt", None),
+            ("claude", "synthetic-conversation-1"),
+            ("chatgpt", "synthetic-conversation-1"),
+        ])
+        self.assertEqual(failures, {})
+        self.assertEqual(len(categories["initial_provider_request"]), 2)
+        self.assertEqual(len(categories["after_provider_switch"]), 4)
+
+    def test_failed_handoff_keeps_previous_conversation_for_next_provider(self):
+        observed = []
+        def fake_turn(base_url, api_key, provider, model, conversation_id, number, timeout):
+            observed.append((provider, conversation_id))
+            if number == 1:
+                return {"ok": False, "failure": "provider_stream_error"}
+            return {
+                "ok": True,
+                "conversation_id": conversation_id or "synthetic-conversation",
+                "ttft_ms": 8,
+                "total_ms": 20,
+            }
+
+        with patch("provider_switch_benchmark.request_turn", side_effect=fake_turn):
+            categories, failures = measure_sequence(
+                "http://127.0.0.1:8080", "synthetic-key",
+                [("chatgpt", "gpt"), ("claude", "sonnet"), ("gemini", "flash")],
+                1, 5,
+            )
+        self.assertEqual(observed, [
+            ("chatgpt", None),
+            ("claude", "synthetic-conversation"),
+            ("gemini", "synthetic-conversation"),
+        ])
+        self.assertEqual(failures, {"claude:provider_stream_error": 1})
+        self.assertEqual(len(categories["after_provider_switch"]), 1)
 
     def test_sse_measures_first_content_and_terminal(self):
         class FakeResponse:
