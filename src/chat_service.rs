@@ -4,10 +4,18 @@
 //! streaming and non-streaming handlers share the same provider event contract.
 use crate::chat_backend::{BackendRequest, ChatBackend, ChatEvent, GatewayError};
 use crate::{
-    app_state::AppState, completed_chat_outcome, memory::ChatMessage, persist_completed_turn,
-    record_provider_outcome, ProviderOutcome,
+    api::api_error,
+    app_state::{AppState, AuthKeyContext},
+    budget_personal_memory_items, completed_chat_outcome,
+    context::{self, ContextBuilder, ContextPlan, ThreadSyncState},
+    conversation_context_read_error, is_reopenable_provider_thread_url,
+    memory::{ChatMessage, LongTermMemoryStore, ProviderThread},
+    memory_egress, persist_completed_turn, providers,
+    read_conversation_context_with_transcript_for_owner, record_provider_outcome,
+    transcript_marker, ProviderOutcome,
 };
 use anyhow::Result;
+use axum::{extract::Extension, http::StatusCode, response::Response};
 use std::{
     sync::Arc,
     time::{Duration, Instant},
@@ -224,6 +232,190 @@ pub(crate) async fn finalize_provider_attempt(
         },
     );
     persist_error
+}
+
+/// Resolve and authorize the provider candidates before acquiring a worker
+/// permit. In particular, a failed affinity read or an empty API-key allowlist
+/// must never fall through to a different provider.
+pub(crate) async fn resolve_chat_candidates(
+    state: &AppState,
+    owner_key_id: &str,
+    model: &str,
+    conversation_id: Option<&str>,
+    auth_context: Option<&Extension<AuthKeyContext>>,
+) -> Result<(Vec<String>, String), Box<Response>> {
+    let mut candidates = state
+        .router
+        .resolve_for_owner_async(owner_key_id, model, conversation_id, state.memory.clone())
+        .await
+        .map_err(|_| {
+            tracing::error!(conversation_id = ?conversation_id, "provider affinity read failed");
+            Box::new(api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                "memory_read_failed",
+                "conversation routing state could not be read safely",
+            ))
+        })?;
+    let original_candidate_count = candidates.len();
+    if let Some(Extension(context)) = auth_context {
+        if let Some(allowed) = &context.provider_allowlist {
+            candidates.retain(|provider| allowed.iter().any(|item| item == provider));
+            if candidates.is_empty() && original_candidate_count > 0 {
+                return Err(Box::new(api_error(
+                    StatusCode::FORBIDDEN,
+                    "authentication_error",
+                    "provider_not_allowed",
+                    "the API key is not allowed to use the requested provider",
+                )));
+            }
+        }
+    }
+    let provider_model = model
+        .split_once('/')
+        .map(|(_, model)| model)
+        .unwrap_or(model)
+        .to_owned();
+    tracing::info!(model, ?candidates, conv = ?conversation_id, "routing request");
+    if candidates.is_empty() {
+        return Err(Box::new(api_error(
+            StatusCode::NOT_FOUND,
+            "invalid_request_error",
+            "model_not_found",
+            format!("model '{model}' is not configured for an enabled provider; use /v1/models or model='auto'"),
+        )));
+    }
+    Ok((candidates, provider_model))
+}
+
+pub(crate) struct PreparedChatContext {
+    pub(crate) memory_egress_policy: memory_egress::MemoryEgressPolicy,
+    pub(crate) personal_memory_items: Vec<memory_egress::PersonalMemoryItem>,
+    pub(crate) context_token_budget: usize,
+    pub(crate) prompt: String,
+    pub(crate) windowed: Vec<ChatMessage>,
+    pub(crate) has_history: bool,
+    pub(crate) stored_messages: Vec<ChatMessage>,
+}
+
+/// Prepare one immutable, owner-scoped context snapshot before provider
+/// routing or admission. Both optional personal-memory reads and canonical
+/// transcript reads fail closed; no provider is touched on a failed read.
+pub(crate) async fn prepare_chat_context(
+    state: &AppState,
+    owner_key_id: &str,
+    conversation_id: Option<&str>,
+    incoming_messages: &[ChatMessage],
+) -> Result<PreparedChatContext, Box<Response>> {
+    let memory_egress_policy = memory_egress::MemoryEgressPolicy::from_env().map_err(|_| {
+        Box::new(api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "server_error",
+            "memory_egress_policy_invalid",
+            "provider memory egress policy is invalid",
+        ))
+    })?;
+
+    // Do not reserve memory context tokens when no provider is authorized
+    // to receive personal items. Disabled personal memory requires no read.
+    let retrieved_memory = if !memory_egress_policy
+        .allowed_personal_memory_providers()
+        .is_empty()
+    {
+        state
+            .memory
+            .clone()
+            .retrieve_long_term_memory_items_async(owner_key_id.to_owned(), 20)
+            .await
+            .map_err(|_| {
+                Box::new(api_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "server_error",
+                    "memory_read_failed",
+                    "long-term memory could not be read safely",
+                ))
+            })?
+    } else {
+        Vec::new()
+    };
+    let (personal_memory_items, memory_tokens) =
+        budget_personal_memory_items(retrieved_memory, 512);
+    let context_token_budget = 8000usize.saturating_sub(memory_tokens);
+
+    let (prompt, windowed, has_history, stored_messages) =
+        read_conversation_context_with_transcript_for_owner(
+            state.memory.clone(),
+            owner_key_id.to_owned(),
+            conversation_id.map(str::to_owned),
+            incoming_messages.to_vec(),
+            context_token_budget,
+        )
+        .await
+        .map_err(|_| Box::new(conversation_context_read_error(conversation_id)))?;
+    if prompt.is_empty() {
+        return Err(Box::new(api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            "empty_prompt",
+            "prompt must not be empty",
+        )));
+    }
+
+    Ok(PreparedChatContext {
+        memory_egress_policy,
+        personal_memory_items,
+        context_token_budget,
+        prompt,
+        windowed,
+        has_history,
+        stored_messages,
+    })
+}
+
+/// The pure provider-context decision is shared by JSON and SSE attempts.
+///
+/// A delta is allowed only for a validated, reopenable thread whose exact
+/// provider, model and durable transcript marker still match. Otherwise
+/// return an isolated bounded replay and never navigate the old thread.
+pub(crate) fn plan_provider_send(
+    provider: &str,
+    model: &str,
+    stored_messages: &[ChatMessage],
+    incoming_messages: &[ChatMessage],
+    saved_thread: Option<ProviderThread>,
+    token_budget: usize,
+    replay_prompt: &str,
+) -> (String, Option<String>) {
+    let saved_thread = saved_thread
+        .filter(|thread| is_reopenable_provider_thread_url(provider, &thread.thread_url));
+    let supports_reopen = providers::ADAPTERS
+        .iter()
+        .find(|spec| spec.id == provider)
+        .is_some_and(|spec| matches!(spec.threads, providers::ThreadSupport::UrlAddressable))
+        && saved_thread
+            .as_ref()
+            .is_some_and(|thread| thread.model.as_deref() == Some(model));
+    let last_marker = transcript_marker(stored_messages);
+    let thread_state = saved_thread.as_ref().map(|thread| ThreadSyncState {
+        provider: thread.provider.clone(),
+        thread_url: thread.thread_url.clone(),
+        synced_through_message_id: thread.synced_through_message_id.clone(),
+        last_stored_message_id: Some(last_marker),
+    });
+    match ContextBuilder::plan(
+        stored_messages,
+        incoming_messages,
+        provider,
+        thread_state.as_ref(),
+        supports_reopen,
+        token_budget,
+    ) {
+        ContextPlan::Delta { messages } => (
+            context::render_prompt(&messages),
+            saved_thread.map(|thread| thread.thread_url),
+        ),
+        ContextPlan::Replay { preamble, .. } => (format!("{preamble}\n{replay_prompt}"), None),
+    }
 }
 
 impl ChatService {
