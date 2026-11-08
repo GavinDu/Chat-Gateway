@@ -23,7 +23,11 @@ pub(super) fn provider_thread_navigation_ready(
     thread_navigation_snapshot_ready(actual, target, composer_ready)
 }
 
-pub(super) fn thread_navigation_snapshot_ready(actual: &str, target: &str, composer_ready: bool) -> bool {
+pub(super) fn thread_navigation_snapshot_ready(
+    actual: &str,
+    target: &str,
+    composer_ready: bool,
+) -> bool {
     composer_ready && pool_policy::provider_thread_navigation_matches(actual, target)
 }
 
