@@ -36,7 +36,10 @@ pub(crate) struct ProviderOutcome<'a> {
 
 /// Classify the entire gateway operation, including durable turn commit.
 /// Provider text alone is not successful API completion if persistence fails.
-pub(crate) fn completed_chat_outcome(stream_failed: bool, persistence_failed: bool) -> &'static str {
+pub(crate) fn completed_chat_outcome(
+    stream_failed: bool,
+    persistence_failed: bool,
+) -> &'static str {
     if stream_failed || persistence_failed {
         "error"
     } else {
