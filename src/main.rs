@@ -52,8 +52,7 @@ use chat_service::FirstEvent;
 use chat_service::{first_event, record_attempt_error, ChatService};
 use cli::Cli;
 use config::AppConfig;
-use context::{ContextBuilder, ContextPlan, ThreadSyncState};
-use memory::{ChatMessage, ConversationStore, LongTermMemoryStore, ProviderThread, UnifiedMemory};
+use memory::{ChatMessage, ConversationStore, ProviderThread, UnifiedMemory};
 use request_security::{
     local_request_authority_is_safe, login_origin_is_same_authority, remote_gateway_origin,
     remote_request_is_allowed, validate_remote_gateway_config, RemoteProxyTrust,
