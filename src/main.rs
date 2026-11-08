@@ -286,6 +286,7 @@ async fn main() -> anyhow::Result<()> {
         router: ProviderRouter::new(cfg.clone()),
         models_cache: Arc::new(RwLock::new(HashMap::new())),
         relay: Arc::new(relay_state),
+        embedded_login: Arc::new(embedded_login::EmbeddedLoginRuntime::default()),
         provider_guard: pool.provider_guard(),
         provider_sessions: pool.provider_sessions(),
         metrics: pool.metrics(),
@@ -405,8 +406,9 @@ async fn main() -> anyhow::Result<()> {
     println!("Chat Gateway v2 Obscura Native listening on {}", addr);
     // Bound graceful draining so a stuck stream cannot prevent shutdown forever.
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
+    let state_for_shutdown = state.clone();
     let shutdown = async move {
-        shutdown_signal().await;
+        shutdown_signal(state_for_shutdown).await;
         let _ = shutdown_tx.send(());
     };
     let mut server = Box::pin(std::future::IntoFuture::into_future(
