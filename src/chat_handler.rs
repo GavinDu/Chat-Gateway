@@ -646,16 +646,11 @@ pub(super) async fn run(
                         &state.provider_sessions,
                         &state.metrics,
                         &provider_name,
-                        &message,
+                        gateway_error.as_ref(),
                         queue_ms,
                         provider_started,
                         request_started,
                     );
-                    if let Some(error) = gateway_error.as_ref() {
-                        state
-                            .provider_sessions
-                            .record_gateway_error(&provider_name, error);
-                    }
                     last_err = Some(message);
                     continue;
                 }

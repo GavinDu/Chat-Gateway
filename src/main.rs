@@ -1999,14 +1999,18 @@ fn record_attempt_error(
     provider_sessions: &provider_state::ProviderSessionRegistry,
     metrics_registry: &metrics::MetricsRegistry,
     provider: &str,
-    error: &str,
+    typed_error: Option<&chat_backend::GatewayError>,
     queue_ms: u64,
     provider_started: Instant,
     request_started: Instant,
 ) {
     let provider_work_ms = provider_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
     let total_ms = request_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
-    provider_sessions.record_error(provider, error);
+    // Provider text is untrusted; it must not decide whether the account needs
+    // login. An absent typed error is a generic failed attempt, never an
+    // inferred authentication failure from substrings in a page or exception.
+    let generic_failure = chat_backend::GatewayError::provider_failure("provider attempt failed");
+    provider_sessions.record_gateway_error(provider, typed_error.unwrap_or(&generic_failure));
     metrics_registry.record_provider_timings(
         provider,
         "error",
@@ -3357,7 +3361,7 @@ mod first_event_tests {
     async fn first_event_surfaces_session_expiry_before_any_chunk() {
         let provider = "test-first-event-session-expiry";
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
-        tx.send(Err(crate::chat_backend::GatewayError::provider_failure(
+        tx.send(Err(crate::chat_backend::GatewayError::session_expired(
             "session_expired: please sign in",
         )))
         .await
@@ -3374,7 +3378,7 @@ mod first_event_tests {
             &provider_sessions,
             &metrics_registry,
             provider,
-            &error.to_string(),
+            Some(&error),
             0,
             Instant::now(),
             Instant::now(),
@@ -3388,6 +3392,50 @@ mod first_event_tests {
         assert!(metrics.contains(&format!(
             "gateway_provider_requests_total{{provider=\"{provider}\",outcome=\"error\"}} 1"
         )));
+    }
+
+    #[test]
+    fn first_attempt_auth_state_follows_error_kind_not_provider_text() {
+        let provider = "test-first-event-typed-provider-failure";
+        let registry = crate::provider_state::ProviderSessionRegistry::default();
+        let metrics = crate::metrics::MetricsRegistry::default();
+        let upstream = crate::chat_backend::GatewayError::provider_failure(
+            "session expired; please sign in; cookie=synthetic-secret",
+        );
+        record_attempt_error(
+            &registry,
+            &metrics,
+            provider,
+            Some(&upstream),
+            0,
+            Instant::now(),
+            Instant::now(),
+        );
+        assert_eq!(
+            registry.status(provider).state,
+            crate::provider_state::ProviderSessionState::Degraded,
+            "an ordinary typed failure must not force login from untrusted text"
+        );
+
+        let untouched = "test-first-event-non-provider-error";
+        let caller_error = crate::chat_backend::GatewayError::typed(
+            crate::chat_backend::GatewayErrorKind::InvalidRequest,
+            "session expired; please sign in",
+            false,
+        );
+        record_attempt_error(
+            &registry,
+            &metrics,
+            untouched,
+            Some(&caller_error),
+            0,
+            Instant::now(),
+            Instant::now(),
+        );
+        assert_eq!(
+            registry.status(untouched).state,
+            crate::provider_state::ProviderSessionState::Unknown
+        );
     }
 
     #[tokio::test]
