@@ -178,6 +178,114 @@ fn streamed_provider_response(attempt: StreamingAttempt) -> Response {
     (headers, Sse::new(sse_stream)).into_response()
 }
 
+/// One non-streaming provider attempt. A failure before any content may be
+/// retried on another candidate; a partial response is never committed.
+struct JsonAttempt<'a> {
+    state: &'a AppState,
+    owner_key_id: &'a str,
+    windowed: &'a [ChatMessage],
+    provider: &'a str,
+    model: &'a str,
+    provider_model: &'a str,
+    conversation_id: &'a str,
+    request_id: &'a str,
+    request_started: Instant,
+    provider_started: Instant,
+    completion_timeout: std::time::Duration,
+    queue_ms: u64,
+    prompt_tokens: u64,
+    receiver: tokio::sync::mpsc::Receiver<Result<chat_backend::ChatEvent, chat_backend::GatewayError>>,
+}
+
+async fn json_provider_response(attempt: JsonAttempt<'_>) -> std::result::Result<Response, String> {
+    let JsonAttempt {
+        state,
+        owner_key_id,
+        windowed,
+        provider,
+        model,
+        provider_model,
+        conversation_id,
+        request_id,
+        request_started,
+        provider_started,
+        completion_timeout,
+        queue_ms,
+        prompt_tokens,
+        receiver,
+    } = attempt;
+    let collected = state
+        .chat_service
+        .collect_with_timeout(receiver, provider_started, completion_timeout)
+        .await;
+    let full = collected.content;
+    let failed = collected.error;
+    let ttft_ms = collected
+        .first_event_elapsed
+        .map(|elapsed| elapsed.as_millis().min(u64::MAX as u128) as u64);
+    let provider_work_ms = provider_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+    let total_ms = request_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+    if let Some(error) = failed {
+        state.provider_sessions.record_gateway_error(provider, &error);
+        let message = error.to_string();
+        chat_service::record_provider_outcome(
+            &state.metrics,
+            chat_service::ProviderOutcome {
+                request_id,
+                provider,
+                outcome: "error",
+                queue_ms,
+                ttft_ms,
+                provider_work_ms,
+                total_ms,
+            },
+        );
+        if full.is_empty() {
+            tracing::warn!(provider = %provider, "provider failed before output; considering fallback");
+            return Err(message);
+        }
+        tracing::warn!(provider = %provider, "provider failed after partial output");
+        return Ok(api_error(
+            StatusCode::BAD_GATEWAY,
+            "provider_error",
+            "partial_response",
+            "provider failed after emitting a partial response; the turn was not committed",
+        ));
+    }
+
+    let persist_error = chat_service::finalize_provider_attempt(
+        state,
+        owner_key_id,
+        conversation_id,
+        windowed,
+        &full,
+        model,
+        chat_service::AttemptTelemetry {
+            request_id,
+            provider,
+            queue_ms,
+            ttft_ms,
+            provider_work_ms,
+            request_started,
+            stream_failed: false,
+        },
+    )
+    .await;
+    if let Some(error) = persist_error {
+        tracing::error!(conversation_id = %conversation_id, %error, "conversation persistence failed");
+        return Ok(api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "server_error",
+            "memory_persistence_failed",
+            "conversation could not be persisted",
+        ));
+    }
+
+    let body = json_completion_body(conversation_id, model, &full, prompt_tokens);
+    let headers = completion_response_headers(conversation_id, provider, provider_model, false);
+    Ok((headers, Json(body)).into_response())
+}
+
 pub(super) async fn run(
     state: Arc<AppState>,
     headers: HeaderMap,
@@ -423,90 +531,32 @@ pub(super) async fn run(
             });
         }
 
-        // Non-streaming: retry another provider only if no response bytes were
-        // emitted. A partial response is an error, never a successful turn.
-        let collected = state
-            .chat_service
-            .collect_with_timeout(
-                rx,
-                provider_started,
-                std::time::Duration::from_secs(provider_cfg.timeout_seconds),
-            )
-            .await;
-        let full = collected.content;
-        let failed = collected.error;
-        let ttft_ms = collected
-            .first_event_elapsed
-            .map(|elapsed| elapsed.as_millis().min(u64::MAX as u128) as u64);
-        let provider_work_ms = provider_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
-        let total_ms = request_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
-        if let Some(e) = failed {
-            state
-                .provider_sessions
-                .record_gateway_error(&provider_name, &e);
-            let message = e.to_string();
-            chat_service::record_provider_outcome(
-                &state.metrics,
-                chat_service::ProviderOutcome {
-                    request_id: &request_id,
-                    provider: &provider_name,
-                    outcome: "error",
-                    queue_ms,
-                    ttft_ms,
-                    provider_work_ms,
-                    total_ms,
-                },
-            );
-            if full.is_empty() {
-                tracing::warn!(provider = %provider_name, "provider failed before output; considering fallback");
+        // Keep the exclusive provider permit until the JSON attempt has fully
+        // finished. Only an error before the first content can use failover.
+        let response = json_provider_response(JsonAttempt {
+            state: &state,
+            owner_key_id: &owner_key_id,
+            windowed: &windowed,
+            provider: &provider_name,
+            model: &req.model,
+            provider_model: &provider_model,
+            conversation_id: &new_conv_id,
+            request_id: &request_id,
+            request_started,
+            provider_started,
+            completion_timeout: std::time::Duration::from_secs(provider_cfg.timeout_seconds),
+            queue_ms,
+            prompt_tokens: estimate_tokens(&provider_prompt),
+            receiver: rx,
+        })
+        .await;
+        match response {
+            Ok(response) => return response,
+            Err(message) => {
                 last_err = Some(message);
                 continue;
             }
-            tracing::warn!(provider = %provider_name, "provider failed after partial output");
-            return api_error(
-                axum::http::StatusCode::BAD_GATEWAY,
-                "provider_error",
-                "partial_response",
-                "provider failed after emitting a partial response; the turn was not committed",
-            );
         }
-
-        let persist_error = chat_service::finalize_provider_attempt(
-            &state,
-            &owner_key_id,
-            &new_conv_id,
-            &windowed,
-            &full,
-            &req.model,
-            chat_service::AttemptTelemetry {
-                request_id: &request_id,
-                provider: &provider_name,
-                queue_ms,
-                ttft_ms,
-                provider_work_ms,
-                request_started,
-                stream_failed: false,
-            },
-        )
-        .await;
-        if let Some(error) = persist_error {
-            tracing::error!(conversation_id = %new_conv_id, %error, "conversation persistence failed");
-            return api_error(
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                "server_error",
-                "memory_persistence_failed",
-                "conversation could not be persisted",
-            );
-        }
-        let body = json_completion_body(
-            &new_conv_id,
-            &req.model,
-            &full,
-            estimate_tokens(&provider_prompt),
-        );
-        let resp_headers =
-            completion_response_headers(&new_conv_id, &provider_name, &provider_model, false);
-        return (resp_headers, Json(body)).into_response();
     }
 
     if candidate_count > 0 && busy_count == candidate_count {
