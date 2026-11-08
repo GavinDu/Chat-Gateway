@@ -45,12 +45,15 @@ mod router;
 mod session;
 
 #[cfg(test)]
-use api::add_gateway_headers;
-use api::{api_error, estimate_tokens, validate_chat_req, ChatReq};
+use api::{add_gateway_headers, validate_chat_req, ChatReq};
+use api::{api_error, estimate_tokens};
 use app::shutdown_signal;
 use app_state::{AppState, AuthKeyContext, ProviderEligibilityMode};
 use browser::pool::ObscuraPool;
 use chat_backend::{BackendRequest, ProviderId};
+#[cfg(test)]
+use chat_request::oversized_chat_body_error;
+use chat_request::valid_conversation_id;
 #[cfg(test)]
 use chat_service::{completed_chat_outcome, FirstEvent};
 use chat_service::{first_event, record_attempt_error, ChatService};
@@ -1971,23 +1974,6 @@ fn budget_personal_memory_items(
     (selected, used)
 }
 
-fn valid_conversation_id(value: &str) -> bool {
-    (8..=128).contains(&value.len())
-        && value.is_ascii()
-        && value
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-}
-
-fn oversized_chat_body_error() -> Response {
-    api_error(
-        StatusCode::PAYLOAD_TOO_LARGE,
-        "invalid_request_error",
-        "request_too_large",
-        "request body exceeds the 1 MiB limit",
-    )
-}
-
 async fn chat_completions(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -2028,28 +2014,6 @@ mod provider_failure_redaction_tests {
         assert!(!String::from_utf8_lossy(&body).contains("session-secret"));
         assert!(!String::from_utf8_lossy(&body).contains("sensitive-token"));
     }
-}
-
-// Returning a ready-to-send Axum response keeps validation errors consistent at the handler boundary.
-#[allow(clippy::result_large_err)]
-fn parse_and_validate_chat_req(body: &[u8]) -> Result<ChatReq, Response> {
-    let req = serde_json::from_slice::<ChatReq>(body).map_err(|error| {
-        api_error(
-            StatusCode::BAD_REQUEST,
-            "invalid_request_error",
-            "invalid_json",
-            format!("invalid or unsupported request field: {error}"),
-        )
-    })?;
-    validate_chat_req(&req).map_err(|(code, message)| {
-        api_error(
-            StatusCode::BAD_REQUEST,
-            "invalid_request_error",
-            code,
-            message,
-        )
-    })?;
-    Ok(req)
 }
 
 #[cfg(test)]

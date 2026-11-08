@@ -2,9 +2,8 @@
 //! Authentication owner identity and conversation IDs are resolved before
 //! memory reads, routing, or backend dispatch.
 use crate::{
-    api::{api_error, ChatReq},
+    api::{api_error, validate_chat_req, ChatReq},
     app_state::AuthKeyContext,
-    oversized_chat_body_error, parse_and_validate_chat_req, valid_conversation_id,
 };
 use axum::{
     extract::Extension,
@@ -71,4 +70,43 @@ pub(crate) fn prepare_chat_request(
         owner_key_id,
         conversation_id,
     })
+}
+
+pub(crate) fn valid_conversation_id(value: &str) -> bool {
+    (8..=128).contains(&value.len())
+        && value.is_ascii()
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+pub(crate) fn oversized_chat_body_error() -> Response {
+    api_error(
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "invalid_request_error",
+        "request_too_large",
+        "request body exceeds the 1 MiB limit",
+    )
+}
+
+// Returning a ready-to-send Axum response keeps validation errors consistent at the handler boundary.
+#[allow(clippy::result_large_err)]
+fn parse_and_validate_chat_req(body: &[u8]) -> Result<ChatReq, Response> {
+    let req = serde_json::from_slice::<ChatReq>(body).map_err(|error| {
+        api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            "invalid_json",
+            format!("invalid or unsupported request field: {error}"),
+        )
+    })?;
+    validate_chat_req(&req).map_err(|(code, message)| {
+        api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            code,
+            message,
+        )
+    })?;
+    Ok(req)
 }
