@@ -48,7 +48,7 @@ use app_state::{AppState, AuthKeyContext};
 use browser::pool::ObscuraPool;
 use chat_backend::{BackendRequest, ProviderId};
 #[cfg(test)]
-use chat_service::FirstEvent;
+use chat_service::{completed_chat_outcome, FirstEvent};
 use chat_service::{first_event, record_attempt_error, ChatService};
 use cli::Cli;
 use config::AppConfig;
@@ -1994,53 +1994,6 @@ async fn read_conversation_context_with_transcript_for_owner(
     memory
         .build_context_with_transcript(owner_key_id, conversation_id, messages, token_budget)
         .await
-}
-
-/// Keep provider timing metrics and completion logs identical for streaming
-/// and non-streaming requests. State transitions remain at the call site
-/// because stream errors carry additional session-expiry classification.
-struct ProviderOutcome<'a> {
-    request_id: &'a str,
-    provider: &'a str,
-    outcome: &'a str,
-    queue_ms: u64,
-    ttft_ms: Option<u64>,
-    provider_work_ms: u64,
-    total_ms: u64,
-}
-
-/// Classify the entire gateway operation, including durable turn commit.
-/// Provider text alone is not successful API completion if persistence fails.
-fn completed_chat_outcome(stream_failed: bool, persistence_failed: bool) -> &'static str {
-    if stream_failed || persistence_failed {
-        "error"
-    } else {
-        "success"
-    }
-}
-
-fn record_provider_outcome(
-    metrics_registry: &metrics::MetricsRegistry,
-    outcome: ProviderOutcome<'_>,
-) {
-    metrics_registry.record_provider_timings(
-        outcome.provider,
-        outcome.outcome,
-        outcome.queue_ms,
-        outcome.ttft_ms,
-        outcome.provider_work_ms,
-        outcome.total_ms,
-    );
-    tracing::info!(
-        request_id = %outcome.request_id,
-        provider = %outcome.provider,
-        queue_ms = outcome.queue_ms,
-        ttft_ms = ?outcome.ttft_ms,
-        provider_work_ms = outcome.provider_work_ms,
-        total_ms = outcome.total_ms,
-        outcome = outcome.outcome,
-        "provider request completed"
-    );
 }
 
 fn budget_personal_memory_items(
