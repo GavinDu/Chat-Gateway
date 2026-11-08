@@ -1,4 +1,5 @@
 pub(crate) mod health;
+pub(crate) mod models;
 pub(crate) mod ops;
 
 use crate::{chat_backend::Role, context, memory::ChatMessage};
