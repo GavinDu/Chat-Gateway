@@ -132,7 +132,7 @@ test("Manus relay only collects consented manus.im cookies", async () => {
   const api = loadShared(cookies);
   assert.deepEqual(JSON.parse(JSON.stringify(api.PROVIDERS.manus)), ["manus.im"]);
   const snapshot = await api.providerCookieSnapshot("manus");
-  assert.deepEqual(snapshot.cookies.map(cookie => cookie.name).sort(), ["api", "session"]);
+  assert.deepEqual(JSON.parse(JSON.stringify(snapshot.cookies.map(cookie => cookie.name).sort())), ["api", "session"]);
   assert.equal(snapshot.local_storage && Object.keys(snapshot.local_storage).length, 0);
 });
 
