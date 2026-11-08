@@ -59,7 +59,6 @@ pub(super) fn landing_navigation_snapshot_ready(
     composer_ready
         && pool_policy::provider_thread_url_is_same_origin(actual, target)
         && pool_policy::landing_is_not_previous_thread(provider, actual)
-
 }
 
 #[cfg(test)]
