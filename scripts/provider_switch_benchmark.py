@@ -14,6 +14,8 @@ import time
 import urllib.error
 import urllib.request
 
+from provider_concurrency_benchmark import parse_sse
+
 
 def percentile(values: list[int], p: float) -> int | None:
     if not values:
@@ -22,35 +24,10 @@ def percentile(values: list[int], p: float) -> int | None:
     return ordered[max(0, min(len(ordered) - 1, math.ceil(p * len(ordered) / 100) - 1))]
 
 
-def consume_sse(response, started: float) -> tuple[int | None, bool, bool]:
-    ttft = None
-    done = False
-    provider_error = False
-    for raw in response:
-        line = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else raw
-        if not line.startswith("data:"):
-            continue
-        data = line[5:].strip()
-        if data == "[DONE]":
-            done = True
-            break
-        if not data:
-            continue
-        try:
-            event = json.loads(data)
-        except json.JSONDecodeError:
-            provider_error = True
-            break
-        if event.get("error") is not None:
-            provider_error = True
-            break
-        choices = event.get("choices") or []
-        if choices:
-            delta = choices[0].get("delta") or {}
-            content = delta.get("content")
-            if isinstance(content, str) and content and ttft is None:
-                ttft = int((time.monotonic() - started) * 1000)
-    return ttft, done, provider_error
+def consume_sse(response, started: float) -> tuple[int | None, bool, bool, bool]:
+    # Both benchmark tools must reject content plus [DONE] without a
+    # successful final finish_reason; the gateway emits [DONE] on failures too.
+    return parse_sse(response, started)
 
 
 def parse_step(value: str) -> tuple[str, str]:
@@ -87,7 +64,7 @@ def request_turn(base_url: str, api_key: str, provider: str, model: str,
         with urllib.request.urlopen(request, timeout=timeout) as response:
             actual_provider = response.headers.get("X-Gateway-Provider", "").lower()
             returned_conversation = response.headers.get("X-Conversation-Id")
-            ttft, done, provider_error = consume_sse(response, started)
+            ttft, done, provider_error, finished = consume_sse(response, started)
             status = response.status
     except urllib.error.HTTPError as error:
         return {"ok": False, "failure": f"http_{error.code}"}
@@ -108,6 +85,8 @@ def request_turn(base_url: str, api_key: str, provider: str, model: str,
         return {"ok": False, "failure": "missing_first_token"}
     if not done:
         return {"ok": False, "failure": "missing_sse_done"}
+    if not finished:
+        return {"ok": False, "failure": "missing_terminal_finish"}
     return {"ok": True, "ttft_ms": ttft, "total_ms": total,
             "conversation_id": returned_conversation}
 
