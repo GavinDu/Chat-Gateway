@@ -1,10 +1,45 @@
 import unittest
+import urllib.error
 from unittest.mock import patch
 
-from provider_switch_benchmark import consume_sse, latency_category, measure_sequence, parse_step, percentile, summarize
+from provider_switch_benchmark import consume_sse, latency_category, measure_sequence, parse_step, percentile, request_turn, summarize
+from provider_bench import _NoRedirect
 
 
 class ProviderSwitchBenchmarkTests(unittest.TestCase):
+    def test_switch_requests_never_replay_gateway_credentials_across_redirects(self):
+        with patch("provider_switch_benchmark.urllib.request.build_opener") as factory:
+            factory.return_value.open.side_effect = urllib.error.HTTPError(
+                "https://private.example/v1/chat/completions", 308,
+                "redirect refused", {}, None
+            )
+            result = request_turn(
+                "https://private.example", "synthetic-secret",
+                "chatgpt", "gpt", "synthetic-conversation", 0, 5,
+            )
+        self.assertEqual(result, {"ok": False, "failure": "http_308"})
+        self.assertIsInstance(factory.call_args.args[0], _NoRedirect)
+        request = factory.return_value.open.call_args.args[0]
+        self.assertEqual(request.get_header("Authorization"), "Bearer synthetic-secret")
+        self.assertEqual(request.get_header("X-conversation-id"), "synthetic-conversation")
+
+    def test_switch_request_rejects_unsafe_endpoints_without_sending_credentials(self):
+        with patch("provider_switch_benchmark.urllib.request.build_opener") as factory:
+            for url in [
+                "http://private.example",
+                "https://user:password@private.example",
+                "https://private.example/extra-path",
+                "https://private.example?secret=x",
+            ]:
+                with self.subTest(url=url):
+                    result = request_turn(
+                        url, "synthetic-secret", "chatgpt", "gpt", None, 0, 5,
+                    )
+                    self.assertEqual(
+                        result, {"ok": False, "failure": "invalid_benchmark_endpoint"},
+                    )
+            factory.assert_not_called()
+
     def test_step_requires_provider_and_model(self):
         self.assertEqual(parse_step("chatgpt=gpt-model"), ("chatgpt", "gpt-model"))
         with self.assertRaises(Exception):
