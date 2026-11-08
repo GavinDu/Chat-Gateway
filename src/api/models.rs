@@ -1,6 +1,15 @@
 //! Model discovery and provider-availability filtering.
-use crate::{app_state::{AppState, AuthKeyContext, ProviderEligibilityMode}, config::{self, AppConfig}};
-use axum::{extract::{Extension, State}, response::IntoResponse, Json};
+use crate::{
+    app_state::{AppState, AuthKeyContext, ProviderEligibilityMode},
+    config::AppConfig,
+};
+#[cfg(test)]
+use crate::config;
+use axum::{
+    extract::{Extension, State},
+    response::IntoResponse,
+    Json,
+};
 use std::{collections::HashMap, sync::Arc};
 
 fn build_model_list(cfg: &AppConfig, cache: &HashMap<String, Vec<String>>) -> serde_json::Value {
