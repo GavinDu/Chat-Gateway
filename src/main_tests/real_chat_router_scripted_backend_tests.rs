@@ -186,12 +186,12 @@ async fn real_router_terminal_event_with_content_matches_json_and_sse() {
         if stream {
             let sse = String::from_utf8(body.to_vec()).unwrap();
             assert_eq!(
-                sse.matches("\\"content\\":\\"single terminal answer\\"").count(),
+                sse.matches(r#""content":"single terminal answer""#).count(),
                 1,
                 "the terminal event's text must be sent only once"
             );
             assert!(sse.contains("data: [DONE]"));
-            assert!(sse.contains("\\"finish_reason\\":\\"stop\\""));
+            assert!(sse.contains(r#""finish_reason":"stop""#));
         } else {
             let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
             assert_eq!(
