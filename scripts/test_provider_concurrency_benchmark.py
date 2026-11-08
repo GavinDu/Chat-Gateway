@@ -2,7 +2,8 @@ import unittest
 import urllib.error
 from unittest.mock import patch
 
-from provider_concurrency_benchmark import one_request, parse_sse, peak_rss_kb, percentile
+from provider_concurrency_benchmark import bounded_sse_lines, one_request, parse_sse, peak_rss_kb, percentile
+from provider_bench import MAX_SSE_LINE_BYTES
 from provider_bench import _NoRedirect
 
 
@@ -39,6 +40,57 @@ class ProviderConcurrencyBenchmarkTests(unittest.TestCase):
                         result, {"ok": False, "failure": "invalid_benchmark_endpoint"}
                     )
             factory.assert_not_called()
+
+    def test_sse_reader_rejects_oversized_network_line(self):
+        import time
+        class OversizedResponse:
+            def readline(self, maximum):
+                self_test = MAX_SSE_LINE_BYTES + 1
+                assert maximum == self_test
+                return b"x" * maximum
+
+        _, done, error, finished = parse_sse(
+            bounded_sse_lines(OversizedResponse()), time.monotonic()
+        )
+        self.assertFalse(done)
+        self.assertTrue(error)
+        self.assertFalse(finished)
+
+    def test_sse_reader_rejects_excessive_cumulative_bytes(self):
+        import time
+        class FakeResponse:
+            def __init__(self, lines):
+                self.lines = iter(lines)
+            def readline(self, maximum):
+                return next(self.lines, b"")
+
+        comment = b": " + b"x" * 33000 + b"\n"
+        _, done, error, finished = parse_sse(
+            bounded_sse_lines(FakeResponse([comment] * 65)), time.monotonic()
+        )
+        self.assertFalse(done)
+        self.assertTrue(error)
+        self.assertFalse(finished)
+
+    def test_bounded_stream_accepts_normal_terminal_response(self):
+        import time
+        class FakeResponse:
+            def __init__(self, lines):
+                self.lines = iter(lines)
+            def readline(self, maximum):
+                return next(self.lines, b"")
+
+        ttft, done, error, finished = parse_sse(
+            bounded_sse_lines(FakeResponse([
+                b'data: {"choices":[{"delta":{"content":"hello"}}]}\n',
+                b'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n',
+                b"data: [DONE]\n",
+            ])), time.monotonic()
+        )
+        self.assertIsNotNone(ttft)
+        self.assertTrue(done)
+        self.assertFalse(error)
+        self.assertTrue(finished)
 
     def test_percentile_uses_nearest_rank(self):
         values = [50, 10, 40, 20, 30]
