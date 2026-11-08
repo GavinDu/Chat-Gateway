@@ -110,3 +110,27 @@ fn parse_and_validate_chat_req(body: &[u8]) -> Result<ChatReq, Response> {
     })?;
     Ok(req)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::valid_conversation_id;
+
+    #[test]
+    fn conversation_id_accepts_ascii_boundaries() {
+        assert!(valid_conversation_id("abcdefgh"));
+        assert!(valid_conversation_id(&"a".repeat(128)));
+        assert!(valid_conversation_id("ABC_123-xyz"));
+    }
+
+    #[test]
+    fn conversation_id_rejects_invalid_lengths_and_characters() {
+        assert!(!valid_conversation_id(""));
+        assert!(!valid_conversation_id("abcdefg"));
+        assert!(!valid_conversation_id(&"a".repeat(129)));
+        assert!(!valid_conversation_id("abc/defghi"));
+        assert!(!valid_conversation_id("abc.defghi"));
+        assert!(!valid_conversation_id("abc defghi"));
+        assert!(!valid_conversation_id("abc\\ndefghi"));
+        assert!(!valid_conversation_id("abcédefghi"));
+    }
+}
