@@ -1,8 +1,16 @@
 //! Fail-closed HTTP request validation shared by streaming and JSON chat.
 //! Authentication owner identity and conversation IDs are resolved before
 //! memory reads, routing, or backend dispatch.
-use axum::{extract::Extension, http::{HeaderMap, StatusCode}, response::Response};
-use crate::{api::{api_error, ChatReq}, app_state::AuthKeyContext, oversized_chat_body_error, parse_and_validate_chat_req, valid_conversation_id};
+use crate::{
+    api::{api_error, ChatReq},
+    app_state::AuthKeyContext,
+    oversized_chat_body_error, parse_and_validate_chat_req, valid_conversation_id,
+};
+use axum::{
+    extract::Extension,
+    http::{HeaderMap, StatusCode},
+    response::Response,
+};
 
 /// Only syntactically and semantically valid requests proceed to memory or
 /// provider access. This same boundary applies to JSON and SSE requests.
