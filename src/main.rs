@@ -47,9 +47,9 @@ use app::shutdown_signal;
 use app_state::{AppState, AuthKeyContext};
 use browser::pool::ObscuraPool;
 use chat_backend::{BackendRequest, ProviderId};
-use chat_service::{first_event, record_attempt_error, ChatService};
 #[cfg(test)]
 use chat_service::FirstEvent;
+use chat_service::{first_event, record_attempt_error, ChatService};
 use cli::Cli;
 use config::AppConfig;
 use context::{ContextBuilder, ContextPlan, ThreadSyncState};
