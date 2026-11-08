@@ -625,6 +625,7 @@ mod tests {
     };
     use anyhow::Result;
     use std::sync::Arc;
+    use std::time::Instant;
     use tokio::sync::mpsc;
 
     #[test]
