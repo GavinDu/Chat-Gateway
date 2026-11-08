@@ -298,10 +298,10 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/health", get(api::health::health))
         .route("/ready", get(api::health::readiness))
-        .route("/metrics", get(metrics_endpoint))
+        .route("/metrics", get(api::ops::metrics_endpoint))
         .route(
             "/v1/admin/memory-egress-policy",
-            get(memory_egress_policy_status),
+            get(api::ops::memory_egress_policy_status),
         )
         .route(
             "/v1/admin/providers/:provider/reset",
@@ -1012,55 +1012,6 @@ async fn reset_provider_for_retry(
         "challenge_disabled": false,
     }))
     .into_response()
-}
-
-async fn memory_egress_policy_status() -> Response {
-    match memory_egress::MemoryEgressPolicy::from_env() {
-        Ok(policy) => Json(serde_json::json!({
-            "personal_long_term_memory": {
-                "default": "deny",
-                "allowed_providers": policy.allowed_personal_memory_providers(),
-            },
-            "current_turn": "allowed",
-            "conversation_context": "allowed",
-            "personal_memory_retrieval_wired": true,
-        }))
-        .into_response(),
-        Err(_) => api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "server_error",
-            "memory_egress_policy_invalid",
-            "provider memory egress policy is invalid",
-        ),
-    }
-}
-
-async fn metrics_endpoint(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let provider_states = state
-        .cfg
-        .providers
-        .iter()
-        .map(|provider| {
-            (
-                provider.name.clone(),
-                state
-                    .provider_sessions
-                    .status(&provider.name)
-                    .state
-                    .as_str()
-                    .to_owned(),
-            )
-        })
-        .collect::<Vec<_>>();
-    let mut headers = axum::http::HeaderMap::new();
-    headers.insert(
-        axum::http::header::CONTENT_TYPE,
-        axum::http::HeaderValue::from_static("text/plain; version=0.0.4; charset=utf-8"),
-    );
-    (
-        headers,
-        state.metrics.render_with_provider_states(&provider_states),
-    )
 }
 
 /// Add a gateway-generated request ID to every response, including security
