@@ -44,6 +44,80 @@ async fn session_refresh_permit<'a>(
     }
 }
 
+/// Adapter diagnostics must use the same actionable input as the send path:
+/// hidden autosizers and disabled composers cannot receive a real prompt.
+fn diagnostic_input_selector<'a>(
+    page: &obscura_core::Page,
+    selectors: &[&'a str],
+) -> Option<&'a str> {
+    selectors
+        .iter()
+        .copied()
+        .find(|selector| providers::common::visible_composer_exists(page, &[*selector]))
+}
+
+/// Probe the visible editor, never the first hidden duplicate DOM match.
+/// The test string stays inside the page and is not included in diagnostics.
+fn diagnostic_prompt_retained(page: &obscura_core::Page, selector: &str, prompt: &str) -> bool {
+    let (Ok(selector), Ok(prompt)) = (
+        serde_json::to_string(selector),
+        serde_json::to_string(prompt),
+    ) else {
+        return false;
+    };
+    let script = format!(
+        r#"(() => {{
+            const el = Array.from(document.querySelectorAll({selector})).find(el =>
+                el.getClientRects().length > 0 &&
+                window.getComputedStyle(el).visibility !== 'hidden' &&
+                !el.closest('[hidden], [inert], [aria-hidden="true"]') &&
+                !el.disabled && !el.readOnly &&
+                el.getAttribute('aria-disabled') !== 'true'
+            );
+            if (!el) return false;
+            const value = 'value' in el ? el.value : (el.innerText || el.textContent || '');
+            return typeof value === 'string' && value.trim() === {prompt}.trim();
+        }})()"#
+    );
+    page.evaluate(&script).as_bool() == Some(true)
+}
+
+#[cfg(test)]
+mod adapter_diagnostic_composer_tests {
+    #[tokio::test]
+    async fn hidden_and_disabled_diagnostic_inputs_cannot_override_visible_editor() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <textarea id="hidden" class="composer" style="display:none">stale</textarea>
+            <textarea id="disabled" class="composer" disabled>stale</textarea>
+            <textarea id="ready" class="composer">diagnostic draft</textarea>
+            </body></html>"#;
+        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        assert_eq!(
+            super::diagnostic_input_selector(&page, &["#hidden", "#disabled", "#ready"]),
+            Some("#ready")
+        );
+        assert!(super::diagnostic_prompt_retained(
+            &page,
+            ".composer",
+            "diagnostic draft"
+        ));
+        page.evaluate("document.querySelector('#ready').value = ''");
+        assert!(!super::diagnostic_prompt_retained(
+            &page,
+            ".composer",
+            "diagnostic draft"
+        ));
+    }
+}
+
 /// Fixed selector names only: never log arbitrary field attributes or values.
 fn diagnostic_input_controls(page: &obscura_core::Page) -> Vec<String> {
     [
@@ -634,7 +708,7 @@ pub(super) fn browser_thread(
                                 report.input_controls = diagnostic_input_controls(&page);
                                 // Phase 1 — input (20s, Go's budget).
                                 let input_sel = match providers::common::wait_for_selector(&mut page, sets[0].1, 20000).await {
-                                    Ok(()) => sets[0].1.iter().copied().find(|s| page.query_selector(s).is_some()).unwrap_or(sets[0].1[0]),
+                                    Ok(()) => diagnostic_input_selector(&page, sets[0].1).unwrap_or(sets[0].1[0]),
                                     Err(e) => {
                                         report.input_controls = diagnostic_input_controls(&page);
                                         report.errors.push(format!("input: {e}"));
@@ -651,12 +725,14 @@ pub(super) fn browser_thread(
                                     return;
                                 }
                                 providers::common::drive_page(&mut page, Duration::from_millis(400)).await;
-                                let input_json = serde_json::to_string(input_sel).unwrap_or_default();
-                                let dummy_json = serde_json::to_string(DUMMY).unwrap_or_default();
                                 report.input_controls = diagnostic_input_controls(&page);
-                                report.typed_prompt_retained = page.evaluate(&format!(
-                                    "(()=>{{const el=document.querySelector({input_json});return !!el && String('value' in el?el.value:el.textContent).trim()==={dummy_json}.trim();}})()"
-                                )).as_bool();
+                                report.typed_prompt_retained =
+                                    Some(diagnostic_prompt_retained(&page, input_sel, DUMMY));
+                                if report.typed_prompt_retained != Some(true) {
+                                    report.errors.push("input: diagnostic prompt changed before send".to_string());
+                                    finish(report);
+                                    return;
+                                }
                                 // Only fixed, known control names enter diagnostics. Do not
                                 // forward arbitrary upstream labels or input values.
                                 for (label, selector) in [
