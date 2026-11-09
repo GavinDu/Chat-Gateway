@@ -325,12 +325,12 @@ mod tests {
         let registry = MetricsRegistry::default();
         registry.record_provider_page_lock_wait("grok", 42);
         let metrics = registry.render_with_provider_states(&[]);
-        assert!(metrics.contains(
-            "gateway_provider_page_lock_duration_ms_count{provider=\"grok\"} 1"
-        ));
-        assert!(metrics.contains(
-            "gateway_provider_page_lock_duration_ms_sum{provider=\"grok\"} 42"
-        ));
+        assert!(
+            metrics.contains("gateway_provider_page_lock_duration_ms_count{provider=\"grok\"} 1")
+        );
+        assert!(
+            metrics.contains("gateway_provider_page_lock_duration_ms_sum{provider=\"grok\"} 42")
+        );
     }
 
     #[test]
