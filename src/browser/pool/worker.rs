@@ -19,6 +19,18 @@ async fn send_unless_disconnected<T>(
     }
 }
 
+/// A page lock may also be held by a status probe or login operation that
+/// does not use the global operation gate. Bound this second queue separately:
+/// one stuck provider must not leave an admitted send waiting forever.
+async fn acquire_page_lock<'a>(
+    lock: &'a tokio::sync::Mutex<()>,
+    queue_timeout: Duration,
+) -> Result<tokio::sync::MutexGuard<'a, ()>> {
+    tokio::time::timeout(queue_timeout, lock.lock())
+        .await
+        .map_err(|_| anyhow::Error::new(ProviderBusyError))
+}
+
 /// Abandoned refreshes must not wait behind a send and mutate its session later.
 /// Once activation starts, finish it atomically with respect to this lock.
 async fn session_refresh_permit<'a>(
@@ -326,8 +338,18 @@ pub(super) fn browser_thread(
                                     Ok(guard) => guard,
                                     Err(_) => { let _ = chunks.send(Err(anyhow::Error::new(ProviderBusyError))).await; return; }
                                 };
-                                let Some(_guard) = send_unless_disconnected(&chunks, lock.lock()).await else {
+                                let Some(page_lock) = send_unless_disconnected(
+                                    &chunks,
+                                    acquire_page_lock(&lock, operation_queue_timeout),
+                                ).await else {
                                     return;
+                                };
+                                let _guard = match page_lock {
+                                    Ok(guard) => guard,
+                                    Err(error) => {
+                                        let _ = chunks.send(Err(error)).await;
+                                        return;
+                                    }
                                 };
                                 // A queued request may have been cancelled
                                 // while another send owned the page lock.
@@ -982,6 +1004,20 @@ mod queued_send_cancellation_tests {
             .expect("disconnection must cancel a blocked provider operation")
             .unwrap();
         assert_eq!(output, None);
+    }
+
+    #[tokio::test]
+    async fn busy_provider_page_lock_has_bounded_wait_and_recovers() {
+        let lock = tokio::sync::Mutex::new(());
+        let held = lock.lock().await;
+        let error = acquire_page_lock(&lock, Duration::from_millis(10))
+            .await
+            .unwrap_err();
+        assert!(error.downcast_ref::<ProviderBusyError>().is_some());
+        drop(held);
+        assert!(acquire_page_lock(&lock, Duration::from_millis(50))
+            .await
+            .is_ok());
     }
 
     #[tokio::test]
