@@ -99,11 +99,11 @@ impl SiteAdapter for MistralAdapter {
 /// through Resource Timing only when the browser and origin permit it; a missing
 /// status is *not* evidence that asset fetching succeeded.
 fn mistral_readiness_diagnostics(page: &Page) -> String {
-    let evidence = page.evaluate(
+    let mut evidence = page.evaluate(
         r#"(() => {
             // JS bundles loaded by link rel=modulepreload (or preload as=script)
-            // may report initiatorType=link rather than script. Only include
-            // links explicitly declared as script assets, not stylesheet
+            // may report initiatorType=link, fetch, or other rather than script.
+            // Include only explicit script-asset preloads, not stylesheet
             // failures that could otherwise be misclassified as JS blockers.
             const scriptPreloads = new Set(
                 Array.from(document.querySelectorAll(
@@ -112,7 +112,7 @@ fn mistral_readiness_diagnostics(page: &Page) -> String {
             );
             const entries = performance.getEntriesByType('resource')
                 .filter(entry => entry.initiatorType === 'script' ||
-                    (entry.initiatorType === 'link' && scriptPreloads.has(entry.name)));
+                    scriptPreloads.has(entry.name));
             const assetStatuses = [];
             for (const entry of entries) {
                 if (assetStatuses.length >= 8) break;
@@ -131,11 +131,19 @@ fn mistral_readiness_diagnostics(page: &Page) -> String {
                 readyState: document.readyState,
                 scriptCount: document.scripts.length,
                 loadedResources: entries.length,
-                assetStatuses,
-                challenge: !!document.querySelector('[id*="challenge"], [class*="challenge"], iframe[src*="challenge"]')
+                assetStatuses
             };
         })()"#,
     );
+    // A CSS class containing "challenge" may be part of ordinary UI state.
+    // Use the same host/path and challenge-body proof as the provider guard,
+    // without forwarding body text or URL query values into diagnostics.
+    if let Some(object) = evidence.as_object_mut() {
+        object.insert(
+            "challenge".to_owned(),
+            crate::provider_guard::is_challenge_page(page).into(),
+        );
+    }
     mistral_readiness_summary(&evidence)
 }
 
@@ -244,7 +252,7 @@ mod readiness_tests {
                 Object.defineProperty(performance, 'getEntriesByType', {
                     configurable: true,
                     value: () => [
-                        ...links.map(name => ({initiatorType: 'link', name, responseStatus: 403})),
+                        ...links.map((name, index) => ({initiatorType: index === 0 ? 'other' : 'fetch', name, responseStatus: 403})),
                         {initiatorType: 'link', name: 'https://style.example.invalid/style.css', responseStatus: 403}
                     ]
                 });
@@ -255,6 +263,36 @@ mod readiness_tests {
         let result = super::mistral_readiness_diagnostics(&page);
         assert!(result.contains("script_resource_entries=2"), "{result}");
         assert!(!result.contains("style.example.invalid"));
+        assert!(!result.contains("blocker=script_http_403"));
+        assert!(result.contains("script_asset_http_errors=not_observable"));
+    }
+
+    #[tokio::test]
+    async fn generic_challenge_class_is_not_a_manual_verification_blocker() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body><div class="challenge-history">Recent work</div><script>window.ready=true</script></body></html>"#;
+        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        let ordinary = super::mistral_readiness_diagnostics(&page);
+        assert!(
+            !ordinary.contains("blocker=challenge_visible"),
+            "{ordinary}"
+        );
+
+        page.evaluate(
+            "document.body.insertAdjacentHTML('beforeend', '<p>Verify you are human</p>')",
+        );
+        let challenged = super::mistral_readiness_diagnostics(&page);
+        assert!(
+            challenged.contains("blocker=challenge_visible"),
+            "{challenged}"
+        );
     }
 
     #[test]
