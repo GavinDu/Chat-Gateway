@@ -115,9 +115,12 @@ async function providerCookieSnapshot(provider) {
   if (!hasAllPermissions) {
     throw new Error("Missing provider host permissions. Refusing to send a partial cookie snapshot; re-link the provider and grant all requested domains.");
   }
+  // Independent domain reads run concurrently instead of serializing each
+  // browser API round-trip. Promise.all preserves configured domain order for
+  // deterministic deduplication; any failed read rejects the whole snapshot.
+  const domainCookies = await Promise.all(domains.map(domain => chrome.cookies.getAll({domain})));
   const all = [];
-  for (const domain of domains) {
-    const cookies = await chrome.cookies.getAll({domain});
+  for (const cookies of domainCookies) {
     for (const cookie of cookies) {
       const normalized = cookie.domain.replace(/^\./, "").toLowerCase();
       if (domains.some(root => normalized === root || normalized.endsWith("." + root))) {
