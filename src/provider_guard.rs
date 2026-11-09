@@ -119,7 +119,7 @@ fn current_utc_day() -> u64 {
 /// Only a challenge host or URL path is evidence of a challenge route.
 /// Query parameters (including user prompts, redirect targets or conversation
 /// IDs) must never trip the sticky provider-wide challenge circuit breaker.
-fn is_challenge_url(url: &str) -> bool {
+pub(crate) fn is_challenge_url(url: &str) -> bool {
     let Ok(uri) = url.parse::<axum::http::Uri>() else {
         return false;
     };
