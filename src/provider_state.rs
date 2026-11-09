@@ -141,9 +141,8 @@ impl ProviderSessionRegistry {
     /// force re-login; other provider failures enter a bounded cooldown.
     pub fn record_gateway_error(&self, provider: &str, error: &GatewayError) {
         match error.kind {
-            GatewayErrorKind::SessionExpired | GatewayErrorKind::Challenge => {
-                self.record_needs_login(provider);
-            }
+            GatewayErrorKind::SessionExpired => self.record_needs_login(provider),
+            GatewayErrorKind::Challenge => self.record_manual_challenge(provider),
             GatewayErrorKind::InvalidRequest
             | GatewayErrorKind::ModelNotFound
             | GatewayErrorKind::ProviderBusy
@@ -160,6 +159,25 @@ impl ProviderSessionRegistry {
     /// assert that authentication expired or a challenge was detected.
     pub fn record_error(&self, provider: &str, _error: &str) {
         self.record_probe_failure(provider);
+    }
+
+    /// A challenge requires owner action, but does not prove the session
+    /// credentials expired. Fail closed without a scheduled half-open retry.
+    /// New relay cookie imports cannot silently clear this manual blocker.
+    fn record_manual_challenge(&self, provider: &str) {
+        if let Ok(mut map) = self.states.lock() {
+            map.insert(
+                provider.to_owned(),
+                ProviderSessionStatus {
+                    state: ProviderSessionState::Degraded,
+                    last_error: Some(
+                        "provider manual verification required; resolve challenge and reset before retrying"
+                            .to_owned(),
+                    ),
+                    retry_after: None,
+                },
+            );
+        }
     }
 
     fn record_asset_blocked(&self, provider: &str) {
@@ -331,9 +349,38 @@ mod tests {
             "challenge",
             &GatewayError::challenge("challenge from provider"),
         );
+        let challenged = registry.status("challenge");
+        assert_eq!(challenged.state, ProviderSessionState::Degraded);
+        assert_eq!(challenged.retry_after, None);
+        assert!(!registry.is_available("challenge"));
+    }
+
+    #[test]
+    fn manual_challenge_is_not_false_session_expiry_or_automatic_retry() {
+        let registry = ProviderSessionRegistry::default();
+        registry.record_success("gemini");
+        registry.record_gateway_error(
+            "gemini",
+            &GatewayError::challenge("cookie=private; bearer=secret"),
+        );
+        let challenged = registry.status("gemini");
+        assert_eq!(challenged.state, ProviderSessionState::Degraded);
+        assert_eq!(challenged.retry_after, None);
+        let message = challenged.last_error.as_deref().unwrap();
+        assert!(message.contains("manual verification"));
+        assert!(!message.contains("private"));
+        assert!(!message.contains("secret"));
+        assert!(!message.contains("expired"));
+        assert!(!registry.is_routable("gemini"));
+        assert!(!registry.is_available("gemini"));
+
+        registry.record_probe_success("gemini");
+        registry.record_session_import("gemini");
+        assert_eq!(registry.status("gemini"), challenged);
+        registry.reset_for_retry("gemini").unwrap();
         assert_eq!(
-            registry.status("challenge").state,
-            ProviderSessionState::NeedsLogin
+            registry.status("gemini").state,
+            ProviderSessionState::Unknown
         );
     }
 
