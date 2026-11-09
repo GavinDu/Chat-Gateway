@@ -711,6 +711,19 @@ mod text_selector_tests {
     use super::text_selector_parts;
 
     #[test]
+    fn selector_override_is_role_specific_and_preserves_defaults() {
+        let base = &crate::providers::chatgpt::SELECTORS;
+        let override_cfg = crate::config::ProviderSelectorOverrides {
+            input: Some(vec!["textarea[data-test='new-composer']".into()]),
+            ..Default::default()
+        };
+        let effective = base.effective(&override_cfg);
+        assert_eq!(effective.input_refs(), vec!["textarea[data-test='new-composer']"]);
+        assert_eq!(effective.send_refs(), base.send);
+        assert_eq!(effective.response_refs(), base.response);
+    }
+
+    #[test]
     fn parses_internal_text_selector() {
         assert_eq!(
             text_selector_parts("text:button=Stop"),
