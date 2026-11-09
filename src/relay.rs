@@ -804,7 +804,8 @@ pub async fn status(State(app): State<Arc<crate::AppState>>, headers: HeaderMap)
             .find(|item| item.provider == provider)
             .and_then(|item| item.logged_in);
         let lifecycle = app.provider_sessions.status(provider).state;
-        let manual_verification_required = app.provider_sessions.manual_challenge_required(provider);
+        let manual_verification_required =
+            app.provider_sessions.manual_challenge_required(provider);
         let authentication = provider_authentication_status(observed, lifecycle);
         providers.push(serde_json::json!({
             "provider": provider,
