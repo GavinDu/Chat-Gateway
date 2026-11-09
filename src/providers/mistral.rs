@@ -199,5 +199,4 @@ mod readiness_tests {
         assert!(!result.contains("https://"));
         assert!(!result.contains("static.mistral.ai:200"));
     }
-
 }
