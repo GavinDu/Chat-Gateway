@@ -526,7 +526,6 @@ mod visible_composer_tests {
             .unwrap());
         assert_eq!(page.evaluate("window.sent || 0").as_f64(), Some(1.0));
     }
-
 }
 
 #[cfg(test)]
