@@ -23,9 +23,9 @@ function loadShared(cookieFixtures = [], hasAllPermissions = true, storageValues
       cookies: {
         // Return the full fixture set to simulate a permissive/misbehaving
         // browser API; providerCookieSnapshot must still enforce its own scope.
-        getAll: async () => {
+        getAll: async ({domain}) => {
           cookieReads += 1;
-          if (hooks.onCookieRead) await hooks.onCookieRead(storageValues);
+          if (hooks.onCookieRead) await hooks.onCookieRead(storageValues, domain);
           return cookieFixtures;
         }
       },
@@ -147,6 +147,50 @@ test("relay fetch aborts a stalled credential import without replaying it", asyn
   assert.equal(api.fetchCalls.length, 1, "ambiguous writes must not be replayed");
   assert.equal(api.fetchCalls[0].options.signal.aborted, true);
   assert.equal(cleared, true, "the timeout must be cleared after abort");
+});
+
+test("provider cookie reads for separate domains run concurrently after permission consent", async () => {
+  const pendingDomains = [];
+  let releaseRead;
+  const readGate = new Promise(resolve => { releaseRead = resolve; });
+  const api = loadShared([
+    {name:"one",value:"safe",domain:".chatgpt.com",path:"/",secure:true,httpOnly:true},
+    {name:"two",value:"safe",domain:".openai.com",path:"/",secure:true,httpOnly:true}
+  ], true, {}, {
+    onCookieRead: async (_storage, domain) => {
+      pendingDomains.push(domain);
+      await readGate;
+    }
+  });
+  const snapshot = api.providerCookieSnapshot("chatgpt");
+  try {
+    for (let i = 0; i < 8 && pendingDomains.length < 2; i++) {
+      await new Promise(resolve => setImmediate(resolve));
+    }
+    assert.deepEqual(pendingDomains, ["chatgpt.com", "openai.com"],
+      "both consented domain reads should start without waiting for the other");
+  } finally {
+    releaseRead();
+  }
+  const result = await snapshot;
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(result.cookies.map(cookie => cookie.name).sort())),
+    ["one", "two"]
+  );
+});
+
+test("failed parallel cookie read never produces a partial snapshot", async () => {
+  const api = loadShared([
+    {name:"one",value:"safe",domain:".chatgpt.com",path:"/",secure:true,httpOnly:true}
+  ], true, {
+    gateway:"http://127.0.0.1:8080",token:"relay-secret",linkedProviders:["chatgpt"]
+  }, {
+    onCookieRead: async (_storage, domain) => {
+      if (domain === "openai.com") throw new Error("synthetic cookie store unavailable");
+    }
+  });
+  await assert.rejects(() => api.syncProvider("chatgpt"), /synthetic cookie store unavailable/);
+  assert.equal(api.fetchCalls.length, 0, "a partial snapshot must not reach the gateway");
 });
 
 test("provider cookie snapshot excludes cookies outside that provider's domain roots", async () => {
