@@ -380,6 +380,20 @@ fn visible_input_query(selector_js: &str) -> String {
     )
 }
 
+/// Re-read the actionable composer after framework renders, not just after
+/// the initial typing event. Never log the prompt when the value changes.
+fn composer_retains_prompt(page: &Page, selector: &str, prompt: &str) -> anyhow::Result<bool> {
+    let selector_js = serde_json::to_string(selector)?;
+    let el_js = visible_input_query(&selector_js);
+    let prompt_js = serde_json::to_string(prompt)?;
+    Ok(page
+        .evaluate(&format!(
+            "(() => {{ const el = {el_js}; if (!el) return false; const value = ('value' in el ? el.value : (el.innerText || el.textContent || '')); return value === {prompt_js}; }})()"
+        ))
+        .as_bool()
+        == Some(true))
+}
+
 #[cfg(test)]
 mod visible_composer_tests {
     use super::visible_composer_exists;
@@ -552,10 +566,7 @@ pub async fn human_type(page: &Page, selectors: &[&str], text: &str) -> anyhow::
     // Controlled editors may discard synthetic input on their next render.
     // A successful event dispatch alone is not evidence that the prompt stuck.
     tokio::time::sleep(Duration::from_millis(120)).await;
-    let retained = page.evaluate(&format!(
-        "(() => {{ const el = {el_js}; if (!el) return false; const value = ('value' in el ? el.value : (el.innerText || el.textContent || '')); return value === {text_js}; }})()"
-    ));
-    if retained.as_bool() != Some(true) {
+    if !composer_retains_prompt(page, selector, text)? {
         anyhow::bail!("provider input did not retain the prompt after framework render");
     }
     Ok(())
@@ -992,6 +1003,11 @@ pub async fn send_prompt(
         .copied()
         .find(|s| visible_composer_exists(page, &[*s]))
         .unwrap_or(inputs[0]);
+    // The provider may re-render or clear the composer while the browser is
+    // settling after typing. Never click Send with a missing or changed draft.
+    if !composer_retains_prompt(page, input_sel, prompt)? {
+        anyhow::bail!("provider input changed before send after framework render");
+    }
     let sends = set.send_refs();
     // The click/Enter dispatch is not proof that a controlled SPA accepted
     // the prompt. ChatGPT and Grok require a visible submission transition.
@@ -1100,6 +1116,39 @@ fn submission_accepted(before: &SubmissionSnapshot, after: &SubmissionSnapshot) 
     (after.input_present && after.input_empty && !before.input_empty)
         || after.response_count > before.response_count
         || (after.streaming && !before.streaming)
+}
+
+#[cfg(test)]
+mod pre_send_retention_tests {
+    #[tokio::test]
+    async fn late_framework_clear_after_typing_does_not_click_send() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body><form>
+            <textarea id="prompt"></textarea>
+            <button id="send" type="button" onclick="window.sent=(window.sent||0)+1">Send</button>
+            </form><script>
+            document.querySelector('#prompt').addEventListener('input', () => {
+                setTimeout(() => { document.querySelector('#prompt').value = ''; }, 220);
+            });
+            </script></body></html>"#;
+        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        let overrides = crate::config::ProviderSelectorOverrides {
+            input: Some(vec!["#prompt".to_owned()]),
+            send: Some(vec!["#send".to_owned()]),
+            ..Default::default()
+        };
+        let selectors = crate::providers::chatgpt::SELECTORS.effective(&overrides);
+        let result = super::send_prompt(&mut page, &selectors, "user draft").await;
+        assert!(result.is_err(), "a cleared draft must not be submitted");
+        assert_eq!(page.evaluate("window.sent || 0").as_f64(), Some(0.0));
+    }
 }
 
 #[cfg(test)]
