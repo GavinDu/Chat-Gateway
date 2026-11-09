@@ -11,7 +11,7 @@ use std::{
     io::Write,
     path::Path,
     sync::{Arc, Mutex},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use zeroize::{Zeroize, Zeroizing};
 
