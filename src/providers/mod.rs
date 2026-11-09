@@ -195,8 +195,10 @@ pub trait SiteAdapter: Send + Sync {
 
     fn selectors(&self) -> AdapterSelectors;
 
-    /// Full selector data (for --test-adapter probing over the whole
-    /// fallback arrays, not just the primaries).
+    /// Retained compatibility hook for adapter-specific built-in selector
+    /// metadata. Runtime readiness and --test-adapter use effective_selectors
+    /// so configuration overrides are never bypassed.
+    #[allow(dead_code)]
     fn selector_set(&self) -> &common::SelectorSet;
     fn effective_selectors(&self) -> common::EffectiveSelectorSet;
 }
