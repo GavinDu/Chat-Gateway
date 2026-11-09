@@ -1470,18 +1470,106 @@ mod cookie_restore_result_tests {
 }
 
 /// Check all eligible snapshot cookies before touching the shared browser
-/// cookie jar. A malformed later cookie must not leave a partially restored
-/// session, and refresh callers must preflight before clearing old credentials.
+/// cookie jar. A malformed or expired later cookie must not leave a partially
+/// restored session, and refresh callers preflight before clearing credentials.
 pub(crate) fn preflight_cookie_restore(file: &SessionFile, provider: &str) -> Result<()> {
     validate_cookie_scopes(file)?;
+    let now_epoch = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64();
     let invalid = file
         .cookies
         .iter()
         .filter(|cookie| {
-            cookie_domain_allowed(provider, &cookie.domain) && !restored_cookie_fields_safe(cookie)
+            cookie_domain_allowed(provider, &cookie.domain)
+                && (!restored_cookie_fields_safe(cookie)
+                    || cookie.validate_browser_metadata().is_err()
+                    || cookie
+                        .expires
+                        .is_some_and(|expiry| expiry >= 0.0 && expiry <= now_epoch))
         })
         .count();
     ensure_cookie_restore_complete(invalid)
+}
+
+/// Build one Set-Cookie restore header without exposing its credential value in
+/// logs. Chrome reports expirationDate as Unix seconds; Max-Age preserves the
+/// remaining lifetime, while absence of expiry keeps session cookies ephemeral.
+fn cookie_restore_header(cookie: &Cookie, now_epoch: f64) -> Result<Zeroizing<String>> {
+    cookie.validate_browser_metadata()?;
+    if !restored_cookie_fields_safe(cookie) {
+        anyhow::bail!("provider cookie has invalid persisted fields");
+    }
+    let mut header = Zeroizing::new(format!("{}={}", cookie.name, cookie.value));
+    if cookie.domain.starts_with('.') && !cookie_has_prefix(&cookie.name, "__Host-") {
+        header.push_str(&format!("; Domain={}", cookie.domain));
+    }
+    header.push_str(&format!("; Path={}", cookie.path));
+    if cookie.secure {
+        header.push_str("; Secure");
+    }
+    if cookie.http_only {
+        header.push_str("; HttpOnly");
+    }
+    if let Some(same_site) = cookie.same_site.as_deref() {
+        header.push_str("; SameSite=");
+        header.push_str(same_site);
+    }
+    if let Some(expiry) = cookie.expires.filter(|expiry| *expiry >= 0.0) {
+        if expiry <= now_epoch {
+            anyhow::bail!("provider session cookie expired before restoration");
+        }
+        let remaining = ((expiry - now_epoch).ceil().min(i64::MAX as f64) as i64).max(1);
+        header.push_str(&format!("; Max-Age={remaining}"));
+    }
+    Ok(header)
+}
+
+
+#[cfg(test)]
+mod restored_cookie_attribute_tests {
+    use super::*;
+
+    fn sample() -> Cookie {
+        Cookie {
+            name: "synthetic".into(),
+            value: "not-a-real-session".into(),
+            domain: ".google.com".into(),
+            path: "/".into(),
+            secure: true,
+            http_only: true,
+            expires: Some(1_700_000_120.0),
+            same_site: Some("None".into()),
+        }
+    }
+
+    #[test]
+    fn same_site_and_remaining_expiry_survive_restore_header_construction() {
+        let header = cookie_restore_header(&sample(), 1_700_000_000.0).unwrap();
+        assert!(header.contains("; Domain=.google.com"));
+        assert!(header.contains("; SameSite=None"));
+        assert!(header.contains("; Max-Age=120"));
+        let mut session_cookie = sample();
+        session_cookie.expires = None;
+        session_cookie.same_site = Some("Strict".into());
+        let header = cookie_restore_header(&session_cookie, 1_700_000_000.0).unwrap();
+        assert!(header.contains("; SameSite=Strict"));
+        assert!(!header.contains("Max-Age="));
+    }
+
+    #[test]
+    fn invalid_and_expired_metadata_cannot_construct_restored_credentials() {
+        let mut expired = sample();
+        expired.expires = Some(1_699_999_999.0);
+        assert!(cookie_restore_header(&expired, 1_700_000_000.0).is_err());
+        let mut insecure = sample();
+        insecure.secure = false;
+        assert!(cookie_restore_header(&insecure, 1_700_000_000.0).is_err());
+        let mut unknown = sample();
+        unknown.same_site = Some("NotValid".into());
+        assert!(cookie_restore_header(&unknown, 1_700_000_000.0).is_err());
+    }
 }
 
 /// Restore step 1 (BEFORE goto): put the saved cookies into the browser's
@@ -1489,6 +1577,10 @@ pub(crate) fn preflight_cookie_restore(file: &SessionFile, provider: &str) -> Re
 pub fn restore_cookies(browser: &Browser, file: &SessionFile, provider: &str) -> Result<()> {
     preflight_cookie_restore(file, provider)?;
     let store = browser.cookies();
+    let now_epoch = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64();
     let mut failed_writes = 0usize;
     let mut expected_restores = Vec::new();
     for c in &file.cookies {
@@ -1507,29 +1599,16 @@ pub fn restore_cookies(browser: &Browser, file: &SessionFile, provider: &str) ->
             );
             continue;
         }
-        // Cookie headers contain reusable bearer credentials. Keep the
-        // temporary header in zeroizing memory rather than an ordinary String.
-        let mut s = Zeroizing::new(format!("{}={}", c.name, c.value));
-        // Preserve host-only scope on all cookies, not just __Host- cookies.
-        // Chrome's exported domain cookies carry a leading dot; adding Domain
-        // for an ordinary host-only cookie would leak it to subdomains.
-        if c.domain.starts_with('.') && !cookie_has_prefix(&c.name, "__Host-") {
-            s.push_str(&format!("; Domain={}", c.domain));
-        }
-        s.push_str(&format!(
-            "; Path={}",
-            if c.path.is_empty() {
-                "/".to_string()
-            } else {
-                c.path.clone()
+        // Keep the temporary credential header in zeroizing memory. Metadata
+        // was preflighted before any writes; still fail closed if it expires
+        // between preflight and restoration.
+        let s = match cookie_restore_header(c, now_epoch) {
+            Ok(header) => header,
+            Err(_) => {
+                failed_writes += 1;
+                continue;
             }
-        ));
-        if c.secure {
-            s.push_str("; Secure");
-        }
-        if c.http_only {
-            s.push_str("; HttpOnly");
-        }
+        };
         let url = if c.domain.is_empty() {
             "https://localhost/".to_string()
         } else {
