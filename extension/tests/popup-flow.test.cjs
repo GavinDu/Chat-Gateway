@@ -111,11 +111,13 @@ test("connected dashboard exposes login and small logout, then allows reconnecti
 
 test("provider challenge is shown as manual verification, not an expired session or automatic retry",async()=>{
   const popup=loadPopup({manualVerification:true});
+  popup.server.linked=true;
   await popup.controls.refreshStatus();
   const row=popup.elements.get("status").children[0];
   const status=row.children.find(child=>child.className==="provider-detail").textContent;
   assert.match(status,/Manual provider verification required; open website/);
   assert.doesNotMatch(status,/Gateway check unavailable; retry/);
+  assert.doesNotMatch(status,/Login needed/);
   const actions=row.children.find(child=>child.className==="provider-actions").children;
   assert.ok(actions.some(button=>button.textContent==="Open website"));
 });
