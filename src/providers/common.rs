@@ -780,7 +780,17 @@ fn submission_snapshot(
             .get("inputEmpty")
             .and_then(|x| x.as_bool())
             .unwrap_or(false),
-        response_count: v.get("responseCount").and_then(|x| x.as_u64()).unwrap_or(0),
+        // Obscura's JS bridge may represent integer DOM counts as JSON floats.
+        // Failing to decode 1.0 hid a new assistant node and caused false
+        // submission timeouts for controlled composers that retain their text.
+        response_count: v
+            .get("responseCount")
+            .and_then(|value| value.as_u64().or_else(|| {
+                value.as_f64().filter(|number| {
+                    number.is_finite() && *number >= 0.0 && number.fract() == 0.0
+                }).map(|number| number as u64)
+            }))
+            .unwrap_or(0),
         streaming: v
             .get("streaming")
             .and_then(|x| x.as_bool())
@@ -843,6 +853,37 @@ mod submission_transition_tests {
                 ..before
             }
         ));
+    }
+
+    #[tokio::test]
+    async fn mobile_form_submission_is_acknowledged_by_new_response_node() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        page.goto("data:text/html,<html><body><form id='chat'><textarea id='mobile'>draft</textarea><button type='submit'>Send</button></form><script>document.querySelector('#chat').addEventListener('submit',function(e){e.preventDefault();const response=document.createElement('div');response.className='answer';response.textContent='OK';document.body.appendChild(response);});</script></body></html>")
+            .await
+            .unwrap();
+        let before = super::submission_snapshot(&page, "#mobile", &[".answer"]).unwrap();
+        assert_eq!(before.response_count, 0);
+        assert!(!before.input_empty);
+        assert!(super::click_send_or_enter(&mut page, &["button[type='submit']"], "#mobile", 400)
+            .await
+            .unwrap());
+        let after = super::submission_snapshot(&page, "#mobile", &[".answer"]).unwrap();
+        assert_eq!(after.response_count, 1, "Obscura may decode DOM counts as 1.0");
+        assert!(!after.input_empty, "the fixture intentionally retains text");
+        assert!(super::submission_accepted(&before, &after));
+    }
+
+    #[test]
+    fn numeric_dom_counts_reject_nan_and_fractional_values() {
+        // The browser bridge may return floating-point numbers, but the
+        // transition must still require a genuinely larger whole node count.
+        let before = SubmissionSnapshot { input_present: true, input_empty: false, response_count: 2, streaming: false };
+        let after = SubmissionSnapshot { response_count: 3, ..before };
+        assert!(submission_accepted(&before, &after));
     }
 
     #[test]
