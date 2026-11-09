@@ -411,16 +411,14 @@ impl VaultSessionStore {
     }
 }
 
-
 #[cfg(test)]
 mod relay_import_noop_tests {
     use super::*;
 
     #[test]
     fn unchanged_refresh_skips_reencryption_but_new_or_changed_snapshots_do_not() {
-        let dir = std::env::temp_dir().join(format!(
-            "chat-gateway-relay-noop-{}", uuid::Uuid::new_v4()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("chat-gateway-relay-noop-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&dir).unwrap();
         let target = dir.join("chatgpt.vault");
         let key = [7_u8; 32];
@@ -596,7 +594,10 @@ pub fn import_relay_session(provider: &str, file: &SessionFile) -> Result<()> {
         // The browser worker still runs activation, so a saved-but-inactive
         // session can recover without rewriting the same encrypted snapshot.
         remove_legacy_session_snapshot(provider)?;
-        tracing::debug!(provider, "identical relay session snapshot; vault write skipped");
+        tracing::debug!(
+            provider,
+            "identical relay session snapshot; vault write skipped"
+        );
         return Ok(());
     }
     let encrypted = encrypt_session_snapshot(file, provider, &key)?;
