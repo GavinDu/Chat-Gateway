@@ -58,7 +58,7 @@ pub struct LoginView {
     pub active: bool,
     pub url: Option<String>,
     pub title: Option<String>,
-    /// "idle" | "login_required" | "composer_available" | "active_unknown"
+    /// "idle" | "login_required" | "composer_available" | "active_unknown" | "challenge_required"
     pub state: String,
     pub logged_in: Option<bool>,
     pub input_found: bool,
