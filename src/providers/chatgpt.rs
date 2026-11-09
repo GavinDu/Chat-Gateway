@@ -14,7 +14,7 @@ pub const SELECTORS: SelectorSet = SelectorSet {
     url: "https://chatgpt.com",
     picker: &["button[data-testid=\"model-switcher\"]", "text:button=ChatGPT", "div#model-switcher"],
     input: &["#prompt-textarea", "div#prompt-textarea[contenteditable=\"true\"]", "textarea[data-id=\"root\"]", "textarea#mobile-composer-prompt[name=\"prompt\"]"],
-    send: &["button[data-testid=\"send-button\"]", "button[aria-label=\"Send prompt\"]"],
+    send: &["button[data-testid=\"send-button\"]", "button[aria-label=\"Send prompt\"]", "form:has(textarea#mobile-composer-prompt[name=\"prompt\"]) button[aria-label=\"Send message\"]"],
     response: &["div[data-message-author-role=\"assistant\"] div.markdown", "article div.markdown", "div[data-message-id] div.markdown"],
     model_keywords: "chatgpt|gpt|o1|o3|o4",
     model_pairs: &[("button[data-testid='model-switcher-dropdown-button'], button[aria-label*='model' i], [data-testid='model-switcher-dropdown-button']", "[role='menuitem'], [role='option'], [data-testid*='model' i]")],

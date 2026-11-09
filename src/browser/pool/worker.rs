@@ -32,6 +32,37 @@ async fn session_refresh_permit<'a>(
     }
 }
 
+/// Fixed selector names only: never log arbitrary field attributes or values.
+fn diagnostic_input_controls(page: &obscura_core::Page) -> Vec<String> {
+    [
+        ("ChatGPT desktop", "#prompt-textarea"),
+        (
+            "ChatGPT mobile",
+            "textarea#mobile-composer-prompt[name=\"prompt\"]",
+        ),
+        (
+            "Ask Grok anything aria",
+            "textarea[aria-label=\"Ask Grok anything\"]",
+        ),
+        ("Ask anything aria", "textarea[aria-label=\"Ask anything\"]"),
+        ("Ask Grok aria", "textarea[aria-label=\"Ask Grok\"]"),
+        ("Message Grok aria", "textarea[aria-label=\"Message Grok\"]"),
+        ("Ask placeholder", "textarea[placeholder*=\"Ask\"]"),
+        ("Message placeholder", "textarea[placeholder*=\"Message\"]"),
+        ("labelled textarea", "textarea[aria-label]"),
+        ("any textarea", "textarea"),
+        (
+            "editable textbox",
+            "[contenteditable=\"true\"][role=\"textbox\"]",
+        ),
+        ("any editable", "[contenteditable]"),
+    ]
+    .into_iter()
+    .filter(|(_, selector)| page.query_selector(selector).is_some())
+    .map(|(name, _)| name.to_owned())
+    .collect()
+}
+
 async fn ensure_provider_page(
     browser: &obscura_core::Browser,
     pages: &SharedPages,
@@ -566,10 +597,12 @@ pub(super) fn browser_thread(
                                     ("response", set.response),
                                 ];
                                 report.probe = providers::common::probe_selector_groups(&page, &sets);
+                                report.input_controls = diagnostic_input_controls(&page);
                                 // Phase 1 — input (20s, Go's budget).
                                 let input_sel = match providers::common::wait_for_selector(&mut page, sets[0].1, 20000).await {
                                     Ok(()) => sets[0].1.iter().copied().find(|s| page.query_selector(s).is_some()).unwrap_or(sets[0].1[0]),
                                     Err(e) => {
+                                        report.input_controls = diagnostic_input_controls(&page);
                                         report.errors.push(format!("input: {e}"));
                                         finish(report);
                                         return;
@@ -586,6 +619,7 @@ pub(super) fn browser_thread(
                                 providers::common::drive_page(&mut page, Duration::from_millis(400)).await;
                                 let input_json = serde_json::to_string(input_sel).unwrap_or_default();
                                 let dummy_json = serde_json::to_string(DUMMY).unwrap_or_default();
+                                report.input_controls = diagnostic_input_controls(&page);
                                 report.typed_prompt_retained = page.evaluate(&format!(
                                     "(()=>{{const el=document.querySelector({input_json});return !!el && String('value' in el?el.value:el.textContent).trim()==={dummy_json}.trim();}})()"
                                 )).as_bool();
@@ -595,6 +629,7 @@ pub(super) fn browser_thread(
                                     ("Send", "button[aria-label=\"Send\"]"),
                                     ("Send prompt", "button[aria-label=\"Send prompt\"]"),
                                     ("Send message", "button[aria-label=\"Send message\"]"),
+                                    ("Mobile composer Send message", "form:has(textarea#mobile-composer-prompt[name=\"prompt\"]) button[aria-label=\"Send message\"]"),
                                     ("Submit", "button[aria-label=\"Submit\"]"),
                                     ("Submit prompt", "button[aria-label=\"Submit prompt\"]"),
                                     ("send-button test id", "button[data-testid=\"send-button\"]"),

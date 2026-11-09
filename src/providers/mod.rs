@@ -1516,15 +1516,22 @@ mod live_dom_send_tests {
             .build()
             .unwrap();
         let mut page = browser.new_page().await.unwrap();
+        let button = if input == "#mobile-composer-prompt" {
+            r#"<button id="fixture-send" type="button" aria-label="Send message">Send</button>"#
+        } else {
+            r#"<button id="fixture-send" type="button" data-testid="send-button" aria-label="Send">Send</button>"#
+        };
         let html = format!(
-            r#"<html><body><script>globalThis.fixtureLoaded=true</script><form>{markup}<button type="button" data-testid="send-button" aria-label="Send">Send</button></form></body></html>"#
+            r#"<html><body><script>globalThis.fixtureLoaded=true</script><form><button id="unrelated-send" type="button" aria-label="Send message">Other</button></form><form>{markup}{button}</form></body></html>"#
         );
         let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
         page.goto(&format!("data:text/html,{encoded}"))
             .await
             .unwrap();
         let js = r#"(() => {
-          document.querySelector('button').addEventListener('click', () => {
+          globalThis.unrelatedClicked = false;
+          document.getElementById('unrelated-send').addEventListener('click', () => {globalThis.unrelatedClicked=true;});
+          document.getElementById('fixture-send').addEventListener('click', () => {
             globalThis.fixtureClicked = true;
             setTimeout(() => {
               globalThis.fixtureTimerFired = true;
@@ -1567,6 +1574,10 @@ mod live_dom_send_tests {
         }
         assert_eq!(text, "SYNTHETIC_ASYNC_OK");
         assert!(done);
+        assert_eq!(
+            page.evaluate("globalThis.unrelatedClicked"),
+            serde_json::json!(false)
+        );
         assert_eq!(page.evaluate("document.getElementById('autosizer') ? document.getElementById('autosizer').value : 'DO_NOT_TOUCH'"),serde_json::json!("DO_NOT_TOUCH"));
     }
     #[tokio::test]

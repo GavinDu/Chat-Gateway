@@ -282,6 +282,8 @@ pub struct TestAdapterReport {
     pub typed_prompt_retained: Option<bool>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub send_controls: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub input_controls: Vec<String>,
     pub errors: Vec<String>,
 }
 
