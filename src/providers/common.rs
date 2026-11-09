@@ -397,7 +397,10 @@ mod streaming_visibility_regression_tests {
 
         let previous = response_probe(&page, &[".answer"], false);
         assert_eq!(previous.text.as_deref(), Some("previous reply"));
-        assert_eq!(previous.count, 2, "visible placeholders still count as nodes");
+        assert_eq!(
+            previous.count, 2,
+            "visible placeholders still count as nodes"
+        );
 
         page.evaluate("document.querySelector('#placeholder').textContent = 'new reply'");
         let new_reply = response_probe(&page, &[".answer"], false);
@@ -406,7 +409,10 @@ mod streaming_visibility_regression_tests {
         page.evaluate("document.querySelectorAll('.answer')[0].textContent = '  '");
         page.evaluate("document.querySelector('#placeholder').textContent = '  '");
         let blank = response_probe(&page, &[".answer"], false);
-        assert_eq!(blank.text, None, "whitespace cannot masquerade as generated text");
+        assert_eq!(
+            blank.text, None,
+            "whitespace cannot masquerade as generated text"
+        );
     }
 
     #[tokio::test]
