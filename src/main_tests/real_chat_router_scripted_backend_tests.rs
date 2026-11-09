@@ -18,6 +18,7 @@ fn configured_provider(name: &str, priority: u32) -> config::ProviderConfig {
         min_request_interval_ms: 1,
         daily_request_cap: 100,
         models: vec!["fake-model".to_owned()],
+        selectors: config::ProviderSelectorOverrides::default(),
     }
 }
 
