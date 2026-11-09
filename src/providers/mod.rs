@@ -1819,7 +1819,11 @@ mod timeout_terminal_regression_tests {
         .await
         .unwrap();
 
-        let error = rx.recv().await.expect("expected a challenge error").unwrap_err();
+        let error = rx
+            .recv()
+            .await
+            .expect("expected a challenge error")
+            .unwrap_err();
         assert!(
             error.downcast_ref::<ProviderChallengeError>().is_some(),
             "the challenge during typing must not look like a generic composer failure"
@@ -1830,7 +1834,6 @@ mod timeout_terminal_regression_tests {
         );
         assert!(rx.recv().await.is_none(), "challenge must not emit done");
     }
-
 }
 
 #[cfg(test)]
