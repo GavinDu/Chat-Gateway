@@ -53,6 +53,7 @@ struct MetricData {
     handler_ms: BTreeMap<String, Histogram>,
     queue_ms: BTreeMap<String, Histogram>,
     page_lock_ms: BTreeMap<String, Histogram>,
+    relay_import_phase_ms: BTreeMap<String, Histogram>,
     ttft_ms: BTreeMap<String, Histogram>,
     provider_work_ms: BTreeMap<String, Histogram>,
     provider_tail_ms: BTreeMap<String, Histogram>,
@@ -125,6 +126,19 @@ impl MetricsRegistry {
                 .entry(provider.to_owned())
                 .or_default()
                 .observe(wait_ms);
+        }
+    }
+
+    /// Bounded relay import phases only; no provider, cookie, URL or session labels.
+    pub fn record_relay_import_phase(&self, phase: &str, elapsed_ms: u64) {
+        if !matches!(phase, "persist" | "activate") {
+            return;
+        }
+        if let Ok(mut data) = self.data.lock() {
+            data.relay_import_phase_ms
+                .entry(phase.to_owned())
+                .or_default()
+                .observe(elapsed_ms);
         }
     }
 
@@ -255,6 +269,18 @@ impl MetricsRegistry {
                 histogram.render(&mut out, metric, label, key);
             }
         }
+        let _ = writeln!(
+            out,
+            "# TYPE gateway_relay_session_import_phase_ms histogram"
+        );
+        for (phase, histogram) in &data.relay_import_phase_ms {
+            histogram.render(
+                &mut out,
+                "gateway_relay_session_import_phase_ms",
+                "phase",
+                phase,
+            );
+        }
         let _ = writeln!(out, "# TYPE gateway_poll_tick_ms histogram");
         for (provider, histogram) in &data.poll_tick_ms {
             histogram.render(&mut out, "gateway_poll_tick_ms", "provider", provider);
@@ -334,6 +360,22 @@ mod tests {
     }
 
     #[test]
+    fn relay_import_metrics_use_only_bounded_phase_labels() {
+        let registry = MetricsRegistry::default();
+        registry.record_relay_import_phase("persist", 15);
+        registry.record_relay_import_phase("activate", 42);
+        registry.record_relay_import_phase("secret-session-id", 999);
+        let metrics = registry.render_with_provider_states(&[]);
+        assert!(
+            metrics.contains("gateway_relay_session_import_phase_ms_count{phase=\"persist\"} 1")
+        );
+        assert!(
+            metrics.contains("gateway_relay_session_import_phase_ms_sum{phase=\"activate\"} 42")
+        );
+        assert!(!metrics.contains("secret-session-id"));
+    }
+
+    #[test]
     fn provider_completion_tail_metric_records_observations() {
         let registry = MetricsRegistry::default();
         registry.record_provider_tail("tail-test", 1_234);
@@ -357,6 +399,7 @@ mod tests {
             "# TYPE gateway_provider_tail_ms histogram\n",
             "# TYPE gateway_chat_total_duration_ms histogram\n",
             "# TYPE gateway_overhead_ms histogram\n",
+            "# TYPE gateway_relay_session_import_phase_ms histogram\n",
             "# TYPE gateway_poll_tick_ms histogram\n",
             "# TYPE gateway_poll_evaluations_total counter\n",
             "# TYPE gateway_provider_requests_total counter\n",

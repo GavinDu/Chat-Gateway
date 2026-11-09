@@ -41,3 +41,11 @@ privacy implications.
   individual prompt content.
 - Treat gateway-overhead values as estimates and compare them with the
   queue, TTFT, provider-work, and total-duration measurements together.
+
+Relay session imports also expose `gateway_relay_session_import_phase_ms` with
+fixed `phase="persist"` and `phase="activate"` labels. The first measures
+session validation/persistence, including rejected imports; the second
+measures browser activation and is absent if persistence fails. HTTP status
+and sanitized handler logs indicate failure versus timeout. These aggregate
+histograms deliberately do not include provider names, cookie values, session
+identifiers, or URLs.
