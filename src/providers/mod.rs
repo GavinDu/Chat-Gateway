@@ -183,7 +183,8 @@ pub trait SiteAdapter: Send + Sync {
                         if (!button.getClientRects().length ||
                             window.getComputedStyle(button).visibility === "hidden" ||
                             button.closest('[hidden], [inert], [aria-hidden="true"]') ||
-                            button.disabled || button.getAttribute("aria-disabled") === "true") continue;
+                            button.disabled || button.matches(':disabled') ||
+                            button.closest('fieldset[disabled], [aria-disabled="true"]')) continue;
                         button.click();
                         return true;
                     } catch (_) {}
@@ -1691,7 +1692,7 @@ mod generation_cancel_visibility_tests {
             .build()
             .unwrap();
         let mut page = browser.new_page().await.unwrap();
-        let html = r#"<html><body><button aria-label="Stop generating" style="display:none" onclick="window.hiddenClicks=(window.hiddenClicks||0)+1">Hidden</button><button aria-label="Stop sharing" onclick="window.unrelatedClicks=(window.unrelatedClicks||0)+1">Stop sharing</button><button aria-label="Stop generating" disabled onclick="window.disabledClicks=(window.disabledClicks||0)+1">Disabled</button><button aria-label="Stop generating" onclick="window.activeClicks=(window.activeClicks||0)+1">Stop</button></body></html>"#;
+        let html = r#"<html><body><button aria-label="Stop generating" style="display:none" onclick="window.hiddenClicks=(window.hiddenClicks||0)+1">Hidden</button><button aria-label="Stop sharing" onclick="window.unrelatedClicks=(window.unrelatedClicks||0)+1">Stop sharing</button><button aria-label="Stop generating" disabled onclick="window.disabledClicks=(window.disabledClicks||0)+1">Disabled</button><fieldset disabled><button aria-label="Stop generating" onclick="window.fieldsetClicks=(window.fieldsetClicks||0)+1">Disabled fieldset</button></fieldset><button aria-label="Stop generating" onclick="window.activeClicks=(window.activeClicks||0)+1">Stop</button></body></html>"#;
         let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
         page.goto(&format!("data:text/html,{encoded}"))
             .await
@@ -1715,6 +1716,10 @@ mod generation_cancel_visibility_tests {
         );
         assert_eq!(
             page.evaluate("window.unrelatedClicks || 0").as_f64(),
+            Some(0.0)
+        );
+        assert_eq!(
+            page.evaluate("window.fieldsetClicks || 0").as_f64(),
             Some(0.0)
         );
     }

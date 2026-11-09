@@ -191,6 +191,15 @@ pub fn response_probe(
     let script = format!(
         r#"(() => {{
             const selectors = {selectors};
+            const visible = el => {{
+                try {{
+                    return el.getClientRects().length > 0 &&
+                        window.getComputedStyle(el).visibility !== "hidden" &&
+                        !el.closest('[hidden], [inert], [aria-hidden="true"]') &&
+                        !el.disabled && !el.matches(':disabled') &&
+                        !el.closest('fieldset[disabled], [aria-disabled="true"]');
+                }} catch (_) {{ return false; }}
+            }};
             const nodes = new Set();
             let text = null;
             let lastResponseNode = null;
@@ -209,6 +218,7 @@ pub fn response_probe(
                     }} else {{
                         matches = Array.from(document.querySelectorAll(selector));
                     }}
+                    matches = matches.filter(visible);
                     matches.forEach(node => nodes.add(node));
                     if (text === null && matches.length) {{
                         const last = matches[matches.length - 1];
@@ -220,17 +230,9 @@ pub fn response_probe(
                     }}
                 }} catch (_) {{}}
             }}
-            // Hidden or disabled Stop controls can remain in a provider SPA
-            // long after a response finishes. Their DOM presence is not proof
-            // of active streaming, nor is an unrelated "Stop sharing" button.
-            const visible = el => {{
-                try {{
-                    return el.getClientRects().length > 0 &&
-                        window.getComputedStyle(el).visibility !== "hidden" &&
-                        !el.closest('[hidden], [inert], [aria-hidden="true"]') &&
-                        !el.disabled && el.getAttribute("aria-disabled") !== "true";
-                }} catch (_) {{ return false; }}
-            }};
+            // Hidden, disabled or unrelated Stop controls are not proof
+            // of active streaming, just as hidden response nodes are not
+            // evidence of a new provider answer.
             let streaming = false;
             try {{
                 streaming = Array.from(document.querySelectorAll({streaming_selector})).some(visible);
@@ -254,8 +256,12 @@ pub fn response_probe(
                 for (let depth = 0; depth < 6 && scope; depth += 1, scope = scope.parentElement) {{
                     let buttons = [];
                     try {{ buttons = Array.from(scope.querySelectorAll("button, [role='button']")); }} catch (_) {{}}
-                    const labels = buttons.map(button => ((button.getAttribute("aria-label") || "") + " " + (button.getAttribute("data-testid") || "") + " " + (button.innerText || button.textContent || "")).toLowerCase());
-                    if (labels.some(label => /copy|regenerate|retry|good response|bad response|thumbs up|thumbs down/.test(label))) {{
+                    if (buttons.some(button => visible(button) &&
+                        /copy|regenerate|retry|good response|bad response|thumbs up|thumbs down/.test(
+                            ((button.getAttribute("aria-label") || "") + " " +
+                            (button.getAttribute("data-testid") || "") + " " +
+                            (button.innerText || button.textContent || "")).toLowerCase()
+                        ))) {{
                         postAnswerAffordance = true;
                         break;
                     }}
@@ -294,6 +300,60 @@ mod streaming_visibility_regression_tests {
             active.streaming,
             "a visible Stop generating button is active"
         );
+    }
+    #[tokio::test]
+    async fn disabled_stop_and_hidden_copy_never_signal_progress_or_completion() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <article><div class="answer">done</div><button id="copy" aria-label="Copy" hidden>Copy</button></article>
+            <fieldset disabled><button id="stop" aria-label="Stop generating">Stop</button></fieldset>
+            <div aria-disabled="true"><span data-is-streaming="true">stale indicator</span></div>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        let idle = response_probe(&page, &[".answer"], false);
+        assert!(
+            !idle.streaming,
+            "disabled Stop controls must not indicate streaming"
+        );
+        assert!(
+            !idle.post_answer_affordance,
+            "a hidden Copy control cannot confirm completion"
+        );
+        page.evaluate("document.querySelector('#copy').hidden = false");
+        let finished = response_probe(&page, &[".answer"], false);
+        assert!(finished.post_answer_affordance);
+        page.evaluate("document.querySelector('fieldset').disabled = false");
+        let active = response_probe(&page, &[".answer"], false);
+        assert!(active.streaming);
+    }
+
+    #[tokio::test]
+    async fn hidden_assistant_node_does_not_override_visible_response_or_count() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body><article><div class="answer">visible answer</div><div class="answer" hidden>stale hidden answer</div></article></body></html>"#;
+        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+
+        let response = response_probe(&page, &[".answer"], false);
+        assert_eq!(response.text.as_deref(), Some("visible answer"));
+        assert_eq!(response.count, 1);
+        page.evaluate("document.querySelector('.answer').hidden = true");
+        let hidden = response_probe(&page, &[".answer"], false);
+        assert_eq!(hidden.text, None);
+        assert_eq!(hidden.count, 0);
     }
 }
 
@@ -1056,21 +1116,21 @@ fn submission_snapshot(
             const el = {input_expr};
             const value = el ? ('value' in el ? el.value : (el.innerText || el.textContent || '')) : null;
             const responses = {responses};
-            const nodes = new Set();
-            for (const selector of responses) {{
-                try {{ document.querySelectorAll(selector).forEach(node => nodes.add(node)); }} catch (_) {{}}
-            }}
-            // Treat only visible, actionable generation controls as streaming.
-            // Hidden leftovers and unrelated controls such as "Stop sharing"
-            // must not turn an unacknowledged click into a successful send.
             const visible = node => {{
                 try {{
                     return node.getClientRects().length > 0 &&
                         window.getComputedStyle(node).visibility !== "hidden" &&
                         !node.closest('[hidden], [inert], [aria-hidden="true"]') &&
-                        !node.disabled && node.getAttribute("aria-disabled") !== "true";
+                        !node.disabled && !node.matches(':disabled') &&
+                        !node.closest('fieldset[disabled], [aria-disabled="true"]');
                 }} catch (_) {{ return false; }}
             }};
+            const nodes = new Set();
+            for (const selector of responses) {{
+                try {{ document.querySelectorAll(selector).forEach(node => {{ if (visible(node)) nodes.add(node); }}); }} catch (_) {{}}
+            }}
+            // Visible response nodes and actionable generation controls
+            // are the only credible evidence of a submission transition.
             const streaming = Array.from(document.querySelectorAll('[data-is-streaming="true"]')).some(visible) ||
                 Array.from(document.querySelectorAll("button")).some(button => visible(button) &&
                     /^(stop|stop generating|stop generation|stop responding|stop response|stop answering)$/i.test(
@@ -1317,6 +1377,55 @@ mod submission_transition_tests {
         let active = super::submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
         assert!(active.streaming);
         assert!(super::submission_accepted(&baseline, &active));
+    }
+
+    #[tokio::test]
+    async fn disabled_stop_cannot_acknowledge_unchanged_composer() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body><form>
+            <textarea id="prompt">draft</textarea>
+            <fieldset disabled><button id="stop" aria-label="Stop generating">Stop</button></fieldset>
+            <span aria-disabled="true"><span data-is-streaming="true"></span></span>
+        </form></body></html>"#;
+        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        let before = super::submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
+        assert!(!before.streaming);
+        page.evaluate("document.querySelector('fieldset').setAttribute('data-changed', 'yes')");
+        let after = super::submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
+        assert!(!super::submission_accepted(&before, &after));
+        page.evaluate("document.querySelector('fieldset').disabled = false");
+        let streaming = super::submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
+        assert!(super::submission_accepted(&before, &streaming));
+    }
+
+    #[tokio::test]
+    async fn hidden_response_node_does_not_acknowledge_an_unchanged_draft() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body><textarea id="prompt">draft</textarea><div class="answer">old</div></body></html>"#;
+        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+
+        let before = super::submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
+        assert_eq!(before.response_count, 1);
+        page.evaluate("document.body.insertAdjacentHTML('beforeend', '<div class=\"answer\" hidden>old</div>')");
+        let hidden = super::submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
+        assert!(!super::submission_accepted(&before, &hidden));
+        page.evaluate("document.querySelector('.answer[hidden]').hidden = false");
+        let visible = super::submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
+        assert!(super::submission_accepted(&before, &visible));
     }
 
     #[test]
