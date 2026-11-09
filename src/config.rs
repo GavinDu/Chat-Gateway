@@ -328,18 +328,33 @@ impl AppConfig {
             ] {
                 if let Some(selectors) = selectors {
                     if selectors.is_empty() || selectors.len() > 16 {
-                        anyhow::bail!("provider '{}' selectors.{} must contain 1-16 entries", provider.name, role);
+                        anyhow::bail!(
+                            "provider '{}' selectors.{} must contain 1-16 entries",
+                            provider.name,
+                            role
+                        );
                     }
                     for selector in selectors {
-                        if selector.trim().is_empty() || selector.len() > 512
+                        if selector.trim().is_empty()
+                            || selector.len() > 512
                             || selector.chars().any(|ch| ch.is_control())
                             || selector.contains(":has-text(")
-                            || matches!(selector.as_str(), "button[type=\"submit\"]" | "button:has(svg)")
+                            || matches!(
+                                selector.as_str(),
+                                "button[type=\"submit\"]" | "button:has(svg)"
+                            )
                         {
-                            anyhow::bail!("provider '{}' selectors.{} contains an invalid selector", provider.name, role);
+                            anyhow::bail!(
+                                "provider '{}' selectors.{} contains an invalid selector",
+                                provider.name,
+                                role
+                            );
                         }
                         if selector.starts_with("text:") && !matches!(role, "picker") {
-                            anyhow::bail!("provider '{}' only supports text: selectors for the picker role", provider.name);
+                            anyhow::bail!(
+                                "provider '{}' only supports text: selectors for the picker role",
+                                provider.name
+                            );
                         }
                     }
                 }
@@ -456,10 +471,14 @@ mod tests {
     fn configurable_selector_groups_parse_and_validate() {
         let cfg = config("providers:\n  - name: chatgpt\n    selectors:\n      input: ['textarea[name=prompt]']\n      send: ['form button[aria-label=Send]']\n");
         assert!(cfg.validate().is_ok());
-        assert_eq!(cfg.providers[0].selectors.input.as_ref().unwrap()[0], "textarea[name=prompt]");
+        assert_eq!(
+            cfg.providers[0].selectors.input.as_ref().unwrap()[0],
+            "textarea[name=prompt]"
+        );
         let empty = config("providers:\n  - name: grok\n    selectors:\n      send: []\n");
         assert!(empty.validate().is_err());
-        let generic = config("providers:\n  - name: grok\n    selectors:\n      send: ['button:has(svg)']\n");
+        let generic =
+            config("providers:\n  - name: grok\n    selectors:\n      send: ['button:has(svg)']\n");
         assert!(generic.validate().is_err());
     }
 
