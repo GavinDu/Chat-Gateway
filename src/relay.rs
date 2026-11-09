@@ -806,6 +806,47 @@ pub async fn status(State(app): State<Arc<crate::AppState>>, headers: HeaderMap)
     Json(serde_json::json!({"ok":true,"providers":providers,"vault_mode":std::env::var("CHAT_GATEWAY_SESSION_STORE").as_deref()==Ok("vault")})).into_response()
 }
 
+/// Relay import validates, encrypts and writes a credential snapshot. Those
+/// operations involve blocking disk I/O and must not stall the async HTTP
+/// reactor while a browser worker is also being activated.
+async fn persist_relay_session_off_reactor(
+    operation: impl FnOnce() -> anyhow::Result<()> + Send + 'static,
+) -> anyhow::Result<()> {
+    tokio::task::spawn_blocking(operation)
+        .await
+        .map_err(|_| anyhow::anyhow!("relay session persistence task could not complete"))?
+}
+
+#[cfg(test)]
+mod relay_persist_off_reactor_tests {
+    use super::persist_relay_session_off_reactor;
+    use std::sync::{Arc, Mutex};
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn snapshot_persistence_runs_off_the_async_request_thread() {
+        let request_thread = std::thread::current().id();
+        let observed = Arc::new(Mutex::new(None));
+        let worker_observed = Arc::clone(&observed);
+        persist_relay_session_off_reactor(move || {
+            *worker_observed.lock().unwrap() = Some(std::thread::current().id());
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let worker_thread = observed.lock().unwrap().unwrap();
+        assert_ne!(worker_thread, request_thread);
+    }
+
+    #[tokio::test]
+    async fn persistence_failure_is_propagated_before_activation() {
+        let failed =
+            persist_relay_session_off_reactor(|| anyhow::bail!("synthetic snapshot rejection"))
+                .await
+                .unwrap_err();
+        assert_eq!(failed.to_string(), "synthetic snapshot rejection");
+    }
+}
+
 pub async fn import_session(
     State(app): State<Arc<crate::AppState>>,
     headers: HeaderMap,
@@ -827,7 +868,11 @@ pub async fn import_session(
         );
     }
     let store_started = Instant::now();
-    let imported = crate::session::import_relay_session(&provider, &file);
+    let provider_for_persist = provider.clone();
+    let imported = persist_relay_session_off_reactor(move || {
+        crate::session::import_relay_session(&provider_for_persist, &file)
+    })
+    .await;
     let vault_ms = store_started.elapsed().as_millis();
     app.metrics
         .record_relay_import_phase("persist", vault_ms.min(u64::MAX as u128) as u64);
