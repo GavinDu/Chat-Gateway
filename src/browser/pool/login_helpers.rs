@@ -62,10 +62,12 @@ pub(super) fn build_login_view(
     let input_found = registry
         .get(&provider)
         .map(|a| {
-            a.selector_set()
-                .input
+            // Login readiness must use the same selectors as prompt sending:
+            // a YAML override can replace the provider's default composer.
+            a.effective_selectors()
+                .input_refs()
                 .iter()
-                .any(|s| page.query_selector(s).is_some())
+                .any(|s| providers::common::element_exists(page, s))
         })
         .unwrap_or(false);
     let (state, logged_in) = login::login_state(is_login, input_found);
@@ -97,5 +99,41 @@ pub(super) fn login_active_info(
         logged_in: view.logged_in,
         input_found: view.input_found,
         state: view.state,
+    }
+}
+
+#[cfg(test)]
+mod login_effective_selectors_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn custom_composer_selector_is_visible_to_login_status_without_auth_claim() {
+        let cfg: crate::config::AppConfig = serde_yaml::from_str(
+            r#"
+providers:
+  - name: gemini
+    selectors:
+      input:
+        - "textarea#custom-gemini-composer"
+"#,
+        )
+        .unwrap();
+        let registry = Rc::new(providers::build_registry(&cfg));
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        page.goto("data:text/html,<html><body><textarea id='custom-gemini-composer'></textarea></body></html>")
+            .await
+            .unwrap();
+
+        let view = build_login_view(Provider::Gemini, &page, &registry);
+        assert!(view.input_found, "custom composer should be discovered");
+        assert_eq!(view.state, "composer_available");
+        assert_eq!(view.logged_in, None, "composer alone cannot prove login");
+        let status = login_active_info(Provider::Gemini, &page, &registry);
+        assert!(status.input_found);
+        assert_eq!(status.logged_in, None);
     }
 }
