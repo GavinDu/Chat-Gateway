@@ -952,7 +952,7 @@ mod browser_event_loop_tests {
             .unwrap();
         let result = super::click_send_or_enter(&mut page, &["#send"], "#prompt", 200).await;
         assert!(result.is_err());
-        assert_eq!(page.evaluate("window.enterCount"), serde_json::json!(0));
+        assert_eq!(page.evaluate("window.enterCount").as_f64(), Some(0.0));
     }
 
     #[tokio::test]
