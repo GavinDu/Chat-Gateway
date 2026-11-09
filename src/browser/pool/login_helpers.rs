@@ -59,15 +59,27 @@ pub(super) fn build_login_view(
 ) -> LoginView {
     let url = page.url();
     let is_login = providers::common::is_login_page(page);
-    let input_found = registry
-        .get(&provider)
-        .map(|a| {
-            // Use configured selectors, but do not report hidden/disabled
-            // SPA placeholders as usable composer controls.
-            providers::common::visible_composer_exists(page, &a.effective_selectors().input_refs())
-        })
-        .unwrap_or(false);
-    let (state, logged_in) = login::login_state(is_login, input_found);
+    // A challenge can coexist with an old composer in a client-side app.
+    // Never report that stale editor as ready while manual verification is
+    // required; this observation is not proof of expired credentials.
+    let challenge = crate::provider_guard::is_challenge_page(page);
+    let input_found = !challenge
+        && registry
+            .get(&provider)
+            .map(|a| {
+                // Use configured selectors, but do not report hidden/disabled
+                // SPA placeholders as usable composer controls.
+                providers::common::visible_composer_exists(
+                    page,
+                    &a.effective_selectors().input_refs(),
+                )
+            })
+            .unwrap_or(false);
+    let (state, logged_in) = if challenge {
+        ("challenge_required".to_owned(), None)
+    } else {
+        login::login_state(is_login, input_found)
+    };
     let (title, fields, buttons, snapshot) = login::parse_view(page.evaluate(login::VIEW_SCRIPT));
     LoginView {
         provider: provider.name().to_string(),
@@ -102,6 +114,41 @@ pub(super) fn login_active_info(
 #[cfg(test)]
 mod login_effective_selectors_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn visible_composer_on_challenge_page_is_not_reported_ready() {
+        let cfg: crate::config::AppConfig = serde_yaml::from_str(
+            r#"
+providers:
+  - name: gemini
+    selectors:
+      input:
+        - "textarea#custom-gemini-composer"
+"#,
+        )
+        .unwrap();
+        let registry = Rc::new(providers::build_registry(&cfg));
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <p>Please verify you are human to continue.</p>
+            <textarea id="custom-gemini-composer"></textarea>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        let view = build_login_view(Provider::Gemini, &page, &registry);
+        assert_eq!(view.state, "challenge_required");
+        assert!(!view.input_found);
+        assert_eq!(view.logged_in, None);
+        let status = login_active_info(Provider::Gemini, &page, &registry);
+        assert_eq!(status.state, "challenge_required");
+        assert!(!status.input_found);
+    }
 
     #[tokio::test]
     async fn custom_composer_selector_is_visible_to_login_status_without_auth_claim() {
