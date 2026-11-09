@@ -338,12 +338,17 @@ pub(super) fn browser_thread(
                                     Ok(guard) => guard,
                                     Err(_) => { let _ = chunks.send(Err(anyhow::Error::new(ProviderBusyError))).await; return; }
                                 };
+                                let page_lock_started = Instant::now();
                                 let Some(page_lock) = send_unless_disconnected(
                                     &chunks,
                                     acquire_page_lock(&lock, operation_queue_timeout),
                                 ).await else {
                                     return;
                                 };
+                                request_metrics.record_provider_page_lock_wait(
+                                    &provider_name,
+                                    page_lock_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+                                );
                                 let _guard = match page_lock {
                                     Ok(guard) => guard,
                                     Err(error) => {

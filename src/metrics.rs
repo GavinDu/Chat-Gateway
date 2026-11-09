@@ -52,6 +52,7 @@ struct MetricData {
     requests: BTreeMap<(String, u16), u64>,
     handler_ms: BTreeMap<String, Histogram>,
     queue_ms: BTreeMap<String, Histogram>,
+    page_lock_ms: BTreeMap<String, Histogram>,
     ttft_ms: BTreeMap<String, Histogram>,
     provider_work_ms: BTreeMap<String, Histogram>,
     provider_tail_ms: BTreeMap<String, Histogram>,
@@ -112,6 +113,18 @@ impl MetricsRegistry {
     pub fn record_browser_worker_restart(&self) {
         if let Ok(mut data) = self.data.lock() {
             data.browser_worker_restarts += 1;
+        }
+    }
+
+    /// Measure the second queue after gateway admission (provider page lock).
+    /// The metric contains only a registered provider name and elapsed time;
+    /// record both successful lock acquisition and typed busy timeouts.
+    pub fn record_provider_page_lock_wait(&self, provider: &str, wait_ms: u64) {
+        if let Ok(mut data) = self.data.lock() {
+            data.page_lock_ms
+                .entry(provider.to_owned())
+                .or_default()
+                .observe(wait_ms);
         }
     }
 
@@ -225,6 +238,7 @@ impl MetricsRegistry {
         for (metric, values) in [
             ("gateway_http_handler_duration_ms", &data.handler_ms),
             ("gateway_provider_queue_duration_ms", &data.queue_ms),
+            ("gateway_provider_page_lock_duration_ms", &data.page_lock_ms),
             ("gateway_provider_ttft_ms", &data.ttft_ms),
             ("gateway_provider_work_duration_ms", &data.provider_work_ms),
             ("gateway_provider_tail_ms", &data.provider_tail_ms),
@@ -307,6 +321,19 @@ mod tests {
     }
 
     #[test]
+    fn page_lock_wait_metric_records_phase_without_prompt_or_session_labels() {
+        let registry = MetricsRegistry::default();
+        registry.record_provider_page_lock_wait("grok", 42);
+        let metrics = registry.render_with_provider_states(&[]);
+        assert!(
+            metrics.contains("gateway_provider_page_lock_duration_ms_count{provider=\"grok\"} 1")
+        );
+        assert!(
+            metrics.contains("gateway_provider_page_lock_duration_ms_sum{provider=\"grok\"} 42")
+        );
+    }
+
+    #[test]
     fn provider_completion_tail_metric_records_observations() {
         let registry = MetricsRegistry::default();
         registry.record_provider_tail("tail-test", 1_234);
@@ -324,6 +351,7 @@ mod tests {
             "# TYPE gateway_http_requests_total counter\n",
             "# TYPE gateway_http_handler_duration_ms histogram\n",
             "# TYPE gateway_provider_queue_duration_ms histogram\n",
+            "# TYPE gateway_provider_page_lock_duration_ms histogram\n",
             "# TYPE gateway_provider_ttft_ms histogram\n",
             "# TYPE gateway_provider_work_duration_ms histogram\n",
             "# TYPE gateway_provider_tail_ms histogram\n",
