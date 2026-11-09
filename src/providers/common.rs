@@ -115,14 +115,7 @@ impl SelectorSet {
         EffectiveSelectorSet::new(self, overrides)
     }
 
-    pub fn adapter_selectors(&self) -> crate::providers::AdapterSelectors {
-        crate::providers::AdapterSelectors {
-            input_selector: self.input[0].to_string(),
-            send_button: self.send[0].to_string(),
-            response_container: self.response[0].to_string(),
-            model_picker: self.picker[0].to_string(),
-        }
-    }
+
 }
 
 /// Streaming indicator shared by all providers. Keep this valid CSS only;
