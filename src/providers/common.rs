@@ -1304,15 +1304,28 @@ fn submission_snapshot(
             for (const selector of responses) {{
                 try {{ document.querySelectorAll(selector).forEach(node => {{ if (visible(node)) nodes.add(node); }}); }} catch (_) {{}}
             }}
+            // Clear-on-click alone can happen when a controlled SPA drops an
+            // unsubmitted draft. A newly rendered visible user turn, unlike
+            // an empty composer, is positive evidence of application uptake.
+            const userTurns = new Set();
+            for (const selector of [
+                '[data-message-author-role="user"]',
+                '[data-testid="user-message"]',
+                '[data-testid="message-user"]'
+            ]) {{
+                try {{ document.querySelectorAll(selector).forEach(node => {{
+                    if (visible(node)) userTurns.add(node);
+                }}); }} catch (_) {{}}
+            }}
             // Visible response nodes and actionable generation controls
-            // are the only credible evidence of a submission transition.
+            // are additional evidence of a submission transition.
             const streaming = Array.from(document.querySelectorAll('[data-is-streaming="true"]')).some(visible) ||
                 Array.from(document.querySelectorAll("button")).some(button => visible(button) &&
                     /^(stop|stop generating|stop generation|stop responding|stop response|stop answering)$/i.test(
                         (button.getAttribute("aria-label") || button.innerText || button.textContent || "").trim()
                     ));
             return {{ inputPresent: !!el, inputEmpty: value !== null && !value.trim(), responseCount: nodes.size,
-                streaming }};
+                userTurnCount: userTurns.size, streaming }};
         }})()"#
     );
     let v = page.evaluate(&js);
@@ -1330,6 +1343,10 @@ fn submission_snapshot(
         // submission timeouts for controlled composers that retain their text.
         response_count: v
             .get("responseCount")
+            .and_then(decode_dom_count)
+            .unwrap_or(0),
+        user_turn_count: v
+            .get("userTurnCount")
             .and_then(decode_dom_count)
             .unwrap_or(0),
         streaming: v
@@ -1354,11 +1371,13 @@ struct SubmissionSnapshot {
     input_present: bool,
     input_empty: bool,
     response_count: u64,
+    user_turn_count: u64,
     streaming: bool,
 }
 
 fn submission_accepted(before: &SubmissionSnapshot, after: &SubmissionSnapshot) -> bool {
-    (after.input_present && after.input_empty && !before.input_empty)
+    // A cleared draft alone is not proof that the provider received a turn.
+    after.user_turn_count > before.user_turn_count
         || after.response_count > before.response_count
         || (after.streaming && !before.streaming)
 }
@@ -1458,6 +1477,7 @@ mod submission_transition_tests {
             input_present: true,
             input_empty: false,
             response_count: 2,
+            user_turn_count: 1,
             streaming: false,
         };
         assert!(!submission_accepted(&before, &before));
@@ -1468,10 +1488,17 @@ mod submission_transition_tests {
                 ..before
             }
         ));
-        assert!(submission_accepted(
+        assert!(!submission_accepted(
             &before,
             &SubmissionSnapshot {
                 input_empty: true,
+                ..before
+            }
+        ));
+        assert!(submission_accepted(
+            &before,
+            &SubmissionSnapshot {
+                user_turn_count: 2,
                 ..before
             }
         ));
@@ -1489,6 +1516,42 @@ mod submission_transition_tests {
                 ..before
             }
         ));
+    }
+
+    #[tokio::test]
+    async fn cleared_draft_without_new_visible_user_turn_does_not_acknowledge_submission() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body><form>
+            <textarea id="prompt">draft</textarea>
+            <button id="send" type="button" onclick="document.querySelector('#prompt').value=''">Send</button>
+            <div data-message-author-role="user">previous turn</div>
+        </form></body></html>"#;
+        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+
+        let before = super::submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
+        assert_eq!(before.user_turn_count, 1);
+        assert!(super::click_send_or_enter(&mut page, &["#send"], "#prompt", 400)
+            .await
+            .unwrap());
+        let cleared = super::submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
+        assert!(cleared.input_empty);
+        assert!(!super::submission_accepted(&before, &cleared));
+
+        page.evaluate("document.body.insertAdjacentHTML('beforeend', '<div data-message-author-role=\\\"user\\\" hidden>new turn</div>')");
+        let hidden = super::submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
+        assert!(!super::submission_accepted(&before, &hidden));
+
+        page.evaluate("document.querySelector('[data-message-author-role=user][hidden]').hidden = false");
+        let accepted = super::submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
+        assert_eq!(accepted.user_turn_count, 2);
+        assert!(super::submission_accepted(&before, &accepted));
     }
 
     #[tokio::test]
@@ -1670,6 +1733,7 @@ mod submission_transition_tests {
             input_present: true,
             input_empty: false,
             response_count: 1,
+            user_turn_count: 0,
             streaming: true,
         };
         assert!(!submission_accepted(&before, &before));
