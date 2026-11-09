@@ -345,6 +345,38 @@ impl SessionStore for VaultSessionStore {
     }
 }
 
+/// Obscura's cookie snapshot exposes value, scope and flags but not
+/// Chrome's expirationDate / SameSite metadata. If an unchanged cookie was
+/// imported by the browser relay, retain its validated policy metadata when
+/// a warm-page save refreshes the encrypted vault. Never copy attributes
+/// across different values, domains, paths or security flags.
+fn preserve_verified_cookie_metadata(captured: &mut SessionFile, previous: &SessionFile) {
+    let now_epoch = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64();
+    for cookie in &mut captured.cookies {
+        if cookie.expires.is_some() || cookie.same_site.is_some() {
+            continue;
+        }
+        if let Some(prior) = previous.cookies.iter().find(|prior| {
+            prior.name == cookie.name
+                && prior.value == cookie.value
+                && prior.domain == cookie.domain
+                && prior.path == cookie.path
+                && prior.secure == cookie.secure
+                && prior.http_only == cookie.http_only
+                && prior.validate_browser_metadata().is_ok()
+                && !prior
+                    .expires
+                    .is_some_and(|expiry| expiry >= 0.0 && expiry <= now_epoch)
+        }) {
+            cookie.expires = prior.expires;
+            cookie.same_site.clone_from(&prior.same_site);
+        }
+    }
+}
+
 impl VaultSessionStore {
     async fn save_session(
         &self,
@@ -370,20 +402,25 @@ impl VaultSessionStore {
 
     async fn save_file_if_changed(
         &self,
-        file: SessionFile,
+        mut file: SessionFile,
         provider: &str,
         tracker: &SessionWriteTracker,
     ) -> Result<()> {
         let key = vault_key_from_env()?;
-        let current_hash = session_state_hash(&file)?;
         let destination = session_vault_path(provider)?;
-        let previous_hash = match std::fs::read(&destination) {
-            Ok(bytes) => Some(session_state_hash(&decrypt_session_snapshot(
-                &bytes, provider, &key,
-            )?)?),
+        let previous = match std::fs::read(&destination) {
+            Ok(bytes) => Some(decrypt_session_snapshot(&bytes, provider, &key)?),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => return Err(error.into()),
         };
+        if let Some(previous) = previous.as_ref() {
+            preserve_verified_cookie_metadata(&mut file, previous);
+        }
+        let current_hash = session_state_hash(&file)?;
+        let previous_hash = previous
+            .as_ref()
+            .map(session_state_hash)
+            .transpose()?;
 
         if previous_hash.as_deref() == Some(current_hash.as_str()) {
             remove_legacy_session_snapshot(provider)?;
@@ -408,6 +445,79 @@ impl VaultSessionStore {
             "encrypted session saved"
         );
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod preserve_cookie_metadata_tests {
+    use super::*;
+
+    fn cookie() -> Cookie {
+        Cookie {
+            name: "fixture".into(),
+            value: "synthetic".into(),
+            domain: ".google.com".into(),
+            path: "/".into(),
+            secure: true,
+            http_only: true,
+            expires: Some(2_000_000_000.0),
+            same_site: Some("Strict".into()),
+        }
+    }
+
+    fn snapshot(cookie: Cookie) -> SessionFile {
+        SessionFile {
+            local_storage: HashMap::new(),
+            cookies: vec![cookie],
+            ts: "fixture".into(),
+        }
+    }
+
+    #[test]
+    fn warm_capture_preserves_verified_cookie_expiry_and_same_site_only_if_identity_matches() {
+        let previous = snapshot(cookie());
+        let mut captured = cookie();
+        captured.expires = None;
+        captured.same_site = None;
+        let mut identical = snapshot(captured.clone());
+        preserve_verified_cookie_metadata(&mut identical, &previous);
+        assert_eq!(identical.cookies[0].expires, previous.cookies[0].expires);
+        assert_eq!(identical.cookies[0].same_site, previous.cookies[0].same_site);
+        assert_eq!(
+            session_state_hash(&identical).unwrap(),
+            session_state_hash(&previous).unwrap()
+        );
+
+        for changed in [
+            { let mut c = captured.clone(); c.value = "rotated".into(); c },
+            { let mut c = captured.clone(); c.domain = "google.com".into(); c },
+            { let mut c = captured.clone(); c.path = "/other".into(); c },
+            { let mut c = captured.clone(); c.http_only = false; c },
+        ] {
+            let mut snapshot = snapshot(changed);
+            preserve_verified_cookie_metadata(&mut snapshot, &previous);
+            assert!(snapshot.cookies[0].expires.is_none());
+            assert!(snapshot.cookies[0].same_site.is_none());
+        }
+    }
+
+    #[test]
+    fn expired_or_invalid_old_metadata_is_not_carried_to_new_capture() {
+        let mut previous_cookie = cookie();
+        previous_cookie.expires = Some(1_000_000_000.0);
+        let mut captured_cookie = cookie();
+        captured_cookie.expires = None;
+        captured_cookie.same_site = None;
+        let mut captured = snapshot(captured_cookie.clone());
+        preserve_verified_cookie_metadata(&mut captured, &snapshot(previous_cookie));
+        assert!(captured.cookies[0].expires.is_none());
+        assert!(captured.cookies[0].same_site.is_none());
+
+        let mut invalid = cookie();
+        invalid.same_site = Some("Unknown".into());
+        let mut captured = snapshot(captured_cookie);
+        preserve_verified_cookie_metadata(&mut captured, &snapshot(invalid));
+        assert!(captured.cookies[0].same_site.is_none());
     }
 }
 
