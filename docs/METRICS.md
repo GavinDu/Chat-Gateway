@@ -49,3 +49,10 @@ measures browser activation and is absent if persistence fails. HTTP status
 and sanitized handler logs indicate failure versus timeout. These aggregate
 histograms deliberately do not include provider names, cookie values, session
 identifiers, or URLs.
+
+The `gateway_provider_timeout_total` counter separates provider
+`phase="submission"` timeouts (prompt submission did not finish before the
+configured deadline) from `phase="generation"` timeouts (response polling
+exceeded that shared deadline after submission). These are terminal timeout
+events, not queue waits or evidence of a successful answer. Labels are limited
+to provider and these two fixed phase values.
