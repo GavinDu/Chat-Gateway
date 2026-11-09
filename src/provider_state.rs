@@ -35,6 +35,8 @@ pub struct ProviderSessionStatus {
 }
 
 const DEGRADED_RETRY_COOLDOWN: Duration = Duration::from_secs(15);
+const MANUAL_VERIFICATION_NOTICE: &str =
+    "provider manual verification required; resolve challenge and reset before retrying";
 
 /// Cloneable session registry. Clones share one gateway's state; independent
 /// registries are isolated, including in tests and embedded gateway instances.
@@ -72,6 +74,15 @@ impl ProviderSessionRegistry {
 
     pub fn record_needs_login(&self, provider: &str) {
         self.record_error_state(provider, true, None);
+    }
+
+    /// Expose only a fixed, non-sensitive classification for dashboards.
+    /// Manual challenges never become automatic cooldown retries.
+    pub fn manual_challenge_required(&self, provider: &str) -> bool {
+        let status = self.status(provider);
+        status.state == ProviderSessionState::Degraded
+            && status.retry_after.is_none()
+            && status.last_error.as_deref() == Some(MANUAL_VERIFICATION_NOTICE)
     }
 
     pub fn record_probe_failure(&self, provider: &str) {
@@ -170,10 +181,7 @@ impl ProviderSessionRegistry {
                 provider.to_owned(),
                 ProviderSessionStatus {
                     state: ProviderSessionState::Degraded,
-                    last_error: Some(
-                        "provider manual verification required; resolve challenge and reset before retrying"
-                            .to_owned(),
-                    ),
+                    last_error: Some(MANUAL_VERIFICATION_NOTICE.to_owned()),
                     retry_after: None,
                 },
             );
@@ -373,6 +381,7 @@ mod tests {
         assert!(!message.contains("expired"));
         assert!(!registry.is_routable("gemini"));
         assert!(!registry.is_available("gemini"));
+        assert!(registry.manual_challenge_required("gemini"));
 
         registry.record_probe_success("gemini");
         registry.record_session_import("gemini");
@@ -382,6 +391,7 @@ mod tests {
             registry.status("gemini").state,
             ProviderSessionState::Unknown
         );
+        assert!(!registry.manual_challenge_required("gemini"));
     }
 
     #[test]
