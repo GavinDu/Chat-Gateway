@@ -841,6 +841,10 @@ pub(super) fn browser_thread(
                                     if reply.is_closed() { return Ok(()); }
                                     let file = session::load_session_file(provider.name())?
                                         .ok_or_else(|| anyhow::anyhow!("imported provider session is missing"))?;
+                                    // Validate every eligible cookie before the refresh clears
+                                    // the old browser-wide jar. Invalid snapshots must not
+                                    // disrupt a previously usable provider page/session.
+                                    session::preflight_cookie_restore(&file, provider.name())?;
                                     let activated = page_session::activate_if_changed(&applied_imports, provider, &file, || async {
                                     page_session::replace_after_success(
                                     || async {
