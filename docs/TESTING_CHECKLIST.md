@@ -26,8 +26,12 @@ Docker key-volume access and HTTP authentication work together.
 - [ ] Reject approval page fetches from scripts/frames, wrong Origin, wrong CSRF capability, expired requests, and token-exchange replay. Polling before approval must not return a token.
 - [ ] Close and reopen the popup during approval; confirm it completes and reconnects after browser/gateway restarts.
 - [ ] Show provider statuses inside the extension and refresh them while open.
-- [ ] With all eight providers enabled, keep status responses responsive during browser probes; unavailable live observations must fall back to saved-session and cached availability without claiming verified login.
+- [ ] With all nine providers enabled, keep status responses responsive during browser probes; unavailable live observations must fall back to saved-session and cached availability without claiming verified login.
 - [ ] Connect an already signed-in provider and sync its existing session; with no session, open the official provider site and sync cookie changes after sign-in.
 - [ ] Keep permission denial, logout/expired session, disabled provider, and unavailable gateway visible without claiming cookies prove a verified login.
 
 - [ ] Start through the real Docker helper using an owner-only (`0600`) host config; confirm the nonroot gateway reads its private config volume and the host file remains `0600`.
+
+## Epic #807 provider acceptance
+
+Record per-provider merged-main evidence in [the provider acceptance matrix](EPIC_807_PROVIDER_ACCEPTANCE.md). Do not treat synthetic fixtures or successful GitHub Actions checks as evidence of a valid live login or completed provider reply.
