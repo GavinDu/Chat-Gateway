@@ -807,12 +807,14 @@ fn requires_submission_acknowledgement(url: &str) -> bool {
     if !matches!(uri.scheme_str(), Some("https" | "http")) {
         return false;
     }
-    let host = uri.host().unwrap_or_default().trim_end_matches('.').to_ascii_lowercase();
+    let host = uri
+        .host()
+        .unwrap_or_default()
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
     match host.as_str() {
         "chatgpt.com" | "www.chatgpt.com" | "grok.com" | "www.grok.com" => true,
-        "x.com" | "www.x.com" => {
-            uri.path() == "/i/grok" || uri.path().starts_with("/i/grok/")
-        }
+        "x.com" | "www.x.com" => uri.path() == "/i/grok" || uri.path().starts_with("/i/grok/"),
         _ => false,
     }
 }
@@ -832,7 +834,10 @@ mod provider_submission_route_tests {
             "https://x.com/i/grok/",
             "https://www.x.com/i/grok/conversation/123",
         ] {
-            assert!(requires_submission_acknowledgement(url), "missing acknowledgement guard for {url}");
+            assert!(
+                requires_submission_acknowledgement(url),
+                "missing acknowledgement guard for {url}"
+            );
         }
     }
 
@@ -847,7 +852,10 @@ mod provider_submission_route_tests {
             "https://claude.ai/",
             "data:text/html,<div>grok.com</div>",
         ] {
-            assert!(!requires_submission_acknowledgement(url), "incorrect provider acknowledgement guard for {url}");
+            assert!(
+                !requires_submission_acknowledgement(url),
+                "incorrect provider acknowledgement guard for {url}"
+            );
         }
     }
 }
