@@ -961,8 +961,24 @@ fn submission_snapshot(
             for (const selector of responses) {{
                 try {{ document.querySelectorAll(selector).forEach(node => nodes.add(node)); }} catch (_) {{}}
             }}
+            // Treat only visible, actionable generation controls as streaming.
+            // Hidden leftovers and unrelated controls such as "Stop sharing"
+            // must not turn an unacknowledged click into a successful send.
+            const visible = node => {{
+                try {{
+                    return node.getClientRects().length > 0 &&
+                        window.getComputedStyle(node).visibility !== "hidden" &&
+                        !node.closest('[hidden], [inert], [aria-hidden="true"]') &&
+                        !node.disabled && node.getAttribute("aria-disabled") !== "true";
+                }} catch (_) {{ return false; }}
+            }};
+            const streaming = Array.from(document.querySelectorAll('[data-is-streaming="true"]')).some(visible) ||
+                Array.from(document.querySelectorAll("button")).some(button => visible(button) &&
+                    /^(stop|stop generating|stop generation|stop responding|stop response|stop answering)$/i.test(
+                        (button.getAttribute("aria-label") || button.innerText || button.textContent || "").trim()
+                    ));
             return {{ inputPresent: !!el, inputEmpty: value !== null && !value.trim(), responseCount: nodes.size,
-                streaming: !!document.querySelector('[data-is-streaming="true"], button[aria-label*="Stop"]') }};
+                streaming }};
         }})()"#
     );
     let v = page.evaluate(&js);
@@ -1138,6 +1154,35 @@ mod submission_transition_tests {
         );
         assert_eq!(page.evaluate("window.sent || 0").as_f64(), Some(1.0));
         assert_eq!(page.evaluate("window.entered || 0").as_f64(), Some(0.0));
+    }
+
+    #[tokio::test]
+    async fn hidden_or_unrelated_stop_control_does_not_acknowledge_submission() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body><form><textarea id="prompt">draft</textarea><button id="stop" aria-label="Stop generating" style="display:none">Stop</button><button aria-label="Stop sharing">Stop sharing</button><span data-is-streaming="true" hidden></span></form></body></html>"#;
+        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+
+        let baseline = super::submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
+        assert!(!baseline.streaming);
+        assert!(!baseline.input_empty);
+        // Simulate the SPA inserting an unrelated Stop control after click:
+        // without a new assistant node this must still not count as an ack.
+        page.evaluate("document.querySelector('[aria-label=\"Stop sharing\"]').setAttribute('data-test', 'unchanged')");
+        let unrelated = super::submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
+        assert!(!super::submission_accepted(&baseline, &unrelated));
+
+        // A genuinely visible generation Stop is an observable transition.
+        page.evaluate("document.querySelector('#stop').style.display = 'block'");
+        let active = super::submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
+        assert!(active.streaming);
+        assert!(super::submission_accepted(&baseline, &active));
     }
 
     #[test]
