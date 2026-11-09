@@ -71,8 +71,11 @@ fn diagnostic_prompt_retained(page: &obscura_core::Page, selector: &str, prompt:
                 el.getClientRects().length > 0 &&
                 window.getComputedStyle(el).visibility !== 'hidden' &&
                 !el.closest('[hidden], [inert], [aria-hidden="true"]') &&
-                !el.disabled && !el.readOnly &&
-                el.getAttribute('aria-disabled') !== 'true'
+                !el.disabled && !el.matches(':disabled') &&
+                !el.closest('fieldset[disabled]') && !el.readOnly &&
+                el.getAttribute('aria-disabled') !== 'true' &&
+                el.getAttribute('aria-readonly') !== 'true' &&
+                el.getAttribute('contenteditable') !== 'false'
             );
             if (!el) return false;
             const value = 'value' in el ? el.value : (el.innerText || el.textContent || '');
@@ -94,6 +97,9 @@ mod adapter_diagnostic_composer_tests {
         let html = r#"<html><body>
             <textarea id="hidden" class="composer" style="display:none">stale</textarea>
             <textarea id="disabled" class="composer" disabled>stale</textarea>
+            <fieldset disabled><textarea id="inherited" class="composer">stale</textarea></fieldset>
+            <div id="noneditable" class="composer" contenteditable="false">stale</div>
+            <div id="aria-readonly" class="composer" contenteditable="true" aria-readonly="true">stale</div>
             <textarea id="ready" class="composer">diagnostic draft</textarea>
             </body></html>"#;
         let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
@@ -101,7 +107,17 @@ mod adapter_diagnostic_composer_tests {
             .await
             .unwrap();
         assert_eq!(
-            super::diagnostic_input_selector(&page, &["#hidden", "#disabled", "#ready"]),
+            super::diagnostic_input_selector(
+                &page,
+                &[
+                    "#hidden",
+                    "#disabled",
+                    "#inherited",
+                    "#noneditable",
+                    "#aria-readonly",
+                    "#ready"
+                ]
+            ),
             Some("#ready")
         );
         assert!(super::diagnostic_prompt_retained(
