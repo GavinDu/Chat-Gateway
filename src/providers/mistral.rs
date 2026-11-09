@@ -184,7 +184,10 @@ fn mistral_readiness_summary(evidence: &serde_json::Value) -> String {
     };
     let scripts = count("scriptCount");
     let resources = count("loadedResources");
-    let resource_timing = match evidence.get("resourceTimingAvailable").and_then(|v| v.as_bool()) {
+    let resource_timing = match evidence
+        .get("resourceTimingAvailable")
+        .and_then(|v| v.as_bool())
+    {
         Some(true) => "available",
         Some(false) => "unavailable",
         None => "unknown",
@@ -281,7 +284,10 @@ mod readiness_tests {
         );
         let diagnostics = super::mistral_readiness_diagnostics(&page);
         assert!(diagnostics.contains("script_elements=1"), "{diagnostics}");
-        assert!(diagnostics.contains("resource_timing=unavailable"), "{diagnostics}");
+        assert!(
+            diagnostics.contains("resource_timing=unavailable"),
+            "{diagnostics}"
+        );
         assert!(
             diagnostics.contains("blocker=resource_timing_unavailable"),
             "{diagnostics}"
