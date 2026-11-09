@@ -941,6 +941,21 @@ mod text_selector_tests {
 #[cfg(test)]
 mod browser_event_loop_tests {
     #[tokio::test]
+    async fn disabled_send_button_never_dispatches_enter() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        page.goto("data:text/html,<html><body><form><textarea id='prompt'></textarea><button id='send' disabled>Send</button></form><script>window.enterCount=0;document.querySelector('#prompt').addEventListener('keydown',()=>window.enterCount++)</script></body></html>")
+            .await
+            .unwrap();
+        let result = super::click_send_or_enter(&mut page, &["#send"], "#prompt", 200).await;
+        assert!(result.is_err());
+        assert_eq!(page.evaluate("window.enterCount"), serde_json::json!(0));
+    }
+
+    #[tokio::test]
     async fn delayed_composer_is_observed_by_selector_wait() {
         let browser = obscura_core::Browser::builder()
             .stealth(false)
