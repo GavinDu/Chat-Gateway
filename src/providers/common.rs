@@ -394,6 +394,15 @@ pub async fn human_type(page: &Page, selectors: &[&str], text: &str) -> anyhow::
     if page.evaluate(&js).as_bool() != Some(true) {
         anyhow::bail!("typing into the provider input failed");
     }
+    // Controlled editors may discard synthetic input on their next render.
+    // A successful event dispatch alone is not evidence that the prompt stuck.
+    tokio::time::sleep(Duration::from_millis(120)).await;
+    let retained = page.evaluate(&format!(
+        "(() => {{ const el = document.querySelector({selector_js}); if (!el) return false; const value = ('value' in el ? el.value : (el.innerText || el.textContent || '')); return value === {text_js}; }})()"
+    ));
+    if retained.as_bool() != Some(true) {
+        anyhow::bail!("provider input did not retain the prompt after framework render");
+    }
     Ok(())
 }
 
@@ -437,7 +446,16 @@ pub async fn click_send_or_enter(
         }
         drive_page(page, Duration::from_millis(150)).await;
     }
-    // Do not report a successful fallback when Enter could not be dispatched.
+    // A disabled send control is an explicit refusal by the application.
+    // Synthetic Enter is not trusted and must not bypass that state.
+    let send_js = serde_json::to_string(send_selectors)?;
+    let disabled = page.evaluate(&format!(
+        "(() => {{ const input = document.querySelector({input_js}); if (!input) return true; const selectors = {send_js}; let root = input; for (let depth = 0; root && depth < 6; depth++, root = root.parentElement) {{ if (root.tagName === 'BODY' || root.tagName === 'HTML') break; for (const selector of selectors) {{ const button = root.querySelector(selector); if (button && (button.disabled || button.getAttribute('aria-disabled') === 'true')) return true; }} if (root.tagName === 'FORM') break; }} return false; }})()"
+    ));
+    if disabled.as_bool() == Some(true) {
+        anyhow::bail!("provider send control is disabled or composer is missing");
+    }
+    // Enter dispatch is a best-effort fallback, not a submission acknowledgement.
     press_enter(page, input_selector)?;
     Ok(false)
 }
