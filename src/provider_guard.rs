@@ -116,18 +116,37 @@ fn current_utc_day() -> u64 {
         / 86_400
 }
 
+/// Only a challenge host or URL path is evidence of a challenge route.
+/// Query parameters (including user prompts, redirect targets or conversation
+/// IDs) must never trip the sticky provider-wide challenge circuit breaker.
+fn is_challenge_url(url: &str) -> bool {
+    let Ok(uri) = url.parse::<axum::http::Uri>() else {
+        return false;
+    };
+    if !matches!(uri.scheme_str(), Some("https" | "http")) {
+        return false;
+    }
+    let host = uri.host().unwrap_or_default().to_ascii_lowercase();
+    let host = host.trim_end_matches('.');
+    if matches!(host, "challenges.cloudflare.com" | "challenge.cloudflare.com") {
+        return true;
+    }
+    uri.path().split('/').any(|segment| {
+        matches!(
+            segment.to_ascii_lowercase().as_str(),
+            "captcha"
+                | "challenge"
+                | "checkpoint"
+                | "verify-human"
+                | "verify_you_are_human"
+                | "challenge-platform"
+        )
+    })
+}
+
 fn has_challenge_marker(url: &str, body: &str) -> bool {
-    let url = url.to_ascii_lowercase();
     let body = body.to_ascii_lowercase();
-    [
-        "captcha",
-        "challenge",
-        "checkpoint",
-        "verify-human",
-        "verify_you_are_human",
-    ]
-    .iter()
-    .any(|needle| url.contains(needle))
+    is_challenge_url(url)
         || [
             "verify you are human",
             "confirm you are not a robot",
@@ -207,6 +226,28 @@ mod tests {
             "https://example.test/chat",
             "Welcome back. How can I help?"
         ));
+    }
+
+    #[test]
+    fn challenge_url_detection_ignores_non_route_keywords() {
+        for url in [
+            "https://chatgpt.com/c/challenge-essay",
+            "https://gemini.google.com/app?q=security%20challenge",
+            "https://grok.com/chat?next=https%3A%2F%2Fexample.test%2Fcaptcha",
+            "https://challenges.cloudflare.com.attacker.invalid/",
+            "data:text/html,<div>challenge</div>",
+        ] {
+            assert!(!is_challenge_url(url), "false challenge redirect: {url}");
+            assert!(!has_challenge_marker(url, ""), "false challenge page: {url}");
+        }
+        for url in [
+            "https://example.test/cdn-cgi/challenge-platform/h/g/",
+            "https://example.test/verify-human",
+            "https://example.test/checkpoint?next=/chat",
+            "https://challenges.cloudflare.com/",
+        ] {
+            assert!(is_challenge_url(url), "missed challenge route: {url}");
+        }
     }
 
     #[tokio::test]
