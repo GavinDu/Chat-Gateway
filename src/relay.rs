@@ -854,6 +854,7 @@ async fn bounded_session_status_scan<T: Send + 'static>(
 mod relay_persist_off_reactor_tests {
     use super::{bounded_session_status_scan, session_snapshot_io_off_reactor};
     use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
     #[tokio::test(flavor = "current_thread")]
     async fn snapshot_persistence_runs_off_the_async_request_thread() {
