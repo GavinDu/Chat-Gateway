@@ -62,12 +62,9 @@ pub(super) fn build_login_view(
     let input_found = registry
         .get(&provider)
         .map(|a| {
-            // Login readiness must use the same selectors as prompt sending:
-            // a YAML override can replace the provider's default composer.
-            a.effective_selectors()
-                .input_refs()
-                .iter()
-                .any(|s| providers::common::element_exists(page, s))
+            // Use configured selectors, but do not report hidden/disabled
+            // SPA placeholders as usable composer controls.
+            providers::common::visible_composer_exists(page, &a.effective_selectors().input_refs())
         })
         .unwrap_or(false);
     let (state, logged_in) = login::login_state(is_login, input_found);
