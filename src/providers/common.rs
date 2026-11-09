@@ -138,6 +138,12 @@ pub struct ResponseProbe {
 }
 
 fn decode_response_probe(value: serde_json::Value) -> ResponseProbe {
+    let url = value
+        .get("url")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let url_challenge = crate::provider_guard::is_challenge_url(&url);
     ResponseProbe {
         text: value
             .get("text")
@@ -160,15 +166,12 @@ fn decode_response_probe(value: serde_json::Value) -> ResponseProbe {
             .get("postAnswerAffordance")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false),
-        url: value
-            .get("url")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default()
-            .to_owned(),
-        challenge: value
-            .get("challenge")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false),
+        url,
+        challenge: url_challenge
+            || value
+                .get("challenge")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
     }
 }
 
@@ -224,10 +227,10 @@ pub fn response_probe(
                     .some(button => ((button.innerText || button.textContent || "").trim()).toLowerCase().includes("stop"));
             }}
             const url = String(location.href || "");
-            const lowerUrl = url.toLowerCase();
             const body = ({check_body_challenge} ? (document.body?.innerText || "").slice(0, 12000) : "").toLowerCase();
-            const challenge = ["captcha", "challenge", "checkpoint", "verify-human", "verify_you_are_human"].some(marker => lowerUrl.includes(marker))
-                || ["verify you are human", "confirm you are not a robot", "unusual traffic", "complete the captcha", "security challenge", "checking your browser"].some(marker => body.includes(marker));
+            // URL challenge detection runs in Rust using the shared host/path
+            // classifier. Query values and chat text must not trip the guard.
+            const challenge = ["verify you are human", "confirm you are not a robot", "unusual traffic", "complete the captcha", "security challenge", "checking your browser"].some(marker => body.includes(marker));
             let postAnswerAffordance = false;
             if (lastResponseNode) {{
                 const scopeSelector = "article, [data-message-author-role='assistant'], [data-testid='assistant-message'], [data-testid*='conversation-turn'], [data-testid*='message']";
@@ -300,6 +303,25 @@ pub fn element_exists(page: &Page, selector: &str) -> bool {
 #[cfg(test)]
 mod response_probe_tests {
     use super::{decode_response_probe, ResponseProbe};
+
+    #[test]
+    fn challenge_probe_does_not_disable_provider_for_query_text() {
+        let query = serde_json::json!({
+            "url": "https://gemini.google.com/app?prompt=security%20challenge",
+            "challenge": false
+        });
+        assert!(!decode_response_probe(query).challenge);
+        let challenge = serde_json::json!({
+            "url": "https://chatgpt.com/cdn-cgi/challenge-platform/h/g/",
+            "challenge": false
+        });
+        assert!(decode_response_probe(challenge).challenge);
+        let body = serde_json::json!({
+            "url": "https://chatgpt.com/",
+            "challenge": true
+        });
+        assert!(decode_response_probe(body).challenge);
+    }
 
     #[test]
     fn decodes_response_probe_fields_and_handles_malformed_values() {
