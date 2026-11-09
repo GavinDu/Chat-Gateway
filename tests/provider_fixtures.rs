@@ -70,6 +70,10 @@ const FIXTURES: &[(&str, &str, &str)] = &[
         include_str!("fixtures/gemini/streaming.html"),
     ),
     ("gemini", "done", include_str!("fixtures/gemini/done.html")),
+    ("manus", "logged-out", include_str!("fixtures/manus/logged-out.html")),
+    ("manus", "idle", include_str!("fixtures/manus/idle.html")),
+    ("manus", "streaming", include_str!("fixtures/manus/streaming.html")),
+    ("manus", "done", include_str!("fixtures/manus/done.html")),
     (
         "grok",
         "logged-out",
@@ -133,6 +137,7 @@ fn every_provider_has_all_required_states() {
         "chatgpt",
         "gemini",
         "grok",
+        "manus",
         "mistral",
         "perplexity",
     ] {
