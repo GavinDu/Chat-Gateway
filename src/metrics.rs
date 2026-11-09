@@ -269,7 +269,10 @@ impl MetricsRegistry {
                 histogram.render(&mut out, metric, label, key);
             }
         }
-        let _ = writeln!(out, "# TYPE gateway_relay_session_import_phase_ms histogram");
+        let _ = writeln!(
+            out,
+            "# TYPE gateway_relay_session_import_phase_ms histogram"
+        );
         for (phase, histogram) in &data.relay_import_phase_ms {
             histogram.render(
                 &mut out,
@@ -363,12 +366,12 @@ mod tests {
         registry.record_relay_import_phase("activate", 42);
         registry.record_relay_import_phase("secret-session-id", 999);
         let metrics = registry.render_with_provider_states(&[]);
-        assert!(metrics.contains(
-            "gateway_relay_session_import_phase_ms_count{phase=\"persist\"} 1"
-        ));
-        assert!(metrics.contains(
-            "gateway_relay_session_import_phase_ms_sum{phase=\"activate\"} 42"
-        ));
+        assert!(
+            metrics.contains("gateway_relay_session_import_phase_ms_count{phase=\"persist\"} 1")
+        );
+        assert!(
+            metrics.contains("gateway_relay_session_import_phase_ms_sum{phase=\"activate\"} 42")
+        );
         assert!(!metrics.contains("secret-session-id"));
     }
 
