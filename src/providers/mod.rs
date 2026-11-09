@@ -1533,7 +1533,10 @@ mod nine_provider_selector_fixture_tests {
             ("perplexity", "<textarea placeholder='Ask question'></textarea>", "<button aria-label='Submit'>Submit</button>", "<div data-testid='answer'>SYNTHETIC_RESPONSE</div>"),
         ];
         assert_eq!(fixtures.len(), ADAPTERS.len());
-        let browser = obscura_core::Browser::builder().stealth(false).build().unwrap();
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
         for (name, input, send, response) in fixtures {
             let spec = ADAPTERS
                 .iter()
@@ -1542,7 +1545,9 @@ mod nine_provider_selector_fixture_tests {
             let html = format!("<html><body>{input}{send}{response}</body></html>");
             let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
             let mut page = browser.new_page().await.unwrap();
-            page.goto(&format!("data:text/html,{encoded}")).await.unwrap();
+            page.goto(&format!("data:text/html,{encoded}"))
+                .await
+                .unwrap();
 
             let groups = [
                 ("input", spec.selectors.input),
@@ -1551,7 +1556,10 @@ mod nine_provider_selector_fixture_tests {
             ];
             let observed = common::probe_selector_groups(&page, &groups);
             for (role, matched) in observed {
-                assert!(matched.is_some(), "{name}: {role} selectors did not match the fixture");
+                assert!(
+                    matched.is_some(),
+                    "{name}: {role} selectors did not match the fixture"
+                );
             }
             assert_eq!(
                 common::response_text(&page, spec.selectors.response).as_deref(),
@@ -1569,7 +1577,12 @@ mod nine_provider_selector_fixture_tests {
                 ("send", spec.selectors.send),
                 ("response", spec.selectors.response),
             ] {
-                assert!(!selectors.is_empty(), "{} missing {} selectors", spec.id, role);
+                assert!(
+                    !selectors.is_empty(),
+                    "{} missing {} selectors",
+                    spec.id,
+                    role
+                );
                 let unique: std::collections::HashSet<_> = selectors.iter().collect();
                 assert_eq!(
                     unique.len(),
