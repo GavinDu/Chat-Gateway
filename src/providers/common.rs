@@ -478,7 +478,7 @@ pub async fn click_send_or_enter(
         for selector in send_selectors {
             let selector_js = serde_json::to_string(selector)?;
             let js = format!(
-                "(() => {{ const input = document.querySelector({input_js}); if (!input) return false; let root = input; for (let depth = 0; root && depth < 6; depth++, root = root.parentElement) {{ if (root.tagName === 'BODY' || root.tagName === 'HTML') break; for (const button of root.querySelectorAll({selector_js})) {{ if (button.getClientRects().length && window.getComputedStyle(button).visibility !== 'hidden' && !button.closest('[inert], [aria-hidden=true]') && !button.disabled && button.getAttribute('aria-disabled') !== 'true') {{ button.click(); return true; }} }} if (root.tagName === 'FORM') break; }} return false; }})()"
+                "(() => {{ const input = document.querySelector({input_js}); if (!input) return false; let root = input; for (let depth = 0; root && depth < 12; depth++, root = root.parentElement) {{ if (root.tagName === 'BODY' || root.tagName === 'HTML') break; for (const button of root.querySelectorAll({selector_js})) {{ if (button.getClientRects().length && window.getComputedStyle(button).visibility !== 'hidden' && !button.closest('[inert], [aria-hidden=true]') && !button.disabled && button.getAttribute('aria-disabled') !== 'true') {{ button.click(); return true; }} }} if (root.tagName === 'FORM') break; }} return false; }})()"
             );
             if page.evaluate(&js).as_bool() == Some(true) {
                 return Ok(true);
@@ -490,7 +490,7 @@ pub async fn click_send_or_enter(
     // Synthetic Enter is not trusted and must not bypass that state.
     let send_js = serde_json::to_string(send_selectors)?;
     let disabled = page.evaluate(&format!(
-        "(() => {{ const input = document.querySelector({input_js}); if (!input) return true; const selectors = {send_js}; let root = input; for (let depth = 0; root && depth < 6; depth++, root = root.parentElement) {{ if (root.tagName === 'BODY' || root.tagName === 'HTML') break; for (const selector of selectors) {{ for (const button of root.querySelectorAll(selector)) {{ if (button.getClientRects().length && window.getComputedStyle(button).visibility !== 'hidden' && !button.closest('[inert], [aria-hidden=true]') && (button.disabled || button.getAttribute('aria-disabled') === 'true')) return true; }} }} if (root.tagName === 'FORM') break; }} return false; }})()"
+        "(() => {{ const input = document.querySelector({input_js}); if (!input) return true; const selectors = {send_js}; let root = input; for (let depth = 0; root && depth < 12; depth++, root = root.parentElement) {{ if (root.tagName === 'BODY' || root.tagName === 'HTML') break; for (const selector of selectors) {{ for (const button of root.querySelectorAll(selector)) {{ if (button.getClientRects().length && window.getComputedStyle(button).visibility !== 'hidden' && !button.closest('[inert], [aria-hidden=true]') && (button.disabled || button.getAttribute('aria-disabled') === 'true')) return true; }} }} if (root.tagName === 'FORM') break; }} return false; }})()"
     ));
     if disabled.as_bool() == Some(true) {
         anyhow::bail!("provider send control is disabled or composer is missing");
@@ -1066,6 +1066,32 @@ mod submission_transition_tests {
             page.evaluate("window.visibleClicks || 0").as_f64(),
             Some(1.0)
         );
+    }
+
+    #[tokio::test]
+    async fn deeply_nested_composer_finds_form_send_without_synthetic_enter() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        // The send control is a sibling of eight nested editor wrappers.
+        let wrappers = "<div>".repeat(8);
+        let closers = "</div>".repeat(8);
+        let html = format!(
+            "<html><body><form><button type='button' id='send' onclick='window.sent=(window.sent||0)+1'>Send</button>{wrappers}<textarea id='prompt'>message</textarea>{closers}</form><script>window.entered=0;document.querySelector('#prompt').addEventListener('keydown',()=>window.entered++)</script></body></html>"
+        );
+        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}")).await.unwrap();
+
+        assert!(
+            super::click_send_or_enter(&mut page, &["#send"], "#prompt", 450)
+                .await
+                .unwrap(),
+            "deep composer must click its actual send control"
+        );
+        assert_eq!(page.evaluate("window.sent || 0").as_f64(), Some(1.0));
+        assert_eq!(page.evaluate("window.entered || 0").as_f64(), Some(0.0));
     }
 
     #[test]
