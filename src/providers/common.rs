@@ -370,6 +370,14 @@ pub fn visible_composer_exists(page: &Page, selectors: &[&str]) -> bool {
     page.evaluate(&script).as_bool() == Some(true)
 }
 
+/// Choose the first actionable input from a selector that may match
+/// both a hidden sizing placeholder and the actual visible composer.
+fn visible_input_query(selector_js: &str) -> String {
+    format!(
+        "Array.from(document.querySelectorAll({selector_js})).find(el => el.getClientRects().length > 0 && window.getComputedStyle(el).visibility !== 'hidden' && !el.closest('[hidden], [inert], [aria-hidden=\"true\"]') && !el.disabled && !el.readOnly && el.getAttribute('aria-disabled') !== 'true')"
+    )
+}
+
 #[cfg(test)]
 mod visible_composer_tests {
     use super::visible_composer_exists;
@@ -513,19 +521,28 @@ pub fn click_first(page: &Page, selectors: &[&str]) -> anyhow::Result<()> {
 /// native value setter branch instead of execCommand. Everything else
 /// keeps merged's path (selectAll clear + execCommand insertText).
 pub async fn human_type(page: &Page, selectors: &[&str], text: &str) -> anyhow::Result<()> {
-    click_first(page, selectors)?;
-    tokio::time::sleep(Duration::from_millis(80)).await;
     let selector = selectors
         .iter()
         .copied()
-        .find(|selector| element_exists(page, selector))
-        .ok_or_else(|| anyhow::anyhow!("provider input disappeared before typing"))?;
+        .find(|selector| visible_composer_exists(page, &[*selector]))
+        .ok_or_else(|| anyhow::anyhow!("actionable provider composer disappeared before typing"))?;
     let selector_js = serde_json::to_string(selector)?;
+    let el_js = visible_input_query(&selector_js);
+    // Preserve Obscura's native click for ordinary single inputs. When the
+    // first matching node is hidden, avoid clicking that stale placeholder;
+    // the JS input path below focuses the visible match instead.
+    let first_is_actionable = page.evaluate(&format!(
+        "(() => {{ const el = {el_js}; return !!el && el === document.querySelector({selector_js}); }})()"
+    ));
+    if first_is_actionable.as_bool() == Some(true) {
+        click_first(page, &[selector])?;
+    }
+    tokio::time::sleep(Duration::from_millis(80)).await;
     let text_js = serde_json::to_string(text)?;
     let js = format!(
-        "(function() {{ var el = document.querySelector({selector}); if (!el) return false; el.focus(); if (el.tagName === 'TEXTAREA') {{ try {{ var setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set; setter.call(el, {text}); }} catch (e) {{ el.value = {text}; }} el.dispatchEvent(new InputEvent('input', {{ bubbles: true, inputType: 'insertText', data: {text} }})); el.dispatchEvent(new Event('change', {{ bubbles: true }})); return true; }} try {{ document.execCommand('selectAll', false, null); }} catch (e) {{}} var ok = false; try {{ ok = document.execCommand('insertText', false, {text}); }} catch (e) {{}} if (!ok) {{ if ('value' in el) {{ el.value = {text}; }} else {{ el.textContent = {text}; }} }} el.dispatchEvent(new InputEvent('input', {{ bubbles: true, inputType: 'insertText', data: {text} }})); el.dispatchEvent(new Event('change', {{ bubbles: true }})); return true; }})()",
+        "(function() {{ var el = {el_js}; if (!el) return false; el.focus(); if (el.tagName === 'TEXTAREA') {{ try {{ var setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set; setter.call(el, {text}); }} catch (e) {{ el.value = {text}; }} el.dispatchEvent(new InputEvent('input', {{ bubbles: true, inputType: 'insertText', data: {text} }})); el.dispatchEvent(new Event('change', {{ bubbles: true }})); return true; }} try {{ document.execCommand('selectAll', false, null); }} catch (e) {{}} var ok = false; try {{ ok = document.execCommand('insertText', false, {text}); }} catch (e) {{}} if (!ok) {{ if ('value' in el) {{ el.value = {text}; }} else {{ el.textContent = {text}; }} }} el.dispatchEvent(new InputEvent('input', {{ bubbles: true, inputType: 'insertText', data: {text} }})); el.dispatchEvent(new Event('change', {{ bubbles: true }})); return true; }})()",
         text = text_js,
-        selector = selector_js,
+        el_js = el_js,
     );
     if page.evaluate(&js).as_bool() != Some(true) {
         anyhow::bail!("typing into the provider input failed");
@@ -534,7 +551,7 @@ pub async fn human_type(page: &Page, selectors: &[&str], text: &str) -> anyhow::
     // A successful event dispatch alone is not evidence that the prompt stuck.
     tokio::time::sleep(Duration::from_millis(120)).await;
     let retained = page.evaluate(&format!(
-        "(() => {{ const el = document.querySelector({selector_js}); if (!el) return false; const value = ('value' in el ? el.value : (el.innerText || el.textContent || '')); return value === {text_js}; }})()"
+        "(() => {{ const el = {el_js}; if (!el) return false; const value = ('value' in el ? el.value : (el.innerText || el.textContent || '')); return value === {text_js}; }})()"
     ));
     if retained.as_bool() != Some(true) {
         anyhow::bail!("provider input did not retain the prompt after framework render");
@@ -549,9 +566,9 @@ pub async fn human_type(page: &Page, selectors: &[&str], text: &str) -> anyhow::
 /// may ignore it.
 pub fn press_enter(page: &Page, selector: &str) -> anyhow::Result<()> {
     let sel_js = serde_json::to_string(selector)?;
+    let el_js = visible_input_query(&sel_js);
     let js = format!(
-        "(function() {{ var el = document.querySelector({}); if (!el) return false; el.focus(); ['keydown','keypress','keyup'].forEach(function(t) {{ el.dispatchEvent(new KeyboardEvent(t, {{key:'Enter', code:'Enter', keyCode:13, which:13, bubbles:true, cancelable:true}})); }}); return true; }})()",
-        sel_js
+        "(function() {{ var el = {el_js}; if (!el) return false; el.focus(); ['keydown','keypress','keyup'].forEach(function(t) {{ el.dispatchEvent(new KeyboardEvent(t, {{key:'Enter', code:'Enter', keyCode:13, which:13, bubbles:true, cancelable:true}})); }}); return true; }})()"
     );
     if page.evaluate(&js).as_bool() != Some(true) {
         anyhow::bail!("press Enter failed: input element not found");
@@ -570,11 +587,12 @@ pub async fn click_send_or_enter(
 ) -> anyhow::Result<bool> {
     let start = std::time::Instant::now();
     let input_js = serde_json::to_string(input_selector)?;
+    let input_expr = visible_input_query(&input_js);
     while start.elapsed().as_millis() < timeout_ms as u128 {
         for selector in send_selectors {
             let selector_js = serde_json::to_string(selector)?;
             let js = format!(
-                "(() => {{ const input = document.querySelector({input_js}); if (!input) return false; let root = input; for (let depth = 0; root && depth < 12; depth++, root = root.parentElement) {{ if (root.tagName === 'BODY' || root.tagName === 'HTML') break; for (const button of root.querySelectorAll({selector_js})) {{ if (button.getClientRects().length && window.getComputedStyle(button).visibility !== 'hidden' && !button.closest('[inert], [aria-hidden=true]') && !button.disabled && button.getAttribute('aria-disabled') !== 'true') {{ button.click(); return true; }} }} if (root.tagName === 'FORM') break; }} return false; }})()"
+                "(() => {{ const input = {input_expr}; if (!input) return false; let root = input; for (let depth = 0; root && depth < 12; depth++, root = root.parentElement) {{ if (root.tagName === 'BODY' || root.tagName === 'HTML') break; for (const button of root.querySelectorAll({selector_js})) {{ if (button.getClientRects().length && window.getComputedStyle(button).visibility !== 'hidden' && !button.closest('[inert], [aria-hidden=true]') && !button.disabled && button.getAttribute('aria-disabled') !== 'true') {{ button.click(); return true; }} }} if (root.tagName === 'FORM') break; }} return false; }})()"
             );
             if page.evaluate(&js).as_bool() == Some(true) {
                 return Ok(true);
@@ -586,7 +604,7 @@ pub async fn click_send_or_enter(
     // Synthetic Enter is not trusted and must not bypass that state.
     let send_js = serde_json::to_string(send_selectors)?;
     let disabled = page.evaluate(&format!(
-        "(() => {{ const input = document.querySelector({input_js}); if (!input) return true; const selectors = {send_js}; let root = input; for (let depth = 0; root && depth < 12; depth++, root = root.parentElement) {{ if (root.tagName === 'BODY' || root.tagName === 'HTML') break; for (const selector of selectors) {{ for (const button of root.querySelectorAll(selector)) {{ if (button.getClientRects().length && window.getComputedStyle(button).visibility !== 'hidden' && !button.closest('[inert], [aria-hidden=true]') && (button.disabled || button.getAttribute('aria-disabled') === 'true')) return true; }} }} if (root.tagName === 'FORM') break; }} return false; }})()"
+        "(() => {{ const input = {input_expr}; if (!input) return true; const selectors = {send_js}; let root = input; for (let depth = 0; root && depth < 12; depth++, root = root.parentElement) {{ if (root.tagName === 'BODY' || root.tagName === 'HTML') break; for (const selector of selectors) {{ for (const button of root.querySelectorAll(selector)) {{ if (button.getClientRects().length && window.getComputedStyle(button).visibility !== 'hidden' && !button.closest('[inert], [aria-hidden=true]') && (button.disabled || button.getAttribute('aria-disabled') === 'true')) return true; }} }} if (root.tagName === 'FORM') break; }} return false; }})()"
     ));
     if disabled.as_bool() == Some(true) {
         anyhow::bail!("provider send control is disabled or composer is missing");
@@ -970,7 +988,7 @@ pub async fn send_prompt(
     let input_sel = inputs
         .iter()
         .copied()
-        .find(|s| page.query_selector(s).is_some())
+        .find(|s| visible_composer_exists(page, &[*s]))
         .unwrap_or(inputs[0]);
     let sends = set.send_refs();
     // The click/Enter dispatch is not proof that a controlled SPA accepted
@@ -1003,10 +1021,11 @@ fn submission_snapshot(
     response_selectors: &[&str],
 ) -> anyhow::Result<SubmissionSnapshot> {
     let input = serde_json::to_string(input_selector)?;
+    let input_expr = visible_input_query(&input);
     let responses = serde_json::to_string(response_selectors)?;
     let js = format!(
         r#"(() => {{
-            const el = document.querySelector({input});
+            const el = {input_expr};
             const value = el ? ('value' in el ? el.value : (el.innerText || el.textContent || '')) : null;
             const responses = {responses};
             const nodes = new Set();
@@ -1356,6 +1375,49 @@ mod browser_event_loop_tests {
         let result = super::click_send_or_enter(&mut page, &["#send"], "#prompt", 200).await;
         assert!(result.is_err());
         assert_eq!(page.evaluate("window.enterCount").as_f64(), Some(0.0));
+    }
+
+    #[tokio::test]
+    async fn hidden_duplicate_input_is_never_typed_or_used_for_send() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body><form><textarea class="prompt" style="display:none" onclick="window.hiddenClicks=(window.hiddenClicks||0)+1"></textarea><textarea class="prompt"></textarea><button id="send" type="button" onclick="window.sent=(window.sent||0)+1">Send</button></form></body></html>"#;
+        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+
+        super::wait_for_selector(&mut page, &["textarea.prompt"], 500)
+            .await
+            .unwrap();
+        super::human_type(&page, &["textarea.prompt"], "visible message")
+            .await
+            .unwrap();
+        assert_eq!(
+            page.evaluate(
+                "Array.from(document.querySelectorAll('textarea.prompt')).map(el => el.value)"
+            ),
+            serde_json::json!(["", "visible message"])
+        );
+        let baseline = super::submission_snapshot(&page, "textarea.prompt", &[".answer"]).unwrap();
+        assert!(
+            !baseline.input_empty,
+            "read the visible input, not the hidden autosizer"
+        );
+        assert!(
+            super::click_send_or_enter(&mut page, &["#send"], "textarea.prompt", 500)
+                .await
+                .unwrap(),
+            "send must use the visible input's enclosing form"
+        );
+        assert_eq!(page.evaluate("window.sent || 0").as_f64(), Some(1.0));
+        assert_eq!(
+            page.evaluate("window.hiddenClicks || 0").as_f64(),
+            Some(0.0)
+        );
     }
 
     #[tokio::test]
