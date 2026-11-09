@@ -171,7 +171,26 @@ pub trait SiteAdapter: Send + Sync {
     /// Providers with a Stop control use the shared selector; adapters may
     /// override this method when their UI needs a different action.
     fn cancel_generation(&self, page: &Page) {
-        let _ = common::click_first(page, &[r#"button[aria-label*="Stop"]"#]);
+        // A reused SPA can retain hidden/disabled Stop buttons, and may also
+        // show unrelated controls such as "Stop sharing". Clicking the first
+        // DOM match is not a reliable generation cancellation.
+        let _ = page.evaluate(
+            r#"(() => {
+                for (const button of document.querySelectorAll('button, [role="button"]')) {
+                    const label = (button.getAttribute("aria-label") || button.innerText || button.textContent || "").trim();
+                    if (!/^(stop|stop generating|stop generation|stop responding|stop response|stop answering)$/i.test(label)) continue;
+                    try {
+                        if (!button.getClientRects().length ||
+                            window.getComputedStyle(button).visibility === "hidden" ||
+                            button.closest('[hidden], [inert], [aria-hidden="true"]') ||
+                            button.disabled || button.getAttribute("aria-disabled") === "true") continue;
+                        button.click();
+                        return true;
+                    } catch (_) {}
+                }
+                return false;
+            })()"#,
+        );
     }
 
     fn selectors(&self) -> AdapterSelectors;
@@ -1642,6 +1661,34 @@ mod nine_provider_selector_fixture_tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod generation_cancel_visibility_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn cancellation_skips_hidden_disabled_and_unrelated_stop_buttons() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body><button aria-label="Stop generating" style="display:none" onclick="window.hiddenClicks=(window.hiddenClicks||0)+1">Hidden</button><button aria-label="Stop sharing" onclick="window.unrelatedClicks=(window.unrelatedClicks||0)+1">Stop sharing</button><button aria-label="Stop generating" disabled onclick="window.disabledClicks=(window.disabledClicks||0)+1">Disabled</button><button aria-label="Stop generating" onclick="window.activeClicks=(window.activeClicks||0)+1">Stop</button></body></html>"#;
+        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+
+        let adapter = qwen::QwenAdapter {
+            cfg: serde_yaml::from_str("name: qwen").unwrap(),
+        };
+        adapter.cancel_generation(&page);
+        assert_eq!(page.evaluate("window.activeClicks || 0").as_f64(), Some(1.0));
+        assert_eq!(page.evaluate("window.hiddenClicks || 0").as_f64(), Some(0.0));
+        assert_eq!(page.evaluate("window.disabledClicks || 0").as_f64(), Some(0.0));
+        assert_eq!(page.evaluate("window.unrelatedClicks || 0").as_f64(), Some(0.0));
     }
 }
 
