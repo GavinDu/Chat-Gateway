@@ -1469,10 +1469,25 @@ mod cookie_restore_result_tests {
     }
 }
 
+/// Check all eligible snapshot cookies before touching the shared browser
+/// cookie jar. A malformed later cookie must not leave a partially restored
+/// session, and refresh callers must preflight before clearing old credentials.
+pub(crate) fn preflight_cookie_restore(file: &SessionFile, provider: &str) -> Result<()> {
+    validate_cookie_scopes(file)?;
+    let invalid = file
+        .cookies
+        .iter()
+        .filter(|cookie| {
+            cookie_domain_allowed(provider, &cookie.domain) && !restored_cookie_fields_safe(cookie)
+        })
+        .count();
+    ensure_cookie_restore_complete(invalid)
+}
+
 /// Restore step 1 (BEFORE goto): put the saved cookies into the browser's
 /// cookie store so the first navigation is already authenticated.
 pub fn restore_cookies(browser: &Browser, file: &SessionFile, provider: &str) -> Result<()> {
-    validate_cookie_scopes(file)?;
+    preflight_cookie_restore(file, provider)?;
     let store = browser.cookies();
     let mut failed_writes = 0usize;
     let mut expected_restores = Vec::new();
@@ -1801,6 +1816,33 @@ mod cookie_scope_tests {
             assert_eq!(error, "failed to restore 1 provider session cookie(s)");
             assert!(browser.cookies().get_all().is_empty());
         }
+    }
+
+    #[tokio::test]
+    async fn late_invalid_cookie_rejects_entire_restore_without_partial_mutation() {
+        let browser = Browser::builder().stealth(false).build().unwrap();
+        browser
+            .cookies()
+            .set("preserved=dummy; Secure; Path=/", "https://chatgpt.com/")
+            .unwrap();
+        let mut valid = cookie("session", "new-private-value", "/");
+        valid.domain = "chatgpt.com".into();
+        let mut invalid = cookie("invalid", "new-private-value", "/");
+        invalid.domain = "chatgpt.com".into();
+        invalid.path = "/bad;inject".into();
+        let file = SessionFile {
+            cookies: vec![valid, invalid],
+            local_storage: HashMap::new(),
+            ts: "fixture".into(),
+        };
+        let err = preflight_cookie_restore(&file, "chatgpt").unwrap_err();
+        assert_eq!(err.to_string(), "failed to restore 1 provider session cookie(s)");
+        let err = restore_cookies(&browser, &file, "chatgpt").unwrap_err();
+        assert_eq!(err.to_string(), "failed to restore 1 provider session cookie(s)");
+        let remaining = browser.cookies().get_all();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].name, "preserved");
+        assert_eq!(remaining[0].value, "dummy");
     }
 
     #[tokio::test]
