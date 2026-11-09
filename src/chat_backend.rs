@@ -540,7 +540,6 @@ mod tests {
     use crate::browser::pool::{
         BrowserWorkerUnavailableError, ProviderBusyError, ProviderSessionExpiredError,
     };
-    use crate::providers::mistral::MistralAssetBlockedError;
     use anyhow::Result;
     use std::sync::Arc;
     use tokio::sync::mpsc;
