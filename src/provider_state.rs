@@ -150,6 +150,7 @@ impl ProviderSessionRegistry {
             | GatewayErrorKind::Memory => {}
             GatewayErrorKind::Timeout
             | GatewayErrorKind::ProviderFailure
+            | GatewayErrorKind::ProviderAssetBlocked
             | GatewayErrorKind::BackendUnavailable => self.record_probe_failure(provider),
         }
     }
