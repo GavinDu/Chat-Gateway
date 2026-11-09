@@ -106,7 +106,17 @@ mod adapter_diagnostic_composer_tests {
             .await
             .unwrap();
         assert_eq!(
-            super::diagnostic_input_selector(&page, &["#hidden", "#disabled", "#inherited", "#noneditable", "#aria-readonly", "#ready"]),
+            super::diagnostic_input_selector(
+                &page,
+                &[
+                    "#hidden",
+                    "#disabled",
+                    "#inherited",
+                    "#noneditable",
+                    "#aria-readonly",
+                    "#ready"
+                ]
+            ),
             Some("#ready")
         );
         assert!(super::diagnostic_prompt_retained(
