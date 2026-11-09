@@ -525,8 +525,9 @@ pub(super) fn browser_thread(
                                     let Some(page) = pages.borrow().get(&provider).cloned() else {
                                         return Ok(false);
                                     };
-                                    verify_session_page(provider, &page, adapter.as_ref())?;
-                                    Ok(true)
+                                    // An inconclusive probe is false, never a verified login.
+                                    // Preserve the distinction used during warm-up and by status.
+                                    verify_session_page(provider, &page, adapter.as_ref())
                                 }.await;
                                 let _ = reply.send(result);
                             });
