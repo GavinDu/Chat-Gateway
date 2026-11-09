@@ -1377,7 +1377,12 @@ struct SubmissionSnapshot {
 
 fn submission_accepted(before: &SubmissionSnapshot, after: &SubmissionSnapshot) -> bool {
     // A cleared draft alone is not proof that the provider received a turn.
-    after.user_turn_count > before.user_turn_count
+    // A newly visible user turn plus a cleared/unmounted composer is stronger
+    // evidence than either transition in isolation.
+    let user_turn_ack = after.user_turn_count > before.user_turn_count
+        && !before.input_empty
+        && (!after.input_present || after.input_empty);
+    user_turn_ack
         || after.response_count > before.response_count
         || (after.streaming && !before.streaming)
 }
@@ -1499,6 +1504,7 @@ mod submission_transition_tests {
             &before,
             &SubmissionSnapshot {
                 user_turn_count: 2,
+                input_empty: true,
                 ..before
             }
         ));
