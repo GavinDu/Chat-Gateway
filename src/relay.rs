@@ -827,16 +827,25 @@ pub async fn import_session(
         );
     }
     let store_started = Instant::now();
-    match crate::session::import_relay_session(&provider, &file) {
+    let imported = crate::session::import_relay_session(&provider, &file);
+    let vault_ms = store_started.elapsed().as_millis();
+    app.metrics.record_relay_import_phase(
+        "persist",
+        vault_ms.min(u64::MAX as u128) as u64,
+    );
+    match imported {
         Ok(()) => {
-            let vault_ms = store_started.elapsed().as_millis();
             let activation_started = Instant::now();
-            match bounded_session_activation(
+            let activated = bounded_session_activation(
                 RELAY_SESSION_ACTIVATION_TIMEOUT,
                 app.pool.refresh_session(&provider),
             )
-            .await
-            {
+            .await;
+            app.metrics.record_relay_import_phase(
+                "activate",
+                activation_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+            );
+            match activated {
                 Ok(Ok(())) => {
                     tracing::info!(
                         provider,
