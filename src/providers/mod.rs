@@ -56,6 +56,14 @@ fn provider_challenge_error(provider: &str) -> anyhow::Error {
     anyhow::Error::new(ProviderChallengeError::new(provider))
 }
 
+/// Typed auth failure for a redirect observed during prompt dispatch or
+/// response polling. Only the structured URL classifier may make this
+/// determination; query text and chat content are not authentication proof.
+fn login_redirect_error(url: &str) -> Option<anyhow::Error> {
+    common::is_login_url(url)
+        .then(|| anyhow::Error::new(crate::browser::pool::ProviderSessionExpiredError))
+}
+
 /// Primary selectors for an adapter (diagnostics + readiness reporting).
 // Selector metadata is retained for upcoming adapter contract/readiness diagnostics.
 #[allow(dead_code)]
@@ -520,6 +528,37 @@ mod response_poller_challenge_tests {
     }
 }
 
+#[cfg(test)]
+mod send_auth_redirect_tests {
+    use super::login_redirect_error;
+    use crate::browser::pool::ProviderSessionExpiredError;
+
+    #[test]
+    fn auth_routes_use_typed_session_expiry_during_submission_and_polling() {
+        for url in [
+            "https://chatgpt.com/auth/login?next=%2Fc",
+            "https://accounts.x.com/",
+            "https://login.microsoftonline.com/tenant/oauth2/authorize",
+        ] {
+            let error = login_redirect_error(url).expect("explicit auth redirect");
+            assert!(error.downcast_ref::<ProviderSessionExpiredError>().is_some());
+        }
+    }
+
+    #[test]
+    fn normal_conversations_and_redirect_strings_are_not_auth_failures() {
+        for url in [
+            "https://chatgpt.com/c/authoring",
+            "https://grok.com/chat?next=https%3A%2F%2Faccounts.x.com%2Flogin",
+            "https://accounts.x.com.attacker.invalid/",
+            "https://gemini.google.com/app?q=auth",
+            "data:text/html,<p>Login</p>",
+        ] {
+            assert!(login_redirect_error(url).is_none(), "false expiry: {url}");
+        }
+    }
+}
+
 /// Completion is a two-snapshot decision. A new token, DOM node, or resumed
 /// streaming indicator between the idle poll and the final challenge check
 /// invalidates completion. Otherwise a provider can append text just after
@@ -642,6 +681,10 @@ pub async fn run_send(
             .await;
         return;
     }
+    if let Some(error) = login_redirect_error(&page.url()) {
+        let _ = chunks.send(Err(error)).await;
+        return;
+    }
 
     // Baseline snapshot (Go concept, Rust form): capture the response
     // text BEFORE sending, so pre-existing text on a reused warm page
@@ -674,6 +717,8 @@ pub async fn run_send(
                 let _ = chunks
                     .send(Err(provider_challenge_error(adapter.name())))
                     .await;
+            } else if let Some(auth_error) = login_redirect_error(&page.url()) {
+                let _ = chunks.send(Err(auth_error)).await;
             } else {
                 let _ = chunks.send(Err(error)).await;
             }
@@ -754,6 +799,12 @@ pub async fn run_send(
             let _ = chunks
                 .send(Err(provider_challenge_error(adapter.name())))
                 .await;
+            return;
+        }
+        // A login redirect after Send must not look like a slow model or
+        // allow the previous warm-page response to complete successfully.
+        if let Some(auth_error) = login_redirect_error(&probe.url) {
+            let _ = chunks.send(Err(auth_error)).await;
             return;
         }
         if should_probe_response_count(response_node_detected)
