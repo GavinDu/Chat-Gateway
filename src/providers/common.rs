@@ -728,7 +728,7 @@ pub async fn send_prompt(
     let sends = set.send_refs();
     // The click/Enter dispatch is not proof that a controlled SPA accepted
     // the prompt. ChatGPT and Grok require a visible submission transition.
-    let verify_submission = set.url.contains("chatgpt.com") || set.url.contains("grok.com");
+    let verify_submission = page.url().contains("chatgpt.com") || page.url().contains("grok.com");
     let baseline = if verify_submission {
         Some(submission_snapshot(page, input_sel, &set.response_refs())?)
     } else {
