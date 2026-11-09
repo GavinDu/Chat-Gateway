@@ -566,13 +566,13 @@ fn cookie_expiration_header(cookie: &Cookie) -> Result<String> {
         anyhow::bail!("provider cookie prefix constraints prevent safe revocation");
     }
     let mut expired = format!("{}=; Max-Age=0; Path={}", cookie.name, path);
-    if host_prefix {
-        expired.push_str("; Secure");
-    } else {
+    // An exported domain without a leading dot denotes a host-only cookie.
+    // Adding Domain while revoking it would target a different cookie scope.
+    if !host_prefix && cookie.domain.starts_with('.') {
         expired.push_str(&format!("; Domain={}", cookie.domain));
-        if cookie.secure {
-            expired.push_str("; Secure");
-        }
+    }
+    if cookie.secure {
+        expired.push_str("; Secure");
     }
     if cookie.http_only {
         expired.push_str("; HttpOnly");
@@ -1142,7 +1142,7 @@ fn restored_cookie_fields_safe(cookie: &Cookie) -> bool {
             .bytes()
             .any(|b| b.is_ascii_control() || b == b';');
     let valid_prefix = (!cookie_has_prefix(&cookie.name, "__Host-")
-        || (cookie.secure && cookie.path == "/"))
+        || (cookie.secure && cookie.path == "/" && !cookie.domain.starts_with('.')))
         && (!cookie_has_prefix(&cookie.name, "__Secure-") || cookie.secure);
     valid_name && valid_value && valid_path && valid_prefix
 }
@@ -1495,9 +1495,10 @@ pub fn restore_cookies(browser: &Browser, file: &SessionFile, provider: &str) ->
         // Cookie headers contain reusable bearer credentials. Keep the
         // temporary header in zeroizing memory rather than an ordinary String.
         let mut s = Zeroizing::new(format!("{}={}", c.name, c.value));
-        // __Host- cookies must be restored without a Domain attribute. The
-        // pinned jar silently drops prefix violations even when set() returns Ok.
-        if !c.domain.is_empty() && !cookie_has_prefix(&c.name, "__Host-") {
+        // Preserve host-only scope on all cookies, not just __Host- cookies.
+        // Chrome's exported domain cookies carry a leading dot; adding Domain
+        // for an ordinary host-only cookie would leak it to subdomains.
+        if c.domain.starts_with('.') && !cookie_has_prefix(&c.name, "__Host-") {
             s.push_str(&format!("; Domain={}", c.domain));
         }
         s.push_str(&format!(
@@ -1832,6 +1833,65 @@ mod cookie_scope_tests {
             assert_eq!(clear_provider_cookies(&browser, "chatgpt").unwrap(), 1);
             assert!(browser.cookies().get_all().is_empty());
         }
+    }
+
+    #[tokio::test]
+    async fn gemini_host_only_cookie_never_expands_to_google_subdomains() {
+        let browser = Browser::builder().stealth(false).build().unwrap();
+        let mut item = cookie("session-fixture", "private-test", "/");
+        item.domain = "google.com".into();
+        let file = SessionFile {
+            cookies: vec![item],
+            local_storage: HashMap::new(),
+            ts: "fixture".into(),
+        };
+        restore_cookies(&browser, &file, "gemini").unwrap();
+        assert_eq!(
+            browser.cookies().get_for_url("https://google.com/").unwrap().len(),
+            1
+        );
+        assert!(
+            browser
+                .cookies()
+                .get_for_url("https://gemini.google.com/")
+                .unwrap()
+                .is_empty(),
+            "host-only Google credentials must never be sent to Gemini subdomains"
+        );
+        assert_eq!(clear_provider_cookies(&browser, "gemini").unwrap(), 1);
+        assert!(browser.cookies().get_all().is_empty());
+    }
+
+    #[tokio::test]
+    async fn gemini_domain_cookie_retains_subdomain_scope_and_revokes() {
+        let browser = Browser::builder().stealth(false).build().unwrap();
+        let mut item = cookie("session-fixture", "private-test", "/");
+        item.domain = ".google.com".into();
+        let file = SessionFile {
+            cookies: vec![item],
+            local_storage: HashMap::new(),
+            ts: "fixture".into(),
+        };
+        restore_cookies(&browser, &file, "gemini").unwrap();
+        assert_eq!(
+            browser
+                .cookies()
+                .get_for_url("https://gemini.google.com/")
+                .unwrap()
+                .len(),
+            1,
+            "explicit domain-scoped Google cookies should remain available to Gemini"
+        );
+        assert_eq!(clear_provider_cookies(&browser, "gemini").unwrap(), 1);
+        assert!(browser.cookies().get_all().is_empty());
+    }
+
+    #[test]
+    fn host_prefixed_cookie_with_domain_scope_is_rejected() {
+        let mut item = cookie("__Host-synthetic", "private-test", "/");
+        item.domain = ".google.com".into();
+        assert!(!restored_cookie_fields_safe(&item));
+        assert!(cookie_expiration_header(&item).is_err());
     }
 
     #[tokio::test]
