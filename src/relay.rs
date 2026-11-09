@@ -761,8 +761,7 @@ pub async fn status(State(app): State<Arc<crate::AppState>>, headers: HeaderMap)
     // A Docker installation may not have an embedded login worker. Keep the
     // saved-session dashboard available and treat live verification as unknown.
     let active = optional_login_observations(app.pool.login_status_all()).await;
-    let mut providers = Vec::new();
-    for provider in [
+    const PROVIDERS: [&str; 9] = [
         "qwen",
         "metaai",
         "claude",
@@ -772,17 +771,28 @@ pub async fn status(State(app): State<Arc<crate::AppState>>, headers: HeaderMap)
         "mistral",
         "perplexity",
         "manus",
-    ] {
-        let session_present = match crate::session::load_session_file(provider) {
-            Ok(session) => session.is_some(),
-            Err(_) => {
-                return json_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "session_status_unavailable",
-                    "provider session status could not be read; check vault configuration",
-                );
-            }
-        };
+    ];
+    // Session loading may decrypt multiple vault records and read disk. Keep
+    // it off the async HTTP reactor; return presence flags only, not secrets.
+    let session_presence = session_snapshot_io_off_reactor(move || {
+        PROVIDERS
+            .iter()
+            .map(|provider| crate::session::load_session_file(provider).map(|s| s.is_some()))
+            .collect::<anyhow::Result<Vec<_>>>()
+    })
+    .await;
+    let session_presence = match session_presence {
+        Ok(presence) => presence,
+        Err(_) => {
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "session_status_unavailable",
+                "provider session status could not be read; check vault configuration",
+            );
+        }
+    };
+    let mut providers = Vec::new();
+    for (provider, session_present) in PROVIDERS.into_iter().zip(session_presence) {
         let enabled = app
             .cfg
             .provider(provider)
@@ -809,9 +819,9 @@ pub async fn status(State(app): State<Arc<crate::AppState>>, headers: HeaderMap)
 /// Relay import validates, encrypts and writes a credential snapshot. Those
 /// operations involve blocking disk I/O and must not stall the async HTTP
 /// reactor while a browser worker is also being activated.
-async fn persist_relay_session_off_reactor(
-    operation: impl FnOnce() -> anyhow::Result<()> + Send + 'static,
-) -> anyhow::Result<()> {
+async fn session_snapshot_io_off_reactor<T: Send + 'static>(
+    operation: impl FnOnce() -> anyhow::Result<T> + Send + 'static,
+) -> anyhow::Result<T> {
     tokio::task::spawn_blocking(operation)
         .await
         .map_err(|_| anyhow::anyhow!("relay session persistence task could not complete"))?
@@ -819,7 +829,7 @@ async fn persist_relay_session_off_reactor(
 
 #[cfg(test)]
 mod relay_persist_off_reactor_tests {
-    use super::persist_relay_session_off_reactor;
+    use super::session_snapshot_io_off_reactor;
     use std::sync::{Arc, Mutex};
 
     #[tokio::test(flavor = "current_thread")]
@@ -827,7 +837,7 @@ mod relay_persist_off_reactor_tests {
         let request_thread = std::thread::current().id();
         let observed = Arc::new(Mutex::new(None));
         let worker_observed = Arc::clone(&observed);
-        persist_relay_session_off_reactor(move || {
+        session_snapshot_io_off_reactor(move || {
             *worker_observed.lock().unwrap() = Some(std::thread::current().id());
             Ok(())
         })
@@ -837,10 +847,22 @@ mod relay_persist_off_reactor_tests {
         assert_ne!(worker_thread, request_thread);
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn status_presence_scan_runs_off_reactor_and_returns_only_flags() {
+        let reactor_thread = std::thread::current().id();
+        let (scanner_thread, flags) = session_snapshot_io_off_reactor(|| {
+            Ok((std::thread::current().id(), vec![true, false, true]))
+        })
+        .await
+        .unwrap();
+        assert_ne!(reactor_thread, scanner_thread);
+        assert_eq!(flags, vec![true, false, true]);
+    }
+
     #[tokio::test]
     async fn persistence_failure_is_propagated_before_activation() {
         let failed =
-            persist_relay_session_off_reactor(|| anyhow::bail!("synthetic snapshot rejection"))
+            session_snapshot_io_off_reactor::<()>(|| anyhow::bail!("synthetic snapshot rejection"))
                 .await
                 .unwrap_err();
         assert_eq!(failed.to_string(), "synthetic snapshot rejection");
@@ -869,7 +891,7 @@ pub async fn import_session(
     }
     let store_started = Instant::now();
     let provider_for_persist = provider.clone();
-    let imported = persist_relay_session_off_reactor(move || {
+    let imported = session_snapshot_io_off_reactor(move || {
         crate::session::import_relay_session(&provider_for_persist, &file)
     })
     .await;
