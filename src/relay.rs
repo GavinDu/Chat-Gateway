@@ -899,11 +899,10 @@ mod relay_persist_off_reactor_tests {
 
     #[tokio::test]
     async fn bounded_status_scan_propagates_success_and_storage_failure() {
-        let success =
-            bounded_session_status_scan(Duration::from_secs(1), || Ok(vec![true, false]))
-                .await
-                .unwrap()
-                .unwrap();
+        let success = bounded_session_status_scan(Duration::from_secs(1), || Ok(vec![true, false]))
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(success, vec![true, false]);
         let failure = bounded_session_status_scan::<()>(Duration::from_secs(1), || {
             anyhow::bail!("synthetic vault status failure")
