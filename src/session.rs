@@ -411,6 +411,48 @@ impl VaultSessionStore {
     }
 }
 
+#[cfg(test)]
+mod relay_import_noop_tests {
+    use super::*;
+
+    #[test]
+    fn unchanged_refresh_skips_reencryption_but_new_or_changed_snapshots_do_not() {
+        let dir =
+            std::env::temp_dir().join(format!("chat-gateway-relay-noop-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let target = dir.join("chatgpt.vault");
+        let key = [7_u8; 32];
+        let mut file = SessionFile {
+            local_storage: HashMap::new(),
+            cookies: vec![Cookie {
+                name: "fixture".into(),
+                value: "synthetic-only".into(),
+                domain: ".chatgpt.com".into(),
+                path: "/".into(),
+                secure: true,
+                http_only: true,
+                expires: None,
+                same_site: None,
+            }],
+            ts: "first".into(),
+        };
+        assert!(!relay_vault_snapshot_unchanged("chatgpt", &file, &key, &target).unwrap());
+        let encrypted = encrypt_session_snapshot(&file, "chatgpt", &key).unwrap();
+        std::fs::write(&target, &encrypted).unwrap();
+        assert!(relay_vault_snapshot_unchanged("chatgpt", &file, &key, &target).unwrap());
+        file.ts = "new timestamp only".into();
+        assert!(relay_vault_snapshot_unchanged("chatgpt", &file, &key, &target).unwrap());
+        file.cookies[0].value = "rotated-synthetic-only".into();
+        assert!(!relay_vault_snapshot_unchanged("chatgpt", &file, &key, &target).unwrap());
+        file.cookies[0].value = "synthetic-only".into();
+        file.cookies[0].same_site = Some("Strict".into());
+        assert!(!relay_vault_snapshot_unchanged("chatgpt", &file, &key, &target).unwrap());
+        std::fs::write(&target, b"corrupt-envelope").unwrap();
+        assert!(!relay_vault_snapshot_unchanged("chatgpt", &file, &key, &target).unwrap());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
 /// Migrate one legacy plaintext snapshot into the encrypted vault. Isolated
 /// paths make migration failure handling testable without process-wide env or
 /// working-directory changes.
@@ -495,6 +537,28 @@ fn migrate_legacy_snapshot_with_remover(
     Ok(verified)
 }
 
+/// A periodic extension refresh often sends an identical cookie snapshot.
+/// Decrypting and comparing the existing vault avoids an unnecessary nonce,
+/// rewrite, fsync and read-back on every refresh. Corrupt/old-key records are
+/// not treated as matches, preserving the existing explicit re-link recovery.
+fn relay_vault_snapshot_unchanged(
+    provider: &str,
+    incoming: &SessionFile,
+    key: &[u8; 32],
+    destination: &Path,
+) -> Result<bool> {
+    let ciphertext = match std::fs::read(destination) {
+        Ok(bytes) => Zeroizing::new(bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    let existing = match decrypt_session_snapshot(&ciphertext, provider, key) {
+        Ok(file) => file,
+        Err(_) => return Ok(false),
+    };
+    Ok(session_state_hash(&existing)? == session_state_hash(incoming)?)
+}
+
 /// Import a browser-linked session directly into the encrypted vault. Arbitrary
 /// localStorage export is deliberately disabled until each provider has a
 /// reviewed key allowlist.
@@ -526,6 +590,16 @@ pub fn import_relay_session(provider: &str, file: &SessionFile) -> Result<()> {
     let key = vault_key_from_env()?;
     let destination = session_vault_path(provider)?;
     ensure_private_session_dir_sync(Path::new("sessions"))?;
+    if relay_vault_snapshot_unchanged(provider, file, &key, Path::new(&destination))? {
+        // The browser worker still runs activation, so a saved-but-inactive
+        // session can recover without rewriting the same encrypted snapshot.
+        remove_legacy_session_snapshot(provider)?;
+        tracing::debug!(
+            provider,
+            "identical relay session snapshot; vault write skipped"
+        );
+        return Ok(());
+    }
     let encrypted = encrypt_session_snapshot(file, provider, &key)?;
     write_session_file_atomically(Path::new(&destination), &encrypted)?;
     let verified = (|| -> Result<()> {
