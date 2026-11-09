@@ -990,6 +990,14 @@ pub async fn import_session(
     let vault_ms = store_started.elapsed().as_millis();
     app.metrics
         .record_relay_import_phase("persist", vault_ms.min(u64::MAX as u128) as u64);
+    // A rejected snapshot has no activation phase. Still record one total
+    // duration so import latency distributions include failed attempts.
+    if imported.is_err() {
+        app.metrics.record_relay_import_phase(
+            "total",
+            store_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+        );
+    }
     match imported {
         Ok(()) => {
             let activation_started = Instant::now();
@@ -1004,6 +1012,11 @@ pub async fn import_session(
                     .elapsed()
                     .as_millis()
                     .min(u64::MAX as u128) as u64,
+            );
+            // Includes activation successes, failures and bounded timeouts.
+            app.metrics.record_relay_import_phase(
+                "total",
+                store_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
             );
             match activated {
                 Ok(Ok(())) => {
