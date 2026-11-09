@@ -45,9 +45,21 @@ fn classify_session_probe(is_login_page: bool, input_found: bool) -> Result<bool
     ))
 }
 
+/// A login page may still be displaying an authentication redirect, a challenge,
+/// or an unloaded shell. Never persist and promote that page to a warmed session
+/// merely because the user pressed Complete.
+pub(super) fn require_login_completion_ready(probe: Result<bool>) -> Result<()> {
+    if !probe? {
+        anyhow::bail!(
+            "provider login is not ready: chat composer unavailable; finish authentication or retry after page load"
+        );
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod inconclusive_session_probe_tests {
-    use super::{classify_session_probe, ProviderSessionExpiredError};
+    use super::{classify_session_probe, require_login_completion_ready, ProviderSessionExpiredError};
 
     #[test]
     fn missing_chat_input_is_inconclusive_not_an_expired_session() {
@@ -58,4 +70,16 @@ mod inconclusive_session_probe_tests {
             .downcast_ref::<ProviderSessionExpiredError>()
             .is_some());
     }
+    #[test]
+    fn login_complete_requires_proven_composer_readiness() {
+        assert!(require_login_completion_ready(Ok(true)).is_ok());
+        let unknown = require_login_completion_ready(Ok(false)).unwrap_err();
+        assert!(unknown.to_string().contains("chat composer unavailable"));
+        let expired = require_login_completion_ready(Err(
+            anyhow::Error::new(ProviderSessionExpiredError)
+        ))
+        .unwrap_err();
+        assert!(expired.downcast_ref::<ProviderSessionExpiredError>().is_some());
+    }
+
 }
