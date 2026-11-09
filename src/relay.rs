@@ -22,6 +22,16 @@ const REQUEST_SKEW_SECONDS: i64 = 60;
 const NONCE_RETENTION: Duration = Duration::from_secs(5 * 60);
 const MAX_PAIR_ATTEMPTS: u8 = 5;
 const MAX_RELAY_REQUESTS_PER_MINUTE: usize = 120;
+const RELAY_SESSION_ACTIVATION_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Dropping a timed-out refresh future closes its reply receiver. The browser
+/// worker observes that cancellation before beginning queued activation.
+async fn bounded_session_activation<T>(
+    wait: Duration,
+    activation: impl std::future::Future<Output = anyhow::Result<T>>,
+) -> Result<anyhow::Result<T>, tokio::time::error::Elapsed> {
+    tokio::time::timeout(wait, activation).await
+}
 
 struct PendingApproval {
     id: String,
@@ -816,19 +826,53 @@ pub async fn import_session(
             "provider must be enabled before its browser session can be linked",
         );
     }
+    let store_started = Instant::now();
     match crate::session::import_relay_session(&provider, &file) {
-        Ok(()) => match app.pool.refresh_session(&provider).await {
-            Ok(()) => {
-                Json(serde_json::json!({"ok":true,"provider":provider,"linked":true,"active":true}))
-                    .into_response()
-            }
-            Err(error) => {
-                tracing::warn!(provider, error = %error, "browser relay session was saved but could not be activated");
-                json_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "session_refresh_failed",
-                    "session was saved but could not be activated; retry or restart the gateway",
-                )
+        Ok(()) => {
+            let vault_ms = store_started.elapsed().as_millis();
+            let activation_started = Instant::now();
+            match bounded_session_activation(
+                RELAY_SESSION_ACTIVATION_TIMEOUT,
+                app.pool.refresh_session(&provider),
+            )
+            .await
+            {
+                Ok(Ok(())) => {
+                    tracing::info!(
+                        provider,
+                        vault_ms,
+                        activation_ms = activation_started.elapsed().as_millis(),
+                        "browser relay session persisted and activation request completed"
+                    );
+                    Json(serde_json::json!({"ok":true,"provider":provider,"linked":true,"active":true}))
+                        .into_response()
+                }
+                Ok(Err(_)) => {
+                    tracing::warn!(
+                        provider,
+                        vault_ms,
+                        activation_ms = activation_started.elapsed().as_millis(),
+                        "browser relay session saved but activation failed"
+                    );
+                    json_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "session_refresh_failed",
+                        "session was saved but could not be activated; retry or restart the gateway",
+                    )
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        provider,
+                        vault_ms,
+                        activation_ms = activation_started.elapsed().as_millis(),
+                        "browser relay activation wait expired; saved credentials retained for retry"
+                    );
+                    json_error(
+                        StatusCode::GATEWAY_TIMEOUT,
+                        "session_activation_timeout",
+                        "session saved but activation timed out; check provider status before retrying",
+                    )
+                }
             }
         },
         Err(error) if error.downcast_ref::<crate::session::ConflictingCookieScopes>().is_some() => {
@@ -1224,5 +1268,36 @@ mod tests {
     fn extension_origin_is_rejected_when_not_configured() {
         let headers = HeaderMap::new();
         assert!(!relay_origin_is_allowed(&headers));
+    }
+}
+
+#[cfg(test)]
+mod relay_activation_timeout_tests {
+    use super::bounded_session_activation;
+    use std::{cell::Cell, future, rc::Rc, time::Duration};
+
+    struct CancellationObserved(Rc<Cell<bool>>);
+    impl Drop for CancellationObserved {
+        fn drop(&mut self) {
+            self.0.set(true);
+        }
+    }
+
+    #[tokio::test]
+    async fn timed_out_activation_drops_the_future_before_retry() {
+        let cancelled = Rc::new(Cell::new(false));
+        let marker = cancelled.clone();
+        let blocked = async move {
+            let _marker = CancellationObserved(marker);
+            future::pending::<anyhow::Result<()>>().await
+        };
+        let result = bounded_session_activation(Duration::from_millis(10), blocked).await;
+        assert!(result.is_err());
+        assert!(cancelled.get(), "queued activation must be cancellable");
+        let retry = bounded_session_activation(Duration::from_secs(1), async {
+            Ok::<_, anyhow::Error>(())
+        })
+        .await;
+        assert!(retry.unwrap().is_ok());
     }
 }
