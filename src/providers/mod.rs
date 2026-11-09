@@ -1512,6 +1512,96 @@ mod completion_pause_regression_tests {
     }
 }
 
+/// Synthetic, credential-free DOM contracts. These encode the selectors
+/// documented in our adapter catalog; they are not live provider recordings.
+/// Keep #814 open until delegated merged-main provider acceptance is recorded.
+#[cfg(test)]
+mod nine_provider_selector_fixture_tests {
+    use super::{common, ADAPTERS};
+
+    #[tokio::test]
+    async fn every_catalog_provider_discovers_input_send_and_response_in_its_fixture() {
+        let fixtures: &[(&str, &str, &str, &str)] = &[
+            ("qwen", "<textarea placeholder='Ask Qwen'></textarea>", "<button aria-label='Send message'>Send</button>", "<div class='markdown-body'>SYNTHETIC_RESPONSE</div>"),
+            ("metaai", "<div contenteditable='true' role='textbox'></div>", "<button aria-label='Send'>Send</button>", "<div data-testid='bot-message'>SYNTHETIC_RESPONSE</div>"),
+            ("claude", "<div contenteditable='true' data-placeholder='Ask Claude'></div>", "<button aria-label='Send Message'>Send</button>", "<div data-testid='assistant-message'>SYNTHETIC_RESPONSE</div>"),
+            ("chatgpt", "<textarea id='prompt-textarea'></textarea>", "<button data-testid='send-button'>Send</button>", "<div data-message-author-role='assistant'><div class='markdown'>SYNTHETIC_RESPONSE</div></div>"),
+            ("gemini", "<rich-textarea aria-label='Prompt'></rich-textarea>", "<button aria-label='Send message'>Send</button>", "<model-response>SYNTHETIC_RESPONSE</model-response>"),
+            ("grok", "<textarea placeholder='Ask Grok'></textarea>", "<button aria-label='Send'>Send</button>", "<div data-testid='grok-response'>SYNTHETIC_RESPONSE</div>"),
+            ("manus", "<textarea placeholder='Ask Manus'></textarea>", "<button aria-label='Send'>Send</button>", "<div data-message-role='assistant'>SYNTHETIC_RESPONSE</div>"),
+            ("mistral", "<textarea placeholder='Ask Le Chat'></textarea>", "<button aria-label='Send'>Send</button>", "<div class='markdown'>SYNTHETIC_RESPONSE</div>"),
+            ("perplexity", "<textarea placeholder='Ask question'></textarea>", "<button aria-label='Submit'>Submit</button>", "<div data-testid='answer'>SYNTHETIC_RESPONSE</div>"),
+        ];
+        assert_eq!(fixtures.len(), ADAPTERS.len());
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        for (name, input, send, response) in fixtures {
+            let spec = ADAPTERS
+                .iter()
+                .find(|spec| spec.id == *name)
+                .expect("fixture provider must exist in catalog");
+            let html = format!("<html><body>{input}{send}{response}</body></html>");
+            let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+            let mut page = browser.new_page().await.unwrap();
+            page.goto(&format!("data:text/html,{encoded}"))
+                .await
+                .unwrap();
+
+            let groups = [
+                ("input", spec.selectors.input),
+                ("send", spec.selectors.send),
+                ("response", spec.selectors.response),
+            ];
+            let observed = common::probe_selector_groups(&page, &groups);
+            for (role, matched) in observed {
+                assert!(
+                    matched.is_some(),
+                    "{name}: {role} selectors did not match the fixture"
+                );
+            }
+            assert_eq!(
+                common::response_text(&page, spec.selectors.response).as_deref(),
+                Some("SYNTHETIC_RESPONSE"),
+                "{name}: response extraction did not match the fixture"
+            );
+        }
+    }
+
+    #[test]
+    fn all_catalog_providers_have_nonempty_distinct_selector_roles() {
+        for spec in ADAPTERS {
+            for (role, selectors) in [
+                ("input", spec.selectors.input),
+                ("send", spec.selectors.send),
+                ("response", spec.selectors.response),
+            ] {
+                assert!(
+                    !selectors.is_empty(),
+                    "{} missing {} selectors",
+                    spec.id,
+                    role
+                );
+                let unique: std::collections::HashSet<_> = selectors.iter().collect();
+                assert_eq!(
+                    unique.len(),
+                    selectors.len(),
+                    "{} has repeated {} selectors",
+                    spec.id,
+                    role
+                );
+                assert!(
+                    selectors.iter().all(|selector| !selector.trim().is_empty()),
+                    "{} has empty {} selector",
+                    spec.id,
+                    role
+                );
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod live_dom_send_tests {
     use super::*;
