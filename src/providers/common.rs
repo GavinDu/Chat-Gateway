@@ -361,8 +361,10 @@ pub fn visible_composer_exists(page: &Page, selectors: &[&str]) -> bool {
                         if (input.getClientRects().length > 0 &&
                             window.getComputedStyle(input).visibility !== "hidden" &&
                             !input.closest('[hidden], [inert], [aria-hidden="true"]') &&
-                            !input.disabled && !input.readOnly &&
-                            input.getAttribute("aria-disabled") !== "true") return true;
+                            !input.disabled && !input.matches(':disabled') && !input.readOnly &&
+                            input.getAttribute("aria-disabled") !== "true" &&
+                            input.getAttribute("aria-readonly") !== "true" &&
+                            input.getAttribute("contenteditable") !== "false") return true;
                     }}
                 }} catch (_) {{}}
             }}
@@ -376,7 +378,7 @@ pub fn visible_composer_exists(page: &Page, selectors: &[&str]) -> bool {
 /// both a hidden sizing placeholder and the actual visible composer.
 fn visible_input_query(selector_js: &str) -> String {
     format!(
-        "Array.from(document.querySelectorAll({selector_js})).find(el => el.getClientRects().length > 0 && window.getComputedStyle(el).visibility !== 'hidden' && !el.closest('[hidden], [inert], [aria-hidden=\"true\"]') && !el.disabled && !el.readOnly && el.getAttribute('aria-disabled') !== 'true')"
+        "Array.from(document.querySelectorAll({selector_js})).find(el => el.getClientRects().length > 0 && window.getComputedStyle(el).visibility !== 'hidden' && !el.closest('[hidden], [inert], [aria-hidden=\"true\"]') && !el.disabled && !el.matches(':disabled') && !el.readOnly && el.getAttribute('aria-disabled') !== 'true' && el.getAttribute('aria-readonly') !== 'true' && el.getAttribute('contenteditable') !== 'false')"
     )
 }
 
@@ -405,14 +407,14 @@ mod visible_composer_tests {
             .build()
             .unwrap();
         let mut page = browser.new_page().await.unwrap();
-        let html = r#"<html><body><textarea id="hidden" style="display:none"></textarea><textarea id="disabled" disabled></textarea><textarea id="readonly" readonly></textarea><textarea id="visible"></textarea></body></html>"#;
+        let html = r#"<html><body><textarea id="hidden" style="display:none"></textarea><textarea id="disabled" disabled></textarea><textarea id="readonly" readonly></textarea><fieldset disabled><textarea id="fieldset-disabled"></textarea></fieldset><div id="noneditable" contenteditable="false" role="textbox">stale</div><div id="aria-readonly" contenteditable="true" aria-readonly="true">stale</div><textarea id="visible"></textarea></body></html>"#;
         let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
         page.goto(&format!("data:text/html,{encoded}"))
             .await
             .unwrap();
         assert!(!visible_composer_exists(
             &page,
-            &["#hidden", "#disabled", "#readonly"]
+            &["#hidden", "#disabled", "#readonly", "#fieldset-disabled", "#noneditable", "#aria-readonly"]
         ));
         assert!(visible_composer_exists(&page, &["#hidden", "#visible"]));
         page.evaluate("document.querySelector('#visible').hidden = true");
@@ -605,7 +607,7 @@ pub async fn click_send_or_enter(
         for selector in send_selectors {
             let selector_js = serde_json::to_string(selector)?;
             let js = format!(
-                "(() => {{ const input = {input_expr}; if (!input) return false; let root = input; for (let depth = 0; root && depth < 12; depth++, root = root.parentElement) {{ if (root.tagName === 'BODY' || root.tagName === 'HTML') break; for (const button of root.querySelectorAll({selector_js})) {{ if (button.getClientRects().length && window.getComputedStyle(button).visibility !== 'hidden' && !button.closest('[inert], [aria-hidden=true]') && !button.disabled && button.getAttribute('aria-disabled') !== 'true') {{ button.click(); return true; }} }} if (root.tagName === 'FORM') break; }} return false; }})()"
+                "(() => {{ const input = {input_expr}; if (!input) return false; let root = input; for (let depth = 0; root && depth < 12; depth++, root = root.parentElement) {{ if (root.tagName === 'BODY' || root.tagName === 'HTML') break; for (const button of root.querySelectorAll({selector_js})) {{ if (button.getClientRects().length && window.getComputedStyle(button).visibility !== 'hidden' && !button.closest('[inert], [aria-hidden=true]') && !button.disabled && !button.matches(':disabled') && button.getAttribute('aria-disabled') !== 'true') {{ button.click(); return true; }} }} if (root.tagName === 'FORM') break; }} return false; }})()"
             );
             if page.evaluate(&js).as_bool() == Some(true) {
                 return Ok(true);
@@ -617,7 +619,7 @@ pub async fn click_send_or_enter(
     // Synthetic Enter is not trusted and must not bypass that state.
     let send_js = serde_json::to_string(send_selectors)?;
     let disabled = page.evaluate(&format!(
-        "(() => {{ const input = {input_expr}; if (!input) return true; const selectors = {send_js}; let root = input; for (let depth = 0; root && depth < 12; depth++, root = root.parentElement) {{ if (root.tagName === 'BODY' || root.tagName === 'HTML') break; for (const selector of selectors) {{ for (const button of root.querySelectorAll(selector)) {{ if (button.getClientRects().length && window.getComputedStyle(button).visibility !== 'hidden' && !button.closest('[inert], [aria-hidden=true]') && (button.disabled || button.getAttribute('aria-disabled') === 'true')) return true; }} }} if (root.tagName === 'FORM') break; }} return false; }})()"
+        "(() => {{ const input = {input_expr}; if (!input) return true; const selectors = {send_js}; let root = input; for (let depth = 0; root && depth < 12; depth++, root = root.parentElement) {{ if (root.tagName === 'BODY' || root.tagName === 'HTML') break; for (const selector of selectors) {{ for (const button of root.querySelectorAll(selector)) {{ if (button.getClientRects().length && window.getComputedStyle(button).visibility !== 'hidden' && !button.closest('[inert], [aria-hidden=true]') && (button.disabled || button.matches(':disabled') || button.getAttribute('aria-disabled') === 'true')) return true; }} }} if (root.tagName === 'FORM') break; }} return false; }})()"
     ));
     if disabled.as_bool() == Some(true) {
         anyhow::bail!("provider send control is disabled or composer is missing");
@@ -1425,6 +1427,26 @@ mod browser_event_loop_tests {
             .unwrap();
         let result = super::click_send_or_enter(&mut page, &["#send"], "#prompt", 200).await;
         assert!(result.is_err());
+        assert_eq!(page.evaluate("window.enterCount").as_f64(), Some(0.0));
+    }
+
+    #[tokio::test]
+    async fn inherited_disabled_send_control_is_not_clicked_or_bypassed_by_enter() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        page.goto("data:text/html,<html><body><form><textarea id='prompt'></textarea><fieldset disabled><button id='send' onclick='window.sent=(window.sent||0)+1'>Send</button></fieldset></form><script>window.enterCount=0;document.querySelector('#prompt').addEventListener('keydown',()=>window.enterCount++)</script></body></html>")
+            .await
+            .unwrap();
+        assert!(
+            super::click_send_or_enter(&mut page, &["#send"], "#prompt", 200)
+                .await
+                .is_err(),
+            "a button in a disabled fieldset is not an actionable send control"
+        );
+        assert_eq!(page.evaluate("window.sent || 0").as_f64(), Some(0.0));
         assert_eq!(page.evaluate("window.enterCount").as_f64(), Some(0.0));
     }
 
