@@ -661,7 +661,21 @@ pub async fn run_send(
     match tokio::time::timeout(timeout, adapter.send_prompt(page, &prompt)).await {
         Ok(Ok(())) => {}
         Ok(Err(error)) => {
-            let _ = chunks.send(Err(error)).await;
+            // A provider can redirect to manual verification while the
+            // composer is being typed or the Send control is settling.
+            // Preserve the typed challenge category rather than exposing
+            // a misleading missing-composer or submission error.
+            if crate::provider_guard::is_challenge_page(page) {
+                provider_guard.disable_provider(
+                    adapter.name(),
+                    "challenge page detected; manual review required",
+                );
+                let _ = chunks
+                    .send(Err(provider_challenge_error(adapter.name())))
+                    .await;
+            } else {
+                let _ = chunks.send(Err(error)).await;
+            }
             return;
         }
         Err(_) => {
@@ -1768,6 +1782,55 @@ mod timeout_terminal_regression_tests {
         assert!(!output
             .contains("gateway_provider_timeout_total{provider=\"qwen\",phase=\"submission\"} 1"));
     }
+    #[tokio::test]
+    async fn challenge_during_typing_returns_typed_manual_blocker() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body><textarea placeholder="Ask anything" oninput="document.body.insertAdjacentHTML('beforeend','<p>Verify you are human</p>'); this.remove()"></textarea></body></html>"#;
+        let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+
+        let adapter = Arc::new(qwen::QwenAdapter {
+            cfg: serde_yaml::from_str("name: qwen\nmodels: [qwen]").unwrap(),
+        });
+        let guard = crate::provider_guard::ProviderGuard::default();
+        let (tx, mut rx) = mpsc::channel(8);
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            run_send(
+                adapter,
+                &mut page,
+                "synthetic prompt".into(),
+                Duration::from_secs(3),
+                Duration::from_millis(50),
+                ProviderSendPolicy {
+                    completion_idle: Duration::from_millis(100),
+                    provider_guard: guard.clone(),
+                    metrics: crate::metrics::MetricsRegistry::default(),
+                },
+                tx,
+            ),
+        )
+        .await
+        .unwrap();
+
+        let error = rx.recv().await.expect("expected a challenge error").unwrap_err();
+        assert!(
+            error.downcast_ref::<ProviderChallengeError>().is_some(),
+            "the challenge during typing must not look like a generic composer failure"
+        );
+        assert_eq!(
+            guard.provider_disabled_reason("qwen"),
+            Some("challenge page detected; manual review required")
+        );
+        assert!(rx.recv().await.is_none(), "challenge must not emit done");
+    }
+
 }
 
 #[cfg(test)]
