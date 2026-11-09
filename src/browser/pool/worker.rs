@@ -71,7 +71,8 @@ fn diagnostic_prompt_retained(page: &obscura_core::Page, selector: &str, prompt:
                 el.getClientRects().length > 0 &&
                 window.getComputedStyle(el).visibility !== 'hidden' &&
                 !el.closest('[hidden], [inert], [aria-hidden="true"]') &&
-                !el.disabled && !el.matches(':disabled') && !el.readOnly &&
+                !el.disabled && !el.matches(':disabled') &&
+                !el.closest('fieldset[disabled]') && !el.readOnly &&
                 el.getAttribute('aria-disabled') !== 'true' &&
                 el.getAttribute('aria-readonly') !== 'true' &&
                 el.getAttribute('contenteditable') !== 'false'
