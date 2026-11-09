@@ -869,6 +869,33 @@ mod relay_persist_off_reactor_tests {
     }
 }
 
+/// Never expose arbitrary error strings returned by credential import in
+/// telemetry; storage/validation errors may contain private file paths or
+/// values supplied by the extension. Emit only this fixed category.
+fn relay_import_failure_category(error: &anyhow::Error) -> &'static str {
+    if error
+        .downcast_ref::<crate::session::ConflictingCookieScopes>()
+        .is_some()
+    {
+        "cookie_scope_conflict"
+    } else {
+        "snapshot_rejected"
+    }
+}
+
+#[cfg(test)]
+mod relay_import_diagnostic_redaction_tests {
+    #[test]
+    fn import_error_labels_cannot_forward_secret_error_text() {
+        let error = anyhow::anyhow!("cookie=very-secret; bearer=private; user=person@example.test");
+        let label = super::relay_import_failure_category(&error);
+        assert_eq!(label, "snapshot_rejected");
+        assert!(!label.contains("very-secret"));
+        assert!(!label.contains("private"));
+        assert!(!label.contains('@'));
+    }
+}
+
 pub async fn import_session(
     State(app): State<Arc<crate::AppState>>,
     headers: HeaderMap,
@@ -908,7 +935,10 @@ pub async fn import_session(
             .await;
             app.metrics.record_relay_import_phase(
                 "activate",
-                activation_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+                activation_started
+                    .elapsed()
+                    .as_millis()
+                    .min(u64::MAX as u128) as u64,
             );
             match activated {
                 Ok(Ok(())) => {
@@ -948,13 +978,26 @@ pub async fn import_session(
                     )
                 }
             }
-        },
-        Err(error) if error.downcast_ref::<crate::session::ConflictingCookieScopes>().is_some() => {
+        }
+        Err(error)
+            if error
+                .downcast_ref::<crate::session::ConflictingCookieScopes>()
+                .is_some() =>
+        {
+            tracing::warn!(
+                provider,
+                category = relay_import_failure_category(&error),
+                "browser relay session import rejected"
+            );
             json_error(StatusCode::UNPROCESSABLE_ENTITY, "cookie_scope_conflict",
                 "session contains cookie scopes this gateway cannot preserve; existing saved session was kept; try the dedicated login browser")
         }
         Err(error) => {
-            tracing::warn!(provider, error = %error, "browser relay session import rejected");
+            tracing::warn!(
+                provider,
+                category = relay_import_failure_category(&error),
+                "browser relay session import rejected"
+            );
             json_error(
                 StatusCode::BAD_REQUEST,
                 "session_import_rejected",
