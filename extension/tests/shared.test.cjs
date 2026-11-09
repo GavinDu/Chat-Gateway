@@ -468,3 +468,48 @@ test("unknown unprocessable-session errors retain generic guidance without forwa
     {fetchResponse:{ok:false,status:422,json:async()=>({error:{code:"other",message:"private upstream data"}})}});
   await assert.rejects(()=>api.syncProvider("gemini"), e=> e.message.includes("Gateway rejected session update (422)") && !e.message.includes("private upstream data"));
 });
+
+
+test("Gemini relay retains Chrome SameSite and expiry while leaving session cookies session-only", async () => {
+  const api = loadShared([
+    {
+      name: "persistent", value: "synthetic", domain: ".google.com", path: "/",
+      secure: true, httpOnly: true, session: false, expirationDate: 2000000000.5,
+      sameSite: "no_restriction"
+    },
+    {
+      name: "session", value: "synthetic", domain: "gemini.google.com", path: "/",
+      secure: true, httpOnly: true, session: true, expirationDate: 2000000000,
+      sameSite: "strict"
+    },
+    {
+      name: "unspecified", value: "synthetic", domain: "googleusercontent.com", path: "/",
+      secure: true, httpOnly: false, session: true, sameSite: "unspecified"
+    }
+  ]);
+  const snapshot = await api.providerCookieSnapshot("gemini");
+  const cookies = Object.fromEntries(JSON.parse(JSON.stringify(snapshot.cookies)).map(cookie => [cookie.name, cookie]));
+  assert.equal(cookies.persistent.same_site, "None");
+  assert.equal(cookies.persistent.expires, 2000000000.5);
+  assert.equal(cookies.session.same_site, "Strict");
+  assert.equal(Object.hasOwn(cookies.session, "expires"), false);
+  assert.equal(Object.hasOwn(cookies.unspecified, "same_site"), false);
+});
+
+test("invalid browser cookie attributes fail the complete relay upload before persistence", async () => {
+  for (const invalid of [
+    {sameSite: "unsupported"},
+    {session: false, expirationDate: Number.NaN},
+    {session: false, expirationDate: -2}
+  ]) {
+    const api = loadShared([
+      {name: "safe", value: "fixture", domain: ".google.com", path: "/", secure: true},
+      {name: "invalid", value: "fixture", domain: "gemini.google.com",
+       path: "/", secure: true, ...invalid}
+    ], true, {
+      gateway: "http://127.0.0.1:8080", token: "fixture-token", linkedProviders: ["gemini"]
+    });
+    await assert.rejects(() => api.syncProvider("gemini"), /cookie (SameSite|expiry)/);
+    assert.equal(api.fetchCalls.length, 0, "never upload a partial credential snapshot");
+  }
+});
