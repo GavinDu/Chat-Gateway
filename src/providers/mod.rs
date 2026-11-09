@@ -1510,43 +1510,42 @@ mod completion_pause_regression_tests {
 #[cfg(test)]
 mod live_dom_send_tests {
     use super::*;
-    #[tokio::test]
-    async fn real_adapter_observes_asynchronous_response_in_the_pinned_browser() {
+    async fn exercise_composer(adapter: Arc<dyn SiteAdapter>, markup: &str, input: &str) {
         let browser = obscura_core::Browser::builder()
             .stealth(false)
             .build()
             .unwrap();
         let mut page = browser.new_page().await.unwrap();
-        let html = r#"<html><body><script>globalThis.fixtureLoaded=true</script><form>
-          <textarea id="prompt-textarea"></textarea>
-          <button type="button" data-testid="send-button">Send</button>
-        </form></body></html>"#;
+        let button = if input == "#mobile-composer-prompt" {
+            r#"<button id="fixture-send" type="button" aria-label="Send message">Send</button>"#
+        } else {
+            r#"<button id="fixture-send" type="button" data-testid="send-button" aria-label="Send">Send</button>"#
+        };
+        let html = format!(
+            r#"<html><body><script>globalThis.fixtureLoaded=true</script><form><button id="unrelated-send" type="button" aria-label="Send message">Other</button></form><form>{markup}{button}</form></body></html>"#
+        );
         let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
         page.goto(&format!("data:text/html,{encoded}"))
             .await
             .unwrap();
-        assert_eq!(
-            page.evaluate(
-                r#"(() => {
-          document.querySelector('button').addEventListener('click', () => {
+        let js = r#"(() => {
+          globalThis.unrelatedClicked = false;
+          document.getElementById('unrelated-send').addEventListener('click', () => {globalThis.unrelatedClicked=true;});
+          document.getElementById('fixture-send').addEventListener('click', () => {
             globalThis.fixtureClicked = true;
             setTimeout(() => {
               globalThis.fixtureTimerFired = true;
               const outer = document.createElement('div');
               outer.setAttribute('data-message-author-role', 'assistant');
               const text = document.createElement('div'); text.setAttribute('class', 'markdown');
-              text.textContent = document.getElementById('prompt-textarea').value;
+              text.textContent = document.querySelector(__INPUT__).value;
               outer.appendChild(text); document.body.appendChild(outer);
             }, 30);
           });
           return true;
         })()"#
-            ),
-            serde_json::json!(true)
-        );
-        let adapter = Arc::new(chatgpt::ChatGPTAdapter {
-            cfg: serde_yaml::from_str("name: chatgpt\nmodels: [gpt]").unwrap(),
-        });
+            .replace("__INPUT__", &serde_json::to_string(input).unwrap());
+        assert_eq!(page.evaluate(&js), serde_json::json!(true));
         let (tx, mut rx) = mpsc::channel(32);
         tokio::time::timeout(
             Duration::from_secs(5),
@@ -1566,17 +1565,45 @@ mod live_dom_send_tests {
         )
         .await
         .unwrap();
-        let diagnostics = page.evaluate("[globalThis.fixtureClicked, globalThis.fixtureTimerFired, document.querySelectorAll('.markdown').length, document.getElementById('prompt-textarea').value, document.body.textContent]");
         let mut text = String::new();
         let mut done = false;
         while let Some(chunk) = rx.recv().await {
-            let chunk = chunk.unwrap_or_else(|error| {
-                panic!("synthetic browser error: {error}; state={diagnostics}")
-            });
+            let chunk = chunk.unwrap();
             text.push_str(&chunk.content);
             done |= chunk.done;
         }
         assert_eq!(text, "SYNTHETIC_ASYNC_OK");
         assert!(done);
+        assert_eq!(
+            page.evaluate("globalThis.unrelatedClicked"),
+            serde_json::json!(false)
+        );
+        assert_eq!(page.evaluate("document.getElementById('autosizer') ? document.getElementById('autosizer').value : 'DO_NOT_TOUCH'"),serde_json::json!("DO_NOT_TOUCH"));
+    }
+    #[tokio::test]
+    async fn real_adapter_observes_asynchronous_response_in_the_pinned_browser() {
+        let adapter = Arc::new(chatgpt::ChatGPTAdapter {
+            cfg: serde_yaml::from_str("name: chatgpt\nmodels: [gpt]").unwrap(),
+        });
+        exercise_composer(
+            adapter,
+            r#"<textarea id="prompt-textarea"></textarea>"#,
+            "#prompt-textarea",
+        )
+        .await;
+    }
+    #[tokio::test]
+    async fn current_chatgpt_mobile_composer_produces_a_real_adapter_response() {
+        let adapter = Arc::new(chatgpt::ChatGPTAdapter {
+            cfg: serde_yaml::from_str("name: chatgpt\nmodels: [gpt]").unwrap(),
+        });
+        exercise_composer(adapter,r#"<textarea id="mobile-composer-prompt" name="prompt" placeholder="Ask ChatGPT" aria-label="Chat with ChatGPT"></textarea>"#,"#mobile-composer-prompt").await;
+    }
+    #[tokio::test]
+    async fn current_grok_labelled_composer_avoids_the_hidden_autosizer() {
+        let adapter = Arc::new(grok::GrokAdapter {
+            cfg: serde_yaml::from_str("name: grok\nmodels: [grok]").unwrap(),
+        });
+        exercise_composer(adapter,r#"<textarea id="autosizer" aria-hidden="true" style="visibility:hidden">DO_NOT_TOUCH</textarea><textarea aria-label="Ask Grok anything"></textarea>"#,r#"textarea[aria-label="Ask Grok anything"]"#).await;
     }
 }

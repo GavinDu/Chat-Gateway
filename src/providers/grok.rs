@@ -22,6 +22,7 @@ pub const SELECTORS: SelectorSet = SelectorSet {
         "textarea[placeholder*=\"Ask\"]",
         "div[contenteditable=\"true\"][role=\"textbox\"]",
         "textarea[name=\"message\"]",
+        "textarea[aria-label=\"Ask Grok anything\"]",
     ],
     send: &["button[aria-label=\"Send\"]", "button.send-button"],
     response: &[

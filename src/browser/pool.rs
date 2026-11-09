@@ -277,6 +277,13 @@ pub struct TestAdapterReport {
     pub input_found: bool,
     pub send_clicked: bool,
     pub response_token: bool,
+    /// Diagnostic flags only; never echo typed text or arbitrary page labels.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub typed_prompt_retained: Option<bool>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub send_controls: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub input_controls: Vec<String>,
     pub errors: Vec<String>,
 }
 

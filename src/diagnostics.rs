@@ -29,6 +29,7 @@ mod tests {
             send_clicked: true,
             response_token: true,
             errors: Vec::new(),
+            ..TestAdapterReport::default()
         }
     }
 

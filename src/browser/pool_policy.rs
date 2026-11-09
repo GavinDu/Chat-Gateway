@@ -1,8 +1,6 @@
 //! Pure URL and provider-session policy helpers used by the browser pool.
 //! Kept separate from worker commands so security-sensitive decisions are easy to test.
 
-use crate::login;
-
 /// A persisted provider thread URL must remain on the provider's configured
 /// origin. This prevents stale or corrupted thread metadata from navigating
 /// the authenticated browser page to an unrelated site.
@@ -433,13 +431,13 @@ mod provider_thread_navigation_tests {
     }
 }
 
-pub(super) fn session_probe_requires_login(is_login_page: bool, input_found: bool) -> bool {
-    login::login_state(is_login_page, input_found).0 == "login_required"
+pub(super) fn session_probe_requires_login(is_login_page: bool, _input_found: bool) -> bool {
+    is_login_page
 }
 
 pub(super) fn session_probe_page_healthy(is_login_page: bool, input_found: bool) -> bool {
-    let (_, logged_in) = login::login_state(is_login_page, input_found);
-    logged_in == Some(true)
+    // Composer availability is a routing signal, not account-login proof.
+    !is_login_page && input_found
 }
 
 #[cfg(test)]
