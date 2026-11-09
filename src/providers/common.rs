@@ -1082,7 +1082,9 @@ mod submission_transition_tests {
             "<html><body><form><button type='button' id='send' onclick='window.sent=(window.sent||0)+1'>Send</button>{wrappers}<textarea id='prompt'>message</textarea>{closers}</form><script>window.entered=0;document.querySelector('#prompt').addEventListener('keydown',()=>window.entered++)</script></body></html>"
         );
         let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
-        page.goto(&format!("data:text/html,{encoded}")).await.unwrap();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
 
         assert!(
             super::click_send_or_enter(&mut page, &["#send"], "#prompt", 450)
