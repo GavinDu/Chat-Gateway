@@ -603,7 +603,7 @@ pub fn click_first(page: &Page, selectors: &[&str]) -> anyhow::Result<()> {
 ///
 /// Two Go concepts, in merged form: the dispatched InputEvent carries
 /// Go's `inputType: 'insertText'` + `data` fields (free, and
-/// framework-observable), and plain TEXTAREA inputs use Go's qwen-style
+/// framework-observable), and plain TEXTAREA or INPUT composers use the
 /// native value setter branch instead of execCommand. Everything else
 /// keeps merged's path (selectAll clear + execCommand insertText).
 pub async fn human_type(page: &Page, selectors: &[&str], text: &str) -> anyhow::Result<()> {
