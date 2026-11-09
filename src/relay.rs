@@ -804,6 +804,8 @@ pub async fn status(State(app): State<Arc<crate::AppState>>, headers: HeaderMap)
             .find(|item| item.provider == provider)
             .and_then(|item| item.logged_in);
         let lifecycle = app.provider_sessions.status(provider).state;
+        let manual_verification_required =
+            app.provider_sessions.manual_challenge_required(provider);
         let authentication = provider_authentication_status(observed, lifecycle);
         providers.push(serde_json::json!({
             "provider": provider,
@@ -811,6 +813,7 @@ pub async fn status(State(app): State<Arc<crate::AppState>>, headers: HeaderMap)
             "enabled": enabled,
             "authentication": authentication,
             "availability": lifecycle.as_str(),
+            "manual_verification_required": manual_verification_required,
         }));
     }
     Json(serde_json::json!({"ok":true,"providers":providers,"vault_mode":std::env::var("CHAT_GATEWAY_SESSION_STORE").as_deref()==Ok("vault")})).into_response()
@@ -1216,6 +1219,19 @@ mod tests {
         ] {
             assert_eq!(provider_authentication_status(observed, state), expected);
         }
+    }
+
+    #[test]
+    fn challenge_blocker_does_not_falsely_report_expired_authentication() {
+        let registry = crate::provider_state::ProviderSessionRegistry::default();
+        registry.record_gateway_error(
+            "gemini",
+            &crate::chat_backend::GatewayError::challenge("manual verification required"),
+        );
+        let state = registry.status("gemini").state;
+        assert_eq!(provider_authentication_status(None, state), "unknown");
+        assert!(!registry.is_available("gemini"));
+        assert!(registry.manual_challenge_required("gemini"));
     }
 
     fn relay_state_with_token(token: Option<&str>) -> RelayState {

@@ -86,7 +86,9 @@ async function refreshStatus() {
     const auth = item.authentication === "verified" ? "Login verified"
       : item.authentication === "needs_login" ? "Login needed"
       : "Login unverified";
-    status.textContent = [enabled, linked, browser, auth, ...(item.availability === "degraded" ? ["Gateway check unavailable; retry"] : [])].join(" · ");
+    const blocker = item.manual_verification_required ? "Manual provider verification required; open website"
+      : item.availability === "degraded" ? "Gateway check unavailable; retry" : null;
+    status.textContent = [enabled, linked, browser, auth, ...(blocker ? [blocker] : [])].join(" · ");
     li.append(status);
 
     const actions = document.createElement("div");
