@@ -148,13 +148,26 @@ fn mistral_readiness_summary(evidence: &serde_json::Value) -> String {
             Some(format!("{host}:{}", status as u16))
         })
         .collect();
+    // Only classify directly observed symptoms; a 403 alone does not prove
+    // whether cookies, provider CDN policy or browser compatibility caused it.
+    let blocker = if challenge {
+        "challenge_visible"
+    } else if asset_errors.iter().any(|error| error.ends_with(":403")) {
+        "script_http_403"
+    } else if !asset_errors.is_empty() {
+        "script_http_error"
+    } else if scripts == 0 {
+        "no_script_elements"
+    } else {
+        "undetermined"
+    };
     let failures = if asset_errors.is_empty() {
         "not_observable".to_string()
     } else {
         asset_errors.join(",")
     };
     format!(
-        "document_ready={state}, script_elements={scripts}, script_resource_entries={resources}, challenge_marker={challenge}, script_asset_http_errors={failures}; Resource Timing statuses can be unavailable for cross-origin assets"
+        "document_ready={state}, script_elements={scripts}, script_resource_entries={resources}, challenge_marker={challenge}, blocker={blocker}, script_asset_http_errors={failures}; Resource Timing statuses can be unavailable for cross-origin assets"
     )
 }
 
@@ -194,9 +207,33 @@ mod readiness_tests {
         assert!(result.contains("script_resource_entries=4"));
         assert!(result.contains("static.mistral.ai:403"));
         assert!(result.contains("other-cdn.example:502"));
+        assert!(result.contains("blocker=script_http_403"));
         assert!(!result.contains("secret"));
         assert!(!result.contains("token"));
         assert!(!result.contains("https://"));
         assert!(!result.contains("static.mistral.ai:200"));
+    }
+
+    #[test]
+    fn challenge_and_unobservable_script_failures_are_distinct() {
+        let challenge = serde_json::json!({
+            "readyState": "complete",
+            "scriptCount": 2.0,
+            "loadedResources": 1.0,
+            "challenge": true,
+            "assetStatuses": [{"host": "static.mistral.ai", "status": 403.0}]
+        });
+        assert!(super::mistral_readiness_summary(&challenge).contains("blocker=challenge_visible"));
+        let missing = serde_json::json!({
+            "readyState": "complete",
+            "scriptCount": 0.0,
+            "loadedResources": 0.0,
+            "challenge": false,
+            "assetStatuses": []
+        });
+        let diagnostics = super::mistral_readiness_summary(&missing);
+        assert!(diagnostics.contains("blocker=no_script_elements"));
+        assert!(diagnostics.contains("script_asset_http_errors=not_observable"));
+        assert!(!diagnostics.contains("403"));
     }
 }
