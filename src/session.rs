@@ -1526,7 +1526,6 @@ fn cookie_restore_header(cookie: &Cookie, now_epoch: f64) -> Result<Zeroizing<St
     Ok(header)
 }
 
-
 #[cfg(test)]
 mod restored_cookie_attribute_tests {
     use super::*;
