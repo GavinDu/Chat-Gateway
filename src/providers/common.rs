@@ -78,7 +78,9 @@ pub struct EffectiveSelectorSet {
 impl EffectiveSelectorSet {
     pub fn new(base: &SelectorSet, overrides: &crate::config::ProviderSelectorOverrides) -> Self {
         let collect = |original: &[&str], configured: &Option<Vec<String>>| {
-            configured.clone().unwrap_or_else(|| original.iter().map(|s| (*s).to_owned()).collect())
+            configured
+                .clone()
+                .unwrap_or_else(|| original.iter().map(|s| (*s).to_owned()).collect())
         };
         Self {
             picker: collect(base.picker, &overrides.picker),
@@ -111,11 +113,12 @@ impl EffectiveSelectorSet {
 }
 
 impl SelectorSet {
-    pub fn effective(&self, overrides: &crate::config::ProviderSelectorOverrides) -> EffectiveSelectorSet {
+    pub fn effective(
+        &self,
+        overrides: &crate::config::ProviderSelectorOverrides,
+    ) -> EffectiveSelectorSet {
         EffectiveSelectorSet::new(self, overrides)
     }
-
-
 }
 
 /// Streaming indicator shared by all providers. Keep this valid CSS only;
@@ -167,7 +170,11 @@ fn decode_response_probe(value: serde_json::Value) -> ResponseProbe {
 
 /// Read response text, response-node count, and streaming state in one
 /// JavaScript evaluation per polling tick.
-pub fn response_probe(page: &Page, selectors: &[&str], check_body_challenge: bool) -> ResponseProbe {
+pub fn response_probe(
+    page: &Page,
+    selectors: &[&str],
+    check_body_challenge: bool,
+) -> ResponseProbe {
     let Ok(selectors) = serde_json::to_string(selectors) else {
         return ResponseProbe::default();
     };
@@ -686,12 +693,18 @@ pub async fn discover_models(
 
 /// Wait for the input, type the prompt, click send (v1 send steps 1-3;
 /// the response stream is polled by providers::run_send).
-pub async fn send_prompt(page: &mut Page, set: &EffectiveSelectorSet, prompt: &str) -> anyhow::Result<()> {
+pub async fn send_prompt(
+    page: &mut Page,
+    set: &EffectiveSelectorSet,
+    prompt: &str,
+) -> anyhow::Result<()> {
     let inputs = set.input_refs();
     wait_for_selector(page, &inputs, 15_000).await?;
     human_type(page, &inputs, prompt).await?;
     drive_page(page, Duration::from_millis(200)).await;
-    let input_sel = inputs.iter().copied()
+    let input_sel = inputs
+        .iter()
+        .copied()
         .find(|s| page.query_selector(s).is_some())
         .unwrap_or(inputs[0]);
     let sends = set.send_refs();
@@ -711,7 +724,10 @@ mod text_selector_tests {
             ..Default::default()
         };
         let effective = base.effective(&override_cfg);
-        assert_eq!(effective.input_refs(), vec!["textarea[data-test='new-composer']"]);
+        assert_eq!(
+            effective.input_refs(),
+            vec!["textarea[data-test='new-composer']"]
+        );
         assert_eq!(effective.send_refs(), base.send);
         assert_eq!(effective.response_refs(), base.response);
     }
