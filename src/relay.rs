@@ -829,10 +829,8 @@ pub async fn import_session(
     let store_started = Instant::now();
     let imported = crate::session::import_relay_session(&provider, &file);
     let vault_ms = store_started.elapsed().as_millis();
-    app.metrics.record_relay_import_phase(
-        "persist",
-        vault_ms.min(u64::MAX as u128) as u64,
-    );
+    app.metrics
+        .record_relay_import_phase("persist", vault_ms.min(u64::MAX as u128) as u64);
     match imported {
         Ok(()) => {
             let activation_started = Instant::now();
