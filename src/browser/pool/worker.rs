@@ -1041,8 +1041,8 @@ mod queued_send_cancellation_tests {
             &lock,
             tokio::time::Instant::now() + Duration::from_millis(10),
         )
-            .await
-            .unwrap_err();
+        .await
+        .unwrap_err();
         assert!(error.downcast_ref::<ProviderBusyError>().is_some());
         drop(held);
         assert!(acquire_page_lock(
