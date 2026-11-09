@@ -110,9 +110,19 @@ fn mistral_readiness_diagnostics(page: &Page) -> String {
                     'link[rel~="modulepreload"], link[rel~="preload"][as="script"]'
                 )).map(link => link.href)
             );
-            const entries = performance.getEntriesByType('resource')
-                .filter(entry => entry.initiatorType === 'script' ||
-                    scriptPreloads.has(entry.name));
+            let resourceTimingAvailable = false;
+            let entries = [];
+            try {
+                const resources = performance.getEntriesByType('resource');
+                if (Array.isArray(resources)) {
+                    resourceTimingAvailable = true;
+                    entries = resources.filter(entry => entry.initiatorType === 'script' ||
+                        scriptPreloads.has(entry.name));
+                }
+            } catch (_) {
+                // Some restricted/partial pages lack Resource Timing. Do not
+                // mistake a failed probe for proof that all scripts loaded.
+            }
             const assetStatuses = [];
             let scriptHttp403Observed = false;
             for (const entry of entries) {
@@ -135,6 +145,7 @@ fn mistral_readiness_diagnostics(page: &Page) -> String {
                 readyState: document.readyState,
                 scriptCount: document.scripts.length,
                 loadedResources: entries.length,
+                resourceTimingAvailable,
                 assetStatuses,
                 scriptHttp403Observed
             };
@@ -153,6 +164,11 @@ fn mistral_readiness_diagnostics(page: &Page) -> String {
 }
 
 fn mistral_readiness_summary(evidence: &serde_json::Value) -> String {
+    // A blocked script or unsupported browser probe can make evaluate() fail
+    // entirely. Missing evidence is not proof that zero script tags exist.
+    if !evidence.is_object() {
+        return "document_ready=unknown, blocker=diagnostic_unavailable, script_asset_http_errors=not_observable; browser readiness probe did not return structured evidence".to_owned();
+    }
     let state = evidence
         .get("readyState")
         .and_then(|value| value.as_str())
@@ -168,6 +184,14 @@ fn mistral_readiness_summary(evidence: &serde_json::Value) -> String {
     };
     let scripts = count("scriptCount");
     let resources = count("loadedResources");
+    let resource_timing = match evidence
+        .get("resourceTimingAvailable")
+        .and_then(|v| v.as_bool())
+    {
+        Some(true) => "available",
+        Some(false) => "unavailable",
+        None => "unknown",
+    };
     let challenge = evidence
         .get("challenge")
         .and_then(|value| value.as_bool())
@@ -210,6 +234,8 @@ fn mistral_readiness_summary(evidence: &serde_json::Value) -> String {
         "script_http_error"
     } else if scripts == 0 {
         "no_script_elements"
+    } else if resource_timing == "unavailable" {
+        "resource_timing_unavailable"
     } else {
         "undetermined"
     };
@@ -219,7 +245,7 @@ fn mistral_readiness_summary(evidence: &serde_json::Value) -> String {
         asset_errors.join(",")
     };
     format!(
-        "document_ready={state}, script_elements={scripts}, script_resource_entries={resources}, challenge_marker={challenge}, blocker={blocker}, script_asset_http_errors={failures}; Resource Timing statuses can be unavailable for cross-origin assets"
+        "document_ready={state}, script_elements={scripts}, script_resource_entries={resources}, resource_timing={resource_timing}, challenge_marker={challenge}, blocker={blocker}, script_asset_http_errors={failures}; Resource Timing statuses can be unavailable for cross-origin assets"
     )
 }
 
@@ -240,6 +266,43 @@ mod readiness_tests {
         assert!(diagnostics.contains("script_asset_http_errors=not_observable"));
         assert!(!diagnostics.contains("data:text/html"));
     }
+    #[tokio::test]
+    async fn restricted_resource_timing_is_reported_without_false_script_success() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        page.goto("data:text/html,<html><body><script>window.ready=true</script></body></html>")
+            .await
+            .unwrap();
+        page.evaluate(
+            r#"Object.defineProperty(performance, 'getEntriesByType', {
+                configurable: true,
+                value: () => { throw new Error('synthetic blocked timing API'); }
+            })"#,
+        );
+        let diagnostics = super::mistral_readiness_diagnostics(&page);
+        assert!(diagnostics.contains("script_elements=1"), "{diagnostics}");
+        assert!(
+            diagnostics.contains("resource_timing=unavailable"),
+            "{diagnostics}"
+        );
+        assert!(
+            diagnostics.contains("blocker=resource_timing_unavailable"),
+            "{diagnostics}"
+        );
+        assert!(!diagnostics.contains("synthetic blocked timing API"));
+        assert!(!diagnostics.contains("blocker=script_http_403"));
+    }
+
+    #[test]
+    fn unavailable_evaluation_is_not_misreported_as_zero_script_elements() {
+        let diagnostics = super::mistral_readiness_summary(&serde_json::Value::Null);
+        assert!(diagnostics.contains("blocker=diagnostic_unavailable"));
+        assert!(!diagnostics.contains("blocker=no_script_elements"));
+    }
+
     #[tokio::test]
     async fn module_preloads_are_script_resources_but_stylesheet_links_are_not() {
         let browser = obscura_core::Browser::builder()
