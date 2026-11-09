@@ -280,11 +280,19 @@ mod readiness_tests {
             .await
             .unwrap();
         let ordinary = super::mistral_readiness_diagnostics(&page);
-        assert!(!ordinary.contains("blocker=challenge_visible"), "{ordinary}");
+        assert!(
+            !ordinary.contains("blocker=challenge_visible"),
+            "{ordinary}"
+        );
 
-        page.evaluate("document.body.insertAdjacentHTML('beforeend', '<p>Verify you are human</p>')");
+        page.evaluate(
+            "document.body.insertAdjacentHTML('beforeend', '<p>Verify you are human</p>')",
+        );
         let challenged = super::mistral_readiness_diagnostics(&page);
-        assert!(challenged.contains("blocker=challenge_visible"), "{challenged}");
+        assert!(
+            challenged.contains("blocker=challenge_visible"),
+            "{challenged}"
+        );
     }
 
     #[test]
