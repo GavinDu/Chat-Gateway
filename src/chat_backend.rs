@@ -610,7 +610,10 @@ mod tests {
         let blocked = super::map_backend_error(anyhow::Error::new(super::MistralAssetBlockedError));
         assert_eq!(blocked.kind, GatewayErrorKind::ProviderAssetBlocked);
         assert!(!blocked.is_retryable());
-        assert_eq!(blocked.message, "provider JavaScript assets blocked by HTTP 403");
+        assert_eq!(
+            blocked.message,
+            "provider JavaScript assets blocked by HTTP 403"
+        );
 
         let ordinary = super::map_backend_error(anyhow::anyhow!("provider rejected request"));
         assert_eq!(ordinary.kind, GatewayErrorKind::ProviderFailure);
