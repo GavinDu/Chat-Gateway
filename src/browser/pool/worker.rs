@@ -58,11 +58,7 @@ fn diagnostic_input_selector<'a>(
 
 /// Probe the visible editor, never the first hidden duplicate DOM match.
 /// The test string stays inside the page and is not included in diagnostics.
-fn diagnostic_prompt_retained(
-    page: &obscura_core::Page,
-    selector: &str,
-    prompt: &str,
-) -> bool {
+fn diagnostic_prompt_retained(page: &obscura_core::Page, selector: &str, prompt: &str) -> bool {
     let (Ok(selector), Ok(prompt)) = (
         serde_json::to_string(selector),
         serde_json::to_string(prompt),
