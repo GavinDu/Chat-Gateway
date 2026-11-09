@@ -1685,10 +1685,22 @@ mod generation_cancel_visibility_tests {
             cfg: serde_yaml::from_str("name: qwen").unwrap(),
         };
         adapter.cancel_generation(&page);
-        assert_eq!(page.evaluate("window.activeClicks || 0").as_f64(), Some(1.0));
-        assert_eq!(page.evaluate("window.hiddenClicks || 0").as_f64(), Some(0.0));
-        assert_eq!(page.evaluate("window.disabledClicks || 0").as_f64(), Some(0.0));
-        assert_eq!(page.evaluate("window.unrelatedClicks || 0").as_f64(), Some(0.0));
+        assert_eq!(
+            page.evaluate("window.activeClicks || 0").as_f64(),
+            Some(1.0)
+        );
+        assert_eq!(
+            page.evaluate("window.hiddenClicks || 0").as_f64(),
+            Some(0.0)
+        );
+        assert_eq!(
+            page.evaluate("window.disabledClicks || 0").as_f64(),
+            Some(0.0)
+        );
+        assert_eq!(
+            page.evaluate("window.unrelatedClicks || 0").as_f64(),
+            Some(0.0)
+        );
     }
 }
 
