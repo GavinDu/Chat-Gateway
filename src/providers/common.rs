@@ -308,6 +308,23 @@ fn text_selector_parts(selector: &str) -> Option<(&str, &str)> {
     Some((tag, needle))
 }
 
+#[cfg(test)]
+fn text_selector_matches(page: &Page, selector: &str) -> bool {
+    let Some((tag, needle)) = text_selector_parts(selector) else {
+        return false;
+    };
+    let Ok(tag) = serde_json::to_string(tag) else {
+        return false;
+    };
+    let Ok(needle) = serde_json::to_string(needle) else {
+        return false;
+    };
+    page.evaluate(&format!(
+        "Array.from(document.querySelectorAll({tag})).some(el => ((el.innerText || el.textContent || '').trim()).includes({needle}))"
+    ))
+    .as_bool() == Some(true)
+}
+
 fn click_text_selector(page: &Page, selector: &str) -> anyhow::Result<bool> {
     let Some((tag, needle)) = text_selector_parts(selector) else {
         return Ok(false);
@@ -318,6 +335,15 @@ fn click_text_selector(page: &Page, selector: &str) -> anyhow::Result<bool> {
         "(() => {{ const el = Array.from(document.querySelectorAll({tag})).find(el => ((el.innerText || el.textContent || '').trim()).includes({needle}) && el.getClientRects().length); if (!el) return false; el.click(); return true; }})()"
     ));
     Ok(clicked.as_bool() == Some(true))
+}
+
+#[cfg(test)]
+pub fn element_exists(page: &Page, selector: &str) -> bool {
+    if text_selector_parts(selector).is_some() {
+        text_selector_matches(page, selector)
+    } else {
+        page.query_selector(selector).is_some()
+    }
 }
 
 /// A DOM match alone is not a usable chat composer. Login/status probes
