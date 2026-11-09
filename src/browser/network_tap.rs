@@ -1,5 +1,8 @@
 use crate::providers::Provider;
-use std::sync::{atomic::{AtomicUsize, Ordering}, Arc};
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
 
 /// Metadata-only response observation. Obscura currently exposes buffered
 /// response bodies, so this deliberately does not claim incremental SSE data.
@@ -32,14 +35,15 @@ fn is_mistral_script_failure(
 fn safe_hostname(host: &str) -> &str {
     if !host.is_empty()
         && host.len() <= 128
-        && host.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+        && host
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
     {
         host
     } else {
         "unknown"
     }
 }
-
 
 fn provider_network_tap_reported_bytes(body_len: usize) -> usize {
     body_len.min(MAX_PROVIDER_NETWORK_TAP_REPORTED_BYTES)
@@ -105,13 +109,36 @@ mod tests {
     #[test]
     fn mistral_script_failure_filter_is_exact_and_status_bounded() {
         use obscura_core::ResourceType;
-        assert!(is_mistral_script_failure(Provider::Mistral, ResourceType::Script, 403));
-        assert!(is_mistral_script_failure(Provider::Mistral, ResourceType::Script, 502));
-        assert!(!is_mistral_script_failure(Provider::Mistral, ResourceType::Script, 200));
-        assert!(!is_mistral_script_failure(Provider::Mistral, ResourceType::Fetch, 403));
-        assert!(!is_mistral_script_failure(Provider::ChatGPT, ResourceType::Script, 403));
+        assert!(is_mistral_script_failure(
+            Provider::Mistral,
+            ResourceType::Script,
+            403
+        ));
+        assert!(is_mistral_script_failure(
+            Provider::Mistral,
+            ResourceType::Script,
+            502
+        ));
+        assert!(!is_mistral_script_failure(
+            Provider::Mistral,
+            ResourceType::Script,
+            200
+        ));
+        assert!(!is_mistral_script_failure(
+            Provider::Mistral,
+            ResourceType::Fetch,
+            403
+        ));
+        assert!(!is_mistral_script_failure(
+            Provider::ChatGPT,
+            ResourceType::Script,
+            403
+        ));
         assert_eq!(safe_hostname("cdn.mistral.ai"), "cdn.mistral.ai");
-        assert_eq!(safe_hostname("cdn.mistral.ai/secret?token=private"), "unknown");
+        assert_eq!(
+            safe_hostname("cdn.mistral.ai/secret?token=private"),
+            "unknown"
+        );
         assert_eq!(safe_hostname("a".repeat(129).as_str()), "unknown");
     }
 
