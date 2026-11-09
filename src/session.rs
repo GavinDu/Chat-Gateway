@@ -406,7 +406,12 @@ impl VaultSessionStore {
         let mut file = capture_session(browser, page, provider).await?;
         let key = vault_key_from_env()?;
         let destination = session_vault_path(provider)?;
-        preserve_cookie_metadata_from_existing_vault(&mut file, provider, &key, Path::new(&destination));
+        preserve_cookie_metadata_from_existing_vault(
+            &mut file,
+            provider,
+            &key,
+            Path::new(&destination),
+        );
         ensure_private_session_dir(Path::new("sessions")).await?;
         let encrypted = encrypt_session_snapshot(&file, provider, &key)?;
         write_session_file_atomically(Path::new(&destination), &encrypted)?;
@@ -563,7 +568,8 @@ mod explicit_save_cookie_metadata_tests {
 
     #[test]
     fn explicit_login_save_preserves_same_session_attributes_but_not_rotated_cookies() {
-        let dir = std::env::temp_dir().join(format!("chat-gateway-explicit-save-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir()
+            .join(format!("chat-gateway-explicit-save-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&dir).unwrap();
         let destination = dir.join("gemini.vault");
         let key = [13_u8; 32];
