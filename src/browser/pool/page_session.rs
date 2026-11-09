@@ -58,17 +58,17 @@ where
 /// Build the replacement completely before mutating the warm-page cache.
 /// A failed cookie restore, navigation, or storage replay must not drop the
 /// existing page; the import fingerprint remains retryable as well.
-pub(super) async fn replace_after_success<T, F, Fut>(
-    pages: &std::cell::RefCell<std::collections::HashMap<Provider, T>>,
-    provider: Provider,
+pub(super) async fn replace_after_success<T, F, Fut, Insert>(
     build: F,
+    insert: Insert,
 ) -> Result<()>
 where
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = Result<T>>,
+    Insert: FnOnce(T),
 {
     let replacement = build().await?;
-    pages.borrow_mut().insert(provider, replacement);
+    insert(replacement);
     Ok(())
 }
 
@@ -81,18 +81,30 @@ mod activation_tests {
             Provider::Grok,
             String::from("warm-page"),
         )]));
-        let failure = replace_after_success(&pages, Provider::Grok, || async {
-            anyhow::bail!("synthetic cookie restore failure")
-        })
+        let failure = replace_after_success(
+            || async { Err::<String, _>(anyhow::anyhow!("synthetic cookie restore failure")) },
+            |replacement| {
+                pages.borrow_mut().insert(Provider::Grok, replacement);
+            },
+        )
         .await;
         assert!(failure.is_err());
-        assert_eq!(pages.borrow().get(&Provider::Grok).map(String::as_str), Some("warm-page"));
-        replace_after_success(&pages, Provider::Grok, || async {
-            Ok(String::from("restored-page"))
-        })
+        assert_eq!(
+            pages.borrow().get(&Provider::Grok).map(String::as_str),
+            Some("warm-page")
+        );
+        replace_after_success(
+            || async { Ok(String::from("restored-page")) },
+            |replacement| {
+                pages.borrow_mut().insert(Provider::Grok, replacement);
+            },
+        )
         .await
         .unwrap();
-        assert_eq!(pages.borrow().get(&Provider::Grok).map(String::as_str), Some("restored-page"));
+        assert_eq!(
+            pages.borrow().get(&Provider::Grok).map(String::as_str),
+            Some("restored-page")
+        );
     }
 
     #[tokio::test]
