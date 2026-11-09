@@ -1847,7 +1847,11 @@ mod cookie_scope_tests {
         };
         restore_cookies(&browser, &file, "gemini").unwrap();
         assert_eq!(
-            browser.cookies().get_for_url("https://google.com/").unwrap().len(),
+            browser
+                .cookies()
+                .get_for_url("https://google.com/")
+                .unwrap()
+                .len(),
             1
         );
         assert!(
