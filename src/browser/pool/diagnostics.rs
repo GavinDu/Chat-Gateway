@@ -59,7 +59,9 @@ pub(super) fn require_login_completion_ready(probe: Result<bool>) -> Result<()> 
 
 #[cfg(test)]
 mod inconclusive_session_probe_tests {
-    use super::{classify_session_probe, require_login_completion_ready, ProviderSessionExpiredError};
+    use super::{
+        classify_session_probe, require_login_completion_ready, ProviderSessionExpiredError,
+    };
 
     #[test]
     fn missing_chat_input_is_inconclusive_not_an_expired_session() {
@@ -75,11 +77,11 @@ mod inconclusive_session_probe_tests {
         assert!(require_login_completion_ready(Ok(true)).is_ok());
         let unknown = require_login_completion_ready(Ok(false)).unwrap_err();
         assert!(unknown.to_string().contains("chat composer unavailable"));
-        let expired = require_login_completion_ready(Err(
-            anyhow::Error::new(ProviderSessionExpiredError)
-        ))
-        .unwrap_err();
-        assert!(expired.downcast_ref::<ProviderSessionExpiredError>().is_some());
+        let expired =
+            require_login_completion_ready(Err(anyhow::Error::new(ProviderSessionExpiredError)))
+                .unwrap_err();
+        assert!(expired
+            .downcast_ref::<ProviderSessionExpiredError>()
+            .is_some());
     }
-
 }
