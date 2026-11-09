@@ -377,6 +377,24 @@ fn preserve_verified_cookie_metadata(captured: &mut SessionFile, previous: &Sess
     }
 }
 
+/// Explicit login saves also come from Obscura, which cannot export
+/// SameSite or cookie expiry. Keep validated prior relay attributes for cookies
+/// that have exactly the same value and scope, just like post-send saves.
+/// An unreadable or old-key vault must never prevent an explicit fresh login.
+fn preserve_cookie_metadata_from_existing_vault(
+    file: &mut SessionFile,
+    provider: &str,
+    key: &[u8; 32],
+    destination: &Path,
+) {
+    if let Ok(encrypted) = std::fs::read(destination) {
+        let encrypted = Zeroizing::new(encrypted);
+        if let Ok(previous) = decrypt_session_snapshot(&encrypted, provider, key) {
+            preserve_verified_cookie_metadata(file, &previous);
+        }
+    }
+}
+
 impl VaultSessionStore {
     async fn save_session(
         &self,
@@ -385,11 +403,13 @@ impl VaultSessionStore {
         provider: &str,
         tracker: &SessionWriteTracker,
     ) -> Result<()> {
-        let file = capture_session(browser, page, provider).await?;
+        let mut file = capture_session(browser, page, provider).await?;
         let key = vault_key_from_env()?;
+        let destination = session_vault_path(provider)?;
+        preserve_cookie_metadata_from_existing_vault(&mut file, provider, &key, Path::new(&destination));
         ensure_private_session_dir(Path::new("sessions")).await?;
         let encrypted = encrypt_session_snapshot(&file, provider, &key)?;
-        write_session_file_atomically(Path::new(&session_vault_path(provider)?), &encrypted)?;
+        write_session_file_atomically(Path::new(&destination), &encrypted)?;
         remove_legacy_session_snapshot(provider)?;
         tracker.record_success(provider);
         tracing::info!(
@@ -534,6 +554,55 @@ mod preserve_cookie_metadata_tests {
         let mut captured = snapshot(captured_cookie);
         preserve_verified_cookie_metadata(&mut captured, &snapshot(invalid));
         assert!(captured.cookies[0].same_site.is_none());
+    }
+}
+
+#[cfg(test)]
+mod explicit_save_cookie_metadata_tests {
+    use super::*;
+
+    #[test]
+    fn explicit_login_save_preserves_same_session_attributes_but_not_rotated_cookies() {
+        let dir = std::env::temp_dir().join(format!("chat-gateway-explicit-save-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let destination = dir.join("gemini.vault");
+        let key = [13_u8; 32];
+        let saved_cookie = Cookie {
+            name: "synthetic".into(),
+            value: "original".into(),
+            domain: ".google.com".into(),
+            path: "/".into(),
+            secure: true,
+            http_only: true,
+            expires: Some(2_000_000_000.0),
+            same_site: Some("Strict".into()),
+        };
+        let previous = SessionFile {
+            local_storage: HashMap::new(),
+            cookies: vec![saved_cookie.clone()],
+            ts: "before".into(),
+        };
+        let encrypted = encrypt_session_snapshot(&previous, "gemini", &key).unwrap();
+        std::fs::write(&destination, &encrypted).unwrap();
+
+        let mut captured = previous.clone();
+        captured.cookies[0].expires = None;
+        captured.cookies[0].same_site = None;
+        preserve_cookie_metadata_from_existing_vault(&mut captured, "gemini", &key, &destination);
+        assert_eq!(captured.cookies[0].expires, saved_cookie.expires);
+        assert_eq!(captured.cookies[0].same_site, saved_cookie.same_site);
+
+        captured.cookies[0].value = "rotated".into();
+        captured.cookies[0].expires = None;
+        captured.cookies[0].same_site = None;
+        preserve_cookie_metadata_from_existing_vault(&mut captured, "gemini", &key, &destination);
+        assert_eq!(captured.cookies[0].expires, None);
+        assert_eq!(captured.cookies[0].same_site, None);
+
+        std::fs::write(&destination, b"corrupted-encrypted-vault").unwrap();
+        preserve_cookie_metadata_from_existing_vault(&mut captured, "gemini", &key, &destination);
+        assert_eq!(captured.cookies[0].expires, None);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }
 
