@@ -682,6 +682,10 @@ pub async fn run_send(
             // A timeout is not a successful completion. Propagate a typed
             // provider error so the API won't commit a partial/empty turn.
             metrics.record_provider_timeout(adapter.name(), "generation");
+            // The request is terminal, but the remote composer may still be
+            // generating. Stop it before another send reuses this warm page.
+            // Cancellation is best effort; the timeout remains an error.
+            adapter.cancel_generation(page);
             let _ = chunks
                 .send(Err(anyhow::Error::new(common::ProviderTimeoutError::new(
                     adapter.name(),
@@ -1652,7 +1656,7 @@ mod timeout_terminal_regression_tests {
             .build()
             .unwrap();
         let mut page = browser.new_page().await.unwrap();
-        let html = r#"<html><body><form><textarea placeholder="Ask anything"></textarea><button type="button" aria-label="Send">Send</button></form></body></html>"#;
+        let html = r#"<html><body><form><textarea placeholder="Ask anything"></textarea><button type="button" aria-label="Send" onclick="document.querySelector('#stop').hidden=false">Send</button><button type="button" id="stop" aria-label="Stop generation" hidden onclick="window.cancelCount=(window.cancelCount||0)+1">Stop</button></form></body></html>"#;
         let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
         page.goto(&format!("data:text/html,{encoded}"))
             .await
@@ -1692,6 +1696,11 @@ mod timeout_terminal_regression_tests {
             .is_some());
         assert!(failure.to_string().contains("did not complete"));
         assert!(rx.recv().await.is_none(), "timeout must not emit done");
+        assert_eq!(
+            page.evaluate("window.cancelCount || 0").as_f64(),
+            Some(1.0),
+            "generation timeout should attempt to stop the in-flight provider response"
+        );
         let output = metrics.render_with_provider_states(&[]);
         assert!(output
             .contains("gateway_provider_timeout_total{provider=\"qwen\",phase=\"generation\"} 1"));
