@@ -772,10 +772,19 @@ fn submission_snapshot(
     );
     let v = page.evaluate(&js);
     Ok(SubmissionSnapshot {
-        input_present: v.get("inputPresent").and_then(|x| x.as_bool()).unwrap_or(false),
-        input_empty: v.get("inputEmpty").and_then(|x| x.as_bool()).unwrap_or(false),
+        input_present: v
+            .get("inputPresent")
+            .and_then(|x| x.as_bool())
+            .unwrap_or(false),
+        input_empty: v
+            .get("inputEmpty")
+            .and_then(|x| x.as_bool())
+            .unwrap_or(false),
         response_count: v.get("responseCount").and_then(|x| x.as_u64()).unwrap_or(0),
-        streaming: v.get("streaming").and_then(|x| x.as_bool()).unwrap_or(false),
+        streaming: v
+            .get("streaming")
+            .and_then(|x| x.as_bool())
+            .unwrap_or(false),
     })
 }
 
@@ -799,17 +808,51 @@ mod submission_transition_tests {
 
     #[test]
     fn dispatch_without_state_change_is_not_submission() {
-        let before = SubmissionSnapshot { input_present: true, input_empty: false, response_count: 2, streaming: false };
+        let before = SubmissionSnapshot {
+            input_present: true,
+            input_empty: false,
+            response_count: 2,
+            streaming: false,
+        };
         assert!(!submission_accepted(&before, &before));
-        assert!(!submission_accepted(&before, &SubmissionSnapshot { input_present: false, ..before }));
-        assert!(submission_accepted(&before, &SubmissionSnapshot { input_empty: true, ..before }));
-        assert!(submission_accepted(&before, &SubmissionSnapshot { response_count: 3, ..before }));
-        assert!(submission_accepted(&before, &SubmissionSnapshot { streaming: true, ..before }));
+        assert!(!submission_accepted(
+            &before,
+            &SubmissionSnapshot {
+                input_present: false,
+                ..before
+            }
+        ));
+        assert!(submission_accepted(
+            &before,
+            &SubmissionSnapshot {
+                input_empty: true,
+                ..before
+            }
+        ));
+        assert!(submission_accepted(
+            &before,
+            &SubmissionSnapshot {
+                response_count: 3,
+                ..before
+            }
+        ));
+        assert!(submission_accepted(
+            &before,
+            &SubmissionSnapshot {
+                streaming: true,
+                ..before
+            }
+        ));
     }
 
     #[test]
     fn preexisting_streaming_is_not_new_acknowledgement() {
-        let before = SubmissionSnapshot { input_present: true, input_empty: false, response_count: 1, streaming: true };
+        let before = SubmissionSnapshot {
+            input_present: true,
+            input_empty: false,
+            response_count: 1,
+            streaming: true,
+        };
         assert!(!submission_accepted(&before, &before));
     }
 }
