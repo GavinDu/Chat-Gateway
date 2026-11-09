@@ -607,7 +607,7 @@ mod tests {
             "provider challenge requires manual review"
         );
 
-        let blocked = super::map_backend_error(anyhow::Error::new(MistralAssetBlockedError));
+        let blocked = super::map_backend_error(anyhow::Error::new(super::MistralAssetBlockedError));
         assert_eq!(blocked.kind, GatewayErrorKind::ProviderAssetBlocked);
         assert!(!blocked.is_retryable());
         assert_eq!(blocked.message, "provider JavaScript assets blocked by HTTP 403");
