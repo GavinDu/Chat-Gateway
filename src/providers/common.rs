@@ -482,8 +482,10 @@ pub fn is_login_url(url: &str) -> bool {
     }
     let host = uri.host().unwrap_or_default().to_ascii_lowercase();
     let host = host.trim_end_matches('.');
-    if matches!(host, "accounts.google.com" | "accounts.x.com" | "login.microsoftonline.com")
-        || host.starts_with("login.")
+    if matches!(
+        host,
+        "accounts.google.com" | "accounts.x.com" | "login.microsoftonline.com"
+    ) || host.starts_with("login.")
         || host.starts_with("auth.")
         || host.ends_with(".auth0.com")
     {
