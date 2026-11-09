@@ -58,10 +58,7 @@ where
 /// Build the replacement completely before mutating the warm-page cache.
 /// A failed cookie restore, navigation, or storage replay must not drop the
 /// existing page; the import fingerprint remains retryable as well.
-pub(super) async fn replace_after_success<T, F, Fut, Insert>(
-    build: F,
-    insert: Insert,
-) -> Result<()>
+pub(super) async fn replace_after_success<T, F, Fut, Insert>(build: F, insert: Insert) -> Result<()>
 where
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = Result<T>>,
