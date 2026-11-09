@@ -541,7 +541,9 @@ mod send_auth_redirect_tests {
             "https://login.microsoftonline.com/tenant/oauth2/authorize",
         ] {
             let error = login_redirect_error(url).expect("explicit auth redirect");
-            assert!(error.downcast_ref::<ProviderSessionExpiredError>().is_some());
+            assert!(error
+                .downcast_ref::<ProviderSessionExpiredError>()
+                .is_some());
         }
     }
 
