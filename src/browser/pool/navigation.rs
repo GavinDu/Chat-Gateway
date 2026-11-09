@@ -15,11 +15,10 @@ pub(super) fn provider_thread_navigation_ready(
     page: &obscura_core::Page,
     adapter: &dyn providers::SiteAdapter,
 ) -> bool {
-    let composer_ready = adapter
-        .selector_set()
-        .input
-        .iter()
-        .any(|selector| page.query_selector(selector).is_some());
+    let composer_ready = providers::common::visible_composer_exists(
+        page,
+        &adapter.effective_selectors().input_refs(),
+    );
     thread_navigation_snapshot_ready(actual, target, composer_ready)
 }
 
@@ -40,11 +39,10 @@ pub(super) fn provider_landing_navigation_ready(
     page: &obscura_core::Page,
     adapter: &dyn providers::SiteAdapter,
 ) -> bool {
-    let composer_ready = adapter
-        .selector_set()
-        .input
-        .iter()
-        .any(|selector| page.query_selector(selector).is_some());
+    let composer_ready = providers::common::visible_composer_exists(
+        page,
+        &adapter.effective_selectors().input_refs(),
+    );
     landing_navigation_snapshot_ready(actual, target, adapter.name(), composer_ready)
 }
 
@@ -64,6 +62,64 @@ pub(super) fn landing_navigation_snapshot_ready(
 #[cfg(test)]
 mod provider_reopen_composer_tests {
     use super::{landing_navigation_snapshot_ready, thread_navigation_snapshot_ready};
+
+    #[tokio::test]
+    async fn navigation_uses_configured_visible_editor_not_hidden_builtin_match() {
+        let cfg: crate::config::AppConfig = serde_yaml::from_str(
+            r#"
+providers:
+  - name: chatgpt
+    selectors:
+      input:
+        - "textarea#custom-ready"
+"#,
+        )
+        .unwrap();
+        let registry = crate::providers::build_registry(&cfg);
+        let adapter = registry.get(&crate::providers::Provider::ChatGPT).unwrap();
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <div id="prompt-textarea" contenteditable="true" style="display:none"></div>
+            <textarea id="custom-ready">ready</textarea>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+
+        assert!(super::provider_landing_navigation_ready(
+            "https://chatgpt.com/",
+            "https://chatgpt.com/",
+            &page,
+            adapter.as_ref()
+        ));
+        assert!(super::provider_thread_navigation_ready(
+            "https://chatgpt.com/c/saved",
+            "https://chatgpt.com/c/saved",
+            &page,
+            adapter.as_ref()
+        ));
+
+        // A stale built-in editor cannot bypass a disabled configured input.
+        page.evaluate("document.querySelector('#prompt-textarea').style.display = 'block'");
+        page.evaluate("document.querySelector('#custom-ready').disabled = true");
+        assert!(!super::provider_landing_navigation_ready(
+            "https://chatgpt.com/",
+            "https://chatgpt.com/",
+            &page,
+            adapter.as_ref()
+        ));
+        assert!(!super::provider_thread_navigation_ready(
+            "https://chatgpt.com/c/saved",
+            "https://chatgpt.com/c/saved",
+            &page,
+            adapter.as_ref()
+        ));
+    }
 
     #[test]
     fn saved_thread_reopen_needs_matching_path_and_ready_composer() {
