@@ -414,7 +414,14 @@ mod visible_composer_tests {
             .unwrap();
         assert!(!visible_composer_exists(
             &page,
-            &["#hidden", "#disabled", "#readonly", "#fieldset-disabled", "#noneditable", "#aria-readonly"]
+            &[
+                "#hidden",
+                "#disabled",
+                "#readonly",
+                "#fieldset-disabled",
+                "#noneditable",
+                "#aria-readonly"
+            ]
         ));
         assert!(visible_composer_exists(&page, &["#hidden", "#visible"]));
         page.evaluate("document.querySelector('#visible').hidden = true");
