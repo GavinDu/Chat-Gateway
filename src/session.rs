@@ -1836,9 +1836,15 @@ mod cookie_scope_tests {
             ts: "fixture".into(),
         };
         let err = preflight_cookie_restore(&file, "chatgpt").unwrap_err();
-        assert_eq!(err.to_string(), "failed to restore 1 provider session cookie(s)");
+        assert_eq!(
+            err.to_string(),
+            "failed to restore 1 provider session cookie(s)"
+        );
         let err = restore_cookies(&browser, &file, "chatgpt").unwrap_err();
-        assert_eq!(err.to_string(), "failed to restore 1 provider session cookie(s)");
+        assert_eq!(
+            err.to_string(),
+            "failed to restore 1 provider session cookie(s)"
+        );
         let remaining = browser.cookies().get_all();
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].name, "preserved");
