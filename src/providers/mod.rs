@@ -654,7 +654,9 @@ pub async fn run_send(
                     common::ProviderTimeoutPhase::Generation,
                 ))))
                 .await;
-            break;
+            // Do not fall through to the unconditional "generation complete"
+            // log after a terminal error. An expired response is never done.
+            return;
         }
 
         common::drive_page(page, poll_tick).await;
@@ -1601,6 +1603,65 @@ mod nine_provider_selector_fixture_tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod timeout_terminal_regression_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn generation_timeout_emits_only_a_typed_error_and_phase_metric() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body><form><textarea placeholder="Ask anything"></textarea><button type="button" aria-label="Send">Send</button></form></body></html>"#;
+        let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+
+        let adapter = Arc::new(qwen::QwenAdapter {
+            cfg: serde_yaml::from_str("name: qwen\nmodels: [qwen]").unwrap(),
+        });
+        let metrics = crate::metrics::MetricsRegistry::default();
+        let (tx, mut rx) = mpsc::channel(8);
+        tokio::time::timeout(
+            Duration::from_secs(8),
+            run_send(
+                adapter,
+                &mut page,
+                "SYNTHETIC_TIMEOUT".into(),
+                Duration::from_secs(3),
+                Duration::from_millis(50),
+                ProviderSendPolicy {
+                    completion_idle: Duration::from_millis(100),
+                    provider_guard: crate::provider_guard::ProviderGuard::default(),
+                    metrics: metrics.clone(),
+                },
+                tx,
+            ),
+        )
+        .await
+        .unwrap();
+
+        let failure = rx
+            .recv()
+            .await
+            .expect("timeout error was not sent")
+            .unwrap_err();
+        assert!(failure
+            .downcast_ref::<common::ProviderTimeoutError>()
+            .is_some());
+        assert!(failure.to_string().contains("did not complete"));
+        assert!(rx.recv().await.is_none(), "timeout must not emit done");
+        let output = metrics.render_with_provider_states(&[]);
+        assert!(output
+            .contains("gateway_provider_timeout_total{provider=\"qwen\",phase=\"generation\"} 1"));
+        assert!(!output
+            .contains("gateway_provider_timeout_total{provider=\"qwen\",phase=\"submission\"} 1"));
     }
 }
 
