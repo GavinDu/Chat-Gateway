@@ -128,7 +128,10 @@ fn is_challenge_url(url: &str) -> bool {
     }
     let host = uri.host().unwrap_or_default().to_ascii_lowercase();
     let host = host.trim_end_matches('.');
-    if matches!(host, "challenges.cloudflare.com" | "challenge.cloudflare.com") {
+    if matches!(
+        host,
+        "challenges.cloudflare.com" | "challenge.cloudflare.com"
+    ) {
         return true;
     }
     uri.path().split('/').any(|segment| {
@@ -238,7 +241,10 @@ mod tests {
             "data:text/html,<div>challenge</div>",
         ] {
             assert!(!is_challenge_url(url), "false challenge redirect: {url}");
-            assert!(!has_challenge_marker(url, ""), "false challenge page: {url}");
+            assert!(
+                !has_challenge_marker(url, ""),
+                "false challenge page: {url}"
+            );
         }
         for url in [
             "https://example.test/cdn-cgi/challenge-platform/h/g/",
