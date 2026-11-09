@@ -470,22 +470,68 @@ fn matching_model_labels(labels: Vec<String>, keywords: &str) -> anyhow::Result<
         .collect())
 }
 
-/// Login/session-expiry detection, Go concept in Rust form (Rust v1 had
-/// none): Go's login keyword list (base.go) matched against the page
-/// URL. Callers fail the attempt with a distinct session_expired error
-/// so the API can report it and the router can skip the provider.
-pub const LOGIN_KEYWORDS: &[&str] = &[
-    "login",
-    "signin",
-    "sign-in",
-    "auth",
-    "accounts.google.com",
-    "auth0",
-];
+/// Classify actual authentication redirects, not incidental keywords in
+/// article paths, query strings, or conversation IDs. A login URL is evidence
+/// of expired auth; an absent composer alone is not.
+pub fn is_login_url(url: &str) -> bool {
+    let Ok(uri) = url.parse::<axum::http::Uri>() else {
+        return false;
+    };
+    if !matches!(uri.scheme_str(), Some("https" | "http")) {
+        return false;
+    }
+    let host = uri.host().unwrap_or_default().to_ascii_lowercase();
+    let host = host.trim_end_matches('.');
+    if matches!(host, "accounts.google.com" | "accounts.x.com" | "login.microsoftonline.com")
+        || host.starts_with("login.")
+        || host.starts_with("auth.")
+        || host.ends_with(".auth0.com")
+    {
+        return true;
+    }
+    uri.path().split('/').any(|segment| {
+        matches!(
+            segment.to_ascii_lowercase().as_str(),
+            "login" | "signin" | "sign-in" | "auth" | "oauth" | "oauth2" | "authorize" | "sso"
+        )
+    })
+}
 
 pub fn is_login_page(page: &Page) -> bool {
-    let url = page.url().to_lowercase();
-    LOGIN_KEYWORDS.iter().any(|kw| url.contains(kw))
+    is_login_url(&page.url())
+}
+
+#[cfg(test)]
+mod login_url_classification_tests {
+    use super::is_login_url;
+
+    #[test]
+    fn recognizes_explicit_provider_and_sso_redirects() {
+        for url in [
+            "https://accounts.google.com/v3/signin/challenge",
+            "https://accounts.x.com/",
+            "https://chatgpt.com/auth/login",
+            "https://claude.ai/login?next=%2Fnew",
+            "https://login.microsoftonline.com/tenant/oauth2/authorize",
+            "https://login.auth0.com/authorize",
+        ] {
+            assert!(is_login_url(url), "missed authentication redirect: {url}");
+        }
+    }
+
+    #[test]
+    fn does_not_treat_unrelated_url_text_as_expired_authentication() {
+        for url in [
+            "https://chatgpt.com/c/authoring",
+            "https://grok.com/author",
+            "https://gemini.google.com/app?q=auth",
+            "https://claude.ai/new?redirect=https%3A%2F%2Fauth.openai.com%2Flogin",
+            "https://accounts.x.com.attacker.invalid/",
+            "data:text/html,<textarea></textarea>",
+        ] {
+            assert!(!is_login_url(url), "false login detection: {url}");
+        }
+    }
 }
 
 pub fn check_session(provider: &str, page: &Page) -> anyhow::Result<()> {
