@@ -48,7 +48,10 @@ impl SiteAdapter for MetaAIAdapter {
     }
 
     fn response_text(&self, page: &Page) -> Option<String> {
-        common::response_text(page, &SELECTORS.effective(&self.cfg.selectors).response_refs())
+        common::response_text(
+            page,
+            &SELECTORS.effective(&self.cfg.selectors).response_refs(),
+        )
     }
 
     fn selectors(&self) -> AdapterSelectors {
