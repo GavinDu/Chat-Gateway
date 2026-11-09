@@ -114,16 +114,20 @@ fn mistral_readiness_diagnostics(page: &Page) -> String {
                 .filter(entry => entry.initiatorType === 'script' ||
                     scriptPreloads.has(entry.name));
             const assetStatuses = [];
+            let scriptHttp403Observed = false;
             for (const entry of entries) {
-                if (assetStatuses.length >= 8) break;
                 const status = entry.responseStatus;
                 if (!Number.isInteger(status) || status < 400 || status >= 600) continue;
                 try {
-                    // Never pass resource URLs, paths, query strings, or credentials
-                    // to Rust diagnostics. Only the hostname and HTTP status.
-                    const host = new URL(entry.name, location.href).hostname.toLowerCase();
+                    // A late script 403 must not disappear when the bounded
+                    // diagnostics list already contains eight other failures.
+                    // Never pass asset URLs, paths, queries, or credentials to Rust.
+                    const asset = new URL(entry.name, location.href);
+                    if (asset.protocol !== 'https:' && asset.protocol !== 'http:') continue;
+                    const host = asset.hostname.toLowerCase();
                     if (/^[a-z0-9.-]{1,128}$/.test(host)) {
-                        assetStatuses.push({host, status});
+                        if (status === 403) scriptHttp403Observed = true;
+                        if (assetStatuses.length < 8) assetStatuses.push({host, status});
                     }
                 } catch (_) {}
             }
@@ -131,7 +135,8 @@ fn mistral_readiness_diagnostics(page: &Page) -> String {
                 readyState: document.readyState,
                 scriptCount: document.scripts.length,
                 loadedResources: entries.length,
-                assetStatuses
+                assetStatuses,
+                scriptHttp403Observed
             };
         })()"#,
     );
@@ -194,7 +199,12 @@ fn mistral_readiness_summary(evidence: &serde_json::Value) -> String {
     // whether cookies, provider CDN policy or browser compatibility caused it.
     let blocker = if challenge {
         "challenge_visible"
-    } else if asset_errors.iter().any(|error| error.ends_with(":403")) {
+    } else if evidence
+        .get("scriptHttp403Observed")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+        || asset_errors.iter().any(|error| error.ends_with(":403"))
+    {
         "script_http_403"
     } else if !asset_errors.is_empty() {
         "script_http_error"
@@ -265,6 +275,40 @@ mod readiness_tests {
         assert!(!result.contains("style.example.invalid"));
         assert!(!result.contains("blocker=script_http_403"));
         assert!(result.contains("script_asset_http_errors=not_observable"));
+    }
+
+    #[tokio::test]
+    async fn late_script_403_survives_eight_entry_diagnostic_cap_without_url_leaks() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        page.goto("data:text/html,<html><body><script>window.ready=true</script></body></html>")
+            .await
+            .unwrap();
+        let stubbed = page.evaluate(
+            r#"(() => {
+                Object.defineProperty(performance, 'getEntriesByType', {
+                    configurable: true,
+                    value: () => Array.from({length:10}, (_, i) => ({
+                        initiatorType: 'script',
+                        name: 'https://cdn.example.invalid/private-asset-' + i + '.js?token=secret',
+                        responseStatus: i === 9 ? 403 : 500
+                    }))
+                });
+                return true;
+            })()"#,
+        );
+        assert_eq!(stubbed.as_bool(), Some(true));
+        let result = super::mistral_readiness_diagnostics(&page);
+        assert!(result.contains("script_resource_entries=10"), "{result}");
+        assert!(result.contains("blocker=script_http_403"), "{result}");
+        assert!(result.contains("cdn.example.invalid:500"), "{result}");
+        assert!(!result.contains("cdn.example.invalid:403"), "{result}");
+        assert!(!result.contains("private-asset"));
+        assert!(!result.contains("token"));
+        assert!(!result.contains("secret"));
     }
 
     #[tokio::test]
