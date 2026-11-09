@@ -215,16 +215,6 @@ jobs:
           cache-bin: false
           key: chat-gateway-ci-deps
 
-      # Temporary lockfile regeneration for the dependency-security upgrade.
-      # Once committed via GitHub connector, remove this step.
-      - name: Generate upgraded SQLite lockfile for review
-        run: |
-          cargo update -p rusqlite --precise 0.41.0
-          echo LOCKFILE_BEGIN
-          base64 -w0 Cargo.lock
-          echo
-          echo LOCKFILE_END
-
       - name: Run Clippy
         run: cargo clippy --all-targets --locked -- -D warnings
 
