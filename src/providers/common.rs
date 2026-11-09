@@ -951,21 +951,27 @@ pub fn probe_selector_groups(
         .collect()
 }
 
-/// Text of the last element matching `selector` (innerText, falling back
-/// to textContent), or None when nothing matches. Replaces chromiumoxide
-/// find_elements + inner_text polling.
+/// Text of the last visible non-empty element matching `selector`,
+/// or None when no actionable response is present. Old hidden SPA nodes
+/// must not override the latest visible assistant response or satisfy probes.
 pub fn last_element_text(page: &Page, selector: &str) -> Option<String> {
     let sel_js = serde_json::to_string(selector).ok()?;
     let js = format!(
-        "(function() {{ var els = document.querySelectorAll({}); if (!els.length) return null; var el = els[els.length - 1]; return el.innerText || el.textContent || ''; }})()",
-        sel_js
+        r#"(() => {{
+            const nodes = Array.from(document.querySelectorAll({sel_js}));
+            for (let i = nodes.length - 1; i >= 0; i--) {{
+                const node = nodes[i];
+                if (!node.getClientRects().length ||
+                    window.getComputedStyle(node).visibility === 'hidden' ||
+                    node.closest('[hidden], [inert], [aria-hidden="true"], [aria-disabled="true"], fieldset[disabled]') ||
+                    node.disabled || node.matches(':disabled')) continue;
+                const value = node.innerText || node.textContent || '';
+                if (value.trim()) return value;
+            }}
+            return null;
+        }})()"#
     );
-    let v = page.evaluate(&js);
-    if v.is_null() {
-        None
-    } else {
-        Some(v.as_str().unwrap_or("").to_string())
-    }
+    page.evaluate(&js).as_str().map(str::to_owned)
 }
 
 /// Response text for an adapter: first response selector (in fallback
@@ -979,6 +985,56 @@ pub fn response_text(page: &Page, selectors: &[&str]) -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod last_visible_response_text_tests {
+    #[tokio::test]
+    async fn hidden_and_disabled_last_nodes_cannot_override_real_response() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <div class="answer">visible answer</div>
+            <div class="answer" hidden>stale hidden answer</div>
+            <div aria-hidden="true"><div class="answer">stale aria answer</div></div>
+            <div aria-disabled="true"><div class="answer">stale disabled answer</div></div>
+            <div class="answer" style="visibility:hidden">stale style answer</div>
+            </body></html>"#;
+        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        assert_eq!(
+            super::last_element_text(&page, ".answer").as_deref(),
+            Some("visible answer")
+        );
+        assert_eq!(
+            super::response_text(&page, &[".answer"]).as_deref(),
+            Some("visible answer")
+        );
+        page.evaluate("document.querySelector('.answer').hidden = true");
+        assert!(super::last_element_text(&page, ".answer").is_none());
+        assert!(super::response_text(&page, &[".answer"]).is_none());
+    }
+
+    #[tokio::test]
+    async fn trailing_empty_visible_node_does_not_hide_earlier_answer() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        page.goto("data:text/html,<html><body><div class='answer'>answer</div><div class='answer'></div></body></html>")
+            .await
+            .unwrap();
+        assert_eq!(
+            super::last_element_text(&page, ".answer").as_deref(),
+            Some("answer")
+        );
+    }
 }
 
 /// Discover models without sending a message (v1 body): navigate, open
