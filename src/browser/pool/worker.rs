@@ -788,6 +788,7 @@ pub(super) fn browser_thread(
                         }
                         Command::LoginComplete { provider, reply } => {
                             let browser = browser.clone();
+                            let registry = registry.clone();
                             let pages = pages.clone();
                             let locks = locks.clone();
                             let login_pages = login_pages.clone();
@@ -810,6 +811,14 @@ pub(super) fn browser_thread(
                                     let lock = locks.borrow().get(&provider).cloned()
                                         .unwrap_or_else(|| Rc::new(tokio::sync::Mutex::new(())));
                                     let _guard = lock.lock().await;
+                                    if crate::provider_guard::is_challenge_page(&login_page) {
+                                        anyhow::bail!("provider challenge requires manual completion before saving a session");
+                                    }
+                                    let adapter = registry.get(&provider)
+                                        .ok_or_else(|| anyhow::anyhow!("provider adapter is not registered"))?;
+                                    super::diagnostics::require_login_completion_ready(
+                                        verify_session_page(provider, &login_page, adapter.as_ref())
+                                    )?;
                                     applied_imports.borrow_mut().remove(&provider);
                                     // Same format/path as every other save:
                                     // sessions/<provider>.json via
