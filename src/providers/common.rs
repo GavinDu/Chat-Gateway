@@ -1004,7 +1004,9 @@ mod last_visible_response_text_tests {
             <div class="answer" style="visibility:hidden">stale style answer</div>
             </body></html>"#;
         let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
-        page.goto(&format!("data:text/html,{encoded}")).await.unwrap();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
         assert_eq!(
             super::last_element_text(&page, ".answer").as_deref(),
             Some("visible answer")
