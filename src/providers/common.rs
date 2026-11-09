@@ -294,14 +294,22 @@ mod chat_text_challenge_regression_tests {
             .await
             .unwrap();
         let normal = super::response_probe(&page, &[".answer"], true);
-        assert!(!normal.challenge, "response text must not be a challenge page");
+        assert!(
+            !normal.challenge,
+            "response text must not be a challenge page"
+        );
         assert_eq!(
             normal.text.as_deref(),
             Some("To verify you are human, follow the on-screen instructions")
         );
-        page.evaluate("document.body.insertAdjacentHTML('beforeend', '<h1>Security challenge</h1>')");
+        page.evaluate(
+            "document.body.insertAdjacentHTML('beforeend', '<h1>Security challenge</h1>')",
+        );
         let blocked = super::response_probe(&page, &[".answer"], true);
-        assert!(blocked.challenge, "visible verification UI must still block");
+        assert!(
+            blocked.challenge,
+            "visible verification UI must still block"
+        );
     }
 }
 
