@@ -581,6 +581,9 @@ pub(super) fn browser_thread(
                                         return;
                                     }
                                 };
+                                // Test-adapter navigation uses an independent page, so attach
+                                // the same sanitized network diagnostics before its first load.
+                                crate::browser::network_tap::attach_provider_network_tap(&mut page, provider);
                                 let session_file = match session::load_session_file(provider.name()) {
                                     Ok(file) => file,
                                     Err(error) => {
@@ -723,6 +726,8 @@ pub(super) fn browser_thread(
                                     page_session::replace_after_success(
                                     || async {
                                     let mut page = super::browser_factory::new_page(&browser).await?;
+                                    // Observe script fetch failures on the restored page too.
+                                    crate::browser::network_tap::attach_provider_network_tap(&mut page, provider);
                                     page.goto(provider.login_url()).await?;
                                     let storage_cleared = page.evaluate(
                                         "(()=>{try{localStorage.clear();return true;}catch(_){return false;}})()"
