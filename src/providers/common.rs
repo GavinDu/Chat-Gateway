@@ -123,7 +123,7 @@ impl SelectorSet {
 
 /// Streaming indicator shared by all providers. Keep this valid CSS only;
 /// text matching is handled by the explicit text-selector helper below.
-pub const STREAMING_SELECTOR: &str = r#"[data-is-streaming="true"], button[aria-label*="Stop"]"#;
+pub const STREAMING_SELECTOR: &str = r#"[data-is-streaming="true"]"#;
 
 /// Snapshot of the three DOM signals used by the response polling loop.
 /// A single page evaluation keeps the signals from drifting across ticks.
@@ -220,11 +220,27 @@ pub fn response_probe(
                     }}
                 }} catch (_) {{}}
             }}
+            // Hidden or disabled Stop controls can remain in a provider SPA
+            // long after a response finishes. Their DOM presence is not proof
+            // of active streaming, nor is an unrelated "Stop sharing" button.
+            const visible = el => {{
+                try {{
+                    return el.getClientRects().length > 0 &&
+                        window.getComputedStyle(el).visibility !== "hidden" &&
+                        !el.closest('[hidden], [inert], [aria-hidden="true"]') &&
+                        !el.disabled && el.getAttribute("aria-disabled") !== "true";
+                }} catch (_) {{ return false; }}
+            }};
             let streaming = false;
-            try {{ streaming = document.querySelector({streaming_selector}) !== null; }} catch (_) {{}}
+            try {{
+                streaming = Array.from(document.querySelectorAll({streaming_selector})).some(visible);
+            }} catch (_) {{}}
             if (!streaming) {{
                 streaming = Array.from(document.querySelectorAll("button"))
-                    .some(button => ((button.innerText || button.textContent || "").trim()).toLowerCase().includes("stop"));
+                    .some(button => visible(button) &&
+                        /^(stop|stop generating|stop generation|stop responding|stop response|stop answering)$/i.test(
+                            (button.getAttribute("aria-label") || button.innerText || button.textContent || "").trim()
+                        ));
             }}
             const url = String(location.href || "");
             const body = ({check_body_challenge} ? (document.body?.innerText || "").slice(0, 12000) : "").toLowerCase();
@@ -251,6 +267,34 @@ pub fn response_probe(
         check_body_challenge = check_body_challenge,
     );
     decode_response_probe(page.evaluate(&script))
+}
+
+#[cfg(test)]
+mod streaming_visibility_regression_tests {
+    use super::response_probe;
+
+    #[tokio::test]
+    async fn hidden_stop_controls_and_unrelated_buttons_do_not_extend_generation() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body><div class="answer">done</div><button id="stop" aria-label="Stop generating" style="display:none">Stop</button><span data-is-streaming="true" hidden></span><button aria-label="Stop sharing">Stop sharing</button></body></html>"#;
+        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        let idle = response_probe(&page, &[".answer"], false);
+        assert!(!idle.streaming, "hidden controls are not active generation");
+
+        page.evaluate("document.querySelector('#stop').style.display = 'block'");
+        let active = response_probe(&page, &[".answer"], false);
+        assert!(
+            active.streaming,
+            "a visible Stop generating button is active"
+        );
+    }
 }
 
 /// Parse the internal `text:TAG=NEEDLE` selector syntax. This is deliberately
