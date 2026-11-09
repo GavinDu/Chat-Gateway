@@ -609,6 +609,7 @@ pub async fn run_send(
             return;
         }
         Err(_) => {
+            metrics.record_provider_timeout(adapter.name(), "submission");
             let _ = chunks
                 .send(Err(anyhow::Error::new(common::ProviderTimeoutError::new(
                     adapter.name(),
@@ -645,6 +646,7 @@ pub async fn run_send(
         if start.elapsed() > timeout {
             // A timeout is not a successful completion. Propagate a typed
             // provider error so the API won't commit a partial/empty turn.
+            metrics.record_provider_timeout(adapter.name(), "generation");
             let _ = chunks
                 .send(Err(anyhow::Error::new(common::ProviderTimeoutError::new(
                     adapter.name(),
