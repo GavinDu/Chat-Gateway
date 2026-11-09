@@ -123,7 +123,7 @@ impl SelectorSet {
 
 /// Streaming indicator shared by all providers. Keep this valid CSS only;
 /// text matching is handled by the explicit text-selector helper below.
-pub const STREAMING_SELECTOR: &str = r#"[data-is-streaming="true"], button[aria-label*="Stop"]"#;
+pub const STREAMING_SELECTOR: &str = r#"[data-is-streaming="true"]"#;
 
 /// Snapshot of the three DOM signals used by the response polling loop.
 /// A single page evaluation keeps the signals from drifting across ticks.
@@ -280,7 +280,7 @@ mod streaming_visibility_regression_tests {
             .build()
             .unwrap();
         let mut page = browser.new_page().await.unwrap();
-        let html = r#"<html><body><div class="answer">done</div><button id="stop" aria-label="Stop generating" style="display:none">Stop</button><span data-is-streaming="true" hidden></span><button>Stop sharing</button></body></html>"#;
+        let html = r#"<html><body><div class="answer">done</div><button id="stop" aria-label="Stop generating" style="display:none">Stop</button><span data-is-streaming="true" hidden></span><button aria-label="Stop sharing">Stop sharing</button></body></html>"#;
         let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
         page.goto(&format!("data:text/html,{encoded}"))
             .await
