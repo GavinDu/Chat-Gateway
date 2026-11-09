@@ -23,6 +23,9 @@ const NONCE_RETENTION: Duration = Duration::from_secs(5 * 60);
 const MAX_PAIR_ATTEMPTS: u8 = 5;
 const MAX_RELAY_REQUESTS_PER_MINUTE: usize = 120;
 const RELAY_SESSION_ACTIVATION_TIMEOUT: Duration = Duration::from_secs(30);
+// Decrypting status presence is read-only, unlike session import. Bound the
+// dashboard wait without cancelling or replaying credential mutations.
+const RELAY_STATUS_SCAN_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Dropping a timed-out refresh future closes its reply receiver. The browser
 /// worker observes that cancellation before beginning queued activation.
@@ -784,7 +787,7 @@ pub async fn status(State(app): State<Arc<crate::AppState>>, headers: HeaderMap)
     ];
     // Session loading may decrypt multiple vault records and read disk. Keep
     // it off the async HTTP reactor; return presence flags only, not secrets.
-    let session_presence = session_snapshot_io_off_reactor(move || {
+    let session_presence = bounded_session_status_scan(RELAY_STATUS_SCAN_TIMEOUT, move || {
         PROVIDERS
             .iter()
             .map(|provider| crate::session::load_session_file(provider).map(|s| s.is_some()))
@@ -792,12 +795,19 @@ pub async fn status(State(app): State<Arc<crate::AppState>>, headers: HeaderMap)
     })
     .await;
     let session_presence = match session_presence {
-        Ok(presence) => presence,
-        Err(_) => {
+        Ok(Ok(presence)) => presence,
+        Ok(Err(_)) => {
             return json_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "session_status_unavailable",
                 "provider session status could not be read; check vault configuration",
+            );
+        }
+        Err(_) => {
+            return json_error(
+                StatusCode::GATEWAY_TIMEOUT,
+                "session_status_timeout",
+                "provider session status scan timed out; retry after checking vault storage",
             );
         }
     };
@@ -841,10 +851,21 @@ async fn session_snapshot_io_off_reactor<T: Send + 'static>(
         .map_err(|_| anyhow::anyhow!("relay session persistence task could not complete"))?
 }
 
+/// A status scan is read-only: the caller may stop waiting without making
+/// another import or losing a valid vault snapshot. The blocking thread may
+/// finish later, so do not apply this timeout wrapper to credential writes.
+async fn bounded_session_status_scan<T: Send + 'static>(
+    wait: Duration,
+    operation: impl FnOnce() -> anyhow::Result<T> + Send + 'static,
+) -> Result<anyhow::Result<T>, tokio::time::error::Elapsed> {
+    tokio::time::timeout(wait, session_snapshot_io_off_reactor(operation)).await
+}
+
 #[cfg(test)]
 mod relay_persist_off_reactor_tests {
-    use super::session_snapshot_io_off_reactor;
+    use super::{bounded_session_status_scan, session_snapshot_io_off_reactor};
     use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
     #[tokio::test(flavor = "current_thread")]
     async fn snapshot_persistence_runs_off_the_async_request_thread() {
@@ -871,6 +892,36 @@ mod relay_persist_off_reactor_tests {
         .unwrap();
         assert_ne!(reactor_thread, scanner_thread);
         assert_eq!(flags, vec![true, false, true]);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn stalled_vault_status_scan_times_out_without_blocking_async_requests() {
+        let (release, blocked) = std::sync::mpsc::channel::<()>();
+        let result = bounded_session_status_scan(Duration::from_millis(20), move || {
+            blocked.recv()?;
+            Ok(vec![true, false])
+        })
+        .await;
+        assert!(result.is_err(), "status scan must have a bounded HTTP wait");
+        // A previously dispatched read-only task can finish safely after the
+        // caller stops waiting; do not let the test strand a blocking thread.
+        release.send(()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn bounded_status_scan_propagates_success_and_storage_failure() {
+        let success = bounded_session_status_scan(Duration::from_secs(1), || Ok(vec![true, false]))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(success, vec![true, false]);
+        let failure = bounded_session_status_scan::<()>(Duration::from_secs(1), || {
+            anyhow::bail!("synthetic vault status failure")
+        })
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(failure.to_string(), "synthetic vault status failure");
     }
 
     #[tokio::test]
