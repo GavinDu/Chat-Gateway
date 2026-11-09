@@ -65,7 +65,56 @@ pub struct SelectorSet {
     pub model_pairs: &'static [(&'static str, &'static str)],
 }
 
+/// Effective selector data owned by each adapter. Keeping the same shared
+/// send/response implementation avoids drift between configured and built-in paths.
+#[derive(Debug, Clone)]
+pub struct EffectiveSelectorSet {
+    pub picker: Vec<String>,
+    pub input: Vec<String>,
+    pub send: Vec<String>,
+    pub response: Vec<String>,
+}
+
+impl EffectiveSelectorSet {
+    pub fn new(base: &SelectorSet, overrides: &crate::config::ProviderSelectorOverrides) -> Self {
+        let collect = |original: &[&str], configured: &Option<Vec<String>>| {
+            configured.clone().unwrap_or_else(|| original.iter().map(|s| (*s).to_owned()).collect())
+        };
+        Self {
+            picker: collect(base.picker, &overrides.picker),
+            input: collect(base.input, &overrides.input),
+            send: collect(base.send, &overrides.send),
+            response: collect(base.response, &overrides.response),
+        }
+    }
+
+    pub fn input_refs(&self) -> Vec<&str> {
+        self.input.iter().map(String::as_str).collect()
+    }
+    pub fn send_refs(&self) -> Vec<&str> {
+        self.send.iter().map(String::as_str).collect()
+    }
+    pub fn response_refs(&self) -> Vec<&str> {
+        self.response.iter().map(String::as_str).collect()
+    }
+    pub fn picker_refs(&self) -> Vec<&str> {
+        self.picker.iter().map(String::as_str).collect()
+    }
+    pub fn adapter_selectors(&self) -> crate::providers::AdapterSelectors {
+        crate::providers::AdapterSelectors {
+            input_selector: self.input.first().cloned().unwrap_or_default(),
+            send_button: self.send.first().cloned().unwrap_or_default(),
+            response_container: self.response.first().cloned().unwrap_or_default(),
+            model_picker: self.picker.first().cloned().unwrap_or_default(),
+        }
+    }
+}
+
 impl SelectorSet {
+    pub fn effective(&self, overrides: &crate::config::ProviderSelectorOverrides) -> EffectiveSelectorSet {
+        EffectiveSelectorSet::new(self, overrides)
+    }
+
     pub fn adapter_selectors(&self) -> crate::providers::AdapterSelectors {
         crate::providers::AdapterSelectors {
             input_selector: self.input[0].to_string(),
@@ -125,8 +174,8 @@ fn decode_response_probe(value: serde_json::Value) -> ResponseProbe {
 
 /// Read response text, response-node count, and streaming state in one
 /// JavaScript evaluation per polling tick.
-pub fn response_probe(page: &Page, set: &SelectorSet, check_body_challenge: bool) -> ResponseProbe {
-    let Ok(selectors) = serde_json::to_string(set.response) else {
+pub fn response_probe(page: &Page, selectors: &[&str], check_body_challenge: bool) -> ResponseProbe {
+    let Ok(selectors) = serde_json::to_string(selectors) else {
         return ResponseProbe::default();
     };
     let Ok(streaming_selector) = serde_json::to_string(STREAMING_SELECTOR) else {
@@ -580,8 +629,8 @@ pub fn last_element_text(page: &Page, selector: &str) -> Option<String> {
 
 /// Response text for an adapter: first response selector (in fallback
 /// order) that currently yields non-empty text.
-pub fn response_text(page: &Page, set: &SelectorSet) -> Option<String> {
-    for sel in set.response {
+pub fn response_text(page: &Page, selectors: &[&str]) -> Option<String> {
+    for sel in selectors {
         if let Some(t) = last_element_text(page, sel) {
             if !t.is_empty() {
                 return Some(t);
@@ -642,25 +691,16 @@ pub async fn discover_models(
 
 /// Wait for the input, type the prompt, click send (v1 send steps 1-3;
 /// the response stream is polled by providers::run_send).
-pub async fn send_prompt(page: &mut Page, set: &SelectorSet, prompt: &str) -> anyhow::Result<()> {
-    // 1. Wait for input ready
-    wait_for_selector(page, set.input, 15000).await?;
-
-    // 2. Focus + clear + type (Obscura stealth is built in)
-    human_type(page, set.input, prompt).await?;
+pub async fn send_prompt(page: &mut Page, set: &EffectiveSelectorSet, prompt: &str) -> anyhow::Result<()> {
+    let inputs = set.input_refs();
+    wait_for_selector(page, &inputs, 15_000).await?;
+    human_type(page, &inputs, prompt).await?;
     drive_page(page, Duration::from_millis(200)).await;
-
-    // 3. Send: button click, with Go's Enter fallback when no send
-    // button appears within the 5s send budget. The input selector is
-    // the first input selector that currently matches, else the first
-    // listed input selector.
-    let input_sel = set
-        .input
-        .iter()
-        .copied()
+    let input_sel = inputs.iter().copied()
         .find(|s| page.query_selector(s).is_some())
-        .unwrap_or(set.input[0]);
-    click_send_or_enter(page, set.send, input_sel, 5000).await?;
+        .unwrap_or(inputs[0]);
+    let sends = set.send_refs();
+    click_send_or_enter(page, &sends, input_sel, 5_000).await?;
     Ok(())
 }
 
