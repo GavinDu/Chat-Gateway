@@ -144,10 +144,14 @@ fn decode_response_probe(value: serde_json::Value) -> ResponseProbe {
             .and_then(serde_json::Value::as_str)
             .filter(|text| !text.is_empty())
             .map(str::to_owned),
+        // Obscura may deserialize a whole-number JS node count as 1.0.
+        // Reuse the submission-count decoder so a new response isn't
+        // mistaken for zero during generation polling.
         count: value
             .get("count")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0) as usize,
+            .and_then(decode_dom_count)
+            .and_then(|count| usize::try_from(count).ok())
+            .unwrap_or(0),
         streaming: value
             .get("streaming")
             .and_then(serde_json::Value::as_bool)
@@ -320,6 +324,20 @@ mod response_probe_tests {
         assert_eq!(
             decode_response_probe(serde_json::json!({"text": "", "count": -1})),
             ResponseProbe::default()
+        );
+        // Obscura's JS bridge emits whole numeric DOM counts as floats.
+        // Polling must agree with submission acknowledgement on those counts.
+        assert_eq!(
+            decode_response_probe(serde_json::json!({"count": 3.0})).count,
+            3
+        );
+        assert_eq!(
+            decode_response_probe(serde_json::json!({"count": 2.5})).count,
+            0
+        );
+        assert_eq!(
+            decode_response_probe(serde_json::json!({"count": "4"})).count,
+            0
         );
     }
 }
