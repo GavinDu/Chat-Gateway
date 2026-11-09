@@ -131,8 +131,9 @@ impl MetricsRegistry {
     }
 
     /// Bounded relay import phases only; no provider, cookie, URL or session labels.
+    /// "total" includes persistence and activation, including failed attempts.
     pub fn record_relay_import_phase(&self, phase: &str, elapsed_ms: u64) {
-        if !matches!(phase, "persist" | "activate") {
+        if !matches!(phase, "persist" | "activate" | "total") {
             return;
         }
         if let Ok(mut data) = self.data.lock() {
@@ -388,6 +389,7 @@ mod tests {
         let registry = MetricsRegistry::default();
         registry.record_relay_import_phase("persist", 15);
         registry.record_relay_import_phase("activate", 42);
+        registry.record_relay_import_phase("total", 57);
         registry.record_relay_import_phase("secret-session-id", 999);
         let metrics = registry.render_with_provider_states(&[]);
         assert!(
@@ -395,6 +397,9 @@ mod tests {
         );
         assert!(
             metrics.contains("gateway_relay_session_import_phase_ms_sum{phase=\"activate\"} 42")
+        );
+        assert!(
+            metrics.contains("gateway_relay_session_import_phase_ms_sum{phase=\"total\"} 57")
         );
         assert!(!metrics.contains("secret-session-id"));
     }
