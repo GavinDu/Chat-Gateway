@@ -170,6 +170,7 @@ mod tests {
                     daily_request_cap: 100,
                     models: vec!["sonnet".into()],
                     completion_idle_ms: 15_000,
+                    selectors: crate::config::ProviderSelectorOverrides::default(),
                 },
                 ProviderConfig {
                     name: "chatgpt".into(),
@@ -182,6 +183,7 @@ mod tests {
                     daily_request_cap: 100,
                     models: vec!["gpt-4o".into()],
                     completion_idle_ms: 15_000,
+                    selectors: crate::config::ProviderSelectorOverrides::default(),
                 },
             ],
         };

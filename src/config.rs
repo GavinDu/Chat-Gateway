@@ -136,6 +136,22 @@ pub struct ProviderConfig {
     pub daily_request_cap: u32,
     #[serde(default)]
     pub models: Vec<String>,
+    /// Optional full replacement selector lists for this provider. Omitted roles use defaults.
+    #[serde(default)]
+    pub selectors: ProviderSelectorOverrides,
+}
+
+/// Declarative selector overrides; an explicitly empty list is rejected.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ProviderSelectorOverrides {
+    #[serde(default)]
+    pub picker: Option<Vec<String>>,
+    #[serde(default)]
+    pub input: Option<Vec<String>>,
+    #[serde(default)]
+    pub send: Option<Vec<String>>,
+    #[serde(default)]
+    pub response: Option<Vec<String>>,
 }
 
 impl AppConfig {
@@ -304,6 +320,45 @@ impl AppConfig {
                     provider.name
                 );
             }
+            for (role, selectors) in [
+                ("picker", &provider.selectors.picker),
+                ("input", &provider.selectors.input),
+                ("send", &provider.selectors.send),
+                ("response", &provider.selectors.response),
+            ] {
+                if let Some(selectors) = selectors {
+                    if selectors.is_empty() || selectors.len() > 16 {
+                        anyhow::bail!(
+                            "provider '{}' selectors.{} must contain 1-16 entries",
+                            provider.name,
+                            role
+                        );
+                    }
+                    for selector in selectors {
+                        if selector.trim().is_empty()
+                            || selector.len() > 512
+                            || selector.chars().any(|ch| ch.is_control())
+                            || selector.contains(":has-text(")
+                            || matches!(
+                                selector.as_str(),
+                                "button[type=\"submit\"]" | "button:has(svg)"
+                            )
+                        {
+                            anyhow::bail!(
+                                "provider '{}' selectors.{} contains an invalid selector",
+                                provider.name,
+                                role
+                            );
+                        }
+                        if selector.starts_with("text:") && !matches!(role, "picker") {
+                            anyhow::bail!(
+                                "provider '{}' only supports text: selectors for the picker role",
+                                provider.name
+                            );
+                        }
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -410,6 +465,21 @@ mod tests {
     fn accepts_supported_provider_configuration() {
         let cfg = config("memory:\n  max_tokens: 4000\nproviders:\n  - name: chatgpt\n    timeout_seconds: 30\n    session_pool_size: 1\n");
         assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn configurable_selector_groups_parse_and_validate() {
+        let cfg = config("providers:\n  - name: chatgpt\n    selectors:\n      input: ['textarea[name=prompt]']\n      send: ['form button[aria-label=Send]']\n");
+        assert!(cfg.validate().is_ok());
+        assert_eq!(
+            cfg.providers[0].selectors.input.as_ref().unwrap()[0],
+            "textarea[name=prompt]"
+        );
+        let empty = config("providers:\n  - name: grok\n    selectors:\n      send: []\n");
+        assert!(empty.validate().is_err());
+        let generic =
+            config("providers:\n  - name: grok\n    selectors:\n      send: ['button:has(svg)']\n");
+        assert!(generic.validate().is_err());
     }
 
     #[test]

@@ -377,7 +377,7 @@ pub(super) fn browser_thread(
                                     return;
                                 }
                                 let Some(composer) = send_unless_disconnected(&chunks,
-                                    providers::common::wait_for_selector(&mut page, adapter.selector_set().input, 15_000)).await else { return; };
+                                    providers::common::wait_for_selector(&mut page, &adapter.effective_selectors().input_refs(), 15_000)).await else { return; };
                                 if let Err(error) = composer {
                                     let _ = chunks.send(Err(error)).await;
                                     return;
@@ -590,11 +590,14 @@ pub(super) fn browser_thread(
                                 // Selector probe over the full Rust v1
                                 // arrays (snapshot, not Go's 5s waits —
                                 // obscura query_selector is instant).
-                                let set = adapter.selector_set();
+                                let effective = adapter.effective_selectors();
+                                let inputs = effective.input_refs();
+                                let sends = effective.send_refs();
+                                let responses = effective.response_refs();
                                 let sets: [(&str, &[&str]); 3] = [
-                                    ("input", set.input),
-                                    ("send", set.send),
-                                    ("response", set.response),
+                                    ("input", &inputs),
+                                    ("send", &sends),
+                                    ("response", &responses),
                                 ];
                                 report.probe = providers::common::probe_selector_groups(&page, &sets);
                                 report.input_controls = diagnostic_input_controls(&page);

@@ -25,7 +25,7 @@ pub(super) fn verify_session_page(
 ) -> Result<bool> {
     let is_login_page = providers::common::is_login_page(page);
     let input_found = adapter
-        .selector_set()
+        .effective_selectors()
         .input
         .iter()
         .any(|selector| page.query_selector(selector).is_some());

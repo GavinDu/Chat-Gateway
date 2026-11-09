@@ -109,6 +109,7 @@ mod model_list_tests {
             min_request_interval_ms: 5_000,
             daily_request_cap: 100,
             models: models.iter().map(|model| (*model).to_owned()).collect(),
+            selectors: config::ProviderSelectorOverrides::default(),
         }
     }
 
