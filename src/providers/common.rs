@@ -985,7 +985,9 @@ mod submission_transition_tests {
         let mut page = browser.new_page().await.unwrap();
         let html = r#"<html><body><form><textarea id="prompt">draft</textarea><button class="send" type="button" style="display:none" onclick="window.hiddenClicks=(window.hiddenClicks||0)+1">hidden</button><button class="send" type="button" disabled>disabled</button><button class="send" type="button" onclick="window.visibleClicks=(window.visibleClicks||0)+1">send</button></form></body></html>"#;
         let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
-        page.goto(&format!("data:text/html,{encoded}")).await.unwrap();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
 
         assert!(
             super::click_send_or_enter(&mut page, &["button.send"], "#prompt", 400)
@@ -993,8 +995,14 @@ mod submission_transition_tests {
                 .unwrap(),
             "a visible enabled send must be selected before Enter fallback"
         );
-        assert_eq!(page.evaluate("window.hiddenClicks || 0").as_f64(), Some(0.0));
-        assert_eq!(page.evaluate("window.visibleClicks || 0").as_f64(), Some(1.0));
+        assert_eq!(
+            page.evaluate("window.hiddenClicks || 0").as_f64(),
+            Some(0.0)
+        );
+        assert_eq!(
+            page.evaluate("window.visibleClicks || 0").as_f64(),
+            Some(1.0)
+        );
     }
 
     #[test]
