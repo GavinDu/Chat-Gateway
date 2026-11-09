@@ -318,7 +318,10 @@ mod streaming_visibility_regression_tests {
             .await
             .unwrap();
         let idle = response_probe(&page, &[".answer"], false);
-        assert!(!idle.streaming, "disabled Stop controls must not indicate streaming");
+        assert!(
+            !idle.streaming,
+            "disabled Stop controls must not indicate streaming"
+        );
         assert!(
             !idle.post_answer_affordance,
             "a hidden Copy control cannot confirm completion"
@@ -352,7 +355,6 @@ mod streaming_visibility_regression_tests {
         assert_eq!(hidden.text, None);
         assert_eq!(hidden.count, 0);
     }
-
 }
 
 /// Parse the internal `text:TAG=NEEDLE` selector syntax. This is deliberately
