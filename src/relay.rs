@@ -1218,6 +1218,18 @@ mod tests {
         }
     }
 
+    #[test]
+    fn challenge_blocker_does_not_falsely_report_expired_authentication() {
+        let registry = crate::provider_state::ProviderSessionRegistry::default();
+        registry.record_gateway_error(
+            "gemini",
+            &crate::chat_backend::GatewayError::challenge("manual verification required"),
+        );
+        let state = registry.status("gemini").state;
+        assert_eq!(provider_authentication_status(None, state), "unknown");
+        assert!(!registry.is_available("gemini"));
+    }
+
     fn relay_state_with_token(token: Option<&str>) -> RelayState {
         let install_token_hash = token.map(|token| {
             let hash: [u8; 32] = Sha256::digest(token.as_bytes()).into();
