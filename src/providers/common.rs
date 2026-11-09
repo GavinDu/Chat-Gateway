@@ -1174,7 +1174,9 @@ mod submission_transition_tests {
         assert!(!baseline.input_empty);
         // Simulate the SPA inserting an unrelated Stop control after click:
         // without a new assistant node this must still not count as an ack.
-        page.evaluate("document.querySelector('[aria-label=\"Stop sharing\"]').setAttribute('data-test', 'unchanged')");
+        page.evaluate(
+            "document.querySelector('[aria-label=\"Stop sharing\"]').setAttribute('data-test', 'unchanged')",
+        );
         let unrelated = super::submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
         assert!(!super::submission_accepted(&baseline, &unrelated));
 
