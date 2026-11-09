@@ -70,7 +70,7 @@ fn diagnostic_prompt_retained(page: &obscura_core::Page, selector: &str, prompt:
             const el = Array.from(document.querySelectorAll({selector})).find(el =>
                 el.getClientRects().length > 0 &&
                 window.getComputedStyle(el).visibility !== 'hidden' &&
-                !el.closest('[hidden], [inert], [aria-hidden="true"]') &&
+                !el.closest('[hidden], [inert], [aria-hidden="true"], [aria-disabled="true"]') &&
                 !el.disabled && !el.matches(':disabled') &&
                 !el.closest('fieldset[disabled]') && !el.readOnly &&
                 el.getAttribute('aria-disabled') !== 'true' &&
@@ -98,6 +98,7 @@ mod adapter_diagnostic_composer_tests {
             <textarea id="hidden" class="composer" style="display:none">stale</textarea>
             <textarea id="disabled" class="composer" disabled>stale</textarea>
             <fieldset disabled><textarea id="inherited" class="composer">stale</textarea></fieldset>
+            <div aria-disabled="true"><textarea id="aria-inherited" class="composer">diagnostic draft</textarea></div>
             <div id="noneditable" class="composer" contenteditable="false">stale</div>
             <div id="aria-readonly" class="composer" contenteditable="true" aria-readonly="true">stale</div>
             <textarea id="ready" class="composer">diagnostic draft</textarea>
@@ -113,6 +114,7 @@ mod adapter_diagnostic_composer_tests {
                     "#hidden",
                     "#disabled",
                     "#inherited",
+                    "#aria-inherited",
                     "#noneditable",
                     "#aria-readonly",
                     "#ready"
@@ -129,6 +131,21 @@ mod adapter_diagnostic_composer_tests {
         assert!(!super::diagnostic_prompt_retained(
             &page,
             ".composer",
+            "diagnostic draft"
+        ));
+        assert_eq!(
+            super::diagnostic_input_selector(&page, &["#aria-inherited"]),
+            None,
+            "diagnostics must not report a disabled wrapper as composer ready"
+        );
+        page.evaluate("document.querySelector('[aria-disabled]').removeAttribute('aria-disabled')");
+        assert_eq!(
+            super::diagnostic_input_selector(&page, &["#aria-inherited"]),
+            Some("#aria-inherited")
+        );
+        assert!(super::diagnostic_prompt_retained(
+            &page,
+            "#aria-inherited",
             "diagnostic draft"
         ));
     }
