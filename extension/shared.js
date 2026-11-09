@@ -41,6 +41,11 @@ function randomHex(bytes = 16) {
   return Array.from(value, byte => byte.toString(16).padStart(2, "0")).join("");
 }
 
+// The gateway itself permits up to 30 seconds for session activation. Give
+// persistence/network overhead additional time, but never strand a provider's
+// serialized sync/logout queue behind an unbounded credential transfer.
+const RELAY_FETCH_TIMEOUT_MS = 60_000;
+
 async function relayFetch(path, options = {}, expectedConnection = null) {
   const {gateway, token} = await chrome.storage.local.get(["gateway", "token"]);
   // Cookie snapshots must never switch destinations after they were collected.
@@ -73,7 +78,27 @@ async function relayFetch(path, options = {}, expectedConnection = null) {
   if (options.body) headers.set("Content-Type", "application/json");
   // Fail closed on HTTP redirects: a 307/308 could replay the provider
   // cookie snapshot body to a different origin before CORS responds.
-  return fetch(localGateway + path, {...options, headers, cache:"no-store", redirect:"error"});
+  // Abort only the client wait; a timed-out POST may already have persisted
+  // on the gateway, so never automatically replay it as a "failed" import.
+  const controller = new AbortController();
+  const upstreamSignal = options.signal;
+  const abortFromCaller = () => controller.abort();
+  if (upstreamSignal?.aborted) controller.abort();
+  else upstreamSignal?.addEventListener?.("abort", abortFromCaller, {once:true});
+  const deadline = setTimeout(() => controller.abort(), RELAY_FETCH_TIMEOUT_MS);
+  try {
+    return await fetch(localGateway + path, {
+      ...options, headers, cache:"no-store", redirect:"error", signal:controller.signal
+    });
+  } catch (error) {
+    if (controller.signal.aborted) {
+      throw new Error("Gateway request timed out or was cancelled; the session may have changed. Check provider status before retrying.");
+    }
+    throw error;
+  } finally {
+    clearTimeout(deadline);
+    upstreamSignal?.removeEventListener?.("abort", abortFromCaller);
+  }
 }
 
 async function providerCookieSnapshot(provider) {
