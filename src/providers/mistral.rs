@@ -101,8 +101,18 @@ impl SiteAdapter for MistralAdapter {
 fn mistral_readiness_diagnostics(page: &Page) -> String {
     let evidence = page.evaluate(
         r#"(() => {
+            // JS bundles loaded by link rel=modulepreload (or preload as=script)
+            // may report initiatorType=link rather than script. Only include
+            // links explicitly declared as script assets, not stylesheet
+            // failures that could otherwise be misclassified as JS blockers.
+            const scriptPreloads = new Set(
+                Array.from(document.querySelectorAll(
+                    'link[rel~="modulepreload"], link[rel~="preload"][as="script"]'
+                )).map(link => link.href)
+            );
             const entries = performance.getEntriesByType('resource')
-                .filter(entry => entry.initiatorType === 'script');
+                .filter(entry => entry.initiatorType === 'script' ||
+                    (entry.initiatorType === 'link' && scriptPreloads.has(entry.name)));
             const assetStatuses = [];
             for (const entry of entries) {
                 if (assetStatuses.length >= 8) break;
@@ -212,6 +222,41 @@ mod readiness_tests {
         assert!(diagnostics.contains("script_asset_http_errors=not_observable"));
         assert!(!diagnostics.contains("data:text/html"));
     }
+    #[tokio::test]
+    async fn module_preloads_are_script_resources_but_stylesheet_links_are_not() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        // Data URLs keep this synthetic fixture independent of the network.
+        let html = r#"<html><head>
+            <link id="module" rel="modulepreload" href="data:text/javascript,export%20default%201">
+            <link id="classic" rel="preload" as="script" href="data:text/javascript,void(0)">
+            </head><body></body></html>"#;
+        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        let stubbed = page.evaluate(
+            r#"(() => {
+                const links = ['module', 'classic'].map(id => document.getElementById(id).href);
+                Object.defineProperty(performance, 'getEntriesByType', {
+                    configurable: true,
+                    value: () => [
+                        ...links.map(name => ({initiatorType: 'link', name, responseStatus: 403})),
+                        {initiatorType: 'link', name: 'https://style.example.invalid/style.css', responseStatus: 403}
+                    ]
+                });
+                return true;
+            })()"#,
+        );
+        assert_eq!(stubbed.as_bool(), Some(true));
+        let result = super::mistral_readiness_diagnostics(&page);
+        assert!(result.contains("script_resource_entries=2"), "{result}");
+        assert!(!result.contains("style.example.invalid"));
+    }
+
     #[test]
     fn script_asset_diagnostics_preserve_browser_counts_and_redact_urls() {
         let evidence = serde_json::json!({
