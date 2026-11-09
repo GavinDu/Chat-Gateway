@@ -1647,17 +1647,21 @@ mod timeout_terminal_regression_tests {
         .await
         .unwrap();
 
-        let failure = rx.recv().await.expect("timeout error was not sent").unwrap_err();
-        assert!(failure.downcast_ref::<common::ProviderTimeoutError>().is_some());
+        let failure = rx
+            .recv()
+            .await
+            .expect("timeout error was not sent")
+            .unwrap_err();
+        assert!(failure
+            .downcast_ref::<common::ProviderTimeoutError>()
+            .is_some());
         assert!(failure.to_string().contains("did not complete"));
         assert!(rx.recv().await.is_none(), "timeout must not emit done");
         let output = metrics.render_with_provider_states(&[]);
-        assert!(output.contains(
-            "gateway_provider_timeout_total{provider=\"qwen\",phase=\"generation\"} 1"
-        ));
-        assert!(!output.contains(
-            "gateway_provider_timeout_total{provider=\"qwen\",phase=\"submission\"} 1"
-        ));
+        assert!(output
+            .contains("gateway_provider_timeout_total{provider=\"qwen\",phase=\"generation\"} 1"));
+        assert!(!output
+            .contains("gateway_provider_timeout_total{provider=\"qwen\",phase=\"submission\"} 1"));
     }
 }
 
