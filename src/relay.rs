@@ -1247,10 +1247,7 @@ mod tests {
         );
         let state = registry.status("gemini").state;
         assert!(registry.manual_challenge_required("gemini"));
-        assert_eq!(
-            provider_authentication_status(None, state, true),
-            "unknown"
-        );
+        assert_eq!(provider_authentication_status(None, state, true), "unknown");
         assert_eq!(
             provider_authentication_status(Some(true), state, true),
             "unknown",
