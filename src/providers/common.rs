@@ -797,6 +797,69 @@ pub async fn discover_models(
     }
 }
 
+/// ChatGPT and Grok require an observable composer/response transition to
+/// acknowledge a send. Match actual provider hosts and Grok's alternate X
+/// route, never incidental substrings in query parameters or attacker hosts.
+fn requires_submission_acknowledgement(url: &str) -> bool {
+    let Ok(uri) = url.parse::<axum::http::Uri>() else {
+        return false;
+    };
+    if !matches!(uri.scheme_str(), Some("https" | "http")) {
+        return false;
+    }
+    let host = uri
+        .host()
+        .unwrap_or_default()
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    match host.as_str() {
+        "chatgpt.com" | "www.chatgpt.com" | "grok.com" | "www.grok.com" => true,
+        "x.com" | "www.x.com" => uri.path() == "/i/grok" || uri.path().starts_with("/i/grok/"),
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod provider_submission_route_tests {
+    use super::requires_submission_acknowledgement;
+
+    #[test]
+    fn requires_ack_on_real_chatgpt_and_both_grok_routes() {
+        for url in [
+            "https://chatgpt.com/",
+            "https://chatgpt.com/c/abcdef",
+            "https://grok.com/",
+            "https://grok.com/chat/123",
+            "https://x.com/i/grok",
+            "https://x.com/i/grok/",
+            "https://www.x.com/i/grok/conversation/123",
+        ] {
+            assert!(
+                requires_submission_acknowledgement(url),
+                "missing acknowledgement guard for {url}"
+            );
+        }
+    }
+
+    #[test]
+    fn ignores_urls_with_provider_names_only_in_queries_or_subdomains() {
+        for url in [
+            "https://example.test/?next=https%3A%2F%2Fgrok.com",
+            "https://grok.com.attacker.invalid/",
+            "https://chatgpt.com.attacker.invalid/",
+            "https://x.com/home?q=%2Fi%2Fgrok",
+            "https://x.com/i/grokish",
+            "https://claude.ai/",
+            "data:text/html,<div>grok.com</div>",
+        ] {
+            assert!(
+                !requires_submission_acknowledgement(url),
+                "incorrect provider acknowledgement guard for {url}"
+            );
+        }
+    }
+}
+
 /// Wait for the input, type the prompt, click send (v1 send steps 1-3;
 /// the response stream is polled by providers::run_send).
 pub async fn send_prompt(
@@ -816,7 +879,7 @@ pub async fn send_prompt(
     let sends = set.send_refs();
     // The click/Enter dispatch is not proof that a controlled SPA accepted
     // the prompt. ChatGPT and Grok require a visible submission transition.
-    let verify_submission = page.url().contains("chatgpt.com") || page.url().contains("grok.com");
+    let verify_submission = requires_submission_acknowledgement(&page.url());
     let baseline = if verify_submission {
         Some(submission_snapshot(page, input_sel, &set.response_refs())?)
     } else {
