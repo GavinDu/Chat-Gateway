@@ -1148,3 +1148,129 @@ mod discovered_label_tests {
         );
     }
 }
+
+// Offline DOM contract test: exercise the *actual adapter selectors* against
+// synthetic fixtures, not just data-contract markers. These examples do not
+// make any claim about the current authenticated provider websites.
+#[cfg(test)]
+mod provider_fixture_selector_tests {
+    use super::SelectorSet;
+
+    fn fixture_url(html: &str) -> String {
+        let mut uri = String::from("data:text/html,");
+        for byte in html.bytes() {
+            if byte.is_ascii_alphanumeric() || b"-_.~".contains(&byte) {
+                uri.push(char::from(byte));
+            } else {
+                use std::fmt::Write as _;
+                write!(uri, "%{byte:02X}").expect("encoding fixture URL");
+            }
+        }
+        uri
+    }
+
+    #[tokio::test]
+    async fn every_provider_fixture_matches_registered_input_send_and_response_selectors() {
+        let fixtures: &[(&str, &SelectorSet, &str, &str, &str)] = &[
+            (
+                "qwen",
+                &crate::providers::qwen::SELECTORS,
+                include_str!("../../tests/fixtures/qwen/idle.html"),
+                include_str!("../../tests/fixtures/qwen/streaming.html"),
+                include_str!("../../tests/fixtures/qwen/done.html"),
+            ),
+            (
+                "metaai",
+                &crate::providers::metaai::SELECTORS,
+                include_str!("../../tests/fixtures/metaai/idle.html"),
+                include_str!("../../tests/fixtures/metaai/streaming.html"),
+                include_str!("../../tests/fixtures/metaai/done.html"),
+            ),
+            (
+                "claude",
+                &crate::providers::claude::SELECTORS,
+                include_str!("../../tests/fixtures/claude/idle.html"),
+                include_str!("../../tests/fixtures/claude/streaming.html"),
+                include_str!("../../tests/fixtures/claude/done.html"),
+            ),
+            (
+                "chatgpt",
+                &crate::providers::chatgpt::SELECTORS,
+                include_str!("../../tests/fixtures/chatgpt/idle.html"),
+                include_str!("../../tests/fixtures/chatgpt/streaming.html"),
+                include_str!("../../tests/fixtures/chatgpt/done.html"),
+            ),
+            (
+                "gemini",
+                &crate::providers::gemini::SELECTORS,
+                include_str!("../../tests/fixtures/gemini/idle.html"),
+                include_str!("../../tests/fixtures/gemini/streaming.html"),
+                include_str!("../../tests/fixtures/gemini/done.html"),
+            ),
+            (
+                "grok",
+                &crate::providers::grok::SELECTORS,
+                include_str!("../../tests/fixtures/grok/idle.html"),
+                include_str!("../../tests/fixtures/grok/streaming.html"),
+                include_str!("../../tests/fixtures/grok/done.html"),
+            ),
+            (
+                "manus",
+                &crate::providers::manus::SELECTORS,
+                include_str!("../../tests/fixtures/manus/idle.html"),
+                include_str!("../../tests/fixtures/manus/streaming.html"),
+                include_str!("../../tests/fixtures/manus/done.html"),
+            ),
+            (
+                "mistral",
+                &crate::providers::mistral::SELECTORS,
+                include_str!("../../tests/fixtures/mistral/idle.html"),
+                include_str!("../../tests/fixtures/mistral/streaming.html"),
+                include_str!("../../tests/fixtures/mistral/done.html"),
+            ),
+            (
+                "perplexity",
+                &crate::providers::perplexity::SELECTORS,
+                include_str!("../../tests/fixtures/perplexity/idle.html"),
+                include_str!("../../tests/fixtures/perplexity/streaming.html"),
+                include_str!("../../tests/fixtures/perplexity/done.html"),
+            ),
+        ];
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        for (name, selectors, idle, streaming, done) in fixtures {
+            for (state, html, expect_response) in [
+                ("idle", *idle, false),
+                ("streaming", *streaming, true),
+                ("done", *done, true),
+            ] {
+                page.goto(&fixture_url(html)).await.unwrap();
+                assert!(
+                    selectors
+                        .input
+                        .iter()
+                        .any(|selector| super::element_exists(&page, selector)),
+                    "{name}/{state} has no matching registered input selector"
+                );
+                assert!(
+                    selectors
+                        .send
+                        .iter()
+                        .any(|selector| super::element_exists(&page, selector)),
+                    "{name}/{state} has no matching registered send selector"
+                );
+                assert_eq!(
+                    selectors
+                        .response
+                        .iter()
+                        .any(|selector| super::element_exists(&page, selector)),
+                    expect_response,
+                    "{name}/{state} has unexpected response selector behavior"
+                );
+            }
+        }
+    }
+}
