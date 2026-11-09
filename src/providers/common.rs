@@ -626,7 +626,7 @@ pub async fn human_type(page: &Page, selectors: &[&str], text: &str) -> anyhow::
     tokio::time::sleep(Duration::from_millis(80)).await;
     let text_js = serde_json::to_string(text)?;
     let js = format!(
-        "(function() {{ var el = {el_js}; if (!el) return false; el.focus(); if (el.tagName === 'TEXTAREA') {{ try {{ var setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set; setter.call(el, {text}); }} catch (e) {{ el.value = {text}; }} el.dispatchEvent(new InputEvent('input', {{ bubbles: true, inputType: 'insertText', data: {text} }})); el.dispatchEvent(new Event('change', {{ bubbles: true }})); return true; }} try {{ document.execCommand('selectAll', false, null); }} catch (e) {{}} var ok = false; try {{ ok = document.execCommand('insertText', false, {text}); }} catch (e) {{}} if (!ok) {{ if ('value' in el) {{ el.value = {text}; }} else {{ el.textContent = {text}; }} }} el.dispatchEvent(new InputEvent('input', {{ bubbles: true, inputType: 'insertText', data: {text} }})); el.dispatchEvent(new Event('change', {{ bubbles: true }})); return true; }})()",
+        "(function() {{ var el = {el_js}; if (!el) return false; el.focus(); if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {{ try {{ var prototype = el.tagName === 'INPUT' ? window.HTMLInputElement.prototype : window.HTMLTextAreaElement.prototype; var setter = Object.getOwnPropertyDescriptor(prototype, 'value').set; setter.call(el, {text}); }} catch (e) {{ el.value = {text}; }} el.dispatchEvent(new InputEvent('input', {{ bubbles: true, inputType: 'insertText', data: {text} }})); el.dispatchEvent(new Event('change', {{ bubbles: true }})); return true; }} try {{ document.execCommand('selectAll', false, null); }} catch (e) {{}} var ok = false; try {{ ok = document.execCommand('insertText', false, {text}); }} catch (e) {{}} if (!ok) {{ if ('value' in el) {{ el.value = {text}; }} else {{ el.textContent = {text}; }} }} el.dispatchEvent(new InputEvent('input', {{ bubbles: true, inputType: 'insertText', data: {text} }})); el.dispatchEvent(new Event('change', {{ bubbles: true }})); return true; }})()",
         text = text_js,
         el_js = el_js,
     );
@@ -1218,6 +1218,58 @@ mod pre_send_retention_tests {
         let result = super::send_prompt(&mut page, &selectors, "user draft").await;
         assert!(result.is_err(), "a cleared draft must not be submitted");
         assert_eq!(page.evaluate("window.sent || 0").as_f64(), Some(0.0));
+    }
+}
+
+#[cfg(test)]
+mod native_input_setter_tests {
+    #[tokio::test]
+    async fn html_input_composer_uses_native_value_setter_for_controlled_frameworks() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        page.goto("data:text/html,<html><body><input id='prompt' type='text'></body></html>")
+            .await
+            .unwrap();
+        // Simulate a framework-installed own-property value setter. Direct
+        // assignment can fool its value tracker into discarding a synthetic
+        // input event; the native prototype setter must bypass that trap.
+        page.evaluate(
+            r#"(() => {
+                const el = document.querySelector('#prompt');
+                const native = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
+                window.directWrites = 0;
+                window.inputEvents = 0;
+                Object.defineProperty(el, 'value', {
+                    configurable: true,
+                    get() { return native.get.call(this); },
+                    set(value) {
+                        window.directWrites++;
+                        native.set.call(this, value);
+                    }
+                });
+                // Some webviews do not support execCommand('insertText').
+                Object.defineProperty(document, 'execCommand', {
+                    configurable: true, value: () => false
+                });
+                el.addEventListener('input', () => {
+                    window.inputEvents++;
+                    window.lastInput = el.value;
+                });
+                return true;
+            })()"#,
+        );
+        super::human_type(&page, &["#prompt"], "input draft")
+            .await
+            .unwrap();
+        assert_eq!(
+            page.evaluate("window.lastInput").as_str(),
+            Some("input draft")
+        );
+        assert_eq!(page.evaluate("window.directWrites").as_f64(), Some(0.0));
+        assert_eq!(page.evaluate("window.inputEvents").as_f64(), Some(1.0));
     }
 }
 
