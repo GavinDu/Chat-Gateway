@@ -5,6 +5,20 @@ use anyhow::Result;
 use async_trait::async_trait;
 use obscura_core::Page;
 
+/// Strongly observed HTTP 403 for a script asset while Mistral's composer
+/// remains unavailable. Do not infer if CDN policy, network, browser, or
+/// missing authentication caused it; no path/query/cookie is retained.
+#[derive(Debug)]
+pub struct MistralAssetBlockedError;
+
+impl std::fmt::Display for MistralAssetBlockedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Mistral composer blocked: JavaScript asset returned HTTP 403")
+    }
+}
+
+impl std::error::Error for MistralAssetBlockedError {}
+
 /// Mistral (Le Chat) - chat.mistral.ai. Model picker top; Large/Small/Codestral/Pixtral.
 pub struct MistralAdapter {
     pub cfg: ProviderConfig,
@@ -46,6 +60,16 @@ impl SiteAdapter for MistralAdapter {
         if let Err(error) = common::wait_for_selector(page, &inputs, 15_000).await {
             common::check_session("mistral", page)?;
             let diagnostics = mistral_readiness_diagnostics(page);
+            if diagnostics.contains("blocker=script_http_403") {
+                // Observed script HTTP status, not speculation about its cause.
+                // The API maps this typed failure to a redacted blocked status.
+                tracing::warn!(
+                    provider = "mistral",
+                    diagnostics = %diagnostics,
+                    "Mistral composer blocked by directly observed script HTTP 403"
+                );
+                return Err(anyhow::Error::new(MistralAssetBlockedError));
+            }
             anyhow::bail!(
                 "Mistral composer unavailable: {error}; {diagnostics}. Check provider JavaScript asset loading, session and network access; selector overrides cannot repair an HTTP 403"
             );
@@ -208,6 +232,10 @@ mod readiness_tests {
         assert!(result.contains("static.mistral.ai:403"));
         assert!(result.contains("other-cdn.example:502"));
         assert!(result.contains("blocker=script_http_403"));
+        assert_eq!(
+            super::MistralAssetBlockedError.to_string(),
+            "Mistral composer blocked: JavaScript asset returned HTTP 403"
+        );
         assert!(!result.contains("secret"));
         assert!(!result.contains("token"));
         assert!(!result.contains("https://"));
