@@ -1127,7 +1127,6 @@ mod discovered_label_tests {
     }
 }
 
-
 // Offline DOM contract test: exercise the *actual adapter selectors* against
 // synthetic fixtures, not just data-contract markers. These examples do not
 // make any claim about the current authenticated provider websites.
@@ -1228,11 +1227,17 @@ mod provider_fixture_selector_tests {
             ] {
                 page.goto(&fixture_url(html)).await.unwrap();
                 assert!(
-                    selectors.input.iter().any(|selector| super::element_exists(&page, selector)),
+                    selectors
+                        .input
+                        .iter()
+                        .any(|selector| super::element_exists(&page, selector)),
                     "{name}/{state} has no matching registered input selector"
                 );
                 assert!(
-                    selectors.send.iter().any(|selector| super::element_exists(&page, selector)),
+                    selectors
+                        .send
+                        .iter()
+                        .any(|selector| super::element_exists(&page, selector)),
                     "{name}/{state} has no matching registered send selector"
                 );
                 assert_eq!(
