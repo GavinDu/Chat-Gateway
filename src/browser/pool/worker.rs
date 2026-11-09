@@ -720,7 +720,8 @@ pub(super) fn browser_thread(
                                     let file = session::load_session_file(provider.name())?
                                         .ok_or_else(|| anyhow::anyhow!("imported provider session is missing"))?;
                                     let activated = page_session::activate_if_changed(&applied_imports, provider, &file, || async {
-                                    pages.borrow_mut().remove(&provider);
+                                    page_session::replace_after_success(
+                                    || async {
                                     let mut page = super::browser_factory::new_page(&browser).await?;
                                     page.goto(provider.login_url()).await?;
                                     let storage_cleared = page.evaluate(
@@ -731,8 +732,10 @@ pub(super) fn browser_thread(
                                     }
                                     session::clear_provider_cookies(&browser, provider.name())?;
                                     PageSession::open(&browser, &mut page, provider, Some(&file)).await?;
-                                    pages.borrow_mut().insert(provider, Rc::new(page));
-                                    Ok(())
+                                    Ok(Rc::new(page))
+                                    },
+                                    |replacement| { pages.borrow_mut().insert(provider, replacement); },
+                                    ).await
                                     }).await?;
                                     if activated { provider_sessions.record_session_import(provider.name()); }
                                     Ok(())

@@ -55,9 +55,55 @@ where
     Ok(true)
 }
 
+/// Build the replacement completely before mutating the warm-page cache.
+/// A failed cookie restore, navigation, or storage replay must not drop the
+/// existing page; the import fingerprint remains retryable as well.
+pub(super) async fn replace_after_success<T, F, Fut, Insert>(build: F, insert: Insert) -> Result<()>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+    Insert: FnOnce(T),
+{
+    let replacement = build().await?;
+    insert(replacement);
+    Ok(())
+}
+
 #[cfg(test)]
 mod activation_tests {
     use super::*;
+    #[tokio::test]
+    async fn failed_refresh_keeps_existing_page_until_replacement_is_ready() {
+        let pages = std::cell::RefCell::new(std::collections::HashMap::from([(
+            Provider::Grok,
+            String::from("warm-page"),
+        )]));
+        let failure = replace_after_success(
+            || async { Err::<String, _>(anyhow::anyhow!("synthetic cookie restore failure")) },
+            |replacement| {
+                pages.borrow_mut().insert(Provider::Grok, replacement);
+            },
+        )
+        .await;
+        assert!(failure.is_err());
+        assert_eq!(
+            pages.borrow().get(&Provider::Grok).map(String::as_str),
+            Some("warm-page")
+        );
+        replace_after_success(
+            || async { Ok(String::from("restored-page")) },
+            |replacement| {
+                pages.borrow_mut().insert(Provider::Grok, replacement);
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            pages.borrow().get(&Provider::Grok).map(String::as_str),
+            Some("restored-page")
+        );
+    }
+
     #[tokio::test]
     async fn identical_snapshots_do_not_reload_and_failed_activation_can_retry() {
         let applied = std::cell::RefCell::new(std::collections::HashMap::new());
