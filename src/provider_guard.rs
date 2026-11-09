@@ -273,11 +273,20 @@ mod tests {
         page.goto(&format!("data:text/html,{encoded}"))
             .await
             .unwrap();
-        assert!(!super::is_challenge_page(&page), "chat-turn text is not a challenge");
+        assert!(
+            !super::is_challenge_page(&page),
+            "chat-turn text is not a challenge"
+        );
         page.evaluate("document.body.insertAdjacentHTML('beforeend', '<div role=dialog>Verify you are human to continue</div>')");
-        assert!(super::is_challenge_page(&page), "visible verification dialog blocks");
+        assert!(
+            super::is_challenge_page(&page),
+            "visible verification dialog blocks"
+        );
         page.evaluate("document.querySelector('[role=dialog]').hidden = true");
-        assert!(!super::is_challenge_page(&page), "hidden challenge text is not a blocker");
+        assert!(
+            !super::is_challenge_page(&page),
+            "hidden challenge text is not a blocker"
+        );
     }
 
     #[test]
