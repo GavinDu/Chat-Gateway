@@ -1543,9 +1543,11 @@ mod submission_transition_tests {
 
         let before = super::submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
         assert_eq!(before.user_turn_count, 1);
-        assert!(super::click_send_or_enter(&mut page, &["#send"], "#prompt", 400)
-            .await
-            .unwrap());
+        assert!(
+            super::click_send_or_enter(&mut page, &["#send"], "#prompt", 400)
+                .await
+                .unwrap()
+        );
         let cleared = super::submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
         assert!(cleared.input_empty);
         assert!(!super::submission_accepted(&before, &cleared));
@@ -1554,7 +1556,9 @@ mod submission_transition_tests {
         let hidden = super::submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
         assert!(!super::submission_accepted(&before, &hidden));
 
-        page.evaluate("document.querySelector('[data-message-author-role=user][hidden]').hidden = false");
+        page.evaluate(
+            "document.querySelector('[data-message-author-role=user][hidden]').hidden = false",
+        );
         let accepted = super::submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
         assert_eq!(accepted.user_turn_count, 2);
         assert!(super::submission_accepted(&before, &accepted));
