@@ -726,8 +726,135 @@ pub async fn send_prompt(
         .find(|s| page.query_selector(s).is_some())
         .unwrap_or(inputs[0]);
     let sends = set.send_refs();
+    // The click/Enter dispatch is not proof that a controlled SPA accepted
+    // the prompt. ChatGPT and Grok require a visible submission transition.
+    let verify_submission = page.url().contains("chatgpt.com") || page.url().contains("grok.com");
+    let baseline = if verify_submission {
+        Some(submission_snapshot(page, input_sel, &set.response_refs())?)
+    } else {
+        None
+    };
     click_send_or_enter(page, &sends, input_sel, 5_000).await?;
+    if let Some(before) = baseline {
+        let start = std::time::Instant::now();
+        while start.elapsed() < Duration::from_secs(5) {
+            drive_page(page, Duration::from_millis(150)).await;
+            let after = submission_snapshot(page, input_sel, &set.response_refs())?;
+            if submission_accepted(&before, &after) {
+                return Ok(());
+            }
+        }
+        anyhow::bail!("provider did not acknowledge prompt submission (composer unchanged and no new response)");
+    }
     Ok(())
+}
+
+/// Capture only DOM transition signals; no prompt content is logged.
+fn submission_snapshot(
+    page: &Page,
+    input_selector: &str,
+    response_selectors: &[&str],
+) -> anyhow::Result<SubmissionSnapshot> {
+    let input = serde_json::to_string(input_selector)?;
+    let responses = serde_json::to_string(response_selectors)?;
+    let js = format!(
+        r#"(() => {{
+            const el = document.querySelector({input});
+            const value = el ? ('value' in el ? el.value : (el.innerText || el.textContent || '')) : null;
+            const responses = {responses};
+            const nodes = new Set();
+            for (const selector of responses) {{
+                try {{ document.querySelectorAll(selector).forEach(node => nodes.add(node)); }} catch (_) {{}}
+            }}
+            return {{ inputPresent: !!el, inputEmpty: value !== null && !value.trim(), responseCount: nodes.size,
+                streaming: !!document.querySelector('[data-is-streaming="true"], button[aria-label*="Stop"]') }};
+        }})()"#
+    );
+    let v = page.evaluate(&js);
+    Ok(SubmissionSnapshot {
+        input_present: v
+            .get("inputPresent")
+            .and_then(|x| x.as_bool())
+            .unwrap_or(false),
+        input_empty: v
+            .get("inputEmpty")
+            .and_then(|x| x.as_bool())
+            .unwrap_or(false),
+        response_count: v.get("responseCount").and_then(|x| x.as_u64()).unwrap_or(0),
+        streaming: v
+            .get("streaming")
+            .and_then(|x| x.as_bool())
+            .unwrap_or(false),
+    })
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SubmissionSnapshot {
+    input_present: bool,
+    input_empty: bool,
+    response_count: u64,
+    streaming: bool,
+}
+
+fn submission_accepted(before: &SubmissionSnapshot, after: &SubmissionSnapshot) -> bool {
+    (after.input_present && after.input_empty && !before.input_empty)
+        || after.response_count > before.response_count
+        || (after.streaming && !before.streaming)
+}
+
+#[cfg(test)]
+mod submission_transition_tests {
+    use super::{submission_accepted, SubmissionSnapshot};
+
+    #[test]
+    fn dispatch_without_state_change_is_not_submission() {
+        let before = SubmissionSnapshot {
+            input_present: true,
+            input_empty: false,
+            response_count: 2,
+            streaming: false,
+        };
+        assert!(!submission_accepted(&before, &before));
+        assert!(!submission_accepted(
+            &before,
+            &SubmissionSnapshot {
+                input_present: false,
+                ..before
+            }
+        ));
+        assert!(submission_accepted(
+            &before,
+            &SubmissionSnapshot {
+                input_empty: true,
+                ..before
+            }
+        ));
+        assert!(submission_accepted(
+            &before,
+            &SubmissionSnapshot {
+                response_count: 3,
+                ..before
+            }
+        ));
+        assert!(submission_accepted(
+            &before,
+            &SubmissionSnapshot {
+                streaming: true,
+                ..before
+            }
+        ));
+    }
+
+    #[test]
+    fn preexisting_streaming_is_not_new_acknowledgement() {
+        let before = SubmissionSnapshot {
+            input_present: true,
+            input_empty: false,
+            response_count: 1,
+            streaming: true,
+        };
+        assert!(!submission_accepted(&before, &before));
+    }
 }
 
 #[cfg(test)]
@@ -813,6 +940,21 @@ mod text_selector_tests {
 
 #[cfg(test)]
 mod browser_event_loop_tests {
+    #[tokio::test]
+    async fn disabled_send_button_never_dispatches_enter() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        page.goto("data:text/html,<html><body><form><textarea id='prompt'></textarea><button id='send' disabled>Send</button></form><script>window.enterCount=0;document.querySelector('#prompt').addEventListener('keydown',()=>window.enterCount++)</script></body></html>")
+            .await
+            .unwrap();
+        let result = super::click_send_or_enter(&mut page, &["#send"], "#prompt", 200).await;
+        assert!(result.is_err());
+        assert_eq!(page.evaluate("window.enterCount").as_f64(), Some(0.0));
+    }
+
     #[tokio::test]
     async fn delayed_composer_is_observed_by_selector_wait() {
         let browser = obscura_core::Browser::builder()
