@@ -654,7 +654,9 @@ pub async fn run_send(
                     common::ProviderTimeoutPhase::Generation,
                 ))))
                 .await;
-            break;
+            // Do not fall through to the unconditional "generation complete"
+            // log after a terminal error. An expired response is never done.
+            return;
         }
 
         common::drive_page(page, poll_tick).await;
