@@ -151,7 +151,11 @@ pub trait SiteAdapter: Send + Sync {
 
     /// Fetch text, node count, and streaming state in one page evaluation.
     fn response_probe(&self, page: &Page, check_body_challenge: bool) -> common::ResponseProbe {
-        common::response_probe(page, &self.effective_selectors().response_refs(), check_body_challenge)
+        common::response_probe(
+            page,
+            &self.effective_selectors().response_refs(),
+            check_body_challenge,
+        )
     }
 
     /// Completion strategy selected by this provider's adapter catalog row.
