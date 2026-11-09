@@ -102,8 +102,8 @@ fn mistral_readiness_diagnostics(page: &Page) -> String {
     let mut evidence = page.evaluate(
         r#"(() => {
             // JS bundles loaded by link rel=modulepreload (or preload as=script)
-            // may report initiatorType=link rather than script. Only include
-            // links explicitly declared as script assets, not stylesheet
+            // may report initiatorType=link, fetch, or other rather than script.
+            // Include only explicit script-asset preloads, not stylesheet
             // failures that could otherwise be misclassified as JS blockers.
             const scriptPreloads = new Set(
                 Array.from(document.querySelectorAll(
@@ -252,7 +252,7 @@ mod readiness_tests {
                 Object.defineProperty(performance, 'getEntriesByType', {
                     configurable: true,
                     value: () => [
-                        ...links.map((name, index) => ({initiatorType: index === 0 ? 'other' : 'link', name, responseStatus: 403})),
+                        ...links.map((name, index) => ({initiatorType: index === 0 ? 'other' : 'fetch', name, responseStatus: 403})),
                         {initiatorType: 'link', name: 'https://style.example.invalid/style.css', responseStatus: 403}
                     ]
                 });
@@ -263,6 +263,8 @@ mod readiness_tests {
         let result = super::mistral_readiness_diagnostics(&page);
         assert!(result.contains("script_resource_entries=2"), "{result}");
         assert!(!result.contains("style.example.invalid"));
+        assert!(!result.contains("blocker=script_http_403"));
+        assert!(result.contains("script_asset_http_errors=not_observable"));
     }
 
     #[tokio::test]
