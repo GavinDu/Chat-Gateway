@@ -887,9 +887,7 @@ fn relay_import_failure_category(error: &anyhow::Error) -> &'static str {
 mod relay_import_diagnostic_redaction_tests {
     #[test]
     fn import_error_labels_cannot_forward_secret_error_text() {
-        let error = anyhow::anyhow!(
-            "cookie=very-secret; bearer=private; user=person@example.test"
-        );
+        let error = anyhow::anyhow!("cookie=very-secret; bearer=private; user=person@example.test");
         let label = super::relay_import_failure_category(&error);
         assert_eq!(label, "snapshot_rejected");
         assert!(!label.contains("very-secret"));
@@ -937,7 +935,10 @@ pub async fn import_session(
             .await;
             app.metrics.record_relay_import_phase(
                 "activate",
-                activation_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+                activation_started
+                    .elapsed()
+                    .as_millis()
+                    .min(u64::MAX as u128) as u64,
             );
             match activated {
                 Ok(Ok(())) => {
@@ -977,8 +978,12 @@ pub async fn import_session(
                     )
                 }
             }
-        },
-        Err(error) if error.downcast_ref::<crate::session::ConflictingCookieScopes>().is_some() => {
+        }
+        Err(error)
+            if error
+                .downcast_ref::<crate::session::ConflictingCookieScopes>()
+                .is_some() =>
+        {
             tracing::warn!(
                 provider,
                 category = relay_import_failure_category(&error),
