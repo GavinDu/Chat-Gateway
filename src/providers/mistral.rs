@@ -71,36 +71,90 @@ impl SiteAdapter for MistralAdapter {
     }
 }
 
-/// Collect non-sensitive readiness evidence without logging asset URLs,
-/// cookie values, page content or authentication tokens. Resource timing
-/// does not expose HTTP response status; never infer a 403 from this probe.
+/// Collect only non-sensitive script metadata. HTTP response status is exposed
+/// through Resource Timing only when the browser and origin permit it; a missing
+/// status is *not* evidence that asset fetching succeeded.
 fn mistral_readiness_diagnostics(page: &Page) -> String {
     let evidence = page.evaluate(
-        r#"(() => ({
-            readyState: document.readyState,
-            scriptCount: document.scripts.length,
-            loadedResources: performance.getEntriesByType('resource').filter(e => e.initiatorType === 'script').length,
-            challenge: !!document.querySelector('[id*="challenge"], [class*="challenge"], iframe[src*="challenge"]')
-        }))()"#,
+        r#"(() => {
+            const entries = performance.getEntriesByType('resource')
+                .filter(entry => entry.initiatorType === 'script');
+            const assetStatuses = [];
+            for (const entry of entries) {
+                if (assetStatuses.length >= 8) break;
+                const status = entry.responseStatus;
+                if (!Number.isInteger(status) || status < 400 || status >= 600) continue;
+                try {
+                    // Never pass resource URLs, paths, query strings, or credentials
+                    // to Rust diagnostics. Only the hostname and HTTP status.
+                    const host = new URL(entry.name, location.href).hostname.toLowerCase();
+                    if (/^[a-z0-9.-]{1,128}$/.test(host)) {
+                        assetStatuses.push({host, status});
+                    }
+                } catch (_) {}
+            }
+            return {
+                readyState: document.readyState,
+                scriptCount: document.scripts.length,
+                loadedResources: entries.length,
+                assetStatuses,
+                challenge: !!document.querySelector('[id*="challenge"], [class*="challenge"], iframe[src*="challenge"]')
+            };
+        })()"#,
     );
+    mistral_readiness_summary(&evidence)
+}
+
+fn mistral_readiness_summary(evidence: &serde_json::Value) -> String {
     let state = evidence
         .get("readyState")
-        .and_then(|v| v.as_str())
+        .and_then(|value| value.as_str())
         .unwrap_or("unknown");
-    let scripts = evidence
-        .get("scriptCount")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
-    let resources = evidence
-        .get("loadedResources")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
+    // Obscura may decode JavaScript integer values as JSON floating-point
+    // numbers; as_u64() alone silently reports zero for 3.0.
+    let count = |key: &str| {
+        evidence
+            .get(key)
+            .and_then(|value| value.as_f64())
+            .filter(|value| value.is_finite() && *value >= 0.0)
+            .unwrap_or(0.0) as u64
+    };
+    let scripts = count("scriptCount");
+    let resources = count("loadedResources");
     let challenge = evidence
         .get("challenge")
-        .and_then(|v| v.as_bool())
+        .and_then(|value| value.as_bool())
         .unwrap_or(false);
+    let asset_errors: Vec<String> = evidence
+        .get("assetStatuses")
+        .and_then(|value| value.as_array())
+        .into_iter()
+        .flatten()
+        .take(8)
+        .filter_map(|item| {
+            let host = item.get("host")?.as_str()?;
+            if host.is_empty()
+                || host.len() > 128
+                || !host
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'.' || byte == b'-')
+            {
+                return None;
+            }
+            let status = item.get("status")?.as_f64()?;
+            if !(400.0..600.0).contains(&status) || status.fract() != 0.0 {
+                return None;
+            }
+            Some(format!("{host}:{}", status as u16))
+        })
+        .collect();
+    let failures = if asset_errors.is_empty() {
+        "not_observable".to_string()
+    } else {
+        asset_errors.join(",")
+    };
     format!(
-        "document_ready={state}, script_elements={scripts}, script_resource_entries={resources}, challenge_marker={challenge}; HTTP asset status not observable from DOM"
+        "document_ready={state}, script_elements={scripts}, script_resource_entries={resources}, challenge_marker={challenge}, script_asset_http_errors={failures}; Resource Timing statuses can be unavailable for cross-origin assets"
     )
 }
 
@@ -118,7 +172,32 @@ mod readiness_tests {
             .unwrap();
         let diagnostics = super::mistral_readiness_diagnostics(&page);
         assert!(diagnostics.contains("script_elements="));
-        assert!(diagnostics.contains("HTTP asset status not observable from DOM"));
+        assert!(diagnostics.contains("script_asset_http_errors=not_observable"));
         assert!(!diagnostics.contains("data:text/html"));
     }
+    #[test]
+    fn script_asset_diagnostics_preserve_browser_counts_and_redact_urls() {
+        let evidence = serde_json::json!({
+            "readyState": "complete",
+            "scriptCount": 3.0,
+            "loadedResources": 4.0,
+            "challenge": false,
+            "assetStatuses": [
+                {"host": "static.mistral.ai", "status": 403.0},
+                {"host": "https://static.mistral.ai/secret?token=private", "status": 403.0},
+                {"host": "static.mistral.ai", "status": 200.0},
+                {"host": "other-cdn.example", "status": 502.0}
+            ]
+        });
+        let result = super::mistral_readiness_summary(&evidence);
+        assert!(result.contains("script_elements=3"));
+        assert!(result.contains("script_resource_entries=4"));
+        assert!(result.contains("static.mistral.ai:403"));
+        assert!(result.contains("other-cdn.example:502"));
+        assert!(!result.contains("secret"));
+        assert!(!result.contains("token"));
+        assert!(!result.contains("https://"));
+        assert!(!result.contains("static.mistral.ai:200"));
+    }
+
 }
