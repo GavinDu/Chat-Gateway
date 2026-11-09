@@ -62,6 +62,7 @@ struct MetricData {
     poll_tick_ms: BTreeMap<String, Histogram>,
     poll_evaluations: BTreeMap<String, u64>,
     provider_outcomes: BTreeMap<(String, String), u64>,
+    provider_timeout_phases: BTreeMap<(String, String), u64>,
     browser_worker_restarts: u64,
 }
 
@@ -139,6 +140,20 @@ impl MetricsRegistry {
                 .entry(phase.to_owned())
                 .or_default()
                 .observe(elapsed_ms);
+        }
+    }
+
+    /// Track only known timeout phases for registered provider attempts.
+    /// No prompts, URLs, thread IDs or session data enter these labels.
+    pub fn record_provider_timeout(&self, provider: &str, phase: &str) {
+        if !matches!(phase, "submission" | "generation") {
+            return;
+        }
+        if let Ok(mut data) = self.data.lock() {
+            *data
+                .provider_timeout_phases
+                .entry((provider.to_owned(), phase.to_owned()))
+                .or_default() += 1;
         }
     }
 
@@ -302,6 +317,15 @@ impl MetricsRegistry {
                 escape_label(outcome)
             );
         }
+        let _ = writeln!(out, "# TYPE gateway_provider_timeout_total counter");
+        for ((provider, phase), count) in &data.provider_timeout_phases {
+            let _ = writeln!(
+                out,
+                "gateway_provider_timeout_total{{provider=\"{}\",phase=\"{}\"}} {count}",
+                escape_label(provider),
+                phase
+            );
+        }
         let _ = writeln!(out, "# TYPE gateway_browser_worker_restarts_total counter");
         let _ = writeln!(
             out,
@@ -376,6 +400,22 @@ mod tests {
     }
 
     #[test]
+    fn provider_timeout_metrics_distinguish_submission_and_generation_only() {
+        let registry = MetricsRegistry::default();
+        registry.record_provider_timeout("chatgpt", "submission");
+        registry.record_provider_timeout("chatgpt", "generation");
+        registry.record_provider_timeout("chatgpt", "session-identifier");
+        let metrics = registry.render_with_provider_states(&[]);
+        assert!(metrics.contains(
+            "gateway_provider_timeout_total{provider=\"chatgpt\",phase=\"submission\"} 1"
+        ));
+        assert!(metrics.contains(
+            "gateway_provider_timeout_total{provider=\"chatgpt\",phase=\"generation\"} 1"
+        ));
+        assert!(!metrics.contains("session-identifier"));
+    }
+
+    #[test]
     fn provider_completion_tail_metric_records_observations() {
         let registry = MetricsRegistry::default();
         registry.record_provider_tail("tail-test", 1_234);
@@ -403,6 +443,7 @@ mod tests {
             "# TYPE gateway_poll_tick_ms histogram\n",
             "# TYPE gateway_poll_evaluations_total counter\n",
             "# TYPE gateway_provider_requests_total counter\n",
+            "# TYPE gateway_provider_timeout_total counter\n",
             "# TYPE gateway_browser_worker_restarts_total counter\n",
             "gateway_browser_worker_restarts_total 0\n",
             "# TYPE gateway_provider_session_state gauge\n",
