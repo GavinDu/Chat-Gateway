@@ -221,11 +221,18 @@ pub fn response_probe(
                     matches = matches.filter(visible);
                     matches.forEach(node => nodes.add(node));
                     if (text === null && matches.length) {{
-                        const last = matches[matches.length - 1];
-                        const content = last.innerText || last.textContent || "";
-                        if (content) {{
-                            text = content;
-                            lastResponseNode = last;
+                        // Frameworks can append a visible but empty assistant
+                        // placeholder after a completed reply. Select the last
+                        // non-whitespace response instead of treating that
+                        // placeholder as the reply or hiding the earlier text.
+                        for (let i = matches.length - 1; i >= 0; i -= 1) {{
+                            const node = matches[i];
+                            const content = node.innerText || node.textContent || "";
+                            if (content.trim()) {{
+                                text = content;
+                                lastResponseNode = node;
+                                break;
+                            }}
                         }}
                     }}
                 }} catch (_) {{}}
@@ -370,6 +377,42 @@ mod streaming_visibility_regression_tests {
         page.evaluate("document.querySelector('fieldset').disabled = false");
         let active = response_probe(&page, &[".answer"], false);
         assert!(active.streaming);
+    }
+
+    #[tokio::test]
+    async fn visible_empty_trailing_response_does_not_hide_last_populated_reply() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <article><div class="answer">previous reply</div></article>
+            <article><div class="answer" id="placeholder">  </div></article>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+
+        let previous = response_probe(&page, &[".answer"], false);
+        assert_eq!(previous.text.as_deref(), Some("previous reply"));
+        assert_eq!(
+            previous.count, 2,
+            "visible placeholders still count as nodes"
+        );
+
+        page.evaluate("document.querySelector('#placeholder').textContent = 'new reply'");
+        let new_reply = response_probe(&page, &[".answer"], false);
+        assert_eq!(new_reply.text.as_deref(), Some("new reply"));
+
+        page.evaluate("document.querySelectorAll('.answer')[0].textContent = '  '");
+        page.evaluate("document.querySelector('#placeholder').textContent = '  '");
+        let blank = response_probe(&page, &[".answer"], false);
+        assert_eq!(
+            blank.text, None,
+            "whitespace cannot masquerade as generated text"
+        );
     }
 
     #[tokio::test]
