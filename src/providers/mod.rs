@@ -448,19 +448,54 @@ fn should_check_body_challenge(poll_count: u32) -> bool {
 }
 
 fn probe_has_challenge(probe: &common::ResponseProbe) -> bool {
-    if probe.challenge {
-        return true;
+    // The shared classifier only recognizes challenge hosts and path segments.
+    // Never trip the sticky circuit breaker because a prompt, chat title or
+    // redirect target contains the word "challenge" in URL query parameters.
+    probe.challenge || crate::provider_guard::is_challenge_url(&probe.url)
+}
+
+#[cfg(test)]
+mod response_poller_challenge_tests {
+    use super::*;
+
+    #[test]
+    fn ignores_prompt_and_chat_title_keywords() {
+        for url in [
+            "https://chatgpt.com/c/challenge-essay",
+            "https://gemini.google.com/app?prompt=security%20challenge",
+            "https://grok.com/chat?q=captcha",
+            "https://grok.com/chat?next=https%3A%2F%2Fexample.test%2Fcheckpoint",
+            "https://challenges.cloudflare.com.attacker.invalid/chat",
+        ] {
+            assert!(
+                !probe_has_challenge(&common::ResponseProbe {
+                    url: url.to_owned(),
+                    ..Default::default()
+                }),
+                "normal conversation must not trip circuit breaker: {url}"
+            );
+        }
     }
-    let lower_url = probe.url.to_ascii_lowercase();
-    [
-        "captcha",
-        "challenge",
-        "checkpoint",
-        "verify-human",
-        "verify_you_are_human",
-    ]
-    .iter()
-    .any(|marker| lower_url.contains(marker))
+
+    #[test]
+    fn recognizes_real_challenge_routes_and_dom_proof() {
+        for url in [
+            "https://challenges.cloudflare.com/",
+            "https://example.test/cdn-cgi/challenge-platform/h/g/",
+            "https://example.test/verify-human",
+            "https://example.test/checkpoint?next=/chat",
+        ] {
+            assert!(probe_has_challenge(&common::ResponseProbe {
+                url: url.to_owned(),
+                ..Default::default()
+            }));
+        }
+        assert!(probe_has_challenge(&common::ResponseProbe {
+            url: "https://chatgpt.com/".to_owned(),
+            challenge: true,
+            ..Default::default()
+        }));
+    }
 }
 
 /// Completion is a two-snapshot decision. A new token, DOM node, or resumed
