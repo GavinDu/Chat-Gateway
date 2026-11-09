@@ -647,12 +647,14 @@ pub async fn discover_models(
     page: &mut Page,
     set: &SelectorSet,
     cfg_models: &[String],
+    overrides: &crate::config::ProviderSelectorOverrides,
 ) -> anyhow::Result<Vec<String>> {
     page.goto(set.url).await?;
     drive_page(page, Duration::from_millis(1200)).await;
 
     // Try to open model picker without sending message
-    for sel in set.picker {
+    let effective = set.effective(overrides);
+    for sel in effective.picker_refs() {
         if click_first(page, &[sel]).is_ok() {
             drive_page(page, Duration::from_millis(600)).await;
             break;

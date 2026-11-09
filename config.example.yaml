@@ -59,6 +59,13 @@ providers:
     min_request_interval_ms: 5000
     daily_request_cap: 100
     models: [gpt, chatgpt, gpt-5, gpt-4o, gpt-4o-mini, o1, o3-mini]
+    # Optional: override each selector role independently, without rebuilding.
+    # A role's list replaces its built-in fallback list. Other roles retain defaults.
+    # selectors:
+    #   input: ['#prompt-textarea', 'textarea#mobile-composer-prompt[name="prompt"]']
+    #   send: ['button[data-testid="send-button"]', 'form:has(textarea#mobile-composer-prompt[name="prompt"]) button[aria-label="Send message"]']
+    #   response: ['div[data-message-author-role="assistant"] div.markdown']
+    #   picker: ['button[data-testid="model-switcher"]']
   - name: gemini
     enabled: false
     priority: 5

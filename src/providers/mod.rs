@@ -151,7 +151,7 @@ pub trait SiteAdapter: Send + Sync {
 
     /// Fetch text, node count, and streaming state in one page evaluation.
     fn response_probe(&self, page: &Page, check_body_challenge: bool) -> common::ResponseProbe {
-        common::response_probe(page, self.selector_set(), check_body_challenge)
+        common::response_probe(page, &self.effective_selectors().response_refs(), check_body_challenge)
     }
 
     /// Completion strategy selected by this provider's adapter catalog row.
@@ -175,6 +175,7 @@ pub trait SiteAdapter: Send + Sync {
     /// Full selector data (for --test-adapter probing over the whole
     /// fallback arrays, not just the primaries).
     fn selector_set(&self) -> &common::SelectorSet;
+    fn effective_selectors(&self) -> common::EffectiveSelectorSet;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
