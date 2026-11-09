@@ -783,7 +783,10 @@ fn submission_snapshot(
         // Obscura's JS bridge may represent integer DOM counts as JSON floats.
         // Failing to decode 1.0 hid a new assistant node and caused false
         // submission timeouts for controlled composers that retain their text.
-        response_count: v.get("responseCount").and_then(decode_dom_count).unwrap_or(0),
+        response_count: v
+            .get("responseCount")
+            .and_then(decode_dom_count)
+            .unwrap_or(0),
         streaming: v
             .get("streaming")
             .and_then(|x| x.as_bool())
@@ -871,11 +874,16 @@ mod submission_transition_tests {
         let before = super::submission_snapshot(&page, "#mobile", &[".answer"]).unwrap();
         assert_eq!(before.response_count, 0);
         assert!(!before.input_empty);
-        assert!(super::click_send_or_enter(&mut page, &["button[type='submit']"], "#mobile", 400)
-            .await
-            .unwrap());
+        assert!(
+            super::click_send_or_enter(&mut page, &["button[type='submit']"], "#mobile", 400)
+                .await
+                .unwrap()
+        );
         let after = super::submission_snapshot(&page, "#mobile", &[".answer"]).unwrap();
-        assert_eq!(after.response_count, 1, "Obscura may decode DOM counts as 1.0");
+        assert_eq!(
+            after.response_count, 1,
+            "Obscura may decode DOM counts as 1.0"
+        );
         assert!(!after.input_empty, "the fixture intentionally retains text");
         assert!(super::submission_accepted(&before, &after));
     }
