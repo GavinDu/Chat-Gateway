@@ -591,7 +591,11 @@ mod explicit_save_cookie_metadata_tests {
         let encrypted = encrypt_session_snapshot(&previous, "gemini", &key).unwrap();
         std::fs::write(&destination, &encrypted).unwrap();
 
-        let mut captured = previous.clone();
+        let mut captured = SessionFile {
+            local_storage: HashMap::new(),
+            cookies: vec![saved_cookie.clone()],
+            ts: "captured".into(),
+        };
         captured.cookies[0].expires = None;
         captured.cookies[0].same_site = None;
         preserve_cookie_metadata_from_existing_vault(&mut captured, "gemini", &key, &destination);
