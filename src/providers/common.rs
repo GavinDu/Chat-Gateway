@@ -344,6 +344,58 @@ pub fn element_exists(page: &Page, selector: &str) -> bool {
     }
 }
 
+/// A DOM match alone is not a usable chat composer. Login/status probes
+/// must ignore hidden, disabled and read-only inputs left in SPA shells.
+/// This reports UI readiness only, never proof of account authentication.
+pub fn visible_composer_exists(page: &Page, selectors: &[&str]) -> bool {
+    let Ok(selectors) = serde_json::to_string(selectors) else {
+        return false;
+    };
+    let script = format!(
+        r#"(() => {{
+            for (const selector of {selectors}) {{
+                try {{
+                    for (const input of document.querySelectorAll(selector)) {{
+                        if (input.getClientRects().length > 0 &&
+                            window.getComputedStyle(input).visibility !== "hidden" &&
+                            !input.closest('[hidden], [inert], [aria-hidden="true"]') &&
+                            !input.disabled && !input.readOnly &&
+                            input.getAttribute("aria-disabled") !== "true") return true;
+                    }}
+                }} catch (_) {{}}
+            }}
+            return false;
+        }})()"#
+    );
+    page.evaluate(&script).as_bool() == Some(true)
+}
+
+#[cfg(test)]
+mod visible_composer_tests {
+    use super::visible_composer_exists;
+
+    #[tokio::test]
+    async fn hidden_disabled_and_readonly_composers_are_not_reported_ready() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body><textarea id="hidden" style="display:none"></textarea><textarea id="disabled" disabled></textarea><textarea id="readonly" readonly></textarea><textarea id="visible"></textarea></body></html>"#;
+        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        assert!(!visible_composer_exists(
+            &page,
+            &["#hidden", "#disabled", "#readonly"]
+        ));
+        assert!(visible_composer_exists(&page, &["#hidden", "#visible"]));
+        page.evaluate("document.querySelector('#visible').hidden = true");
+        assert!(!visible_composer_exists(&page, &["#visible"]));
+    }
+}
+
 #[cfg(test)]
 mod response_probe_tests {
     use super::{decode_response_probe, ResponseProbe};

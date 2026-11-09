@@ -24,11 +24,10 @@ pub(super) fn verify_session_page(
     adapter: &dyn providers::SiteAdapter,
 ) -> Result<bool> {
     let is_login_page = providers::common::is_login_page(page);
-    let input_found = adapter
-        .effective_selectors()
-        .input
-        .iter()
-        .any(|selector| page.query_selector(selector).is_some());
+    let input_found = providers::common::visible_composer_exists(
+        page,
+        &adapter.effective_selectors().input_refs(),
+    );
     classify_session_probe(is_login_page, input_found)
 }
 
