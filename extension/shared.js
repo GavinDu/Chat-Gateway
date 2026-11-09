@@ -124,9 +124,26 @@ async function providerCookieSnapshot(provider) {
     for (const cookie of cookies) {
       const normalized = cookie.domain.replace(/^\./, "").toLowerCase();
       if (domains.some(root => normalized === root || normalized.endsWith("." + root))) {
+        // Preserve browser cookie policy rather than silently replacing
+        // SameSite=None/Strict with a default and persistent cookies with
+        // session-only cookies on gateway restoration.
+        const sameSite = {
+          strict: "Strict", lax: "Lax", no_restriction: "None", unspecified: undefined
+        };
+        if (cookie.sameSite !== undefined &&
+            !Object.prototype.hasOwnProperty.call(sameSite, cookie.sameSite)) {
+          throw new Error("Unsupported browser cookie SameSite attribute; session snapshot was not sent.");
+        }
+        const expiry = cookie.session || cookie.expirationDate === undefined
+          ? undefined : cookie.expirationDate;
+        if (expiry !== undefined && (!Number.isFinite(expiry) || expiry < 0)) {
+          throw new Error("Invalid browser cookie expiry; session snapshot was not sent.");
+        }
         all.push({
           name: cookie.name, value: cookie.value, domain: cookie.domain,
-          path: cookie.path || "/", secure: Boolean(cookie.secure), http_only: Boolean(cookie.httpOnly)
+          path: cookie.path || "/", secure: Boolean(cookie.secure), http_only: Boolean(cookie.httpOnly),
+          ...(sameSite[cookie.sameSite] ? {same_site: sameSite[cookie.sameSite]} : {}),
+          ...(expiry !== undefined ? {expires: expiry} : {})
         });
       }
     }
