@@ -730,11 +730,21 @@ fn authenticated_request_with_origin(
 fn provider_authentication_status(
     observed: Option<bool>,
     state: crate::provider_state::ProviderSessionState,
+    manual_verification_required: bool,
 ) -> &'static str {
+    // An earlier login-view probe may still show a stale composer while the
+    // latest chat attempt has proved that credentials expired or a manual
+    // challenge blocks the session. Explicit blockers take precedence over
+    // opportunistic browser observations.
+    if manual_verification_required {
+        return "unknown";
+    }
+    if state == crate::provider_state::ProviderSessionState::NeedsLogin {
+        return "needs_login";
+    }
     match observed {
         Some(true) => "verified",
         Some(false) => "needs_login",
-        None if state == crate::provider_state::ProviderSessionState::NeedsLogin => "needs_login",
         // Routability alone (including public model discovery) is not proof of login.
         None => "unknown",
     }
@@ -806,7 +816,8 @@ pub async fn status(State(app): State<Arc<crate::AppState>>, headers: HeaderMap)
         let lifecycle = app.provider_sessions.status(provider).state;
         let manual_verification_required =
             app.provider_sessions.manual_challenge_required(provider);
-        let authentication = provider_authentication_status(observed, lifecycle);
+        let authentication =
+            provider_authentication_status(observed, lifecycle, manual_verification_required);
         providers.push(serde_json::json!({
             "provider": provider,
             "linked": session_present,
@@ -1209,15 +1220,21 @@ mod tests {
     #[test]
     fn provider_status_uses_runtime_login_failures_without_claiming_readiness_is_authentication() {
         use crate::provider_state::ProviderSessionState::{Degraded, NeedsLogin, Ready, Unknown};
-        for (observed, state, expected) in [
-            (None, NeedsLogin, "needs_login"),
-            (None, Ready, "unknown"),
-            (None, Degraded, "unknown"),
-            (None, Unknown, "unknown"),
-            (Some(true), Ready, "verified"),
-            (Some(false), Ready, "needs_login"),
+        for (observed, state, challenge, expected) in [
+            (None, NeedsLogin, false, "needs_login"),
+            (Some(true), NeedsLogin, false, "needs_login"),
+            (None, Ready, false, "unknown"),
+            (None, Degraded, false, "unknown"),
+            (None, Unknown, false, "unknown"),
+            (Some(true), Ready, false, "verified"),
+            (Some(false), Ready, false, "needs_login"),
+            (Some(true), Degraded, true, "unknown"),
+            (Some(false), Degraded, true, "unknown"),
         ] {
-            assert_eq!(provider_authentication_status(observed, state), expected);
+            assert_eq!(
+                provider_authentication_status(observed, state, challenge),
+                expected
+            );
         }
     }
 
@@ -1229,9 +1246,17 @@ mod tests {
             &crate::chat_backend::GatewayError::challenge("manual verification required"),
         );
         let state = registry.status("gemini").state;
-        assert_eq!(provider_authentication_status(None, state), "unknown");
-        assert!(!registry.is_available("gemini"));
         assert!(registry.manual_challenge_required("gemini"));
+        assert_eq!(
+            provider_authentication_status(None, state, true),
+            "unknown"
+        );
+        assert_eq!(
+            provider_authentication_status(Some(true), state, true),
+            "unknown",
+            "stale composer observations must not override manual verification"
+        );
+        assert!(!registry.is_available("gemini"));
     }
 
     fn relay_state_with_token(token: Option<&str>) -> RelayState {
