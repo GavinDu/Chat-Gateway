@@ -470,7 +470,7 @@ pub async fn drive_page(page: &mut Page, duration: Duration) {
     tokio::time::sleep_until(deadline).await;
 }
 
-/// Wait until any of the selectors matches (polls query_selector).
+/// Wait for an actionable composer, not merely a stale hidden input node.
 pub async fn wait_for_selector(
     page: &mut Page,
     selectors: &[&str],
@@ -478,12 +478,12 @@ pub async fn wait_for_selector(
 ) -> anyhow::Result<()> {
     let start = std::time::Instant::now();
     while start.elapsed().as_millis() < timeout_ms as u128 {
-        if selectors.iter().any(|sel| element_exists(page, sel)) {
+        if visible_composer_exists(page, selectors) {
             return Ok(());
         }
         drive_page(page, Duration::from_millis(150)).await;
     }
-    anyhow::bail!("timeout waiting for {:?}", selectors)
+    anyhow::bail!("timeout waiting for actionable provider composer")
 }
 
 /// Click the first matching element (obscura Element::click is
@@ -1356,6 +1356,28 @@ mod browser_event_loop_tests {
         let result = super::click_send_or_enter(&mut page, &["#send"], "#prompt", 200).await;
         assert!(result.is_err());
         assert_eq!(page.evaluate("window.enterCount").as_f64(), Some(0.0));
+    }
+
+    #[tokio::test]
+    async fn hidden_or_disabled_input_does_not_short_circuit_composer_wait() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        page.goto("data:text/html,<html><body><textarea id='hidden' hidden></textarea><textarea id='disabled' disabled></textarea></body></html>")
+            .await
+            .unwrap();
+        assert!(
+            super::wait_for_selector(&mut page, &["#hidden", "#disabled"], 200)
+                .await
+                .is_err(),
+            "non-actionable inputs must not count as composer readiness"
+        );
+        page.evaluate("document.querySelector('#hidden').hidden = false");
+        super::wait_for_selector(&mut page, &["#hidden", "#disabled"], 500)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
