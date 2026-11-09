@@ -398,9 +398,7 @@ mod tests {
         assert!(
             metrics.contains("gateway_relay_session_import_phase_ms_sum{phase=\"activate\"} 42")
         );
-        assert!(
-            metrics.contains("gateway_relay_session_import_phase_ms_sum{phase=\"total\"} 57")
-        );
+        assert!(metrics.contains("gateway_relay_session_import_phase_ms_sum{phase=\"total\"} 57"));
         assert!(!metrics.contains("secret-session-id"));
     }
 
