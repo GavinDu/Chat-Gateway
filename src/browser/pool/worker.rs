@@ -24,9 +24,9 @@ async fn send_unless_disconnected<T>(
 /// one stuck provider must not leave an admitted send waiting forever.
 async fn acquire_page_lock<'a>(
     lock: &'a tokio::sync::Mutex<()>,
-    queue_timeout: Duration,
+    deadline: tokio::time::Instant,
 ) -> Result<tokio::sync::MutexGuard<'a, ()>> {
-    tokio::time::timeout(queue_timeout, lock.lock())
+    tokio::time::timeout_at(deadline, lock.lock())
         .await
         .map_err(|_| anyhow::Error::new(ProviderBusyError))
 }
@@ -332,8 +332,13 @@ pub(super) fn browser_thread(
                             let request_metrics = metrics.clone();
                             let send_session_write_tracker = session_write_tracker.clone();
                             tokio::task::spawn_local(async move {
+                                // Both operation admission and the provider page lock
+                                // consume one queue budget, rather than each waiting for
+                                // the full configured timeout independently.
+                                let queue_deadline =
+                                    tokio::time::Instant::now() + operation_queue_timeout;
                                 let Some(operation) = send_unless_disconnected(&chunks,
-                                    tokio::time::timeout(operation_queue_timeout, operation_gate.lock())).await else { return; };
+                                    tokio::time::timeout_at(queue_deadline, operation_gate.lock())).await else { return; };
                                 let _operation = match operation {
                                     Ok(guard) => guard,
                                     Err(_) => { let _ = chunks.send(Err(anyhow::Error::new(ProviderBusyError))).await; return; }
@@ -341,7 +346,7 @@ pub(super) fn browser_thread(
                                 let page_lock_started = Instant::now();
                                 let Some(page_lock) = send_unless_disconnected(
                                     &chunks,
-                                    acquire_page_lock(&lock, operation_queue_timeout),
+                                    acquire_page_lock(&lock, queue_deadline),
                                 ).await else {
                                     return;
                                 };
@@ -1032,14 +1037,32 @@ mod queued_send_cancellation_tests {
     async fn busy_provider_page_lock_has_bounded_wait_and_recovers() {
         let lock = tokio::sync::Mutex::new(());
         let held = lock.lock().await;
-        let error = acquire_page_lock(&lock, Duration::from_millis(10))
+        let error = acquire_page_lock(
+            &lock,
+            tokio::time::Instant::now() + Duration::from_millis(10),
+        )
             .await
             .unwrap_err();
         assert!(error.downcast_ref::<ProviderBusyError>().is_some());
         drop(held);
-        assert!(acquire_page_lock(&lock, Duration::from_millis(50))
-            .await
-            .is_ok());
+        assert!(acquire_page_lock(
+            &lock,
+            tokio::time::Instant::now() + Duration::from_millis(50),
+        )
+        .await
+        .is_ok());
+    }
+
+    #[tokio::test]
+    async fn expired_shared_queue_deadline_rejects_second_page_lock_wait() {
+        let lock = tokio::sync::Mutex::new(());
+        let held = lock.lock().await;
+        // The operation-gate stage may have consumed the queue budget before
+        // page-lock admission. Do not grant another full queue timeout.
+        let expired = tokio::time::Instant::now() - Duration::from_millis(1);
+        let error = acquire_page_lock(&lock, expired).await.unwrap_err();
+        assert!(error.downcast_ref::<ProviderBusyError>().is_some());
+        drop(held);
     }
 
     #[tokio::test]
