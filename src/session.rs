@@ -568,8 +568,10 @@ mod explicit_save_cookie_metadata_tests {
 
     #[test]
     fn explicit_login_save_preserves_same_session_attributes_but_not_rotated_cookies() {
-        let dir = std::env::temp_dir()
-            .join(format!("chat-gateway-explicit-save-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!(
+            "chat-gateway-explicit-save-{}",
+            uuid::Uuid::new_v4()
+        ));
         std::fs::create_dir(&dir).unwrap();
         let destination = dir.join("gemini.vault");
         let key = [13_u8; 32];
