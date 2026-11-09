@@ -44,6 +44,7 @@ impl SiteAdapter for MistralAdapter {
         let effective = SELECTORS.effective(&self.cfg.selectors);
         let inputs = effective.input_refs();
         if let Err(error) = common::wait_for_selector(page, &inputs, 15_000).await {
+            common::check_session("mistral", page)?;
             let diagnostics = mistral_readiness_diagnostics(page);
             anyhow::bail!(
                 "Mistral composer unavailable: {error}; {diagnostics}. Check provider JavaScript asset loading, session and network access; selector overrides cannot repair an HTTP 403"
