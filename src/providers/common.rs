@@ -783,18 +783,21 @@ fn submission_snapshot(
         // Obscura's JS bridge may represent integer DOM counts as JSON floats.
         // Failing to decode 1.0 hid a new assistant node and caused false
         // submission timeouts for controlled composers that retain their text.
-        response_count: v
-            .get("responseCount")
-            .and_then(|value| value.as_u64().or_else(|| {
-                value.as_f64().filter(|number| {
-                    number.is_finite() && *number >= 0.0 && number.fract() == 0.0
-                }).map(|number| number as u64)
-            }))
-            .unwrap_or(0),
+        response_count: v.get("responseCount").and_then(decode_dom_count).unwrap_or(0),
         streaming: v
             .get("streaming")
             .and_then(|x| x.as_bool())
             .unwrap_or(false),
+    })
+}
+
+// The Obscura JS bridge can encode a whole DOM count as a JSON float.
+fn decode_dom_count(value: &serde_json::Value) -> Option<u64> {
+    value.as_u64().or_else(|| {
+        value
+            .as_f64()
+            .filter(|n| n.is_finite() && *n >= 0.0 && *n < u64::MAX as f64 && n.fract() == 0.0)
+            .map(|n| n as u64)
     })
 }
 
@@ -879,11 +882,11 @@ mod submission_transition_tests {
 
     #[test]
     fn numeric_dom_counts_reject_nan_and_fractional_values() {
-        // The browser bridge may return floating-point numbers, but the
-        // transition must still require a genuinely larger whole node count.
-        let before = SubmissionSnapshot { input_present: true, input_empty: false, response_count: 2, streaming: false };
-        let after = SubmissionSnapshot { response_count: 3, ..before };
-        assert!(submission_accepted(&before, &after));
+        assert_eq!(super::decode_dom_count(&serde_json::json!(3.0)), Some(3));
+        assert_eq!(super::decode_dom_count(&serde_json::json!(3)), Some(3));
+        assert_eq!(super::decode_dom_count(&serde_json::json!(3.25)), None);
+        assert_eq!(super::decode_dom_count(&serde_json::json!(-1.0)), None);
+        assert_eq!(super::decode_dom_count(&serde_json::json!("3")), None);
     }
 
     #[test]
