@@ -11,7 +11,14 @@ function loadShared(cookieFixtures = [], hasAllPermissions = true, storageValues
     URL,
     Headers,
     crypto: webcrypto,
-    fetch: async (url, options) => { fetchCalls.push({url, options}); return hooks.fetchResponse || {ok:true, status:200}; },
+    AbortController,
+    setTimeout: hooks.setTimeout || setTimeout,
+    clearTimeout: hooks.clearTimeout || clearTimeout,
+    fetch: async (url, options) => {
+      fetchCalls.push({url, options});
+      if (hooks.onFetch) return hooks.onFetch(url, options);
+      return hooks.fetchResponse || {ok:true, status:200};
+    },
     chrome: {
       cookies: {
         // Return the full fixture set to simulate a permissive/misbehaving
@@ -107,6 +114,39 @@ test("a caller cannot override the no-redirect policy on credentialed relay requ
   await api.relayFetch("/relay/v1/status", {method:"POST", body:"{}", redirect:"follow"});
   assert.equal(api.fetchCalls.length, 1);
   assert.equal(api.fetchCalls[0].options.redirect, "error");
+});
+
+test("relay fetch aborts a stalled credential import without replaying it", async () => {
+  let timeout;
+  let cleared = false;
+  const api = loadShared([], true, {
+    gateway: "http://127.0.0.1:8080",
+    token: "relay-secret"
+  }, {
+    setTimeout(callback, delay) {
+      timeout = {callback, delay};
+      return 42;
+    },
+    clearTimeout(id) {
+      assert.equal(id, 42);
+      cleared = true;
+    },
+    onFetch(_url, options) {
+      return new Promise((_resolve, reject) => {
+        options.signal.addEventListener("abort", () => reject(new Error("aborted")), {once:true});
+      });
+    }
+  });
+
+  const request = api.relayFetch("/relay/v1/session/chatgpt", {method:"POST", body:"{}"});
+  for (let i = 0; i < 8 && !timeout; i++) await new Promise(resolve => setImmediate(resolve));
+  assert.equal(timeout?.delay, 60_000);
+  assert.equal(api.fetchCalls.length, 1);
+  timeout.callback();
+  await assert.rejects(request, /session may have changed\. Check provider status before retrying/);
+  assert.equal(api.fetchCalls.length, 1, "ambiguous writes must not be replayed");
+  assert.equal(api.fetchCalls[0].options.signal.aborted, true);
+  assert.equal(cleared, true, "the timeout must be cleared after abort");
 });
 
 test("provider cookie snapshot excludes cookies outside that provider's domain roots", async () => {
