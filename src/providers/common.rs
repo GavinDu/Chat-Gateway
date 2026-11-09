@@ -245,7 +245,7 @@ pub fn response_probe(
                         ));
             }}
             const url = String(location.href || "");
-            const body = ({check_body_challenge} ? (document.body?.innerText || "").slice(0, 12000) : "").toLowerCase();
+            const body = ({check_body_challenge} ? {challenge_text_js} : "").toLowerCase();
             // URL challenge detection runs in Rust using the shared host/path
             // classifier. Query values and chat text must not trip the guard.
             const challenge = ["verify you are human", "confirm you are not a robot", "unusual traffic", "complete the captcha", "security challenge", "checking your browser"].some(marker => body.includes(marker));
@@ -271,8 +271,46 @@ pub fn response_probe(
             return {{ text, count: nodes.size, streaming, postAnswerAffordance, url, challenge }};
         }})()"#,
         check_body_challenge = check_body_challenge,
+        challenge_text_js = crate::provider_guard::NON_MESSAGE_CHALLENGE_TEXT_JS,
     );
     decode_response_probe(page.evaluate(&script))
+}
+
+#[cfg(test)]
+mod chat_text_challenge_regression_tests {
+    #[tokio::test]
+    async fn assistant_quoting_challenge_phrases_does_not_trip_response_poller() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <div data-message-author-role="assistant"><div class="answer">To verify you are human, follow the on-screen instructions</div></div>
+            <textarea id="composer"></textarea>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        let normal = super::response_probe(&page, &[".answer"], true);
+        assert!(
+            !normal.challenge,
+            "response text must not be a challenge page"
+        );
+        assert_eq!(
+            normal.text.as_deref(),
+            Some("To verify you are human, follow the on-screen instructions")
+        );
+        page.evaluate(
+            "document.body.insertAdjacentHTML('beforeend', '<h1>Security challenge</h1>')",
+        );
+        let blocked = super::response_probe(&page, &[".answer"], true);
+        assert!(
+            blocked.challenge,
+            "visible verification UI must still block"
+        );
+    }
 }
 
 #[cfg(test)]

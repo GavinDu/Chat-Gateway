@@ -147,6 +147,29 @@ pub(crate) fn is_challenge_url(url: &str) -> bool {
     })
 }
 
+/// Visible security text outside known chat-turn containers. A user or
+/// assistant quoting challenge wording must never trip the sticky provider
+/// circuit breaker. True verification overlays remain in the scan, and
+/// explicit challenge URLs are always checked independently.
+pub(crate) const NON_MESSAGE_CHALLENGE_TEXT_JS: &str = r#"(() => {
+    if (!document.body) return '';
+    const messages = "[data-message-author-role], [data-testid='assistant-message'], [data-testid='user-message'], [data-testid*='conversation-turn']";
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+    let text = '';
+    let visited = 0;
+    while (walker.nextNode() && visited++ < 16000 && text.length < 12000) {
+        const node = walker.currentNode;
+        const parent = node.parentElement;
+        if (!parent || parent.closest(messages) ||
+            parent.closest('[hidden], [inert], [aria-hidden="true"]') ||
+            !parent.getClientRects().length ||
+            window.getComputedStyle(parent).visibility === 'hidden') continue;
+        const part = node.textContent || '';
+        text += part.slice(0, 12000 - text.length) + ' ';
+    }
+    return text;
+})()"#;
+
 fn has_challenge_marker(url: &str, body: &str) -> bool {
     let body = body.to_ascii_lowercase();
     is_challenge_url(url)
@@ -165,7 +188,7 @@ fn has_challenge_marker(url: &str, body: &str) -> bool {
 /// Detect challenge pages without attempting to solve or bypass them.
 pub fn is_challenge_page(page: &Page) -> bool {
     let url = page.url();
-    let evaluation = page.evaluate("document.body ? document.body.innerText.slice(0, 12000) : ''");
+    let evaluation = page.evaluate(NON_MESSAGE_CHALLENGE_TEXT_JS);
     let body = evaluation.as_str().unwrap_or("");
     has_challenge_marker(&url, body)
 }
@@ -229,6 +252,41 @@ mod tests {
             "https://example.test/chat",
             "Welcome back. How can I help?"
         ));
+    }
+
+    #[tokio::test]
+    async fn quoted_security_phrase_in_chat_does_not_block_but_visible_overlay_does() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <main>
+              <div data-message-author-role="user">Explain the phrase verify you are human</div>
+              <div data-message-author-role="assistant">A security challenge is a verification step</div>
+              <div data-testid="conversation-turn-42">Checking your browser is a quoted instruction</div>
+              <textarea id="composer"></textarea>
+            </main>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        assert!(
+            !super::is_challenge_page(&page),
+            "chat-turn text is not a challenge"
+        );
+        page.evaluate("document.body.insertAdjacentHTML('beforeend', '<div role=dialog>Verify you are human to continue</div>')");
+        assert!(
+            super::is_challenge_page(&page),
+            "visible verification dialog blocks"
+        );
+        page.evaluate("document.querySelector('[role=dialog]').hidden = true");
+        assert!(
+            !super::is_challenge_page(&page),
+            "hidden challenge text is not a blocker"
+        );
     }
 
     #[test]
