@@ -1,5 +1,6 @@
 //! Canonical chat execution contract independent of the browser engine.
 use crate::providers::common::ProviderTimeoutError;
+use crate::providers::mistral::MistralAssetBlockedError;
 use crate::{
     browser::pool::{
         BrowserWorkerUnavailableError, ProviderBusyError, ProviderSessionExpiredError,
@@ -129,6 +130,7 @@ pub enum GatewayErrorKind {
     Timeout,
     Memory,
     ProviderFailure,
+    ProviderAssetBlocked,
     BackendUnavailable,
 }
 
@@ -250,6 +252,12 @@ impl axum::response::IntoResponse for GatewayError {
                 "memory_error",
                 "conversation could not be processed",
             ),
+            GatewayErrorKind::ProviderAssetBlocked => (
+                StatusCode::BAD_GATEWAY,
+                "provider_error",
+                "provider_asset_blocked",
+                "provider JavaScript assets are blocked; check provider network, browser compatibility and authentication",
+            ),
             GatewayErrorKind::ProviderFailure | GatewayErrorKind::BackendUnavailable => (
                 StatusCode::BAD_GATEWAY,
                 "provider_error",
@@ -314,6 +322,13 @@ fn map_backend_error(error: anyhow::Error) -> GatewayError {
     }
     if error.downcast_ref::<ProviderTimeoutError>().is_some() {
         return GatewayError::timeout("provider request timed out");
+    }
+    if error.downcast_ref::<MistralAssetBlockedError>().is_some() {
+        return GatewayError::typed(
+            GatewayErrorKind::ProviderAssetBlocked,
+            "provider JavaScript assets blocked by HTTP 403",
+            false,
+        );
     }
     GatewayError::provider_failure(error.to_string())
 }
@@ -592,6 +607,11 @@ mod tests {
             "provider challenge requires manual review"
         );
 
+        let blocked = super::map_backend_error(anyhow::Error::new(MistralAssetBlockedError));
+        assert_eq!(blocked.kind, GatewayErrorKind::ProviderAssetBlocked);
+        assert!(!blocked.is_retryable());
+        assert_eq!(blocked.message, "provider JavaScript assets blocked by HTTP 403");
+
         let ordinary = super::map_backend_error(anyhow::anyhow!("provider rejected request"));
         assert_eq!(ordinary.kind, GatewayErrorKind::ProviderFailure);
         assert!(!ordinary.is_retryable());
@@ -660,6 +680,11 @@ mod tests {
                 GatewayErrorKind::ProviderFailure,
                 StatusCode::BAD_GATEWAY,
                 "provider_unavailable",
+            ),
+            (
+                GatewayErrorKind::ProviderAssetBlocked,
+                StatusCode::BAD_GATEWAY,
+                "provider_asset_blocked",
             ),
             (
                 GatewayErrorKind::BackendUnavailable,
