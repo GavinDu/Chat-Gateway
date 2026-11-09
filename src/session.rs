@@ -417,10 +417,7 @@ impl VaultSessionStore {
             preserve_verified_cookie_metadata(&mut file, previous);
         }
         let current_hash = session_state_hash(&file)?;
-        let previous_hash = previous
-            .as_ref()
-            .map(session_state_hash)
-            .transpose()?;
+        let previous_hash = previous.as_ref().map(session_state_hash).transpose()?;
 
         if previous_hash.as_deref() == Some(current_hash.as_str()) {
             remove_legacy_session_snapshot(provider)?;
@@ -482,17 +479,36 @@ mod preserve_cookie_metadata_tests {
         let mut identical = snapshot(captured.clone());
         preserve_verified_cookie_metadata(&mut identical, &previous);
         assert_eq!(identical.cookies[0].expires, previous.cookies[0].expires);
-        assert_eq!(identical.cookies[0].same_site, previous.cookies[0].same_site);
+        assert_eq!(
+            identical.cookies[0].same_site,
+            previous.cookies[0].same_site
+        );
         assert_eq!(
             session_state_hash(&identical).unwrap(),
             session_state_hash(&previous).unwrap()
         );
 
         for changed in [
-            { let mut c = captured.clone(); c.value = "rotated".into(); c },
-            { let mut c = captured.clone(); c.domain = "google.com".into(); c },
-            { let mut c = captured.clone(); c.path = "/other".into(); c },
-            { let mut c = captured.clone(); c.http_only = false; c },
+            {
+                let mut c = captured.clone();
+                c.value = "rotated".into();
+                c
+            },
+            {
+                let mut c = captured.clone();
+                c.domain = "google.com".into();
+                c
+            },
+            {
+                let mut c = captured.clone();
+                c.path = "/other".into();
+                c
+            },
+            {
+                let mut c = captured.clone();
+                c.http_only = false;
+                c
+            },
         ] {
             let mut snapshot = snapshot(changed);
             preserve_verified_cookie_metadata(&mut snapshot, &previous);
