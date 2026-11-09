@@ -862,7 +862,7 @@ mod relay_persist_off_reactor_tests {
     #[tokio::test]
     async fn persistence_failure_is_propagated_before_activation() {
         let failed =
-            session_snapshot_io_off_reactor(|| anyhow::bail!("synthetic snapshot rejection"))
+            session_snapshot_io_off_reactor::<()>(|| anyhow::bail!("synthetic snapshot rejection"))
                 .await
                 .unwrap_err();
         assert_eq!(failed.to_string(), "synthetic snapshot rejection");
