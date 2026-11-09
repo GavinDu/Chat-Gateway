@@ -290,7 +290,10 @@ mod streaming_visibility_regression_tests {
 
         page.evaluate("document.querySelector('#stop').style.display = 'block'");
         let active = response_probe(&page, &[".answer"], false);
-        assert!(active.streaming, "a visible Stop generating button is active");
+        assert!(
+            active.streaming,
+            "a visible Stop generating button is active"
+        );
     }
 }
 
