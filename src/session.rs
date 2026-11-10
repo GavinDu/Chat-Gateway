@@ -851,6 +851,9 @@ pub fn import_relay_session(provider: &str, file: &SessionFile) -> Result<()> {
             "localStorage import is disabled until provider-specific key allowlists are configured"
         );
     }
+    // Two different credentials for the exact same scope are ambiguous.
+    // Reject before normalization or any encrypted vault write.
+    ensure_unambiguous_same_scope_cookie_values(&file.cookies, provider)?;
     let (cookies, dropped) = resolve_cookie_scope_duplicates(&file.cookies);
     if dropped > 0 {
         // Counts only: cookie names, domains and values are credentials.
@@ -1712,6 +1715,33 @@ fn write_session_file_atomically(destination: &Path, serialized: &[u8]) -> Resul
 ///
 /// This never broadens a kept cookie's scope: it selects one of the scopes
 /// already present in the relay snapshot and drops only the shadowed copy.
+/// Chrome can contain both host-only and domain-scoped cookies with the same
+/// name/path; those are intentionally resolved below. However, two *different*
+/// values in one exact scope cannot both represent the current credential. Do
+/// not silently choose the first arbitrary snapshot entry. This is checked
+/// before import writes or browser-jar mutation; the diagnostic never reveals
+/// cookie names, domains or values.
+fn ensure_unambiguous_same_scope_cookie_values(cookies: &[Cookie], provider: &str) -> Result<()> {
+    let mut seen: HashMap<(String, String, String, bool), &str> = HashMap::new();
+    for cookie in cookies {
+        if !cookie_domain_allowed(provider, &cookie.domain) {
+            continue;
+        }
+        let identity = (
+            cookie.name.clone(),
+            cookie.domain.trim_matches('.').to_ascii_lowercase(),
+            cookie.path.clone(),
+            cookie.domain.starts_with('.'),
+        );
+        if let Some(existing) = seen.insert(identity, cookie.value.as_str()) {
+            if existing != cookie.value {
+                anyhow::bail!("conflicting credential values in one provider cookie scope");
+            }
+        }
+    }
+    Ok(())
+}
+
 fn resolve_cookie_scope_duplicates(cookies: &[Cookie]) -> (Vec<Cookie>, usize) {
     let mut resolved: Vec<Cookie> = Vec::with_capacity(cookies.len());
     let mut positions: HashMap<(String, String, String), usize> = HashMap::new();
@@ -1860,6 +1890,7 @@ mod cookie_restore_result_tests {
 /// cookie jar. A malformed or expired later cookie must not leave a partially
 /// restored session, and refresh callers preflight before clearing credentials.
 pub(crate) fn preflight_cookie_restore(file: &SessionFile, provider: &str) -> Result<()> {
+    ensure_unambiguous_same_scope_cookie_values(&file.cookies, provider)?;
     let (cookies, _) = resolve_cookie_scope_duplicates(&file.cookies);
     let now_epoch = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2216,6 +2247,64 @@ mod cookie_scope_tests {
             "value",
             "/safe\r\nInjected: yes"
         )));
+    }
+
+    #[test]
+    fn two_different_credentials_for_one_exact_scope_are_rejected_before_import_or_restore() {
+        let mut first = cookie("fixture", "private-first", "/");
+        first.domain = ".google.com".into();
+        let mut second = first.clone();
+        second.value = "private-second".into();
+        second.domain = ".GOOGLE.COM".into();
+        let file = SessionFile {
+            cookies: vec![first, second],
+            local_storage: HashMap::new(),
+            ts: "synthetic".into(),
+        };
+        let restore = preflight_cookie_restore(&file, "gemini").unwrap_err();
+        assert_eq!(
+            restore.to_string(),
+            "conflicting credential values in one provider cookie scope"
+        );
+        let import = import_relay_session("gemini", &file).unwrap_err();
+        assert_eq!(import.to_string(), restore.to_string());
+        assert!(!import.to_string().contains("private-first"));
+        assert!(!import.to_string().contains("private-second"));
+    }
+
+    #[test]
+    fn same_value_duplicates_and_distinct_host_domain_scopes_remain_supported() {
+        let mut domain = cookie("fixture", "synthetic-domain", "/");
+        domain.domain = ".google.com".into();
+        let same = domain.clone();
+        let mut host = domain.clone();
+        host.domain = "google.com".into();
+        host.value = "synthetic-host".into();
+        let file = SessionFile {
+            cookies: vec![domain, same, host],
+            local_storage: HashMap::new(),
+            ts: "synthetic".into(),
+        };
+        assert!(ensure_unambiguous_same_scope_cookie_values(&file.cookies, "gemini").is_ok());
+        assert!(preflight_cookie_restore(&file, "gemini").is_ok());
+        let (resolved, dropped) = resolve_cookie_scope_duplicates(&file.cookies);
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(dropped, 2);
+        assert_eq!(resolved[0].domain, ".google.com");
+    }
+
+    #[test]
+    fn unrelated_provider_cookies_do_not_block_this_providers_restore() {
+        let mut first = cookie("fixture", "first", "/");
+        first.domain = ".claude.ai".into();
+        let mut second = first.clone();
+        second.value = "second".into();
+        let file = SessionFile {
+            cookies: vec![first, second],
+            local_storage: HashMap::new(),
+            ts: "synthetic".into(),
+        };
+        assert!(preflight_cookie_restore(&file, "gemini").is_ok());
     }
 
     #[tokio::test]
