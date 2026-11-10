@@ -4,7 +4,7 @@ const vm = require("node:vm");
 const fs = require("node:fs");
 const path = require("node:path");
 
-function fixture({connected = false, linked = false, cookies = true, authentication = "unknown"} = {}) {
+function fixture({connected = false, linked = false, cookies = true, authentication = "unknown", syncStatus = "uploaded"} = {}) {
   const nodes = new Map();
   const values = connected ? {gateway:"http://127.0.0.1:8080", token:"c".repeat(64)} : {};
   const network = [], openedTabs = [], messages = [];
@@ -41,8 +41,11 @@ function fixture({connected = false, linked = false, cookies = true, authenticat
         values.linkedProviders = (values.linkedProviders || []).filter(value => value !== message.provider);
       }
       if (message.type === "sync-provider") {
-        linked = true;
-        network.push({uri:"/relay/v1/session/" + message.provider,method:"POST"});
+        if (syncStatus === "uploaded") {
+          linked = true;
+          network.push({uri:"/relay/v1/session/" + message.provider,method:"POST"});
+        }
+        return {ok:true,syncStatus};
       }
       return {ok:true};
     }},
@@ -134,6 +137,27 @@ test("provider login sync exposes compact Log out and permits reconnect", async 
   assert.equal(providerButtons(f)[0].textContent,"Log in / Connect");
   await providerButtons(f)[0].click();
   assert.equal(f.messages.filter(x=>x.type==="sync-provider" && x.provider==="metaai").length,2);
+});
+
+test("a lost second cookie snapshot cannot be reported as a saved provider", async () => {
+  const f = fixture({connected:true,linked:false,cookies:true,syncStatus:"no_cookies"});
+  await settle();
+  await assert.rejects(
+    () => f.context.connectProviderForTest("metaai"),
+    /Provider cookies disappeared before sync/
+  );
+  assert.deepEqual(Array.from(f.values.linkedProviders || []),[]);
+  assert.equal(f.network.filter(call => call.uri === "/relay/v1/session/metaai").length,0);
+});
+
+test("an obsolete provider sync cannot be reported as saved", async () => {
+  const f = fixture({connected:true,linked:false,cookies:true,syncStatus:"skipped"});
+  await settle();
+  await assert.rejects(
+    () => f.context.connectProviderForTest("metaai"),
+    /Provider session was not uploaded/
+  );
+  assert.deepEqual(Array.from(f.values.linkedProviders || []),[]);
 });
 
 test("provider logout does not attempt to sign out from the official site", async () => {
