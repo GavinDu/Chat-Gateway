@@ -1460,8 +1460,17 @@ fn submission_observed_for_prompt(
     if !submission_accepted(before, after) {
         return Ok(false);
     }
-    if after.response_count > before.response_count || (after.streaming && !before.streaming) {
-        return Ok(true);
+    let response_transition =
+        after.response_count > before.response_count || (after.streaming && !before.streaming);
+    // An unrelated history turn can arrive alongside newly hydrated answer
+    // nodes. When a new user turn exists, it must belong to this prompt even
+    // if a response/generation transition was also observed.
+    if after.user_turn_count <= before.user_turn_count {
+        return Ok(response_transition);
+    }
+    let user_turn_transition = !before.input_empty && (!after.input_present || after.input_empty);
+    if !user_turn_transition && !response_transition {
+        return Ok(false);
     }
     let prompt_js = serde_json::to_string(prompt)?;
     let matched = page.evaluate(&format!(
@@ -1649,6 +1658,44 @@ mod prompt_bound_submission_tests {
         assert!(
             !submission_observed_for_prompt(&page, &before, &after, "fixture request").unwrap()
         );
+    }
+
+    #[tokio::test]
+    async fn an_unrelated_new_user_turn_blocks_even_a_new_response_node() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <textarea id="prompt">expected prompt</textarea>
+            <div data-message-author-role="user">old prompt</div>
+            <div class="answer">old reply</div>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+
+        let before = submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
+        page.evaluate(
+            r#"(() => {
+                document.querySelector('#prompt').value = '';
+                document.body.insertAdjacentHTML('beforeend',
+                    '<div data-message-author-role="user">unrelated hydration</div><div class="answer">hydrated response</div>');
+                return true;
+            })()"#,
+        );
+        let after = submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
+        assert!(after.response_count > before.response_count);
+        assert!(after.user_turn_count > before.user_turn_count);
+        assert!(
+            !submission_observed_for_prompt(&page, &before, &after, "expected prompt").unwrap()
+        );
+        page.evaluate(
+            "document.querySelectorAll('[data-message-author-role=\"user\"]')[1].textContent = 'expected prompt'",
+        );
+        assert!(submission_observed_for_prompt(&page, &before, &after, "expected prompt").unwrap());
     }
 
     #[tokio::test]
