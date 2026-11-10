@@ -659,6 +659,50 @@ pub struct ProviderSendPolicy {
     pub metrics: crate::metrics::MetricsRegistry,
 }
 
+/// Once ChatGPT/Grok have accepted Send, a later redirect to an unrelated
+/// origin must never be treated as a provider response or terminal state.
+/// Reuse the same exact host/route guard as the Send click; other adapters
+/// retain their existing login/challenge classification behavior.
+fn require_expected_response_origin(provider: &str, page: &Page) -> anyhow::Result<()> {
+    if matches!(provider, "chatgpt" | "grok") {
+        common::require_submission_provider_route(provider, page)?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod response_origin_guard_tests {
+    use super::require_expected_response_origin;
+
+    #[tokio::test]
+    async fn foreign_page_with_response_nodes_cannot_complete_strict_provider() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        page.goto(
+            "data:text/html,<html><body><div class='assistant-message'>unrelated content</div></body></html>",
+        )
+        .await
+        .unwrap();
+        for provider in ["chatgpt", "grok"] {
+            let error = require_expected_response_origin(provider, &page).unwrap_err();
+            assert!(error.to_string().contains("chat origin unavailable"));
+            assert!(!error.to_string().contains("unrelated content"));
+        }
+        assert!(require_expected_response_origin("claude", &page).is_ok());
+
+        // Keep the explicit synthetic fixture exception restricted to tests.
+        page.evaluate(
+            "document.documentElement.setAttribute('data-chat-gateway-test-fixture', '')",
+        );
+        for provider in ["chatgpt", "grok"] {
+            assert!(require_expected_response_origin(provider, &page).is_ok());
+        }
+    }
+}
+
 pub async fn run_send(
     adapter: Arc<dyn SiteAdapter>,
     page: &mut Page,
@@ -809,6 +853,10 @@ pub async fn run_send(
             let _ = chunks.send(Err(auth_error)).await;
             return;
         }
+        if let Err(error) = require_expected_response_origin(adapter.name(), page) {
+            let _ = chunks.send(Err(error)).await;
+            return;
+        }
         if should_probe_response_count(response_node_detected)
             && should_reset_response_tracker(
                 response_node_detected,
@@ -891,6 +939,10 @@ pub async fn run_send(
                             let _ = chunks
                                 .send(Err(provider_challenge_error(adapter.name())))
                                 .await;
+                            return;
+                        }
+                        if let Err(error) = require_expected_response_origin(adapter.name(), page) {
+                            let _ = chunks.send(Err(error)).await;
                             return;
                         }
                         if !final_probe_confirms_completion(
@@ -1003,6 +1055,10 @@ pub async fn run_send(
                     let _ = chunks
                         .send(Err(provider_challenge_error(adapter.name())))
                         .await;
+                    return;
+                }
+                if let Err(error) = require_expected_response_origin(adapter.name(), page) {
+                    let _ = chunks.send(Err(error)).await;
                     return;
                 }
                 if !final_probe_confirms_completion(
