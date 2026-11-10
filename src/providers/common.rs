@@ -487,14 +487,16 @@ pub fn element_exists(page: &Page, selector: &str) -> bool {
     }
 }
 
-/// A matching DIV is not a usable composer unless it is effectively editable.
-/// Follow the closest explicit contenteditable value: a child can override an
+/// A login input, checkbox or upload control is not a chat composer even
+/// when a user-supplied selector happens to match it. Only native text/search
+/// inputs and textareas, or elements effectively contenteditable, can accept
+/// a chat prompt. Follow the closest explicit contenteditable value: a child can override an
 /// ancestor's false value, while an unannotated SPA placeholder is never an
 /// editor. Use DOM attributes rather than relying on engine-specific
 /// isContentEditable support in the pinned embedded browser.
 fn editable_composer_condition(element: &str) -> String {
     format!(
-        "({element}.matches('textarea, input') || (() => {{ let node = {element}; while (node) {{ const value = node.getAttribute('contenteditable'); if (value !== null && value !== 'inherit') return value === '' || value === 'true' || value === 'plaintext-only'; node = node.parentElement; }} return false; }})())"
+        "({element}.tagName === 'TEXTAREA' || ({element}.tagName === 'INPUT' && ({element}.type === 'text' || {element}.type === 'search')) || ({element}.tagName !== 'INPUT' && (() => {{ let node = {element}; while (node) {{ const value = node.getAttribute('contenteditable'); if (value !== null && value !== 'inherit') return value === '' || value === 'true' || value === 'plaintext-only'; node = node.parentElement; }} return false; }})()))"
     )
 }
 
@@ -583,6 +585,57 @@ mod visible_composer_tests {
         page.evaluate("document.querySelector('#visible').hidden = true");
         assert!(!visible_composer_exists(&page, &["#visible"]));
     }
+    #[tokio::test]
+    async fn login_and_nontext_inputs_cannot_masquerade_as_chat_composer() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <input id="email" type="email" value="account@example.test">
+            <input id="password" type="password" value="credential">
+            <input id="checkbox" type="checkbox" value="untouched">
+            <input id="search" type="search">
+            <input id="text" type="text">
+            <textarea id="textarea"></textarea>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        assert!(!visible_composer_exists(
+            &page,
+            &["#email", "#password", "#checkbox"]
+        ));
+        assert!(visible_composer_exists(
+            &page,
+            &["#search", "#text", "#textarea"]
+        ));
+        super::human_type(
+            &page,
+            &["#email, #password, #checkbox, #text"],
+            "safe draft",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            page.evaluate("document.querySelector('#text').value")
+                .as_str(),
+            Some("safe draft")
+        );
+        assert_eq!(
+            page.evaluate("document.querySelector('#password').value")
+                .as_str(),
+            Some("credential")
+        );
+        assert_eq!(
+            page.evaluate("document.querySelector('#checkbox').value")
+                .as_str(),
+            Some("untouched")
+        );
+    }
+
     #[tokio::test]
     async fn noneditable_dom_placeholders_cannot_win_composer_selection() {
         let browser = obscura_core::Browser::builder()
