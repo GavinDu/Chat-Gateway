@@ -35,6 +35,7 @@ pub(super) fn build_browser(cfg: &AppConfig) -> Result<obscura_core::Browser> {
 pub(super) async fn new_page(browser: &obscura_core::Browser) -> Result<obscura_core::Page> {
     let mut page = browser.new_page().await?;
     page.add_preload_script(include_str!("iframe_sandbox.js"));
+    page.add_preload_script(include_str!("window_compat.js"));
     Ok(page)
 }
 
@@ -69,5 +70,29 @@ mod compatibility_tests {
                 serde_json::json!(true)
             );
         }
+    #[tokio::test]
+    async fn window_origin_is_available_before_first_script_and_after_navigation() {
+        let html = r#"<!doctype html><script>
+        'use strict';
+        globalThis.originCompat = typeof window.origin === 'string' &&
+          window.origin === new URL(window.location.href).origin &&
+          Object.getOwnPropertyDescriptor(window, 'origin') !== undefined;
+        </script>"#;
+        let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        let url = format!("data:text/html,{encoded}");
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = super::new_page(&browser).await.unwrap();
+        for _ in 0..2 {
+            page.goto(&url).await.unwrap();
+            assert_eq!(
+                page.evaluate("globalThis.originCompat"),
+                serde_json::json!(true),
+                "the page must expose window.origin before app scripts execute"
+            );
+        }
+    }
     }
 }
