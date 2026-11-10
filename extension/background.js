@@ -79,7 +79,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
   if (message?.type === "sync-provider" && PROVIDERS[message.provider]) {
-    queueProviderSync(message.provider).then(() => sendResponse({ok:true})).catch(error => sendResponse({ok:false,error:error.message}));
+    queueProviderSync(message.provider).then(syncStatus => sendResponse({ok:true,syncStatus:syncStatus || "skipped"})).catch(error => sendResponse({ok:false,error:error.message}));
     return true;
   }
   if (message?.type === "logout-provider" && PROVIDERS[message.provider]) {
