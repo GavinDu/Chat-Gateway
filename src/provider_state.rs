@@ -159,6 +159,7 @@ impl ProviderSessionRegistry {
             | GatewayErrorKind::ProviderBusy
             | GatewayErrorKind::Memory => {}
             GatewayErrorKind::ProviderAssetBlocked => self.record_asset_blocked(provider),
+            GatewayErrorKind::ProviderInputRejected => self.record_input_rejected(provider),
             GatewayErrorKind::Timeout
             | GatewayErrorKind::ProviderFailure
             | GatewayErrorKind::BackendUnavailable => self.record_probe_failure(provider),
@@ -196,6 +197,24 @@ impl ProviderSessionRegistry {
                     state: ProviderSessionState::Degraded,
                     last_error: Some(
                         "provider JavaScript assets blocked (HTTP 403); check network and browser compatibility"
+                            .to_owned(),
+                    ),
+                    retry_after: SystemTime::now().checked_add(DEGRADED_RETRY_COOLDOWN),
+                },
+            );
+        }
+    }
+
+    /// Editor-input incompatibility is neither a successful send nor proof of
+    /// authentication expiry. Preserve a stable, non-secret diagnostic.
+    fn record_input_rejected(&self, provider: &str) {
+        if let Ok(mut map) = self.states.lock() {
+            map.insert(
+                provider.to_owned(),
+                ProviderSessionStatus {
+                    state: ProviderSessionState::Degraded,
+                    last_error: Some(
+                        "provider composer rejected input; check embedded browser compatibility"
                             .to_owned(),
                     ),
                     retry_after: SystemTime::now().checked_add(DEGRADED_RETRY_COOLDOWN),
@@ -331,6 +350,33 @@ mod tests {
         assert!(message.contains("JavaScript assets blocked (HTTP 403)"));
         assert!(!message.contains("private"));
         assert!(!message.contains("token"));
+    }
+
+    #[test]
+    fn rejected_composer_input_is_actionable_but_never_claims_auth_expiry() {
+        let registry = ProviderSessionRegistry::default();
+        registry.record_success("chatgpt");
+        registry.record_gateway_error(
+            "chatgpt",
+            &GatewayError::typed(
+                GatewayErrorKind::ProviderInputRejected,
+                "prompt=secret-value; cookie=private",
+                false,
+            ),
+        );
+        let status = registry.status("chatgpt");
+        assert_eq!(status.state, ProviderSessionState::Degraded);
+        assert!(status.retry_after.is_some());
+        assert_eq!(
+            status.last_error.as_deref(),
+            Some("provider composer rejected input; check embedded browser compatibility")
+        );
+        assert!(!registry.manual_challenge_required("chatgpt"));
+        registry.record_success("chatgpt");
+        assert_eq!(
+            registry.status("chatgpt").state,
+            ProviderSessionState::Ready
+        );
     }
 
     #[test]
