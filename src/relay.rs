@@ -951,7 +951,10 @@ mod relay_persist_off_reactor_tests {
 /// telemetry; storage/validation errors may contain private file paths or
 /// values supplied by the extension. Emit only this fixed category.
 fn relay_import_failure_category(error: &anyhow::Error) -> &'static str {
-    if error.downcast_ref::<RelaySnapshotWorkerUnavailable>().is_some() {
+    if error
+        .downcast_ref::<RelaySnapshotWorkerUnavailable>()
+        .is_some()
+    {
         "persistence_worker_unavailable"
     } else {
         "snapshot_rejected"
@@ -978,7 +981,9 @@ mod relay_import_diagnostic_redaction_tests {
         assert!(failure
             .downcast_ref::<super::RelaySnapshotWorkerUnavailable>()
             .is_some());
-        assert!(!failure.to_string().contains("synthetic sensitive-looking token"));
+        assert!(!failure
+            .to_string()
+            .contains("synthetic sensitive-looking token"));
     }
 
     #[test]
