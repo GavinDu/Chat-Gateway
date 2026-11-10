@@ -1468,8 +1468,7 @@ fn submission_observed_for_prompt(
     if after.user_turn_count <= before.user_turn_count {
         return Ok(response_transition);
     }
-    let user_turn_transition = !before.input_empty
-        && (!after.input_present || after.input_empty);
+    let user_turn_transition = !before.input_empty && (!after.input_present || after.input_empty);
     if !user_turn_transition && !response_transition {
         return Ok(false);
     }
