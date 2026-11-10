@@ -1543,20 +1543,22 @@ mod prompt_bound_submission_tests {
         );
         let after = submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
         assert!(super::submission_accepted(&before, &after));
-        assert!(!submission_observed_for_prompt(&page, &before, &after, "fixture request").unwrap());
+        assert!(
+            !submission_observed_for_prompt(&page, &before, &after, "fixture request").unwrap()
+        );
 
         // A matching latest visible user message is accepted only after the
         // composer transition and a new user turn.
-        page.evaluate(
-            "document.body.lastElementChild.textContent = 'fixture request'",
-        );
+        page.evaluate("document.body.lastElementChild.textContent = 'fixture request'");
         assert!(submission_observed_for_prompt(&page, &before, &after, "fixture request").unwrap());
 
         // An unrelated last visible message must defeat an older matching turn.
         page.evaluate(
             "document.body.insertAdjacentHTML('beforeend', '<div data-testid=\"user-message\">other request</div>')",
         );
-        assert!(!submission_observed_for_prompt(&page, &before, &after, "fixture request").unwrap());
+        assert!(
+            !submission_observed_for_prompt(&page, &before, &after, "fixture request").unwrap()
+        );
     }
 
     #[tokio::test]
@@ -1566,11 +1568,15 @@ mod prompt_bound_submission_tests {
             .build()
             .unwrap();
         let mut page = browser.new_page().await.unwrap();
-        page.goto("data:text/html,<html><body><textarea id='prompt'>draft</textarea></body></html>")
-            .await
-            .unwrap();
+        page.goto(
+            "data:text/html,<html><body><textarea id='prompt'>draft</textarea></body></html>",
+        )
+        .await
+        .unwrap();
         let before = submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
-        page.evaluate("document.body.insertAdjacentHTML('beforeend', '<div class=\"answer\">reply</div>')");
+        page.evaluate(
+            "document.body.insertAdjacentHTML('beforeend', '<div class=\"answer\">reply</div>')",
+        );
         let after = submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
         assert!(submission_observed_for_prompt(&page, &before, &after, "draft").unwrap());
     }
