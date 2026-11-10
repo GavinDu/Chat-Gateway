@@ -389,24 +389,14 @@ mod readiness_tests {
             .unwrap();
         let installed = page.evaluate(
             r#"(() => {
-                const script = document.createElement('script');
-                script.src = 'https://assets.example.invalid/app.bundle.js?token=private';
-                // Leave the synthetic tag detached: no external fetch or E2E.
-                document.body.appendChild(script);
-                script.remove();
-                // A detached script is intentionally not a document script.
                 const retained = document.createElement('script');
-                retained.src = script.src;
-                retained.type = 'module';
-                document.body.appendChild(retained);
-                // Remove src before resource execution; scriptSources is derived
-                // from a later synthetic DOM attribute, not a real network load.
-                retained.removeAttribute('src');
-                retained.setAttribute('data-test-src', script.src);
+                // Unsupported script type: never fetch or execute a live asset.
+                retained.type = 'application/x-synthetic-fixture';
                 Object.defineProperty(retained, 'src', {
                     configurable: true,
                     get: () => 'https://assets.example.invalid/app.bundle.js?token=private'
                 });
+                document.body.appendChild(retained);
                 Object.defineProperty(performance, 'getEntriesByType', {
                     configurable: true,
                     value: () => [
