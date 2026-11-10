@@ -167,17 +167,17 @@ async function providerCookieSnapshot(provider) {
 
 async function syncProvider(provider) {
   const {gateway, token, linkedProviders = []} = await chrome.storage.local.get(["gateway", "token", "linkedProviders"]);
-  if (!gateway || !token || !linkedProviders.includes(provider)) return;
+  if (!gateway || !token || !linkedProviders.includes(provider)) return "skipped";
   const snapshot = await providerCookieSnapshot(provider);
   // A permission/cookie read can await long enough for unpair, re-pair or
   // explicit provider unlink. Re-check ownership and consent immediately
   // before preparing the upload, and bind the relay fetch to that snapshot.
   const current = await chrome.storage.local.get(["gateway", "token", "linkedProviders"]);
   if (current.gateway !== gateway || current.token !== token ||
-      !current.linkedProviders?.includes(provider)) return;
+      !current.linkedProviders?.includes(provider)) return "skipped";
   // Missing permissions or an expired browser session must not overwrite a
   // previously valid gateway session with an empty snapshot.
-  if (snapshot.cookies.length === 0) return;
+  if (snapshot.cookies.length === 0) return "no_cookies";
   // Storage reads also await; recheck host consent at the final upload
   // boundary rather than relying only on the snapshot-time checks.
   const domains = PROVIDERS[provider];
@@ -190,11 +190,16 @@ async function syncProvider(provider) {
   const response = await relayFetch("/relay/v1/session/" + encodeURIComponent(provider), {
     method:"POST", body:JSON.stringify(snapshot)
   }, {gateway, token, provider});
-  if (!response.ok && response.status === 422) {
+  if (!response.ok && (response.status === 422 || response.status === 400)) {
     const failure = await response.json().catch(() => null);
-    if (failure?.error?.code === "cookie_scope_conflict") {
+    if (response.status === 422 && failure?.error?.code === "cookie_scope_conflict") {
       throw new Error("This session contains cookie scopes the gateway cannot preserve. Your saved session was kept. Try the gateway's dedicated login browser.");
+    }
+    if (response.status === 400 && failure?.error?.code === "session_missing_credentials") {
+      throw new Error("No provider cookies reached the gateway. Sign in to the provider and retry linking.");
     }
   }
   if (!response.ok) throw new Error("Gateway rejected session update (" + response.status + "). Check vault mode and provider permissions.");
+  return "uploaded";
 }
+

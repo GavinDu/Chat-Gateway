@@ -247,6 +247,15 @@ async function connectProvider(provider, openLogin = false) {
     // send a manual import in parallel with a logout request.
     const result = await chrome.runtime.sendMessage({type:"sync-provider",provider});
     if (!result?.ok) throw new Error(result?.error || ("Gateway could not sync " + provider));
+    // An empty or superseded browser-cookie capture is a skipped upload,
+    // never evidence that the provider session was saved. The service worker
+    // still skips empty *automatic* refreshes to preserve older credentials.
+    if (result.syncStatus === "no_cookies") {
+      throw new Error("Provider cookies disappeared before sync. Sign in to the provider and retry linking.");
+    }
+    if (result.syncStatus && result.syncStatus !== "uploaded") {
+      throw new Error("Provider session was not uploaded; check the gateway connection and retry.");
+    }
   } catch (error) {
     // A failed first connection must not opt this provider into background
     // uploads. Leave prior consent unchanged on an existing connection.

@@ -284,7 +284,8 @@ test("empty cookie snapshot never overwrites an existing linked gateway session"
     linkedProviders: ["chatgpt"]
   });
 
-  await api.syncProvider("chatgpt");
+  const status = await api.syncProvider("chatgpt");
+  assert.equal(status, "no_cookies", "silent skip is not a successful upload");
 
   assert.equal(api.fetchCalls.length, 0, "an empty browser snapshot must not revoke a valid gateway session");
 });
@@ -298,7 +299,8 @@ test("linked provider sync sends its cookie snapshot only to the configured loca
     linkedProviders: ["chatgpt"]
   });
 
-  await api.syncProvider("chatgpt");
+  const status = await api.syncProvider("chatgpt");
+  assert.equal(status, "uploaded");
 
   assert.equal(api.fetchCalls.length, 1);
   assert.equal(api.fetchCalls[0].url, "http://127.0.0.1:8080/relay/v1/session/chatgpt");
@@ -502,6 +504,17 @@ test("unknown unprocessable-session errors retain generic guidance without forwa
   await assert.rejects(()=>api.syncProvider("gemini"), e=> e.message.includes("Gateway rejected session update (422)") && !e.message.includes("private upstream data"));
 });
 
+
+test("typed missing-cookie import error gives login guidance without leaking gateway response", async () => {
+  const api = loadShared([{name:"fixture",value:"dummy",domain:".google.com",path:"/",secure:true,httpOnly:true}], true,
+    {gateway:"http://127.0.0.1:8080",token:"fixture-token",linkedProviders:["gemini"]},
+    {fetchResponse:{ok:false,status:400,json:async()=>({error:{code:"session_missing_credentials",message:"secret cookie value"}})}});
+  await assert.rejects(
+    () => api.syncProvider("gemini"),
+    error => error.message.includes("Sign in to the provider") && !error.message.includes("secret cookie value")
+  );
+  assert.equal(api.fetchCalls.length, 1);
+});
 
 test("Gemini relay retains Chrome SameSite and expiry while leaving session cookies session-only", async () => {
   const api = loadShared([
