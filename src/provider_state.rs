@@ -373,7 +373,10 @@ mod tests {
         );
         assert!(!registry.manual_challenge_required("chatgpt"));
         registry.record_success("chatgpt");
-        assert_eq!(registry.status("chatgpt").state, ProviderSessionState::Ready);
+        assert_eq!(
+            registry.status("chatgpt").state,
+            ProviderSessionState::Ready
+        );
     }
 
     #[test]
