@@ -1364,6 +1364,18 @@ fn requires_submission_acknowledgement(url: &str) -> bool {
 /// typed expired-session error for explicit authentication redirects.
 pub fn require_submission_provider_route(provider: &str, page: &Page) -> anyhow::Result<()> {
     check_session(provider, page)?;
+    // Unit fixtures need to exercise the real adapters without live network
+    // access. This exception exists only in test builds and requires an
+    // explicit marker on an in-memory data: document, never a provider page.
+    #[cfg(test)]
+    if page.url().starts_with("data:text/html,")
+        && page
+            .evaluate("document.documentElement.hasAttribute('data-chat-gateway-test-fixture')")
+            .as_bool()
+            == Some(true)
+    {
+        return Ok(());
+    }
     if submission_provider_for_url(&page.url()) != Some(provider) {
         anyhow::bail!("provider chat origin unavailable before prompt submission");
     }
