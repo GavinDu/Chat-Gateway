@@ -2272,9 +2272,7 @@ mod prompt_bound_submission_tests {
         );
         let hydrated = submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
         assert!(super::submission_accepted(&before, &hydrated));
-        assert!(
-            !submission_observed_for_prompt(&page, &before, &hydrated, "draft").unwrap()
-        );
+        assert!(!submission_observed_for_prompt(&page, &before, &hydrated, "draft").unwrap());
 
         // If the composer clears in addition to a new response, the provider
         // has a second observable submission transition.
