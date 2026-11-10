@@ -110,6 +110,12 @@ fn mistral_readiness_diagnostics(page: &Page) -> String {
                     'link[rel~="modulepreload"], link[rel~="preload"][as="script"]'
                 )).map(link => link.href)
             );
+            // Some embedded engines report module/script fetches with a
+            // non-script initiator. Match actual script-tag sources too;
+            // never promote unrelated fetches or stylesheets to JS failures.
+            const scriptSources = new Set(
+                Array.from(document.scripts).map(script => script.src).filter(Boolean)
+            );
             let resourceTimingAvailable = false;
             let entries = [];
             try {
@@ -117,7 +123,7 @@ fn mistral_readiness_diagnostics(page: &Page) -> String {
                 if (Array.isArray(resources)) {
                     resourceTimingAvailable = true;
                     entries = resources.filter(entry => entry.initiatorType === 'script' ||
-                        scriptPreloads.has(entry.name));
+                        scriptPreloads.has(entry.name) || scriptSources.has(entry.name));
                 }
             } catch (_) {
                 // Some restricted/partial pages lack Resource Timing. Do not
@@ -369,6 +375,61 @@ mod readiness_tests {
         assert!(!result.contains("style.example.invalid"));
         assert!(!result.contains("blocker=script_http_403"));
         assert!(result.contains("script_asset_http_errors=not_observable"));
+    }
+
+    #[tokio::test]
+    async fn script_src_with_fetch_initiator_is_script_evidence_but_css_is_not() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        page.goto("data:text/html,<html><body><script>window.ready=true</script></body></html>")
+            .await
+            .unwrap();
+        let installed = page.evaluate(
+            r#"(() => {
+                const retained = document.createElement('script');
+                // Unsupported script type: never fetch or execute a live asset.
+                retained.type = 'application/x-synthetic-fixture';
+                Object.defineProperty(retained, 'src', {
+                    configurable: true,
+                    get: () => 'https://assets.example.invalid/app.bundle.js?token=private'
+                });
+                document.body.appendChild(retained);
+                Object.defineProperty(performance, 'getEntriesByType', {
+                    configurable: true,
+                    value: () => [
+                        {initiatorType: 'fetch',
+                         name: 'https://assets.example.invalid/app.bundle.js?token=private',
+                         responseStatus: 403},
+                        {initiatorType: 'link',
+                         name: 'https://style.example.invalid/app.css',
+                         responseStatus: 403}
+                    ]
+                });
+                return true;
+            })()"#,
+        );
+        assert_eq!(installed.as_bool(), Some(true));
+        let diagnostics = super::mistral_readiness_diagnostics(&page);
+        assert!(
+            diagnostics.contains("script_resource_entries=1"),
+            "{diagnostics}"
+        );
+        assert!(
+            diagnostics.contains("blocker=script_http_403"),
+            "{diagnostics}"
+        );
+        assert!(
+            diagnostics.contains("assets.example.invalid:403"),
+            "{diagnostics}"
+        );
+        assert!(
+            !diagnostics.contains("style.example.invalid"),
+            "{diagnostics}"
+        );
+        assert!(!diagnostics.contains("private"), "{diagnostics}");
     }
 
     #[tokio::test]
