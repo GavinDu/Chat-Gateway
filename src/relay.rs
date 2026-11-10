@@ -26,6 +26,9 @@ const RELAY_SESSION_ACTIVATION_TIMEOUT: Duration = Duration::from_secs(30);
 // Decrypting status presence is read-only, unlike session import. Bound the
 // dashboard wait without cancelling or replaying credential mutations.
 const RELAY_STATUS_SCAN_TIMEOUT: Duration = Duration::from_secs(5);
+// Do not let an older relay import overwrite a newer provider snapshot while
+// another request is activating. A timed-out waiter has not touched the vault.
+const RELAY_IMPORT_QUEUE_TIMEOUT: Duration = Duration::from_secs(45);
 
 /// Dropping a timed-out refresh future closes its reply receiver. The browser
 /// worker observes that cancellation before beginning queued activation.
@@ -50,6 +53,67 @@ fn approval_navigation_is_allowed(headers: &HeaderMap) -> bool {
         && headers.get("sec-fetch-dest").and_then(|v| v.to_str().ok()) == Some("document")
 }
 
+/// Serialize persistence plus activation for one provider without blocking
+/// unrelated provider imports. The map is only accessed for enabled providers.
+#[derive(Default)]
+struct ProviderImportGates {
+    gates: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+}
+
+impl ProviderImportGates {
+    fn for_provider(&self, provider: &str) -> Option<Arc<tokio::sync::Mutex<()>>> {
+        let mut gates = self.gates.lock().ok()?;
+        Some(Arc::clone(
+            gates
+                .entry(provider.to_owned())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
+        ))
+    }
+}
+
+#[cfg(test)]
+mod provider_import_gate_tests {
+    use super::ProviderImportGates;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn same_provider_serializes_while_another_provider_is_independent() {
+        let gates = ProviderImportGates::default();
+        let first = gates.for_provider("chatgpt").unwrap();
+        let second = gates.for_provider("chatgpt").unwrap();
+        let gemini = gates.for_provider("gemini").unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
+        assert!(!Arc::ptr_eq(&first, &gemini));
+
+        let held = first.lock().await;
+        assert!(tokio::time::timeout(Duration::from_millis(20), second.lock())
+            .await
+            .is_err());
+        assert!(tokio::time::timeout(Duration::from_millis(100), gemini.lock())
+            .await
+            .is_ok());
+        drop(held);
+        assert!(tokio::time::timeout(Duration::from_millis(100), second.lock())
+            .await
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn cancelled_waiter_does_not_poison_provider_gate() {
+        let gates = ProviderImportGates::default();
+        let gate = gates.for_provider("gemini").unwrap();
+        let held = gate.lock().await;
+        assert!(tokio::time::timeout(Duration::from_millis(20), gate.lock())
+            .await
+            .is_err());
+        drop(held);
+        assert!(tokio::time::timeout(Duration::from_millis(100), gate.lock())
+            .await
+            .is_ok());
+    }
+}
+
 pub struct RelayState {
     approval: Mutex<Option<PendingApproval>>,
     pairing_hash: Mutex<[u8; 32]>,
@@ -58,6 +122,7 @@ pub struct RelayState {
     install_token_hash: Mutex<Option<[u8; 32]>>,
     used_nonces: Mutex<HashMap<String, Instant>>,
     request_times: Mutex<VecDeque<Instant>>,
+    import_gates: ProviderImportGates,
 }
 
 impl RelayState {
@@ -78,6 +143,7 @@ impl RelayState {
                 install_token_hash: Mutex::new(load_install_token_hash()?),
                 used_nonces: Mutex::new(HashMap::new()),
                 request_times: Mutex::new(VecDeque::new()),
+                import_gates: ProviderImportGates::default(),
             },
             code,
         ))
@@ -1017,6 +1083,35 @@ pub async fn import_session(
             "provider must be enabled before its browser session can be linked",
         );
     }
+    let import_started = Instant::now();
+    let gate = match app.relay.import_gates.for_provider(&provider) {
+        Some(gate) => gate,
+        None => {
+            return json_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "session_import_unavailable",
+                "relay import queue unavailable; retry after service recovery",
+            )
+        }
+    };
+    let _provider_import = match tokio::time::timeout(RELAY_IMPORT_QUEUE_TIMEOUT, gate.lock()).await
+    {
+        Ok(guard) => guard,
+        Err(_) => {
+            let queued_ms = import_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+            app.metrics.record_relay_import_phase("queue", queued_ms);
+            app.metrics.record_relay_import_phase("total", queued_ms);
+            return json_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "session_import_busy",
+                "provider import is busy; retry after the earlier import completes",
+            );
+        }
+    };
+    app.metrics.record_relay_import_phase(
+        "queue",
+        import_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+    );
     let store_started = Instant::now();
     let provider_for_persist = provider.clone();
     let imported = session_snapshot_io_off_reactor(move || {
@@ -1031,7 +1126,7 @@ pub async fn import_session(
     if imported.is_err() {
         app.metrics.record_relay_import_phase(
             "total",
-            store_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+            import_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
         );
     }
     match imported {
@@ -1052,7 +1147,7 @@ pub async fn import_session(
             // Includes activation successes, failures and bounded timeouts.
             app.metrics.record_relay_import_phase(
                 "total",
-                store_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+                import_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
             );
             match activated {
                 Ok(Ok(())) => {
