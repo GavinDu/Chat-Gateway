@@ -953,6 +953,18 @@ fn cookie_expiration_header(cookie: &Cookie) -> Result<String> {
     Ok(expired)
 }
 
+/// A host-only cookie (example.com) and a domain-scoped cookie
+/// (.example.com) are distinct revocation targets, even if name/path match.
+/// DNS host spelling is case-insensitive, but scope's leading dot is not.
+fn same_revocation_cookie_scope(
+    target: (&str, &str, &str),
+    remaining: (&str, &str, &str),
+) -> bool {
+    target.0 == remaining.0
+        && target.1.eq_ignore_ascii_case(remaining.1)
+        && target.2 == remaining.2
+}
+
 /// Remove cookies for one provider from Obscura's shared browser jar.
 /// Every deletion is verified; failure aborts unlink before persistent records
 /// are deleted, preventing a false success response for live credentials.
@@ -981,15 +993,47 @@ pub fn clear_provider_cookies(browser: &Browser, provider: &str) -> Result<usize
         );
         store.set(&expired, &url)?;
         if store.get_all().iter().any(|remaining| {
-            remaining.name == cookie.name
-                && remaining.domain.trim_start_matches('.') == cookie.domain.trim_start_matches('.')
-                && remaining.path == cookie.path
+            same_revocation_cookie_scope(
+                (&cookie.name, &cookie.domain, &cookie.path),
+                (&remaining.name, &remaining.domain, &remaining.path),
+            )
         }) {
             anyhow::bail!("provider cookie remained in the browser jar after revocation");
         }
         cleared += 1;
     }
     Ok(cleared)
+}
+
+#[cfg(test)]
+mod cookie_revocation_scope_tests {
+    use super::same_revocation_cookie_scope;
+
+    #[test]
+    fn host_only_and_domain_scoped_cookies_are_distinct_revocation_targets() {
+        let host_only = ("SID", "google.com", "/");
+        let domain_scoped = ("SID", ".google.com", "/");
+        // A surviving domain-scoped cookie must not be mistaken for a failed
+        // deletion of the host-only cookie, or vice versa.
+        assert!(!same_revocation_cookie_scope(host_only, domain_scoped));
+        assert!(!same_revocation_cookie_scope(domain_scoped, host_only));
+        assert!(same_revocation_cookie_scope(
+            host_only,
+            ("SID", "GOOGLE.COM", "/")
+        ));
+        assert!(same_revocation_cookie_scope(
+            domain_scoped,
+            ("SID", ".GOOGLE.COM", "/")
+        ));
+        assert!(!same_revocation_cookie_scope(
+            host_only,
+            ("OTHER", "google.com", "/")
+        ));
+        assert!(!same_revocation_cookie_scope(
+            host_only,
+            ("SID", "google.com", "/account")
+        ));
+    }
 }
 
 pub fn delete_session_snapshot(provider: &str) -> Result<bool> {
