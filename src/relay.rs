@@ -1202,6 +1202,36 @@ fn relay_import_failure_category(error: &anyhow::Error) -> &'static str {
     }
 }
 
+/// Unlink errors may contain private vault paths or provider-supplied text.
+/// The response is already redacted; preserve the same boundary for log data.
+fn relay_unlink_failure_category(error: &anyhow::Error) -> &'static str {
+    if error
+        .downcast_ref::<crate::browser::pool::BrowserWorkerUnavailableError>()
+        .is_some()
+    {
+        "browser_worker_unavailable"
+    } else {
+        "session_revocation_failed"
+    }
+}
+
+#[cfg(test)]
+mod relay_unlink_diagnostic_redaction_tests {
+    #[test]
+    fn unlink_error_category_never_includes_private_upstream_text() {
+        let secret = anyhow::anyhow!("cookie=very-secret; bearer=private; /vault/token");
+        assert_eq!(
+            super::relay_unlink_failure_category(&secret),
+            "session_revocation_failed"
+        );
+        let worker = anyhow::Error::new(crate::browser::pool::BrowserWorkerUnavailableError);
+        assert_eq!(
+            super::relay_unlink_failure_category(&worker),
+            "browser_worker_unavailable"
+        );
+    }
+}
+
 #[cfg(test)]
 mod relay_import_diagnostic_redaction_tests {
     #[test]
@@ -1468,7 +1498,11 @@ pub async fn unlink(
                     .into_response()
             }
             Err(error) => {
-                tracing::warn!(provider, error = %error, "browser relay provider unlink incomplete");
+                tracing::warn!(
+                    provider,
+                    category = relay_unlink_failure_category(&error),
+                    "browser relay provider unlink incomplete"
+                );
                 json_error(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "unlink_failed",
