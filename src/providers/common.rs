@@ -962,7 +962,9 @@ async fn click_send_or_enter_checked_with_policy(
     // Missing controls are not permission to synthesize keyboard input on
     // ChatGPT/Grok: those editors must offer an actionable Send button.
     if !allow_untrusted_enter {
-        anyhow::bail!("provider Send control unavailable; synthetic Enter is not a supported submission path");
+        anyhow::bail!(
+            "provider Send control unavailable; synthetic Enter is not a supported submission path"
+        );
     }
     // Enter dispatch remains a best-effort legacy fallback for other sites.
     press_enter(page, input_selector)?;
