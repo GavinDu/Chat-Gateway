@@ -2017,7 +2017,7 @@ mod composer_rejected_input_tests {
         let html = r#"<html><body><textarea id="prompt"></textarea>
             <script>
               document.querySelector('#prompt').addEventListener('input', () => {
-                  setTimeout(() => { document.querySelector('#prompt').value = ''; }, 0);
+                  document.querySelector('#prompt').value = '';
               });
             </script></body></html>"#;
         let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
