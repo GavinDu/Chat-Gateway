@@ -893,11 +893,15 @@ mod draft_at_click_tests {
         page.goto(&format!("data:text/html,{encoded}"))
             .await
             .unwrap();
-        assert!(
-            click_send_or_enter_checked(&mut page, &["#send"], "#prompt", 200, Some("original draft"))
-                .await
-                .unwrap()
-        );
+        assert!(click_send_or_enter_checked(
+            &mut page,
+            &["#send"],
+            "#prompt",
+            200,
+            Some("original draft")
+        )
+        .await
+        .unwrap());
         assert_eq!(page.evaluate("window.sent || 0").as_f64(), Some(1.0));
     }
 }
