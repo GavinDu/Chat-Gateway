@@ -126,7 +126,10 @@ mod provider_import_gate_tests {
         // The unrelated provider remains independently available.
         assert!(other_provider_gate.try_lock().is_ok());
         tokio::time::sleep(Duration::from_millis(20)).await;
-        assert!(!task.is_finished(), "unlink must wait for import completion");
+        assert!(
+            !task.is_finished(),
+            "unlink must wait for import completion"
+        );
         assert!(*state.lock().await, "unlink must not run during import");
         drop(import_guard);
         tokio::time::timeout(Duration::from_millis(200), task)
