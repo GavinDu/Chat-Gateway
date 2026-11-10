@@ -612,19 +612,26 @@ mod visible_composer_tests {
             &page,
             &["#search", "#text", "#textarea"]
         ));
-        super::human_type(&page, &["#email, #password, #checkbox, #text"], "safe draft")
-            .await
-            .unwrap();
+        super::human_type(
+            &page,
+            &["#email, #password, #checkbox, #text"],
+            "safe draft",
+        )
+        .await
+        .unwrap();
         assert_eq!(
-            page.evaluate("document.querySelector('#text').value").as_str(),
+            page.evaluate("document.querySelector('#text').value")
+                .as_str(),
             Some("safe draft")
         );
         assert_eq!(
-            page.evaluate("document.querySelector('#password').value").as_str(),
+            page.evaluate("document.querySelector('#password').value")
+                .as_str(),
             Some("credential")
         );
         assert_eq!(
-            page.evaluate("document.querySelector('#checkbox').value").as_str(),
+            page.evaluate("document.querySelector('#checkbox').value")
+                .as_str(),
             Some("untouched")
         );
     }
