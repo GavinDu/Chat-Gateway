@@ -1188,12 +1188,13 @@ mod draft_at_click_tests {
         let mut page = browser.new_page().await.unwrap();
         let html = r#"<html><body>
             <div id="panel">
-                <input id="prompt" type="text" form="target" value="current draft">
+                <textarea id="prompt">current draft</textarea>
                 <form id="other"><button class="send" type="button"
-                    onclick="window.other=(window.other||0)+1">Wrong form</button></form>
-                <form id="target"><button class="send" type="button"
-                    onclick="window.sent=(window.sent||0)+1">Target form</button></form>
+                    onclick="window.other++">Wrong form</button></form>
+                <button class="send" type="button"
+                    onclick="window.sent++">Current composer</button>
             </div>
+            <script>window.other=0; window.sent=0;</script>
         </body></html>"#;
         let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
         page.goto(&format!("data:text/html,{encoded}"))
@@ -1221,11 +1222,11 @@ mod draft_at_click_tests {
         let mut page = browser.new_page().await.unwrap();
         let html = r#"<html><body>
             <div id="panel">
-                <input id="prompt" type="text" form="target" value="current draft">
+                <textarea id="prompt">current draft</textarea>
                 <form id="other"><button class="send" type="button" disabled
-                    onclick="window.other=(window.other||0)+1">Wrong form</button></form>
-                <form id="target"></form>
+                    onclick="window.other++">Wrong form</button></form>
             </div>
+            <script>window.other=0;</script>
         </body></html>"#;
         let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
         page.goto(&format!("data:text/html,{encoded}"))
