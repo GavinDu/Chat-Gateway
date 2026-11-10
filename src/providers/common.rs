@@ -908,6 +908,7 @@ async fn click_send_or_enter_checked(
         timeout_ms,
         expected_prompt,
         true,
+        None,
     )
     .await
 }
@@ -922,19 +923,44 @@ async fn click_send_or_enter_checked_with_policy(
     timeout_ms: u64,
     expected_prompt: Option<&str>,
     allow_untrusted_enter: bool,
+    expected_provider: Option<&str>,
 ) -> anyhow::Result<bool> {
     let start = std::time::Instant::now();
     let input_js = serde_json::to_string(input_selector)?;
     let input_expr = visible_input_query(&input_js);
     let expected_js = serde_json::to_string(&expected_prompt)?;
+    let provider_js = serde_json::to_string(&expected_provider)?;
+    // The last Rust-side route check precedes the five-second Send-button
+    // wait. Validate the *current* browser URL within the same page evaluation
+    // that clicks Send, so an intervening foreign redirect is never clicked.
+    let route_guard = format!(
+        r#"const provider = {provider_js};
+           if (provider !== null) {{
+               const rawHost = location.hostname.toLowerCase();
+               const host = rawHost.endsWith('.') ? rawHost.slice(0, -1) : rawHost;
+               const path = location.pathname;
+               const expectedHost = provider === 'chatgpt'
+                   ? (host === 'chatgpt.com' || host === 'www.chatgpt.com')
+                   : provider === 'grok' &&
+                       ((host === 'grok.com' || host === 'www.grok.com') ||
+                       ((host === 'x.com' || host === 'www.x.com') &&
+                           (path === '/i/grok' || path.startsWith('/i/grok/'))));
+               if (location.protocol !== 'https:' || location.username ||
+                   location.password || (location.port && location.port !== '443') ||
+                   !expectedHost) return 'off-provider';
+           }}"#
+    );
     while start.elapsed().as_millis() < timeout_ms as u128 {
         for selector in send_selectors {
             let selector_js = serde_json::to_string(selector)?;
             let js = format!(
-                "(() => {{ const input = {input_expr}; if (!input) return 'missing'; const expected = {expected_js}; if (expected !== null && ('value' in input ? input.value : (input.innerText || input.textContent || '')) !== expected) return 'changed'; let root = input; for (let depth = 0; root && depth < 12; depth++, root = root.parentElement) {{ if (root.tagName === 'BODY' || root.tagName === 'HTML') break; for (const button of root.querySelectorAll({selector_js})) {{ if (button.getClientRects().length && window.getComputedStyle(button).visibility !== 'hidden' && !button.closest('[inert], [hidden], [aria-hidden=true], [aria-disabled=true]') && !button.disabled && !button.matches(':disabled') && !button.closest('fieldset[disabled]') && button.getAttribute('aria-disabled') !== 'true') {{ button.click(); return 'clicked'; }} }} if (root.tagName === 'FORM') break; }} const form = input.form || input.closest('form'); if (form && form.id) {{ for (const button of document.querySelectorAll({selector_js})) {{ if (button.tagName !== 'BUTTON' || (button.form !== form && button.getAttribute('form') !== form.id) || form.contains(button)) continue; if (button.getClientRects().length && window.getComputedStyle(button).visibility !== 'hidden' && !button.closest('[inert], [hidden], [aria-hidden=true], [aria-disabled=true]') && !button.disabled && !button.matches(':disabled') && !button.closest('fieldset[disabled]') && button.getAttribute('aria-disabled') !== 'true') {{ button.click(); return 'clicked'; }} }} }} return 'waiting'; }})()"
+                "(() => {{ {route_guard} const input = {input_expr}; if (!input) return 'missing'; const expected = {expected_js}; if (expected !== null && ('value' in input ? input.value : (input.innerText || input.textContent || '')) !== expected) return 'changed'; let root = input; for (let depth = 0; root && depth < 12; depth++, root = root.parentElement) {{ if (root.tagName === 'BODY' || root.tagName === 'HTML') break; for (const button of root.querySelectorAll({selector_js})) {{ if (button.getClientRects().length && window.getComputedStyle(button).visibility !== 'hidden' && !button.closest('[inert], [hidden], [aria-hidden=true], [aria-disabled=true]') && !button.disabled && !button.matches(':disabled') && !button.closest('fieldset[disabled]') && button.getAttribute('aria-disabled') !== 'true') {{ button.click(); return 'clicked'; }} }} if (root.tagName === 'FORM') break; }} const form = input.form || input.closest('form'); if (form && form.id) {{ for (const button of document.querySelectorAll({selector_js})) {{ if (button.tagName !== 'BUTTON' || (button.form !== form && button.getAttribute('form') !== form.id) || form.contains(button)) continue; if (button.getClientRects().length && window.getComputedStyle(button).visibility !== 'hidden' && !button.closest('[inert], [hidden], [aria-hidden=true], [aria-disabled=true]') && !button.disabled && !button.matches(':disabled') && !button.closest('fieldset[disabled]') && button.getAttribute('aria-disabled') !== 'true') {{ button.click(); return 'clicked'; }} }} }} return 'waiting'; }})()"
             );
             match page.evaluate(&js).as_str() {
                 Some("clicked") => return Ok(true),
+                Some("off-provider") => {
+                    anyhow::bail!("provider left its chat origin before Send click")
+                }
                 Some("changed" | "missing") if expected_prompt.is_some() => {
                     anyhow::bail!("provider draft changed or disappeared while waiting for send")
                 }
@@ -976,6 +1002,50 @@ mod draft_at_click_tests {
     use super::{click_send_or_enter_checked, click_send_or_enter_checked_with_policy};
 
     #[tokio::test]
+    async fn foreign_redirect_cannot_click_matching_send_button() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body><form>
+            <textarea id="prompt">draft</textarea>
+            <button id="send" type="button" onclick="window.sent=(window.sent||0)+1">Send</button>
+        </form></body></html>"#;
+        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        let error = click_send_or_enter_checked_with_policy(
+            &mut page,
+            &["#send"],
+            "#prompt",
+            100,
+            Some("draft"),
+            false,
+            Some("chatgpt"),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("chat origin"));
+        assert_eq!(page.evaluate("window.sent || 0").as_f64(), Some(0.0));
+        // The same fixture with no provider route binding can still use the
+        // ordinary click path; refusal above is about the foreign origin.
+        assert!(click_send_or_enter_checked_with_policy(
+            &mut page,
+            &["#send"],
+            "#prompt",
+            100,
+            Some("draft"),
+            true,
+            None,
+        )
+        .await
+        .unwrap());
+        assert_eq!(page.evaluate("window.sent || 0").as_f64(), Some(1.0));
+    }
+
+    #[tokio::test]
     async fn missing_send_control_never_dispatches_untrusted_enter_for_guarded_providers() {
         let browser = obscura_core::Browser::builder()
             .stealth(false)
@@ -1000,6 +1070,7 @@ mod draft_at_click_tests {
             100,
             Some("expected draft"),
             false,
+            None,
         )
         .await
         .unwrap_err();
@@ -1019,6 +1090,7 @@ mod draft_at_click_tests {
             100,
             Some("expected draft"),
             true,
+            None,
         )
         .await
         .unwrap());
@@ -1696,6 +1768,7 @@ pub async fn send_prompt(
             5_000,
             Some(prompt),
             false,
+            expected_submission_provider,
         )
         .await?;
     } else {
