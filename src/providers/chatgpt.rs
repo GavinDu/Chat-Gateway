@@ -44,6 +44,7 @@ impl SiteAdapter for ChatGPTAdapter {
     }
 
     async fn send_prompt(&self, page: &mut Page, prompt: &str) -> Result<()> {
+        common::require_submission_provider_route("chatgpt", page)?;
         common::send_prompt(page, &SELECTORS.effective(&self.cfg.selectors), prompt).await
     }
 

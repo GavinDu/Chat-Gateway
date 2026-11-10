@@ -1909,7 +1909,7 @@ mod live_dom_send_tests {
             r#"<button id="fixture-send" type="button" data-testid="send-button" aria-label="Send">Send</button>"#
         };
         let html = format!(
-            r#"<html><body><script>globalThis.fixtureLoaded=true</script><form><button id="unrelated-send" type="button" aria-label="Send message">Other</button></form><form>{markup}{button}</form></body></html>"#
+            r#"<html data-chat-gateway-test-fixture><body><script>globalThis.fixtureLoaded=true</script><form><button id="unrelated-send" type="button" aria-label="Send message">Other</button></form><form>{markup}{button}</form></body></html>"#
         );
         let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
         page.goto(&format!("data:text/html,{encoded}"))
