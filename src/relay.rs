@@ -1197,6 +1197,11 @@ fn relay_import_failure_category(error: &anyhow::Error) -> &'static str {
         .is_some()
     {
         "persistence_worker_unavailable"
+    } else if error
+        .downcast_ref::<crate::session::RelayMissingCookiesError>()
+        .is_some()
+    {
+        "missing_session_cookies"
     } else {
         "snapshot_rejected"
     }
@@ -1255,6 +1260,16 @@ mod relay_import_diagnostic_redaction_tests {
         assert!(!failure
             .to_string()
             .contains("synthetic sensitive-looking token"));
+    }
+
+    #[test]
+    fn empty_cookie_capture_has_specific_redacted_diagnostic() {
+        let error = anyhow::Error::new(crate::session::RelayMissingCookiesError);
+        assert_eq!(
+            super::relay_import_failure_category(&error),
+            "missing_session_cookies"
+        );
+        assert!(!super::relay_import_failure_category(&error).contains('@'));
     }
 
     #[test]
@@ -1418,6 +1433,12 @@ pub async fn import_session(
                         StatusCode::SERVICE_UNAVAILABLE,
                         "session_import_unavailable",
                         "relay persistence worker unavailable; retry after service recovery",
+                    )
+                } else if category == "missing_session_cookies" {
+                    json_error(
+                        StatusCode::BAD_REQUEST,
+                        "session_missing_credentials",
+                        "no provider cookies were captured; sign in to the provider and retry linking",
                     )
                 } else {
                     json_error(
