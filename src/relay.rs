@@ -116,22 +116,17 @@ mod provider_import_gate_tests {
         *state.lock().await = true;
 
         let revoked = Arc::clone(&state);
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
         let task = tokio::spawn(async move {
+            let _ = entered_tx.send(());
             let _guard = unlink_gate.lock().await;
             *revoked.lock().await = false;
         });
+        entered_rx.await.unwrap();
         // The unrelated provider remains independently available.
         assert!(other_provider_gate.try_lock().is_ok());
-        assert!(
-            tokio::time::timeout(Duration::from_millis(20), async {
-                while task.is_finished() {
-                    tokio::task::yield_now().await;
-                }
-                tokio::time::sleep(Duration::from_millis(30)).await;
-            })
-            .await
-            .is_err()
-        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(!task.is_finished(), "unlink must wait for import completion");
         assert!(*state.lock().await, "unlink must not run during import");
         drop(import_guard);
         tokio::time::timeout(Duration::from_millis(200), task)
