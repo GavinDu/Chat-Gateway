@@ -936,17 +936,20 @@ async fn click_send_or_enter_checked_with_policy(
     let route_guard = format!(
         r#"const provider = {provider_js};
            if (provider !== null) {{
-               const rawHost = location.hostname.toLowerCase();
+               let currentUrl;
+               try {{ currentUrl = new URL(location.href); }}
+               catch (_) {{ return 'off-provider'; }}
+               const rawHost = currentUrl.hostname.toLowerCase();
                const host = rawHost.endsWith('.') ? rawHost.slice(0, -1) : rawHost;
-               const path = location.pathname;
+               const path = currentUrl.pathname;
                const expectedHost = provider === 'chatgpt'
                    ? (host === 'chatgpt.com' || host === 'www.chatgpt.com')
                    : provider === 'grok' &&
                        ((host === 'grok.com' || host === 'www.grok.com') ||
                        ((host === 'x.com' || host === 'www.x.com') &&
                            (path === '/i/grok' || path.startsWith('/i/grok/'))));
-               if (location.protocol !== 'https:' || location.username ||
-                   location.password || (location.port && location.port !== '443') ||
+               if (currentUrl.protocol !== 'https:' || currentUrl.username ||
+                   currentUrl.password || (currentUrl.port && currentUrl.port !== '443') ||
                    !expectedHost) return 'off-provider';
            }}"#
     );
