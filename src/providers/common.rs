@@ -901,6 +901,28 @@ async fn click_send_or_enter_checked(
     timeout_ms: u64,
     expected_prompt: Option<&str>,
 ) -> anyhow::Result<bool> {
+    click_send_or_enter_checked_with_policy(
+        page,
+        send_selectors,
+        input_selector,
+        timeout_ms,
+        expected_prompt,
+        true,
+    )
+    .await
+}
+
+/// Controlled ChatGPT/Grok editors cannot rely on synthetic Enter to submit:
+/// a missing Send control must not trigger an untrusted keystroke sequence.
+/// Keep the existing legacy fallback only for the other provider adapters.
+async fn click_send_or_enter_checked_with_policy(
+    page: &mut Page,
+    send_selectors: &[&str],
+    input_selector: &str,
+    timeout_ms: u64,
+    expected_prompt: Option<&str>,
+    allow_untrusted_enter: bool,
+) -> anyhow::Result<bool> {
     let start = std::time::Instant::now();
     let input_js = serde_json::to_string(input_selector)?;
     let input_expr = visible_input_query(&input_js);
@@ -937,14 +959,71 @@ async fn click_send_or_enter_checked(
             anyhow::bail!("provider draft changed or disappeared before Enter fallback");
         }
     }
-    // Enter dispatch is a best-effort fallback, not a submission acknowledgement.
+    // Missing controls are not permission to synthesize keyboard input on
+    // ChatGPT/Grok: those editors must offer an actionable Send button.
+    if !allow_untrusted_enter {
+        anyhow::bail!(
+            "provider Send control unavailable; synthetic Enter is not a supported submission path"
+        );
+    }
+    // Enter dispatch remains a best-effort legacy fallback for other sites.
     press_enter(page, input_selector)?;
     Ok(false)
 }
 
 #[cfg(test)]
 mod draft_at_click_tests {
-    use super::click_send_or_enter_checked;
+    use super::{click_send_or_enter_checked, click_send_or_enter_checked_with_policy};
+
+    #[tokio::test]
+    async fn missing_send_control_never_dispatches_untrusted_enter_for_guarded_providers() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body><form>
+            <textarea id="prompt">expected draft</textarea>
+            <script>
+                window.enters = 0;
+                document.querySelector('#prompt').addEventListener('keydown', () => window.enters++);
+            </script>
+        </form></body></html>"#;
+        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        let error = click_send_or_enter_checked_with_policy(
+            &mut page,
+            &["#missing-send"],
+            "#prompt",
+            100,
+            Some("expected draft"),
+            false,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("synthetic Enter"));
+        assert_eq!(page.evaluate("window.enters || 0").as_f64(), Some(0.0));
+        assert_eq!(
+            page.evaluate("document.querySelector('#prompt').value")
+                .as_str(),
+            Some("expected draft")
+        );
+        // The same harmless fixture still exercises the legacy path when
+        // explicitly opted in for providers without strict acknowledgement.
+        assert!(!click_send_or_enter_checked_with_policy(
+            &mut page,
+            &["#missing-send"],
+            "#prompt",
+            100,
+            Some("expected draft"),
+            true,
+        )
+        .await
+        .unwrap());
+        assert!(page.evaluate("window.enters || 0").as_f64().unwrap_or(0.0) > 0.0);
+    }
 
     #[tokio::test]
     async fn changed_draft_must_not_click_enabled_button_or_dispatch_enter() {
@@ -1609,7 +1688,19 @@ pub async fn send_prompt(
     } else {
         None
     };
-    click_send_or_enter_checked(page, &sends, input_sel, 5_000, Some(prompt)).await?;
+    if verify_submission {
+        click_send_or_enter_checked_with_policy(
+            page,
+            &sends,
+            input_sel,
+            5_000,
+            Some(prompt),
+            false,
+        )
+        .await?;
+    } else {
+        click_send_or_enter_checked(page, &sends, input_sel, 5_000, Some(prompt)).await?;
+    }
     if let Some(before) = baseline {
         let start = std::time::Instant::now();
         while start.elapsed() < Duration::from_secs(5) {
