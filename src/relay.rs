@@ -1460,6 +1460,7 @@ mod tests {
             install_token_hash: Mutex::new(install_token_hash),
             used_nonces: Mutex::new(HashMap::new()),
             request_times: Mutex::new(VecDeque::new()),
+            import_gates: ProviderImportGates::default(),
         }
     }
 
