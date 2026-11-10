@@ -1329,12 +1329,16 @@ pub async fn discover_models(
 /// ChatGPT and Grok require an observable composer/response transition to
 /// acknowledge a send. Match actual provider hosts and Grok's alternate X
 /// route, never incidental substrings in query parameters or attacker hosts.
-fn requires_submission_acknowledgement(url: &str) -> bool {
+fn submission_provider_for_url(url: &str) -> Option<&'static str> {
     let Ok(uri) = url.parse::<axum::http::Uri>() else {
-        return false;
+        return None;
     };
-    if !matches!(uri.scheme_str(), Some("https" | "http")) {
-        return false;
+    if uri.scheme_str() != Some("https")
+        || uri.authority().is_none_or(|authority| {
+            authority.as_str().contains('@') || authority.port_u16().is_some_and(|port| port != 443)
+        })
+    {
+        return None;
     }
     let host = uri
         .host()
@@ -1342,10 +1346,30 @@ fn requires_submission_acknowledgement(url: &str) -> bool {
         .trim_end_matches('.')
         .to_ascii_lowercase();
     match host.as_str() {
-        "chatgpt.com" | "www.chatgpt.com" | "grok.com" | "www.grok.com" => true,
-        "x.com" | "www.x.com" => uri.path() == "/i/grok" || uri.path().starts_with("/i/grok/"),
-        _ => false,
+        "chatgpt.com" | "www.chatgpt.com" => Some("chatgpt"),
+        "grok.com" | "www.grok.com" => Some("grok"),
+        "x.com" | "www.x.com"
+            if uri.path() == "/i/grok" || uri.path().starts_with("/i/grok/") =>
+        {
+            Some("grok")
+        }
+        _ => None,
     }
+}
+
+fn requires_submission_acknowledgement(url: &str) -> bool {
+    submission_provider_for_url(url).is_some()
+}
+
+/// A composer's DOM selectors are not trusted evidence of a ChatGPT/Grok
+/// origin. Reject unrelated pages before input or click, and preserve the
+/// typed expired-session error for explicit authentication redirects.
+pub fn require_submission_provider_route(provider: &str, page: &Page) -> anyhow::Result<()> {
+    check_session(provider, page)?;
+    if submission_provider_for_url(&page.url()) != Some(provider) {
+        anyhow::bail!("provider chat origin unavailable before prompt submission");
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1368,6 +1392,42 @@ mod provider_submission_route_tests {
                 "missing acknowledgement guard for {url}"
             );
         }
+    }
+
+    #[test]
+    fn chatgpt_and_grok_routes_remain_distinct_across_provider_navigation() {
+        use super::submission_provider_for_url;
+        assert_eq!(submission_provider_for_url("https://chatgpt.com/c/abc"), Some("chatgpt"));
+        assert_eq!(submission_provider_for_url("https://grok.com/chat/abc"), Some("grok"));
+        assert_eq!(submission_provider_for_url("https://x.com/i/grok/abc"), Some("grok"));
+        assert_ne!(
+            submission_provider_for_url("https://chatgpt.com/"),
+            submission_provider_for_url("https://x.com/i/grok")
+        );
+        for url in [
+            "http://chatgpt.com/",
+            "https://chatgpt.com:8443/",
+            "https://x.com/home",
+            "https://chatgpt.com.attacker.invalid/",
+        ] {
+            assert!(submission_provider_for_url(url).is_none(), "{url}");
+        }
+    }
+
+    #[tokio::test]
+    async fn unrelated_page_with_matching_send_button_cannot_serve_as_chatgpt() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        page.goto(
+            "data:text/html,<html><body><textarea id='prompt'>draft</textarea><button id='send'>Send</button></body></html>",
+        )
+        .await
+        .unwrap();
+        let error = super::require_submission_provider_route("chatgpt", &page).unwrap_err();
+        assert!(error.to_string().contains("chat origin unavailable"));
     }
 
     #[test]
@@ -1413,7 +1473,9 @@ pub async fn send_prompt(
     let sends = set.send_refs();
     // The click/Enter dispatch is not proof that a controlled SPA accepted
     // the prompt. ChatGPT and Grok require a visible submission transition.
-    let verify_submission = requires_submission_acknowledgement(&page.url());
+    let initial_url = page.url();
+    let verify_submission = requires_submission_acknowledgement(&initial_url);
+    let expected_submission_provider = submission_provider_for_url(&initial_url);
     let baseline = if verify_submission {
         Some(submission_snapshot(page, input_sel, &set.response_refs())?)
     } else {
@@ -1424,6 +1486,10 @@ pub async fn send_prompt(
         let start = std::time::Instant::now();
         while start.elapsed() < Duration::from_secs(5) {
             drive_page(page, Duration::from_millis(150)).await;
+            if submission_provider_for_url(&page.url()) != expected_submission_provider {
+                check_session("browser", page)?;
+                anyhow::bail!("provider left its chat origin before prompt submission was acknowledged");
+            }
             let after = submission_snapshot(page, input_sel, &set.response_refs())?;
             if submission_observed_for_prompt(page, &before, &after, prompt)? {
                 return Ok(());
