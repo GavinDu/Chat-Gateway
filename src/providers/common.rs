@@ -787,17 +787,35 @@ pub async fn click_send_or_enter(
     input_selector: &str,
     timeout_ms: u64,
 ) -> anyhow::Result<bool> {
+    click_send_or_enter_checked(page, send_selectors, input_selector, timeout_ms, None).await
+}
+
+/// For production sends, verify the draft inside the same page evaluation as
+/// the click. A controlled editor may rerender during the send-button wait:
+/// an earlier retention check is not safe evidence of the *current* draft.
+async fn click_send_or_enter_checked(
+    page: &mut Page,
+    send_selectors: &[&str],
+    input_selector: &str,
+    timeout_ms: u64,
+    expected_prompt: Option<&str>,
+) -> anyhow::Result<bool> {
     let start = std::time::Instant::now();
     let input_js = serde_json::to_string(input_selector)?;
     let input_expr = visible_input_query(&input_js);
+    let expected_js = serde_json::to_string(&expected_prompt)?;
     while start.elapsed().as_millis() < timeout_ms as u128 {
         for selector in send_selectors {
             let selector_js = serde_json::to_string(selector)?;
             let js = format!(
-                "(() => {{ const input = {input_expr}; if (!input) return false; let root = input; for (let depth = 0; root && depth < 12; depth++, root = root.parentElement) {{ if (root.tagName === 'BODY' || root.tagName === 'HTML') break; for (const button of root.querySelectorAll({selector_js})) {{ if (button.getClientRects().length && window.getComputedStyle(button).visibility !== 'hidden' && !button.closest('[inert], [hidden], [aria-hidden=true], [aria-disabled=true]') && !button.disabled && !button.matches(':disabled') && !button.closest('fieldset[disabled]') && button.getAttribute('aria-disabled') !== 'true') {{ button.click(); return true; }} }} if (root.tagName === 'FORM') break; }} return false; }})()"
+                "(() => {{ const input = {input_expr}; if (!input) return 'missing'; const expected = {expected_js}; if (expected !== null && ('value' in input ? input.value : (input.innerText || input.textContent || '')) !== expected) return 'changed'; let root = input; for (let depth = 0; root && depth < 12; depth++, root = root.parentElement) {{ if (root.tagName === 'BODY' || root.tagName === 'HTML') break; for (const button of root.querySelectorAll({selector_js})) {{ if (button.getClientRects().length && window.getComputedStyle(button).visibility !== 'hidden' && !button.closest('[inert], [hidden], [aria-hidden=true], [aria-disabled=true]') && !button.disabled && !button.matches(':disabled') && !button.closest('fieldset[disabled]') && button.getAttribute('aria-disabled') !== 'true') {{ button.click(); return 'clicked'; }} }} if (root.tagName === 'FORM') break; }} return 'waiting'; }})()"
             );
-            if page.evaluate(&js).as_bool() == Some(true) {
-                return Ok(true);
+            match page.evaluate(&js).as_str() {
+                Some("clicked") => return Ok(true),
+                Some("changed" | "missing") if expected_prompt.is_some() => {
+                    anyhow::bail!("provider draft changed or disappeared while waiting for send")
+                }
+                _ => {}
             }
         }
         drive_page(page, Duration::from_millis(150)).await;
@@ -811,9 +829,81 @@ pub async fn click_send_or_enter(
     if disabled.as_bool() == Some(true) {
         anyhow::bail!("provider send control is disabled or composer is missing");
     }
+    // The composer can also change while we wait for a send control that is
+    // absent. Never dispatch synthetic Enter against a different draft.
+    if let Some(expected) = expected_prompt {
+        if !composer_retains_prompt(page, input_selector, expected)? {
+            anyhow::bail!("provider draft changed or disappeared before Enter fallback");
+        }
+    }
     // Enter dispatch is a best-effort fallback, not a submission acknowledgement.
     press_enter(page, input_selector)?;
     Ok(false)
+}
+
+#[cfg(test)]
+mod draft_at_click_tests {
+    use super::click_send_or_enter_checked;
+
+    #[tokio::test]
+    async fn changed_draft_must_not_click_enabled_button_or_dispatch_enter() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body><form>
+            <textarea id="prompt">changed by framework</textarea>
+            <button id="send" type="button" onclick="window.sent=(window.sent||0)+1">Send</button>
+            <script>
+                window.enters = 0;
+                document.querySelector('#prompt').addEventListener('keydown', () => window.enters++);
+            </script>
+        </form></body></html>"#;
+        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        let error = click_send_or_enter_checked(
+            &mut page,
+            &["#send"],
+            "#prompt",
+            200,
+            Some("original draft"),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("provider draft changed"));
+        assert_eq!(page.evaluate("window.sent || 0").as_f64(), Some(0.0));
+        assert_eq!(page.evaluate("window.enters || 0").as_f64(), Some(0.0));
+    }
+
+    #[tokio::test]
+    async fn unchanged_draft_can_click_send() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body><form>
+            <textarea id="prompt">original draft</textarea>
+            <button id="send" type="button" onclick="window.sent=(window.sent||0)+1">Send</button>
+        </form></body></html>"#;
+        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        assert!(click_send_or_enter_checked(
+            &mut page,
+            &["#send"],
+            "#prompt",
+            200,
+            Some("original draft")
+        )
+        .await
+        .unwrap());
+        assert_eq!(page.evaluate("window.sent || 0").as_f64(), Some(1.0));
+    }
 }
 
 fn matching_model_labels(labels: Vec<String>, keywords: &str) -> anyhow::Result<Vec<String>> {
@@ -1262,7 +1352,7 @@ pub async fn send_prompt(
     } else {
         None
     };
-    click_send_or_enter(page, &sends, input_sel, 5_000).await?;
+    click_send_or_enter_checked(page, &sends, input_sel, 5_000, Some(prompt)).await?;
     if let Some(before) = baseline {
         let start = std::time::Instant::now();
         while start.elapsed() < Duration::from_secs(5) {
