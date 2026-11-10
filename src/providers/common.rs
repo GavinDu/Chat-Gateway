@@ -602,7 +602,10 @@ mod visible_composer_tests {
             .await
             .unwrap();
 
-        assert!(!visible_composer_exists(&page, &["#plain", "#blocked", "#readonly-child"]));
+        assert!(!visible_composer_exists(
+            &page,
+            &["#plain", "#blocked", "#readonly-child"]
+        ));
         assert!(visible_composer_exists(&page, &["#editable", "#override"]));
 
         // The actual typing and retention helpers share visible_input_query.
