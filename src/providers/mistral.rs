@@ -169,10 +169,15 @@ fn mistral_readiness_summary(evidence: &serde_json::Value) -> String {
     if !evidence.is_object() {
         return "document_ready=unknown, blocker=diagnostic_unavailable, script_asset_http_errors=not_observable; browser readiness probe did not return structured evidence".to_owned();
     }
-    let state = evidence
-        .get("readyState")
-        .and_then(|value| value.as_str())
-        .unwrap_or("unknown");
+    // Do not forward untrusted page-provided strings into diagnostics.
+    // A restricted browser or altered document getter can return arbitrary
+    // text; preserve only the standardized readyState values.
+    let state = match evidence.get("readyState").and_then(|value| value.as_str()) {
+        Some("loading") => "loading",
+        Some("interactive") => "interactive",
+        Some("complete") => "complete",
+        _ => "unknown",
+    };
     // Obscura may decode JavaScript integer values as JSON floating-point
     // numbers; as_u64() alone silently reports zero for 3.0.
     let count = |key: &str| {
@@ -294,6 +299,32 @@ mod readiness_tests {
         );
         assert!(!diagnostics.contains("synthetic blocked timing API"));
         assert!(!diagnostics.contains("blocker=script_http_403"));
+    }
+
+    #[test]
+    fn unexpected_document_ready_state_cannot_inject_page_text_into_diagnostics() {
+        for legitimate in ["loading", "interactive", "complete"] {
+            let evidence = serde_json::json!({
+                "readyState": legitimate,
+                "scriptCount": 1,
+                "loadedResources": 0,
+                "assetStatuses": []
+            });
+            let result = super::mistral_readiness_summary(&evidence);
+            assert!(result.contains(&format!("document_ready={legitimate}")));
+        }
+        let evidence = serde_json::json!({
+            "readyState": "complete\\nsecret=session-token\\nblocker=script_http_403",
+            "scriptCount": 2,
+            "loadedResources": 0,
+            "assetStatuses": [],
+            "scriptHttp403Observed": false
+        });
+        let result = super::mistral_readiness_summary(&evidence);
+        assert!(result.contains("document_ready=unknown"), "{result}");
+        assert!(result.contains("blocker=undetermined"), "{result}");
+        assert!(!result.contains("session-token"));
+        assert!(!result.contains("complete\\nsecret"));
     }
 
     #[test]
