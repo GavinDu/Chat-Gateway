@@ -956,13 +956,8 @@ fn cookie_expiration_header(cookie: &Cookie) -> Result<String> {
 /// A host-only cookie (example.com) and a domain-scoped cookie
 /// (.example.com) are distinct revocation targets, even if name/path match.
 /// DNS host spelling is case-insensitive, but scope's leading dot is not.
-fn same_revocation_cookie_scope(
-    target: (&str, &str, &str),
-    remaining: (&str, &str, &str),
-) -> bool {
-    target.0 == remaining.0
-        && target.1.eq_ignore_ascii_case(remaining.1)
-        && target.2 == remaining.2
+fn same_revocation_cookie_scope(target: (&str, &str, &str), remaining: (&str, &str, &str)) -> bool {
+    target.0 == remaining.0 && target.1.eq_ignore_ascii_case(remaining.1) && target.2 == remaining.2
 }
 
 /// Remove cookies for one provider from Obscura's shared browser jar.
