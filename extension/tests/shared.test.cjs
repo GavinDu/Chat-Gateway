@@ -206,6 +206,39 @@ test("provider cookie snapshot excludes cookies outside that provider's domain r
   assert.equal(snapshot.local_storage && Object.keys(snapshot.local_storage).length, 0);
 });
 
+test("gemini snapshot drops host-only root duplicates but keeps the domain scope", async () => {
+  const fixtures = [
+    { name: "SID", value: "host-root", domain: "google.com", path: "/", secure: true, httpOnly: true },
+    { name: "SID", value: "domain-root", domain: ".google.com", path: "/", secure: true, httpOnly: true },
+    { name: "SID", value: "host-login", domain: "gemini.google.com", path: "/", secure: true, httpOnly: true },
+    { name: "NID", value: "host-subdomain", domain: "accounts.google.com", path: "/", secure: true, httpOnly: true }
+  ];
+  const api = loadShared(fixtures);
+  const snapshot = await api.providerCookieSnapshot("gemini");
+  const cookies = snapshot.cookies.map(cookie => [cookie.domain, cookie.value]);
+  assert.deepEqual(JSON.parse(JSON.stringify(cookies)), [
+    [".google.com", "domain-root"],
+    ["gemini.google.com", "host-login"],
+    ["accounts.google.com", "host-subdomain"]
+  ]);
+});
+
+test("chatgpt snapshot keeps host-only login-host and auth-subdomain cookies", async () => {
+  const fixtures = [
+    { name: "session", value: "root-host", domain: "chatgpt.com", path: "/", secure: true, httpOnly: true },
+    { name: "session", value: "root-domain", domain: ".chatgpt.com", path: "/", secure: true, httpOnly: true },
+    { name: "auth", value: "subdomain-host", domain: "auth.openai.com", path: "/", secure: true, httpOnly: true }
+  ];
+  const api = loadShared(fixtures);
+  const snapshot = await api.providerCookieSnapshot("chatgpt");
+  const cookies = snapshot.cookies.map(cookie => [cookie.domain, cookie.value]);
+  assert.deepEqual(JSON.parse(JSON.stringify(cookies)), [
+    ["chatgpt.com", "root-host"],
+    [".chatgpt.com", "root-domain"],
+    ["auth.openai.com", "subdomain-host"]
+  ]);
+});
+
 test("Manus relay only collects consented manus.im cookies", async () => {
   const cookies = [
     {name:"session",value:"manus-session",domain:".manus.im",path:"/",secure:true,httpOnly:true},
@@ -455,7 +488,7 @@ test("token-bound logout never follows a newly paired gateway", async () => {
 
 
 test("conflicting cookie scopes report preserved session and dedicated login guidance", async () => {
-  const api=loadShared([{name:"fixture",value:"dummy",domain:"google.com",path:"/",secure:true,httpOnly:true}],true,
+  const api=loadShared([{name:"fixture",value:"dummy",domain:".google.com",path:"/",secure:true,httpOnly:true}],true,
     {gateway:"http://127.0.0.1:8080",token:"fixture-token",linkedProviders:["gemini"]},
     {fetchResponse:{ok:false,status:422,json:async()=>({error:{code:"cookie_scope_conflict",message:"private upstream data"}})}});
   await assert.rejects(()=>api.syncProvider("gemini"), e=> e.message.includes("saved session was kept") && e.message.includes("dedicated login browser") && !e.message.includes("private upstream data"));
@@ -463,7 +496,7 @@ test("conflicting cookie scopes report preserved session and dedicated login gui
 });
 
 test("unknown unprocessable-session errors retain generic guidance without forwarding text", async () => {
-  const api=loadShared([{name:"fixture",value:"dummy",domain:"google.com",path:"/",secure:true,httpOnly:true}],true,
+  const api=loadShared([{name:"fixture",value:"dummy",domain:".google.com",path:"/",secure:true,httpOnly:true}],true,
     {gateway:"http://127.0.0.1:8080",token:"fixture-token",linkedProviders:["gemini"]},
     {fetchResponse:{ok:false,status:422,json:async()=>({error:{code:"other",message:"private upstream data"}})}});
   await assert.rejects(()=>api.syncProvider("gemini"), e=> e.message.includes("Gateway rejected session update (422)") && !e.message.includes("private upstream data"));
@@ -483,7 +516,7 @@ test("Gemini relay retains Chrome SameSite and expiry while leaving session cook
       sameSite: "strict"
     },
     {
-      name: "unspecified", value: "synthetic", domain: "googleusercontent.com", path: "/",
+      name: "unspecified", value: "synthetic", domain: ".googleusercontent.com", path: "/",
       secure: true, httpOnly: false, session: true, sameSite: "unspecified"
     }
   ]);

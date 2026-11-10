@@ -151,6 +151,55 @@ mod adapter_diagnostic_composer_tests {
     }
 }
 
+#[cfg(test)]
+mod adapter_diagnostic_location_tests {
+    #[test]
+    fn page_location_diagnostics_strip_query_fragment_and_userinfo() {
+        assert_eq!(
+            super::sanitize_page_location("https://chatgpt.com/c/abc?prompt=secret#frag"),
+            "https://chatgpt.com/c/abc"
+        );
+        assert_eq!(
+            super::sanitize_page_location("https://user:pass@chatgpt.com/c/abc"),
+            "https://chatgpt.com/c/abc"
+        );
+        assert_eq!(
+            super::sanitize_page_location("https://user:pass@chatgpt.com"),
+            "https://chatgpt.com"
+        );
+        assert_eq!(super::sanitize_page_location("about:blank"), "about:blank");
+        assert!(
+            super::sanitize_page_location(&format!("https://chatgpt.com/{}", "a".repeat(400)))
+                .chars()
+                .count()
+                <= 256
+        );
+    }
+}
+
+/// Provider pages can put prompts, thread ids or account tokens in the URL
+/// query or fragment. Keep only a bounded scheme/host/path prefix.
+fn sanitize_page_location(url: &str) -> String {
+    let base = url.split(['?', '#']).next().unwrap_or(url);
+    let without_userinfo = match base.split_once("://") {
+        Some((scheme, rest)) => match rest.split_once('/') {
+            Some((authority, path)) if authority.contains('@') => {
+                let host = authority
+                    .rsplit_once('@')
+                    .map_or(authority, |(_, host)| host);
+                format!("{scheme}://{host}/{path}")
+            }
+            None if rest.contains('@') => {
+                let host = rest.rsplit_once('@').map_or(rest, |(_, host)| host);
+                format!("{scheme}://{host}")
+            }
+            _ => base.to_string(),
+        },
+        None => base.to_string(),
+    };
+    without_userinfo.chars().take(256).collect()
+}
+
 /// Fixed selector names only: never log arbitrary field attributes or values.
 fn diagnostic_input_controls(page: &obscura_core::Page) -> Vec<String> {
     [
@@ -723,6 +772,10 @@ pub(super) fn browser_thread(
                                     return;
                                 }
                                 providers::common::drive_page(&mut page, Duration::from_millis(1200)).await;
+                                // Classify the landed page without exposing prompts,
+                                // thread ids, account tokens or cookie values.
+                                report.page = Some(sanitize_page_location(&page.url()));
+                                report.restored_cookie_count = Some(browser.cookies().get_all().len());
                                 // Phase 0 — session check.
                                 if providers::common::is_login_page(&page) {
                                     report.errors.push("session expired: re-login required before running --test-adapter".to_string());

@@ -937,15 +937,8 @@ mod relay_persist_off_reactor_tests {
 /// Never expose arbitrary error strings returned by credential import in
 /// telemetry; storage/validation errors may contain private file paths or
 /// values supplied by the extension. Emit only this fixed category.
-fn relay_import_failure_category(error: &anyhow::Error) -> &'static str {
-    if error
-        .downcast_ref::<crate::session::ConflictingCookieScopes>()
-        .is_some()
-    {
-        "cookie_scope_conflict"
-    } else {
-        "snapshot_rejected"
-    }
+fn relay_import_failure_category(_error: &anyhow::Error) -> &'static str {
+    "snapshot_rejected"
 }
 
 #[cfg(test)]
@@ -1056,19 +1049,6 @@ pub async fn import_session(
                     )
                 }
             }
-        }
-        Err(error)
-            if error
-                .downcast_ref::<crate::session::ConflictingCookieScopes>()
-                .is_some() =>
-        {
-            tracing::warn!(
-                provider,
-                category = relay_import_failure_category(&error),
-                "browser relay session import rejected"
-            );
-            json_error(StatusCode::UNPROCESSABLE_ENTITY, "cookie_scope_conflict",
-                "session contains cookie scopes this gateway cannot preserve; existing saved session was kept; try the dedicated login browser")
         }
         Err(error) => {
             tracing::warn!(

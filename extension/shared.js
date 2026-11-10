@@ -119,11 +119,19 @@ async function providerCookieSnapshot(provider) {
   // browser API round-trip. Promise.all preserves configured domain order for
   // deterministic deduplication; any failed read rejects the whole snapshot.
   const domainCookies = await Promise.all(domains.map(domain => chrome.cookies.getAll({domain})));
+  const loginHost = new URL(PROVIDER_LOGIN_URLS[provider]).hostname.toLowerCase();
   const all = [];
   for (const cookies of domainCookies) {
     for (const cookie of cookies) {
       const normalized = cookie.domain.replace(/^\./, "").toLowerCase();
       if (domains.some(root => normalized === root || normalized.endsWith("." + root))) {
+        // A host-only cookie is only sent to its exact host. A host-only copy on
+        // a provider root (for example `google.com`) therefore cannot
+        // authenticate the provider origin (`gemini.google.com`), and uploading
+        // it next to the domain-scoped twin forces the gateway to discard one.
+        // Drop the unusable host-only root copy and keep the domain scope.
+        const hostOnly = !cookie.domain.startsWith(".");
+        if (hostOnly && normalized !== loginHost && domains.includes(normalized)) continue;
         // Preserve browser cookie policy rather than silently replacing
         // SameSite=None/Strict with a default and persistent cookies with
         // session-only cookies on gateway restoration.
