@@ -413,10 +413,22 @@ mod readiness_tests {
         );
         assert_eq!(installed.as_bool(), Some(true));
         let diagnostics = super::mistral_readiness_diagnostics(&page);
-        assert!(diagnostics.contains("script_resource_entries=1"), "{diagnostics}");
-        assert!(diagnostics.contains("blocker=script_http_403"), "{diagnostics}");
-        assert!(diagnostics.contains("assets.example.invalid:403"), "{diagnostics}");
-        assert!(!diagnostics.contains("style.example.invalid"), "{diagnostics}");
+        assert!(
+            diagnostics.contains("script_resource_entries=1"),
+            "{diagnostics}"
+        );
+        assert!(
+            diagnostics.contains("blocker=script_http_403"),
+            "{diagnostics}"
+        );
+        assert!(
+            diagnostics.contains("assets.example.invalid:403"),
+            "{diagnostics}"
+        );
+        assert!(
+            !diagnostics.contains("style.example.invalid"),
+            "{diagnostics}"
+        );
         assert!(!diagnostics.contains("private"), "{diagnostics}");
     }
 
