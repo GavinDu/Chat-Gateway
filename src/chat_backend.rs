@@ -1,5 +1,5 @@
 //! Canonical chat execution contract independent of the browser engine.
-use crate::providers::common::ProviderTimeoutError;
+use crate::providers::common::{ProviderComposerInputRejectedError, ProviderTimeoutError};
 use crate::providers::mistral::MistralAssetBlockedError;
 use crate::{
     browser::pool::{
@@ -131,6 +131,7 @@ pub enum GatewayErrorKind {
     Memory,
     ProviderFailure,
     ProviderAssetBlocked,
+    ProviderInputRejected,
     BackendUnavailable,
 }
 
@@ -258,6 +259,12 @@ impl axum::response::IntoResponse for GatewayError {
                 "provider_asset_blocked",
                 "provider JavaScript assets are blocked; check provider network, browser compatibility and authentication",
             ),
+            GatewayErrorKind::ProviderInputRejected => (
+                StatusCode::BAD_GATEWAY,
+                "provider_error",
+                "provider_input_rejected",
+                "provider composer did not accept the prompt; check browser compatibility",
+            ),
             GatewayErrorKind::ProviderFailure | GatewayErrorKind::BackendUnavailable => (
                 StatusCode::BAD_GATEWAY,
                 "provider_error",
@@ -327,6 +334,16 @@ fn map_backend_error(error: anyhow::Error) -> GatewayError {
         return GatewayError::typed(
             GatewayErrorKind::ProviderAssetBlocked,
             "provider JavaScript assets blocked by HTTP 403",
+            false,
+        );
+    }
+    if error
+        .downcast_ref::<ProviderComposerInputRejectedError>()
+        .is_some()
+    {
+        return GatewayError::typed(
+            GatewayErrorKind::ProviderInputRejected,
+            "provider composer rejected input after framework render",
             false,
         );
     }
@@ -615,6 +632,15 @@ mod tests {
             "provider JavaScript assets blocked by HTTP 403"
         );
 
+        let input_rejected =
+            super::map_backend_error(anyhow::Error::new(super::ProviderComposerInputRejectedError));
+        assert_eq!(input_rejected.kind, GatewayErrorKind::ProviderInputRejected);
+        assert!(!input_rejected.is_retryable());
+        assert_eq!(
+            input_rejected.message,
+            "provider composer rejected input after framework render"
+        );
+
         let ordinary = super::map_backend_error(anyhow::anyhow!("provider rejected request"));
         assert_eq!(ordinary.kind, GatewayErrorKind::ProviderFailure);
         assert!(!ordinary.is_retryable());
@@ -688,6 +714,11 @@ mod tests {
                 GatewayErrorKind::ProviderAssetBlocked,
                 StatusCode::BAD_GATEWAY,
                 "provider_asset_blocked",
+            ),
+            (
+                GatewayErrorKind::ProviderInputRejected,
+                StatusCode::BAD_GATEWAY,
+                "provider_input_rejected",
             ),
             (
                 GatewayErrorKind::BackendUnavailable,
