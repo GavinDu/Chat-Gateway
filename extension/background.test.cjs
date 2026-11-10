@@ -63,6 +63,29 @@ function flushAsyncWork() {
   return new Promise(resolve => setImmediate(resolve));
 }
 
+test("explicit provider sync reports a skipped upload instead of success", async () => {
+  const f = loadBackground(["chatgpt"]);
+  let status = "no_cookies";
+  f.sandbox.syncProvider = async provider => {
+    f.calls.push(provider);
+    return status;
+  };
+  const request = () => new Promise(resolve => {
+    const asynchronous = f.listeners.message[0](
+      {type:"sync-provider",provider:"chatgpt"}, {}, resolve
+    );
+    assert.equal(asynchronous, true);
+  });
+  const skipped = await request();
+  assert.equal(skipped.ok, true);
+  assert.equal(skipped.syncStatus, "no_cookies");
+  status = "uploaded";
+  const uploaded = await request();
+  assert.equal(uploaded.ok, true);
+  assert.equal(uploaded.syncStatus, "uploaded");
+  assert.deepEqual(f.calls, ["chatgpt", "chatgpt"]);
+});
+
 test("service-worker install and startup restore each unique linked provider", async () => {
   const { calls, listeners } = loadBackground([
     "chatgpt",
