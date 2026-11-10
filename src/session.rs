@@ -1463,14 +1463,35 @@ fn load_session_file_from_path(path: &Path) -> Result<Option<SessionFile>> {
 
 /// Conservative provider-domain allowlist for persisted authentication cookies.
 /// Keep these families narrow: session files contain reusable credentials.
+/// Set-Cookie Domain accepts normalized ASCII DNS names only. Reject
+/// control characters, empty labels and extra dots rather than normalizing
+/// malformed persisted snapshots into a permitted provider suffix.
+fn valid_cookie_domain_syntax(domain: &str) -> bool {
+    let name = domain.strip_prefix('.').unwrap_or(domain);
+    !name.is_empty()
+        && name.len() <= 253
+        && name.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && label
+                    .as_bytes()
+                    .first()
+                    .is_some_and(u8::is_ascii_alphanumeric)
+                && label
+                    .as_bytes()
+                    .last()
+                    .is_some_and(u8::is_ascii_alphanumeric)
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        })
+}
+
 fn cookie_domain_allowed(provider: &str, domain: &str) -> bool {
-    let domain = domain
-        .trim_start_matches('.')
-        .trim_end_matches('.')
-        .to_ascii_lowercase();
-    if domain.is_empty() || domain.contains('/') || domain.contains(':') {
+    if !valid_cookie_domain_syntax(domain) {
         return false;
     }
+    let domain = domain.trim_start_matches('.').to_ascii_lowercase();
     let allowed: &[&str] = match provider {
         "qwen" => &["qwen.ai", "aliyun.com"],
         "metaai" => &["meta.ai", "facebook.com", "fbcdn.net"],
@@ -1496,6 +1517,7 @@ fn cookie_has_prefix(name: &str, prefix: &str) -> bool {
 }
 
 fn restored_cookie_fields_safe(cookie: &Cookie) -> bool {
+    let valid_domain = valid_cookie_domain_syntax(&cookie.domain);
     let valid_name = !cookie.name.is_empty()
         && cookie
             .name
@@ -1517,7 +1539,7 @@ fn restored_cookie_fields_safe(cookie: &Cookie) -> bool {
     let valid_prefix = (!cookie_has_prefix(&cookie.name, "__Host-")
         || (cookie.secure && cookie.path == "/" && !cookie.domain.starts_with('.')))
         && (!cookie_has_prefix(&cookie.name, "__Secure-") || cookie.secure);
-    valid_name && valid_value && valid_path && valid_prefix
+    valid_domain && valid_name && valid_value && valid_path && valid_prefix
 }
 fn parse_local_storage_snapshot(
     value: serde_json::Value,
@@ -2013,7 +2035,10 @@ pub fn restore_cookies(browser: &Browser, file: &SessionFile, provider: &str) ->
         // an older version. Apply the same provider-domain allowlist at restore
         // time, not just when saving, to avoid cross-provider cookie injection.
         if !cookie_domain_allowed(provider, &c.domain) {
-            tracing::warn!(provider, domain = %c.domain, "skipping cookie outside provider domain allowlist");
+            tracing::warn!(
+                provider,
+                "skipping cookie outside provider domain allowlist"
+            );
             continue;
         }
         if !restored_cookie_fields_safe(c) {
@@ -2215,6 +2240,35 @@ mod cookie_scope_tests {
         let mut secure_cookie = cookie("__Secure-session", "value", "/");
         secure_cookie.secure = false;
         assert!(cookie_expiration_header(&secure_cookie).is_err());
+    }
+
+    #[test]
+    fn malformed_dns_domains_cannot_be_used_for_provider_cookie_headers() {
+        for domain in [
+            ".bad\\r\\n.google.com",
+            ".bad\\n.google.com",
+            ".bad;HttpOnly.google.com",
+            "..google.com",
+            "google.com.",
+            "bad..google.com",
+            "bad_.google.com",
+            "-bad.google.com",
+            "bad-.google.com",
+            "google.com:443",
+            "google.com/redirect",
+        ] {
+            let mut item = cookie("fixture", "synthetic", "/");
+            item.domain = domain.to_string();
+            assert!(!cookie_domain_allowed("gemini", domain), "{domain:?}");
+            assert!(!restored_cookie_fields_safe(&item), "{domain:?}");
+            assert!(cookie_restore_header(&item, 1_700_000_000.0).is_err());
+        }
+        for domain in [".google.com", "gemini.google.com", "GOOGLE.COM"] {
+            let mut item = cookie("fixture", "synthetic", "/");
+            item.domain = domain.to_string();
+            assert!(cookie_domain_allowed("gemini", domain), "{domain:?}");
+            assert!(restored_cookie_fields_safe(&item), "{domain:?}");
+        }
     }
 
     #[test]
