@@ -843,12 +843,25 @@ pub async fn status(State(app): State<Arc<crate::AppState>>, headers: HeaderMap)
 /// Relay import validates, encrypts and writes a credential snapshot. Those
 /// operations involve blocking disk I/O and must not stall the async HTTP
 /// reactor while a browser worker is also being activated.
+/// A task-join failure is an infrastructure fault, not evidence that the
+/// submitted credentials were malformed. Keep the public error generic.
+#[derive(Debug)]
+struct RelaySnapshotWorkerUnavailable;
+
+impl std::fmt::Display for RelaySnapshotWorkerUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("relay session persistence worker unavailable")
+    }
+}
+
+impl std::error::Error for RelaySnapshotWorkerUnavailable {}
+
 async fn session_snapshot_io_off_reactor<T: Send + 'static>(
     operation: impl FnOnce() -> anyhow::Result<T> + Send + 'static,
 ) -> anyhow::Result<T> {
     tokio::task::spawn_blocking(operation)
         .await
-        .map_err(|_| anyhow::anyhow!("relay session persistence task could not complete"))?
+        .map_err(|_| anyhow::Error::new(RelaySnapshotWorkerUnavailable))?
 }
 
 /// A status scan is read-only: the caller may stop waiting without making
@@ -937,12 +950,42 @@ mod relay_persist_off_reactor_tests {
 /// Never expose arbitrary error strings returned by credential import in
 /// telemetry; storage/validation errors may contain private file paths or
 /// values supplied by the extension. Emit only this fixed category.
-fn relay_import_failure_category(_error: &anyhow::Error) -> &'static str {
-    "snapshot_rejected"
+fn relay_import_failure_category(error: &anyhow::Error) -> &'static str {
+    if error
+        .downcast_ref::<RelaySnapshotWorkerUnavailable>()
+        .is_some()
+    {
+        "persistence_worker_unavailable"
+    } else {
+        "snapshot_rejected"
+    }
 }
 
 #[cfg(test)]
 mod relay_import_diagnostic_redaction_tests {
+    #[test]
+    fn worker_failure_has_distinct_redacted_category() {
+        let error = anyhow::Error::new(super::RelaySnapshotWorkerUnavailable);
+        let label = super::relay_import_failure_category(&error);
+        assert_eq!(label, "persistence_worker_unavailable");
+        assert!(!label.contains("cookie"));
+    }
+
+    #[tokio::test]
+    async fn join_failure_is_typed_without_leaking_panic_payload() {
+        let failure = super::session_snapshot_io_off_reactor::<()>(|| {
+            panic!("synthetic sensitive-looking token");
+        })
+        .await
+        .unwrap_err();
+        assert!(failure
+            .downcast_ref::<super::RelaySnapshotWorkerUnavailable>()
+            .is_some());
+        assert!(!failure
+            .to_string()
+            .contains("synthetic sensitive-looking token"));
+    }
+
     #[test]
     fn import_error_labels_cannot_forward_secret_error_text() {
         let error = anyhow::anyhow!("cookie=very-secret; bearer=private; user=person@example.test");
@@ -1051,16 +1094,25 @@ pub async fn import_session(
             }
         }
         Err(error) => {
+            let category = relay_import_failure_category(&error);
             tracing::warn!(
                 provider,
-                category = relay_import_failure_category(&error),
-                "browser relay session import rejected"
+                category,
+                "browser relay session import unsuccessful"
             );
-            json_error(
-                StatusCode::BAD_REQUEST,
-                "session_import_rejected",
-                "session was rejected; check vault configuration and provider permissions",
-            )
+            if category == "persistence_worker_unavailable" {
+                json_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "session_import_unavailable",
+                    "relay persistence worker unavailable; retry after service recovery",
+                )
+            } else {
+                json_error(
+                    StatusCode::BAD_REQUEST,
+                    "session_import_rejected",
+                    "session was rejected; check vault configuration and provider permissions",
+                )
+            }
         }
     }
 }
