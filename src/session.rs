@@ -356,7 +356,7 @@ fn preserve_verified_cookie_metadata(captured: &mut SessionFile, previous: &Sess
         .unwrap_or_default()
         .as_secs_f64();
     for cookie in &mut captured.cookies {
-        if cookie.expires.is_some() || cookie.same_site.is_some() {
+        if cookie.expires.is_some() && cookie.same_site.is_some() {
             continue;
         }
         if let Some(prior) = previous.cookies.iter().find(|prior| {
@@ -371,8 +371,14 @@ fn preserve_verified_cookie_metadata(captured: &mut SessionFile, previous: &Sess
                     .expires
                     .is_some_and(|expiry| expiry >= 0.0 && expiry <= now_epoch)
         }) {
-            cookie.expires = prior.expires;
-            cookie.same_site.clone_from(&prior.same_site);
+            // A partial browser snapshot may know one policy field but not
+            // the other. Never replace a directly observed attribute.
+            if cookie.expires.is_none() {
+                cookie.expires = prior.expires;
+            }
+            if cookie.same_site.is_none() {
+                cookie.same_site.clone_from(&prior.same_site);
+            }
         }
     }
 }
@@ -615,6 +621,76 @@ mod explicit_save_cookie_metadata_tests {
         preserve_cookie_metadata_from_existing_vault(&mut captured, "gemini", &key, &destination);
         assert_eq!(captured.cookies[0].expires, None);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod partial_cookie_policy_preservation_tests {
+    use super::*;
+
+    fn fixture(cookie: Cookie) -> SessionFile {
+        SessionFile {
+            local_storage: HashMap::new(),
+            cookies: vec![cookie],
+            ts: "synthetic-only".into(),
+        }
+    }
+
+    fn cookie() -> Cookie {
+        Cookie {
+            name: "fixture".into(),
+            value: "synthetic-only".into(),
+            domain: ".google.com".into(),
+            path: "/".into(),
+            secure: true,
+            http_only: true,
+            expires: Some(2_000_000_000.0),
+            same_site: Some("Strict".into()),
+        }
+    }
+
+    #[test]
+    fn copies_only_missing_fields_for_the_same_valid_cookie() {
+        let prior = fixture(cookie());
+
+        let mut expiry_present = cookie();
+        expiry_present.expires = Some(2_100_000_000.0);
+        expiry_present.same_site = None;
+        let mut captured = fixture(expiry_present);
+        preserve_verified_cookie_metadata(&mut captured, &prior);
+        assert_eq!(captured.cookies[0].expires, Some(2_100_000_000.0));
+        assert_eq!(captured.cookies[0].same_site.as_deref(), Some("Strict"));
+
+        let mut policy_present = cookie();
+        policy_present.expires = None;
+        policy_present.same_site = Some("Lax".into());
+        let mut captured = fixture(policy_present);
+        preserve_verified_cookie_metadata(&mut captured, &prior);
+        assert_eq!(captured.cookies[0].expires, Some(2_000_000_000.0));
+        assert_eq!(captured.cookies[0].same_site.as_deref(), Some("Lax"));
+    }
+
+    #[test]
+    fn rotated_or_expired_cookie_never_inherits_stale_policy() {
+        let original = fixture(cookie());
+        let mut rotated = cookie();
+        rotated.value = "synthetic-rotated".into();
+        rotated.expires = None;
+        rotated.same_site = None;
+        let mut captured = fixture(rotated);
+        preserve_verified_cookie_metadata(&mut captured, &original);
+        assert_eq!(captured.cookies[0].expires, None);
+        assert_eq!(captured.cookies[0].same_site, None);
+
+        let mut expired = cookie();
+        expired.expires = Some(1_000_000_000.0);
+        let prior = fixture(expired);
+        let mut captured = fixture(cookie());
+        captured.cookies[0].expires = None;
+        captured.cookies[0].same_site = None;
+        preserve_verified_cookie_metadata(&mut captured, &prior);
+        assert_eq!(captured.cookies[0].expires, None);
+        assert_eq!(captured.cookies[0].same_site, None);
     }
 }
 
