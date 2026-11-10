@@ -284,6 +284,12 @@ pub struct TestAdapterReport {
     pub send_controls: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub input_controls: Vec<String>,
+    /// Sanitized page origin/path and restored cookie count help classify
+    /// logged-out or challenge pages without exposing query data or values.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub page: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub restored_cookie_count: Option<usize>,
     pub errors: Vec<String>,
 }
 

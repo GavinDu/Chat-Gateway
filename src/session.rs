@@ -770,7 +770,25 @@ fn relay_vault_snapshot_unchanged(
 /// localStorage export is deliberately disabled until each provider has a
 /// reviewed key allowlist.
 pub fn import_relay_session(provider: &str, file: &SessionFile) -> Result<()> {
-    validate_cookie_scopes(file)?;
+    if !file.local_storage.is_empty() {
+        anyhow::bail!(
+            "localStorage import is disabled until provider-specific key allowlists are configured"
+        );
+    }
+    let (cookies, dropped) = resolve_cookie_scope_duplicates(&file.cookies);
+    if dropped > 0 {
+        // Counts only: cookie names, domains and values are credentials.
+        tracing::info!(
+            provider,
+            cookies_dropped = dropped,
+            "resolved duplicate relay cookie scopes before import"
+        );
+    }
+    let file = SessionFile {
+        cookies,
+        local_storage: HashMap::new(),
+        ts: file.ts.clone(),
+    };
     for cookie in &file.cookies {
         cookie.validate_browser_metadata()?;
     }
@@ -779,11 +797,6 @@ pub fn import_relay_session(provider: &str, file: &SessionFile) -> Result<()> {
         Ok("vault")
     ) {
         anyhow::bail!("browser relay requires CHAT_GATEWAY_SESSION_STORE=vault");
-    }
-    if !file.local_storage.is_empty() {
-        anyhow::bail!(
-            "localStorage import is disabled until provider-specific key allowlists are configured"
-        );
     }
     if file.cookies.len() > 512 {
         anyhow::bail!("too many cookies in relay session");
@@ -797,7 +810,7 @@ pub fn import_relay_session(provider: &str, file: &SessionFile) -> Result<()> {
     let key = vault_key_from_env()?;
     let destination = session_vault_path(provider)?;
     ensure_private_session_dir_sync(Path::new("sessions"))?;
-    if relay_vault_snapshot_unchanged(provider, file, &key, Path::new(&destination))? {
+    if relay_vault_snapshot_unchanged(provider, &file, &key, Path::new(&destination))? {
         // The browser worker still runs activation, so a saved-but-inactive
         // session can recover without rewriting the same encrypted snapshot.
         remove_legacy_session_snapshot(provider)?;
@@ -807,12 +820,12 @@ pub fn import_relay_session(provider: &str, file: &SessionFile) -> Result<()> {
         );
         return Ok(());
     }
-    let encrypted = encrypt_session_snapshot(file, provider, &key)?;
+    let encrypted = encrypt_session_snapshot(&file, provider, &key)?;
     write_session_file_atomically(Path::new(&destination), &encrypted)?;
     let verified = (|| -> Result<()> {
         let written = std::fs::read(&destination)?;
         let restored = decrypt_session_snapshot(&written, provider, &key)?;
-        if session_state_hash(&restored)? != session_state_hash(file)? {
+        if session_state_hash(&restored)? != session_state_hash(&file)? {
             anyhow::bail!("session-vault read-back validation failed");
         }
         Ok(())
@@ -1612,30 +1625,47 @@ fn write_session_file_atomically(destination: &Path, serialized: &[u8]) -> Resul
     Ok(())
 }
 
-/// The pinned browser jar indexes cookies by normalized domain, name and path.
-/// Distinct host-only/domain cookies with that identity cannot both survive.
-#[derive(Debug)]
-pub struct ConflictingCookieScopes;
-impl std::fmt::Display for ConflictingCookieScopes {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("session contains conflicting cookie scopes unsupported by this browser")
-    }
-}
-impl std::error::Error for ConflictingCookieScopes {}
-
-fn validate_cookie_scopes(file: &SessionFile) -> Result<()> {
-    let mut identities = std::collections::HashSet::new();
-    for cookie in &file.cookies {
+/// The pinned browser jar indexes cookies by normalized domain, name and path,
+/// so a host-only cookie and a domain-scoped cookie with the same identity
+/// cannot both survive. Chrome can hold both, so resolve the duplicate
+/// deterministically instead of rejecting the entire provider session:
+/// - keep host-only cookies for `__Host-` names because the prefix forbids a
+///   Domain attribute;
+/// - otherwise keep the domain-scoped cookie, which is sent to both the exact
+///   host and its subdomains, so the provider origin stays authenticated.
+///
+/// This never broadens a kept cookie's scope: it selects one of the scopes
+/// already present in the relay snapshot and drops only the shadowed copy.
+fn resolve_cookie_scope_duplicates(cookies: &[Cookie]) -> (Vec<Cookie>, usize) {
+    let mut resolved: Vec<Cookie> = Vec::with_capacity(cookies.len());
+    let mut positions: HashMap<(String, String, String), usize> = HashMap::new();
+    let mut dropped = 0usize;
+    for cookie in cookies {
         let identity = (
-            cookie.name.as_str(),
+            cookie.name.clone(),
             cookie.domain.trim_matches('.').to_ascii_lowercase(),
-            cookie.path.as_str(),
+            cookie.path.clone(),
         );
-        if !identities.insert(identity) {
-            return Err(ConflictingCookieScopes.into());
+        match positions.get(&identity).copied() {
+            Some(position) => {
+                dropped += 1;
+                let existing = &resolved[position];
+                let prefer_candidate = if cookie_has_prefix(&cookie.name, "__Host-") {
+                    existing.domain.starts_with('.') && !cookie.domain.starts_with('.')
+                } else {
+                    !existing.domain.starts_with('.') && cookie.domain.starts_with('.')
+                };
+                if prefer_candidate {
+                    resolved[position] = cookie.clone();
+                }
+            }
+            None => {
+                positions.insert(identity, resolved.len());
+                resolved.push(cookie.clone());
+            }
         }
     }
-    Ok(())
+    (resolved, dropped)
 }
 
 fn ensure_cookie_restore_complete(failed_writes: usize) -> Result<()> {
@@ -1754,13 +1784,12 @@ mod cookie_restore_result_tests {
 /// cookie jar. A malformed or expired later cookie must not leave a partially
 /// restored session, and refresh callers preflight before clearing credentials.
 pub(crate) fn preflight_cookie_restore(file: &SessionFile, provider: &str) -> Result<()> {
-    validate_cookie_scopes(file)?;
+    let (cookies, _) = resolve_cookie_scope_duplicates(&file.cookies);
     let now_epoch = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs_f64();
-    let invalid = file
-        .cookies
+    let invalid = cookies
         .iter()
         .filter(|cookie| {
             cookie_domain_allowed(provider, &cookie.domain)
@@ -1863,7 +1892,16 @@ pub fn restore_cookies(browser: &Browser, file: &SessionFile, provider: &str) ->
         .as_secs_f64();
     let mut failed_writes = 0usize;
     let mut expected_restores = Vec::new();
-    for c in &file.cookies {
+    let (cookies, dropped) = resolve_cookie_scope_duplicates(&file.cookies);
+    if dropped > 0 {
+        // Counts only: cookie names, domains and values are credentials.
+        tracing::info!(
+            provider,
+            cookies_dropped = dropped,
+            "resolved duplicate provider cookie scopes before restore"
+        );
+    }
+    for c in &cookies {
         // Session files are local files and may have been edited or created by
         // an older version. Apply the same provider-domain allowlist at restore
         // time, not just when saving, to avoid cross-provider cookie injection.
@@ -2105,7 +2143,7 @@ mod cookie_scope_tests {
     }
 
     #[tokio::test]
-    async fn conflicting_cookie_scopes_reject_import_before_vault_access_or_browser_mutation() {
+    async fn conflicting_cookie_scopes_resolve_to_the_domain_scope_before_browser_restore() {
         let browser = Browser::builder().stealth(false).build().unwrap();
         browser
             .cookies()
@@ -2121,18 +2159,39 @@ mod cookie_scope_tests {
             local_storage: HashMap::new(),
             ts: "fixture".into(),
         };
-        // This must fail before reading any key, replacing a vault or queuing
-        // browser activation, even when vault mode has not been configured.
-        let error = import_relay_session("gemini", &file).unwrap_err();
-        assert!(error.downcast_ref::<ConflictingCookieScopes>().is_some());
-        assert!(!error.to_string().contains("private-value"));
-        assert!(restore_cookies(&browser, &file, "gemini")
-            .unwrap_err()
-            .downcast_ref::<ConflictingCookieScopes>()
-            .is_some());
-        let remaining = browser.cookies().get_all();
-        assert_eq!(remaining.len(), 1);
-        assert_eq!(remaining[0].name, "preserved");
+        let (resolved, dropped) = resolve_cookie_scope_duplicates(&file.cookies);
+        assert_eq!(dropped, 1);
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].domain, ".google.com");
+        restore_cookies(&browser, &file, "gemini").unwrap();
+        let restored = browser.cookies().get_all();
+        assert_eq!(
+            restored.len(),
+            2,
+            "the preserved cookie plus one resolved copy"
+        );
+        assert!(restored.iter().any(|cookie| cookie.name == "preserved"));
+        let fixture = restored
+            .iter()
+            .find(|cookie| cookie.name == "fixture")
+            .unwrap();
+        assert_eq!(fixture.value, "first-private-value");
+    }
+
+    #[test]
+    fn host_prefixed_cookie_scope_conflicts_keep_the_host_only_copy() {
+        let mut domain_copy = cookie("__Host-fixture", "domain-value", "/");
+        domain_copy.domain = ".chatgpt.com".into();
+        let mut host_copy = domain_copy.clone();
+        host_copy.domain = "chatgpt.com".into();
+        host_copy.value = "host-value".into();
+        let (resolved, dropped) =
+            resolve_cookie_scope_duplicates(&[domain_copy, host_copy.clone()]);
+        assert_eq!(dropped, 1);
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].domain, "chatgpt.com");
+        assert_eq!(resolved[0].value, "host-value");
+        assert!(restored_cookie_fields_safe(&resolved[0]));
     }
 
     #[test]
@@ -2150,7 +2209,9 @@ mod cookie_scope_tests {
             local_storage: HashMap::new(),
             ts: "fixture".into(),
         };
-        validate_cookie_scopes(&file).unwrap();
+        let (resolved, dropped) = resolve_cookie_scope_duplicates(&file.cookies);
+        assert_eq!(dropped, 0);
+        assert_eq!(resolved.len(), 4);
     }
 
     #[tokio::test]
