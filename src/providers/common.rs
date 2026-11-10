@@ -44,6 +44,20 @@ impl std::fmt::Display for ProviderTimeoutError {
 
 impl std::error::Error for ProviderTimeoutError {}
 
+/// A framework-controlled editor discarded a draft after input dispatch.
+/// Do not interpret synthetic input events as successful typing. This typed
+/// error stays free of the prompt, cookies, page content, or browser URL.
+#[derive(Debug)]
+pub struct ProviderComposerInputRejectedError;
+
+impl std::fmt::Display for ProviderComposerInputRejectedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("provider input did not retain the prompt after framework render")
+    }
+}
+
+impl std::error::Error for ProviderComposerInputRejectedError {}
+
 /// Static per-provider selector/URL data. Each adapter is a SelectorSet
 /// plus the shared interaction logic in this module (ported from v1's
 /// per-adapter discover/send bodies, re-expressed in the real obscura
@@ -857,7 +871,7 @@ pub async fn human_type(page: &Page, selectors: &[&str], text: &str) -> anyhow::
     // A successful event dispatch alone is not evidence that the prompt stuck.
     tokio::time::sleep(Duration::from_millis(120)).await;
     if !composer_retains_prompt(page, selector, text)? {
-        anyhow::bail!("provider input did not retain the prompt after framework render");
+        return Err(anyhow::Error::new(ProviderComposerInputRejectedError));
     }
     Ok(())
 }
@@ -1750,7 +1764,7 @@ pub async fn send_prompt(
     // The provider may re-render or clear the composer while the browser is
     // settling after typing. Never click Send with a missing or changed draft.
     if !composer_retains_prompt(page, input_sel, prompt)? {
-        anyhow::bail!("provider input changed before send after framework render");
+        return Err(anyhow::Error::new(ProviderComposerInputRejectedError));
     }
     if let Some(provider) = expected_submission_provider {
         require_submission_provider_route(provider, page)?;
@@ -1986,6 +2000,37 @@ mod pre_send_retention_tests {
         let result = super::send_prompt(&mut page, &selectors, "user draft").await;
         assert!(result.is_err(), "a cleared draft must not be submitted");
         assert_eq!(page.evaluate("window.sent || 0").as_f64(), Some(0.0));
+    }
+}
+
+#[cfg(test)]
+mod composer_rejected_input_tests {
+    use super::ProviderComposerInputRejectedError;
+
+    #[tokio::test]
+    async fn framework_draft_rejection_is_typed_and_contains_no_prompt() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body><textarea id="prompt"></textarea>
+            <script>
+              document.querySelector('#prompt').addEventListener('input', () => {
+                  setTimeout(() => { document.querySelector('#prompt').value = ''; }, 0);
+              });
+            </script></body></html>"#;
+        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}")).await.unwrap();
+        let error = super::human_type(&page, &["#prompt"], "private-message")
+            .await
+            .unwrap_err();
+        assert!(error.downcast_ref::<ProviderComposerInputRejectedError>().is_some());
+        assert!(!error.to_string().contains("private-message"));
+        assert_eq!(
+            error.to_string(),
+            "provider input did not retain the prompt after framework render"
+        );
     }
 }
 
