@@ -131,9 +131,10 @@ impl MetricsRegistry {
     }
 
     /// Bounded relay import phases only; no provider, cookie, URL or session labels.
-    /// "total" includes persistence and activation, including failed attempts.
+    /// "queue" tracks serialization wait; "total" includes queue, persistence
+    /// and activation, including rejected and busy attempts.
     pub fn record_relay_import_phase(&self, phase: &str, elapsed_ms: u64) {
-        if !matches!(phase, "persist" | "activate" | "total") {
+        if !matches!(phase, "queue" | "persist" | "activate" | "total") {
             return;
         }
         if let Ok(mut data) = self.data.lock() {
@@ -387,11 +388,15 @@ mod tests {
     #[test]
     fn relay_import_metrics_use_only_bounded_phase_labels() {
         let registry = MetricsRegistry::default();
+        registry.record_relay_import_phase("queue", 8);
         registry.record_relay_import_phase("persist", 15);
         registry.record_relay_import_phase("activate", 42);
         registry.record_relay_import_phase("total", 57);
         registry.record_relay_import_phase("secret-session-id", 999);
         let metrics = registry.render_with_provider_states(&[]);
+        assert!(
+            metrics.contains("gateway_relay_session_import_phase_ms_sum{phase=\"queue\"} 8")
+        );
         assert!(
             metrics.contains("gateway_relay_session_import_phase_ms_count{phase=\"persist\"} 1")
         );
