@@ -87,16 +87,22 @@ mod provider_import_gate_tests {
         assert!(!Arc::ptr_eq(&first, &gemini));
 
         let held = first.lock().await;
-        assert!(tokio::time::timeout(Duration::from_millis(20), second.lock())
-            .await
-            .is_err());
-        assert!(tokio::time::timeout(Duration::from_millis(100), gemini.lock())
-            .await
-            .is_ok());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), second.lock())
+                .await
+                .is_err()
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), gemini.lock())
+                .await
+                .is_ok()
+        );
         drop(held);
-        assert!(tokio::time::timeout(Duration::from_millis(100), second.lock())
-            .await
-            .is_ok());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), second.lock())
+                .await
+                .is_ok()
+        );
     }
 
     #[tokio::test]
@@ -108,9 +114,11 @@ mod provider_import_gate_tests {
             .await
             .is_err());
         drop(held);
-        assert!(tokio::time::timeout(Duration::from_millis(100), gate.lock())
-            .await
-            .is_ok());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), gate.lock())
+                .await
+                .is_ok()
+        );
     }
 }
 
