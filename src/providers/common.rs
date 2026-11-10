@@ -1348,9 +1348,7 @@ fn submission_provider_for_url(url: &str) -> Option<&'static str> {
     match host.as_str() {
         "chatgpt.com" | "www.chatgpt.com" => Some("chatgpt"),
         "grok.com" | "www.grok.com" => Some("grok"),
-        "x.com" | "www.x.com"
-            if uri.path() == "/i/grok" || uri.path().starts_with("/i/grok/") =>
-        {
+        "x.com" | "www.x.com" if uri.path() == "/i/grok" || uri.path().starts_with("/i/grok/") => {
             Some("grok")
         }
         _ => None,
@@ -1397,9 +1395,18 @@ mod provider_submission_route_tests {
     #[test]
     fn chatgpt_and_grok_routes_remain_distinct_across_provider_navigation() {
         use super::submission_provider_for_url;
-        assert_eq!(submission_provider_for_url("https://chatgpt.com/c/abc"), Some("chatgpt"));
-        assert_eq!(submission_provider_for_url("https://grok.com/chat/abc"), Some("grok"));
-        assert_eq!(submission_provider_for_url("https://x.com/i/grok/abc"), Some("grok"));
+        assert_eq!(
+            submission_provider_for_url("https://chatgpt.com/c/abc"),
+            Some("chatgpt")
+        );
+        assert_eq!(
+            submission_provider_for_url("https://grok.com/chat/abc"),
+            Some("grok")
+        );
+        assert_eq!(
+            submission_provider_for_url("https://x.com/i/grok/abc"),
+            Some("grok")
+        );
         assert_ne!(
             submission_provider_for_url("https://chatgpt.com/"),
             submission_provider_for_url("https://x.com/i/grok")
@@ -1496,7 +1503,9 @@ pub async fn send_prompt(
             drive_page(page, Duration::from_millis(150)).await;
             if submission_provider_for_url(&page.url()) != expected_submission_provider {
                 check_session("browser", page)?;
-                anyhow::bail!("provider left its chat origin before prompt submission was acknowledged");
+                anyhow::bail!(
+                    "provider left its chat origin before prompt submission was acknowledged"
+                );
             }
             let after = submission_snapshot(page, input_sel, &set.response_refs())?;
             if submission_observed_for_prompt(page, &before, &after, prompt)? {
