@@ -21,6 +21,40 @@ This is the required path from a code change to a local installation. The order 
 - Print the sandbox workspace and feature commit before each test invocation. Run the applicable API, authentication, browser/relay, pairing, and shutdown acceptance for the change. Keep temporary keys, pairing codes, and metadata out of logs; remove the candidate container, temporary volumes, and metadata after the run.
 - Record the tested feature commit and results on the PR. If the sandbox E2E fails, fix the feature branch and repeat CI and E2E for its new head.
 
+### Native Linux browser/SSH E2E capability gate (MCP sandbox)
+
+Before selecting the native Linux browser/SSH suite, the sandbox operator must
+record whether the execution host actually meets the prerequisites. Run this
+read-only capability preflight **inside the sandbox execution host**, not on the
+Mac Docker host (which is a different machine):
+
+```sh
+pwd
+uname -s
+command -v ssh || true
+command -v node || true
+command -v python3 || true
+command -v cargo || true
+test -n "${CHAT_GATEWAY_CHROMIUM_PATH:-}" && test -x "$CHAT_GATEWAY_CHROMIUM_PATH" && echo chromium_path_present || true
+```
+
+After installing the repository's locked Node dependencies on a **disposable**
+Linux test environment, verify the Playwright Chromium executable and required
+runtime libraries/fonts are actually available; an installed Node package or
+an empty browser cache is not proof that Chromium can start. Use the native
+fixture runners from [browser-login/README.md](../browser-login/README.md) to
+validate the browser sandbox and temporary SSH transport, with no provider
+secrets or production volumes. Do not use `--no-sandbox`, privileged Docker
+containers, or weaken the MCP host to make the test pass.
+
+If `ssh`, Chromium, the browser sandbox, or the native build prerequisites
+are absent, record **Not run — missing <prerequisite>** for the corresponding
+native-browser or SSH acceptance stage. HTTP-only tests can run separately
+where supported but must never be called browser/SSH E2E. Do not close live
+acceptance issues or install a release based on skipped tests. The Docker
+host's CLI or a successful GitHub Actions fixture run cannot substitute for
+an MCP sandbox capability check.
+
 ## 4. Merge only after both feature gates pass
 
 Merge the PR only when all required CI checks on its current head and the MCP sandbox E2E both pass and are recorded. Do not merge around failing or pending checks. A direct push to `main` bypasses this workflow; make feature changes through reviewed PRs.
