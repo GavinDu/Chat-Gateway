@@ -632,8 +632,9 @@ mod tests {
             "provider JavaScript assets blocked by HTTP 403"
         );
 
-        let input_rejected =
-            super::map_backend_error(anyhow::Error::new(super::ProviderComposerInputRejectedError));
+        let input_rejected = super::map_backend_error(anyhow::Error::new(
+            super::ProviderComposerInputRejectedError,
+        ));
         assert_eq!(input_rejected.kind, GatewayErrorKind::ProviderInputRejected);
         assert!(!input_rejected.is_retryable());
         assert_eq!(
