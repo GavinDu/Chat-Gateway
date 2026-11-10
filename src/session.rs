@@ -842,6 +842,20 @@ fn relay_vault_snapshot_unchanged(
     Ok(session_state_hash(&existing)? == session_state_hash(incoming)?)
 }
 
+/// A credential-free capture cannot establish a linked browser session.
+/// Carry a fixed, redacted error type so the relay can give a specific action
+/// rather than incorrectly suggesting a vault configuration problem.
+#[derive(Debug)]
+pub struct RelayMissingCookiesError;
+
+impl std::fmt::Display for RelayMissingCookiesError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("relay session has no provider cookies; complete login before linking")
+    }
+}
+
+impl std::error::Error for RelayMissingCookiesError {}
+
 /// Import a browser-linked session directly into the encrypted vault. Arbitrary
 /// localStorage export is deliberately disabled until each provider has a
 /// reviewed key allowlist.
@@ -855,7 +869,7 @@ pub fn import_relay_session(provider: &str, file: &SessionFile) -> Result<()> {
     // capture cannot authenticate a browser session. Fail before touching the
     // vault: a successful empty import would otherwise look falsely linked.
     if file.cookies.is_empty() {
-        anyhow::bail!("relay session has no provider cookies; complete login before linking");
+        return Err(anyhow::Error::new(RelayMissingCookiesError));
     }
     // Two different credentials for the exact same scope are ambiguous.
     // Reject before normalization or any encrypted vault write.
@@ -2391,6 +2405,7 @@ mod cookie_scope_tests {
             ts: "synthetic".into(),
         };
         let error = import_relay_session("gemini", &file).unwrap_err();
+        assert!(error.downcast_ref::<RelayMissingCookiesError>().is_some());
         assert_eq!(
             error.to_string(),
             "relay session has no provider cookies; complete login before linking"
