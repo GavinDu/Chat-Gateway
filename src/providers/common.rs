@@ -1978,7 +1978,14 @@ fn submission_observed_for_prompt(
     // nodes. When a new user turn exists, it must belong to this prompt even
     // if a response/generation transition was also observed.
     if after.user_turn_count <= before.user_turn_count {
-        return Ok(response_transition);
+        // History hydration can insert a visible assistant node while a
+        // framework-controlled editor still holds the unsent draft. Without
+        // a new user turn we need evidence the draft was consumed, or that
+        // the provider entered *new* active generation. A response count
+        // increase alone must not acknowledge an unrelated historical reply.
+        let draft_consumed = !before.input_empty && (!after.input_present || after.input_empty);
+        let generation_started = after.streaming && !before.streaming;
+        return Ok(response_transition && (draft_consumed || generation_started));
     }
     let user_turn_transition = !before.input_empty && (!after.input_present || after.input_empty);
     if !user_turn_transition && !response_transition {
@@ -2246,7 +2253,38 @@ mod prompt_bound_submission_tests {
     }
 
     #[tokio::test]
-    async fn a_new_response_acknowledges_even_without_matching_user_turn() {
+    async fn hydrated_response_without_draft_consumption_cannot_acknowledge_send() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        page.goto(
+            "data:text/html,<html><body><textarea id='prompt'>draft</textarea></body></html>",
+        )
+        .await
+        .unwrap();
+        let before = submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
+        // A background history load is not evidence that a click submitted
+        // this unchanged draft, even when a new assistant DOM node appears.
+        page.evaluate(
+            "document.body.insertAdjacentHTML('beforeend', '<div class=\"answer\">old reply</div>')",
+        );
+        let hydrated = submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
+        assert!(super::submission_accepted(&before, &hydrated));
+        assert!(
+            !submission_observed_for_prompt(&page, &before, &hydrated, "draft").unwrap()
+        );
+
+        // If the composer clears in addition to a new response, the provider
+        // has a second observable submission transition.
+        page.evaluate("document.querySelector('#prompt').value = ''");
+        let consumed = submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
+        assert!(submission_observed_for_prompt(&page, &before, &consumed, "draft").unwrap());
+    }
+
+    #[tokio::test]
+    async fn newly_started_generation_acknowledges_without_clearing_draft() {
         let browser = obscura_core::Browser::builder()
             .stealth(false)
             .build()
@@ -2259,9 +2297,10 @@ mod prompt_bound_submission_tests {
         .unwrap();
         let before = submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
         page.evaluate(
-            "document.body.insertAdjacentHTML('beforeend', '<div class=\"answer\">reply</div>')",
+            "document.body.insertAdjacentHTML('beforeend', '<button aria-label=\"Stop generating\">Stop</button>')",
         );
         let after = submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
+        assert!(after.streaming && !before.streaming);
         assert!(submission_observed_for_prompt(&page, &before, &after, "draft").unwrap());
     }
 }
