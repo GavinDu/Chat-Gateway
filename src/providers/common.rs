@@ -2021,11 +2021,15 @@ mod composer_rejected_input_tests {
               });
             </script></body></html>"#;
         let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
-        page.goto(&format!("data:text/html,{encoded}")).await.unwrap();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
         let error = super::human_type(&page, &["#prompt"], "private-message")
             .await
             .unwrap_err();
-        assert!(error.downcast_ref::<ProviderComposerInputRejectedError>().is_some());
+        assert!(error
+            .downcast_ref::<ProviderComposerInputRejectedError>()
+            .is_some());
         assert!(!error.to_string().contains("private-message"));
         assert_eq!(
             error.to_string(),
