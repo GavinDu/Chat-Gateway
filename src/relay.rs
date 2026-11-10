@@ -71,9 +71,23 @@ impl ProviderImportGates {
     }
 }
 
+/// Keep the provider's serialization guard alive independently of the HTTP
+/// response future. Cancelling the caller must not unlock an already-started
+/// vault write, browser activation, or revocation running in the worker.
+async fn run_provider_mutation_detached<T: Send + 'static>(
+    guard: tokio::sync::OwnedMutexGuard<()>,
+    operation: impl std::future::Future<Output = T> + Send + 'static,
+) -> Result<T, tokio::task::JoinError> {
+    tokio::spawn(async move {
+        let _provider_mutation = guard;
+        operation.await
+    })
+    .await
+}
+
 #[cfg(test)]
 mod provider_import_gate_tests {
-    use super::ProviderImportGates;
+    use super::{run_provider_mutation_detached, ProviderImportGates};
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -137,6 +151,36 @@ mod provider_import_gate_tests {
             .expect("revocation should proceed after import")
             .unwrap();
         assert!(!*state.lock().await, "unlink must leave session revoked");
+    }
+
+    #[tokio::test]
+    async fn cancelled_http_waiter_keeps_gate_until_detached_mutation_finishes() {
+        let gates = ProviderImportGates::default();
+        let gate = gates.for_provider("gemini").unwrap();
+        let owned = Arc::clone(&gate).lock_owned().await;
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        let request = tokio::spawn(run_provider_mutation_detached(owned, async move {
+            let _ = started_tx.send(());
+            let _ = release_rx.await;
+        }));
+        started_rx.await.unwrap();
+        // Simulate disconnecting the HTTP request after the mutation starts.
+        request.abort();
+        let _ = request.await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), gate.lock())
+                .await
+                .is_err(),
+            "disconnect must not unlock an in-flight mutation"
+        );
+        release_tx.send(()).unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), gate.lock())
+                .await
+                .is_ok(),
+            "the mutation must eventually release its provider gate"
+        );
     }
 
     #[tokio::test]
@@ -1136,121 +1180,132 @@ pub async fn import_session(
             )
         }
     };
-    let _provider_import = match tokio::time::timeout(RELAY_IMPORT_QUEUE_TIMEOUT, gate.lock()).await
-    {
-        Ok(guard) => guard,
-        Err(_) => {
-            let queued_ms = import_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
-            app.metrics.record_relay_import_phase("queue", queued_ms);
-            app.metrics.record_relay_import_phase("total", queued_ms);
-            return json_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "session_import_busy",
-                "provider import is busy; retry after the earlier import completes",
-            );
-        }
-    };
+    let provider_import_guard =
+        match tokio::time::timeout(RELAY_IMPORT_QUEUE_TIMEOUT, gate.lock_owned()).await {
+            Ok(guard) => guard,
+            Err(_) => {
+                let queued_ms = import_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+                app.metrics.record_relay_import_phase("queue", queued_ms);
+                app.metrics.record_relay_import_phase("total", queued_ms);
+                return json_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "session_import_busy",
+                    "provider import is busy; retry after the earlier import completes",
+                );
+            }
+        };
     app.metrics.record_relay_import_phase(
         "queue",
         import_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
     );
-    let store_started = Instant::now();
-    let provider_for_persist = provider.clone();
-    let imported = session_snapshot_io_off_reactor(move || {
-        crate::session::import_relay_session(&provider_for_persist, &file)
-    })
-    .await;
-    let vault_ms = store_started.elapsed().as_millis();
-    app.metrics
-        .record_relay_import_phase("persist", vault_ms.min(u64::MAX as u128) as u64);
-    // A rejected snapshot has no activation phase. Still record one total
-    // duration so import latency distributions include failed attempts.
-    if imported.is_err() {
-        app.metrics.record_relay_import_phase(
-            "total",
-            import_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
-        );
-    }
-    match imported {
-        Ok(()) => {
-            let activation_started = Instant::now();
-            let activated = bounded_session_activation(
-                RELAY_SESSION_ACTIVATION_TIMEOUT,
-                app.pool.refresh_session(&provider),
-            )
-            .await;
-            app.metrics.record_relay_import_phase(
-                "activate",
-                activation_started
-                    .elapsed()
-                    .as_millis()
-                    .min(u64::MAX as u128) as u64,
-            );
-            // Includes activation successes, failures and bounded timeouts.
+    let task = run_provider_mutation_detached(provider_import_guard, async move {
+        let store_started = Instant::now();
+        let provider_for_persist = provider.clone();
+        let imported = session_snapshot_io_off_reactor(move || {
+            crate::session::import_relay_session(&provider_for_persist, &file)
+        })
+        .await;
+        let vault_ms = store_started.elapsed().as_millis();
+        app.metrics
+            .record_relay_import_phase("persist", vault_ms.min(u64::MAX as u128) as u64);
+        // A rejected snapshot has no activation phase. Still record one total
+        // duration so import latency distributions include failed attempts.
+        if imported.is_err() {
             app.metrics.record_relay_import_phase(
                 "total",
                 import_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
             );
-            match activated {
-                Ok(Ok(())) => {
-                    tracing::info!(
-                        provider,
-                        vault_ms,
-                        activation_ms = activation_started.elapsed().as_millis(),
-                        "browser relay session persisted and activation request completed"
-                    );
-                    Json(serde_json::json!({"ok":true,"provider":provider,"linked":true,"active":true}))
-                        .into_response()
+        }
+        match imported {
+            Ok(()) => {
+                let activation_started = Instant::now();
+                let activated = bounded_session_activation(
+                    RELAY_SESSION_ACTIVATION_TIMEOUT,
+                    app.pool.refresh_session(&provider),
+                )
+                .await;
+                app.metrics.record_relay_import_phase(
+                    "activate",
+                    activation_started
+                        .elapsed()
+                        .as_millis()
+                        .min(u64::MAX as u128) as u64,
+                );
+                // Includes activation successes, failures and bounded timeouts.
+                app.metrics.record_relay_import_phase(
+                    "total",
+                    import_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+                );
+                match activated {
+                    Ok(Ok(())) => {
+                        tracing::info!(
+                            provider,
+                            vault_ms,
+                            activation_ms = activation_started.elapsed().as_millis(),
+                            "browser relay session persisted and activation request completed"
+                        );
+                        Json(serde_json::json!({"ok":true,"provider":provider,"linked":true,"active":true}))
+                            .into_response()
+                    }
+                    Ok(Err(_)) => {
+                        tracing::warn!(
+                            provider,
+                            vault_ms,
+                            activation_ms = activation_started.elapsed().as_millis(),
+                            "browser relay session saved but activation failed"
+                        );
+                        json_error(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "session_refresh_failed",
+                            "session was saved but could not be activated; retry or restart the gateway",
+                        )
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            provider,
+                            vault_ms,
+                            activation_ms = activation_started.elapsed().as_millis(),
+                            "browser relay activation wait expired; saved credentials retained for retry"
+                        );
+                        json_error(
+                            StatusCode::GATEWAY_TIMEOUT,
+                            "session_activation_timeout",
+                            "session saved but activation timed out; check provider status before retrying",
+                        )
+                    }
                 }
-                Ok(Err(_)) => {
-                    tracing::warn!(
-                        provider,
-                        vault_ms,
-                        activation_ms = activation_started.elapsed().as_millis(),
-                        "browser relay session saved but activation failed"
-                    );
+            }
+            Err(error) => {
+                let category = relay_import_failure_category(&error);
+                tracing::warn!(
+                    provider,
+                    category,
+                    "browser relay session import unsuccessful"
+                );
+                if category == "persistence_worker_unavailable" {
                     json_error(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "session_refresh_failed",
-                        "session was saved but could not be activated; retry or restart the gateway",
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "session_import_unavailable",
+                        "relay persistence worker unavailable; retry after service recovery",
                     )
-                }
-                Err(_) => {
-                    tracing::warn!(
-                        provider,
-                        vault_ms,
-                        activation_ms = activation_started.elapsed().as_millis(),
-                        "browser relay activation wait expired; saved credentials retained for retry"
-                    );
+                } else {
                     json_error(
-                        StatusCode::GATEWAY_TIMEOUT,
-                        "session_activation_timeout",
-                        "session saved but activation timed out; check provider status before retrying",
+                        StatusCode::BAD_REQUEST,
+                        "session_import_rejected",
+                        "session was rejected; check vault configuration and provider permissions",
                     )
                 }
             }
         }
-        Err(error) => {
-            let category = relay_import_failure_category(&error);
-            tracing::warn!(
-                provider,
-                category,
-                "browser relay session import unsuccessful"
-            );
-            if category == "persistence_worker_unavailable" {
-                json_error(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "session_import_unavailable",
-                    "relay persistence worker unavailable; retry after service recovery",
-                )
-            } else {
-                json_error(
-                    StatusCode::BAD_REQUEST,
-                    "session_import_rejected",
-                    "session was rejected; check vault configuration and provider permissions",
-                )
-            }
-        }
+    })
+    .await;
+    match task {
+        Ok(response) => response,
+        Err(_) => json_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "session_import_unavailable",
+            "relay import worker unavailable; check provider status before retrying",
+        ),
     }
 }
 
@@ -1284,35 +1339,46 @@ pub async fn unlink(
     // Hold the gate until the browser worker has finished deleting both the
     // live session and vault snapshot. A concurrent import must not restore
     // credentials after successful unlink.
-    let _provider_unlink = match tokio::time::timeout(RELAY_IMPORT_QUEUE_TIMEOUT, gate.lock()).await
-    {
-        Ok(guard) => guard,
-        Err(_) => {
-            return json_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "session_unlink_busy",
-                "provider session import or unlink is busy; retry revocation",
-            )
+    let provider_unlink_guard =
+        match tokio::time::timeout(RELAY_IMPORT_QUEUE_TIMEOUT, gate.lock_owned()).await {
+            Ok(guard) => guard,
+            Err(_) => {
+                return json_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "session_unlink_busy",
+                    "provider session import or unlink is busy; retry revocation",
+                )
+            }
+        };
+    let task = run_provider_mutation_detached(provider_unlink_guard, async move {
+        match app.pool.unlink_session(&provider).await {
+            Ok(removed) => {
+                app.provider_sessions.record_unlinked(&provider);
+                tracing::info!(
+                    provider,
+                    "browser relay provider unlinked from embedded browser and persistent storage"
+                );
+                Json(serde_json::json!({"ok":true,"provider":provider,"unlinked":removed}))
+                    .into_response()
+            }
+            Err(error) => {
+                tracing::warn!(provider, error = %error, "browser relay provider unlink incomplete");
+                json_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "unlink_failed",
+                    "provider session could not be fully revoked; saved data was retained when cleanup failed",
+                )
+            }
         }
-    };
-    match app.pool.unlink_session(&provider).await {
-        Ok(removed) => {
-            app.provider_sessions.record_unlinked(&provider);
-            tracing::info!(
-                provider,
-                "browser relay provider unlinked from embedded browser and persistent storage"
-            );
-            Json(serde_json::json!({"ok":true,"provider":provider,"unlinked":removed}))
-                .into_response()
-        }
-        Err(error) => {
-            tracing::warn!(provider, error = %error, "browser relay provider unlink incomplete");
-            json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "unlink_failed",
-                "provider session could not be fully revoked; saved data was retained when cleanup failed",
-            )
-        }
+    })
+    .await;
+    match task {
+        Ok(response) => response,
+        Err(_) => json_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "session_unlink_unavailable",
+            "provider session revocation worker unavailable; check status and retry",
+        ),
     }
 }
 
