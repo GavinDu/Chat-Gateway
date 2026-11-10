@@ -201,4 +201,5 @@ async function syncProvider(provider) {
   }
   if (!response.ok) throw new Error("Gateway rejected session update (" + response.status + "). Check vault mode and provider permissions.");
   return "uploaded";
+}
 
