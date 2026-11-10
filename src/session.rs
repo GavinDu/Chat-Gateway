@@ -851,6 +851,12 @@ pub fn import_relay_session(provider: &str, file: &SessionFile) -> Result<()> {
             "localStorage import is disabled until provider-specific key allowlists are configured"
         );
     }
+    // The relay cannot restore localStorage credentials, so an empty cookie
+    // capture cannot authenticate a browser session. Fail before touching the
+    // vault: a successful empty import would otherwise look falsely linked.
+    if file.cookies.is_empty() {
+        anyhow::bail!("relay session has no provider cookies; complete login before linking");
+    }
     // Two different credentials for the exact same scope are ambiguous.
     // Reject before normalization or any encrypted vault write.
     ensure_unambiguous_same_scope_cookie_values(&file.cookies, provider)?;
@@ -2375,6 +2381,22 @@ mod cookie_scope_tests {
             "value",
             "/safe\r\nInjected: yes"
         )));
+    }
+
+    #[test]
+    fn cookie_free_relay_capture_is_rejected_before_vault_persistence() {
+        let file = SessionFile {
+            cookies: Vec::new(),
+            local_storage: HashMap::new(),
+            ts: "synthetic".into(),
+        };
+        let error = import_relay_session("gemini", &file).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "relay session has no provider cookies; complete login before linking"
+        );
+        // No host, cookie names, values, or vault paths are in this error.
+        assert!(!error.to_string().contains("token"));
     }
 
     #[test]
