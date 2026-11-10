@@ -1181,20 +1181,19 @@ pub async fn import_session(
         }
     };
     let provider_import_guard =
-        match tokio::time::timeout(RELAY_IMPORT_QUEUE_TIMEOUT, gate.lock_owned()).await
-    {
-        Ok(guard) => guard,
-        Err(_) => {
-            let queued_ms = import_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
-            app.metrics.record_relay_import_phase("queue", queued_ms);
-            app.metrics.record_relay_import_phase("total", queued_ms);
-            return json_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "session_import_busy",
-                "provider import is busy; retry after the earlier import completes",
-            );
-        }
-    };
+        match tokio::time::timeout(RELAY_IMPORT_QUEUE_TIMEOUT, gate.lock_owned()).await {
+            Ok(guard) => guard,
+            Err(_) => {
+                let queued_ms = import_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+                app.metrics.record_relay_import_phase("queue", queued_ms);
+                app.metrics.record_relay_import_phase("total", queued_ms);
+                return json_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "session_import_busy",
+                    "provider import is busy; retry after the earlier import completes",
+                );
+            }
+        };
     app.metrics.record_relay_import_phase(
         "queue",
         import_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
@@ -1341,17 +1340,16 @@ pub async fn unlink(
     // live session and vault snapshot. A concurrent import must not restore
     // credentials after successful unlink.
     let provider_unlink_guard =
-        match tokio::time::timeout(RELAY_IMPORT_QUEUE_TIMEOUT, gate.lock_owned()).await
-    {
-        Ok(guard) => guard,
-        Err(_) => {
-            return json_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "session_unlink_busy",
-                "provider session import or unlink is busy; retry revocation",
-            )
-        }
-    };
+        match tokio::time::timeout(RELAY_IMPORT_QUEUE_TIMEOUT, gate.lock_owned()).await {
+            Ok(guard) => guard,
+            Err(_) => {
+                return json_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "session_unlink_busy",
+                    "provider session import or unlink is busy; retry revocation",
+                )
+            }
+        };
     let task = run_provider_mutation_detached(provider_unlink_guard, async move {
         match app.pool.unlink_session(&provider).await {
             Ok(removed) => {
