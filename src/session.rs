@@ -924,14 +924,22 @@ pub fn import_relay_session(provider: &str, file: &SessionFile) -> Result<()> {
 }
 
 fn cookie_expiration_header(cookie: &Cookie) -> Result<String> {
-    if !restored_cookie_fields_safe(cookie) {
+    // A browser cookie with an implicit root path can be revoked with Path=/.
+    // Snapshot *restore* still requires a normalized explicit path, but unlink
+    // must not strand a valid browser-jar cookie before reaching this fallback.
+    // __Host- cookies require an explicit / path; do not synthesize it for
+    // prefix-constrained credentials.
+    if cookie.path.is_empty() && cookie_has_prefix(&cookie.name, "__Host-") {
+        anyhow::bail!("provider cookie prefix constraints prevent safe revocation");
+    }
+    let mut normalized = cookie.clone();
+    if normalized.path.is_empty() {
+        normalized.path = "/".to_owned();
+    }
+    if !restored_cookie_fields_safe(&normalized) {
         anyhow::bail!("provider cookie has invalid fields and could not be safely revoked");
     }
-    let path = if cookie.path.is_empty() {
-        "/"
-    } else {
-        cookie.path.as_str()
-    };
+    let path = normalized.path.as_str();
     let host_prefix = cookie_has_prefix(&cookie.name, "__Host-");
     if (host_prefix && (path != "/" || !cookie.secure))
         || (cookie_has_prefix(&cookie.name, "__Secure-") && !cookie.secure)
@@ -2279,6 +2287,24 @@ mod cookie_scope_tests {
         let mut secure_cookie = cookie("__Secure-session", "value", "/");
         secure_cookie.secure = false;
         assert!(cookie_expiration_header(&secure_cookie).is_err());
+    }
+
+    #[test]
+    fn implicit_root_browser_cookie_can_be_revoked_without_relaxing_restore_policy() {
+        let mut item = cookie("session", "private-value", "/");
+        item.domain = "google.com".into();
+        item.path.clear();
+        assert!(!restored_cookie_fields_safe(&item));
+        let expired = cookie_expiration_header(&item).unwrap();
+        assert!(expired.starts_with("session=; Max-Age=0; Path=/"));
+        assert!(!expired.contains("private-value"));
+        assert!(!expired.contains("Domain="), "host-only scope must remain host-only");
+
+        item.name = "__Host-session".into();
+        assert!(cookie_expiration_header(&item).is_err(), "__Host- requires explicit Path=/");
+        item.path = "/safe; Domain=.google.com".into();
+        item.name = "session".into();
+        assert!(cookie_expiration_header(&item).is_err(), "attribute injection must fail closed");
     }
 
     #[test]
