@@ -2298,13 +2298,22 @@ mod cookie_scope_tests {
         let expired = cookie_expiration_header(&item).unwrap();
         assert!(expired.starts_with("session=; Max-Age=0; Path=/"));
         assert!(!expired.contains("private-value"));
-        assert!(!expired.contains("Domain="), "host-only scope must remain host-only");
+        assert!(
+            !expired.contains("Domain="),
+            "host-only scope must remain host-only"
+        );
 
         item.name = "__Host-session".into();
-        assert!(cookie_expiration_header(&item).is_err(), "__Host- requires explicit Path=/");
+        assert!(
+            cookie_expiration_header(&item).is_err(),
+            "__Host- requires explicit Path=/"
+        );
         item.path = "/safe; Domain=.google.com".into();
         item.name = "session".into();
-        assert!(cookie_expiration_header(&item).is_err(), "attribute injection must fail closed");
+        assert!(
+            cookie_expiration_header(&item).is_err(),
+            "attribute injection must fail closed"
+        );
     }
 
     #[test]
