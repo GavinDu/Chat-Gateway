@@ -5,6 +5,40 @@
 //! command delivery remain in the parent pool module.
 use super::*;
 
+/// Session restore/save failures may contain upstream URLs, vault paths, or
+/// credential-bearing text. Only stable categories cross the log boundary;
+/// the surrounding fixed log message identifies the failing operation.
+fn session_worker_failure_category(error: &anyhow::Error) -> &'static str {
+    if error
+        .downcast_ref::<BrowserWorkerUnavailableError>()
+        .is_some()
+    {
+        "browser_worker_unavailable"
+    } else {
+        "session_operation_failed"
+    }
+}
+
+#[cfg(test)]
+mod session_worker_error_redaction_tests {
+    use super::*;
+
+    #[test]
+    fn untrusted_session_error_diagnostics_never_enter_log_categories() {
+        let secret = anyhow::anyhow!("cookie=very-secret; bearer=private; path=/vault/token");
+        assert_eq!(
+            session_worker_failure_category(&secret),
+            "session_operation_failed"
+        );
+        let worker = anyhow::Error::new(BrowserWorkerUnavailableError);
+        assert_eq!(
+            session_worker_failure_category(&worker),
+            "browser_worker_unavailable"
+        );
+        assert!(!session_worker_failure_category(&secret).contains("secret"));
+    }
+}
+
 /// Cancel an in-flight provider operation as soon as its downstream receiver
 /// disappears. The biased order checks disconnect first when both branches
 /// are ready, avoiding even an immediately-ready stale navigation/model step.
@@ -322,7 +356,7 @@ pub(super) fn browser_thread(
                                     // pass the same interactive-login health check as a fresh page.
                                     tracing::warn!(
                                         provider = %pcfg.name,
-                                        %error,
+                                        category = session_worker_failure_category(&error),
                                         "provider session snapshot could not be loaded; interactive login may be required"
                                     );
                                     None
@@ -340,7 +374,7 @@ pub(super) fn browser_thread(
                                 Err(error) => {
                                     tracing::warn!(
                                         provider = %pcfg.name,
-                                        %error,
+                                        category = session_worker_failure_category(&error),
                                         "provider page session warm-up failed"
                                     );
                                     true
@@ -364,7 +398,7 @@ pub(super) fn browser_thread(
                                     provider_sessions.record_probe_failure(provider.name());
                                     tracing::error!(
                                         provider = %pcfg.name,
-                                        %error,
+                                        category = session_worker_failure_category(&error),
                                         "could not clear a partially restored provider session; page withheld"
                                     );
                                     continue;
@@ -425,7 +459,7 @@ pub(super) fn browser_thread(
                                         provider_sessions.record_probe_failure(provider.name());
                                         tracing::warn!(
                                             provider = %pcfg.name,
-                                            %error,
+                                            category = session_worker_failure_category(&error),
                                             "provider session could not be verified during warm-up"
                                         );
                                     }
@@ -682,7 +716,7 @@ pub(super) fn browser_thread(
                                         &provider_name,
                                         &send_session_write_tracker,
                                     ).await {
-                                        tracing::warn!(provider = %provider_name, %error, "rotated session snapshot failed");
+                                        tracing::warn!(provider = %provider_name, category = session_worker_failure_category(&error), "rotated session snapshot failed");
                                     }
                                 }
                             });
@@ -870,7 +904,7 @@ pub(super) fn browser_thread(
                                 } else if let Err(error) =
                                     session::save_session_if_changed(&browser, &page, provider.name(), &adapter_session_write_tracker).await
                                 {
-                                    tracing::warn!(provider = provider.name(), %error, "probe session snapshot failed");
+                                    tracing::warn!(provider = provider.name(), category = session_worker_failure_category(&error), "probe session snapshot failed");
                                 }
                                 finish(report);
                             });
