@@ -95,6 +95,7 @@ async fn run_provider_mutation_detached_with_tail<T: Send + 'static, U: Send + '
     operation: impl std::future::Future<Output = (T, Option<tokio::task::JoinHandle<U>>)>
         + Send
         + 'static,
+    record_tail: impl FnOnce(u64) + Send + 'static,
 ) -> Result<T, tokio::sync::oneshot::error::RecvError> {
     let (reply, receiver) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
@@ -102,7 +103,12 @@ async fn run_provider_mutation_detached_with_tail<T: Send + 'static, U: Send + '
         let (response, pending_refresh) = operation.await;
         let _ = reply.send(response);
         if let Some(refresh) = pending_refresh {
+            // The HTTP caller was already sent its timeout response. The
+            // browser worker can still occupy the per-provider gate here;
+            // measure that hidden serialization tail after it actually ends.
+            let tail_started = Instant::now();
             let _ = refresh.await;
+            record_tail(tail_started.elapsed().as_millis().min(u64::MAX as u128) as u64);
         }
     });
     receiver.await
@@ -215,18 +221,26 @@ mod provider_import_gate_tests {
         let gate = gates.for_provider("gemini").unwrap();
         let owned = Arc::clone(&gate).lock_owned().await;
         let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
-        let response = run_provider_mutation_detached_with_tail(owned, async move {
-            let mut refresh = tokio::spawn(async move {
-                let _ = release_rx.await;
-            });
-            assert!(
-                bounded_session_activation(Duration::from_millis(10), &mut refresh)
-                    .await
-                    .is_err(),
-                "the response must time out before the worker completes"
-            );
-            ("session_activation_timeout", Some(refresh))
-        })
+        let metrics = Arc::new(crate::metrics::MetricsRegistry::default());
+        let tail_metrics = Arc::clone(&metrics);
+        let response = run_provider_mutation_detached_with_tail(
+            owned,
+            async move {
+                let mut refresh = tokio::spawn(async move {
+                    let _ = release_rx.await;
+                });
+                assert!(
+                    bounded_session_activation(Duration::from_millis(10), &mut refresh)
+                        .await
+                        .is_err(),
+                    "the response must time out before the worker completes"
+                );
+                ("session_activation_timeout", Some(refresh))
+            },
+            move |elapsed_ms| {
+                tail_metrics.record_relay_import_phase("activation_tail", elapsed_ms);
+            },
+        )
         .await
         .unwrap();
         assert_eq!(response, "session_activation_timeout");
@@ -236,12 +250,25 @@ mod provider_import_gate_tests {
                 .is_err(),
             "a timed-out refresh must still block later provider mutations"
         );
+        assert!(
+            !metrics
+                .render_with_provider_states(&[])
+                .contains("gateway_relay_session_import_phase_ms_count{phase=\"activation_tail\"}"),
+            "no post-timeout tail is recorded before worker completion"
+        );
         release_tx.send(()).unwrap();
         assert!(
             tokio::time::timeout(Duration::from_millis(200), gate.lock())
                 .await
                 .is_ok(),
             "the provider gate must release after actual worker completion"
+        );
+        let rendered = metrics.render_with_provider_states(&[]);
+        assert!(
+            rendered.contains(
+                "gateway_relay_session_import_phase_ms_count{phase=\"activation_tail\"} 1"
+            ),
+            "the hidden refresh tail must be recorded once"
         );
     }
 
@@ -1260,6 +1287,7 @@ pub async fn import_session(
         "queue",
         import_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
     );
+    let tail_metrics_app = Arc::clone(&app);
     let task = run_provider_mutation_detached_with_tail(provider_import_guard, async move {
         let store_started = Instant::now();
         let provider_for_persist = provider.clone();
@@ -1371,6 +1399,10 @@ pub async fn import_session(
                 (response, None)
             }
         }
+    }, move |elapsed_ms| {
+        tail_metrics_app
+            .metrics
+            .record_relay_import_phase("activation_tail", elapsed_ms);
     })
     .await;
     match task {

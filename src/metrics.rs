@@ -132,9 +132,14 @@ impl MetricsRegistry {
 
     /// Bounded relay import phases only; no provider, cookie, URL or session labels.
     /// "queue" tracks serialization wait; "total" includes queue, persistence
-    /// and activation, including rejected and busy attempts.
+    /// and activation, including rejected and busy attempts. "activation_tail"
+    /// measures the extra time a timed-out browser refresh retains its gate
+    /// *after* the HTTP response; it is not part of response total.
     pub fn record_relay_import_phase(&self, phase: &str, elapsed_ms: u64) {
-        if !matches!(phase, "queue" | "persist" | "activate" | "total") {
+        if !matches!(
+            phase,
+            "queue" | "persist" | "activate" | "total" | "activation_tail"
+        ) {
             return;
         }
         if let Ok(mut data) = self.data.lock() {
@@ -392,6 +397,7 @@ mod tests {
         registry.record_relay_import_phase("persist", 15);
         registry.record_relay_import_phase("activate", 42);
         registry.record_relay_import_phase("total", 57);
+        registry.record_relay_import_phase("activation_tail", 17);
         registry.record_relay_import_phase("secret-session-id", 999);
         let metrics = registry.render_with_provider_states(&[]);
         assert!(metrics.contains("gateway_relay_session_import_phase_ms_sum{phase=\"queue\"} 8"));
@@ -402,6 +408,8 @@ mod tests {
             metrics.contains("gateway_relay_session_import_phase_ms_sum{phase=\"activate\"} 42")
         );
         assert!(metrics.contains("gateway_relay_session_import_phase_ms_sum{phase=\"total\"} 57"));
+        assert!(metrics
+            .contains("gateway_relay_session_import_phase_ms_sum{phase=\"activation_tail\"} 17"));
         assert!(!metrics.contains("secret-session-id"));
     }
 
