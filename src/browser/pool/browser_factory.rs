@@ -70,6 +70,8 @@ mod compatibility_tests {
                 serde_json::json!(true)
             );
         }
+    }
+
     #[tokio::test]
     async fn window_origin_is_available_before_first_script_and_after_navigation() {
         let html = r#"<!doctype html><script>
@@ -93,6 +95,5 @@ mod compatibility_tests {
                 "the page must expose window.origin before app scripts execute"
             );
         }
-    }
     }
 }
