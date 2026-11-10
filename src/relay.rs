@@ -30,12 +30,13 @@ const RELAY_STATUS_SCAN_TIMEOUT: Duration = Duration::from_secs(5);
 // another request is activating. A timed-out waiter has not touched the vault.
 const RELAY_IMPORT_QUEUE_TIMEOUT: Duration = Duration::from_secs(45);
 
-/// Dropping a timed-out refresh future closes its reply receiver. The browser
-/// worker observes that cancellation before beginning queued activation.
+/// Bound the response wait, not the underlying browser worker operation.
+/// A caller that times out must keep the spawned refresh handle alive until
+/// the worker finishes, so a later import/unlink cannot overtake it.
 async fn bounded_session_activation<T>(
     wait: Duration,
-    activation: impl std::future::Future<Output = anyhow::Result<T>>,
-) -> Result<anyhow::Result<T>, tokio::time::error::Elapsed> {
+    activation: impl std::future::Future<Output = T>,
+) -> Result<T, tokio::time::error::Elapsed> {
     tokio::time::timeout(wait, activation).await
 }
 
@@ -85,9 +86,34 @@ async fn run_provider_mutation_detached<T: Send + 'static>(
     .await
 }
 
+/// Return a bounded import response while retaining the serialization gate
+/// for a refresh that is still running in the browser worker after timeout.
+/// Unlike dropping a timed-out oneshot receiver, the deferred join keeps the
+/// worker reply alive and only unlocks once the actual refresh has finished.
+async fn run_provider_mutation_detached_with_tail<T: Send + 'static, U: Send + 'static>(
+    guard: tokio::sync::OwnedMutexGuard<()>,
+    operation: impl std::future::Future<Output = (T, Option<tokio::task::JoinHandle<U>>)>
+        + Send
+        + 'static,
+) -> Result<T, tokio::sync::oneshot::error::RecvError> {
+    let (reply, receiver) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let _provider_mutation = guard;
+        let (response, pending_refresh) = operation.await;
+        let _ = reply.send(response);
+        if let Some(refresh) = pending_refresh {
+            let _ = refresh.await;
+        }
+    });
+    receiver.await
+}
+
 #[cfg(test)]
 mod provider_import_gate_tests {
-    use super::{run_provider_mutation_detached, ProviderImportGates};
+    use super::{
+        bounded_session_activation, run_provider_mutation_detached,
+        run_provider_mutation_detached_with_tail, ProviderImportGates,
+    };
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -180,6 +206,42 @@ mod provider_import_gate_tests {
                 .await
                 .is_ok(),
             "the mutation must eventually release its provider gate"
+        );
+    }
+
+    #[tokio::test]
+    async fn activation_timeout_returns_but_retains_gate_until_worker_finishes() {
+        let gates = ProviderImportGates::default();
+        let gate = gates.for_provider("gemini").unwrap();
+        let owned = Arc::clone(&gate).lock_owned().await;
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        let response = run_provider_mutation_detached_with_tail(owned, async move {
+            let mut refresh = tokio::spawn(async move {
+                let _ = release_rx.await;
+            });
+            assert!(
+                bounded_session_activation(Duration::from_millis(10), &mut refresh)
+                    .await
+                    .is_err(),
+                "the response must time out before the worker completes"
+            );
+            ("session_activation_timeout", Some(refresh))
+        })
+        .await
+        .unwrap();
+        assert_eq!(response, "session_activation_timeout");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), gate.lock())
+                .await
+                .is_err(),
+            "a timed-out refresh must still block later provider mutations"
+        );
+        release_tx.send(()).unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), gate.lock())
+                .await
+                .is_ok(),
+            "the provider gate must release after actual worker completion"
         );
     }
 
@@ -1198,7 +1260,7 @@ pub async fn import_session(
         "queue",
         import_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
     );
-    let task = run_provider_mutation_detached(provider_import_guard, async move {
+    let task = run_provider_mutation_detached_with_tail(provider_import_guard, async move {
         let store_started = Instant::now();
         let provider_for_persist = provider.clone();
         let imported = session_snapshot_io_off_reactor(move || {
@@ -1219,11 +1281,21 @@ pub async fn import_session(
         match imported {
             Ok(()) => {
                 let activation_started = Instant::now();
-                let activated = bounded_session_activation(
-                    RELAY_SESSION_ACTIVATION_TIMEOUT,
-                    app.pool.refresh_session(&provider),
-                )
-                .await;
+                // Keep the queued/active browser refresh alive after the
+                // bounded HTTP wait, including while the browser is executing
+                // an already-dispatched, non-cancellable session replacement.
+                let refresh_app = Arc::clone(&app);
+                let refresh_provider = provider.clone();
+                let mut refresh = tokio::spawn(async move {
+                    refresh_app.pool.refresh_session(&refresh_provider).await
+                });
+                let activated =
+                    bounded_session_activation(RELAY_SESSION_ACTIVATION_TIMEOUT, &mut refresh).await;
+                let pending_refresh = if activated.is_err() {
+                    Some(refresh)
+                } else {
+                    None
+                };
                 app.metrics.record_relay_import_phase(
                     "activate",
                     activation_started
@@ -1236,8 +1308,8 @@ pub async fn import_session(
                     "total",
                     import_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
                 );
-                match activated {
-                    Ok(Ok(())) => {
+                let response = match activated {
+                    Ok(Ok(Ok(()))) => {
                         tracing::info!(
                             provider,
                             vault_ms,
@@ -1247,7 +1319,7 @@ pub async fn import_session(
                         Json(serde_json::json!({"ok":true,"provider":provider,"linked":true,"active":true}))
                             .into_response()
                     }
-                    Ok(Err(_)) => {
+                    Ok(Ok(Err(_))) | Ok(Err(_)) => {
                         tracing::warn!(
                             provider,
                             vault_ms,
@@ -1273,7 +1345,8 @@ pub async fn import_session(
                             "session saved but activation timed out; check provider status before retrying",
                         )
                     }
-                }
+                };
+                (response, pending_refresh)
             }
             Err(error) => {
                 let category = relay_import_failure_category(&error);
@@ -1282,7 +1355,7 @@ pub async fn import_session(
                     category,
                     "browser relay session import unsuccessful"
                 );
-                if category == "persistence_worker_unavailable" {
+                let response = if category == "persistence_worker_unavailable" {
                     json_error(
                         StatusCode::SERVICE_UNAVAILABLE,
                         "session_import_unavailable",
@@ -1294,7 +1367,8 @@ pub async fn import_session(
                         "session_import_rejected",
                         "session was rejected; check vault configuration and provider permissions",
                     )
-                }
+                };
+                (response, None)
             }
         }
     })
