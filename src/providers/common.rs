@@ -1268,7 +1268,7 @@ pub async fn send_prompt(
         while start.elapsed() < Duration::from_secs(5) {
             drive_page(page, Duration::from_millis(150)).await;
             let after = submission_snapshot(page, input_sel, &set.response_refs())?;
-            if submission_accepted(&before, &after) {
+            if submission_observed_for_prompt(page, &before, &after, prompt)? {
                 return Ok(());
             }
         }
@@ -1354,6 +1354,46 @@ fn submission_snapshot(
             .and_then(|x| x.as_bool())
             .unwrap_or(false),
     })
+}
+
+/// A new user-turn node may come from unrelated SPA history hydration. Only
+/// accept a user-turn-only acknowledgement when the *last visible turn* shows
+/// this prompt. The comparison stays in the page; no prompt text is returned
+/// to the caller or written to logs. New answer/generation transitions retain
+/// their separate acknowledgement paths.
+fn submission_observed_for_prompt(
+    page: &Page,
+    before: &SubmissionSnapshot,
+    after: &SubmissionSnapshot,
+    prompt: &str,
+) -> anyhow::Result<bool> {
+    if !submission_accepted(before, after) {
+        return Ok(false);
+    }
+    if after.response_count > before.response_count || (after.streaming && !before.streaming) {
+        return Ok(true);
+    }
+    let prompt_js = serde_json::to_string(prompt)?;
+    let matched = page.evaluate(&format!(
+        r#"(() => {{
+            const expected = {prompt_js};
+            const normalized = text => (text || '').replace(/\s+/g, ' ').trim();
+            if (!normalized(expected)) return false;
+            const turns = Array.from(document.querySelectorAll(
+                '[data-message-author-role="user"], [data-testid="user-message"], [data-testid="message-user"]'
+            )).filter(node => {{
+                try {{
+                    return node.getClientRects().length > 0 &&
+                        window.getComputedStyle(node).visibility !== 'hidden' &&
+                        !node.closest('[hidden], [inert], [aria-hidden="true"], [aria-disabled="true"]');
+                }} catch (_) {{ return false; }}
+            }});
+            if (!turns.length) return false;
+            const last = turns[turns.length - 1];
+            return normalized(last.innerText || last.textContent || '') === normalized(expected);
+        }})()"#
+    ));
+    Ok(matched.as_bool() == Some(true))
 }
 
 // The Obscura JS bridge can encode a whole DOM count as a JSON float.
@@ -1469,6 +1509,70 @@ mod native_input_setter_tests {
         );
         assert_eq!(page.evaluate("window.directWrites").as_f64(), Some(0.0));
         assert_eq!(page.evaluate("window.inputEvents").as_f64(), Some(1.0));
+    }
+}
+
+#[cfg(test)]
+mod prompt_bound_submission_tests {
+    use super::{submission_observed_for_prompt, submission_snapshot};
+
+    #[tokio::test]
+    async fn unrelated_hydrated_turn_cannot_acknowledge_a_cleared_draft() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <textarea id="prompt">fixture request</textarea>
+            <div data-message-author-role="user">older turn</div>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+
+        let before = submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
+        page.evaluate(
+            r#"(() => {
+                document.querySelector('#prompt').value = '';
+                document.body.insertAdjacentHTML('beforeend',
+                    '<div data-message-author-role="user">unrelated history load</div>');
+                return true;
+            })()"#,
+        );
+        let after = submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
+        assert!(super::submission_accepted(&before, &after));
+        assert!(!submission_observed_for_prompt(&page, &before, &after, "fixture request").unwrap());
+
+        // A matching latest visible user message is accepted only after the
+        // composer transition and a new user turn.
+        page.evaluate(
+            "document.body.lastElementChild.textContent = 'fixture request'",
+        );
+        assert!(submission_observed_for_prompt(&page, &before, &after, "fixture request").unwrap());
+
+        // An unrelated last visible message must defeat an older matching turn.
+        page.evaluate(
+            "document.body.insertAdjacentHTML('beforeend', '<div data-testid=\"user-message\">other request</div>')",
+        );
+        assert!(!submission_observed_for_prompt(&page, &before, &after, "fixture request").unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_new_response_acknowledges_even_without_matching_user_turn() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        page.goto("data:text/html,<html><body><textarea id='prompt'>draft</textarea></body></html>")
+            .await
+            .unwrap();
+        let before = submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
+        page.evaluate("document.body.insertAdjacentHTML('beforeend', '<div class=\"answer\">reply</div>')");
+        let after = submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
+        assert!(submission_observed_for_prompt(&page, &before, &after, "draft").unwrap());
     }
 }
 
