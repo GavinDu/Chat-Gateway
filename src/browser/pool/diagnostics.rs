@@ -25,9 +25,9 @@ fn expected_provider_chat_origin(provider: Provider, url: &str) -> bool {
         return false;
     };
     if uri.scheme_str() != Some("https")
-        || uri
-            .authority()
-            .is_none_or(|authority| authority.as_str().contains('@') || authority.port_u16().is_some_and(|port| port != 443))
+        || uri.authority().is_none_or(|authority| {
+            authority.as_str().contains('@') || authority.port_u16().is_some_and(|port| port != 443)
+        })
     {
         return false;
     }
@@ -142,7 +142,10 @@ mod inconclusive_session_probe_tests {
             "https://not-gemini.example/app",
             "data:text/html,<textarea></textarea>",
         ] {
-            assert!(!super::expected_provider_chat_origin(Provider::Gemini, url), "{url}");
+            assert!(
+                !super::expected_provider_chat_origin(Provider::Gemini, url),
+                "{url}"
+            );
         }
         // A foreign page with a visible composer is never a connected session.
         assert!(!classify_session_probe(
@@ -155,8 +158,14 @@ mod inconclusive_session_probe_tests {
     #[test]
     fn grok_secondary_chat_route_is_allowed_without_accepting_other_x_pages() {
         use crate::providers::Provider;
-        for url in ["https://x.com/i/grok", "https://www.x.com/i/grok/thread/123"] {
-            assert!(super::expected_provider_chat_origin(Provider::Grok, url), "{url}");
+        for url in [
+            "https://x.com/i/grok",
+            "https://www.x.com/i/grok/thread/123",
+        ] {
+            assert!(
+                super::expected_provider_chat_origin(Provider::Grok, url),
+                "{url}"
+            );
         }
         for url in [
             "https://x.com/home",
@@ -165,7 +174,10 @@ mod inconclusive_session_probe_tests {
             "https://x.com.attacker.invalid/i/grok",
             "http://x.com/i/grok",
         ] {
-            assert!(!super::expected_provider_chat_origin(Provider::Grok, url), "{url}");
+            assert!(
+                !super::expected_provider_chat_origin(Provider::Grok, url),
+                "{url}"
+            );
         }
     }
 
