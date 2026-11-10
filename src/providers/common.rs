@@ -487,6 +487,17 @@ pub fn element_exists(page: &Page, selector: &str) -> bool {
     }
 }
 
+/// A matching DIV is not a usable composer unless it is effectively editable.
+/// Follow the closest explicit contenteditable value: a child can override an
+/// ancestor's false value, while an unannotated SPA placeholder is never an
+/// editor. Use DOM attributes rather than relying on engine-specific
+/// isContentEditable support in the pinned embedded browser.
+fn editable_composer_condition(element: &str) -> String {
+    format!(
+        "({element}.matches('textarea, input') || (() => {{ let node = {element}; while (node) {{ const value = node.getAttribute('contenteditable'); if (value !== null && value !== 'inherit') return value === '' || value === 'true' || value === 'plaintext-only'; node = node.parentElement; }} return false; }})())"
+    )
+}
+
 /// A DOM match alone is not a usable chat composer. Login/status probes
 /// must ignore hidden, disabled and read-only inputs left in SPA shells.
 /// This reports UI readiness only, never proof of account authentication.
@@ -494,14 +505,16 @@ pub fn visible_composer_exists(page: &Page, selectors: &[&str]) -> bool {
     let Ok(selectors) = serde_json::to_string(selectors) else {
         return false;
     };
+    let editable = editable_composer_condition("input");
     let script = format!(
         r#"(() => {{
             for (const selector of {selectors}) {{
                 try {{
                     for (const input of document.querySelectorAll(selector)) {{
-                        if (input.getClientRects().length > 0 &&
+                        if ({editable} &&
+                            input.getClientRects().length > 0 &&
                             window.getComputedStyle(input).visibility !== "hidden" &&
-                            !input.closest('[hidden], [inert], [aria-hidden="true"], [aria-disabled="true"]') &&
+                            !input.closest('[hidden], [inert], [aria-hidden="true"], [aria-disabled="true"], [aria-readonly="true"]') &&
                             !input.disabled && !input.matches(':disabled') &&
                             !input.closest('fieldset[disabled]') && !input.readOnly &&
                             input.getAttribute("aria-disabled") !== "true" &&
@@ -519,8 +532,9 @@ pub fn visible_composer_exists(page: &Page, selectors: &[&str]) -> bool {
 /// Choose the first actionable input from a selector that may match
 /// both a hidden sizing placeholder and the actual visible composer.
 fn visible_input_query(selector_js: &str) -> String {
+    let editable = editable_composer_condition("el");
     format!(
-        "Array.from(document.querySelectorAll({selector_js})).find(el => el.getClientRects().length > 0 && window.getComputedStyle(el).visibility !== 'hidden' && !el.closest('[hidden], [inert], [aria-hidden=\"true\"], [aria-disabled=\"true\"]') && !el.disabled && !el.matches(':disabled') && !el.closest('fieldset[disabled]') && !el.readOnly && el.getAttribute('aria-disabled') !== 'true' && el.getAttribute('aria-readonly') !== 'true' && el.getAttribute('contenteditable') !== 'false')"
+        "Array.from(document.querySelectorAll({selector_js})).find(el => {editable} && el.getClientRects().length > 0 && window.getComputedStyle(el).visibility !== 'hidden' && !el.closest('[hidden], [inert], [aria-hidden=\"true\"], [aria-disabled=\"true\"], [aria-readonly=\"true\"]') && !el.disabled && !el.matches(':disabled') && !el.closest('fieldset[disabled]') && !el.readOnly && el.getAttribute('aria-disabled') !== 'true' && el.getAttribute('aria-readonly') !== 'true' && el.getAttribute('contenteditable') !== 'false')"
     )
 }
 
@@ -569,6 +583,37 @@ mod visible_composer_tests {
         page.evaluate("document.querySelector('#visible').hidden = true");
         assert!(!visible_composer_exists(&page, &["#visible"]));
     }
+    #[tokio::test]
+    async fn noneditable_dom_placeholders_cannot_win_composer_selection() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <div id="plain" role="textbox">Looks like an input</div>
+            <div contenteditable="false"><div id="blocked" class="editor">Locked</div></div>
+            <div aria-readonly="true"><div id="readonly-child" contenteditable="true">Read only</div></div>
+            <div contenteditable="true"><div id="editable" class="editor">Can edit</div></div>
+            <div contenteditable="false"><div id="override" contenteditable="true">Explicit opt-in</div></div>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+
+        assert!(!visible_composer_exists(&page, &["#plain", "#blocked", "#readonly-child"]));
+        assert!(visible_composer_exists(&page, &["#editable", "#override"]));
+
+        // The actual typing and retention helpers share visible_input_query.
+        // They must skip the first fake match instead of targeting its content.
+        let query = super::visible_input_query(r#"'#blocked, #editable' "#.trim());
+        let selected = page.evaluate(&format!(
+            "(() => {{ const el = {query}; return el ? el.id : ''; }})()"
+        ));
+        assert_eq!(selected.as_str(), Some("editable"));
+    }
+
     #[tokio::test]
     async fn inherited_aria_disabled_composer_cannot_dispatch_send_or_enter() {
         let browser = obscura_core::Browser::builder()
