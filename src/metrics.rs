@@ -136,7 +136,10 @@ impl MetricsRegistry {
     /// measures the extra time a timed-out browser refresh retains its gate
     /// *after* the HTTP response; it is not part of response total.
     pub fn record_relay_import_phase(&self, phase: &str, elapsed_ms: u64) {
-        if !matches!(phase, "queue" | "persist" | "activate" | "total" | "activation_tail") {
+        if !matches!(
+            phase,
+            "queue" | "persist" | "activate" | "total" | "activation_tail"
+        ) {
             return;
         }
         if let Ok(mut data) = self.data.lock() {
@@ -405,9 +408,8 @@ mod tests {
             metrics.contains("gateway_relay_session_import_phase_ms_sum{phase=\"activate\"} 42")
         );
         assert!(metrics.contains("gateway_relay_session_import_phase_ms_sum{phase=\"total\"} 57"));
-        assert!(metrics.contains(
-            "gateway_relay_session_import_phase_ms_sum{phase=\"activation_tail\"} 17"
-        ));
+        assert!(metrics
+            .contains("gateway_relay_session_import_phase_ms_sum{phase=\"activation_tail\"} 17"));
         assert!(!metrics.contains("secret-session-id"));
     }
 
