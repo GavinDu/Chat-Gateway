@@ -1473,8 +1473,14 @@ fn valid_cookie_domain_syntax(domain: &str) -> bool {
         && name.split('.').all(|label| {
             !label.is_empty()
                 && label.len() <= 63
-                && label.as_bytes().first().is_some_and(u8::is_ascii_alphanumeric)
-                && label.as_bytes().last().is_some_and(u8::is_ascii_alphanumeric)
+                && label
+                    .as_bytes()
+                    .first()
+                    .is_some_and(u8::is_ascii_alphanumeric)
+                && label
+                    .as_bytes()
+                    .last()
+                    .is_some_and(u8::is_ascii_alphanumeric)
                 && label
                     .bytes()
                     .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
@@ -2029,7 +2035,10 @@ pub fn restore_cookies(browser: &Browser, file: &SessionFile, provider: &str) ->
         // an older version. Apply the same provider-domain allowlist at restore
         // time, not just when saving, to avoid cross-provider cookie injection.
         if !cookie_domain_allowed(provider, &c.domain) {
-            tracing::warn!(provider, "skipping cookie outside provider domain allowlist");
+            tracing::warn!(
+                provider,
+                "skipping cookie outside provider domain allowlist"
+            );
             continue;
         }
         if !restored_cookie_fields_safe(c) {
