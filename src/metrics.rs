@@ -394,9 +394,7 @@ mod tests {
         registry.record_relay_import_phase("total", 57);
         registry.record_relay_import_phase("secret-session-id", 999);
         let metrics = registry.render_with_provider_states(&[]);
-        assert!(
-            metrics.contains("gateway_relay_session_import_phase_ms_sum{phase=\"queue\"} 8")
-        );
+        assert!(metrics.contains("gateway_relay_session_import_phase_ms_sum{phase=\"queue\"} 8"));
         assert!(
             metrics.contains("gateway_relay_session_import_phase_ms_count{phase=\"persist\"} 1")
         );
