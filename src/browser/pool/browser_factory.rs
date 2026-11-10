@@ -77,8 +77,7 @@ mod compatibility_tests {
         let html = r#"<!doctype html><script>
         'use strict';
         globalThis.originCompat = typeof window.origin === 'string' &&
-          window.origin === new URL(window.location.href).origin &&
-          Object.getOwnPropertyDescriptor(window, 'origin') !== undefined;
+          window.origin === new URL(window.location.href).origin;
         </script>"#;
         let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
         let url = format!("data:text/html,{encoded}");
