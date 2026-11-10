@@ -223,20 +223,24 @@ mod provider_import_gate_tests {
         let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
         let metrics = Arc::new(crate::metrics::MetricsRegistry::default());
         let tail_metrics = Arc::clone(&metrics);
-        let response = run_provider_mutation_detached_with_tail(owned, async move {
-            let mut refresh = tokio::spawn(async move {
-                let _ = release_rx.await;
-            });
-            assert!(
-                bounded_session_activation(Duration::from_millis(10), &mut refresh)
-                    .await
-                    .is_err(),
-                "the response must time out before the worker completes"
-            );
-            ("session_activation_timeout", Some(refresh))
-        }, move |elapsed_ms| {
-            tail_metrics.record_relay_import_phase("activation_tail", elapsed_ms);
-        })
+        let response = run_provider_mutation_detached_with_tail(
+            owned,
+            async move {
+                let mut refresh = tokio::spawn(async move {
+                    let _ = release_rx.await;
+                });
+                assert!(
+                    bounded_session_activation(Duration::from_millis(10), &mut refresh)
+                        .await
+                        .is_err(),
+                    "the response must time out before the worker completes"
+                );
+                ("session_activation_timeout", Some(refresh))
+            },
+            move |elapsed_ms| {
+                tail_metrics.record_relay_import_phase("activation_tail", elapsed_ms);
+            },
+        )
         .await
         .unwrap();
         assert_eq!(response, "session_activation_timeout");
