@@ -1456,8 +1456,16 @@ pub async fn send_prompt(
     set: &EffectiveSelectorSet,
     prompt: &str,
 ) -> anyhow::Result<()> {
+    let initial_url = page.url();
+    let verify_submission = requires_submission_acknowledgement(&initial_url);
+    let expected_submission_provider = submission_provider_for_url(&initial_url);
     let inputs = set.input_refs();
     wait_for_selector(page, &inputs, 15_000).await?;
+    // Waiting for the composer can navigate to a foreign site containing an
+    // equally generic input. Verify the initial provider before typing.
+    if let Some(provider) = expected_submission_provider {
+        require_submission_provider_route(provider, page)?;
+    }
     human_type(page, &inputs, prompt).await?;
     drive_page(page, Duration::from_millis(200)).await;
     let input_sel = inputs
@@ -1470,12 +1478,12 @@ pub async fn send_prompt(
     if !composer_retains_prompt(page, input_sel, prompt)? {
         anyhow::bail!("provider input changed before send after framework render");
     }
+    if let Some(provider) = expected_submission_provider {
+        require_submission_provider_route(provider, page)?;
+    }
     let sends = set.send_refs();
     // The click/Enter dispatch is not proof that a controlled SPA accepted
     // the prompt. ChatGPT and Grok require a visible submission transition.
-    let initial_url = page.url();
-    let verify_submission = requires_submission_acknowledgement(&initial_url);
-    let expected_submission_provider = submission_provider_for_url(&initial_url);
     let baseline = if verify_submission {
         Some(submission_snapshot(page, input_sel, &set.response_refs())?)
     } else {
