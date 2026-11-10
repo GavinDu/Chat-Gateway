@@ -53,8 +53,8 @@ fn approval_navigation_is_allowed(headers: &HeaderMap) -> bool {
         && headers.get("sec-fetch-dest").and_then(|v| v.to_str().ok()) == Some("document")
 }
 
-/// Serialize persistence plus activation for one provider without blocking
-/// unrelated provider imports. The map is only accessed for enabled providers.
+/// Serialize import persistence/activation and unlink revocation for one
+/// registered provider without blocking unrelated providers.
 #[derive(Default)]
 struct ProviderImportGates {
     gates: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
@@ -103,6 +103,42 @@ mod provider_import_gate_tests {
                 .await
                 .is_ok()
         );
+    }
+
+    #[tokio::test]
+    async fn unlink_waits_for_same_provider_import_before_revoking() {
+        let gates = ProviderImportGates::default();
+        let import_gate = gates.for_provider("gemini").unwrap();
+        let unlink_gate = gates.for_provider("gemini").unwrap();
+        let other_provider_gate = gates.for_provider("chatgpt").unwrap();
+        let state = Arc::new(tokio::sync::Mutex::new(false));
+        let import_guard = import_gate.lock().await;
+        *state.lock().await = true;
+
+        let revoked = Arc::clone(&state);
+        let task = tokio::spawn(async move {
+            let _guard = unlink_gate.lock().await;
+            *revoked.lock().await = false;
+        });
+        // The unrelated provider remains independently available.
+        assert!(other_provider_gate.try_lock().is_ok());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), async {
+                while task.is_finished() {
+                    tokio::task::yield_now().await;
+                }
+                tokio::time::sleep(Duration::from_millis(30)).await;
+            })
+            .await
+            .is_err()
+        );
+        assert!(*state.lock().await, "unlink must not run during import");
+        drop(import_guard);
+        tokio::time::timeout(Duration::from_millis(200), task)
+            .await
+            .expect("revocation should proceed after import")
+            .unwrap();
+        assert!(!*state.lock().await, "unlink must leave session revoked");
     }
 
     #[tokio::test]
@@ -1228,6 +1264,39 @@ pub async fn unlink(
     if let Err(response) = authenticated_request(&app, &headers) {
         return *response;
     }
+    // Validate before creating a gate: untrusted path parameters must not
+    // grow the gate map beyond the supported provider catalog.
+    if crate::providers::Provider::from_name(&provider).is_none() {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "unknown_provider",
+            "provider is not supported by this gateway",
+        );
+    }
+    let gate = match app.relay.import_gates.for_provider(&provider) {
+        Some(gate) => gate,
+        None => {
+            return json_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "session_unlink_unavailable",
+                "provider session revocation queue unavailable; retry",
+            )
+        }
+    };
+    // Hold the gate until the browser worker has finished deleting both the
+    // live session and vault snapshot. A concurrent import must not restore
+    // credentials after successful unlink.
+    let _provider_unlink = match tokio::time::timeout(RELAY_IMPORT_QUEUE_TIMEOUT, gate.lock()).await
+    {
+        Ok(guard) => guard,
+        Err(_) => {
+            return json_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "session_unlink_busy",
+                "provider session import or unlink is busy; retry revocation",
+            )
+        }
+    };
     match app.pool.unlink_session(&provider).await {
         Ok(removed) => {
             app.provider_sessions.record_unlinked(&provider);
