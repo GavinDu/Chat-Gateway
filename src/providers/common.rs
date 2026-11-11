@@ -1019,6 +1019,36 @@ mod draft_at_click_tests {
     use super::{click_send_or_enter_checked, click_send_or_enter_checked_with_policy};
 
     #[tokio::test]
+    async fn pointer_events_blocked_send_is_not_clicked_or_bypassed() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body><form>
+            <textarea id="prompt">draft</textarea>
+            <button id="send" type="button" style="pointer-events:none"
+                onclick="window.sent=true">Send</button>
+        </form></body></html>"#;
+        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        let result = click_send_or_enter_checked_with_policy(
+            &mut page,
+            &["#send"],
+            "#prompt",
+            100,
+            Some("draft"),
+            false,
+            None,
+        )
+        .await;
+        assert!(result.is_err());
+        assert_eq!(page.evaluate("window.sent === true").as_bool(), Some(false));
+    }
+
+    #[tokio::test]
     async fn foreign_redirect_cannot_click_matching_send_button() {
         let browser = obscura_core::Browser::builder()
             .stealth(false)
