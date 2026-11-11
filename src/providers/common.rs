@@ -2142,7 +2142,11 @@ mod composer_rejected_input_tests {
             .downcast_ref::<ProviderComposerInputRejectedError>()
             .is_some());
         assert!(!error.to_string().contains("private-message"));
-        assert_eq!(page.evaluate("document.querySelector('#send').disabled").as_bool(), Some(true));
+        assert_eq!(
+            page.evaluate("document.querySelector('#send').disabled")
+                .as_bool(),
+            Some(true)
+        );
     }
 
 }
