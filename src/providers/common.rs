@@ -2587,7 +2587,10 @@ mod text_selector_tests {
 
     #[tokio::test]
     async fn text_click_skips_hidden_and_disabled_send_controls() {
-        let browser = obscura_core::Browser::builder().stealth(false).build().unwrap();
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
         let mut page = browser.new_page().await.unwrap();
         let html = r#"<html><body>
             <button hidden onclick="window.clicked='hidden'">Send</button>
@@ -2596,7 +2599,9 @@ mod text_selector_tests {
             <button id="valid" onclick="window.clicked='valid'">Send</button>
         </body></html>"#;
         let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
-        page.goto(&format!("data:text/html,{encoded}")).await.unwrap();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
         assert!(super::click_text_selector(&page, "text:button=Send").unwrap());
         assert_eq!(page.evaluate("window.clicked").as_str(), Some("valid"));
         page.evaluate("document.querySelector('#valid').disabled = true");
