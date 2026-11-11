@@ -971,7 +971,7 @@ async fn click_send_or_enter_checked_with_policy(
         for selector in send_selectors {
             let selector_js = serde_json::to_string(selector)?;
             let js = format!(
-                "(() => {{ {route_guard} const input = {input_expr}; if (!input) return 'missing'; const expected = {expected_js}; if (expected !== null && ('value' in input ? input.value : (input.innerText || input.textContent || '')) !== expected) return 'changed'; const inputForm = input.form || input.closest('form'); let root = input; for (let depth = 0; root && depth < 12; depth++, root = root.parentElement) {{ if (root.tagName === 'BODY' || root.tagName === 'HTML') break; for (const button of root.querySelectorAll({selector_js})) {{ const buttonForm = button.form || button.closest('form'); if (buttonForm && buttonForm !== inputForm) continue; if (button.getClientRects().length && window.getComputedStyle(button).visibility !== 'hidden' && !button.closest('[inert], [hidden], [aria-hidden=true], [aria-disabled=true]') && !button.disabled && !button.matches(':disabled') && !button.closest('fieldset[disabled]') && button.getAttribute('aria-disabled') !== 'true') {{ button.click(); return 'clicked'; }} }} if (root.tagName === 'FORM') break; }} const form = input.form || input.closest('form'); if (form && form.id) {{ for (const button of document.querySelectorAll({selector_js})) {{ if (button.tagName !== 'BUTTON' || (button.form !== form && button.getAttribute('form') !== form.id) || form.contains(button)) continue; if (button.getClientRects().length && window.getComputedStyle(button).visibility !== 'hidden' && !button.closest('[inert], [hidden], [aria-hidden=true], [aria-disabled=true]') && !button.disabled && !button.matches(':disabled') && !button.closest('fieldset[disabled]') && button.getAttribute('aria-disabled') !== 'true') {{ button.click(); return 'clicked'; }} }} }} return 'waiting'; }})()"
+                "(() => {{ {route_guard} const input = {input_expr}; if (!input) return 'missing'; const expected = {expected_js}; if (expected !== null && ('value' in input ? input.value : (input.innerText || input.textContent || '')) !== expected) return 'changed'; const inputForm = input.form || input.closest('form'); let root = input; for (let depth = 0; root && depth < 12; depth++, root = root.parentElement) {{ if (root.tagName === 'BODY' || root.tagName === 'HTML') break; for (const button of root.querySelectorAll({selector_js})) {{ const buttonForm = button.form || button.closest('form'); if (buttonForm && buttonForm !== inputForm) continue; if (button.getClientRects().length && window.getComputedStyle(button).visibility !== 'hidden' && window.getComputedStyle(button).pointerEvents !== 'none' && !button.closest('[inert], [hidden], [aria-hidden=true], [aria-disabled=true]') && !button.disabled && !button.matches(':disabled') && !button.closest('fieldset[disabled]') && button.getAttribute('aria-disabled') !== 'true') {{ button.click(); return 'clicked'; }} }} if (root.tagName === 'FORM') break; }} const form = input.form || input.closest('form'); if (form && form.id) {{ for (const button of document.querySelectorAll({selector_js})) {{ if (button.tagName !== 'BUTTON' || (button.form !== form && button.getAttribute('form') !== form.id) || form.contains(button)) continue; if (button.getClientRects().length && window.getComputedStyle(button).visibility !== 'hidden' && window.getComputedStyle(button).pointerEvents !== 'none' && !button.closest('[inert], [hidden], [aria-hidden=true], [aria-disabled=true]') && !button.disabled && !button.matches(':disabled') && !button.closest('fieldset[disabled]') && button.getAttribute('aria-disabled') !== 'true') {{ button.click(); return 'clicked'; }} }} }} return 'waiting'; }})()"
             );
             match page.evaluate(&js).as_str() {
                 Some("clicked") => return Ok(true),
@@ -990,7 +990,7 @@ async fn click_send_or_enter_checked_with_policy(
     // Synthetic Enter is not trusted and must not bypass that state.
     let send_js = serde_json::to_string(send_selectors)?;
     let disabled = page.evaluate(&format!(
-        "(() => {{ const input = {input_expr}; if (!input) return true; const selectors = {send_js}; const inputForm = input.form || input.closest('form'); let root = input; for (let depth = 0; root && depth < 12; depth++, root = root.parentElement) {{ if (root.tagName === 'BODY' || root.tagName === 'HTML') break; for (const selector of selectors) {{ for (const button of root.querySelectorAll(selector)) {{ const buttonForm = button.form || button.closest('form'); if (buttonForm && buttonForm !== inputForm) continue; if (button.getClientRects().length && window.getComputedStyle(button).visibility !== 'hidden' && !button.closest('[inert], [aria-hidden=true]') && (button.disabled || button.matches(':disabled') || !!button.closest('fieldset[disabled]') || button.getAttribute('aria-disabled') === 'true' || !!button.closest('[aria-disabled=true]'))) return true; }} }} if (root.tagName === 'FORM') break; }} const form = input.form || input.closest('form'); if (form && form.id) {{ for (const selector of selectors) {{ for (const button of document.querySelectorAll(selector)) {{ if (button.tagName !== 'BUTTON' || (button.form !== form && button.getAttribute('form') !== form.id) || form.contains(button)) continue; if (button.getClientRects().length && window.getComputedStyle(button).visibility !== 'hidden' && !button.closest('[inert], [aria-hidden=true]') && (button.disabled || button.matches(':disabled') || !!button.closest('fieldset[disabled]') || button.getAttribute('aria-disabled') === 'true' || !!button.closest('[aria-disabled=true]'))) return true; }} }} }} return false; }})()"
+        "(() => {{ const input = {input_expr}; if (!input) return true; const selectors = {send_js}; const inputForm = input.form || input.closest('form'); let root = input; for (let depth = 0; root && depth < 12; depth++, root = root.parentElement) {{ if (root.tagName === 'BODY' || root.tagName === 'HTML') break; for (const selector of selectors) {{ for (const button of root.querySelectorAll(selector)) {{ const buttonForm = button.form || button.closest('form'); if (buttonForm && buttonForm !== inputForm) continue; if (button.getClientRects().length && window.getComputedStyle(button).visibility !== 'hidden' && window.getComputedStyle(button).pointerEvents !== 'none' && !button.closest('[inert], [aria-hidden=true]') && (button.disabled || button.matches(':disabled') || !!button.closest('fieldset[disabled]') || button.getAttribute('aria-disabled') === 'true' || !!button.closest('[aria-disabled=true]') || window.getComputedStyle(button).pointerEvents === 'none')) return true; }} }} if (root.tagName === 'FORM') break; }} const form = input.form || input.closest('form'); if (form && form.id) {{ for (const selector of selectors) {{ for (const button of document.querySelectorAll(selector)) {{ if (button.tagName !== 'BUTTON' || (button.form !== form && button.getAttribute('form') !== form.id) || form.contains(button)) continue; if (button.getClientRects().length && window.getComputedStyle(button).visibility !== 'hidden' && window.getComputedStyle(button).pointerEvents !== 'none' && !button.closest('[inert], [aria-hidden=true]') && (button.disabled || button.matches(':disabled') || !!button.closest('fieldset[disabled]') || button.getAttribute('aria-disabled') === 'true' || !!button.closest('[aria-disabled=true]') || window.getComputedStyle(button).pointerEvents === 'none')) return true; }} }} }} return false; }})()"
     ));
     if disabled.as_bool() == Some(true) {
         anyhow::bail!("provider send control is disabled or composer is missing");
@@ -1017,6 +1017,36 @@ async fn click_send_or_enter_checked_with_policy(
 #[cfg(test)]
 mod draft_at_click_tests {
     use super::{click_send_or_enter_checked, click_send_or_enter_checked_with_policy};
+
+    #[tokio::test]
+    async fn pointer_events_blocked_send_is_not_clicked_or_bypassed() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body><form>
+            <textarea id="prompt">draft</textarea>
+            <button id="send" type="button" style="pointer-events:none"
+                onclick="window.sent=true">Send</button>
+        </form></body></html>"#;
+        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        let result = click_send_or_enter_checked_with_policy(
+            &mut page,
+            &["#send"],
+            "#prompt",
+            100,
+            Some("draft"),
+            false,
+            None,
+        )
+        .await;
+        assert!(result.is_err());
+        assert_eq!(page.evaluate("window.sent === true").as_bool(), Some(false));
+    }
 
     #[tokio::test]
     async fn foreign_redirect_cannot_click_matching_send_button() {
