@@ -2111,6 +2111,40 @@ mod composer_rejected_input_tests {
             "provider input did not retain the prompt after framework render"
         );
     }
+
+    #[tokio::test]
+    async fn controlled_contenteditable_rerender_rejects_synthetic_draft() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <div id="prompt" contenteditable="true"></div>
+            <button id="send" disabled>Send</button>
+            <script>
+                const editor = document.querySelector('#prompt');
+                // Model a ProseMirror-style state owner that ignores untrusted
+                // DOM mutations and restores its empty document on input.
+                editor.addEventListener('input', () => {
+                    editor.textContent = '';
+                    document.querySelector('#send').disabled = true;
+                });
+            </script></body></html>"#;
+        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        let error = super::human_type(&page, &["#prompt"], "private-message")
+            .await
+            .unwrap_err();
+        assert!(error
+            .downcast_ref::<ProviderComposerInputRejectedError>()
+            .is_some());
+        assert!(!error.to_string().contains("private-message"));
+        assert_eq!(page.evaluate("document.querySelector('#send').disabled").as_bool(), Some(true));
+    }
+
 }
 
 #[cfg(test)]
