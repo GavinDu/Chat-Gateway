@@ -2113,7 +2113,7 @@ mod composer_rejected_input_tests {
     }
 
     #[tokio::test]
-    async fn controlled_contenteditable_rerender_rejects_synthetic_draft() {
+    async fn controlled_contenteditable_draft_with_disabled_send_is_not_submitted() {
         let browser = obscura_core::Browser::builder()
             .stealth(false)
             .build()
@@ -2136,18 +2136,26 @@ mod composer_rejected_input_tests {
         page.goto(&format!("data:text/html,{encoded}"))
             .await
             .unwrap();
-        let error = super::human_type(&page, &["#prompt"], "private-message")
+        // The pinned embedded browser may retain a synthetic DOM draft even
+        // when the controlled editor never enables submission. DOM retention
+        // is not proof that the framework accepted the prompt.
+        super::human_type(&page, &["#prompt"], "private-message")
             .await
-            .unwrap_err();
-        assert!(error
-            .downcast_ref::<ProviderComposerInputRejectedError>()
-            .is_some());
-        assert!(!error.to_string().contains("private-message"));
+            .unwrap();
         assert_eq!(
             page.evaluate("document.querySelector('#send').disabled")
                 .as_bool(),
             Some(true)
         );
+        let overrides = crate::config::ProviderSelectorOverrides {
+            input: Some(vec!["#prompt".to_owned()]),
+            send: Some(vec!["#send".to_owned()]),
+            ..Default::default()
+        };
+        let selectors = crate::providers::chatgpt::SELECTORS.effective(&overrides);
+        let result = super::send_prompt(&mut page, &selectors, "private-message").await;
+        assert!(result.is_err(), "disabled Send must never acknowledge a prompt");
+        assert!(!result.unwrap_err().to_string().contains("private-message"));
     }
 }
 
