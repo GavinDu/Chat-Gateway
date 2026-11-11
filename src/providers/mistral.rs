@@ -60,14 +60,18 @@ impl SiteAdapter for MistralAdapter {
         if let Err(error) = common::wait_for_selector(page, &inputs, 15_000).await {
             common::check_session("mistral", page)?;
             let diagnostics = mistral_readiness_diagnostics(page);
+            // Log sanitized readiness evidence for every missing-composer
+            // failure, not only the HTTP 403 case. The public error response
+            // stays redacted; never log script URLs, cookies or page content.
+            tracing::warn!(
+                provider = "mistral",
+                stage = "composer_wait",
+                diagnostics = %diagnostics,
+                "Mistral composer readiness failed"
+            );
             if diagnostics.contains("blocker=script_http_403") {
                 // Observed script HTTP status, not speculation about its cause.
                 // The API maps this typed failure to a redacted blocked status.
-                tracing::warn!(
-                    provider = "mistral",
-                    diagnostics = %diagnostics,
-                    "Mistral composer blocked by directly observed script HTTP 403"
-                );
                 return Err(anyhow::Error::new(MistralAssetBlockedError));
             }
             anyhow::bail!(
