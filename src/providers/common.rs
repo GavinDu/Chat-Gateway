@@ -2111,6 +2111,61 @@ mod composer_rejected_input_tests {
             "provider input did not retain the prompt after framework render"
         );
     }
+
+    #[tokio::test]
+    async fn controlled_contenteditable_draft_with_disabled_send_is_not_submitted() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <div id="prompt" contenteditable="true"></div>
+            <button id="send" disabled>Send</button>
+            <script>
+                const editor = document.querySelector('#prompt');
+                // The embedded browser's execCommand path may not fire an
+                // input event. A controlled editor can also restore its
+                // canonical empty document on a later framework render.
+                setInterval(() => {
+                    editor.textContent = '';
+                    document.querySelector('#send').disabled = true;
+                }, 10);
+            </script></body></html>"#;
+        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        // The pinned embedded browser may retain a synthetic DOM draft even
+        // when the controlled editor never enables submission. DOM retention
+        // is not proof that the framework accepted the prompt.
+        super::human_type(&page, &["#prompt"], "private-message")
+            .await
+            .unwrap();
+        assert_eq!(
+            page.evaluate("document.querySelector('#send').disabled")
+                .as_bool(),
+            Some(true)
+        );
+        // The data: fixture is intentionally not a ChatGPT origin. Exercise
+        // the strict ChatGPT/Grok send policy directly: send_prompt only
+        // enables that policy on an authenticated provider route.
+        let result = super::click_send_or_enter_checked_with_policy(
+            &mut page,
+            &["#send"],
+            "#prompt",
+            250,
+            Some("private-message"),
+            false,
+            None,
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "disabled Send must never acknowledge a prompt"
+        );
+        assert!(!result.unwrap_err().to_string().contains("private-message"));
+    }
 }
 
 #[cfg(test)]
