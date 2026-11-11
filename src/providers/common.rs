@@ -2124,12 +2124,13 @@ mod composer_rejected_input_tests {
             <button id="send" disabled>Send</button>
             <script>
                 const editor = document.querySelector('#prompt');
-                // Model a ProseMirror-style state owner that ignores untrusted
-                // DOM mutations and restores its empty document on input.
-                editor.addEventListener('input', () => {
+                // The embedded browser's execCommand path may not fire an
+                // input event. A controlled editor can also restore its
+                // canonical empty document on a later framework render.
+                setInterval(() => {
                     editor.textContent = '';
                     document.querySelector('#send').disabled = true;
-                });
+                }, 10);
             </script></body></html>"#;
         let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
         page.goto(&format!("data:text/html,{encoded}"))
