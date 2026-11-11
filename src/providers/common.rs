@@ -1846,7 +1846,16 @@ pub async fn send_prompt(
     let verify_submission = requires_submission_acknowledgement(&initial_url);
     let expected_submission_provider = submission_provider_for_url(&initial_url);
     let inputs = set.input_refs();
-    wait_for_selector(page, &inputs, 15_000).await?;
+    wait_for_selector(page, &inputs, 15_000)
+        .await
+        .inspect_err(|_| {
+            tracing::warn!(
+                provider = expected_submission_provider.unwrap_or("other"),
+                stage = "composer_wait",
+                outcome = "timeout_or_error",
+                "provider composer diagnostic"
+            );
+        })?;
     // Waiting for the composer can navigate to a foreign site containing an
     // equally generic input. Verify the initial provider before typing.
     if let Some(provider) = expected_submission_provider {
