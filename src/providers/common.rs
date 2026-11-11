@@ -2148,7 +2148,6 @@ mod composer_rejected_input_tests {
             Some(true)
         );
     }
-
 }
 
 #[cfg(test)]
