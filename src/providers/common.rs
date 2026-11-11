@@ -2147,13 +2147,19 @@ mod composer_rejected_input_tests {
                 .as_bool(),
             Some(true)
         );
-        let overrides = crate::config::ProviderSelectorOverrides {
-            input: Some(vec!["#prompt".to_owned()]),
-            send: Some(vec!["#send".to_owned()]),
-            ..Default::default()
-        };
-        let selectors = crate::providers::chatgpt::SELECTORS.effective(&overrides);
-        let result = super::send_prompt(&mut page, &selectors, "private-message").await;
+        // The data: fixture is intentionally not a ChatGPT origin. Exercise
+        // the strict ChatGPT/Grok send policy directly: send_prompt only
+        // enables that policy on an authenticated provider route.
+        let result = super::click_send_or_enter_checked_with_policy(
+            &mut page,
+            &["#send"],
+            "#prompt",
+            250,
+            Some("private-message"),
+            false,
+            None,
+        )
+        .await;
         assert!(
             result.is_err(),
             "disabled Send must never acknowledge a prompt"
