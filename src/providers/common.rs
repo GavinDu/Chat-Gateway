@@ -1890,9 +1890,8 @@ pub async fn send_prompt(
             expected_submission_provider,
         )
         .await
-        .map_err(|error| {
+        .inspect_err(|_| {
             tracing::warn!(provider = expected_submission_provider.unwrap_or("other"), stage = "send_control", outcome = "unavailable_or_rejected", "provider composer diagnostic");
-            error
         })?;
     } else {
         click_send_or_enter_checked(page, &sends, input_sel, 5_000, Some(prompt)).await?;
