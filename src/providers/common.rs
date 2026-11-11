@@ -1846,13 +1846,30 @@ pub async fn send_prompt(
     let verify_submission = requires_submission_acknowledgement(&initial_url);
     let expected_submission_provider = submission_provider_for_url(&initial_url);
     let inputs = set.input_refs();
-    wait_for_selector(page, &inputs, 15_000).await?;
+    wait_for_selector(page, &inputs, 15_000)
+        .await
+        .inspect_err(|_| {
+            tracing::warn!(
+                provider = expected_submission_provider.unwrap_or("other"),
+                stage = "composer_wait",
+                outcome = "timeout_or_error",
+                "provider composer diagnostic"
+            );
+        })?;
     // Waiting for the composer can navigate to a foreign site containing an
     // equally generic input. Verify the initial provider before typing.
     if let Some(provider) = expected_submission_provider {
         require_submission_provider_route(provider, page)?;
     }
-    human_type(page, &inputs, prompt).await?;
+    if let Err(error) = human_type(page, &inputs, prompt).await {
+        tracing::warn!(
+            provider = expected_submission_provider.unwrap_or("other"),
+            stage = "input_dispatch",
+            outcome = "failed",
+            "provider composer diagnostic"
+        );
+        return Err(error);
+    }
     drive_page(page, Duration::from_millis(200)).await;
     let input_sel = inputs
         .iter()
@@ -1862,6 +1879,12 @@ pub async fn send_prompt(
     // The provider may re-render or clear the composer while the browser is
     // settling after typing. Never click Send with a missing or changed draft.
     if !composer_retains_prompt(page, input_sel, prompt)? {
+        tracing::warn!(
+            provider = expected_submission_provider.unwrap_or("other"),
+            stage = "framework_render",
+            outcome = "draft_not_retained",
+            "provider composer diagnostic"
+        );
         return Err(anyhow::Error::new(ProviderComposerInputRejectedError));
     }
     if let Some(provider) = expected_submission_provider {
@@ -1885,7 +1908,15 @@ pub async fn send_prompt(
             false,
             expected_submission_provider,
         )
-        .await?;
+        .await
+        .inspect_err(|_| {
+            tracing::warn!(
+                provider = expected_submission_provider.unwrap_or("other"),
+                stage = "send_control",
+                outcome = "unavailable_or_rejected",
+                "provider composer diagnostic"
+            );
+        })?;
     } else {
         click_send_or_enter_checked(page, &sends, input_sel, 5_000, Some(prompt)).await?;
     }
@@ -1901,9 +1932,21 @@ pub async fn send_prompt(
             }
             let after = submission_snapshot(page, input_sel, &set.response_refs())?;
             if submission_observed_for_prompt(page, &before, &after, prompt)? {
+                tracing::debug!(
+                    provider = expected_submission_provider.unwrap_or("other"),
+                    stage = "submission",
+                    outcome = "acknowledged",
+                    "provider composer diagnostic"
+                );
                 return Ok(());
             }
         }
+        tracing::warn!(
+            provider = expected_submission_provider.unwrap_or("other"),
+            stage = "submission",
+            outcome = "not_acknowledged",
+            "provider composer diagnostic"
+        );
         anyhow::bail!("provider did not acknowledge prompt submission (composer unchanged and no new response)");
     }
     Ok(())
