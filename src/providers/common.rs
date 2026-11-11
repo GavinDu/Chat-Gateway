@@ -2154,7 +2154,10 @@ mod composer_rejected_input_tests {
         };
         let selectors = crate::providers::chatgpt::SELECTORS.effective(&overrides);
         let result = super::send_prompt(&mut page, &selectors, "private-message").await;
-        assert!(result.is_err(), "disabled Send must never acknowledge a prompt");
+        assert!(
+            result.is_err(),
+            "disabled Send must never acknowledge a prompt"
+        );
         assert!(!result.unwrap_err().to_string().contains("private-message"));
     }
 }
