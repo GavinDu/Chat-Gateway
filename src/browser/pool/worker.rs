@@ -50,6 +50,10 @@ struct ComposerPreflightEvidence {
     configured_input_present: bool,
     generic_editor_present: bool,
     generic_editor_actionable: bool,
+    body_element_count: Option<u64>,
+    script_element_count: Option<u64>,
+    external_script_count: Option<u64>,
+    iframe_element_count: Option<u64>,
 }
 
 impl ComposerPreflightEvidence {
@@ -92,6 +96,11 @@ fn composer_preflight_evidence(
     let provider_origin = providers::Provider::from_name(provider).is_some_and(|p| {
         pool_policy::provider_thread_url_is_same_origin(&page.url(), p.login_url())
     });
+    // Bounded element counts, no DOM text, attribute values, script URLs,
+    // cookies, or prompt data. Null means the script did not evaluate.
+    let hydration = page.evaluate(
+        "(() => { try { return { body: document.body ? document.body.querySelectorAll('*').length : 0, scripts: document.querySelectorAll('script').length, external_scripts: document.querySelectorAll('script[src]').length, iframes: document.querySelectorAll('iframe').length }; } catch (_) { return null; } })()",
+    );
     ComposerPreflightEvidence {
         document_ready,
         provider_origin,
@@ -107,6 +116,12 @@ fn composer_preflight_evidence(
             page,
             GENERIC_EDITORS,
         ),
+        body_element_count: hydration.get("body").and_then(serde_json::Value::as_u64),
+        script_element_count: hydration.get("scripts").and_then(serde_json::Value::as_u64),
+        external_script_count: hydration
+            .get("external_scripts")
+            .and_then(serde_json::Value::as_u64),
+        iframe_element_count: hydration.get("iframes").and_then(serde_json::Value::as_u64),
     }
 }
 
@@ -139,6 +154,10 @@ fn report_composer_preflight_failure(
             configured_input_present = evidence.configured_input_present,
             generic_editor_present = evidence.generic_editor_present,
             generic_editor_actionable = evidence.generic_editor_actionable,
+            body_element_count = ?evidence.body_element_count,
+            script_element_count = ?evidence.script_element_count,
+            external_script_count = ?evidence.external_script_count,
+            iframe_element_count = ?evidence.iframe_element_count,
             "provider composer readiness evidence"
         );
     }
@@ -215,6 +234,10 @@ mod composer_preflight_diagnostic_tests {
             configured_input_present: false,
             generic_editor_present: false,
             generic_editor_actionable: false,
+            body_element_count: Some(0),
+            script_element_count: Some(0),
+            external_script_count: Some(0),
+            iframe_element_count: Some(0),
         };
         assert_eq!(evidence.category(), "no_editor_elements");
         evidence.generic_editor_present = true;
@@ -249,6 +272,35 @@ mod composer_preflight_diagnostic_tests {
             &["#prompt-textarea"]
         ));
         assert_eq!(evidence.document_ready, "complete");
+        assert_eq!(evidence.body_element_count, Some(2));
+        assert_eq!(evidence.script_element_count, Some(0));
+        assert_eq!(evidence.external_script_count, Some(0));
+        assert_eq!(evidence.iframe_element_count, Some(0));
+    }
+
+    #[tokio::test]
+    async fn metaai_shell_without_editor_reports_only_script_and_dom_counts() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = "<html><body><div id='app'></div><script>window.booted = true;</script></body></html>";
+        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        let evidence = composer_preflight_evidence(
+            "metaai",
+            &page,
+            &["div[contenteditable='true'][role='textbox']"],
+        );
+        assert_eq!(evidence.category(), "unexpected_origin");
+        assert!(!evidence.generic_editor_present);
+        assert_eq!(evidence.body_element_count, Some(2));
+        assert_eq!(evidence.script_element_count, Some(1));
+        assert_eq!(evidence.external_script_count, Some(0));
+        assert_eq!(evidence.iframe_element_count, Some(0));
     }
 
     #[tokio::test]
