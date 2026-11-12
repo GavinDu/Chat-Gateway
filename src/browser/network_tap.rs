@@ -163,7 +163,11 @@ mod tests {
         for host in ["chat.mistral.ai", "assets.mistral.ai", "mistral.ai"] {
             assert!(is_first_party_mistral_host(host));
         }
-        for host in ["evil-mistral.ai", "mistral.ai.example.com", "static.cloudflareinsights.com"] {
+        for host in [
+            "evil-mistral.ai",
+            "mistral.ai.example.com",
+            "static.cloudflareinsights.com",
+        ] {
             assert!(!is_first_party_mistral_host(host));
         }
     }
