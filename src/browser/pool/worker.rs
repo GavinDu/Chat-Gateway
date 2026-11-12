@@ -371,13 +371,16 @@ async fn ensure_provider_page(
         return Ok(false);
     }
     let mut page = browser_factory::new_page(browser).await?;
-    let network_script_403 = crate::browser::network_tap::attach_provider_network_tap(&mut page, provider);
+    let network_script_403 =
+        crate::browser::network_tap::attach_provider_network_tap(&mut page, provider);
     let snapshot = session::load_session_file(provider.name())?;
     if let Err(error) = PageSession::open(browser, &mut page, provider, snapshot.as_ref()).await {
         session::clear_provider_cookies(browser, provider.name())?;
         return Err(error);
     }
-    pages.borrow_mut().insert_with_script_status(provider, Rc::new(page), network_script_403);
+    pages
+        .borrow_mut()
+        .insert_with_script_status(provider, Rc::new(page), network_script_403);
     Ok(true)
 }
 
