@@ -7,7 +7,10 @@ use std::{
     collections::{HashMap, VecDeque},
     ops::{Deref, DerefMut},
     rc::Rc,
-    sync::{atomic::{AtomicBool, Ordering}, Arc},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
 };
 
 pub(super) type SharedPages = Rc<RefCell<ProviderPageCache>>;
@@ -141,11 +144,9 @@ mod tests {
         let pages = Rc::new(RefCell::new(ProviderPageCache::new(2)));
         let first = Rc::new(browser.new_page().await.unwrap());
         let evidence = Arc::new(AtomicBool::new(true));
-        pages.borrow_mut().insert_with_script_status(
-            Provider::Mistral,
-            first,
-            Some(evidence),
-        );
+        pages
+            .borrow_mut()
+            .insert_with_script_status(Provider::Mistral, first, Some(evidence));
         let lease = PageLease::take(&pages, Provider::Mistral).unwrap();
         assert!(lease.observed_mistral_script_403());
         lease.clear_mistral_script_403_before_navigation();
