@@ -285,7 +285,8 @@ mod composer_preflight_diagnostic_tests {
             .build()
             .unwrap();
         let mut page = browser.new_page().await.unwrap();
-        let html = "<html><body><div id='app'></div><script>window.booted = true;</script></body></html>";
+        let html =
+            "<html><body><div id='app'></div><script>window.booted = true;</script></body></html>";
         let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
         page.goto(&format!("data:text/html,{encoded}"))
             .await
