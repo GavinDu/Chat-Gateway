@@ -1,6 +1,6 @@
 use crate::providers::Provider;
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc,
 };
 
@@ -49,6 +49,14 @@ fn is_mistral_script_failure(
                 )))
 }
 
+/// Only a first-party Mistral script 403 can classify the composer as
+/// provider-asset blocked. Optional third-party analytics failures are not
+/// enough to establish that the editor's own JavaScript is unavailable.
+fn is_first_party_mistral_host(host: &str) -> bool {
+    let host = host.to_ascii_lowercase();
+    host == "mistral.ai" || host.ends_with(".mistral.ai")
+}
+
 fn safe_hostname(host: &str) -> &str {
     if !host.is_empty()
         && host.len() <= 128
@@ -73,16 +81,21 @@ fn provider_network_tap_enabled(provider: Provider) -> bool {
             .unwrap_or(false)
 }
 
-pub(super) fn attach_provider_network_tap(page: &mut obscura_core::Page, provider: Provider) {
+pub(super) fn attach_provider_network_tap(
+    page: &mut obscura_core::Page,
+    provider: Provider,
+) -> Option<Arc<AtomicBool>> {
     let verbose_enabled = provider_network_tap_enabled(provider);
     // Script HTTP failures on the Mistral provider are security-safe default
     // diagnostics. The existing Fetch/XHR tap remains opt-in for other sites.
     if !verbose_enabled && provider != Provider::Mistral {
-        return;
+        return None;
     }
 
     let provider_name = provider.name();
     let script_errors_seen = Arc::new(AtomicUsize::new(0));
+    let mistral_403_seen = Arc::new(AtomicBool::new(false));
+    let observed_403 = Arc::clone(&mistral_403_seen);
     page.on_response(Arc::new(move |info, response| {
         let javascript_asset_path = is_javascript_asset_path(info.url.path())
             || is_javascript_asset_path(response.url.path())
@@ -95,18 +108,29 @@ pub(super) fn attach_provider_network_tap(page: &mut obscura_core::Page, provide
             info.resource_type,
             response.status,
             javascript_asset_path,
-        ) && script_errors_seen.fetch_add(1, Ordering::Relaxed)
+        ) {
+            // Record even after the eight-entry log cap. This per-page flag
+            // contains no hostname, URL, cookies, or response body.
+            if response.status == 403
+                && response
+                    .url
+                    .host_str()
+                    .is_some_and(is_first_party_mistral_host)
+            {
+                observed_403.store(true, Ordering::Relaxed);
+            }
+            if script_errors_seen.fetch_add(1, Ordering::Relaxed)
                 < MAX_MISTRAL_SCRIPT_FAILURE_LOGS_PER_PAGE
-        {
-            // Never include script URL paths/queries, cookie headers or bodies.
-            let host = safe_hostname(response.url.host_str().unwrap_or("unknown"));
-            tracing::warn!(
-                provider = provider_name,
-                host,
-                status = response.status,
-                redirect_hops = response.redirected_from.len().min(8),
-                "Mistral script HTTP failure observed (host/status only)"
-            );
+            {
+                let host = safe_hostname(response.url.host_str().unwrap_or("unknown"));
+                tracing::warn!(
+                    provider = provider_name,
+                    host,
+                    status = response.status,
+                    redirect_hops = response.redirected_from.len().min(8),
+                    "Mistral script HTTP failure observed (host/status only)"
+                );
+            }
         }
         if !verbose_enabled || !matches!(
             info.resource_type,
@@ -127,11 +151,26 @@ pub(super) fn attach_provider_network_tap(page: &mut obscura_core::Page, provide
             "provider network response observed (metadata only)"
         );
     }));
+    (provider == Provider::Mistral).then_some(mistral_403_seen)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_first_party_mistral_script_failure_can_mark_blocker() {
+        for host in ["chat.mistral.ai", "assets.mistral.ai", "mistral.ai"] {
+            assert!(is_first_party_mistral_host(host));
+        }
+        for host in [
+            "evil-mistral.ai",
+            "mistral.ai.example.com",
+            "static.cloudflareinsights.com",
+        ] {
+            assert!(!is_first_party_mistral_host(host));
+        }
+    }
 
     #[test]
     fn mistral_script_failure_filter_is_exact_and_status_bounded() {
