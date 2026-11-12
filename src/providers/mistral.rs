@@ -102,7 +102,7 @@ impl SiteAdapter for MistralAdapter {
 /// Collect only non-sensitive script metadata. HTTP response status is exposed
 /// through Resource Timing only when the browser and origin permit it; a missing
 /// status is *not* evidence that asset fetching succeeded.
-fn mistral_readiness_diagnostics(page: &Page) -> String {
+pub(crate) fn mistral_readiness_diagnostics(page: &Page) -> String {
     let mut evidence = page.evaluate(
         r#"(() => {
             // JS bundles loaded by link rel=modulepreload (or preload as=script)
