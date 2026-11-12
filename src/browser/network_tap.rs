@@ -68,7 +68,10 @@ fn is_metaai_document_response(
 ) -> bool {
     provider == Provider::MetaAI
         && resource_type == obscura_core::ResourceType::Document
-        && matches!(host.to_ascii_lowercase().as_str(), "meta.ai" | "www.meta.ai")
+        && matches!(
+            host.to_ascii_lowercase().as_str(),
+            "meta.ai" | "www.meta.ai"
+        )
 }
 
 fn safe_hostname(host: &str) -> &str {
@@ -214,14 +217,23 @@ mod tests {
                 host
             ));
         }
-        for host in ["meta.ai.attacker.invalid", "fake-meta.ai", "login.meta.ai", ""] {
+        for host in [
+            "meta.ai.attacker.invalid",
+            "fake-meta.ai",
+            "login.meta.ai",
+            "",
+        ] {
             assert!(!is_metaai_document_response(
                 Provider::MetaAI,
                 ResourceType::Document,
                 host
             ));
         }
-        for kind in [ResourceType::Script, ResourceType::Fetch, ResourceType::Other] {
+        for kind in [
+            ResourceType::Script,
+            ResourceType::Fetch,
+            ResourceType::Other,
+        ] {
             assert!(!is_metaai_document_response(
                 Provider::MetaAI,
                 kind,
