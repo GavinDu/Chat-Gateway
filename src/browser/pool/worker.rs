@@ -39,6 +39,74 @@ mod session_worker_error_redaction_tests {
     }
 }
 
+/// Fixed, non-sensitive DOM readiness signals for the two current priority
+/// providers. This does not select a new composer or type into arbitrary inputs;
+/// a generic editor may be a search/login field rather than the chat editor.
+struct ComposerPreflightEvidence {
+    document_ready: &'static str,
+    provider_origin: bool,
+    login_url: bool,
+    challenge_visible: bool,
+    configured_input_present: bool,
+    generic_editor_present: bool,
+    generic_editor_actionable: bool,
+}
+
+impl ComposerPreflightEvidence {
+    fn category(&self) -> &'static str {
+        if !self.provider_origin {
+            "unexpected_origin"
+        } else if self.login_url {
+            "login_redirect"
+        } else if self.challenge_visible {
+            "challenge_visible"
+        } else if self.configured_input_present {
+            "configured_editor_unusable"
+        } else if self.generic_editor_actionable {
+            "unmatched_editor_candidate"
+        } else if self.generic_editor_present {
+            "generic_editor_unusable"
+        } else {
+            "no_editor_elements"
+        }
+    }
+}
+
+fn composer_preflight_evidence(
+    provider: &str,
+    page: &obscura_core::Page,
+    configured_inputs: &[&str],
+) -> ComposerPreflightEvidence {
+    const GENERIC_EDITORS: &[&str] = &[
+        "textarea",
+        "[contenteditable='true']",
+        "input[type='text']",
+        "input[type='search']",
+    ];
+    let document_ready = match page.evaluate("document.readyState").as_str() {
+        Some("loading") => "loading",
+        Some("interactive") => "interactive",
+        Some("complete") => "complete",
+        _ => "unknown",
+    };
+    let provider_origin = providers::Provider::from_name(provider).is_some_and(|p| {
+        pool_policy::provider_thread_url_is_same_origin(&page.url(), p.login_url())
+    });
+    ComposerPreflightEvidence {
+        document_ready,
+        provider_origin,
+        login_url: providers::common::is_login_page(page),
+        challenge_visible: crate::provider_guard::is_challenge_page(page),
+        configured_input_present: configured_inputs
+            .iter()
+            .any(|selector| page.query_selector(selector).is_some()),
+        generic_editor_present: GENERIC_EDITORS
+            .iter()
+            .any(|selector| page.query_selector(selector).is_some()),
+        generic_editor_actionable: providers::common::visible_composer_exists(page, GENERIC_EDITORS),
+    }
+}
+
 /// The browser worker waits for a composer *before* invoking the provider
 /// adapter. A timeout here otherwise bypasses adapter-level diagnostics.
 /// Never record the selector, URL, prompt, page text or upstream error string.
@@ -46,6 +114,7 @@ fn report_composer_preflight_failure(
     provider: &str,
     page: &obscura_core::Page,
     observed_script_403: bool,
+    configured_inputs: &[&str],
     error: anyhow::Error,
 ) -> anyhow::Error {
     tracing::warn!(
@@ -54,6 +123,22 @@ fn report_composer_preflight_failure(
         outcome = "unavailable",
         "provider composer diagnostic"
     );
+    if matches!(provider, "chatgpt" | "metaai") {
+        let evidence = composer_preflight_evidence(provider, page, configured_inputs);
+        tracing::warn!(
+            provider,
+            stage = "composer_preflight",
+            category = evidence.category(),
+            document_ready = evidence.document_ready,
+            provider_origin = evidence.provider_origin,
+            login_url = evidence.login_url,
+            challenge_visible = evidence.challenge_visible,
+            configured_input_present = evidence.configured_input_present,
+            generic_editor_present = evidence.generic_editor_present,
+            generic_editor_actionable = evidence.generic_editor_actionable,
+            "provider composer readiness evidence"
+        );
+    }
     if provider == "mistral" {
         let diagnostics = providers::mistral::mistral_readiness_diagnostics(page);
         tracing::warn!(
@@ -88,7 +173,7 @@ mod composer_preflight_diagnostic_tests {
             .await
             .unwrap();
         let original = anyhow::anyhow!("composer missing");
-        let reported = report_composer_preflight_failure("mistral", &page, false, original);
+        let reported = report_composer_preflight_failure("mistral", &page, false, &[], original);
         assert_eq!(reported.to_string(), "composer missing");
         assert!(reported
             .downcast_ref::<providers::mistral::MistralAssetBlockedError>()
@@ -109,11 +194,76 @@ mod composer_preflight_diagnostic_tests {
             "mistral",
             &page,
             true,
+            &[],
             anyhow::anyhow!("composer missing"),
         );
         assert!(reported
             .downcast_ref::<providers::mistral::MistralAssetBlockedError>()
             .is_some());
+    }
+
+    #[test]
+    fn evidence_categories_do_not_include_untrusted_page_content() {
+        let mut evidence = ComposerPreflightEvidence {
+            document_ready: "complete",
+            provider_origin: true,
+            login_url: false,
+            challenge_visible: false,
+            configured_input_present: false,
+            generic_editor_present: false,
+            generic_editor_actionable: false,
+        };
+        assert_eq!(evidence.category(), "no_editor_elements");
+        evidence.generic_editor_present = true;
+        assert_eq!(evidence.category(), "generic_editor_unusable");
+        evidence.generic_editor_actionable = true;
+        assert_eq!(evidence.category(), "unmatched_editor_candidate");
+        evidence.configured_input_present = true;
+        assert_eq!(evidence.category(), "configured_editor_unusable");
+        evidence.challenge_visible = true;
+        assert_eq!(evidence.category(), "challenge_visible");
+        evidence.provider_origin = false;
+        assert_eq!(evidence.category(), "unexpected_origin");
+    }
+
+    #[tokio::test]
+    async fn hidden_chatgpt_editor_and_visible_alternate_are_only_diagnostic() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = "<html><body><div id='prompt-textarea' contenteditable='true' hidden></div><textarea id='alternate'></textarea></body></html>";
+        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}")).await.unwrap();
+        let evidence = composer_preflight_evidence("chatgpt", &page, &["#prompt-textarea"]);
+        assert!(evidence.configured_input_present);
+        assert!(evidence.generic_editor_actionable);
+        assert!(!providers::common::visible_composer_exists(&page, &["#prompt-textarea"]));
+        assert_eq!(evidence.document_ready, "complete");
+    }
+
+    #[tokio::test]
+    async fn metaai_generic_editor_is_not_treated_as_send_ready() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        page.goto("data:text/html,%3Chtml%3E%3Cbody%3E%3Ctextarea%3E%3C/textarea%3E%3C/body%3E%3C/html%3E")
+            .await
+            .unwrap();
+        let evidence = composer_preflight_evidence(
+            "metaai",
+            &page,
+            &["div[contenteditable='true'][role='textbox']"],
+        );
+        assert!(!evidence.configured_input_present);
+        assert!(evidence.generic_editor_actionable);
+        assert!(!providers::common::visible_composer_exists(
+            &page,
+            &["div[contenteditable='true'][role='textbox']"]
+        ));
     }
 
     #[tokio::test]
@@ -130,6 +280,7 @@ mod composer_preflight_diagnostic_tests {
             "chatgpt",
             &page,
             false,
+            &["#prompt-textarea"],
             anyhow::anyhow!("composer unavailable"),
         );
         assert_eq!(reported.to_string(), "composer unavailable");
@@ -706,6 +857,7 @@ pub(super) fn browser_thread(
                                         provider.name(),
                                         &page,
                                         page.observed_mistral_script_403(),
+                                        &adapter.effective_selectors().input_refs(),
                                         error,
                                     );
                                     let _ = chunks.send(Err(classified)).await;
