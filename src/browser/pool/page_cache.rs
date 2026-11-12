@@ -133,6 +133,62 @@ impl Drop for PageLease {
 mod tests {
     use super::*;
     #[tokio::test]
+    async fn script_error_evidence_follows_only_its_original_page_and_lease() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let pages = Rc::new(RefCell::new(ProviderPageCache::new(2)));
+        let first = Rc::new(browser.new_page().await.unwrap());
+        let evidence = Arc::new(AtomicBool::new(true));
+        pages.borrow_mut().insert_with_script_status(
+            Provider::Mistral,
+            first,
+            Some(evidence),
+        );
+        let lease = PageLease::take(&pages, Provider::Mistral).unwrap();
+        assert!(lease.observed_mistral_script_403());
+        lease.clear_mistral_script_403_before_navigation();
+        assert!(!lease.observed_mistral_script_403());
+        drop(lease);
+        assert!(!PageLease::take(&pages, Provider::Mistral)
+            .unwrap()
+            .observed_mistral_script_403());
+
+        // Replacing a browser page must discard the old network status.
+        pages.borrow_mut().insert(
+            Provider::Mistral,
+            Rc::new(browser.new_page().await.unwrap()),
+        );
+        let replaced = PageLease::take(&pages, Provider::Mistral).unwrap();
+        assert!(!replaced.observed_mistral_script_403());
+    }
+
+    #[tokio::test]
+    async fn script_error_evidence_does_not_survive_cache_eviction() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let pages = Rc::new(RefCell::new(ProviderPageCache::new(1)));
+        pages.borrow_mut().insert_with_script_status(
+            Provider::Mistral,
+            Rc::new(browser.new_page().await.unwrap()),
+            Some(Arc::new(AtomicBool::new(true))),
+        );
+        pages.borrow_mut().insert(
+            Provider::ChatGPT,
+            Rc::new(browser.new_page().await.unwrap()),
+        );
+        pages.borrow_mut().insert(
+            Provider::Mistral,
+            Rc::new(browser.new_page().await.unwrap()),
+        );
+        let lease = PageLease::take(&pages, Provider::Mistral).unwrap();
+        assert!(!lease.observed_mistral_script_403());
+    }
+
+    #[tokio::test]
     async fn eviction_releases_old_pages_and_lease_returns_after_cancellation() {
         let browser = obscura_core::Browser::builder()
             .stealth(false)
