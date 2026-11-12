@@ -103,7 +103,10 @@ fn composer_preflight_evidence(
         generic_editor_present: GENERIC_EDITORS
             .iter()
             .any(|selector| page.query_selector(selector).is_some()),
-        generic_editor_actionable: providers::common::visible_composer_exists(page, GENERIC_EDITORS),
+        generic_editor_actionable: providers::common::visible_composer_exists(
+            page,
+            GENERIC_EDITORS,
+        ),
     }
 }
 
@@ -235,11 +238,16 @@ mod composer_preflight_diagnostic_tests {
         let mut page = browser.new_page().await.unwrap();
         let html = "<html><body><div id='prompt-textarea' contenteditable='true' hidden></div><textarea id='alternate'></textarea></body></html>";
         let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
-        page.goto(&format!("data:text/html,{encoded}")).await.unwrap();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
         let evidence = composer_preflight_evidence("chatgpt", &page, &["#prompt-textarea"]);
         assert!(evidence.configured_input_present);
         assert!(evidence.generic_editor_actionable);
-        assert!(!providers::common::visible_composer_exists(&page, &["#prompt-textarea"]));
+        assert!(!providers::common::visible_composer_exists(
+            &page,
+            &["#prompt-textarea"]
+        ));
         assert_eq!(evidence.document_ready, "complete");
     }
 
