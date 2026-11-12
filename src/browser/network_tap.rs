@@ -19,6 +19,7 @@ fn provider_network_tap_flag_enabled(value: &str) -> bool {
 
 const MAX_PROVIDER_NETWORK_TAP_REPORTED_BYTES: usize = 1_048_576;
 const MAX_MISTRAL_SCRIPT_FAILURE_LOGS_PER_PAGE: usize = 8;
+const MAX_META_AI_DOCUMENT_LOGS_PER_PAGE: usize = 8;
 
 /// Script modulepreloads can arrive as Other/Fetch rather than Script.
 /// Examine pathname suffixes privately, never include paths or query data in
@@ -57,6 +58,19 @@ fn is_first_party_mistral_host(host: &str) -> bool {
     host == "mistral.ai" || host.ends_with(".mistral.ai")
 }
 
+/// Only first-party Meta AI *document* response statuses are logged.
+/// An HTTPS response from an unrelated redirect host must never be classified
+/// as Meta AI content; host checks deliberately reject lookalike suffixes.
+fn is_metaai_document_response(
+    provider: Provider,
+    resource_type: obscura_core::ResourceType,
+    host: &str,
+) -> bool {
+    provider == Provider::MetaAI
+        && resource_type == obscura_core::ResourceType::Document
+        && matches!(host.to_ascii_lowercase().as_str(), "meta.ai" | "www.meta.ai")
+}
+
 fn safe_hostname(host: &str) -> &str {
     if !host.is_empty()
         && host.len() <= 128
@@ -88,15 +102,47 @@ pub(super) fn attach_provider_network_tap(
     let verbose_enabled = provider_network_tap_enabled(provider);
     // Script HTTP failures on the Mistral provider are security-safe default
     // diagnostics. The existing Fetch/XHR tap remains opt-in for other sites.
-    if !verbose_enabled && provider != Provider::Mistral {
+    if !verbose_enabled && !matches!(provider, Provider::Mistral | Provider::MetaAI) {
         return None;
     }
 
     let provider_name = provider.name();
     let script_errors_seen = Arc::new(AtomicUsize::new(0));
+    let metaai_documents_seen = Arc::new(AtomicUsize::new(0));
     let mistral_403_seen = Arc::new(AtomicBool::new(false));
     let observed_403 = Arc::clone(&mistral_403_seen);
+    let metaai_seen = Arc::clone(&metaai_documents_seen);
     page.on_response(Arc::new(move |info, response| {
+        if is_metaai_document_response(
+            provider,
+            info.resource_type,
+            response.url.host_str().unwrap_or(""),
+        ) && metaai_seen.fetch_add(1, Ordering::Relaxed)
+            < MAX_META_AI_DOCUMENT_LOGS_PER_PAGE
+        {
+            // HTTP status and bounded body length only. Do not log the
+            // address/path, cookies, headers, response body or script text.
+            let status = response.status;
+            if status >= 400 {
+                tracing::warn!(
+                    provider = "metaai",
+                    resource_type = "document",
+                    status,
+                    response_bytes_observed = provider_network_tap_reported_bytes(response.body.len()),
+                    redirect_hops = response.redirected_from.len().min(8),
+                    "Meta AI document HTTP response observed (metadata only)"
+                );
+            } else {
+                tracing::info!(
+                    provider = "metaai",
+                    resource_type = "document",
+                    status,
+                    response_bytes_observed = provider_network_tap_reported_bytes(response.body.len()),
+                    redirect_hops = response.redirected_from.len().min(8),
+                    "Meta AI document HTTP response observed (metadata only)"
+                );
+            }
+        }
         let javascript_asset_path = is_javascript_asset_path(info.url.path())
             || is_javascript_asset_path(response.url.path())
             || response
@@ -157,6 +203,37 @@ pub(super) fn attach_provider_network_tap(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn meta_ai_only_logs_first_party_document_response_metadata() {
+        use obscura_core::ResourceType;
+        for host in ["meta.ai", "www.meta.ai", "WWW.META.AI"] {
+            assert!(is_metaai_document_response(
+                Provider::MetaAI,
+                ResourceType::Document,
+                host
+            ));
+        }
+        for host in ["meta.ai.attacker.invalid", "fake-meta.ai", "login.meta.ai", ""] {
+            assert!(!is_metaai_document_response(
+                Provider::MetaAI,
+                ResourceType::Document,
+                host
+            ));
+        }
+        for kind in [ResourceType::Script, ResourceType::Fetch, ResourceType::Other] {
+            assert!(!is_metaai_document_response(
+                Provider::MetaAI,
+                kind,
+                "www.meta.ai"
+            ));
+        }
+        assert!(!is_metaai_document_response(
+            Provider::ChatGPT,
+            ResourceType::Document,
+            "www.meta.ai"
+        ));
+    }
 
     #[test]
     fn only_first_party_mistral_script_failure_can_mark_blocker() {
