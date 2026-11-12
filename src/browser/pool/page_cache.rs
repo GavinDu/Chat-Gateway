@@ -156,10 +156,8 @@ mod tests {
             .observed_mistral_script_403());
 
         // Replacing a browser page must discard the old network status.
-        pages.borrow_mut().insert(
-            Provider::Mistral,
-            Rc::new(browser.new_page().await.unwrap()),
-        );
+        let fresh = Rc::new(browser.new_page().await.unwrap());
+        pages.borrow_mut().insert(Provider::Mistral, fresh);
         let replaced = PageLease::take(&pages, Provider::Mistral).unwrap();
         assert!(!replaced.observed_mistral_script_403());
     }
@@ -171,15 +169,14 @@ mod tests {
             .build()
             .unwrap();
         let pages = Rc::new(RefCell::new(ProviderPageCache::new(1)));
+        let first = Rc::new(browser.new_page().await.unwrap());
         pages.borrow_mut().insert_with_script_status(
             Provider::Mistral,
-            Rc::new(browser.new_page().await.unwrap()),
+            first,
             Some(Arc::new(AtomicBool::new(true))),
         );
-        pages.borrow_mut().insert(
-            Provider::ChatGPT,
-            Rc::new(browser.new_page().await.unwrap()),
-        );
+        let second = Rc::new(browser.new_page().await.unwrap());
+        pages.borrow_mut().insert(Provider::ChatGPT, second);
         pages.borrow_mut().insert(
             Provider::Mistral,
             Rc::new(browser.new_page().await.unwrap()),
