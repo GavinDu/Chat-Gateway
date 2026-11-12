@@ -49,6 +49,14 @@ fn is_mistral_script_failure(
                 )))
 }
 
+/// Only a first-party Mistral script 403 can classify the composer as
+/// provider-asset blocked. Optional third-party analytics failures are not
+/// enough to establish that the editor's own JavaScript is unavailable.
+fn is_first_party_mistral_host(host: &str) -> bool {
+    let host = host.to_ascii_lowercase();
+    host == "mistral.ai" || host.ends_with(".mistral.ai")
+}
+
 fn safe_hostname(host: &str) -> &str {
     if !host.is_empty()
         && host.len() <= 128
@@ -103,7 +111,12 @@ pub(super) fn attach_provider_network_tap(
         ) {
             // Record even after the eight-entry log cap. This per-page flag
             // contains no hostname, URL, cookies, or response body.
-            if response.status == 403 {
+            if response.status == 403
+                && response
+                    .url
+                    .host_str()
+                    .is_some_and(is_first_party_mistral_host)
+            {
                 observed_403.store(true, Ordering::Relaxed);
             }
             if script_errors_seen.fetch_add(1, Ordering::Relaxed)
@@ -144,6 +157,16 @@ pub(super) fn attach_provider_network_tap(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_first_party_mistral_script_failure_can_mark_blocker() {
+        for host in ["chat.mistral.ai", "assets.mistral.ai", "mistral.ai"] {
+            assert!(is_first_party_mistral_host(host));
+        }
+        for host in ["evil-mistral.ai", "mistral.ai.example.com", "static.cloudflareinsights.com"] {
+            assert!(!is_first_party_mistral_host(host));
+        }
+    }
 
     #[test]
     fn mistral_script_failure_filter_is_exact_and_status_bounded() {
