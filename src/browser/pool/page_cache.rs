@@ -177,10 +177,8 @@ mod tests {
         );
         let second = Rc::new(browser.new_page().await.unwrap());
         pages.borrow_mut().insert(Provider::ChatGPT, second);
-        pages.borrow_mut().insert(
-            Provider::Mistral,
-            Rc::new(browser.new_page().await.unwrap()),
-        );
+        let replacement = Rc::new(browser.new_page().await.unwrap());
+        pages.borrow_mut().insert(Provider::Mistral, replacement);
         let lease = PageLease::take(&pages, Provider::Mistral).unwrap();
         assert!(!lease.observed_mistral_script_403());
     }
