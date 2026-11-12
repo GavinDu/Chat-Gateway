@@ -39,6 +39,79 @@ mod session_worker_error_redaction_tests {
     }
 }
 
+/// The browser worker waits for a composer *before* invoking the provider
+/// adapter. A timeout here otherwise bypasses adapter-level diagnostics.
+/// Never record the selector, URL, prompt, page text or upstream error string.
+fn report_composer_preflight_failure(
+    provider: &str,
+    page: &obscura_core::Page,
+    error: anyhow::Error,
+) -> anyhow::Error {
+    tracing::warn!(
+        provider,
+        stage = "composer_preflight",
+        outcome = "unavailable",
+        "provider composer diagnostic"
+    );
+    if provider == "mistral" {
+        let diagnostics = providers::mistral::mistral_readiness_diagnostics(page);
+        tracing::warn!(
+            provider = "mistral",
+            stage = "composer_preflight",
+            diagnostics = %diagnostics,
+            "Mistral composer readiness failed"
+        );
+        // Only observed first-party script HTTP 403 evidence can justify the
+        // typed asset-blocked error. DOM faults and missing Resource Timing
+        // status are not proof of a CDN or authentication policy denial.
+        if diagnostics.contains("blocker=script_http_403") {
+            return anyhow::Error::new(providers::mistral::MistralAssetBlockedError);
+        }
+    }
+    error
+}
+
+#[cfg(test)]
+mod composer_preflight_diagnostic_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn missing_mistral_composer_retains_original_failure_without_403_evidence() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        page.goto("data:text/html,%3Chtml%3E%3Cbody%3Eno%20composer%3C/body%3E%3C/html%3E")
+            .await
+            .unwrap();
+        let original = anyhow::anyhow!("composer missing");
+        let reported = report_composer_preflight_failure("mistral", &page, original);
+        assert_eq!(reported.to_string(), "composer missing");
+        assert!(reported
+            .downcast_ref::<providers::mistral::MistralAssetBlockedError>()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn missing_chatgpt_composer_retains_original_failure() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        page.goto("data:text/html,%3Chtml%3E%3Cbody%3E%3C/body%3E%3C/html%3E")
+            .await
+            .unwrap();
+        let reported = report_composer_preflight_failure(
+            "chatgpt",
+            &page,
+            anyhow::anyhow!("composer unavailable"),
+        );
+        assert_eq!(reported.to_string(), "composer unavailable");
+    }
+}
+
 /// Cancel an in-flight provider operation as soon as its downstream receiver
 /// disappears. The biased order checks disconnect first when both branches
 /// are ready, avoiding even an immediately-ready stale navigation/model step.
@@ -601,7 +674,12 @@ pub(super) fn browser_thread(
                                 let Some(composer) = send_unless_disconnected(&chunks,
                                     providers::common::wait_for_selector(&mut page, &adapter.effective_selectors().input_refs(), 15_000)).await else { return; };
                                 if let Err(error) = composer {
-                                    let _ = chunks.send(Err(error)).await;
+                                    let classified = report_composer_preflight_failure(
+                                        provider.name(),
+                                        &page,
+                                        error,
+                                    );
+                                    let _ = chunks.send(Err(classified)).await;
                                     return;
                                 }
                                 let ready = if thread_url.is_some() {
