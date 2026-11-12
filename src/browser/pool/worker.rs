@@ -1041,7 +1041,7 @@ pub(super) fn browser_thread(
                                     || async {
                                     let mut page = super::browser_factory::new_page(&browser).await?;
                                     // Observe script fetch failures on the restored page too.
-                                    crate::browser::network_tap::attach_provider_network_tap(&mut page, provider);
+                                    let network_script_403 = crate::browser::network_tap::attach_provider_network_tap(&mut page, provider);
                                     page.goto(provider.login_url()).await?;
                                     let storage_cleared = page.evaluate(
                                         "(()=>{try{localStorage.clear();return true;}catch(_){return false;}})()"
@@ -1051,9 +1051,15 @@ pub(super) fn browser_thread(
                                     }
                                     session::clear_provider_cookies(&browser, provider.name())?;
                                     PageSession::open(&browser, &mut page, provider, Some(&file)).await?;
-                                    Ok(Rc::new(page))
+                                    Ok((Rc::new(page), network_script_403))
                                     },
-                                    |replacement| { pages.borrow_mut().insert(provider, replacement); },
+                                    |(replacement, network_script_403)| {
+                                        pages.borrow_mut().insert_with_script_status(
+                                            provider,
+                                            replacement,
+                                            network_script_403,
+                                        );
+                                    },
                                     ).await
                                     }).await?;
                                     if activated { provider_sessions.record_session_import(provider.name()); }
@@ -1079,6 +1085,7 @@ pub(super) fn browser_thread(
                                     let _guard = lock.lock().await;
                                     applied_imports.borrow_mut().remove(&provider);
                                     let mut page = super::browser_factory::new_page(&browser).await?;
+                                    let network_script_403 = crate::browser::network_tap::attach_provider_network_tap(&mut page, provider);
                                     page.goto(provider.login_url()).await?;
                                     let storage_cleared = page.evaluate(
                                         "(()=>{try{localStorage.clear();return true;}catch(_){return false;}})()"
@@ -1089,7 +1096,11 @@ pub(super) fn browser_thread(
                                     session::clear_provider_cookies(&browser, provider.name())?;
                                     page.goto(provider.login_url()).await?;
                                     let removed = session::delete_session_snapshot(provider.name())?;
-                                    pages.borrow_mut().insert(provider, Rc::new(page));
+                                    pages.borrow_mut().insert_with_script_status(
+                                        provider,
+                                        Rc::new(page),
+                                        network_script_403,
+                                    );
                                     login_pages.borrow_mut().remove(&provider);
                                     login_meta.borrow_mut().remove(&provider);
                                     Ok(removed)
