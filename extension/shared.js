@@ -165,6 +165,13 @@ async function providerCookieSnapshot(provider) {
   return {cookies:Array.from(deduped.values()), local_storage:{}, ts:new Date().toISOString()};
 }
 
+async function cookieSnapshotVersion(snapshot, scope) {
+  if (!crypto.subtle?.digest || typeof TextEncoder === "undefined") return null;
+  const encoded = new TextEncoder().encode(JSON.stringify([scope, snapshot.cookies]));
+  const bytes = new Uint8Array(await crypto.subtle.digest("SHA-256", encoded));
+  return Array.from(bytes, byte => byte.toString(16).padStart(2, "0")).join("");
+}
+
 async function syncProvider(provider) {
   const {gateway, token, linkedProviders = []} = await chrome.storage.local.get(["gateway", "token", "linkedProviders"]);
   if (!gateway || !token || !linkedProviders.includes(provider)) return "skipped";
