@@ -55,6 +55,8 @@ function fixture({connected = false, linked = false, cookies = true, authenticat
     document:{getElementById:node,createElement:newNode},
     window:{addEventListener(){}}, setInterval(){},
     confirm:()=>true,
+    isLocalGateway: value => value.startsWith("http://127.0.0.1:") || value.startsWith("http://localhost:"),
+    hasRelayConnection: state => Boolean(state.gateway && (state.token || state.connectionMode === "local")),
     normalizeGateway:value=>value,
     PROVIDER_LOGIN_URLS:{metaai:"https://www.meta.ai/"},
     PROVIDERS:{metaai:["meta.ai"]},
