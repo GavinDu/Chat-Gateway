@@ -15,7 +15,7 @@ pub const SELECTORS: SelectorSet = SelectorSet {
     picker: &["button[data-testid=\"model-switcher\"]", "text:button=ChatGPT", "div#model-switcher"],
     input: &["#prompt-textarea", "div#prompt-textarea[contenteditable=\"true\"]", "textarea[data-id=\"root\"]", "textarea#mobile-composer-prompt[name=\"prompt\"]", "form[data-chatgpt-composer] div.ProseMirror[contenteditable=\"true\"][role=\"textbox\"]"],
     send: &["form[data-chatgpt-composer] button[aria-label=\"Send\"]", "button[data-testid=\"send-button\"]", "button[aria-label=\"Send prompt\"]", "form:has(textarea#mobile-composer-prompt[name=\"prompt\"]) button[aria-label=\"Send message\"]"],
-    response: &["div[data-message-author-role=\"assistant\"] div.markdown", "article div.markdown", "div[data-message-id] div.markdown"],
+    response: &["[class*=\"DilResponseRoot-\"]", "div[data-message-author-role=\"assistant\"] div.markdown", "article div.markdown", "div[data-message-id] div.markdown"],
     model_keywords: "chatgpt|gpt|o1|o3|o4",
     model_pairs: &[("button[data-testid='model-switcher-dropdown-button'], button[aria-label*='model' i], [data-testid='model-switcher-dropdown-button']", "[role='menuitem'], [role='option'], [data-testid*='model' i]")],
 };
@@ -85,6 +85,41 @@ impl SiteAdapter for ChatGPTAdapter {
 
 #[cfg(test)]
 mod composer_tests {
+    #[tokio::test]
+    async fn current_response_root_preserves_all_blocks_and_excludes_user_and_actions() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body><main>
+            <div class="group/user-message"><div class="MarkdownRoot-user">user echo</div></div></main>
+            <div class="DilRenderer-new DilResponseRoot-current">
+                <div class="MarkdownRoot-first"><p>first block</p></div>
+                <div class="MarkdownRoot-second"><p>second block</p></div>
+                <div class="MarkdownRoot-hidden" hidden>hidden block</div>
+                <button>Reload response</button>
+            </div>
+            <button>Copy reply</button>
+            <div class="DilResponseRoot-hidden" hidden>hidden stale answer</div>
+            <div class="DilResponseRoot-pending"></div>
+            </body></html>"#;
+        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        let text =
+            crate::providers::common::response_text(&page, super::SELECTORS.response).unwrap();
+        assert_eq!(text, "first block\n\nsecond block");
+        assert!(
+            !text.contains("user echo") && !text.contains("Copy reply") && !text.contains("stale")
+        );
+        let probe =
+            crate::providers::common::response_probe(&page, super::SELECTORS.response, false);
+        assert_eq!(probe.text.as_deref(), Some(text.as_str()));
+        assert_eq!(probe.count, 2);
+    }
+
     #[tokio::test]
     async fn scoped_editor_rejects_dialogs_and_multiple_forms() {
         let browser = obscura_core::Browser::builder()

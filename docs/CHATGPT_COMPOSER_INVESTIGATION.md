@@ -145,3 +145,65 @@ rewritten. Adapter diagnostics call the same production retention function.
 A regression covers raw whitespace preservation through the send-time guard.
 All four CI jobs passed f0b0091; the subsequent text-representation fix needs
 its own CI and live checks. PR results record the latest tested commit.
+
+## ChatGPT-only follow-up
+
+The user-provided 08:45 screenshot shows the diagnostic prompt receiving OK.
+Do not treat the earlier lack of authentication evidence as proof of an invalid
+session. Subsequent investigation was confined to ChatGPT.
+
+The pinned Obscura WebSocket implementation opens synthetically and drops
+outgoing data. A ChatGPT-only, page-scoped WSS bridge now forwards real frames
+with verified TLS and the browser cookie jar. Its private intercepted endpoint
+opens no listener. Targets are restricted to HTTPS first-party ChatGPT hosts
+with public resolved addresses; queues, frames and connection counts are
+bounded. Navigation resets invalidate pending opens and release orphan sockets.
+Staggered address attempts prevent one unreachable route delaying alternatives.
+
+The pinned ReadableStream shim also ignores underlyingSource.pull. A narrowly
+scoped compatibility hook supplies serialized lazy pulls after startup, guarded
+by the known shim's structure and ChatGPT origin. Native browser streams and
+other provider pages are unchanged. A native fixture covers concurrent reads,
+asynchronous startup and stream completion. Live causality has not been
+isolated: these repairs do not establish reliable provider operation.
+
+The live ChatGPT answer uses DilResponseRoot/MarkdownRoot classes and its user
+turns use group/user-message; legacy author-role/article/markdown selectors are
+absent. Add the observed markers and share answer extraction between normal
+reads and polling. Extract the outermost Markdown blocks inside the response
+root, excluding sibling recovery controls. Preserve all answer blocks and
+literal control-label words in answer text. Submission checks still require
+positive transitions and a matching submitted prompt; ChatGPT alone receives a
+60-second acknowledgement budget inside the existing total request deadline.
+
+One instrumented full API request returned HTTP 200 in about 60 seconds with
+OK plus a Reload response control label. The server's completed generation
+response contained the expected test answer. This establishes a usable session
+and genuine provider generation for that request, not reliable recovery. The
+control-label leak was corrected and covered by the sanitized response fixture.
+Subsequent clean JSON and streaming requests both returned HTTP 502 at submission
+acknowledgement. The latest adapter probe also found the editor, retained its
+draft and clicked Send but received no response within its 45-second window.
+
+Content-free diagnostics showed HTTP 200 for account/conversation setup and
+verification-required flags from ChatGPT, without a visible login or challenge
+page. Those flags alone do not prove manual verification is required: the
+successful generation also followed such flags. Failed attempts did not reach
+the final generation request. Current extension token state remains unverified
+because the Mac is still locked. Per the user's stop condition, live attempts
+were stopped rather than treating one success as resolution.
+
+Temporary page-shape captures and response-body/test-answer diagnostics were
+removed from the candidate. No cookies, tokens, complete HTML, or conversation
+captures were committed. The original configuration edits and session/key
+volumes were preserved. Disposable test containers and the encrypted session
+copy are removed after the investigation.
+
+Checks: 16 current-layout/submission regressions, five native transport/stream
+regressions, four JS facade tests, three provider fixtures, formatting, diff
+checks and clippy pass. Full macOS Rust run: 658 passed, one existing failure
+because /dev/shm is absent. No test was skipped or weakened. Exact feature head
+CI results are recorded on PR #944 after pushing. MCP capability preflight was
+repeated inside /workspace/chat-gateway: Linux, node/python3/cargo available,
+SSH absent and Chromium prerequisites not established. Browser/SSH E2E remains
+NOT RUN. No merge, merged-main E2E or validated main release was performed.

@@ -189,6 +189,22 @@ fn decode_response_probe(value: serde_json::Value) -> ResponseProbe {
     }
 }
 
+// ChatGPT's current response root also contains recovery controls. Read
+// only its outermost Markdown blocks, preserving multi-block answers and
+// literal control-label words in the answer. Other selectors keep their text.
+const RESPONSE_CONTENT_JS: &str = r#"
+    const responseContent = node => {
+        if (!node.matches('[class*="DilResponseRoot-"]')) return node.innerText || node.textContent || '';
+        const blocks=Array.from(node.querySelectorAll('[class*="MarkdownRoot-"]')).filter(block => {
+            const ancestor=block.parentElement?.closest('[class*="MarkdownRoot-"]');
+            return (!ancestor || !node.contains(ancestor)) && block.getClientRects().length > 0 &&
+                getComputedStyle(block).visibility !== 'hidden' &&
+                !block.closest('button, [role="button"], [hidden], [inert], [aria-hidden="true"]');
+        });
+        return blocks.map(block => block.innerText || block.textContent || '').join('\n\n');
+    };
+"#;
+
 /// Read response text, response-node count, and streaming state in one
 /// JavaScript evaluation per polling tick.
 pub fn response_probe(
@@ -205,6 +221,7 @@ pub fn response_probe(
     let script = format!(
         r#"(() => {{
             const selectors = {selectors};
+            {response_content_js}
             const visible = el => {{
                 try {{
                     return el.getClientRects().length > 0 &&
@@ -241,7 +258,7 @@ pub fn response_probe(
                         // placeholder as the reply or hiding the earlier text.
                         for (let i = matches.length - 1; i >= 0; i -= 1) {{
                             const node = matches[i];
-                            const content = node.innerText || node.textContent || "";
+                            const content = responseContent(node);
                             if (content.trim()) {{
                                 text = content;
                                 lastResponseNode = node;
@@ -291,6 +308,7 @@ pub fn response_probe(
             }}
             return {{ text, count: nodes.size, streaming, postAnswerAffordance, url, challenge }};
         }})()"#,
+        response_content_js = RESPONSE_CONTENT_JS,
         check_body_challenge = check_body_challenge,
         challenge_text_js = crate::provider_guard::NON_MESSAGE_CHALLENGE_TEXT_JS,
     );
@@ -1583,17 +1601,19 @@ pub fn last_element_text(page: &Page, selector: &str) -> Option<String> {
     let js = format!(
         r#"(() => {{
             const nodes = Array.from(document.querySelectorAll({sel_js}));
+            {response_content_js}
             for (let i = nodes.length - 1; i >= 0; i--) {{
                 const node = nodes[i];
                 if (!node.getClientRects().length ||
                     window.getComputedStyle(node).visibility === 'hidden' ||
                     node.closest('[hidden], [inert], [aria-hidden="true"], [aria-disabled="true"], fieldset[disabled]') ||
                     node.disabled || node.matches(':disabled')) continue;
-                const value = node.innerText || node.textContent || '';
+                const value = responseContent(node);
                 if (value.trim()) return value;
             }}
             return null;
-        }})()"#
+        }})()"#,
+        response_content_js = RESPONSE_CONTENT_JS,
     );
     page.evaluate(&js).as_str().map(str::to_owned)
 }
@@ -1941,7 +1961,15 @@ pub async fn send_prompt(
     }
     if let Some(before) = baseline {
         let start = std::time::Instant::now();
-        while start.elapsed() < Duration::from_secs(5) {
+        // ChatGPT can establish its authenticated socket after the composer
+        // becomes actionable. Keep the acknowledgement strict, but allow that
+        // handshake to finish inside the outer provider request deadline.
+        let acknowledgement_budget = if expected_submission_provider == Some("chatgpt") {
+            Duration::from_secs(60)
+        } else {
+            Duration::from_secs(5)
+        };
+        while start.elapsed() < acknowledgement_budget {
             drive_page(page, Duration::from_millis(150)).await;
             if submission_provider_for_url(&page.url()) != expected_submission_provider {
                 check_session("browser", page)?;
@@ -2005,7 +2033,8 @@ fn submission_snapshot(
             for (const selector of [
                 '[data-message-author-role="user"]',
                 '[data-testid="user-message"]',
-                '[data-testid="message-user"]'
+                '[data-testid="message-user"]',
+                'main [class~="group/user-message"]'
             ]) {{
                 try {{ document.querySelectorAll(selector).forEach(node => {{
                     if (visible(node)) userTurns.add(node);
@@ -2090,7 +2119,7 @@ fn submission_observed_for_prompt(
             const normalized = text => (text || '').replace(/\s+/g, ' ').trim();
             if (!normalized(expected)) return false;
             const turns = Array.from(document.querySelectorAll(
-                '[data-message-author-role="user"], [data-testid="user-message"], [data-testid="message-user"]'
+                '[data-message-author-role="user"], [data-testid="user-message"], [data-testid="message-user"], main [class~="group/user-message"]'
             )).filter(node => {{
                 try {{
                     return node.getClientRects().length > 0 &&
@@ -2135,6 +2164,43 @@ fn submission_accepted(before: &SubmissionSnapshot, after: &SubmissionSnapshot) 
     user_turn_ack
         || after.response_count > before.response_count
         || (after.streaming && !before.streaming)
+}
+
+#[cfg(test)]
+mod current_chatgpt_submission_tests {
+    #[tokio::test]
+    async fn current_user_turn_requires_matching_prompt_and_cleared_input() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html="<html><body><main><textarea id='prompt'>fixture prompt</textarea></main></body></html>";
+        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        let before = super::submission_snapshot(&page, "#prompt", &[]).unwrap();
+        page.evaluate(r#"(() => {const turn=document.createElement('div');turn.className='group/user-message';turn.textContent='fixture prompt';document.querySelector('main').appendChild(turn);})()"#);
+        let uncleared = super::submission_snapshot(&page, "#prompt", &[]).unwrap();
+        assert!(!super::submission_observed_for_prompt(
+            &page,
+            &before,
+            &uncleared,
+            "fixture prompt"
+        )
+        .unwrap());
+        page.evaluate("document.querySelector('#prompt').value=''");
+        let after = super::submission_snapshot(&page, "#prompt", &[]).unwrap();
+        assert!(
+            super::submission_observed_for_prompt(&page, &before, &after, "fixture prompt")
+                .unwrap()
+        );
+        assert!(
+            !super::submission_observed_for_prompt(&page, &before, &after, "different prompt")
+                .unwrap()
+        );
+    }
 }
 
 #[cfg(test)]
