@@ -82,7 +82,15 @@ try {
   await worker.evaluate(gatewayUrl => chrome.storage.local.set({gateway:gatewayUrl}), base);
   const popup = await context.newPage();
   await popup.goto("chrome-extension://" + id + "/popup.html");
-  await popup.locator("#linked:not([hidden])").waitFor({timeout:20000});
+  try {
+    await popup.locator("#linked:not([hidden])").waitFor({timeout:20000});
+  } catch (error) {
+    console.log("Local popup diagnostic:", await popup.locator("#message").innerText());
+    console.log("Local popup mode:", await popup.locator("#connection-help").innerText());
+    console.log("Local popup storage:", await worker.evaluate(() => chrome.storage.local.get(
+      ["gateway", "connectionMode", "localDisconnected"])));
+    throw error;
+  }
   await popup.locator("#status li").first().waitFor({timeout:10000});
   assert.equal(await popup.locator("#status li").count(),9);
   const stored = await worker.evaluate(() => chrome.storage.local.get(
