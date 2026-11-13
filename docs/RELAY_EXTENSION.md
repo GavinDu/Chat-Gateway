@@ -66,7 +66,7 @@ states and timestamps; it never contains session contents or install tokens.
 This message is **internal to the extension**; there is no unauthenticated
 external-messaging endpoint.
 
-To reduce periodic work, a connected popup refreshes its status every 30
+To reduce periodic work, a connected popup refreshes its status every 10
 seconds (and on focus or manual refresh). Pending pairing retains a
 five-second check; the service worker's linked-provider repair interval is
 15 minutes and cookie changes are debounced for 10 seconds per provider.
