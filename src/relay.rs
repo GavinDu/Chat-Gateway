@@ -994,6 +994,58 @@ fn provider_authentication_status(
     }
 }
 
+/// Fixed-category runtime diagnostics. Never return upstream errors, selectors,
+/// URLs, browser storage or credential material in the extension-facing API.
+fn relay_provider_issue(
+    linked: bool,
+    enabled: bool,
+    authentication: &str,
+    state: crate::provider_state::ProviderSessionState,
+    manual_verification_required: bool,
+    last_error: Option<&str>,
+) -> Option<&'static str> {
+    use crate::provider_state::ProviderSessionState;
+    if !enabled {
+        Some("provider_disabled")
+    } else if !linked {
+        Some("session_not_linked")
+    } else if manual_verification_required {
+        Some("manual_verification_required")
+    } else if last_error.is_some_and(|error| error.contains("JavaScript assets blocked (HTTP 403)")) {
+        Some("provider_assets_blocked")
+    } else if state == ProviderSessionState::NeedsLogin || authentication == "needs_login" {
+        Some("needs_login")
+    } else if state == ProviderSessionState::Degraded {
+        Some("provider_degraded")
+    } else if authentication != "verified" {
+        Some("authentication_unverified")
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod relay_provider_issue_tests {
+    use super::relay_provider_issue;
+    use crate::provider_state::ProviderSessionState::{Degraded, NeedsLogin, Ready, Unknown};
+
+    #[test]
+    fn diagnostics_are_fixed_categories_not_upstream_error_text() {
+        assert_eq!(
+            relay_provider_issue(true, true, "unknown", Degraded, false, Some("JavaScript assets blocked (HTTP 403): cookie=private")),
+            Some("provider_assets_blocked")
+        );
+        assert_eq!(
+            relay_provider_issue(true, true, "unknown", Degraded, true, Some("cookie=private")),
+            Some("manual_verification_required")
+        );
+        assert_eq!(relay_provider_issue(true, true, "needs_login", NeedsLogin, false, None), Some("needs_login"));
+        assert_eq!(relay_provider_issue(true, true, "verified", Ready, false, None), None);
+        assert_eq!(relay_provider_issue(true, true, "unknown", Unknown, false, None), Some("authentication_unverified"));
+        assert_eq!(relay_provider_issue(false, true, "unknown", Unknown, false, None), Some("session_not_linked"));
+    }
+}
+
 async fn optional_login_observations(
     observations: impl std::future::Future<
         Output = anyhow::Result<Vec<crate::browser::pool::LoginActiveInfo>>,
@@ -1053,6 +1105,7 @@ pub async fn status(State(app): State<Arc<crate::AppState>>, headers: HeaderMap)
         }
     };
     let mut providers = Vec::new();
+    let mut issues = Vec::new();
     for (provider, session_present) in PROVIDERS.into_iter().zip(session_presence) {
         let enabled = app
             .cfg
@@ -1064,11 +1117,23 @@ pub async fn status(State(app): State<Arc<crate::AppState>>, headers: HeaderMap)
             .iter()
             .find(|item| item.provider == provider)
             .and_then(|item| item.logged_in);
-        let lifecycle = app.provider_sessions.status(provider).state;
+        let runtime = app.provider_sessions.status(provider);
+        let lifecycle = runtime.state;
         let manual_verification_required =
             app.provider_sessions.manual_challenge_required(provider);
         let authentication =
             provider_authentication_status(observed, lifecycle, manual_verification_required);
+        let issue = relay_provider_issue(
+            session_present,
+            enabled,
+            authentication,
+            lifecycle,
+            manual_verification_required,
+            runtime.last_error.as_deref(),
+        );
+        if let Some(code) = issue {
+            issues.push(serde_json::json!({"provider":provider,"code":code}));
+        }
         providers.push(serde_json::json!({
             "provider": provider,
             "linked": session_present,
@@ -1076,9 +1141,10 @@ pub async fn status(State(app): State<Arc<crate::AppState>>, headers: HeaderMap)
             "authentication": authentication,
             "availability": lifecycle.as_str(),
             "manual_verification_required": manual_verification_required,
+            "issue": issue,
         }));
     }
-    Json(serde_json::json!({"ok":true,"providers":providers,"vault_mode":std::env::var("CHAT_GATEWAY_SESSION_STORE").as_deref()==Ok("vault")})).into_response()
+    Json(serde_json::json!({"ok":true,"providers":providers,"issues":issues,"vault_mode":std::env::var("CHAT_GATEWAY_SESSION_STORE").as_deref()==Ok("vault")})).into_response()
 }
 
 /// Relay import validates, encrypts and writes a credential snapshot. Those
