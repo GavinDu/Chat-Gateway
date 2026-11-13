@@ -244,3 +244,26 @@ test("relay diagnostics reads authenticated gateway status without exposing cred
   assert.equal(requests, 1, "repeated popup reads should reuse the short-lived dashboard snapshot");
   assert.ok(!JSON.stringify(first).includes("private-install-token"));
 });
+
+test("multiple manual syncs coalesce into one forced refresh behind an automatic import", async () => {
+  const f = loadBackground(["chatgpt"]);
+  let release;
+  const held = new Promise(resolve => { release = resolve; });
+  const attempts = [];
+  f.sandbox.syncProvider = async (_provider, opts) => {
+    attempts.push(opts.force);
+    if (attempts.length === 1) await held;
+    return "uploaded";
+  };
+  f.listeners.cookieChanged[0]({cookie:{domain:".chatgpt.com"}});
+  f.timers.get(1).callback();
+  await flushAsyncWork();
+  const request = () => new Promise(resolve =>
+    f.listeners.message[0]({type:"sync-provider", provider:"chatgpt"}, {}, resolve));
+  const a = request();
+  const b = request();
+  release();
+  await Promise.all([a,b]);
+  for (let i = 0; i < 4; i++) await flushAsyncWork();
+  assert.deepEqual(attempts, [false, true], "manual recovery runs once after the automatic import");
+});
