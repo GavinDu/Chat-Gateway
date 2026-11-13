@@ -62,12 +62,12 @@ function queueProviderTask(provider, work) {
 // Keep one trailing refresh per provider. It reads the latest cookie snapshot
 // when it starts, rather than replaying every rotation behind a slow import.
 const queuedProviderSyncs = new Map();
-function queueProviderSync(provider) {
+function queueProviderSync(provider, force = false) {
   const queued = queuedProviderSyncs.get(provider);
   if (queued) return queued;
   const pending = queueProviderTask(provider, () => {
     if (queuedProviderSyncs.get(provider) === pending) queuedProviderSyncs.delete(provider);
-    return syncProvider(provider).then(
+    return syncProvider(provider, {force}).then(
       result => {
         recordProviderDiagnostic(provider, result || "skipped");
         return result;
@@ -108,6 +108,12 @@ function logoutProviderFromRelay(provider) {
     if (!response.ok) throw new Error("Gateway logout failed (" + response.status + "). Auto sync is paused; retry logout.");
     providerDiagnostics.delete(provider);
     lastGatewayCheck = null;
+    const latest = await chrome.storage.local.get(["gateway", "token", "relaySnapshotVersions"]);
+    if (latest.gateway === expected.gateway && latest.token === expected.token) {
+      const versions = {...(latest.relaySnapshotVersions || {})};
+      delete versions[provider];
+      await chrome.storage.local.set({relaySnapshotVersions:versions});
+    }
   });
 }
 
@@ -138,7 +144,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
   if (message?.type === "sync-provider" && PROVIDERS[message.provider]) {
-    queueProviderSync(message.provider).then(syncStatus => sendResponse({ok:true,syncStatus:syncStatus || "skipped"})).catch(error => sendResponse({ok:false,error:error.message}));
+    queueProviderSync(message.provider, true).then(syncStatus => sendResponse({ok:true,syncStatus:syncStatus || "skipped"})).catch(error => sendResponse({ok:false,error:error.message}));
     return true;
   }
   if (message?.type === "logout-provider" && PROVIDERS[message.provider]) {
