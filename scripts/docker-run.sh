@@ -27,7 +27,7 @@ Usage:
   scripts/docker-run.sh restart
   scripts/docker-run.sh status
   scripts/docker-run.sh logs
-  scripts/docker-run.sh pairing-code
+  scripts/docker-run.sh pairing-code (legacy paired-mode only)
   scripts/docker-run.sh login <provider>
 
 Environment:
@@ -187,6 +187,7 @@ start_gateway() {
     -p "127.0.0.1:$PORT:$PORT"
     -e "PORT=$PORT"
     -e "CHAT_GATEWAY_DOCKER_LOCAL_BIND=1"
+    -e "CHAT_GATEWAY_LOCAL_RELAY_NO_PAIRING=1"
     -e "CHAT_GATEWAY_SESSION_STORE=vault"
     -e "CHAT_GATEWAY_VAULT_KEY_FILE=/run/secrets/vault.key"
     --label "chat-gateway.config-source=$CONFIG"
@@ -222,10 +223,10 @@ start_gateway() {
   echo "Persistent data: $DATA_VOLUME, $SESSION_VOLUME"
   echo "Encrypted-vault key: $KEY_VOLUME (mounted read-only; key is not printed)"
   if [[ -z "$EXTENSION_ID" ]]; then
-    echo "Connect from the extension and approve locally to remember its ID. CHAT_GATEWAY_EXTENSION_ID can optionally pin it."
+    echo "CHAT_GATEWAY_EXTENSION_ID can optionally restrict relay access to one extension ID."
   fi
-  echo "Connect from the extension using http://127.0.0.1:$PORT and approve the local confirmation tab."
-  echo "Legacy pairing code (optional): run '$0 pairing-code'."
+  echo "Local relay: no pairing, approval page or install token. Open the Chrome extension to connect."
+  echo "Provider website authentication and Chrome cookie permissions are still required."
 }
 
 case "${1:-}" in
