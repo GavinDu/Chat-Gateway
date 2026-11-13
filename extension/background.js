@@ -69,14 +69,20 @@ function queueProviderTask(provider, work) {
 // Keep one trailing refresh per provider. It reads the latest cookie snapshot
 // when it starts, rather than replaying every rotation behind a slow import.
 const queuedProviderSyncs = new Map();
+const queuedProviderForces = new Set();
 function queueProviderSync(provider, force = false) {
   const queued = queuedProviderSyncs.get(provider);
-  // Explicit operator recovery must not be swallowed by a queued automatic
-  // no-change refresh; the provider queue still serializes both operations.
-  if (queued && !force) return queued;
+  if (queued) {
+    // Upgrade one pending automatic refresh to manual without queueing
+    // duplicate calls that would repeatedly restart the provider page.
+    if (force) queuedProviderForces.add(provider);
+    return queued;
+  }
   const pending = queueProviderTask(provider, () => {
     if (queuedProviderSyncs.get(provider) === pending) queuedProviderSyncs.delete(provider);
-    return syncProvider(provider, {force}).then(
+    const shouldForce = force || queuedProviderForces.has(provider);
+    queuedProviderForces.delete(provider);
+    return syncProvider(provider, {force:shouldForce}).then(
       result => {
         recordProviderDiagnostic(provider, result || "skipped");
         if (result === "uploaded") lastGatewayCheck = null;
@@ -94,6 +100,7 @@ function queueProviderSync(provider, force = false) {
 function logoutProviderFromRelay(provider) {
   // Later sync requests belong after this logout barrier.
   queuedProviderSyncs.delete(provider);
+  queuedProviderForces.delete(provider);
   // Bind logout to the install present when the user clicked. An earlier
   // provider sync may still be queued while a fresh gateway is paired.
   const connectionAtClick = chrome.storage.local.get(["gateway", "token"]);
