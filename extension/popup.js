@@ -168,7 +168,14 @@ async function connectLocalGateway(gateway, requestPermission = false) {
     method:"GET", cache:"no-store", redirect:"error"
   });
   if (!response.ok || (await response.json()).no_pairing !== true) return false;
-  const previous = await chrome.storage.local.get(["gateway", "linkedProviders"]);
+  const previous = await chrome.storage.local.get(["gateway", "token", "connectionMode", "linkedProviders"]);
+  // Opening the popup must not invalidate the fingerprint of successfully
+  // imported sessions, or the next background repair would restart browsers.
+  if (previous.gateway === gateway && previous.connectionMode === "local" && !previous.token) {
+    showGatewayConnection(true);
+    await refreshStatus();
+    return true;
+  }
   const linkedProviders = previous.gateway === gateway ? (previous.linkedProviders || []) : [];
   await chrome.storage.local.set({
     gateway, connectionMode:"local", linkedProviders, localDisconnected:false
