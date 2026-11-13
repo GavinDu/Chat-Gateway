@@ -58,6 +58,10 @@ async function refreshStatus(force = false) {
     ? {ok:true, status:200, json:async () => diagnostics.gateway}
     : await relayFetch("/relay/v1/status", {method:"POST",body:"{}"});
   if (response.status === 401 || response.status === 403) {
+    const state = await chrome.storage.local.get(["gateway", "connectionMode"]);
+    if (state.connectionMode === "local" && isLocalGateway(state.gateway)) {
+      throw new Error("Local relay access rejected. Check the gateway mode and optional extension ID restriction.");
+    }
     await chrome.storage.local.remove("token");
     showGatewayConnection(false);
     throw new Error("Gateway connection expired or was revoked. Choose Connect to gateway to approve it again.");
@@ -151,21 +155,53 @@ async function openProviderLogin(provider) {
   }
 }
 
+// Detect local-only relay mode before asking for a pairing code. A plain
+// read-only mode probe contains no token and never collects provider cookies.
+async function connectLocalGateway(gateway, requestPermission = false) {
+  if (!isLocalGateway(gateway)) return false;
+  const origins = [gateway + "/*"];
+  const allowed = requestPermission
+    ? await chrome.permissions.request({origins})
+    : await chrome.permissions.contains({origins});
+  if (!allowed) return false;
+  const response = await fetch(gateway + "/relay/v1/mode", {
+    method:"GET", cache:"no-store", redirect:"error"
+  });
+  if (!response.ok || (await response.json()).no_pairing !== true) return false;
+  const previous = await chrome.storage.local.get(["gateway", "linkedProviders"]);
+  const linkedProviders = previous.gateway === gateway ? (previous.linkedProviders || []) : [];
+  await chrome.storage.local.set({
+    gateway, connectionMode:"local", linkedProviders, localDisconnected:false
+  });
+  await chrome.storage.local.remove(["token", "pendingConnection", "relaySnapshotVersions"]);
+  await chrome.alarms?.clear?.("relay-connection");
+  showGatewayConnection(true);
+  await refreshStatus(true);
+  return true;
+}
+
 function showConnectionMode() {
   const remote = $("gateway").value.trim().startsWith("https://");
   $("remote-pairing").hidden = !remote;
   $("connection-help").textContent = remote
-    ? "Private remote gateways use their existing one-time pairing code. Local approval is available for local gateways."
-    : "Connect once, approve locally, then your extension reconnects automatically.";
+    ? "Private remote gateways can use the legacy one-time pairing code."
+    : "Local gateway connects directly, without a pairing code or install token.";
 }
 $("gateway").addEventListener("input", showConnectionMode);
 
 async function initialize() {
-  const stored = await chrome.storage.local.get(["gateway","token"]);
+  const stored = await chrome.storage.local.get(["gateway","token","connectionMode","localDisconnected"]);
   if (stored.gateway) $("gateway").value = stored.gateway;
   showConnectionMode();
-  showGatewayConnection(Boolean(stored.token));
-  if (stored.token) {
+  if (!stored.localDisconnected && isLocalGateway($("gateway").value)) {
+    try {
+      if (await connectLocalGateway(normalizeGateway($("gateway").value))) return;
+    } catch (error) {
+      message("Local gateway unavailable: " + error.message);
+    }
+  }
+  showGatewayConnection(hasRelayConnection(stored));
+  if (hasRelayConnection(stored)) {
     try { await refreshStatus(); } catch (error) { message(error.message); }
   }
 }
@@ -173,6 +209,7 @@ async function initialize() {
 $("pair").addEventListener("click", async () => {
   try {
     const gateway = normalizeGateway($("gateway").value);
+    if (await connectLocalGateway(gateway, true)) return;
     const remote = gateway.startsWith("https://");
     const code = remote ? $("code").value.trim() : "";
     if (remote && !/^[0-9]{8}$/.test(code)) throw new Error("Enter the fresh 8-digit code from your private remote gateway.");
@@ -233,8 +270,8 @@ async function connectProvider(provider, openLogin = false) {
   if (!domains) throw new Error("Unsupported provider.");
   // Pairing may be revoked or replaced while Chrome's permission prompt or
   // browser cookie read is pending. Consent must belong to the exact install.
-  const connection = await chrome.storage.local.get(["gateway", "token"]);
-  if (!connection.gateway || !connection.token) {
+  const connection = await chrome.storage.local.get(["gateway", "token", "connectionMode"]);
+  if (!hasRelayConnection(connection)) {
     throw new Error("Connect to gateway before linking a provider.");
   }
   const patterns = domains.flatMap(domain => ["https://" + domain + "/*", "https://*." + domain + "/*"]);
@@ -242,8 +279,8 @@ async function connectProvider(provider, openLogin = false) {
     throw new Error("Provider permissions were not granted.");
   }
   const snapshot = await providerCookieSnapshot(provider);
-  const stored = await chrome.storage.local.get(["gateway", "token", "linkedProviders"]);
-  if (stored.gateway !== connection.gateway || stored.token !== connection.token) {
+  const stored = await chrome.storage.local.get(["gateway", "token", "connectionMode", "linkedProviders"]);
+  if (stored.gateway !== connection.gateway || stored.token !== connection.token || stored.connectionMode !== connection.connectionMode) {
     throw new Error("Gateway connection changed while linking the provider. Reconnect and retry.");
   }
   const prior = stored.linkedProviders || [];
@@ -271,10 +308,10 @@ async function connectProvider(provider, openLogin = false) {
   } catch (error) {
     // A failed first connection must not opt this provider into background
     // uploads. Leave prior consent unchanged on an existing connection.
-    const latest = await chrome.storage.local.get(["gateway", "token", "linkedProviders"]);
+    const latest = await chrome.storage.local.get(["gateway", "token", "connectionMode", "linkedProviders"]);
     // A delayed old-install failure must not revoke consent granted by a
     // newly paired gateway. Roll back only the install that initiated sync.
-    if (latest.gateway === connection.gateway && latest.token === connection.token) {
+    if (latest.gateway === connection.gateway && latest.token === connection.token && latest.connectionMode === connection.connectionMode) {
       await chrome.storage.local.set({
         linkedProviders:(latest.linkedProviders || []).filter(value => value !== provider || prior.includes(provider))
       });
@@ -310,6 +347,15 @@ $("refresh").addEventListener("click", async () => {
 
 $("unpair").addEventListener("click", async () => {
   try {
+    const connection = await chrome.storage.local.get(["gateway", "connectionMode"]);
+    if (connection.connectionMode === "local" && isLocalGateway(connection.gateway)) {
+      await chrome.storage.local.remove(["connectionMode", "token", "linkedProviders", "relaySnapshotVersions", "pendingConnection"]);
+      await chrome.storage.local.set({localDisconnected:true});
+      await chrome.alarms?.clear?.("relay-connection");
+      showGatewayConnection(false);
+      message("Local extension disconnected; provider sessions remain in the encrypted gateway vault.");
+      return;
+    }
     const response = await relayFetch("/relay/v1/unpair",{method:"POST",body:"{}"});
     if (!response.ok) throw new Error("Could not revoke the install token.");
     // A stale approval should not be able to silently reconnect a gateway
@@ -330,6 +376,12 @@ async function updateConnection() {
 }
 async function checkConnection() {
   try {
+    const state = await chrome.storage.local.get(["gateway", "token", "connectionMode", "pendingConnection"]);
+    if (state.connectionMode === "local" && isLocalGateway(state.gateway)) {
+      showGatewayConnection(true);
+      await refreshStatus();
+      return true;
+    }
     const result = await chrome.runtime.sendMessage({type:"poll-connection"});
     const {token, pendingConnection} = await chrome.storage.local.get(["token","pendingConnection"]);
     showGatewayConnection(Boolean(token));
