@@ -49,9 +49,14 @@ function showGatewayConnection(connected) {
   $("gateway").disabled = connected;
 }
 
-async function refreshStatus() {
-  // Privileged extension GETs can omit Origin; POST preserves the origin-bound relay protocol.
-  const response = await relayFetch("/relay/v1/status", {method:"POST",body:"{}"});
+async function refreshStatus(force = false) {
+  // The service-worker API exposes gateway status together with its own
+  // redacted connectivity/sync failures. Fall back to direct status for older
+  // worker versions or when the worker is unavailable.
+  const diagnostics = await chrome.runtime.sendMessage({type:"relay-diagnostics", force}).catch(() => null);
+  const response = diagnostics?.ok && diagnostics.gateway
+    ? {ok:true, status:200, json:async () => diagnostics.gateway}
+    : await relayFetch("/relay/v1/status", {method:"POST",body:"{}"});
   if (response.status === 401 || response.status === 403) {
     await chrome.storage.local.remove("token");
     showGatewayConnection(false);
@@ -88,7 +93,14 @@ async function refreshStatus() {
       : "Login unverified";
     const blocker = item.manual_verification_required ? "Manual provider verification required; open website"
       : item.availability === "degraded" ? "Gateway check unavailable; retry" : null;
-    status.textContent = [enabled, linked, browser, auth, ...(blocker ? [blocker] : [])].join(" · ");
+    const runtimeIssue = item.issue && item.issue !== "authentication_unverified"
+      ? "Gateway issue: " + item.issue.replaceAll("_", " ") : null;
+    const extensionIssue = diagnostics?.extension?.provider_sync?.[item.provider]?.issue;
+    status.textContent = [enabled, linked, browser, auth,
+      ...(blocker ? [blocker] : []),
+      ...(runtimeIssue ? [runtimeIssue] : []),
+      ...(extensionIssue ? ["Extension sync: " + extensionIssue.replaceAll("_", " ")] : [])
+    ].join(" · ");
     li.append(status);
 
     const actions = document.createElement("div");
@@ -292,7 +304,7 @@ async function logoutProvider(provider) {
 }
 
 $("refresh").addEventListener("click", async () => {
-  try { await refreshStatus(); message("Status refreshed."); } catch (error) { message(error.message); }
+  try { await refreshStatus(true); message("Status refreshed."); } catch (error) { message(error.message); }
 });
 
 
@@ -302,7 +314,7 @@ $("unpair").addEventListener("click", async () => {
     if (!response.ok) throw new Error("Could not revoke the install token.");
     // A stale approval should not be able to silently reconnect a gateway
     // after the user explicitly revoked this install.
-    await chrome.storage.local.remove(["token","linkedProviders","pendingConnection"]);
+    await chrome.storage.local.remove(["token","linkedProviders","pendingConnection","relaySnapshotVersions"]);
     await chrome.alarms?.clear?.("relay-connection");
     showGatewayConnection(false);
     message("Gateway disconnected. Saved provider sessions remain in the gateway vault. Reconnect to manage them.");
@@ -332,5 +344,11 @@ async function checkConnection() {
   } catch (error) { message(error.message); return false; }
 }
 initialize().then(updateConnection);
-setInterval(updateConnection, 5000);
+// Connected gateway dashboards use a bounded ten-second check for revocation without five-second polling.
+// Preserve prompt five-second approval completion only while pairing is pending.
+setInterval(updateConnection, 10_000);
+setInterval(async () => {
+  const {pendingConnection} = await chrome.storage.local.get("pendingConnection");
+  if (pendingConnection) await updateConnection();
+}, 5_000);
 window.addEventListener("focus", updateConnection);

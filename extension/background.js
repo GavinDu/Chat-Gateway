@@ -1,6 +1,59 @@
 importScripts("shared.js");
 
 const debounceTimers = new Map();
+// Internal API snapshots contain only fixed health categories and timestamps.
+// Never retain or return provider cookies, install credentials or raw errors.
+const providerDiagnostics = new Map();
+// Keep cache shorter than the popup check interval so token revocation is
+// never masked by a still-valid dashboard snapshot on the next poll.
+const CONNECTION_DIAGNOSTICS_TTL_MS = 5_000;
+let lastGatewayCheck = null;
+let lastGatewayCheckAt = 0;
+let lastGatewayIdentity = null;
+function classifyRelayFailure(error) {
+  const message = String(error?.message || "");
+  if (message.includes("timed out") || message.includes("cancelled")) return "gateway_timeout";
+  if (message.includes("permission") || message.includes("consent")) return "permission_or_consent";
+  if (message.includes("(504)")) return "activation_timeout";
+  if (message.includes("(403)") || message.includes("(401)")) return "gateway_unauthorized";
+  return "relay_unavailable";
+}
+function recordProviderDiagnostic(provider, state, errorCode = null) {
+  providerDiagnostics.set(provider, {
+    state, issue: errorCode, updated_at: new Date().toISOString()
+  });
+}
+async function relayDiagnostics(force = false) {
+  const current = await chrome.storage.local.get(["gateway", "token", "linkedProviders"]);
+  const identity = current.gateway && current.token ? current.gateway + "|" + current.token : null;
+  if (identity !== lastGatewayIdentity) {
+    lastGatewayCheck = null;
+    lastGatewayIdentity = identity;
+    providerDiagnostics.clear();
+  }
+  const extension = {
+    connected: Boolean(current.gateway && current.token),
+    linked_providers: [...(current.linkedProviders || [])].filter(provider => Boolean(PROVIDERS[provider])),
+    provider_sync: Object.fromEntries(providerDiagnostics),
+  };
+  if (!extension.connected) return {ok:false, extension, gateway_issue:"not_connected"};
+  if (!force && lastGatewayCheck && Date.now() - lastGatewayCheckAt < CONNECTION_DIAGNOSTICS_TTL_MS) {
+    return {ok:true, extension, gateway:lastGatewayCheck};
+  }
+  try {
+    const response = await relayFetch("/relay/v1/diagnostics", {method:"POST",body:"{}"});
+    if (!response.ok) {
+      return {ok:false, extension, gateway_issue:
+        response.status === 401 || response.status === 403 ? "gateway_unauthorized" : "gateway_request_failed"};
+    }
+    const gateway = await response.json();
+    lastGatewayCheck = gateway;
+    lastGatewayCheckAt = Date.now();
+    return {ok:true, extension, gateway};
+  } catch (error) {
+    return {ok:false, extension, gateway_issue:classifyRelayFailure(error)};
+  }
+}
 
 // Serialize each provider's automatic imports with logout so a delayed cookie
 // refresh cannot recreate a vault session after the user disconnects it.
@@ -18,12 +71,30 @@ function queueProviderTask(provider, work) {
 // Keep one trailing refresh per provider. It reads the latest cookie snapshot
 // when it starts, rather than replaying every rotation behind a slow import.
 const queuedProviderSyncs = new Map();
-function queueProviderSync(provider) {
+const queuedProviderForces = new Set();
+function queueProviderSync(provider, force = false) {
   const queued = queuedProviderSyncs.get(provider);
-  if (queued) return queued;
+  if (queued) {
+    // Upgrade one pending automatic refresh to manual without queueing
+    // duplicate calls that would repeatedly restart the provider page.
+    if (force) queuedProviderForces.add(provider);
+    return queued;
+  }
   const pending = queueProviderTask(provider, () => {
     if (queuedProviderSyncs.get(provider) === pending) queuedProviderSyncs.delete(provider);
-    return syncProvider(provider);
+    const shouldForce = force || queuedProviderForces.has(provider);
+    queuedProviderForces.delete(provider);
+    return syncProvider(provider, {force:shouldForce}).then(
+      result => {
+        recordProviderDiagnostic(provider, result || "skipped");
+        if (result === "uploaded") lastGatewayCheck = null;
+        return result;
+      },
+      error => {
+        recordProviderDiagnostic(provider, "failed", classifyRelayFailure(error));
+        throw error;
+      }
+    );
   });
   queuedProviderSyncs.set(provider, pending);
   return pending;
@@ -31,6 +102,7 @@ function queueProviderSync(provider) {
 function logoutProviderFromRelay(provider) {
   // Later sync requests belong after this logout barrier.
   queuedProviderSyncs.delete(provider);
+  queuedProviderForces.delete(provider);
   // Bind logout to the install present when the user clicked. An earlier
   // provider sync may still be queued while a fresh gateway is paired.
   const connectionAtClick = chrome.storage.local.get(["gateway", "token"]);
@@ -53,6 +125,14 @@ function logoutProviderFromRelay(provider) {
       method:"DELETE",body:"{}"
     }, {gateway:expected.gateway,token:expected.token});
     if (!response.ok) throw new Error("Gateway logout failed (" + response.status + "). Auto sync is paused; retry logout.");
+    providerDiagnostics.delete(provider);
+    lastGatewayCheck = null;
+    const latest = await chrome.storage.local.get(["gateway", "token", "relaySnapshotVersions"]);
+    if (latest.gateway === expected.gateway && latest.token === expected.token) {
+      const versions = {...(latest.relaySnapshotVersions || {})};
+      delete versions[provider];
+      await chrome.storage.local.set({relaySnapshotVersions:versions});
+    }
   });
 }
 
@@ -68,18 +148,22 @@ chrome.cookies.onChanged.addListener(({cookie}) => {
       queueProviderSync(provider).catch(() => {
         // Never log cookie material or relay credentials. The popup can surface status on demand.
       });
-    }, 750);
+    }, 10_000);
     debounceTimers.set(provider, timer);
   }
 });
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message?.type === "relay-diagnostics") {
+    relayDiagnostics(message.force === true).then(sendResponse).catch(() => sendResponse({ok:false, gateway_issue:"diagnostics_unavailable"}));
+    return true;
+  }
   if (message?.type === "poll-connection") {
     pollConnection().then(() => sendResponse({ok:true})).catch(error => sendResponse({ok:false,error:error.message}));
     return true;
   }
   if (message?.type === "sync-provider" && PROVIDERS[message.provider]) {
-    queueProviderSync(message.provider).then(syncStatus => sendResponse({ok:true,syncStatus:syncStatus || "skipped"})).catch(error => sendResponse({ok:false,error:error.message}));
+    queueProviderSync(message.provider, true).then(syncStatus => sendResponse({ok:true,syncStatus:syncStatus || "skipped"})).catch(error => sendResponse({ok:false,error:error.message}));
     return true;
   }
   if (message?.type === "logout-provider" && PROVIDERS[message.provider]) {
@@ -93,13 +177,21 @@ async function resyncLinkedProviders() {
   const {linkedProviders = []} = await chrome.storage.local.get(["linkedProviders"]);
   // Startup restoration is best-effort: providers remain independently usable
   // if one domain is unavailable, and no session material is written to logs.
+  // Repair an unexpectedly missing vault snapshot even when Chrome cookie
+  // contents are unchanged (for example after a gateway volume replacement).
+  // Do not force heavy browser reloads merely because authentication is unknown.
+  const status = await relayDiagnostics(true);
+  const missing = new Set(status.ok
+    ? (status.gateway.providers || []).filter(item => !item.linked).map(item => item.provider)
+    : []);
   await Promise.allSettled(
-    [...new Set(linkedProviders)].filter(provider => PROVIDERS[provider]).map(queueProviderSync)
+    [...new Set(linkedProviders)].filter(provider => PROVIDERS[provider])
+      .map(provider => queueProviderSync(provider, missing.has(provider)))
   );
 }
 
 function scheduleLinkedProviderResync() {
-  chrome.alarms?.create?.("relay-session-refresh", {periodInMinutes:5});
+  chrome.alarms?.create?.("relay-session-refresh", {periodInMinutes:15});
   pollConnection().catch(() => {});
   resyncLinkedProviders().catch(() => {
     // Do not log provider session material or relay credentials.
@@ -169,6 +261,7 @@ async function completePendingConnection() {
   await chrome.storage.local.set({gateway, token:data.token, linkedProviders});
   await chrome.storage.local.remove("pendingConnection");
   await chrome.alarms?.clear?.("relay-connection");
+  lastGatewayCheck = null;
   resyncLinkedProviders().catch(() => {});
 }
 chrome.alarms?.onAlarm?.addListener?.(alarm => {

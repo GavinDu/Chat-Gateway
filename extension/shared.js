@@ -165,7 +165,16 @@ async function providerCookieSnapshot(provider) {
   return {cookies:Array.from(deduped.values()), local_storage:{}, ts:new Date().toISOString()};
 }
 
-async function syncProvider(provider) {
+async function cookieSnapshotVersion(snapshot, scope) {
+  if (!crypto.subtle?.digest || typeof TextEncoder === "undefined") return null;
+  const ordered = [...snapshot.cookies].sort((a, b) =>
+    (a.domain + "/" + a.path + "/" + a.name).localeCompare(b.domain + "/" + b.path + "/" + b.name));
+  const encoded = new TextEncoder().encode(JSON.stringify([scope, ordered]));
+  const bytes = new Uint8Array(await crypto.subtle.digest("SHA-256", encoded));
+  return Array.from(bytes, byte => byte.toString(16).padStart(2, "0")).join("");
+}
+
+async function syncProvider(provider, {force = false} = {}) {
   const {gateway, token, linkedProviders = []} = await chrome.storage.local.get(["gateway", "token", "linkedProviders"]);
   if (!gateway || !token || !linkedProviders.includes(provider)) return "skipped";
   const snapshot = await providerCookieSnapshot(provider);
@@ -187,6 +196,9 @@ async function syncProvider(provider) {
   if (!await chrome.permissions.contains({origins:requiredOrigins})) {
     throw new Error("Provider host permissions were revoked before session sync.");
   }
+  const version = await cookieSnapshotVersion(snapshot, gateway + "|" + token);
+  const {relaySnapshotVersions = {}} = await chrome.storage.local.get("relaySnapshotVersions");
+  if (!force && version && relaySnapshotVersions[provider] === version) return "unchanged";
   const response = await relayFetch("/relay/v1/session/" + encodeURIComponent(provider), {
     method:"POST", body:JSON.stringify(snapshot)
   }, {gateway, token, provider});
@@ -200,6 +212,13 @@ async function syncProvider(provider) {
     }
   }
   if (!response.ok) throw new Error("Gateway rejected session update (" + response.status + "). Check vault mode and provider permissions.");
+  const latest = await chrome.storage.local.get(["gateway", "token", "linkedProviders", "relaySnapshotVersions"]);
+  if (version && latest.gateway === gateway && latest.token === token &&
+      latest.linkedProviders?.includes(provider)) {
+    await chrome.storage.local.set({
+      relaySnapshotVersions:{...(latest.relaySnapshotVersions || {}), [provider]:version}
+    });
+  }
   return "uploaded";
 }
 

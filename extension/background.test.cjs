@@ -127,7 +127,7 @@ test("cookie rotation is debounced and rejects lookalike domains", async () => {
   onCookieChanged({ cookie: { domain: "chatgpt.com" } });
   assert.equal(timers.size, 2);
   assert.ok(clearedTimers.has(1), "the previous debounce timer should be cancelled");
-  assert.equal(timers.get(2).delay, 750);
+  assert.equal(timers.get(2).delay, 10_000);
 
   timers.get(1).callback();
   await flushAsyncWork();
@@ -205,4 +205,65 @@ test("slow provider sync coalesces a cookie burst into one latest trailing snaps
   const chat = snapshots.filter(x => x.provider === "chatgpt");
   assert.equal(chat.length, 2, "an in-flight import permits only one queued refresh");
   assert.equal(chat[1].version, 20, "the trailing job reads latest cookie state");
+});
+
+test("relay diagnostics message reports redacted local sync failures without raw errors", async () => {
+  const f = loadBackground(["chatgpt"], ["chatgpt"]);
+  f.listeners.startup[0]();
+  await flushAsyncWork();
+  const response = await new Promise(resolve => {
+    const asyncReply = f.listeners.message[0]({type:"relay-diagnostics"}, {}, resolve);
+    assert.equal(asyncReply, true);
+  });
+  assert.equal(response.ok, false);
+  assert.equal(response.gateway_issue, "not_connected");
+  assert.equal(response.extension.connected, false);
+  assert.equal(response.extension.provider_sync.chatgpt.state, "failed");
+  assert.equal(response.extension.provider_sync.chatgpt.issue, "relay_unavailable");
+  assert.ok(!JSON.stringify(response).includes("simulated refresh failure"));
+});
+
+test("relay diagnostics reads authenticated gateway status without exposing credentials", async () => {
+  const f = loadBackground(["chatgpt"]);
+  f.sandbox.chrome.storage.local.get = async () => ({
+    gateway:"http://127.0.0.1:8080", token:"private-install-token", linkedProviders:["chatgpt"]
+  });
+  let requests = 0;
+  f.sandbox.relayFetch = async path => {
+    requests += 1;
+    assert.equal(path, "/relay/v1/diagnostics");
+    return {ok:true,status:200,json:async()=>({ok:true,providers:[{provider:"chatgpt",issue:"authentication_unverified"}]})};
+  };
+  const request = () => new Promise(resolve => f.listeners.message[0]({type:"relay-diagnostics"}, {}, resolve));
+  const first = await request();
+  assert.equal(first.ok, true);
+  assert.equal(first.gateway.providers[0].issue, "authentication_unverified");
+  assert.equal(first.extension.connected, true);
+  assert.equal(requests, 1);
+  await request();
+  assert.equal(requests, 1, "repeated popup reads should reuse the short-lived dashboard snapshot");
+  assert.ok(!JSON.stringify(first).includes("private-install-token"));
+});
+
+test("multiple manual syncs coalesce into one forced refresh behind an automatic import", async () => {
+  const f = loadBackground(["chatgpt"]);
+  let release;
+  const held = new Promise(resolve => { release = resolve; });
+  const attempts = [];
+  f.sandbox.syncProvider = async (_provider, opts) => {
+    attempts.push(opts.force);
+    if (attempts.length === 1) await held;
+    return "uploaded";
+  };
+  f.listeners.cookieChanged[0]({cookie:{domain:".chatgpt.com"}});
+  f.timers.get(1).callback();
+  await flushAsyncWork();
+  const request = () => new Promise(resolve =>
+    f.listeners.message[0]({type:"sync-provider", provider:"chatgpt"}, {}, resolve));
+  const a = request();
+  const b = request();
+  release();
+  await Promise.all([a,b]);
+  for (let i = 0; i < 4; i++) await flushAsyncWork();
+  assert.deepEqual(attempts, [false, true], "manual recovery runs once after the automatic import");
 });

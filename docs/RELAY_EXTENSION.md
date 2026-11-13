@@ -43,3 +43,35 @@ and a separately reviewed allowlist update.
 
 The relay does not scrape passwords, bypass provider security controls, or
 promise that a saved web session will keep working indefinitely.
+
+
+## Live diagnostics APIs
+
+The authenticated gateway exposes `GET` and `POST /relay/v1/diagnostics`.
+This is an alias of the existing protected `/relay/v1/status` response,
+augmented with per-provider `issue` codes and a top-level `issues` array.
+Use the paired extension install token and existing relay request protections
+(Origin and nonce/timestamp requirements for POST); never expose this endpoint
+without the normal relay authentication. `linked` means a saved encrypted
+snapshot exists; `authentication: verified` requires observed login evidence.
+`unknown` and `authentication_unverified` do **not** mean the account is logged
+out. No cookies, browser storage, upstream URLs, prompt text, or raw errors are
+returned.
+
+Inside the extension, `chrome.runtime.sendMessage({type:"relay-diagnostics"})`
+returns `{ok, extension, gateway}` on success, or `{ok:false, extension,
+gateway_issue}` when not connected or the gateway cannot be checked. The
+`extension.provider_sync` map contains only fixed issue categories, result
+states and timestamps; it never contains session contents or install tokens.
+This message is **internal to the extension**; there is no unauthenticated
+external-messaging endpoint.
+
+To reduce periodic work, a connected popup refreshes its status every 10
+seconds (and on focus or manual refresh). Pending pairing retains a
+five-second check; the service worker's linked-provider repair interval is
+15 minutes and cookie changes are debounced for 10 seconds per provider.
+Successful cookie snapshots are fingerprinted locally using SHA-256 bound to the gateway and paired install; only the digest is stored, never the session contents. Automatic refreshes skip identical snapshots even after service-worker suspension. Explicit **Sync session** bypasses this optimization for immediate operator recovery.
+Browser activation timeout, a provider's 403 JavaScript asset failures, and
+incompatible site JavaScript require separate diagnosis; reducing log volume
+does not imply those errors are fixed.
+
