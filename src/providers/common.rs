@@ -556,13 +556,17 @@ fn visible_input_query(selector_js: &str) -> String {
 
 /// Re-read the actionable composer after framework renders, not just after
 /// the initial typing event. Never log the prompt when the value changes.
-fn composer_retains_prompt(page: &Page, selector: &str, prompt: &str) -> anyhow::Result<bool> {
+pub(crate) fn composer_retains_prompt(
+    page: &Page,
+    selector: &str,
+    prompt: &str,
+) -> anyhow::Result<bool> {
     let selector_js = serde_json::to_string(selector)?;
     let el_js = visible_input_query(&selector_js);
     let prompt_js = serde_json::to_string(prompt)?;
     Ok(page
         .evaluate(&format!(
-            "(() => {{ const el = {el_js}; if (!el) return false; const value = ((el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') ? el.value : (el.innerText || el.textContent || '')); return value === {prompt_js}; }})()"
+            "(() => {{ const el = {el_js}; if (!el) return false; return (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') ? el.value === {prompt_js} : (el.innerText === {prompt_js} || el.textContent === {prompt_js}); }})()"
         ))
         .as_bool()
         == Some(true))
@@ -986,7 +990,7 @@ async fn click_send_or_enter_checked_with_policy(
         for selector in send_selectors {
             let selector_js = serde_json::to_string(selector)?;
             let js = format!(
-                "(() => {{ {route_guard} const input = {input_expr}; if (!input) return 'missing'; const expected = {expected_js}; if (expected !== null && ((input.tagName === 'INPUT' || input.tagName === 'TEXTAREA') ? input.value : (input.innerText || input.textContent || '')) !== expected) return 'changed'; const inputForm = input.form || input.closest('form'); let root = input; for (let depth = 0; root && depth < 12; depth++, root = root.parentElement) {{ if (root.tagName === 'BODY' || root.tagName === 'HTML') break; for (const button of root.querySelectorAll({selector_js})) {{ const buttonForm = button.form || button.closest('form'); if (buttonForm && buttonForm !== inputForm) continue; if (button.getClientRects().length && window.getComputedStyle(button).visibility !== 'hidden' && window.getComputedStyle(button).pointerEvents !== 'none' && !button.closest('[inert], [hidden], [aria-hidden=true], [aria-disabled=true]') && !button.disabled && !button.matches(':disabled') && !button.closest('fieldset[disabled]') && button.getAttribute('aria-disabled') !== 'true') {{ button.click(); return 'clicked'; }} }} if (root.tagName === 'FORM') break; }} const form = input.form || input.closest('form'); if (form && form.id) {{ for (const button of document.querySelectorAll({selector_js})) {{ if (button.tagName !== 'BUTTON' || (button.form !== form && button.getAttribute('form') !== form.id) || form.contains(button)) continue; if (button.getClientRects().length && window.getComputedStyle(button).visibility !== 'hidden' && window.getComputedStyle(button).pointerEvents !== 'none' && !button.closest('[inert], [hidden], [aria-hidden=true], [aria-disabled=true]') && !button.disabled && !button.matches(':disabled') && !button.closest('fieldset[disabled]') && button.getAttribute('aria-disabled') !== 'true') {{ button.click(); return 'clicked'; }} }} }} return 'waiting'; }})()"
+                "(() => {{ {route_guard} const input = {input_expr}; if (!input) return 'missing'; const expected = {expected_js}; if (expected !== null && !((input.tagName === 'INPUT' || input.tagName === 'TEXTAREA') ? input.value === expected : (input.innerText === expected || input.textContent === expected))) return 'changed'; const inputForm = input.form || input.closest('form'); let root = input; for (let depth = 0; root && depth < 12; depth++, root = root.parentElement) {{ if (root.tagName === 'BODY' || root.tagName === 'HTML') break; for (const button of root.querySelectorAll({selector_js})) {{ const buttonForm = button.form || button.closest('form'); if (buttonForm && buttonForm !== inputForm) continue; if (button.getClientRects().length && window.getComputedStyle(button).visibility !== 'hidden' && window.getComputedStyle(button).pointerEvents !== 'none' && !button.closest('[inert], [hidden], [aria-hidden=true], [aria-disabled=true]') && !button.disabled && !button.matches(':disabled') && !button.closest('fieldset[disabled]') && button.getAttribute('aria-disabled') !== 'true') {{ button.click(); return 'clicked'; }} }} if (root.tagName === 'FORM') break; }} const form = input.form || input.closest('form'); if (form && form.id) {{ for (const button of document.querySelectorAll({selector_js})) {{ if (button.tagName !== 'BUTTON' || (button.form !== form && button.getAttribute('form') !== form.id) || form.contains(button)) continue; if (button.getClientRects().length && window.getComputedStyle(button).visibility !== 'hidden' && window.getComputedStyle(button).pointerEvents !== 'none' && !button.closest('[inert], [hidden], [aria-hidden=true], [aria-disabled=true]') && !button.disabled && !button.matches(':disabled') && !button.closest('fieldset[disabled]') && button.getAttribute('aria-disabled') !== 'true') {{ button.click(); return 'clicked'; }} }} }} return 'waiting'; }})()"
             );
             match page.evaluate(&js).as_str() {
                 Some("clicked") => return Ok(true),
@@ -2210,6 +2214,40 @@ mod composer_rejected_input_tests {
             serde_json::json!(false)
         );
         assert_ne!(page.evaluate("window.extraInput"), serde_json::json!(true));
+    }
+
+    #[tokio::test]
+    async fn exact_editor_text_survives_layout_whitespace_changes_through_send_guard() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body><form><div id="prompt" contenteditable="true"></div>
+            <button id="send" type="button" onclick="window.sent=true">Send</button></form>
+            <script>Object.defineProperty(document.querySelector('#prompt'), 'innerText', {get(){return 'layout-normalized whitespace';}});</script>
+            </body></html>"#;
+        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        super::human_type(&page, &["#prompt"], "exact  draft\nwith whitespace")
+            .await
+            .unwrap();
+        assert!(super::click_send_or_enter_checked(
+            &mut page,
+            &["#send"],
+            "#prompt",
+            100,
+            Some("exact  draft\nwith whitespace")
+        )
+        .await
+        .unwrap());
+        assert_eq!(page.evaluate("window.sent"), serde_json::json!(true));
+        assert_eq!(
+            page.evaluate("document.querySelector('#prompt').textContent"),
+            serde_json::json!("exact  draft\nwith whitespace")
+        );
     }
 
     #[tokio::test]

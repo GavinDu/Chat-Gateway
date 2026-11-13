@@ -508,30 +508,7 @@ fn diagnostic_input_selector<'a>(
 /// Probe the visible editor, never the first hidden duplicate DOM match.
 /// The test string stays inside the page and is not included in diagnostics.
 fn diagnostic_prompt_retained(page: &obscura_core::Page, selector: &str, prompt: &str) -> bool {
-    let (Ok(selector), Ok(prompt)) = (
-        serde_json::to_string(selector),
-        serde_json::to_string(prompt),
-    ) else {
-        return false;
-    };
-    let script = format!(
-        r#"(() => {{
-            const el = Array.from(document.querySelectorAll({selector})).find(el =>
-                el.getClientRects().length > 0 &&
-                window.getComputedStyle(el).visibility !== 'hidden' &&
-                !el.closest('[hidden], [inert], [aria-hidden="true"], [aria-disabled="true"]') &&
-                !el.disabled && !el.matches(':disabled') &&
-                !el.closest('fieldset[disabled]') && !el.readOnly &&
-                el.getAttribute('aria-disabled') !== 'true' &&
-                el.getAttribute('aria-readonly') !== 'true' &&
-                el.getAttribute('contenteditable') !== 'false'
-            );
-            if (!el) return false;
-            const value = (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') ? el.value : (el.innerText || el.textContent || '');
-            return typeof value === 'string' && value.trim() === {prompt}.trim();
-        }})()"#
-    );
-    page.evaluate(&script).as_bool() == Some(true)
+    providers::common::composer_retains_prompt(page, selector, prompt).unwrap_or(false)
 }
 
 #[cfg(test)]

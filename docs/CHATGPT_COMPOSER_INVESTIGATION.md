@@ -121,10 +121,10 @@ Record exact final results on the PR; do not infer success from the tests below.
 ## Local checks for the combined changes
 
 - 87 extension tests passed, including saved-activation-pending link retention.
-- 36 composer tests passed, including controlled paste without document
+- 37 composer tests passed, including controlled paste without document
   destruction, stale DIV value handling, and ambiguous/dialog editor rejection.
 - All three provider fixture integration tests passed.
-- Full Rust suite: 650 passed, one failed because the existing embedded-login
+- Full Rust suite: 651 passed, one failed because the existing embedded-login
   profile test requires Linux /dev/shm, absent on this Mac. The test was not
   skipped or weakened. Required Linux CI remains authoritative for that case.
 - Formatting, diff checks, and clippy passed; existing dependency warnings remain.
@@ -132,3 +132,16 @@ Record exact final results on the PR; do not infer success from the tests below.
   locked, including after the user opened SSH. No live extension console or
   extension reload has been verified. Source tests do not establish that the
   installed extension is running the edited files.
+
+## Exact DOM text versus layout text
+
+The complete sweep on f0b0091 still returned 502 for all eight enabled providers.
+ChatGPT advanced to submission acknowledgement failure, rather than missing
+composer or rejected draft. Gemini's boolean evidence showed exact textContent
+matching the prompt while layout-normalized innerText differed. Retention and
+send guards now accept either exact representation for contenteditable nodes;
+INPUT/TEXTAREA still require an exact value match. No whitespace is trimmed or
+rewritten. Adapter diagnostics call the same production retention function.
+A regression covers raw whitespace preservation through the send-time guard.
+All four CI jobs passed f0b0091; the subsequent text-representation fix needs
+its own CI and live checks. PR results record the latest tested commit.
