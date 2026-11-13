@@ -45,7 +45,9 @@ impl AppState {
         // A send may use an injected backend even when the native browser
         // worker is down. Only read-only readiness/model probes require the
         // native worker to be alive; backend admission is checked by send().
-        if (matches!(mode, ProviderEligibilityMode::ReadOnly) && !self.pool.worker_alive())
+        if (matches!(mode, ProviderEligibilityMode::ReadOnly)
+            && !self.pool.worker_alive()
+            && !self.cfg.provider(provider).is_some_and(|p| p.uses_oauth()))
             || !self
                 .cfg
                 .provider(provider)

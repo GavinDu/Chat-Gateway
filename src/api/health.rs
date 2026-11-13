@@ -18,6 +18,7 @@ pub(crate) async fn health(State(state): State<Arc<AppState>>) -> impl IntoRespo
             let challenge_disabled_reason = state.provider_guard.provider_disabled_reason(&p.name);
             serde_json::json!({
                 "name": p.name,
+                "connection_method": if p.uses_oauth() { "chatgpt_oauth" } else { "browser_relay" },
                 "enabled": p.enabled,
                 "routable": state.provider_eligible(&p.name, ProviderEligibilityMode::ReadOnly),
                 "priority": p.priority,
@@ -77,7 +78,12 @@ pub(crate) fn readiness_response(
 }
 
 pub(crate) async fn readiness(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    if !state.pool.worker_alive() {
+    let independent = state.cfg.providers.iter().any(|p| {
+        p.enabled
+            && p.uses_oauth()
+            && state.provider_eligible(&p.name, ProviderEligibilityMode::ReadOnly)
+    });
+    if !state.pool.worker_alive() && !independent {
         return readiness_response(0, false, state.pool.worker_generation());
     }
     let routable = state

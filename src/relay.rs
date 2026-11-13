@@ -1200,10 +1200,17 @@ pub async fn status(State(app): State<Arc<crate::AppState>>, headers: HeaderMap)
     ];
     // Session loading may decrypt multiple vault records and read disk. Keep
     // it off the async HTTP reactor; return presence flags only, not secrets.
+    let oauth = app.cfg.provider("chatgpt").is_some_and(|p| p.uses_oauth());
     let session_presence = bounded_session_status_scan(RELAY_STATUS_SCAN_TIMEOUT, move || {
         PROVIDERS
             .iter()
-            .map(|provider| crate::session::load_session_file(provider).map(|s| s.is_some()))
+            .map(|provider| {
+                if oauth && *provider == "chatgpt" {
+                    crate::chatgpt_oauth::linked_snapshot()
+                } else {
+                    crate::session::load_session_file(provider).map(|s| s.is_some())
+                }
+            })
             .collect::<anyhow::Result<Vec<_>>>()
     })
     .await;
@@ -1241,8 +1248,18 @@ pub async fn status(State(app): State<Arc<crate::AppState>>, headers: HeaderMap)
         let lifecycle = runtime.state;
         let manual_verification_required =
             app.provider_sessions.manual_challenge_required(provider);
-        let authentication =
-            provider_authentication_status(observed, lifecycle, manual_verification_required);
+        let via_oauth = oauth && provider == "chatgpt";
+        let authentication = if via_oauth {
+            if session_present
+                && lifecycle != crate::provider_state::ProviderSessionState::NeedsLogin
+            {
+                "verified"
+            } else {
+                "needs_login"
+            }
+        } else {
+            provider_authentication_status(observed, lifecycle, manual_verification_required)
+        };
         let issue = relay_provider_issue(
             session_present,
             enabled,
@@ -1256,6 +1273,7 @@ pub async fn status(State(app): State<Arc<crate::AppState>>, headers: HeaderMap)
         }
         providers.push(serde_json::json!({
             "provider": provider,
+            "connection_method": if via_oauth { "chatgpt_oauth" } else { "browser" },
             "linked": session_present,
             "enabled": enabled,
             "authentication": authentication,
@@ -1489,6 +1507,13 @@ pub async fn import_session(
             "provider must be enabled before its browser session can be linked",
         );
     }
+    if app.cfg.provider(&provider).is_some_and(|p| p.uses_oauth()) {
+        return json_error(
+            StatusCode::CONFLICT,
+            "provider_uses_oauth",
+            "ChatGPT uses account sign-in; browser cookie linking is not used for this provider",
+        );
+    }
     let import_started = Instant::now();
     let gate = match app.relay.import_gates.for_provider(&provider) {
         Some(gate) => gate,
@@ -1667,6 +1692,13 @@ pub async fn unlink(
             StatusCode::BAD_REQUEST,
             "unknown_provider",
             "provider is not supported by this gateway",
+        );
+    }
+    if app.cfg.provider(&provider).is_some_and(|p| p.uses_oauth()) {
+        return json_error(
+            StatusCode::CONFLICT,
+            "provider_uses_oauth",
+            "Use chatgpt-disconnect to revoke this account connection",
         );
     }
     let gate = match app.relay.import_gates.for_provider(&provider) {

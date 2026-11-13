@@ -101,12 +101,12 @@ test("service-worker install and startup restore each unique linked provider", a
 
   listeners.installed[0]();
   await flushAsyncWork();
-  assert.deepEqual(calls, ["chatgpt", "claude"]);
+  assert.deepEqual([...calls].sort(), ["chatgpt", "claude"]);
 
   calls.length = 0;
   listeners.startup[0]();
   await flushAsyncWork();
-  assert.deepEqual(calls, ["chatgpt", "claude"]);
+  assert.deepEqual([...calls].sort(), ["chatgpt", "claude"]);
 });
 
 test("one provider refresh failure does not prevent other linked providers", async () => {
@@ -115,7 +115,7 @@ test("one provider refresh failure does not prevent other linked providers", asy
   listeners.startup[0]();
   await flushAsyncWork();
 
-  assert.deepEqual(calls, ["chatgpt", "claude"]);
+  assert.deepEqual([...calls].sort(), ["chatgpt", "claude"]);
 });
 
 test("cookie rotation is debounced and rejects lookalike domains", async () => {
@@ -154,7 +154,7 @@ test("two linked providers rotate independently without cross-provider sync", as
 
   timers.get(2).callback();
   await flushAsyncWork();
-  assert.deepEqual(calls, ["chatgpt", "claude"]);
+  assert.deepEqual([...calls].sort(), ["chatgpt", "claude"]);
 });
 
 test("rapid cookie rotations coalesce per provider while preserving the other provider", async () => {
@@ -268,4 +268,15 @@ test("multiple manual syncs coalesce into one forced refresh behind an automatic
   await Promise.all([a,b]);
   for (let i = 0; i < 4; i++) await flushAsyncWork();
   assert.deepEqual(attempts, [false, true], "manual recovery runs once after the automatic import");
+});
+
+test("OAuth-managed ChatGPT never reads or uploads extension cookies", async () => {
+  const f = loadBackground(["chatgpt"]);
+  f.sandbox.chrome.storage.local.get = async () => ({gateway:"http://127.0.0.1:8080", token:"fixture-install", linkedProviders:["chatgpt"]});
+  f.sandbox.relayFetch = async path => {
+    assert.equal(path, "/relay/v1/diagnostics");
+    return {ok:true,json:async()=>({providers:[{provider:"chatgpt",connection_method:"chatgpt_oauth"}]})};
+  };
+  assert.equal(await f.sandbox.queueProviderSync("chatgpt", true), "oauth_managed");
+  assert.deepEqual(f.calls, []);
 });

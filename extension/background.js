@@ -80,10 +80,15 @@ function queueProviderSync(provider, force = false) {
     if (force) queuedProviderForces.add(provider);
     return queued;
   }
-  const pending = queueProviderTask(provider, () => {
+  const pending = queueProviderTask(provider, async () => {
     if (queuedProviderSyncs.get(provider) === pending) queuedProviderSyncs.delete(provider);
     const shouldForce = force || queuedProviderForces.has(provider);
     queuedProviderForces.delete(provider);
+    const status = provider === "chatgpt" ? await relayDiagnostics(false) : {ok:false};
+    if (status.ok && status.gateway.providers?.some(item => item.provider === provider && item.connection_method === "chatgpt_oauth")) {
+      recordProviderDiagnostic(provider, "oauth_managed");
+      return "oauth_managed";
+    }
     return syncProvider(provider, {force:shouldForce}).then(
       result => {
         recordProviderDiagnostic(provider, result || "skipped");

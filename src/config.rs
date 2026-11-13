@@ -112,9 +112,22 @@ impl Default for ObscuraConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderTransport {
+    #[default]
+    Browser,
+    ChatgptOauth,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct ProviderConfig {
     pub name: String,
+    #[serde(default)]
+    pub transport: ProviderTransport,
+    /// Optional account-catalog model slug for the generic chatgpt alias.
+    #[serde(default)]
+    pub oauth_model: Option<String>,
     #[serde(default = "default_true")]
     pub enabled: bool,
     #[serde(default = "default_priority")]
@@ -152,6 +165,12 @@ pub struct ProviderSelectorOverrides {
     pub send: Option<Vec<String>>,
     #[serde(default)]
     pub response: Option<Vec<String>>,
+}
+
+impl ProviderConfig {
+    pub fn uses_oauth(&self) -> bool {
+        self.name == "chatgpt" && self.transport == ProviderTransport::ChatgptOauth
+    }
 }
 
 impl AppConfig {
@@ -283,6 +302,20 @@ impl AppConfig {
             }
             if !seen.insert(provider.name.as_str()) {
                 anyhow::bail!("duplicate provider '{}'", provider.name);
+            }
+            if provider.transport == ProviderTransport::ChatgptOauth && provider.name != "chatgpt" {
+                anyhow::bail!("chatgpt_oauth transport is supported only for chatgpt");
+            }
+            if let Some(model) = &provider.oauth_model {
+                if provider.transport != ProviderTransport::ChatgptOauth
+                    || model.is_empty()
+                    || model.len() > 128
+                    || !model
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+                {
+                    anyhow::bail!("oauth_model requires chatgpt_oauth and a valid model slug");
+                }
             }
             if provider.timeout_seconds == 0 {
                 anyhow::bail!(

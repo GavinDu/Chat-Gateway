@@ -4,7 +4,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
 
-function loadPopup({failCookieDomain = null, includeSecondProvider = false, manualVerification = false, localRelay = false} = {}) {
+function loadPopup({oauth = false, failCookieDomain = null, includeSecondProvider = false, manualVerification = false, localRelay = false} = {}) {
   const elements = new Map();
   const chromeCalls = [];
   const values = {gateway:"http://127.0.0.1:8080",linkedProviders:[]};
@@ -50,7 +50,7 @@ function loadPopup({failCookieDomain = null, includeSecondProvider = false, manu
     providerCookieSnapshot:async()=>({cookies:[{name:"token",value:"test-only"}]}),
     relayFetch:async()=>({ok:true,status:200,json:async()=>({
       providers:[
-        {provider:"metaai",enabled:true,linked:server.linked,authentication:server.linked?"unknown":"needs_login",
+        {provider:"metaai",connection_method:oauth?"chatgpt_oauth":"browser",enabled:true,linked:server.linked,authentication:server.linked?"unknown":"needs_login",
           availability:manualVerification?"degraded":"unknown",manual_verification_required:manualVerification},
         ...(includeSecondProvider ? [{provider:"claude",enabled:true,linked:false,authentication:"needs_login",availability:"unknown"}] : []),
       ],
@@ -170,4 +170,17 @@ test("local-only gateway automatically connects without pairing, approval or tok
   assert.equal(popup.server.linked, true);
   await popup.controls.logoutProvider("metaai");
   assert.equal(popup.server.linked, false);
+});
+
+
+test("OAuth dashboard directs account management to gateway without reading cookies",async()=>{
+  const popup=loadPopup({oauth:true});
+  popup.values.token="c".repeat(64);
+  popup.server.linked=true;
+  await popup.controls.refreshStatus();
+  const row=popup.elements.get("status").children[0];
+  const buttons=row.children.find(n=>n.className==="provider-actions").children;
+  assert.ok(buttons.some(b=>b.textContent==="Managed by gateway" && b.disabled));
+  assert.equal(buttons.some(b=>b.textContent==="Log out"),false);
+  assert.equal(popup.chromeCalls.some(call=>call.startsWith("cookies:")),false);
 });

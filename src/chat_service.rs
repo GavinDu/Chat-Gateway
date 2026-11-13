@@ -639,6 +639,23 @@ pub(crate) enum CandidatePromptError {
 pub(crate) async fn prepare_candidate_prompt(
     request: CandidatePromptRequest<'_>,
 ) -> std::result::Result<(String, Option<String>), CandidatePromptError> {
+    if request
+        .state
+        .cfg
+        .provider(request.provider)
+        .is_some_and(|p| p.uses_oauth())
+    {
+        let mut prompt = request.replay_prompt.to_owned();
+        request
+            .policy
+            .append_personal_memory_to_prompt(
+                request.provider,
+                &mut prompt,
+                request.personal_memory_items,
+            )
+            .map_err(|_| CandidatePromptError::MemoryEgressDenied)?;
+        return Ok((prompt, None));
+    }
     let saved_thread = match request.conversation_id {
         Some(id) => request
             .state
@@ -722,6 +739,12 @@ pub(crate) fn plan_provider_send(
 impl ChatService {
     pub fn new(backend: Arc<dyn ChatBackend>) -> Self {
         Self { backend }
+    }
+    pub async fn models(
+        &self,
+        provider: crate::chat_backend::ProviderId,
+    ) -> std::result::Result<Vec<String>, GatewayError> {
+        self.backend.models(provider).await
     }
 
     pub async fn stream(

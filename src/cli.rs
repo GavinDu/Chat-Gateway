@@ -69,6 +69,31 @@ pub struct Cli {
         help = "Restore encrypted vault records from a sessions/.vault-rotation-* backup using the old key"
     )]
     pub vault_restore_backup: Option<String>,
+
+    #[arg(long, conflicts_with_all=["all","test_adapter","create_api_key","vault_list","vault_rotate_key","vault_delete_provider","vault_restore_backup","chatgpt_logout","chatgpt_auth_status","show_memory_egress_policy","json"], help="Connect a ChatGPT account using the supported OAuth flow")]
+    pub chatgpt_connect: bool,
+    #[arg(
+        long,
+        requires = "chatgpt_connect",
+        help = "Explicitly review consent to enable ChatGPT plan usage"
+    )]
+    pub chatgpt_enable_plan: bool,
+    #[arg(long, conflicts_with_all=["all","test_adapter","create_api_key","vault_list","vault_rotate_key","vault_delete_provider","vault_restore_backup","chatgpt_connect","chatgpt_auth_status","show_memory_egress_policy","json"], help="Revoke and clear this ChatGPT OAuth profile")]
+    pub chatgpt_logout: bool,
+    #[arg(long, conflicts_with_all=["all","test_adapter","create_api_key","vault_list","vault_rotate_key","vault_delete_provider","vault_restore_backup","chatgpt_connect","chatgpt_logout","show_memory_egress_policy","json"], help="Show ChatGPT OAuth connection status without credentials")]
+    pub chatgpt_auth_status: bool,
+    #[arg(
+        long,
+        default_value = "default",
+        help = "Local name of the ChatGPT account profile"
+    )]
+    pub chatgpt_profile: String,
+    #[arg(
+        long,
+        default_value_t = 14845,
+        help = "Loopback port for ChatGPT OAuth callbacks"
+    )]
+    pub chatgpt_callback_port: u16,
 }
 
 #[cfg(test)]
@@ -95,6 +120,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn oauth_commands_cannot_run_with_diagnostics_or_vault_maintenance() {
+        for command in [
+            "--chatgpt-connect",
+            "--chatgpt-logout",
+            "--chatgpt-auth-status",
+        ] {
+            assert!(Cli::try_parse_from(["gateway", command]).is_ok());
+            for conflict in [
+                "--all",
+                "--json",
+                "--vault-list",
+                "--vault-rotate-key",
+                "--show-memory-egress-policy",
+            ] {
+                assert!(Cli::try_parse_from(["gateway", command, conflict]).is_err());
+            }
+        }
+        assert!(Cli::try_parse_from(["gateway", "--chatgpt-enable-plan"]).is_err());
+    }
     #[test]
     fn vault_restore_accepts_a_backup_directory() {
         let cli = Cli::try_parse_from([

@@ -54,6 +54,7 @@ struct JsonAttempt<'a> {
     prompt_tokens: u64,
     receiver:
         tokio::sync::mpsc::Receiver<Result<chat_backend::ChatEvent, chat_backend::GatewayError>>,
+    preserve_backend_error: bool,
 }
 
 pub(super) async fn run(
@@ -114,6 +115,20 @@ pub(super) async fn run(
     let mut busy_count = 0usize;
     let mut last_err: Option<String> = None;
     for provider_name in candidates {
+        let preserve_backend_error = candidate_count == 1
+            && state
+                .cfg
+                .provider(&provider_name)
+                .is_some_and(|p| p.uses_oauth());
+        if preserve_backend_error
+            && state.provider_sessions.status(&provider_name).state
+                == crate::provider_state::ProviderSessionState::NeedsLogin
+        {
+            return chat_backend::GatewayError::session_expired(
+                "ChatGPT account connection required",
+            )
+            .into_response();
+        }
         let chat_service::CandidateAttempt {
             permit,
             queue_ms,
@@ -181,6 +196,9 @@ pub(super) async fn run(
                     provider_started,
                     request_started,
                 );
+                if preserve_backend_error {
+                    return e.into_response();
+                }
                 last_err = Some(e.to_string());
                 continue;
             }
@@ -203,6 +221,11 @@ pub(super) async fn run(
                         provider_started,
                         request_started,
                     );
+                    if preserve_backend_error {
+                        if let Some(error) = gateway_error {
+                            return error.into_response();
+                        }
+                    }
                     last_err = Some(message);
                     continue;
                 }
@@ -252,6 +275,7 @@ pub(super) async fn run(
             queue_ms,
             prompt_tokens: estimate_tokens(&provider_prompt),
             receiver: rx,
+            preserve_backend_error,
         })
         .await;
         match response {

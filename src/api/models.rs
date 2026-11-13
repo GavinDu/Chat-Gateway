@@ -99,6 +99,8 @@ mod model_list_tests {
 
     fn provider(name: &str, enabled: bool, models: &[&str]) -> config::ProviderConfig {
         config::ProviderConfig {
+            transport: crate::config::ProviderTransport::Browser,
+            oauth_model: None,
             name: name.to_owned(),
             enabled,
             priority: 1,
