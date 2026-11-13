@@ -70,7 +70,7 @@ use router::ProviderRouter;
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info,obscura_browser::page=error,obscura::console=error".into()),
         )
         .init();
 
@@ -377,6 +377,7 @@ async fn main() -> anyhow::Result<()> {
             post(relay::rotate_pairing_code),
         )
         .route("/relay/v1/status", get(relay::status).post(relay::status))
+        .route("/relay/v1/diagnostics", get(relay::status).post(relay::status))
         .route(
             "/relay/v1/session/:provider",
             post(relay::import_session).delete(relay::unlink),
@@ -1035,14 +1036,38 @@ async fn attach_request_id(mut req: Request<Body>, next: Next) -> Response {
     if let Some(registry) = metrics_registry {
         registry.record_http_request(&route, response.status().as_u16(), duration_ms);
     }
-    tracing::info!(
-        request_id = %request_id,
-        method = %method,
-        route = %route,
-        status = response.status().as_u16(),
-        duration_ms,
-        "http request handled"
-    );
+    // Routine successful relay dashboards are sampled by HTTP metrics, not
+    // emitted every poll. Preserve detailed logs for all failures.
+    if (route == "/relay/v1/status" || route == "/relay/v1/diagnostics")
+        && response.status().is_success()
+    {
+        tracing::debug!(
+            request_id = %request_id,
+            method = %method,
+            route = %route,
+            status = response.status().as_u16(),
+            duration_ms,
+            "relay status request handled"
+        );
+    } else if response.status().is_server_error() || response.status().is_client_error() {
+        tracing::warn!(
+            request_id = %request_id,
+            method = %method,
+            route = %route,
+            status = response.status().as_u16(),
+            duration_ms,
+            "http request failed"
+        );
+    } else {
+        tracing::info!(
+            request_id = %request_id,
+            method = %method,
+            route = %route,
+            status = response.status().as_u16(),
+            duration_ms,
+            "http request handled"
+        );
+    }
 
     // Axum's DefaultBodyLimit rejection happens before the Bytes handler is
     // invoked. Normalize that framework rejection to the same stable error
