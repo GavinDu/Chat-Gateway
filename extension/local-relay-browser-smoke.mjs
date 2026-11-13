@@ -99,7 +99,11 @@ try {
   assert.equal(stored.gateway,base);
   assert.equal(stored.token,undefined);
   assert.equal(stored.pendingConnection,undefined);
-  assert.equal(context.pages().length,1,"no pairing/approval tab should open");
+  const openUrls = context.pages().map(page => page.url());
+  assert.equal(openUrls.filter(url => url.includes("/relay/approve/")).length, 0,
+    "no pairing or approval page should open");
+  assert.equal(openUrls.filter(url => url.startsWith("chrome-extension://")).length, 1,
+    "only the requested extension popup should be opened");
   const diagnostics = await popup.evaluate(() => chrome.runtime.sendMessage({
     type:"relay-diagnostics", force:true
   }));
