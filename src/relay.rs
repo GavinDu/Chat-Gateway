@@ -1011,8 +1011,7 @@ fn relay_provider_issue(
         Some("session_not_linked")
     } else if manual_verification_required {
         Some("manual_verification_required")
-    } else if last_error
-        .is_some_and(|error| error.contains("JavaScript assets blocked (HTTP 403)"))
+    } else if last_error.is_some_and(|error| error.contains("JavaScript assets blocked (HTTP 403)"))
     {
         Some("provider_assets_blocked")
     } else if state == ProviderSessionState::NeedsLogin || authentication == "needs_login" {
@@ -1043,12 +1042,17 @@ mod relay_provider_issue_tests {
         );
         assert_eq!(blocked, Some("provider_assets_blocked"));
 
-        let manual =
-            relay_provider_issue(true, true, "unknown", Degraded, true, Some("cookie=private"));
+        let manual = relay_provider_issue(
+            true,
+            true,
+            "unknown",
+            Degraded,
+            true,
+            Some("cookie=private"),
+        );
         assert_eq!(manual, Some("manual_verification_required"));
 
-        let needs_login =
-            relay_provider_issue(true, true, "needs_login", NeedsLogin, false, None);
+        let needs_login = relay_provider_issue(true, true, "needs_login", NeedsLogin, false, None);
         assert_eq!(needs_login, Some("needs_login"));
 
         let verified = relay_provider_issue(true, true, "verified", Ready, false, None);
