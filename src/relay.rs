@@ -543,18 +543,19 @@ fn extension_origin_matches(id: &str, origin: &str) -> bool {
 }
 
 /// The extension origin must match one configured Chrome extension ID exactly.
+fn local_extension_origin_is_allowed(headers: &HeaderMap, configured_id: Option<&str>) -> bool {
+    requested_extension_id(headers).is_some_and(|id| {
+        configured_id.is_none_or(|configured| configured == id)
+    })
+}
+
 pub fn relay_origin_is_allowed(headers: &HeaderMap) -> bool {
     if local_relay_enabled() {
         // In local mode the Chrome extension Origin is the browser-side
         // boundary, not an install token. Pin CHAT_GATEWAY_EXTENSION_ID when
         // other untrusted extensions are installed.
-        let requested = requested_extension_id(headers);
-        return requested.is_some_and(|id| {
-            std::env::var("CHAT_GATEWAY_EXTENSION_ID")
-                .ok()
-                .filter(|value| !value.is_empty())
-                .is_none_or(|configured| configured == id)
-        });
+        let configured = std::env::var("CHAT_GATEWAY_EXTENSION_ID").ok();
+        return local_extension_origin_is_allowed(headers, configured.as_deref().filter(|id| !id.is_empty()));
     }
     let Some(id) = extension_id() else {
         return false;
@@ -885,6 +886,15 @@ fn authenticated_request_with_origin(
     headers: &HeaderMap,
     origin_allowed: bool,
 ) -> Result<(), Box<Response>> {
+    authenticated_request_with_origin_mode(relay, headers, origin_allowed, local_relay_enabled())
+}
+
+fn authenticated_request_with_origin_mode(
+    relay: &RelayState,
+    headers: &HeaderMap,
+    origin_allowed: bool,
+    local_mode: bool,
+) -> Result<(), Box<Response>> {
     if !origin_allowed {
         return Err(Box::new(json_error(
             StatusCode::FORBIDDEN,
@@ -909,7 +919,7 @@ fn authenticated_request_with_origin(
             )));
         }
     }
-    if !local_relay_enabled() {
+    if !local_mode {
     let authorization = headers
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok());
@@ -1064,6 +1074,51 @@ fn relay_provider_issue(
         Some("authentication_unverified")
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod local_relay_security_tests {
+    use super::{authenticated_request_with_origin_mode, local_extension_origin_is_allowed};
+    use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+
+    #[test]
+    fn normal_websites_and_other_extensions_cannot_control_a_pinned_local_relay() {
+        let mut headers = HeaderMap::new();
+        let id = "abcdefghijklmnopabcdefghijklmnop";
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("https://attacker.example"),
+        );
+        assert!(!local_extension_origin_is_allowed(&headers, None));
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("chrome-extension://abcdefghijklmnopabcdefghijklmnop"),
+        );
+        assert!(local_extension_origin_is_allowed(&headers, None));
+        assert!(local_extension_origin_is_allowed(&headers, Some(id)));
+        assert!(!local_extension_origin_is_allowed(
+            &headers,
+            Some("ponmlkjihgfedcbaponmlkjihgfedcba"),
+        ));
+        headers.remove(header::ORIGIN);
+        assert!(!local_extension_origin_is_allowed(&headers, None));
+    }
+
+    #[test]
+    fn tokenless_local_mode_still_checks_origin_nonce_and_timestamp() {
+        let state = super::tests::relay_state_with_token(None);
+        let mut headers = super::tests::valid_auth_headers(
+            "unused",
+            "abcdef0123456789abcdef0123456789",
+        );
+        headers.remove(header::AUTHORIZATION);
+        assert!(authenticated_request_with_origin_mode(&state, &headers, false, true).is_err());
+        assert!(authenticated_request_with_origin_mode(&state, &headers, true, false).is_err());
+        assert!(authenticated_request_with_origin_mode(&state, &headers, true, true).is_ok());
+        let replay = authenticated_request_with_origin_mode(&state, &headers, true, true)
+            .expect_err("replayed nonce must be rejected");
+        assert_eq!(replay.status(), StatusCode::UNAUTHORIZED);
     }
 }
 
