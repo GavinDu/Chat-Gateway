@@ -132,4 +132,3 @@ Record exact final results on the PR; do not infer success from the tests below.
   locked, including after the user opened SSH. No live extension console or
   extension reload has been verified. Source tests do not establish that the
   installed extension is running the edited files.
-
