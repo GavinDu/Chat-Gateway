@@ -21,7 +21,7 @@ function recordProviderDiagnostic(provider, state, errorCode = null) {
     state, issue: errorCode, updated_at: new Date().toISOString()
   });
 }
-async function relayDiagnostics() {
+async function relayDiagnostics(force = false) {
   const current = await chrome.storage.local.get(["gateway", "token", "linkedProviders"]);
   const identity = current.gateway && current.token ? current.gateway + "|" + current.token : null;
   if (identity !== lastGatewayIdentity) {
@@ -35,7 +35,7 @@ async function relayDiagnostics() {
     provider_sync: Object.fromEntries(providerDiagnostics),
   };
   if (!extension.connected) return {ok:false, extension, gateway_issue:"not_connected"};
-  if (lastGatewayCheck && Date.now() - lastGatewayCheckAt < CONNECTION_DIAGNOSTICS_TTL_MS) {
+  if (!force && lastGatewayCheck && Date.now() - lastGatewayCheckAt < CONNECTION_DIAGNOSTICS_TTL_MS) {
     return {ok:true, extension, gateway:lastGatewayCheck};
   }
   try {
@@ -79,6 +79,7 @@ function queueProviderSync(provider, force = false) {
     return syncProvider(provider, {force}).then(
       result => {
         recordProviderDiagnostic(provider, result || "skipped");
+        if (result === "uploaded") lastGatewayCheck = null;
         return result;
       },
       error => {
@@ -145,7 +146,7 @@ chrome.cookies.onChanged.addListener(({cookie}) => {
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type === "relay-diagnostics") {
-    relayDiagnostics().then(sendResponse).catch(() => sendResponse({ok:false, gateway_issue:"diagnostics_unavailable"}));
+    relayDiagnostics(message.force === true).then(sendResponse).catch(() => sendResponse({ok:false, gateway_issue:"diagnostics_unavailable"}));
     return true;
   }
   if (message?.type === "poll-connection") {
@@ -167,8 +168,16 @@ async function resyncLinkedProviders() {
   const {linkedProviders = []} = await chrome.storage.local.get(["linkedProviders"]);
   // Startup restoration is best-effort: providers remain independently usable
   // if one domain is unavailable, and no session material is written to logs.
+  // Repair an unexpectedly missing vault snapshot even when Chrome cookie
+  // contents are unchanged (for example after a gateway volume replacement).
+  // Do not force heavy browser reloads merely because authentication is unknown.
+  const status = await relayDiagnostics(true);
+  const missing = new Set(status.ok
+    ? (status.gateway.providers || []).filter(item => !item.linked).map(item => item.provider)
+    : []);
   await Promise.allSettled(
-    [...new Set(linkedProviders)].filter(provider => PROVIDERS[provider]).map(queueProviderSync)
+    [...new Set(linkedProviders)].filter(provider => PROVIDERS[provider])
+      .map(provider => queueProviderSync(provider, missing.has(provider)))
   );
 }
 
