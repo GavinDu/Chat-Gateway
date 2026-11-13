@@ -132,7 +132,8 @@ test("provider login sync exposes compact Log out and permits reconnect", async 
   assert.ok(logout,"linked provider must expose small logout");
   assert.match(logout.className,/quiet-danger/);
   await logout.click();
-  assert.equal(f.messages.at(-1).type,"logout-provider");
+  assert.ok(f.messages.some(x=>x.type==="logout-provider" && x.provider==="metaai"),
+    "logout must be sent even when a subsequent diagnostics refresh runs");
   assert.deepEqual(Array.from(f.values.linkedProviders),[]);
   assert.equal(providerButtons(f)[0].textContent,"Log in / Connect");
   await providerButtons(f)[0].click();
