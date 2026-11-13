@@ -29,6 +29,8 @@ function loadBackground(linkedProviders, failingProviders = []) {
       clearedTimers.add(id);
     },
     importScripts() {},
+    hasRelayConnection: state => Boolean(state.gateway && (state.token || state.connectionMode === "local")),
+    relayIdentity: state => state.connectionMode === "local" ? "local" : state.token,
     PROVIDERS: { chatgpt: ["chatgpt.com"], claude: ["claude.ai"] },
     syncProvider: async provider => {
       calls.push(provider);
