@@ -379,7 +379,10 @@ async fn main() -> anyhow::Result<()> {
             post(relay::rotate_pairing_code),
         )
         .route("/relay/v1/status", get(relay::status).post(relay::status))
-        .route("/relay/v1/diagnostics", get(relay::status).post(relay::status))
+        .route(
+            "/relay/v1/diagnostics",
+            get(relay::status).post(relay::status),
+        )
         .route(
             "/relay/v1/session/:provider",
             post(relay::import_session).delete(relay::unlink),
