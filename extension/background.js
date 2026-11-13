@@ -7,6 +7,7 @@ const providerDiagnostics = new Map();
 const CONNECTION_DIAGNOSTICS_TTL_MS = 30_000;
 let lastGatewayCheck = null;
 let lastGatewayCheckAt = 0;
+let lastGatewayIdentity = null;
 function classifyRelayFailure(error) {
   const message = String(error?.message || "");
   if (message.includes("timed out") || message.includes("cancelled")) return "gateway_timeout";
@@ -22,6 +23,12 @@ function recordProviderDiagnostic(provider, state, errorCode = null) {
 }
 async function relayDiagnostics() {
   const current = await chrome.storage.local.get(["gateway", "token", "linkedProviders"]);
+  const identity = current.gateway && current.token ? current.gateway + "|" + current.token : null;
+  if (identity !== lastGatewayIdentity) {
+    lastGatewayCheck = null;
+    lastGatewayIdentity = identity;
+    providerDiagnostics.clear();
+  }
   const extension = {
     connected: Boolean(current.gateway && current.token),
     linked_providers: [...(current.linkedProviders || [])].filter(provider => Boolean(PROVIDERS[provider])),
@@ -64,7 +71,9 @@ function queueProviderTask(provider, work) {
 const queuedProviderSyncs = new Map();
 function queueProviderSync(provider, force = false) {
   const queued = queuedProviderSyncs.get(provider);
-  if (queued) return queued;
+  // Explicit operator recovery must not be swallowed by a queued automatic
+  // no-change refresh; the provider queue still serializes both operations.
+  if (queued && !force) return queued;
   const pending = queueProviderTask(provider, () => {
     if (queuedProviderSyncs.get(provider) === pending) queuedProviderSyncs.delete(provider);
     return syncProvider(provider, {force}).then(
