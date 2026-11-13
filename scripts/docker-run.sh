@@ -29,6 +29,10 @@ Usage:
   scripts/docker-run.sh logs
   scripts/docker-run.sh pairing-code (legacy paired-mode only)
   scripts/docker-run.sh login <provider>
+  scripts/docker-run.sh chatgpt-connect [profile]
+  scripts/docker-run.sh chatgpt-enable-plan [profile]
+  scripts/docker-run.sh chatgpt-auth-status
+  scripts/docker-run.sh chatgpt-disconnect [profile]
 
 Environment:
   PORT                         Published loopback port (default: 8080)
@@ -282,6 +286,39 @@ case "${1:-}" in
       exit 1
     fi
     printf '%s\n' "$code"
+    ;;
+  chatgpt-connect|chatgpt-enable-plan|chatgpt-auth-status|chatgpt-disconnect)
+    require_docker
+    ensure_volumes_and_key
+    oauth_profile="${2:-default}"
+    oauth_port="${CHAT_GATEWAY_OAUTH_PORT:-14845}"
+    if [[ ! "$oauth_port" =~ ^[0-9]{1,5}$ ]] || (( 10#$oauth_port < 1024 || 10#$oauth_port > 65535 )); then
+      echo "CHAT_GATEWAY_OAUTH_PORT must be between 1024 and 65535" >&2
+      exit 2
+    fi
+    oauth_args=(--rm --log-driver none --network "$NETWORK" --memory 256m --memory-swap 256m
+      --mount "type=volume,source=$SESSION_VOLUME,target=/app/sessions"
+      --mount "type=volume,source=$KEY_VOLUME,target=/run/secrets,readonly"
+      -e CHAT_GATEWAY_SESSION_STORE=vault
+      -e CHAT_GATEWAY_VAULT_KEY_FILE=/run/secrets/vault.key)
+    case "$1" in
+      chatgpt-connect|chatgpt-enable-plan)
+        oauth_login_args=()
+        if [[ "$1" == "chatgpt-enable-plan" ]]; then oauth_login_args+=(--chatgpt-enable-plan); fi
+        oauth_args+=(-p "127.0.0.1:$oauth_port:$oauth_port" -e CHAT_GATEWAY_DOCKER_LOCAL_BIND=1)
+        docker run "${oauth_args[@]}" "$IMAGE" --chatgpt-connect --chatgpt-profile "$oauth_profile" --chatgpt-callback-port "$oauth_port" "${oauth_login_args[@]}" | while IFS= read -r line; do
+          case "$line" in
+            "http://127.0.0.1:$oauth_port/")
+              echo "Continue with ChatGPT in your browser and review the requested plan access."
+              open_browser "$line"
+              ;;
+            *) printf '%s\n' "$line" ;;
+          esac
+        done
+        ;;
+      chatgpt-auth-status) docker run "${oauth_args[@]}" "$IMAGE" --chatgpt-auth-status ;;
+      chatgpt-disconnect) docker run "${oauth_args[@]}" "$IMAGE" --chatgpt-logout --chatgpt-profile "$oauth_profile" ;;
+    esac
     ;;
   login)
     require_docker

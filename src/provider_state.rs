@@ -157,6 +157,8 @@ impl ProviderSessionRegistry {
             GatewayErrorKind::InvalidRequest
             | GatewayErrorKind::ModelNotFound
             | GatewayErrorKind::ProviderBusy
+            | GatewayErrorKind::ProviderUsageLimited
+            | GatewayErrorKind::ProviderAccessDenied
             | GatewayErrorKind::Memory => {}
             GatewayErrorKind::ProviderAssetBlocked => self.record_asset_blocked(provider),
             GatewayErrorKind::ProviderInputRejected => self.record_input_rejected(provider),

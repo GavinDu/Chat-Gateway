@@ -51,6 +51,10 @@ providers:
     daily_request_cap: 100
     models: [claude, claude-sonnet-4, claude-opus-4, claude-haiku-3.5, claude-sonnet, claude-opus]
   - name: chatgpt
+    # Optional supported ChatGPT-plan API backend. Connect with:
+    # scripts/docker-run.sh chatgpt-connect
+    # transport: chatgpt_oauth
+    # oauth_model: <slug from the connected account's model catalog>
     enabled: false
     priority: 4
     timeout_seconds: 150

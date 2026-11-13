@@ -36,7 +36,13 @@ pub(crate) async fn refresh_models(state: &Arc<AppState>) {
         if !provider.enabled {
             continue;
         }
-        match state.pool.discover(&provider.name).await {
+        match state
+            .chat_service
+            .models(
+                crate::chat_backend::ProviderId::new(&provider.name).expect("validated provider"),
+            )
+            .await
+        {
             Ok(models) => {
                 state
                     .models_cache
@@ -62,6 +68,8 @@ pub(crate) fn start_background_workers(state: &Arc<AppState>) {
         });
     }
 
+    crate::chatgpt_oauth::start_monitor(state);
+
     // Verify idle provider sessions on the browser worker. Each probe is
     // read-only and serialized by the provider page lock; stagger providers
     // to avoid synchronized browser work after startup.
@@ -69,7 +77,7 @@ pub(crate) fn start_background_workers(state: &Arc<AppState>) {
         .cfg
         .providers
         .iter()
-        .filter(|provider| provider.enabled)
+        .filter(|provider| provider.enabled && !provider.uses_oauth())
     {
         let pool = state.pool.clone();
         let provider_sessions = state.provider_sessions.clone();

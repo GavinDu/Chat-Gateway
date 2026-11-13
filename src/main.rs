@@ -26,6 +26,7 @@ mod chat_handler;
 mod chat_render;
 mod chat_request;
 mod chat_service;
+mod chatgpt_oauth;
 mod cli;
 mod config;
 mod context;
@@ -78,6 +79,20 @@ async fn main() -> anyhow::Result<()> {
 
     let remote_proxy_trust = validate_remote_gateway_config()?;
     let cli = Cli::parse();
+    if cli.chatgpt_connect {
+        return chatgpt_oauth::connect(
+            cli.chatgpt_callback_port,
+            &cli.chatgpt_profile,
+            cli.chatgpt_enable_plan,
+        )
+        .await;
+    }
+    if cli.chatgpt_logout {
+        return chatgpt_oauth::logout(&cli.chatgpt_profile).await;
+    }
+    if cli.chatgpt_auth_status {
+        return chatgpt_oauth::status().await;
+    }
     if cli.show_memory_egress_policy {
         let policy = memory_egress::MemoryEgressPolicy::from_env()
             .map_err(|_| anyhow::anyhow!("provider memory egress policy is invalid"))?;
@@ -160,6 +175,11 @@ async fn main() -> anyhow::Result<()> {
     }
     let cfg = Arc::new(AppConfig::load(&cli.config)?);
     session::validate_encrypted_store_configuration()?;
+    if cfg.providers.iter().any(|p| p.enabled && p.uses_oauth())
+        && std::env::var("CHAT_GATEWAY_SESSION_STORE").as_deref() != Ok("vault")
+    {
+        anyhow::bail!("ChatGPT OAuth requires CHAT_GATEWAY_SESSION_STORE=vault");
+    }
     if cfg.auth.keys.is_empty() {
         tracing::warn!("API-key authentication is disabled; the listener remains loopback-only");
     }
@@ -178,6 +198,7 @@ async fn main() -> anyhow::Result<()> {
             vec![cli.test_adapter.clone().expect("checked above")]
         };
         let registry = providers::build_registry(&cfg);
+        let diagnostic_backend = chatgpt_oauth::RoutedBackend::new(&cfg, pool.clone())?;
         let mut results = Vec::with_capacity(names.len());
 
         for provider in names {
@@ -194,6 +215,64 @@ async fn main() -> anyhow::Result<()> {
                 }
             };
 
+            if cfg.provider(&provider).is_some_and(|p| p.uses_oauth()) {
+                use crate::chat_backend::ChatBackend;
+                let models = diagnostic_backend
+                    .models(ProviderId::new(&provider).expect("known provider"))
+                    .await;
+                let mut healthy = false;
+                if models.is_ok() {
+                    let events = diagnostic_backend
+                        .send_stream(BackendRequest {
+                            provider: ProviderId::new(&provider).expect("known provider"),
+                            prompt: "Reply with exactly OK".into(),
+                            model: "chatgpt".into(),
+                            has_history: false,
+                            thread_url: None,
+                        })
+                        .await;
+                    match events {
+                        Ok(events) => {
+                            let service = ChatService::new(Arc::new(
+                                chatgpt_oauth::RoutedBackend::new(&cfg, pool.clone())?,
+                            ));
+                            let result = service
+                                .collect_with_timeout(
+                                    events,
+                                    Instant::now(),
+                                    std::time::Duration::from_secs(
+                                        cfg.provider(&provider)
+                                            .expect("configured")
+                                            .timeout_seconds,
+                                    ),
+                                )
+                                .await;
+                            healthy = result.error.is_none() && !result.content.is_empty();
+                            if let Some(error) = result.error {
+                                errors.push(error.to_string());
+                            }
+                        }
+                        Err(error) => errors.push(error.to_string()),
+                    }
+                }
+                let models = match models {
+                    Ok(models) => Some(models),
+                    Err(error) => {
+                        errors.push(error.to_string());
+                        None
+                    }
+                };
+                results.push(diagnostics::AdapterDiagnostic {
+                    provider,
+                    queue_ms,
+                    report: None,
+                    models,
+                    selectors: None,
+                    errors,
+                    healthy,
+                });
+                continue;
+            }
             let report = if queue_ms.is_some() {
                 match pool.test_adapter(&provider).await {
                     Ok(report) => Some(report),
@@ -289,7 +368,10 @@ async fn main() -> anyhow::Result<()> {
     let state = Arc::new(AppState {
         cfg: cfg.clone(),
         pool: pool.clone(),
-        chat_service: ChatService::new(pool.clone()),
+        chat_service: ChatService::new(Arc::new(chatgpt_oauth::RoutedBackend::new(
+            &cfg,
+            pool.clone(),
+        )?)),
         memory: Arc::new(UnifiedMemory::from_env(cfg.memory.max_tokens)?),
         router: ProviderRouter::new(cfg.clone()),
         models_cache: Arc::new(RwLock::new(HashMap::new())),
@@ -1590,6 +1672,9 @@ async fn persist_provider_thread(
     model: &str,
     synced_marker: String,
 ) {
+    if state.cfg.provider(provider).is_some_and(|p| p.uses_oauth()) {
+        return;
+    }
     let thread_url = match state.pool.current_url(provider).await {
         Ok(url) if is_reopenable_provider_thread_url(provider, &url) => url,
         Ok(_) => return,

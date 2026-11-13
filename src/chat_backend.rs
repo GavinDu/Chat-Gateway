@@ -125,6 +125,8 @@ pub enum GatewayErrorKind {
     InvalidRequest,
     ModelNotFound,
     ProviderBusy,
+    ProviderUsageLimited,
+    ProviderAccessDenied,
     SessionExpired,
     Challenge,
     Timeout,
@@ -228,6 +230,12 @@ impl axum::response::IntoResponse for GatewayError {
                 "server_error",
                 "provider_busy",
                 "all eligible providers are busy; retry shortly",
+            ),
+            GatewayErrorKind::ProviderUsageLimited => (
+                StatusCode::TOO_MANY_REQUESTS,"provider_error","provider_usage_limited","provider usage limit reached; review account usage settings",
+            ),
+            GatewayErrorKind::ProviderAccessDenied => (
+                StatusCode::FORBIDDEN,"provider_error","provider_access_denied","provider access denied; review account permissions and serving region",
             ),
             GatewayErrorKind::SessionExpired => (
                 StatusCode::UNAUTHORIZED,

@@ -19,6 +19,7 @@ pub(super) async fn json_provider_response(
         queue_ms,
         prompt_tokens,
         receiver,
+        preserve_backend_error,
     } = attempt;
     let collected = state
         .chat_service
@@ -49,6 +50,9 @@ pub(super) async fn json_provider_response(
             },
         );
         if full.is_empty() {
+            if preserve_backend_error {
+                return Ok(error.into_response());
+            }
             tracing::warn!(request_id = %request_id, provider = %provider, error_kind = ?error.kind, retryable = error.retryable, "provider failed before output; considering fallback");
             return Err(message);
         }

@@ -8,6 +8,8 @@ use tower::ServiceExt;
 
 fn configured_provider(name: &str, priority: u32) -> config::ProviderConfig {
     config::ProviderConfig {
+        transport: crate::config::ProviderTransport::Browser,
+        oauth_model: None,
         name: name.to_owned(),
         enabled: true,
         priority,

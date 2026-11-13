@@ -69,6 +69,7 @@ async function refreshStatus(force = false) {
   if (!response.ok) throw new Error("Status request failed (" + response.status + ").");
   const data = await response.json();
   const items = await Promise.all(data.providers.map(async item => {
+    const oauth = item.connection_method === "chatgpt_oauth";
     const li = document.createElement("li");
     const heading = document.createElement("strong");
     heading.textContent = item.provider;
@@ -85,7 +86,9 @@ async function refreshStatus(force = false) {
     // another provider is healthy. Keep the dashboard usable and fail closed
     // for only the affected provider; do not lose all login/logout controls.
     try {
-      if (origins.length && await chrome.permissions.contains({origins})) {
+      if (oauth) {
+        browser = "ChatGPT sign-in managed by gateway";
+      } else if (origins.length && await chrome.permissions.contains({origins})) {
         const present = await Promise.all(domains.map(domain => chrome.cookies.getAll({domain})));
         browser = present.some(cookies => cookies.length > 0) ? "Browser cookies present" : "No browser cookies";
       }
@@ -113,9 +116,10 @@ async function refreshStatus(force = false) {
     const linkButton = document.createElement("button");
     linkButton.type = "button";
     linkButton.className = "provider-action";
-    linkButton.textContent = !item.linked ? "Log in / Connect"
+    linkButton.textContent = oauth ? "Managed by gateway" : !item.linked ? "Log in / Connect"
       : item.authentication === "needs_login" ? "Re-login / Sync" : "Sync session";
-    linkButton.disabled = item.enabled === false;
+    linkButton.disabled = oauth || item.enabled === false;
+    if (oauth) linkButton.title = "Use the gateway’s ChatGPT account commands to connect or disconnect this account.";
     linkButton.addEventListener("click", () => connectProvider(
       item.provider,
       !item.linked || item.authentication === "needs_login"
@@ -129,7 +133,7 @@ async function refreshStatus(force = false) {
     openButton.addEventListener("click", () => openProviderLogin(item.provider).catch(error => message(error.message)));
     actions.append(openButton);
 
-    if (item.linked) {
+    if (item.linked && !oauth) {
       const logoutButton = document.createElement("button");
       logoutButton.type = "button";
       logoutButton.className = "quiet-danger provider-action";

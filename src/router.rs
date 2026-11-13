@@ -160,6 +160,8 @@ mod tests {
             auth: AuthConfig::default(),
             providers: vec![
                 ProviderConfig {
+                    transport: crate::config::ProviderTransport::Browser,
+                    oauth_model: None,
                     name: "claude".into(),
                     enabled: true,
                     priority: 1,
@@ -173,6 +175,8 @@ mod tests {
                     selectors: crate::config::ProviderSelectorOverrides::default(),
                 },
                 ProviderConfig {
+                    transport: crate::config::ProviderTransport::Browser,
+                    oauth_model: None,
                     name: "chatgpt".into(),
                     enabled: true,
                     priority: 2,

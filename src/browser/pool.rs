@@ -538,6 +538,11 @@ impl ObscuraPool {
 
     /// Discover a provider's models on a fresh page (no message sent).
     pub async fn discover(&self, name: &str) -> Result<Vec<String>> {
+        if let Some(config) = self.cfg.provider(name).filter(|p| p.uses_oauth()) {
+            return crate::chatgpt_oauth::catalog(config.clone())
+                .await
+                .map_err(Into::into);
+        }
         let provider =
             Provider::from_name(name).ok_or_else(|| anyhow::anyhow!("unknown provider {name}"))?;
         let (tx, rx) = oneshot::channel();

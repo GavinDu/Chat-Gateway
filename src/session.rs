@@ -1100,6 +1100,7 @@ pub fn list_vault_sessions() -> Result<Vec<VaultSessionInfo>> {
         "mistral",
         "perplexity",
         "manus",
+        "chatgpt-oauth",
     ];
     let mut entries = Vec::with_capacity(PROVIDERS.len());
     for provider in PROVIDERS {
@@ -1113,6 +1114,13 @@ pub fn list_vault_sessions() -> Result<Vec<VaultSessionInfo>> {
                 }
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if *provider == "chatgpt-oauth" {
+                    entries.push(VaultSessionInfo {
+                        provider: (*provider).into(),
+                        status: "missing",
+                    });
+                    continue;
+                }
                 match std::fs::metadata(session_path(provider)?) {
                     Ok(_) => "legacy-plaintext",
                     Err(missing) if missing.kind() == std::io::ErrorKind::NotFound => "missing",
@@ -1142,6 +1150,7 @@ pub fn restore_vault_backup(backup_dir: &str) -> Result<usize> {
     {
         anyhow::bail!("backup directory must be a sessions/.vault-rotation-* directory");
     }
+    let _oauth_lock = crate::chatgpt_oauth::storage::try_lock()?;
     let key = vault_key_from_env()?;
     const PROVIDERS: &[&str] = &[
         "qwen",
@@ -1153,6 +1162,7 @@ pub fn restore_vault_backup(backup_dir: &str) -> Result<usize> {
         "mistral",
         "perplexity",
         "manus",
+        "chatgpt-oauth",
     ];
     let mut backups = Vec::new();
     for provider in PROVIDERS {
@@ -1298,6 +1308,7 @@ fn apply_vault_rotation_records(
 /// backup directory so an interrupted deployment can be recovered with the
 /// old key. Runtime write failures trigger rollback of already-replaced files.
 pub fn rotate_vault_key(new_key: &[u8; 32]) -> Result<(usize, String)> {
+    let _oauth_lock = crate::chatgpt_oauth::storage::try_lock()?;
     let old_key = vault_key_from_env()?;
     if old_key.as_ref() == new_key {
         anyhow::bail!("new vault key must differ from the current key");
@@ -1313,6 +1324,7 @@ pub fn rotate_vault_key(new_key: &[u8; 32]) -> Result<(usize, String)> {
         "mistral",
         "perplexity",
         "manus",
+        "chatgpt-oauth",
     ];
     // A rotation preflight must not migrate any plaintext files before we know
     // every already-encrypted provider record authenticates with the old key.
@@ -1330,7 +1342,7 @@ pub fn rotate_vault_key(new_key: &[u8; 32]) -> Result<(usize, String)> {
     // Migrate remaining legacy plaintext snapshots only after existing vault
     // records have passed authentication. The loader verifies the replacement
     // before removing the plaintext source.
-    for provider in PROVIDERS {
+    for provider in PROVIDERS.iter().filter(|name| **name != "chatgpt-oauth") {
         let _ = VaultSessionStore.load(provider)?;
     }
     let mut records: Vec<(String, String, Vec<u8>)> = Vec::new();
@@ -1365,6 +1377,9 @@ pub fn rotate_vault_key(new_key: &[u8; 32]) -> Result<(usize, String)> {
 }
 
 fn session_vault_path(provider: &str) -> Result<String> {
+    if provider == "chatgpt-oauth" {
+        return Ok("sessions/chatgpt-oauth.vault".into());
+    }
     let legacy = session_path(provider)?;
     Ok(Path::new(&legacy)
         .with_extension("vault")
@@ -1422,7 +1437,7 @@ pub fn validate_encrypted_store_configuration() -> Result<()> {
     Ok(())
 }
 
-fn vault_key_from_env() -> Result<Zeroizing<[u8; 32]>> {
+pub(crate) fn vault_key_from_env() -> Result<Zeroizing<[u8; 32]>> {
     let encoded = if let Ok(value) = std::env::var("CHAT_GATEWAY_VAULT_KEY") {
         Zeroizing::new(value)
     } else if let Ok(path) = std::env::var("CHAT_GATEWAY_VAULT_KEY_FILE") {
@@ -1440,7 +1455,7 @@ fn vault_aad(provider: &str) -> String {
     format!("chat-gateway/session-vault/v1/{provider}")
 }
 
-fn encrypt_session_snapshot(
+pub(crate) fn encrypt_session_snapshot(
     file: &SessionFile,
     provider: &str,
     key_bytes: &[u8; 32],
@@ -1467,7 +1482,7 @@ fn encrypt_session_snapshot(
     Ok(output)
 }
 
-fn decrypt_session_snapshot(
+pub(crate) fn decrypt_session_snapshot(
     bytes: &[u8],
     provider: &str,
     key_bytes: &[u8; 32],
@@ -1497,7 +1512,7 @@ fn decrypt_session_snapshot(
     Ok(serde_json::from_slice(plaintext)?)
 }
 
-fn ensure_private_session_dir_sync(path: &Path) -> Result<()> {
+pub(crate) fn ensure_private_session_dir_sync(path: &Path) -> Result<()> {
     std::fs::create_dir_all(path)?;
     #[cfg(unix)]
     {
@@ -1758,7 +1773,7 @@ async fn write_session_snapshot(
     Ok(())
 }
 
-fn write_session_file_atomically(destination: &Path, serialized: &[u8]) -> Result<()> {
+pub(crate) fn write_session_file_atomically(destination: &Path, serialized: &[u8]) -> Result<()> {
     let temp_path = format!(
         "{}.tmp-{}-{}",
         destination.display(),
@@ -2894,6 +2909,18 @@ mod atomic_session_write_tests {
 #[cfg(test)]
 mod vault_tests {
     use super::*;
+    #[test]
+    fn oauth_metadata_namespace_cannot_be_loaded_as_browser_cookies() {
+        let key = [71u8; 32];
+        let encrypted = encrypt_session_snapshot(&sample_session(), "chatgpt-oauth", &key).unwrap();
+        assert!(decrypt_session_snapshot(&encrypted, "chatgpt-oauth", &key).is_ok());
+        assert!(decrypt_session_snapshot(&encrypted, "chatgpt", &key).is_err());
+        assert!(session_path("chatgpt-oauth").is_err());
+        assert_eq!(
+            session_vault_path("chatgpt-oauth").unwrap(),
+            "sessions/chatgpt-oauth.vault"
+        );
+    }
 
     fn sample_session() -> SessionFile {
         SessionFile {

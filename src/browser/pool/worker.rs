@@ -655,7 +655,7 @@ pub(super) fn browser_thread(
                     }
                 }
                 // Keep only a bounded working set; other providers open on demand.
-                for pcfg in cfg.providers.iter().filter(|pcfg| pcfg.enabled).take(cfg.obscura.max_cached_provider_pages) {
+                for pcfg in cfg.providers.iter().filter(|pcfg| pcfg.enabled && !pcfg.uses_oauth()).take(cfg.obscura.max_cached_provider_pages) {
                     let Some(provider) = Provider::from_name(&pcfg.name) else { continue };
                     match super::browser_factory::new_page(&browser).await {
                         Ok(mut page) => {
