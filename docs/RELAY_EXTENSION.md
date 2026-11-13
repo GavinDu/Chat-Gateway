@@ -70,7 +70,7 @@ To reduce periodic work, a connected popup refreshes its status every 30
 seconds (and on focus or manual refresh). Pending pairing retains a
 five-second check; the service worker's linked-provider repair interval is
 15 minutes and cookie changes are debounced for 10 seconds per provider.
-Explicit **Sync session** is still available for immediate operator recovery.
+Successful cookie snapshots are fingerprinted locally using SHA-256 bound to the gateway and paired install; only the digest is stored, never the session contents. Automatic refreshes skip identical snapshots even after service-worker suspension. Explicit **Sync session** bypasses this optimization for immediate operator recovery.
 Browser activation timeout, a provider's 403 JavaScript asset failures, and
 incompatible site JavaScript require separate diagnosis; reducing log volume
 does not imply those errors are fixed.
