@@ -344,9 +344,9 @@ async function checkConnection() {
   } catch (error) { message(error.message); return false; }
 }
 initialize().then(updateConnection);
-// Connected gateway dashboards need not poll the vault every five seconds.
+// Connected gateway dashboards use a bounded ten-second check for revocation without five-second polling.
 // Preserve prompt five-second approval completion only while pairing is pending.
-setInterval(updateConnection, 30_000);
+setInterval(updateConnection, 10_000);
 setInterval(async () => {
   const {pendingConnection} = await chrome.storage.local.get("pendingConnection");
   if (pendingConnection) await updateConnection();
