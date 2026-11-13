@@ -12,7 +12,7 @@
     <p class="warning">Only link provider accounts you are authorized to use. Passwords and MFA are never collected. Session cookies are bearer credentials.</p>
     <label>Local gateway URL <input id="gateway" value="http://127.0.0.1:8080" spellcheck="false"></label>
     <section id="pairing">
-      <p id="connection-help">Connect once, approve locally, then your extension reconnects automatically.</p>
+      <p id="connection-help">Local connection uses no pairing code or installation token.</p>
       <label id="remote-pairing" hidden>Remote gateway pairing code <input id="code" inputmode="numeric" maxlength="8" autocomplete="one-time-code"></label>
       <button id="pair">Connect to gateway</button>
     </section>
@@ -24,10 +24,10 @@
       <p class="small">Connect an account below, then sign in at its official website if needed. Saved cookies do not prove an active login. MFA and passwords stay with the provider.</p>
       <ul id="status"></ul>
       <button id="unpair" class="quiet-danger compact">Disconnect gateway</button>
-      <p class="small">Disconnecting the extension retains provider vault sessions. Use each provider's Log out button to remove a saved session and stop automatic resync.</p>
+      <p class="small">Disconnecting this extension retains provider vault sessions. Use each provider's Log out button to remove a saved session and stop automatic resync.</p>
     </section>
     <p id="message" role="status" aria-live="polite"></p>
-    <p class="small">Local-only MVP. Keep the gateway bound to loopback. Use encrypted vault mode with a stable key before linking sessions.</p>
+    <p class="small">Local relay requires a gateway published only on 127.0.0.1. No pairing is required. Use encrypted vault mode with a stable key before linking sessions.</p>
   </main>
   <script src="shared.js"></script>
   <script src="popup.js"></script>
