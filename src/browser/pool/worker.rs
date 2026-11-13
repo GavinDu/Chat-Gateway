@@ -125,6 +125,56 @@ fn composer_preflight_evidence(
     }
 }
 
+/// Fixed structural labels only. These observations cannot authenticate a user
+/// or justify typing into a generic editor; no DOM text or attributes escape.
+#[derive(Debug, serde::Serialize)]
+pub struct ComposerContextEvidence {
+    actionable_controls: Vec<&'static str>,
+    editor_in_form: bool,
+    editor_in_dialog: bool,
+    sign_in_control_present: bool,
+    account_control_present: bool,
+}
+
+fn composer_context_evidence(page: &obscura_core::Page) -> ComposerContextEvidence {
+    const EDITOR_KINDS: &[(&str, &str)] = &[
+        ("textarea", "textarea"),
+        (
+            "editable_textbox",
+            "[contenteditable='true'][role='textbox']",
+        ),
+        ("editable", "[contenteditable='true']"),
+        ("search_input", "input[type='search']"),
+        ("text_input", "input[type='text']"),
+    ];
+    ComposerContextEvidence {
+        actionable_controls: EDITOR_KINDS
+            .iter()
+            .filter(|(_, selector)| providers::common::visible_composer_exists(page, &[*selector]))
+            .map(|(label, _)| *label)
+            .collect(),
+        editor_in_form: providers::common::visible_composer_exists(
+            page,
+            &["form textarea", "form [contenteditable='true']"],
+        ),
+        editor_in_dialog: providers::common::visible_composer_exists(
+            page,
+            &[
+                "[role='dialog'] textarea",
+                "[role='dialog'] [contenteditable='true']",
+                "dialog textarea",
+                "dialog [contenteditable='true']",
+            ],
+        ),
+        sign_in_control_present: page
+            .query_selector("a[href*='/auth/login'], button[data-testid='login-button']")
+            .is_some(),
+        account_control_present: page
+            .query_selector("[data-testid='accounts-profile-button']")
+            .is_some(),
+    }
+}
+
 /// The browser worker waits for a composer *before* invoking the provider
 /// adapter. A timeout here otherwise bypasses adapter-level diagnostics.
 /// Never record the selector, URL, prompt, page text or upstream error string.
@@ -143,10 +193,12 @@ fn report_composer_preflight_failure(
     );
     if matches!(provider, "chatgpt" | "metaai") {
         let evidence = composer_preflight_evidence(provider, page, configured_inputs);
+        let context = composer_context_evidence(page);
         tracing::warn!(
             provider,
             stage = "composer_preflight",
             category = evidence.category(),
+            composer_context = ?context,
             document_ready = evidence.document_ready,
             provider_origin = evidence.provider_origin,
             login_url = evidence.login_url,
@@ -183,6 +235,48 @@ fn report_composer_preflight_failure(
 #[cfg(test)]
 mod composer_preflight_diagnostic_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn editor_context_is_actionable_structural_evidence_without_page_data() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <textarea hidden>private-hidden-value</textarea>
+            <form><div contenteditable="true" role="textbox" id="private-id">private-draft</div></form>
+            <div role="dialog"><textarea disabled>private-disabled-value</textarea></div>
+            <a href="/auth/login?token=private-token">private-label</a>
+            <button data-testid="accounts-profile-button">private-account</button>
+            </body></html>"#;
+        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        let evidence = composer_context_evidence(&page);
+        assert_eq!(
+            evidence.actionable_controls,
+            vec!["editable_textbox", "editable"]
+        );
+        assert!(evidence.editor_in_form);
+        assert!(!evidence.editor_in_dialog);
+        assert!(evidence.sign_in_control_present);
+        assert!(evidence.account_control_present);
+        assert!(!serde_json::to_string(&evidence)
+            .unwrap()
+            .contains("private"));
+        assert!(!format!("{evidence:?}").contains("private"));
+        page.evaluate("document.querySelector('[role=dialog] textarea').disabled = false");
+        let evidence = composer_context_evidence(&page);
+        assert!(evidence.editor_in_dialog);
+        assert!(evidence.actionable_controls.contains(&"textarea"));
+        // Structural evidence must not add an arbitrary send-path fallback.
+        assert!(!providers::common::visible_composer_exists(
+            &page,
+            &["#prompt-textarea"]
+        ));
+    }
 
     #[tokio::test]
     async fn missing_mistral_composer_retains_original_failure_without_403_evidence() {
@@ -1130,8 +1224,10 @@ pub(super) fn browser_thread(
                                 // thread ids, account tokens or cookie values.
                                 report.page = Some(sanitize_page_location(&page.url()));
                                 report.restored_cookie_count = Some(browser.cookies().get_all().len());
-                                // Phase 0 — session check.
+                                report.authentication = Some("unverified");
+                                // Phase 0 — redirect check, not proof of authentication.
                                 if providers::common::is_login_page(&page) {
+                                    report.authentication = Some("login_required");
                                     report.errors.push("session expired: re-login required before running --test-adapter".to_string());
                                     finish(report);
                                     return;
@@ -1150,11 +1246,13 @@ pub(super) fn browser_thread(
                                     ("response", &responses),
                                 ];
                                 report.probe = providers::common::probe_selector_groups(&page, &sets);
+                                report.composer_context = Some(composer_context_evidence(&page));
                                 report.input_controls = diagnostic_input_controls(&page);
                                 // Phase 1 — input (20s, Go's budget).
                                 let input_sel = match providers::common::wait_for_selector(&mut page, sets[0].1, 20000).await {
                                     Ok(()) => diagnostic_input_selector(&page, sets[0].1).unwrap_or(sets[0].1[0]),
                                     Err(e) => {
+                                        report.composer_context = Some(composer_context_evidence(&page));
                                         report.input_controls = diagnostic_input_controls(&page);
                                         report.errors.push(format!("input: {e}"));
                                         finish(report);
@@ -1170,6 +1268,7 @@ pub(super) fn browser_thread(
                                     return;
                                 }
                                 providers::common::drive_page(&mut page, Duration::from_millis(400)).await;
+                                report.composer_context = Some(composer_context_evidence(&page));
                                 report.input_controls = diagnostic_input_controls(&page);
                                 report.typed_prompt_retained =
                                     Some(diagnostic_prompt_retained(&page, input_sel, DUMMY));
