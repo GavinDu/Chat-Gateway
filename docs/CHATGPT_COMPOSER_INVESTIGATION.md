@@ -65,10 +65,71 @@ in serialized/logged evidence, and that no generic send fallback is introduced.
    textboxes, searches, or dialog fields.
 5. Require actual HTTP 200 with a nonempty assistant response for each provider.
 6. Complete sandbox, merge, merged-main E2E, and installation gates before
-   installing a release. This diagnostic change does not fix the 502 itself.
+   installing a release. Successful real-provider completion is still required; diagnostic and fixture success alone is insufficient.
 
 Sandbox capability preflight at /workspace/chat-gateway: Linux; node, python3,
 and cargo present; ssh absent; no configured executable Chromium path.
 Browser/SSH acceptance: NOT RUN — missing SSH; Chromium launch/sandbox/runtime
 prerequisites have not been established. HTTP-only tests cannot substitute.
-No candidate image, merge, or new deployment was performed in this investigation.
+The user subsequently explicitly authorized committing, restarting, and testing
+feature changes in a closed loop. Feature builds were installed for that live
+diagnostic loop, preserving the production volumes. No merge or merged-main
+release validation has been performed. This is not a validated main release.
+
+## Closed-loop findings and fixes
+
+- An existing private debug capture identified the live ChatGPT form as
+  `form[data-chatgpt-composer]` with a ProseMirror editable textbox and a
+  form-scoped Send control. Add those narrow selectors and reject ambiguous or
+  dialog/search form candidates before production sends.
+- The pinned Obscura bootstrap exposes a generic value property on DIVs and
+  implements execCommand as a no-op. Use element type rather than property
+  presence when reading/writing composer text. Offer cancellable plain-text
+  paste to controlled editors before the DOM fallback; do not forge trust.
+- An isolated encrypted session copy now finds the ChatGPT editor, retains the
+  single-line diagnostic prompt, and clicks Send. No response token arrived
+  within 45 seconds; network metadata alone does not establish authentication
+  or successful completion.
+- Real requests contain a multiline quoted transcript. Boolean-only evidence
+  established that the live editor discarded the final generated separator
+  whitespace. Remove only the generated trailing newline outside the transcript
+  and personal-memory wrappers; preserve user whitespace inside each wrapper.
+  Draft retention and send guards remain exact, without trimming user content.
+- Startup and relay refresh used unbounded initial document navigation while
+  holding the shared browser operation lock. Bound the full restore/navigation/
+  reload sequence to 30 seconds. Long generation and provider failures remain
+  separate from this navigation budget.
+- The extension treated persisted-but-not-activated sessions as failed uploads
+  and could remove first-link consent. Recognize only the gateway's fixed
+  session_activation_timeout/session_refresh_failed codes as saved activation
+  pending. Preserve consent, invalidate stale status, do not mark snapshot
+  activation successful, and do not immediately replay the upload.
+
+## Provider coverage
+
+All eight enabled providers were tested independently using configured model
+aliases (Meta AI uses meta-ai, not metaai). Intermediate full-stack tests still
+returned 502 for all eight. Observations: Meta AI document/API HTTP 403; Mistral
+unavailable composer with DOM errors and no observed script HTTP 403; Qwen and
+Perplexity response timeout; Claude module-worker and input failures; Gemini
+and Grok input failures. These are observations, not a blanket authentication
+or anti-automation diagnosis. Manus is disabled and was not enabled.
+
+The final generated-newline correction requires another real-provider sweep.
+Record exact final results on the PR; do not infer success from the tests below.
+
+## Local checks for the combined changes
+
+- 87 extension tests passed, including saved-activation-pending link retention.
+- 36 composer tests passed, including controlled paste without document
+  destruction, stale DIV value handling, and ambiguous/dialog editor rejection.
+- All three provider fixture integration tests passed.
+- Full Rust suite: 650 passed, one failed because the existing embedded-login
+  profile test requires Linux /dev/shm, absent on this Mac. The test was not
+  skipped or weakened. Required Linux CI remains authoritative for that case.
+- Formatting, diff checks, and clippy passed; existing dependency warnings remain.
+- Chrome live extension console was attempted twice but the desktop remained
+  locked, including after the user opened SSH. No live extension console or
+  extension reload has been verified. Source tests do not establish that the
+  installed extension is running the edited files.
+

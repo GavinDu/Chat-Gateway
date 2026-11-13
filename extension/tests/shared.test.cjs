@@ -620,3 +620,17 @@ test("local relay mode cannot be used for a remote HTTP or HTTPS gateway", async
     assert.equal(api.fetchCalls.length, 0);
   }
 });
+
+
+test("saved activation failures retain consent without caching success or replaying", async () => {
+  for (const [status, code] of [[504, "session_activation_timeout"], [500, "session_refresh_failed"]]) {
+    const storage = {gateway:"http://127.0.0.1:8080",token:"install",linkedProviders:["chatgpt"]};
+    const api = loadShared([{name:"session",value:"fixture",domain:".chatgpt.com",path:"/",secure:true}], true, storage, {
+      fetchResponse:{ok:false,status,json:async()=>({error:{code}})}
+    });
+    assert.equal(await api.syncProvider("chatgpt"), "saved_activation_pending");
+    assert.deepEqual(storage.linkedProviders, ["chatgpt"]);
+    assert.equal(storage.relaySnapshotVersions, undefined);
+    assert.equal(api.fetchCalls.length, 1);
+  }
+});

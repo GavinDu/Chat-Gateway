@@ -134,6 +134,8 @@ pub struct ComposerContextEvidence {
     editor_in_dialog: bool,
     sign_in_control_present: bool,
     account_control_present: bool,
+    known_send_controls: Vec<&'static str>,
+    form_textbox_with_submit: bool,
 }
 
 fn composer_context_evidence(page: &obscura_core::Page) -> ComposerContextEvidence {
@@ -169,6 +171,16 @@ fn composer_context_evidence(page: &obscura_core::Page) -> ComposerContextEviden
         sign_in_control_present: page
             .query_selector("a[href*='/auth/login'], button[data-testid='login-button']")
             .is_some(),
+        known_send_controls: [
+            ("composer_submit", "button[data-testid='composer-submit-button']"),
+            ("send_button", "button[data-testid='send-button']"),
+            ("send_message", "button[aria-label='Send message']"),
+            ("send_prompt", "button[aria-label='Send prompt']"),
+            ("submit", "button[type='submit']"),
+        ].into_iter().filter(|(_, selector)| page.query_selector(selector).is_some()).map(|(name, _)| name).collect(),
+        form_textbox_with_submit: providers::common::visible_composer_exists(page, &[
+            "form:has(button[data-testid='composer-submit-button']) [contenteditable='true'][role='textbox']",
+        ]),
         account_control_present: page
             .query_selector("[data-testid='accounts-profile-button']")
             .is_some(),
@@ -515,7 +527,7 @@ fn diagnostic_prompt_retained(page: &obscura_core::Page, selector: &str, prompt:
                 el.getAttribute('contenteditable') !== 'false'
             );
             if (!el) return false;
-            const value = 'value' in el ? el.value : (el.innerText || el.textContent || '');
+            const value = (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') ? el.value : (el.innerText || el.textContent || '');
             return typeof value === 'string' && value.trim() === {prompt}.trim();
         }})()"#
     );
@@ -1261,7 +1273,7 @@ pub(super) fn browser_thread(
                                 };
                                 report.input_found = true;
                                 // Phase 2 — dummy prompt (Go RunAdapterTest).
-                                const DUMMY: &str = "chat-gateway selector test — please reply with the word OK";
+                                const DUMMY: &str = "chat-gateway selector test\nplease reply with the word OK";
                                 if let Err(e) = providers::common::human_type(&page, &[input_sel], DUMMY).await {
                                     report.errors.push(format!("input type: {e}"));
                                     finish(report);
