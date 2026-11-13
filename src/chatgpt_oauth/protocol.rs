@@ -89,6 +89,7 @@ impl Decoder {
                 let code = value
                     .pointer("/response/error/code")
                     .or_else(|| value.pointer("/error/code"))
+                    .or_else(|| value.get("code"))
                     .and_then(Value::as_str);
                 match code {
                     Some("subscription_sharing_usage_limit_exceeded") => Err(GatewayError::typed(
@@ -173,6 +174,28 @@ mod tests {
             let error = decoder.push(wire.as_bytes()).unwrap_err();
             assert!(!error.message.contains("secret"));
             assert!(!decoder.completed());
+        }
+    }
+    #[test]
+    fn top_level_error_codes_keep_quota_policy_and_authentication_distinct() {
+        for (code, kind) in [
+            (
+                "subscription_sharing_usage_limit_exceeded",
+                GatewayErrorKind::ProviderUsageLimited,
+            ),
+            (
+                "chatpass_v2_scope_not_authorized",
+                GatewayErrorKind::ProviderAccessDenied,
+            ),
+            (
+                "subscription_sharing_invalid_user",
+                GatewayErrorKind::SessionExpired,
+            ),
+        ] {
+            let wire=format!("data: {{\"type\":\"error\",\"code\":\"{code}\",\"message\":\"private fixture detail\"}}\n\n");
+            let error = Decoder::default().push(wire.as_bytes()).unwrap_err();
+            assert_eq!(error.kind, kind);
+            assert!(!error.message.contains("private fixture"));
         }
     }
     #[test]
