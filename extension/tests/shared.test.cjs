@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
 const { webcrypto } = require("node:crypto");
+const { TextEncoder } = require("node:util");
 
 function loadShared(cookieFixtures = [], hasAllPermissions = true, storageValues = {}, hooks = {}) {
   let cookieReads = 0;
@@ -11,6 +12,7 @@ function loadShared(cookieFixtures = [], hasAllPermissions = true, storageValues
     URL,
     Headers,
     crypto: webcrypto,
+    TextEncoder,
     AbortController,
     setTimeout: hooks.setTimeout || setTimeout,
     clearTimeout: hooks.clearTimeout || clearTimeout,
@@ -35,7 +37,10 @@ function loadShared(cookieFixtures = [], hasAllPermissions = true, storageValues
           return hooks.hasPermissions ? hooks.hasPermissions(origins, storageValues) : hasAllPermissions;
         }
       },
-      storage: { local: { get: async () => storageValues } }
+      storage: { local: {
+        get: async () => storageValues,
+        set: async update => Object.assign(storageValues, update)
+      } }
     }
   };
   vm.createContext(context);
@@ -558,4 +563,32 @@ test("invalid browser cookie attributes fail the complete relay upload before pe
     await assert.rejects(() => api.syncProvider("gemini"), /cookie (SameSite|expiry)/);
     assert.equal(api.fetchCalls.length, 0, "never upload a partial credential snapshot");
   }
+});
+
+test("automatic sync skips unchanged snapshots but manual sync always refreshes", async () => {
+  const storage = {gateway:"http://127.0.0.1:8080",token:"install-1",linkedProviders:["chatgpt"]};
+  const fixtures = [{name:"session",value:"first",domain:".chatgpt.com",path:"/",secure:true,httpOnly:true}];
+  const api = loadShared(fixtures, true, storage);
+  assert.equal(await api.syncProvider("chatgpt"), "uploaded");
+  assert.equal(await api.syncProvider("chatgpt"), "unchanged");
+  assert.equal(api.fetchCalls.length, 1);
+  assert.match(storage.relaySnapshotVersions.chatgpt, /^[a-f0-9]{64}$/);
+  assert.ok(!JSON.stringify(storage.relaySnapshotVersions).includes("first"));
+  fixtures[0].value = "rotated";
+  assert.equal(await api.syncProvider("chatgpt"), "uploaded");
+  assert.equal(await api.syncProvider("chatgpt", {force:true}), "uploaded");
+  assert.equal(api.fetchCalls.length, 3);
+  storage.token = "install-2";
+  assert.equal(await api.syncProvider("chatgpt"), "uploaded");
+  assert.equal(api.fetchCalls.length, 4, "new installation must not inherit a previous sync digest");
+});
+
+test("failed imports do not mark a snapshot as synchronized", async () => {
+  const storage = {gateway:"http://127.0.0.1:8080",token:"install",linkedProviders:["chatgpt"]};
+  const api = loadShared([{name:"session",value:"synthetic",domain:".chatgpt.com",path:"/"}],
+    true, storage, {fetchResponse:{ok:false,status:504}});
+  await assert.rejects(() => api.syncProvider("chatgpt"), /Gateway rejected session update/);
+  assert.equal(storage.relaySnapshotVersions, undefined);
+  await assert.rejects(() => api.syncProvider("chatgpt"), /Gateway rejected session update/);
+  assert.equal(api.fetchCalls.length, 2);
 });
