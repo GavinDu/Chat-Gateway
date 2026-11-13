@@ -49,11 +49,11 @@ function showGatewayConnection(connected) {
   $("gateway").disabled = connected;
 }
 
-async function refreshStatus() {
+async function refreshStatus(force = false) {
   // The service-worker API exposes gateway status together with its own
   // redacted connectivity/sync failures. Fall back to direct status for older
   // worker versions or when the worker is unavailable.
-  const diagnostics = await chrome.runtime.sendMessage({type:"relay-diagnostics"}).catch(() => null);
+  const diagnostics = await chrome.runtime.sendMessage({type:"relay-diagnostics", force}).catch(() => null);
   const response = diagnostics?.ok && diagnostics.gateway
     ? {ok:true, status:200, json:async () => diagnostics.gateway}
     : await relayFetch("/relay/v1/status", {method:"POST",body:"{}"});
@@ -304,7 +304,7 @@ async function logoutProvider(provider) {
 }
 
 $("refresh").addEventListener("click", async () => {
-  try { await refreshStatus(); message("Status refreshed."); } catch (error) { message(error.message); }
+  try { await refreshStatus(true); message("Status refreshed."); } catch (error) { message(error.message); }
 });
 
 
