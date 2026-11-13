@@ -18,7 +18,7 @@ fn provider_network_tap_flag_enabled(value: &str) -> bool {
 }
 
 const MAX_PROVIDER_NETWORK_TAP_REPORTED_BYTES: usize = 1_048_576;
-const MAX_MISTRAL_SCRIPT_FAILURE_LOGS_PER_PAGE: usize = 8;
+const MAX_MISTRAL_SCRIPT_FAILURE_LOGS_PER_PAGE: usize = 1;
 const MAX_META_AI_DOCUMENT_LOGS_PER_PAGE: usize = 8;
 
 /// Script modulepreloads can arrive as Other/Fetch rather than Script.
@@ -158,7 +158,7 @@ pub(super) fn attach_provider_network_tap(
             response.status,
             javascript_asset_path,
         ) {
-            // Record even after the eight-entry log cap. This per-page flag
+            // Record even after the one-entry log cap. This per-page flag
             // contains no hostname, URL, cookies, or response body.
             if response.status == 403
                 && response
