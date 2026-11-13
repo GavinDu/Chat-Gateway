@@ -77,6 +77,9 @@ try {
   });
   const worker = context.serviceWorkers()[0] || await context.waitForEvent("serviceworker");
   const id = new URL(worker.url()).host;
+  // The CI gateway listens on a random isolated port, not the popup's normal
+  // 8080 default. Seed only its URL; never provide a token or pairing secret.
+  await worker.evaluate(gatewayUrl => chrome.storage.local.set({gateway:gatewayUrl}), base);
   const popup = await context.newPage();
   await popup.goto("chrome-extension://" + id + "/popup.html");
   await popup.locator("#linked:not([hidden])").waitFor({timeout:20000});
