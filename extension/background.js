@@ -4,7 +4,7 @@ const debounceTimers = new Map();
 // Internal API snapshots contain only fixed health categories and timestamps.
 // Never retain or return provider cookies, install credentials or raw errors.
 const providerDiagnostics = new Map();
-const CONNECTION_DIAGNOSTICS_TTL_MS = 30_000;
+const CONNECTION_DIAGNOSTICS_TTL_MS = 10_000;
 let lastGatewayCheck = null;
 let lastGatewayCheckAt = 0;
 let lastGatewayIdentity = null;
