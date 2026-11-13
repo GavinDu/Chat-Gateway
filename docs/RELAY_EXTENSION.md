@@ -1,3 +1,42 @@
+## Tokenless local-only relay (Docker helper default)
+
+The official `scripts/docker-run.sh start` helper now sets
+`CHAT_GATEWAY_LOCAL_RELAY_NO_PAIRING=1`, while publishing the gateway **only
+on host 127.0.0.1**. The extension preauthorizes local host origins and
+automatically detects `GET /relay/v1/mode` on startup. No pairing code,
+approval tab, install token, API key, or password is required for **extension ↔
+local gateway** communication. Previously paired local extensions are migrated
+automatically; they must be reloaded after updating the extension and gateway.
+
+The local API exposes:
+
+- `GET /relay/v1/mode` → `{"mode":"local","no_pairing":true}`.
+- `GET /relay/v1/status` and `GET /relay/v1/diagnostics` → redacted live
+  session status, from localhost tools such as `curl`, with no token or
+  special headers.
+- Extension session POST/DELETE endpoints require a real
+  `chrome-extension://<32-character-id>` browser Origin, a fresh
+  timestamp and unique request nonce, and remain subject to rate limits.
+  Normal websites, remote browser origins and DNS-rebound Host headers are
+  refused. These are request-integrity checks, **not a pairing flow**.
+
+If other untrusted Chrome extensions are installed, optionally set
+`CHAT_GATEWAY_EXTENSION_ID` before invoking `scripts/docker-run.sh start`.
+This pins the local mutation API to exactly that extension. Without pinning,
+any installed extension with localhost host permission can potentially invoke
+the local relay API. Localhost is not isolation from other processes on the
+same machine or containers sharing the gateway's Docker network; only use
+tokenless mode in a trusted personal workstation environment. It is forcibly
+disabled when `CHAT_GATEWAY_REMOTE_ORIGIN` is configured, retaining the paired
+remote pathway. For a standalone native server, opt in explicitly by setting
+`CHAT_GATEWAY_LOCAL_RELAY_NO_PAIRING=1`; its default bind stays loopback-only.
+
+This removes **gateway/extension pairing**, not provider website
+authentication, Chrome's explicit provider-cookie permission prompts, or
+encrypted-at-rest vault requirements. `/v1/*` OpenAI-compatible API-key
+authentication is independent of the relay and is unchanged.
+
+
 # Chat Gateway Chrome Relay: provider management
 
 The relay is intended for accounts you are authorized to access. Provider
