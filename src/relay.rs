@@ -1011,7 +1011,9 @@ fn relay_provider_issue(
         Some("session_not_linked")
     } else if manual_verification_required {
         Some("manual_verification_required")
-    } else if last_error.is_some_and(|error| error.contains("JavaScript assets blocked (HTTP 403)")) {
+    } else if last_error
+        .is_some_and(|error| error.contains("JavaScript assets blocked (HTTP 403)"))
+    {
         Some("provider_assets_blocked")
     } else if state == ProviderSessionState::NeedsLogin || authentication == "needs_login" {
         Some("needs_login")
@@ -1031,18 +1033,32 @@ mod relay_provider_issue_tests {
 
     #[test]
     fn diagnostics_are_fixed_categories_not_upstream_error_text() {
-        assert_eq!(
-            relay_provider_issue(true, true, "unknown", Degraded, false, Some("JavaScript assets blocked (HTTP 403): cookie=private")),
-            Some("provider_assets_blocked")
+        let blocked = relay_provider_issue(
+            true,
+            true,
+            "unknown",
+            Degraded,
+            false,
+            Some("JavaScript assets blocked (HTTP 403): cookie=private"),
         );
-        assert_eq!(
-            relay_provider_issue(true, true, "unknown", Degraded, true, Some("cookie=private")),
-            Some("manual_verification_required")
-        );
-        assert_eq!(relay_provider_issue(true, true, "needs_login", NeedsLogin, false, None), Some("needs_login"));
-        assert_eq!(relay_provider_issue(true, true, "verified", Ready, false, None), None);
-        assert_eq!(relay_provider_issue(true, true, "unknown", Unknown, false, None), Some("authentication_unverified"));
-        assert_eq!(relay_provider_issue(false, true, "unknown", Unknown, false, None), Some("session_not_linked"));
+        assert_eq!(blocked, Some("provider_assets_blocked"));
+
+        let manual =
+            relay_provider_issue(true, true, "unknown", Degraded, true, Some("cookie=private"));
+        assert_eq!(manual, Some("manual_verification_required"));
+
+        let needs_login =
+            relay_provider_issue(true, true, "needs_login", NeedsLogin, false, None);
+        assert_eq!(needs_login, Some("needs_login"));
+
+        let verified = relay_provider_issue(true, true, "verified", Ready, false, None);
+        assert_eq!(verified, None);
+
+        let unverified = relay_provider_issue(true, true, "unknown", Unknown, false, None);
+        assert_eq!(unverified, Some("authentication_unverified"));
+
+        let missing = relay_provider_issue(false, true, "unknown", Unknown, false, None);
+        assert_eq!(missing, Some("session_not_linked"));
     }
 }
 
