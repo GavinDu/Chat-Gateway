@@ -521,8 +521,7 @@ pub fn relay_request_origin_is_allowed(path: &str, headers: &HeaderMap) -> bool 
     // A local CLI may inspect *read-only* relay diagnostics without installing
     // a Chrome extension. Mutation endpoints never get this exception.
     if path == "/relay/v1/mode" {
-        return !headers.contains_key(header::ORIGIN)
-            || requested_extension_id(headers).is_some();
+        return !headers.contains_key(header::ORIGIN) || requested_extension_id(headers).is_some();
     }
     if local_relay_enabled()
         && matches!(path, "/relay/v1/status" | "/relay/v1/diagnostics")
@@ -544,9 +543,8 @@ fn extension_origin_matches(id: &str, origin: &str) -> bool {
 
 /// The extension origin must match one configured Chrome extension ID exactly.
 fn local_extension_origin_is_allowed(headers: &HeaderMap, configured_id: Option<&str>) -> bool {
-    requested_extension_id(headers).is_some_and(|id| {
-        configured_id.is_none_or(|configured| configured == id)
-    })
+    requested_extension_id(headers)
+        .is_some_and(|id| configured_id.is_none_or(|configured| configured == id))
 }
 
 pub fn relay_origin_is_allowed(headers: &HeaderMap) -> bool {
@@ -555,7 +553,10 @@ pub fn relay_origin_is_allowed(headers: &HeaderMap) -> bool {
         // boundary, not an install token. Pin CHAT_GATEWAY_EXTENSION_ID when
         // other untrusted extensions are installed.
         let configured = std::env::var("CHAT_GATEWAY_EXTENSION_ID").ok();
-        return local_extension_origin_is_allowed(headers, configured.as_deref().filter(|id| !id.is_empty()));
+        return local_extension_origin_is_allowed(
+            headers,
+            configured.as_deref().filter(|id| !id.is_empty()),
+        );
     }
     let Some(id) = extension_id() else {
         return false;
@@ -920,40 +921,40 @@ fn authenticated_request_with_origin_mode(
         }
     }
     if !local_mode {
-    let authorization = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok());
-    let token = authorization.and_then(|value| value.strip_prefix("Bearer "));
-    let Some(token) = token else {
-        return Err(Box::new(json_error(
-            StatusCode::UNAUTHORIZED,
-            "relay_auth_required",
-            "a paired extension token is required",
-        )));
-    };
-    let candidate: [u8; 32] = Sha256::digest(token.as_bytes()).into();
-    let token_slot = relay.install_token_hash.lock().map_err(|_| {
-        Box::new(json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "relay_unavailable",
-            "relay state is unavailable",
-        ))
-    })?;
-    let Some(expected) = token_slot.as_ref() else {
-        return Err(Box::new(json_error(
-            StatusCode::UNAUTHORIZED,
-            "relay_auth_required",
-            "the extension is not paired",
-        )));
-    };
-    if !bool::from(candidate.ct_eq(expected)) {
-        return Err(Box::new(json_error(
-            StatusCode::UNAUTHORIZED,
-            "relay_auth_required",
-            "the paired extension token is invalid",
-        )));
-    }
-    drop(token_slot);
+        let authorization = headers
+            .get(header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok());
+        let token = authorization.and_then(|value| value.strip_prefix("Bearer "));
+        let Some(token) = token else {
+            return Err(Box::new(json_error(
+                StatusCode::UNAUTHORIZED,
+                "relay_auth_required",
+                "a paired extension token is required",
+            )));
+        };
+        let candidate: [u8; 32] = Sha256::digest(token.as_bytes()).into();
+        let token_slot = relay.install_token_hash.lock().map_err(|_| {
+            Box::new(json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "relay_unavailable",
+                "relay state is unavailable",
+            ))
+        })?;
+        let Some(expected) = token_slot.as_ref() else {
+            return Err(Box::new(json_error(
+                StatusCode::UNAUTHORIZED,
+                "relay_auth_required",
+                "the extension is not paired",
+            )));
+        };
+        if !bool::from(candidate.ct_eq(expected)) {
+            return Err(Box::new(json_error(
+                StatusCode::UNAUTHORIZED,
+                "relay_auth_required",
+                "the paired extension token is invalid",
+            )));
+        }
+        drop(token_slot);
     }
 
     let timestamp = headers
@@ -1108,10 +1109,8 @@ mod local_relay_security_tests {
     #[test]
     fn tokenless_local_mode_still_checks_origin_nonce_and_timestamp() {
         let state = super::tests::relay_state_with_token(None);
-        let mut headers = super::tests::valid_auth_headers(
-            "unused",
-            "abcdef0123456789abcdef0123456789",
-        );
+        let mut headers =
+            super::tests::valid_auth_headers("unused", "abcdef0123456789abcdef0123456789");
         headers.remove(header::AUTHORIZATION);
         assert!(authenticated_request_with_origin_mode(&state, &headers, false, true).is_err());
         assert!(authenticated_request_with_origin_mode(&state, &headers, true, false).is_err());
