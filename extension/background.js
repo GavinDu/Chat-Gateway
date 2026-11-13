@@ -1,6 +1,50 @@
 importScripts("shared.js");
 
 const debounceTimers = new Map();
+// Internal API snapshots contain only fixed health categories and timestamps.
+// Never retain or return provider cookies, install credentials or raw errors.
+const providerDiagnostics = new Map();
+const CONNECTION_DIAGNOSTICS_TTL_MS = 30_000;
+let lastGatewayCheck = null;
+let lastGatewayCheckAt = 0;
+function classifyRelayFailure(error) {
+  const message = String(error?.message || "");
+  if (message.includes("timed out") || message.includes("cancelled")) return "gateway_timeout";
+  if (message.includes("permission") || message.includes("consent")) return "permission_or_consent";
+  if (message.includes("(504)")) return "activation_timeout";
+  if (message.includes("(403)") || message.includes("(401)")) return "gateway_unauthorized";
+  return "relay_unavailable";
+}
+function recordProviderDiagnostic(provider, state, errorCode = null) {
+  providerDiagnostics.set(provider, {
+    state, issue: errorCode, updated_at: new Date().toISOString()
+  });
+}
+async function relayDiagnostics() {
+  const current = await chrome.storage.local.get(["gateway", "token", "linkedProviders"]);
+  const extension = {
+    connected: Boolean(current.gateway && current.token),
+    linked_providers: [...(current.linkedProviders || [])].filter(provider => Boolean(PROVIDERS[provider])),
+    provider_sync: Object.fromEntries(providerDiagnostics),
+  };
+  if (!extension.connected) return {ok:false, extension, gateway_issue:"not_connected"};
+  if (lastGatewayCheck && Date.now() - lastGatewayCheckAt < CONNECTION_DIAGNOSTICS_TTL_MS) {
+    return {ok:true, extension, gateway:lastGatewayCheck};
+  }
+  try {
+    const response = await relayFetch("/relay/v1/diagnostics", {method:"POST",body:"{}"});
+    if (!response.ok) {
+      return {ok:false, extension, gateway_issue:
+        response.status === 401 || response.status === 403 ? "gateway_unauthorized" : "gateway_request_failed"};
+    }
+    const gateway = await response.json();
+    lastGatewayCheck = gateway;
+    lastGatewayCheckAt = Date.now();
+    return {ok:true, extension, gateway};
+  } catch (error) {
+    return {ok:false, extension, gateway_issue:classifyRelayFailure(error)};
+  }
+}
 
 // Serialize each provider's automatic imports with logout so a delayed cookie
 // refresh cannot recreate a vault session after the user disconnects it.
@@ -23,7 +67,16 @@ function queueProviderSync(provider) {
   if (queued) return queued;
   const pending = queueProviderTask(provider, () => {
     if (queuedProviderSyncs.get(provider) === pending) queuedProviderSyncs.delete(provider);
-    return syncProvider(provider);
+    return syncProvider(provider).then(
+      result => {
+        recordProviderDiagnostic(provider, result || "skipped");
+        return result;
+      },
+      error => {
+        recordProviderDiagnostic(provider, "failed", classifyRelayFailure(error));
+        throw error;
+      }
+    );
   });
   queuedProviderSyncs.set(provider, pending);
   return pending;
@@ -53,6 +106,8 @@ function logoutProviderFromRelay(provider) {
       method:"DELETE",body:"{}"
     }, {gateway:expected.gateway,token:expected.token});
     if (!response.ok) throw new Error("Gateway logout failed (" + response.status + "). Auto sync is paused; retry logout.");
+    providerDiagnostics.delete(provider);
+    lastGatewayCheck = null;
   });
 }
 
@@ -68,12 +123,16 @@ chrome.cookies.onChanged.addListener(({cookie}) => {
       queueProviderSync(provider).catch(() => {
         // Never log cookie material or relay credentials. The popup can surface status on demand.
       });
-    }, 750);
+    }, 10_000);
     debounceTimers.set(provider, timer);
   }
 });
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message?.type === "relay-diagnostics") {
+    relayDiagnostics().then(sendResponse).catch(() => sendResponse({ok:false, gateway_issue:"diagnostics_unavailable"}));
+    return true;
+  }
   if (message?.type === "poll-connection") {
     pollConnection().then(() => sendResponse({ok:true})).catch(error => sendResponse({ok:false,error:error.message}));
     return true;
@@ -99,7 +158,7 @@ async function resyncLinkedProviders() {
 }
 
 function scheduleLinkedProviderResync() {
-  chrome.alarms?.create?.("relay-session-refresh", {periodInMinutes:5});
+  chrome.alarms?.create?.("relay-session-refresh", {periodInMinutes:15});
   pollConnection().catch(() => {});
   resyncLinkedProviders().catch(() => {
     // Do not log provider session material or relay credentials.
@@ -169,6 +228,7 @@ async function completePendingConnection() {
   await chrome.storage.local.set({gateway, token:data.token, linkedProviders});
   await chrome.storage.local.remove("pendingConnection");
   await chrome.alarms?.clear?.("relay-connection");
+  lastGatewayCheck = null;
   resyncLinkedProviders().catch(() => {});
 }
 chrome.alarms?.onAlarm?.addListener?.(alarm => {
