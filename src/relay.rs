@@ -1936,7 +1936,7 @@ mod tests {
         assert!(!registry.is_available("gemini"));
     }
 
-    fn relay_state_with_token(token: Option<&str>) -> RelayState {
+    pub(super) fn relay_state_with_token(token: Option<&str>) -> RelayState {
         let install_token_hash = token.map(|token| {
             let hash: [u8; 32] = Sha256::digest(token.as_bytes()).into();
             hash
@@ -1953,7 +1953,7 @@ mod tests {
         }
     }
 
-    fn valid_auth_headers(token: &str, nonce: &str) -> HeaderMap {
+    pub(super) fn valid_auth_headers(token: &str, nonce: &str) -> HeaderMap {
         let mut headers = HeaderMap::new();
         headers.insert(
             header::AUTHORIZATION,
