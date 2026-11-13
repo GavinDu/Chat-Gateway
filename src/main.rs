@@ -281,6 +281,8 @@ async fn main() -> anyhow::Result<()> {
     let (relay_state, legacy_pairing_code) = relay::RelayState::new()?;
     if remote_gateway_origin()?.is_some() {
         println!("Private remote relay pairing code (single use, expires in 10 minutes): {legacy_pairing_code}");
+    } else if relay::local_relay_enabled() {
+        println!("Browser relay: local-only mode (no pairing code or install token).");
     } else {
         println!("Browser relay: connect from the extension and approve locally.");
     }
@@ -378,6 +380,7 @@ async fn main() -> anyhow::Result<()> {
             "/relay/v1/pairing-code/rotate",
             post(relay::rotate_pairing_code),
         )
+        .route("/relay/v1/mode", get(relay::relay_mode))
         .route("/relay/v1/status", get(relay::status).post(relay::status))
         .route(
             "/relay/v1/diagnostics",
