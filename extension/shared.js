@@ -36,6 +36,21 @@ function normalizeGateway(value) {
   throw new Error("Gateway URL must be local HTTP or an explicitly configured HTTPS remote origin.");
 }
 
+function isLocalGateway(value) {
+  try {
+    return new URL(normalizeGateway(value)).protocol === "http:";
+  } catch { return false; }
+}
+
+function hasRelayConnection({gateway, token, connectionMode}) {
+  return Boolean(gateway && (token || (connectionMode === "local" && isLocalGateway(gateway))));
+}
+
+function relayIdentity(state) {
+  return state.connectionMode === "local" && isLocalGateway(state.gateway)
+    ? "local" : state.token;
+}
+
 function randomHex(bytes = 16) {
   const value = crypto.getRandomValues(new Uint8Array(bytes));
   return Array.from(value, byte => byte.toString(16).padStart(2, "0")).join("");
@@ -47,12 +62,13 @@ function randomHex(bytes = 16) {
 const RELAY_FETCH_TIMEOUT_MS = 60_000;
 
 async function relayFetch(path, options = {}, expectedConnection = null) {
-  const {gateway, token} = await chrome.storage.local.get(["gateway", "token"]);
+  const {gateway, token, connectionMode} = await chrome.storage.local.get(["gateway", "token", "connectionMode"]);
   // Cookie snapshots must never switch destinations after they were collected.
   // This also protects a caller that re-pairs while a browser cookie read is
   // pending: a new install token is not consent to upload the old snapshot.
   if (expectedConnection && (
-    gateway !== expectedConnection.gateway || token !== expectedConnection.token
+    gateway !== expectedConnection.gateway || token !== expectedConnection.token ||
+    (expectedConnection.connectionMode !== undefined && connectionMode !== expectedConnection.connectionMode)
   )) {
     throw new Error("Gateway connection changed during provider sync; retry linking.");
   }
@@ -65,8 +81,9 @@ async function relayFetch(path, options = {}, expectedConnection = null) {
     throw new Error("Gateway host permission is missing. Re-pair and grant access only to the configured gateway origin.");
   }
   if (expectedConnection) {
-    const latest = await chrome.storage.local.get(["gateway", "token", "linkedProviders"]);
+    const latest = await chrome.storage.local.get(["gateway", "token", "connectionMode", "linkedProviders"]);
     if (latest.gateway !== gateway || latest.token !== token ||
+        (expectedConnection.connectionMode !== undefined && latest.connectionMode !== expectedConnection.connectionMode) ||
         (expectedConnection.provider && !latest.linkedProviders?.includes(expectedConnection.provider))) {
       throw new Error("Provider consent or gateway connection changed during sync.");
     }
@@ -74,7 +91,7 @@ async function relayFetch(path, options = {}, expectedConnection = null) {
   const headers = new Headers(options.headers || {});
   headers.set("X-Relay-Timestamp", String(Math.floor(Date.now() / 1000)));
   headers.set("X-Relay-Nonce", randomHex());
-  if (token) headers.set("Authorization", "Bearer " + token);
+  if (token && connectionMode !== "local") headers.set("Authorization", "Bearer " + token);
   if (options.body) headers.set("Content-Type", "application/json");
   // Fail closed on HTTP redirects: a 307/308 could replay the provider
   // cookie snapshot body to a different origin before CORS responds.
@@ -175,13 +192,13 @@ async function cookieSnapshotVersion(snapshot, scope) {
 }
 
 async function syncProvider(provider, {force = false} = {}) {
-  const {gateway, token, linkedProviders = []} = await chrome.storage.local.get(["gateway", "token", "linkedProviders"]);
-  if (!gateway || !token || !linkedProviders.includes(provider)) return "skipped";
+  const {gateway, token, connectionMode, linkedProviders = []} = await chrome.storage.local.get(["gateway", "token", "connectionMode", "linkedProviders"]);
+  if (!hasRelayConnection({gateway, token, connectionMode}) || !linkedProviders.includes(provider)) return "skipped";
   const snapshot = await providerCookieSnapshot(provider);
   // A permission/cookie read can await long enough for unpair, re-pair or
   // explicit provider unlink. Re-check ownership and consent immediately
   // before preparing the upload, and bind the relay fetch to that snapshot.
-  const current = await chrome.storage.local.get(["gateway", "token", "linkedProviders"]);
+  const current = await chrome.storage.local.get(["gateway", "token", "connectionMode", "linkedProviders"]);
   if (current.gateway !== gateway || current.token !== token ||
       !current.linkedProviders?.includes(provider)) return "skipped";
   // Missing permissions or an expired browser session must not overwrite a
@@ -196,12 +213,12 @@ async function syncProvider(provider, {force = false} = {}) {
   if (!await chrome.permissions.contains({origins:requiredOrigins})) {
     throw new Error("Provider host permissions were revoked before session sync.");
   }
-  const version = await cookieSnapshotVersion(snapshot, gateway + "|" + token);
+  const version = await cookieSnapshotVersion(snapshot, gateway + "|" + relayIdentity({gateway, token, connectionMode}));
   const {relaySnapshotVersions = {}} = await chrome.storage.local.get("relaySnapshotVersions");
   if (!force && version && relaySnapshotVersions[provider] === version) return "unchanged";
   const response = await relayFetch("/relay/v1/session/" + encodeURIComponent(provider), {
     method:"POST", body:JSON.stringify(snapshot)
-  }, {gateway, token, provider});
+  }, {gateway, token, connectionMode, provider});
   if (!response.ok && (response.status === 422 || response.status === 400)) {
     const failure = await response.json().catch(() => null);
     if (response.status === 422 && failure?.error?.code === "cookie_scope_conflict") {
@@ -212,8 +229,8 @@ async function syncProvider(provider, {force = false} = {}) {
     }
   }
   if (!response.ok) throw new Error("Gateway rejected session update (" + response.status + "). Check vault mode and provider permissions.");
-  const latest = await chrome.storage.local.get(["gateway", "token", "linkedProviders", "relaySnapshotVersions"]);
-  if (version && latest.gateway === gateway && latest.token === token &&
+  const latest = await chrome.storage.local.get(["gateway", "token", "connectionMode", "linkedProviders", "relaySnapshotVersions"]);
+  if (version && latest.gateway === gateway && latest.token === token && latest.connectionMode === connectionMode &&
       latest.linkedProviders?.includes(provider)) {
     await chrome.storage.local.set({
       relaySnapshotVersions:{...(latest.relaySnapshotVersions || {}), [provider]:version}

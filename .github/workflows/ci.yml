@@ -52,6 +52,8 @@ jobs:
         run: node browser-login/smoke.mjs target/debug/chat-gateway-rs --through-ssh
       - name: Real extension local approval and provider dashboard
         run: node extension/approval-browser-smoke.mjs target/debug/chat-gateway-rs
+      - name: Actual local-only extension without pairing
+        run: node extension/local-relay-browser-smoke.mjs target/debug/chat-gateway-rs
 
   docker-build:
     runs-on: ubuntu-latest

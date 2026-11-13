@@ -501,7 +501,34 @@ fn requested_extension_id(headers: &HeaderMap) -> Option<String> {
     extension_id_is_valid(id).then(|| id.to_owned())
 }
 
+/// Opt-in only for trusted loopback deployments. Remote relay deployments
+/// retain the existing pairing / install-token boundary.
+pub fn local_relay_enabled() -> bool {
+    std::env::var("CHAT_GATEWAY_LOCAL_RELAY_NO_PAIRING").as_deref() == Ok("1")
+        && std::env::var_os("CHAT_GATEWAY_REMOTE_ORIGIN").is_none()
+}
+
+/// Read-only mode discovery; no token, vault contents or provider credentials.
+pub async fn relay_mode() -> Response {
+    Json(serde_json::json!({
+        "mode": if local_relay_enabled() { "local" } else { "paired" },
+        "no_pairing": local_relay_enabled()
+    }))
+    .into_response()
+}
+
 pub fn relay_request_origin_is_allowed(path: &str, headers: &HeaderMap) -> bool {
+    // A local CLI may inspect *read-only* relay diagnostics without installing
+    // a Chrome extension. Mutation endpoints never get this exception.
+    if path == "/relay/v1/mode" {
+        return !headers.contains_key(header::ORIGIN) || requested_extension_id(headers).is_some();
+    }
+    if local_relay_enabled()
+        && matches!(path, "/relay/v1/status" | "/relay/v1/diagnostics")
+        && !headers.contains_key(header::ORIGIN)
+    {
+        return true;
+    }
     if matches!(path, "/relay/v1/connect/request" | "/relay/v1/connect/poll")
         && std::env::var_os("CHAT_GATEWAY_EXTENSION_ID").is_none()
     {
@@ -515,7 +542,22 @@ fn extension_origin_matches(id: &str, origin: &str) -> bool {
 }
 
 /// The extension origin must match one configured Chrome extension ID exactly.
+fn local_extension_origin_is_allowed(headers: &HeaderMap, configured_id: Option<&str>) -> bool {
+    requested_extension_id(headers)
+        .is_some_and(|id| configured_id.is_none_or(|configured| configured == id))
+}
+
 pub fn relay_origin_is_allowed(headers: &HeaderMap) -> bool {
+    if local_relay_enabled() {
+        // In local mode the Chrome extension Origin is the browser-side
+        // boundary, not an install token. Pin CHAT_GATEWAY_EXTENSION_ID when
+        // other untrusted extensions are installed.
+        let configured = std::env::var("CHAT_GATEWAY_EXTENSION_ID").ok();
+        return local_extension_origin_is_allowed(
+            headers,
+            configured.as_deref().filter(|id| !id.is_empty()),
+        );
+    }
     let Some(id) = extension_id() else {
         return false;
     };
@@ -845,6 +887,15 @@ fn authenticated_request_with_origin(
     headers: &HeaderMap,
     origin_allowed: bool,
 ) -> Result<(), Box<Response>> {
+    authenticated_request_with_origin_mode(relay, headers, origin_allowed, local_relay_enabled())
+}
+
+fn authenticated_request_with_origin_mode(
+    relay: &RelayState,
+    headers: &HeaderMap,
+    origin_allowed: bool,
+    local_mode: bool,
+) -> Result<(), Box<Response>> {
     if !origin_allowed {
         return Err(Box::new(json_error(
             StatusCode::FORBIDDEN,
@@ -869,40 +920,42 @@ fn authenticated_request_with_origin(
             )));
         }
     }
-    let authorization = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok());
-    let token = authorization.and_then(|value| value.strip_prefix("Bearer "));
-    let Some(token) = token else {
-        return Err(Box::new(json_error(
-            StatusCode::UNAUTHORIZED,
-            "relay_auth_required",
-            "a paired extension token is required",
-        )));
-    };
-    let candidate: [u8; 32] = Sha256::digest(token.as_bytes()).into();
-    let token_slot = relay.install_token_hash.lock().map_err(|_| {
-        Box::new(json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "relay_unavailable",
-            "relay state is unavailable",
-        ))
-    })?;
-    let Some(expected) = token_slot.as_ref() else {
-        return Err(Box::new(json_error(
-            StatusCode::UNAUTHORIZED,
-            "relay_auth_required",
-            "the extension is not paired",
-        )));
-    };
-    if !bool::from(candidate.ct_eq(expected)) {
-        return Err(Box::new(json_error(
-            StatusCode::UNAUTHORIZED,
-            "relay_auth_required",
-            "the paired extension token is invalid",
-        )));
+    if !local_mode {
+        let authorization = headers
+            .get(header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok());
+        let token = authorization.and_then(|value| value.strip_prefix("Bearer "));
+        let Some(token) = token else {
+            return Err(Box::new(json_error(
+                StatusCode::UNAUTHORIZED,
+                "relay_auth_required",
+                "a paired extension token is required",
+            )));
+        };
+        let candidate: [u8; 32] = Sha256::digest(token.as_bytes()).into();
+        let token_slot = relay.install_token_hash.lock().map_err(|_| {
+            Box::new(json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "relay_unavailable",
+                "relay state is unavailable",
+            ))
+        })?;
+        let Some(expected) = token_slot.as_ref() else {
+            return Err(Box::new(json_error(
+                StatusCode::UNAUTHORIZED,
+                "relay_auth_required",
+                "the extension is not paired",
+            )));
+        };
+        if !bool::from(candidate.ct_eq(expected)) {
+            return Err(Box::new(json_error(
+                StatusCode::UNAUTHORIZED,
+                "relay_auth_required",
+                "the paired extension token is invalid",
+            )));
+        }
+        drop(token_slot);
     }
-    drop(token_slot);
 
     let timestamp = headers
         .get("x-relay-timestamp")
@@ -1026,6 +1079,49 @@ fn relay_provider_issue(
 }
 
 #[cfg(test)]
+mod local_relay_security_tests {
+    use super::{authenticated_request_with_origin_mode, local_extension_origin_is_allowed};
+    use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+
+    #[test]
+    fn normal_websites_and_other_extensions_cannot_control_a_pinned_local_relay() {
+        let mut headers = HeaderMap::new();
+        let id = "abcdefghijklmnopabcdefghijklmnop";
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("https://attacker.example"),
+        );
+        assert!(!local_extension_origin_is_allowed(&headers, None));
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("chrome-extension://abcdefghijklmnopabcdefghijklmnop"),
+        );
+        assert!(local_extension_origin_is_allowed(&headers, None));
+        assert!(local_extension_origin_is_allowed(&headers, Some(id)));
+        assert!(!local_extension_origin_is_allowed(
+            &headers,
+            Some("ponmlkjihgfedcbaponmlkjihgfedcba"),
+        ));
+        headers.remove(header::ORIGIN);
+        assert!(!local_extension_origin_is_allowed(&headers, None));
+    }
+
+    #[test]
+    fn tokenless_local_mode_still_checks_origin_nonce_and_timestamp() {
+        let state = super::tests::relay_state_with_token(None);
+        let mut headers =
+            super::tests::valid_auth_headers("unused", "abcdef0123456789abcdef0123456789");
+        headers.remove(header::AUTHORIZATION);
+        assert!(authenticated_request_with_origin_mode(&state, &headers, false, true).is_err());
+        assert!(authenticated_request_with_origin_mode(&state, &headers, true, false).is_err());
+        assert!(authenticated_request_with_origin_mode(&state, &headers, true, true).is_ok());
+        let replay = authenticated_request_with_origin_mode(&state, &headers, true, true)
+            .expect_err("replayed nonce must be rejected");
+        assert_eq!(replay.status(), StatusCode::UNAUTHORIZED);
+    }
+}
+
+#[cfg(test)]
 mod relay_provider_issue_tests {
     use super::relay_provider_issue;
     use crate::provider_state::ProviderSessionState::{Degraded, NeedsLogin, Ready, Unknown};
@@ -1081,8 +1177,12 @@ async fn optional_login_observations(
 }
 
 pub async fn status(State(app): State<Arc<crate::AppState>>, headers: HeaderMap) -> Response {
-    if let Err(response) = authenticated_request(&app, &headers) {
-        return *response;
+    // Local no-Origin clients may inspect this read-only endpoint. The
+    // authority middleware still rejects non-local Host / cross-origin reads.
+    if !(local_relay_enabled() && !headers.contains_key(header::ORIGIN)) {
+        if let Err(response) = authenticated_request(&app, &headers) {
+            return *response;
+        }
     }
     // A Docker installation may not have an embedded login worker. Keep the
     // saved-session dashboard available and treat live verification as unknown.
@@ -1835,7 +1935,7 @@ mod tests {
         assert!(!registry.is_available("gemini"));
     }
 
-    fn relay_state_with_token(token: Option<&str>) -> RelayState {
+    pub(super) fn relay_state_with_token(token: Option<&str>) -> RelayState {
         let install_token_hash = token.map(|token| {
             let hash: [u8; 32] = Sha256::digest(token.as_bytes()).into();
             hash
@@ -1852,7 +1952,7 @@ mod tests {
         }
     }
 
-    fn valid_auth_headers(token: &str, nonce: &str) -> HeaderMap {
+    pub(super) fn valid_auth_headers(token: &str, nonce: &str) -> HeaderMap {
         let mut headers = HeaderMap::new();
         headers.insert(
             header::AUTHORIZATION,

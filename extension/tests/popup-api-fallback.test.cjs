@@ -48,6 +48,8 @@ function loadPopup({pollResult = {ok:true}} = {}) {
     },
     window: {addEventListener() {}},
     setInterval() {},
+    isLocalGateway: value => value.startsWith("http://127.0.0.1:") || value.startsWith("http://localhost:"),
+    hasRelayConnection: state => Boolean(state.gateway && (state.token || state.connectionMode === "local")),
     normalizeGateway: value => value,
     PROVIDER_LOGIN_URLS: {metaai:"https://www.meta.ai/"},
     PROVIDERS: {},

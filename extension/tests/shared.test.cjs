@@ -592,3 +592,31 @@ test("failed imports do not mark a snapshot as synchronized", async () => {
   await assert.rejects(() => api.syncProvider("chatgpt"), /Gateway rejected session update/);
   assert.equal(api.fetchCalls.length, 2);
 });
+
+test("local relay sends diagnostics and session snapshots with no install token", async () => {
+  const storage = {
+    gateway:"http://127.0.0.1:8080", connectionMode:"local",
+    linkedProviders:["chatgpt"]
+  };
+  const api = loadShared([{name:"session", value:"synthetic", domain:".chatgpt.com", path:"/"}],
+    true, storage);
+  await api.relayFetch("/relay/v1/diagnostics", {method:"POST",body:"{}"});
+  assert.equal(api.fetchCalls[0].options.headers.has("Authorization"), false);
+  assert.ok(api.fetchCalls[0].options.headers.has("X-Relay-Nonce"));
+  assert.equal(await api.syncProvider("chatgpt"), "uploaded");
+  assert.equal(api.fetchCalls[1].url, "http://127.0.0.1:8080/relay/v1/session/chatgpt");
+  assert.equal(api.fetchCalls[1].options.headers.has("Authorization"), false);
+  assert.equal(await api.syncProvider("chatgpt"), "unchanged");
+  assert.equal(api.fetchCalls.length, 2);
+  assert.equal(await api.syncProvider("chatgpt", {force:true}), "uploaded");
+  assert.equal(api.fetchCalls.length, 3);
+});
+
+test("local relay mode cannot be used for a remote HTTP or HTTPS gateway", async () => {
+  for (const gateway of ["http://evil.example", "https://evil.example"]) {
+    const api = loadShared([{name:"session",value:"fake",domain:".chatgpt.com",path:"/"}],
+      true, {gateway,connectionMode:"local",linkedProviders:["chatgpt"]});
+    assert.equal(await api.syncProvider("chatgpt"), "skipped");
+    assert.equal(api.fetchCalls.length, 0);
+  }
+});

@@ -4,7 +4,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
 
-function loadPopup({failCookieDomain = null, includeSecondProvider = false, manualVerification = false} = {}) {
+function loadPopup({failCookieDomain = null, includeSecondProvider = false, manualVerification = false, localRelay = false} = {}) {
   const elements = new Map();
   const chromeCalls = [];
   const values = {gateway:"http://127.0.0.1:8080",linkedProviders:[]};
@@ -42,6 +42,8 @@ function loadPopup({failCookieDomain = null, includeSecondProvider = false, manu
     document:{getElementById:byId,createElement:node},
     window:{addEventListener(){}},
     setInterval(){},
+    isLocalGateway: value => value.startsWith("http://127.0.0.1:") || value.startsWith("http://localhost:"),
+    hasRelayConnection: state => Boolean(state.gateway && (state.token || state.connectionMode === "local")),
     normalizeGateway: v=>v,
     PROVIDER_LOGIN_URLS:{metaai:"https://www.meta.ai/"},
     PROVIDERS:{metaai:["meta.ai"],claude:["claude.ai"]},
@@ -54,7 +56,9 @@ function loadPopup({failCookieDomain = null, includeSecondProvider = false, manu
       ],
       vault_mode:true,
     })}),
-    fetch:async()=>({ok:true,json:async()=>({request_id:"a".repeat(64),poll_secret:"b".repeat(64)})}),
+    fetch:async url => ({ok:true,json:async()=>url.endsWith("/relay/v1/mode")
+      ? {mode:localRelay?"local":"paired",no_pairing:localRelay}
+      : {request_id:"a".repeat(64),poll_secret:"b".repeat(64)}}),
     chrome:{
       tabs:{async create({url}) {chromeCalls.push("tab:"+url);}},
       permissions:{request:async()=>true,contains:async()=>true},
@@ -151,4 +155,19 @@ test("explicit gateway disconnect removes pending approval and stops polling",as
   assert.equal(popup.values.pendingConnection,undefined);
   assert.deepEqual(Array.from(popup.values.linkedProviders||[]),[]);
   assert.ok(popup.chromeCalls.includes("alarm-clear:relay-connection"));
+});
+
+test("local-only gateway automatically connects without pairing, approval or token", async () => {
+  const popup = loadPopup({localRelay:true});
+  for (let i = 0; i < 6; i++) await new Promise(resolve => setImmediate(resolve));
+  assert.equal(popup.values.connectionMode, "local");
+  assert.equal(popup.values.token, undefined);
+  assert.equal(popup.values.pendingConnection, undefined);
+  assert.equal(popup.elements.get("linked").hidden, false);
+  assert.equal(popup.elements.get("pairing").hidden, true);
+  assert.equal(popup.chromeCalls.some(value => value.startsWith("tab:")), false);
+  await popup.controls.connectProvider("metaai");
+  assert.equal(popup.server.linked, true);
+  await popup.controls.logoutProvider("metaai");
+  assert.equal(popup.server.linked, false);
 });

@@ -5,7 +5,9 @@ const fs = require('node:fs');
 function load(status, data, expires = Date.now() + 300000, beforeResponse = null) {
   const values = {pendingConnection:{gateway:'http://127.0.0.1:8080',request_id:'a'.repeat(64),poll_secret:'b'.repeat(64),expires}};
   const calls = [];
-  const context = {Map, Set, Promise, Date, normalizeGateway:v=>v, PROVIDERS:{}, importScripts(){}, setTimeout, clearTimeout,
+  const context = {Map, Set, Promise, Date, normalizeGateway:v=>v, PROVIDERS:{}, importScripts(){},
+    hasRelayConnection: state => Boolean(state.gateway && (state.token || state.connectionMode === "local")),
+    relayIdentity: state => state.connectionMode === "local" ? "local" : state.token, setTimeout, clearTimeout,
     fetch:async (url, options)=>{calls.push({url,options});if(beforeResponse)await beforeResponse();return {status,ok:status===200||status===202,json:async()=>data};},
     chrome:{cookies:{onChanged:{addListener(){}}},permissions:{contains:async()=>true},
       runtime:{onMessage:{addListener(){}},onInstalled:{addListener(){}},onStartup:{addListener(){}}},

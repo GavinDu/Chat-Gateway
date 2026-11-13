@@ -24,15 +24,15 @@ function recordProviderDiagnostic(provider, state, errorCode = null) {
   });
 }
 async function relayDiagnostics(force = false) {
-  const current = await chrome.storage.local.get(["gateway", "token", "linkedProviders"]);
-  const identity = current.gateway && current.token ? current.gateway + "|" + current.token : null;
+  const current = await chrome.storage.local.get(["gateway", "token", "connectionMode", "linkedProviders"]);
+  const identity = hasRelayConnection(current) ? current.gateway + "|" + relayIdentity(current) : null;
   if (identity !== lastGatewayIdentity) {
     lastGatewayCheck = null;
     lastGatewayIdentity = identity;
     providerDiagnostics.clear();
   }
   const extension = {
-    connected: Boolean(current.gateway && current.token),
+    connected: hasRelayConnection(current),
     linked_providers: [...(current.linkedProviders || [])].filter(provider => Boolean(PROVIDERS[provider])),
     provider_sync: Object.fromEntries(providerDiagnostics),
   };
@@ -105,14 +105,14 @@ function logoutProviderFromRelay(provider) {
   queuedProviderForces.delete(provider);
   // Bind logout to the install present when the user clicked. An earlier
   // provider sync may still be queued while a fresh gateway is paired.
-  const connectionAtClick = chrome.storage.local.get(["gateway", "token"]);
+  const connectionAtClick = chrome.storage.local.get(["gateway", "token", "connectionMode"]);
   return queueProviderTask(provider, async () => {
     const expected = await connectionAtClick;
-    if (!expected.gateway || !expected.token) {
+    if (!hasRelayConnection(expected)) {
       throw new Error("Gateway connection missing; reconnect before provider logout.");
     }
-    const current = await chrome.storage.local.get(["gateway", "token", "linkedProviders"]);
-    if (current.gateway !== expected.gateway || current.token !== expected.token) {
+    const current = await chrome.storage.local.get(["gateway", "token", "connectionMode", "linkedProviders"]);
+    if (current.gateway !== expected.gateway || current.token !== expected.token || current.connectionMode !== expected.connectionMode) {
       throw new Error("Gateway connection changed before provider logout. Retry on the new connection.");
     }
     // Opt out before revocation; even if gateway deletion fails, do not
@@ -123,12 +123,12 @@ function logoutProviderFromRelay(provider) {
     // DELETE request to a different gateway or a newly issued install token.
     const response = await relayFetch("/relay/v1/session/" + encodeURIComponent(provider), {
       method:"DELETE",body:"{}"
-    }, {gateway:expected.gateway,token:expected.token});
+    }, {gateway:expected.gateway,token:expected.token,connectionMode:expected.connectionMode});
     if (!response.ok) throw new Error("Gateway logout failed (" + response.status + "). Auto sync is paused; retry logout.");
     providerDiagnostics.delete(provider);
     lastGatewayCheck = null;
-    const latest = await chrome.storage.local.get(["gateway", "token", "relaySnapshotVersions"]);
-    if (latest.gateway === expected.gateway && latest.token === expected.token) {
+    const latest = await chrome.storage.local.get(["gateway", "token", "connectionMode", "relaySnapshotVersions"]);
+    if (latest.gateway === expected.gateway && latest.token === expected.token && latest.connectionMode === expected.connectionMode) {
       const versions = {...(latest.relaySnapshotVersions || {})};
       delete versions[provider];
       await chrome.storage.local.set({relaySnapshotVersions:versions});

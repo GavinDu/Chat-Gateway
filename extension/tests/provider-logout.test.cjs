@@ -19,6 +19,8 @@ function loadWorker({failDelete = false} = {}) {
   const sandbox = {
     Map, Promise, Set,
     importScripts() {},
+    hasRelayConnection: state => Boolean(state.gateway && (state.token || state.connectionMode === "local")),
+    relayIdentity: state => state.connectionMode === "local" ? "local" : state.token,
     clearTimeout() {},
     setTimeout() { return 1; },
     PROVIDERS: {metaai:["meta.ai"]},
