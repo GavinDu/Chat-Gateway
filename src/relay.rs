@@ -501,7 +501,35 @@ fn requested_extension_id(headers: &HeaderMap) -> Option<String> {
     extension_id_is_valid(id).then(|| id.to_owned())
 }
 
+/// Opt-in only for trusted loopback deployments. Remote relay deployments
+/// retain the existing pairing / install-token boundary.
+pub fn local_relay_enabled() -> bool {
+    std::env::var("CHAT_GATEWAY_LOCAL_RELAY_NO_PAIRING").as_deref() == Ok("1")
+        && std::env::var_os("CHAT_GATEWAY_REMOTE_ORIGIN").is_none()
+}
+
+/// Read-only mode discovery; no token, vault contents or provider credentials.
+pub async fn relay_mode() -> Response {
+    Json(serde_json::json!({
+        "mode": if local_relay_enabled() { "local" } else { "paired" },
+        "no_pairing": local_relay_enabled()
+    }))
+    .into_response()
+}
+
 pub fn relay_request_origin_is_allowed(path: &str, headers: &HeaderMap) -> bool {
+    // A local CLI may inspect *read-only* relay diagnostics without installing
+    // a Chrome extension. Mutation endpoints never get this exception.
+    if path == "/relay/v1/mode" {
+        return !headers.contains_key(header::ORIGIN)
+            || requested_extension_id(headers).is_some();
+    }
+    if local_relay_enabled()
+        && matches!(path, "/relay/v1/status" | "/relay/v1/diagnostics")
+        && !headers.contains_key(header::ORIGIN)
+    {
+        return true;
+    }
     if matches!(path, "/relay/v1/connect/request" | "/relay/v1/connect/poll")
         && std::env::var_os("CHAT_GATEWAY_EXTENSION_ID").is_none()
     {
@@ -516,6 +544,18 @@ fn extension_origin_matches(id: &str, origin: &str) -> bool {
 
 /// The extension origin must match one configured Chrome extension ID exactly.
 pub fn relay_origin_is_allowed(headers: &HeaderMap) -> bool {
+    if local_relay_enabled() {
+        // In local mode the Chrome extension Origin is the browser-side
+        // boundary, not an install token. Pin CHAT_GATEWAY_EXTENSION_ID when
+        // other untrusted extensions are installed.
+        let requested = requested_extension_id(headers);
+        return requested.is_some_and(|id| {
+            std::env::var("CHAT_GATEWAY_EXTENSION_ID")
+                .ok()
+                .filter(|value| !value.is_empty())
+                .is_none_or(|configured| configured == id)
+        });
+    }
     let Some(id) = extension_id() else {
         return false;
     };
@@ -869,6 +909,7 @@ fn authenticated_request_with_origin(
             )));
         }
     }
+    if !local_relay_enabled() {
     let authorization = headers
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok());
@@ -903,6 +944,7 @@ fn authenticated_request_with_origin(
         )));
     }
     drop(token_slot);
+    }
 
     let timestamp = headers
         .get("x-relay-timestamp")
@@ -1081,8 +1123,12 @@ async fn optional_login_observations(
 }
 
 pub async fn status(State(app): State<Arc<crate::AppState>>, headers: HeaderMap) -> Response {
-    if let Err(response) = authenticated_request(&app, &headers) {
-        return *response;
+    // Local no-Origin clients may inspect this read-only endpoint. The
+    // authority middleware still rejects non-local Host / cross-origin reads.
+    if !(local_relay_enabled() && !headers.contains_key(header::ORIGIN)) {
+        if let Err(response) = authenticated_request(&app, &headers) {
+            return *response;
+        }
     }
     // A Docker installation may not have an embedded login worker. Keep the
     // saved-session dashboard available and treat live verification as unknown.
