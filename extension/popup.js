@@ -314,7 +314,7 @@ $("unpair").addEventListener("click", async () => {
     if (!response.ok) throw new Error("Could not revoke the install token.");
     // A stale approval should not be able to silently reconnect a gateway
     // after the user explicitly revoked this install.
-    await chrome.storage.local.remove(["token","linkedProviders","pendingConnection"]);
+    await chrome.storage.local.remove(["token","linkedProviders","pendingConnection","relaySnapshotVersions"]);
     await chrome.alarms?.clear?.("relay-connection");
     showGatewayConnection(false);
     message("Gateway disconnected. Saved provider sessions remain in the gateway vault. Reconnect to manage them.");
