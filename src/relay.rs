@@ -119,28 +119,31 @@ impl ProviderActivationStates {
         let Some(generation) = generation else {
             return;
         };
-        if let Ok(mut states) = self.states.lock() {
-            if let Some((current_generation, phase)) = states.get_mut(provider) {
-                if *current_generation == generation && *phase == RelayActivationPhase::Pending {
-                    *phase = if succeeded {
-                        RelayActivationPhase::Ready
-                    } else {
-                        RelayActivationPhase::Failed
-                    };
-                }
-            }
+        let Ok(mut states) = self.states.lock() else {
+            return;
+        };
+        let Some((current_generation, phase)) = states.get_mut(provider) else {
+            return;
+        };
+        if *current_generation == generation && *phase == RelayActivationPhase::Pending {
+            *phase = if succeeded {
+                RelayActivationPhase::Ready
+            } else {
+                RelayActivationPhase::Failed
+            };
         }
     }
 
     fn revoke(&self, provider: &str) {
-        if let Ok(mut states) = self.states.lock() {
-            let entry = states
-                .entry(provider.to_owned())
-                .or_insert((0, RelayActivationPhase::NotAttempted));
-            if let Some(next) = entry.0.checked_add(1) {
-                entry.0 = next;
-                entry.1 = RelayActivationPhase::Cancelled;
-            }
+        let Ok(mut states) = self.states.lock() else {
+            return;
+        };
+        let entry = states
+            .entry(provider.to_owned())
+            .or_insert((0, RelayActivationPhase::NotAttempted));
+        if let Some(next) = entry.0.checked_add(1) {
+            entry.0 = next;
+            entry.1 = RelayActivationPhase::Cancelled;
         }
     }
 
