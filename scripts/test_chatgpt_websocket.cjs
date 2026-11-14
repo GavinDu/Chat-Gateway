@@ -74,3 +74,19 @@ test('invalid URLs and duplicate protocols fail without opening a socket', () =>
   assert.throws(()=>new f.context.WebSocket('wss://ws.chatgpt.com/socket',['duplicate','duplicate']),{name:'SyntaxError'});
   assert.equal(f.commands.filter(c=>c.op==='open').length,0);
 });
+
+
+test('ChatGPT stream compatibility leaves native Web Streams unchanged', () => {
+  const NativeStream = require('node:stream/web').ReadableStream;
+  const source = require('node:fs').readFileSync(require('node:path').join(__dirname, '../src/browser/chatgpt_streams.js'), 'utf8');
+  const context = {location:{hostname:'chatgpt.com'}, ReadableStream:NativeStream};
+  require('node:vm').runInNewContext(source, context);
+  assert.equal(context.ReadableStream, NativeStream);
+});
+
+test('ChatGPT stream compatibility does not inspect other providers', () => {
+  const source = require('node:fs').readFileSync(require('node:path').join(__dirname, '../src/browser/chatgpt_streams.js'), 'utf8');
+  const context = {location:{hostname:'example.test'}};
+  Object.defineProperty(context, 'ReadableStream', {get(){throw new Error('foreign provider API inspected');}});
+  assert.doesNotThrow(() => require('node:vm').runInNewContext(source, context));
+});

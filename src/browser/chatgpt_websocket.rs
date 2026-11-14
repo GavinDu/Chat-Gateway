@@ -534,6 +534,129 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn native_chatgpt_stream_prefills_after_start_and_respects_zero_watermark() {
+        let browser = Browser::builder().stealth(false).build().unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        page.goto("data:text/html,<body>stream prefetch fixture</body>")
+            .await
+            .unwrap();
+        let source = include_str!("chatgpt_streams.js").replace(
+            "if (!['chatgpt.com', 'www.chatgpt.com'].includes(location.hostname)) return;",
+            "",
+        );
+        page.evaluate(&source);
+        page.evaluate(r#"(() => {
+            globalThis.prefetchCounts=[0,0];
+            let finish;
+            const started=new Promise(resolve=>finish=resolve);
+            globalThis.finishStreamStart=finish;
+            globalThis.prefetchStreams=[undefined,{highWaterMark:0}].map((strategy,index)=>new ReadableStream({
+                start(){return started;},
+                pull(controller){prefetchCounts[index]++;controller.enqueue('fixture');}
+            },strategy));
+        })()"#);
+        page.settle(100).await;
+        assert_eq!(
+            page.evaluate("JSON.stringify(prefetchCounts)").as_str(),
+            Some("[0,0]")
+        );
+        page.evaluate("finishStreamStart()");
+        page.settle(100).await;
+        assert_eq!(
+            page.evaluate("JSON.stringify(prefetchCounts)").as_str(),
+            Some("[1,0]"),
+            "default streams must prefill without a reader after asynchronous start"
+        );
+        page.evaluate(r#"(() => {globalThis.prefetchReads=null;Promise.all(prefetchStreams.map(stream=>stream.getReader().read())).then(values=>prefetchReads=values.map(v=>v.value));})()"#);
+        page.settle(100).await;
+        assert_eq!(
+            page.evaluate("JSON.stringify(prefetchReads)").as_str(),
+            Some(r#"["fixture","fixture"]"#)
+        );
+        assert_eq!(
+            page.evaluate("JSON.stringify(prefetchCounts)").as_str(),
+            Some("[2,1]"),
+            "zero-watermark streams pull on demand; default streams refill one slot"
+        );
+    }
+
+    #[tokio::test]
+    async fn native_chatgpt_prefetch_uses_chunk_sizes_and_preserves_backpressure() {
+        let browser = Browser::builder().stealth(false).build().unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        page.goto("data:text/html,<body>stream sizes fixture</body>")
+            .await
+            .unwrap();
+        let source = include_str!("chatgpt_streams.js").replace(
+            "if (!['chatgpt.com', 'www.chatgpt.com'].includes(location.hostname)) return;",
+            "",
+        );
+        page.evaluate(&source);
+        page.evaluate(&source); // repeated preload must not count each chunk twice
+        page.evaluate(
+            r#"(() => {
+            globalThis.sizedPulls=0;globalThis.sizeCalls=0;
+            globalThis.sizedController=null;
+            globalThis.sizedStream=new ReadableStream({pull(controller){
+                sizedController=controller;sizedPulls++;controller.enqueue(new Uint8Array(2));
+            }},{highWaterMark:4,size(chunk){sizeCalls++;return chunk.byteLength;}});
+        })()"#,
+        );
+        page.settle(100).await;
+        assert_eq!(
+            page.evaluate("JSON.stringify([sizedPulls,sizeCalls,sizedController.desiredSize])")
+                .as_str(),
+            Some("[2,2,0]")
+        );
+        page.evaluate(r#"(() => {sizedStream.getReader().read();})()"#);
+        page.settle(100).await;
+        assert_eq!(
+            page.evaluate("JSON.stringify([sizedPulls,sizeCalls,sizedController.desiredSize])")
+                .as_str(),
+            Some("[3,3,0]")
+        );
+        page.evaluate("sizedController.error(new Error('fixture failure'))");
+        assert_eq!(page.evaluate("sizedController.desiredSize"), Value::Null);
+        page.settle(100).await;
+        assert_eq!(page.evaluate("sizedPulls").as_f64(), Some(3.0));
+    }
+
+    #[tokio::test]
+    async fn native_chatgpt_prefetch_cancellation_stops_pending_source() {
+        let browser = Browser::builder().stealth(false).build().unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        page.goto("data:text/html,<body>stream cancellation fixture</body>")
+            .await
+            .unwrap();
+        let source = include_str!("chatgpt_streams.js").replace(
+            "if (!['chatgpt.com', 'www.chatgpt.com'].includes(location.hostname)) return;",
+            "",
+        );
+        page.evaluate(&source);
+        page.evaluate(r#"(() => {
+            globalThis.cancelPulls=0;globalThis.cancelCalls=0;globalThis.cancelFinished=false;
+            globalThis.cancelStream=new ReadableStream({
+                pull(controller){cancelPulls++;return new Promise(resolve=>{
+                    globalThis.releaseCancelledPull=()=>{try{controller.enqueue('late fixture');}catch{}resolve();};
+                });},
+                cancel(){cancelCalls++;}
+            });
+        })()"#);
+        page.settle(100).await;
+        assert_eq!(page.evaluate("cancelPulls").as_f64(), Some(1.0));
+        page.evaluate(r#"(() => {cancelStream.cancel().then(()=>cancelFinished=true);releaseCancelledPull();})()"#);
+        page.settle(100).await;
+        assert_eq!(
+            page.evaluate("JSON.stringify([cancelPulls,cancelCalls,cancelFinished])")
+                .as_str(),
+            Some("[1,1,true]")
+        );
+        page.evaluate(r#"(() => {globalThis.cancelReadDone=false;cancelStream.getReader().read().then(value=>cancelReadDone=value.done);})()"#);
+        page.settle(100).await;
+        assert_eq!(page.evaluate("cancelReadDone").as_bool(), Some(true));
+    }
+
+    #[tokio::test]
     async fn native_browser_dispatches_each_received_message_once() {
         let browser = Browser::builder().stealth(false).build().unwrap();
         let mut page = browser.new_page().await.unwrap();

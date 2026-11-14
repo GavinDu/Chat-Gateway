@@ -207,3 +207,51 @@ CI results are recorded on PR #944 after pushing. MCP capability preflight was
 repeated inside /workspace/chat-gateway: Linux, node/python3/cargo available,
 SSH absent and Chromium prerequisites not established. Browser/SSH E2E remains
 NOT RUN. No merge, merged-main E2E or validated main release was performed.
+
+## 2026-11-14: Chrome authentication verified, browser-runtime follow-up
+
+The user ran a first-party session check in the normal Chrome ChatGPT tab:
+HTTP 200, user present, access token present, and session expiry in the future.
+This establishes a currently authenticated Chrome session. It does not prove
+that a transplanted cookie jar is accepted in the embedded runtime.
+
+Extension diagnostics independently show ChatGPT state=uploaded with no sync
+issue. Backend logs show 29 ChatGPT cookies imported. An isolated copy contains
+two nonempty numbered session-cookie chunks, with consecutive indexes and no
+recorded expired session cookie. Cookie presence and recorded expiry are not
+server-side token validation.
+
+The installed binary does not match the existing 6697e3f candidate executable.
+Its request a9c60bdc-c49e-43bd-816e-f826885a0368 failed at input_dispatch with
+ProviderInputRejected in 3.77 seconds. Testing the exact CI-passing 6697e3f
+candidate separately with the refreshed ChatGPT-only encrypted session copy
+gets past input, but JSON and streaming requests independently return 502 after
+63.77 and 63.65 seconds at submission_not_acknowledged. Restarting only the
+isolated candidate separates the streaming test from failure cooldown. The
+production service was not restarted. The temporary container, copied session,
+copied key, data, configuration and network were removed after collection.
+These are real-account diagnostics, not disposable-fixture release acceptance.
+
+A failing native fixture identifies an additional stream compatibility gap:
+the ChatGPT shim pulls only for pending reads and never prefills its default
+queue after asynchronous startup. The [Streams Standard default-controller
+algorithm](https://streams.spec.whatwg.org/#readable-stream-default-controller-should-call-pull)
+also pulls when the queue has capacity. Update the known-shim-only hook to
+prefill according to the watermark and chunk-size algorithm, preserve a zero
+watermark, serialize pulls, and stop on close/error/cancellation. Queue sizes
+are accounted once per queued chunk. An installation marker prevents repeated
+preloads from wrapping the shim and invoking size callbacks twice.
+
+Native fixtures cover prefill after async start, zero-watermark demand reads,
+refilling, custom chunk sizes/backpressure, error and pending-pull cancellation,
+and repeated installation. Node fixtures verify native Web Streams and other
+provider origins remain untouched. Formatting, Clippy and six JS facade tests
+pass; the full Mac unit run has 661 passing tests and the existing Linux-only
+/dev/shm profile-test failure, with nothing skipped or weakened. Provider
+fixtures and dependency audit results are recorded on the PR.
+
+The new stream change has not yet established live provider success. Require
+current-head CI, isolated applicable acceptance and repeated actual JSON and
+streaming completions before claiming reliability. Native MCP browser/SSH
+acceptance remains Not run while the execution host lacks prerequisites. No
+merge, merged-main validation or release installation is claimed.
