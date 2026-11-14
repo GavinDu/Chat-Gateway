@@ -206,6 +206,12 @@ async function resyncLinkedProviders() {
   // contents are unchanged (for example after a gateway volume replacement).
   // Do not force heavy browser reloads merely because authentication is unknown.
   const status = await relayDiagnostics(true);
+  // If an installed gateway is currently unreachable or rejects the status
+  // check, one periodic heartbeat is enough. Do not launch a burst of
+  // automatic cookie reads/imports doomed to fail against the same endpoint.
+  // Keep linked-provider consent intact so the next successful check repairs
+  // missing snapshots normally. Manual provider Sync remains independent.
+  if (!status.ok && status.extension?.connected) return;
   const missing = new Set(status.ok
     ? (status.gateway.providers || []).filter(item => !item.linked).map(item => item.provider)
     : []);
