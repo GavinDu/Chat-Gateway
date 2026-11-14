@@ -304,7 +304,11 @@ mod relay_activation_state_tests {
         let second = states.begin("manus");
         states.finish("manus", first, Some(RelayActivationIssue::RefreshFailed));
         assert_eq!(states.diagnostics("manus").0, "pending");
-        states.finish("manus", second, Some(RelayActivationIssue::WorkerUnavailable));
+        states.finish(
+            "manus",
+            second,
+            Some(RelayActivationIssue::WorkerUnavailable),
+        );
         assert_eq!(
             states.diagnostics("manus"),
             ("failed", Some("browser_worker_unavailable"), None)
@@ -341,15 +345,17 @@ mod relay_activation_state_tests {
     fn bounded_age_and_typed_error_labels_do_not_leak_raw_provider_errors() {
         assert_eq!(relay_pending_age_bucket(Duration::from_secs(29)), "recent");
         assert_eq!(relay_pending_age_bucket(Duration::from_secs(30)), "delayed");
-        assert_eq!(relay_pending_age_bucket(Duration::from_secs(119)), "delayed");
+        assert_eq!(
+            relay_pending_age_bucket(Duration::from_secs(119)),
+            "delayed"
+        );
         assert_eq!(relay_pending_age_bucket(Duration::from_secs(120)), "stale");
         let error = anyhow::anyhow!("cookie=private; URL=https://example.invalid/token");
         let label = relay_activation_error_kind(&error).as_str();
         assert_eq!(label, "refresh_failed");
         assert!(!label.contains("private"));
         assert!(!label.contains("token"));
-        let unavailable =
-            anyhow::Error::new(crate::browser::pool::BrowserWorkerUnavailableError);
+        let unavailable = anyhow::Error::new(crate::browser::pool::BrowserWorkerUnavailableError);
         assert_eq!(
             relay_activation_error_kind(&unavailable),
             RelayActivationIssue::WorkerUnavailable
