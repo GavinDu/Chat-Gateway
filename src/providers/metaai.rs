@@ -5,6 +5,19 @@ use anyhow::Result;
 use async_trait::async_trait;
 use obscura_core::Page;
 
+/// An observed first-party Meta AI document HTTP 403 at browser bootstrap.
+/// This is not a login-expiry signal and does not reveal page or account data.
+#[derive(Debug)]
+pub struct MetaAiDocumentDeniedError;
+
+impl std::fmt::Display for MetaAiDocumentDeniedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Meta AI document denied by HTTP 403 before composer readiness")
+    }
+}
+
+impl std::error::Error for MetaAiDocumentDeniedError {}
+
 /// Meta AI - www.meta.ai. Model switcher shows Llama 4 variants.
 pub struct MetaAIAdapter {
     pub cfg: ProviderConfig,

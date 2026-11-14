@@ -159,6 +159,7 @@ impl ProviderSessionRegistry {
             | GatewayErrorKind::ProviderBusy
             | GatewayErrorKind::Memory => {}
             GatewayErrorKind::ProviderAssetBlocked => self.record_asset_blocked(provider),
+            GatewayErrorKind::ProviderDocumentDenied => self.record_document_denied(provider),
             GatewayErrorKind::ProviderInputRejected => self.record_input_rejected(provider),
             GatewayErrorKind::Timeout
             | GatewayErrorKind::ProviderFailure
@@ -197,6 +198,24 @@ impl ProviderSessionRegistry {
                     state: ProviderSessionState::Degraded,
                     last_error: Some(
                         "provider JavaScript assets blocked (HTTP 403); check network and browser compatibility"
+                            .to_owned(),
+                    ),
+                    retry_after: SystemTime::now().checked_add(DEGRADED_RETRY_COOLDOWN),
+                },
+            );
+        }
+    }
+
+    /// A first-party provider document 403 blocks bootstrap, but is not proof
+    /// of session expiry. Never store an upstream URL or response body.
+    fn record_document_denied(&self, provider: &str) {
+        if let Ok(mut map) = self.states.lock() {
+            map.insert(
+                provider.to_owned(),
+                ProviderSessionStatus {
+                    state: ProviderSessionState::Degraded,
+                    last_error: Some(
+                        "provider document denied (HTTP 403); check network and browser access"
                             .to_owned(),
                     ),
                     retry_after: SystemTime::now().checked_add(DEGRADED_RETRY_COOLDOWN),
@@ -350,6 +369,27 @@ mod tests {
         assert!(message.contains("JavaScript assets blocked (HTTP 403)"));
         assert!(!message.contains("private"));
         assert!(!message.contains("token"));
+    }
+
+    #[test]
+    fn metaai_document_denial_is_degraded_not_expired_and_never_retains_upstream_text() {
+        let registry = ProviderSessionRegistry::default();
+        registry.record_gateway_error(
+            "metaai",
+            &GatewayError::typed(
+                GatewayErrorKind::ProviderDocumentDenied,
+                "document?token=secret; cookie=private",
+                false,
+            ),
+        );
+        let status = registry.status("metaai");
+        assert_eq!(status.state, ProviderSessionState::Degraded);
+        assert!(status.retry_after.is_some());
+        let message = status.last_error.expect("fixed document denial category");
+        assert!(message.contains("document denied (HTTP 403)"));
+        assert!(!message.contains("secret"));
+        assert!(!message.contains("private"));
+        assert!(!registry.manual_challenge_required("metaai"));
     }
 
     #[test]

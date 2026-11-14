@@ -17,7 +17,7 @@ pub(super) type SharedPages = Rc<RefCell<ProviderPageCache>>;
 
 pub(super) struct ProviderPageCache {
     pages: HashMap<Provider, Rc<Page>>,
-    mistral_script_403: HashMap<Provider, Arc<AtomicBool>>,
+    bootstrap_403: HashMap<Provider, Arc<AtomicBool>>,
     order: VecDeque<Provider>,
     capacity: usize,
 }
@@ -26,15 +26,15 @@ impl ProviderPageCache {
     pub(super) fn new(capacity: usize) -> Self {
         Self {
             pages: HashMap::new(),
-            mistral_script_403: HashMap::new(),
+            bootstrap_403: HashMap::new(),
             order: VecDeque::new(),
             capacity: capacity.max(1),
         }
     }
     pub(super) fn insert(&mut self, provider: Provider, page: Rc<Page>) {
-        self.insert_with_script_status(provider, page, None);
+        self.insert_with_bootstrap_status(provider, page, None);
     }
-    pub(super) fn insert_with_script_status(
+    pub(super) fn insert_with_bootstrap_status(
         &mut self,
         provider: Provider,
         page: Rc<Page>,
@@ -44,18 +44,18 @@ impl ProviderPageCache {
         while self.pages.len() >= self.capacity {
             if let Some(oldest) = self.order.pop_front() {
                 self.pages.remove(&oldest);
-                self.mistral_script_403.remove(&oldest);
+                self.bootstrap_403.remove(&oldest);
             }
         }
         self.order.push_back(provider);
         self.pages.insert(provider, page);
         if let Some(observed) = script_403 {
-            self.mistral_script_403.insert(provider, observed);
+            self.bootstrap_403.insert(provider, observed);
         }
     }
     pub(super) fn remove(&mut self, provider: &Provider) -> Option<Rc<Page>> {
         self.order.retain(|value| value != provider);
-        self.mistral_script_403.remove(provider);
+        self.bootstrap_403.remove(provider);
         self.pages.remove(provider)
     }
 }
@@ -72,11 +72,11 @@ pub(super) struct PageLease {
     page: Option<Page>,
     pages: SharedPages,
     provider: Provider,
-    mistral_script_403: Option<Arc<AtomicBool>>,
+    bootstrap_403: Option<Arc<AtomicBool>>,
 }
 impl PageLease {
     pub(super) fn take(pages: &SharedPages, provider: Provider) -> Result<Self> {
-        let observed = pages.borrow().mistral_script_403.get(&provider).cloned();
+        let observed = pages.borrow().bootstrap_403.get(&provider).cloned();
         let page = pages
             .borrow_mut()
             .remove(&provider)
@@ -86,25 +86,26 @@ impl PageLease {
                 page: Some(page),
                 pages: pages.clone(),
                 provider,
-                mistral_script_403: observed,
+                bootstrap_403: observed,
             }),
             Err(page) => {
                 pages
                     .borrow_mut()
-                    .insert_with_script_status(provider, page, observed);
+                    .insert_with_bootstrap_status(provider, page, observed);
                 anyhow::bail!("provider page is still borrowed")
             }
         }
     }
-    /// Direct response-observer evidence, independent of Resource Timing.
-    /// It belongs only to this cached page and is discarded on replacement.
-    pub(super) fn observed_mistral_script_403(&self) -> bool {
-        self.mistral_script_403
+    /// Direct response-observer evidence: Mistral first-party script HTTP 403 or
+    /// Meta AI first-party document HTTP 403. This stays page-scoped and is
+    /// discarded on replacement or eviction, never across providers.
+    pub(super) fn observed_bootstrap_403(&self) -> bool {
+        self.bootstrap_403
             .as_ref()
             .is_some_and(|observed| observed.load(Ordering::Relaxed))
     }
-    pub(super) fn clear_mistral_script_403_before_navigation(&self) {
-        if let Some(observed) = &self.mistral_script_403 {
+    pub(super) fn clear_bootstrap_403_before_navigation(&self) {
+        if let Some(observed) = &self.bootstrap_403 {
             observed.store(false, Ordering::Relaxed);
         }
     }
@@ -123,10 +124,10 @@ impl DerefMut for PageLease {
 impl Drop for PageLease {
     fn drop(&mut self) {
         if let Some(page) = self.page.take() {
-            self.pages.borrow_mut().insert_with_script_status(
+            self.pages.borrow_mut().insert_with_bootstrap_status(
                 self.provider,
                 Rc::new(page),
-                self.mistral_script_403.take(),
+                self.bootstrap_403.take(),
             );
         }
     }
@@ -146,21 +147,21 @@ mod tests {
         let evidence = Arc::new(AtomicBool::new(true));
         pages
             .borrow_mut()
-            .insert_with_script_status(Provider::Mistral, first, Some(evidence));
+            .insert_with_bootstrap_status(Provider::Mistral, first, Some(evidence));
         let lease = PageLease::take(&pages, Provider::Mistral).unwrap();
-        assert!(lease.observed_mistral_script_403());
-        lease.clear_mistral_script_403_before_navigation();
-        assert!(!lease.observed_mistral_script_403());
+        assert!(lease.observed_bootstrap_403());
+        lease.clear_bootstrap_403_before_navigation();
+        assert!(!lease.observed_bootstrap_403());
         drop(lease);
         assert!(!PageLease::take(&pages, Provider::Mistral)
             .unwrap()
-            .observed_mistral_script_403());
+            .observed_bootstrap_403());
 
         // Replacing a browser page must discard the old network status.
         let fresh = Rc::new(browser.new_page().await.unwrap());
         pages.borrow_mut().insert(Provider::Mistral, fresh);
         let replaced = PageLease::take(&pages, Provider::Mistral).unwrap();
-        assert!(!replaced.observed_mistral_script_403());
+        assert!(!replaced.observed_bootstrap_403());
     }
 
     #[tokio::test]
@@ -171,7 +172,7 @@ mod tests {
             .unwrap();
         let pages = Rc::new(RefCell::new(ProviderPageCache::new(1)));
         let first = Rc::new(browser.new_page().await.unwrap());
-        pages.borrow_mut().insert_with_script_status(
+        pages.borrow_mut().insert_with_bootstrap_status(
             Provider::Mistral,
             first,
             Some(Arc::new(AtomicBool::new(true))),
@@ -181,7 +182,31 @@ mod tests {
         let replacement = Rc::new(browser.new_page().await.unwrap());
         pages.borrow_mut().insert(Provider::Mistral, replacement);
         let lease = PageLease::take(&pages, Provider::Mistral).unwrap();
-        assert!(!lease.observed_mistral_script_403());
+        assert!(!lease.observed_bootstrap_403());
+    }
+
+    #[tokio::test]
+    async fn metaai_document_denial_evidence_is_page_scoped_and_cleared_on_navigation() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let pages = Rc::new(RefCell::new(ProviderPageCache::new(2)));
+        let first = Rc::new(browser.new_page().await.unwrap());
+        pages.borrow_mut().insert_with_bootstrap_status(
+            Provider::MetaAI,
+            first,
+            Some(Arc::new(AtomicBool::new(true))),
+        );
+        let evidence = PageLease::take(&pages, Provider::MetaAI).unwrap();
+        assert!(evidence.observed_bootstrap_403());
+        evidence.clear_bootstrap_403_before_navigation();
+        assert!(!evidence.observed_bootstrap_403());
+        drop(evidence);
+        let fresh = Rc::new(browser.new_page().await.unwrap());
+        pages.borrow_mut().insert(Provider::MetaAI, fresh);
+        let replacement = PageLease::take(&pages, Provider::MetaAI).unwrap();
+        assert!(!replacement.observed_bootstrap_403());
     }
 
     #[tokio::test]
