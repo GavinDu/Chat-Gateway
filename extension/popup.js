@@ -95,12 +95,22 @@ async function refreshStatus(force = false) {
     const auth = item.authentication === "verified" ? "Login verified"
       : item.authentication === "needs_login" ? "Login needed"
       : "Login unverified";
+    // Browser activation is not proof of login. Keep the independent
+    // authenticated-provider observation visible beside this fixed category.
+    const activation = !item.linked ? null
+      : item.activation === "pending" ? "Browser activation pending"
+      : item.activation === "ready" ? "Browser activation completed"
+      : item.activation === "failed" ? "Browser activation failed"
+      : item.activation === "cancelled" ? "Browser activation cancelled"
+      : item.activation === "not_attempted" ? "Browser activation not attempted"
+      : null;
     const blocker = item.manual_verification_required ? "Manual provider verification required; open website"
       : item.availability === "degraded" ? "Gateway check unavailable; retry" : null;
     const runtimeIssue = item.issue && item.issue !== "authentication_unverified"
       ? "Gateway issue: " + item.issue.replaceAll("_", " ") : null;
     const extensionIssue = diagnostics?.extension?.provider_sync?.[item.provider]?.issue;
     status.textContent = [enabled, linked, browser, auth,
+      ...(activation ? [activation] : []),
       ...(blocker ? [blocker] : []),
       ...(runtimeIssue ? [runtimeIssue] : []),
       ...(extensionIssue ? ["Extension sync: " + extensionIssue.replaceAll("_", " ")] : [])

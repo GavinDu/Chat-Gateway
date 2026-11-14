@@ -4,7 +4,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
 
-function loadPopup({failCookieDomain = null, includeSecondProvider = false, manualVerification = false, localRelay = false} = {}) {
+function loadPopup({failCookieDomain = null, includeSecondProvider = false, manualVerification = false, localRelay = false, activation = null} = {}) {
   const elements = new Map();
   const chromeCalls = [];
   const values = {gateway:"http://127.0.0.1:8080",linkedProviders:[]};
@@ -51,7 +51,7 @@ function loadPopup({failCookieDomain = null, includeSecondProvider = false, manu
     relayFetch:async()=>({ok:true,status:200,json:async()=>({
       providers:[
         {provider:"metaai",enabled:true,linked:server.linked,authentication:server.linked?"unknown":"needs_login",
-          availability:manualVerification?"degraded":"unknown",manual_verification_required:manualVerification},
+          availability:manualVerification?"degraded":"unknown",manual_verification_required:manualVerification,activation},
         ...(includeSecondProvider ? [{provider:"claude",enabled:true,linked:false,authentication:"needs_login",availability:"unknown"}] : []),
       ],
       vault_mode:true,
@@ -111,6 +111,24 @@ test("connected dashboard exposes login and small logout, then allows reconnecti
   assert.equal(popup.server.linked,true);
   assert.ok(popup.chromeCalls.includes("logout-provider:metaai"));
   assert.equal(popup.chromeCalls.filter(x=>x==="sync-provider:metaai").length,2);
+});
+
+test("browser activation statuses stay distinct from login verification", async () => {
+  for (const [state, expected] of [
+    ["pending", "Browser activation pending"],
+    ["ready", "Browser activation completed"],
+    ["failed", "Browser activation failed"],
+    ["not_attempted", "Browser activation not attempted"]
+  ]) {
+    const popup = loadPopup({activation:state});
+    popup.server.linked = true;
+    await popup.controls.refreshStatus();
+    const row = popup.elements.get("status").children[0];
+    const status = row.children.find(child => child.className==="provider-detail").textContent;
+    assert.match(status, /Login unverified/, "session activation cannot imply authentication");
+    assert.ok(status.includes(expected), "show only fixed activation categories");
+    assert.doesNotMatch(status, /Login verified/);
+  }
 });
 
 test("provider challenge is shown as manual verification, not an expired session or automatic retry",async()=>{
