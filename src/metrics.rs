@@ -421,15 +421,13 @@ mod tests {
         registry.record_provider_timeout("qwen", "generation");
         registry.record_provider_timeout("qwen", "session-identifier");
         let metrics = registry.render_with_provider_states(&[]);
-        assert!(metrics.contains(
-            "gateway_provider_timeout_total{provider=\"qwen\",phase=\"submission\"} 1"
-        ));
+        assert!(metrics
+            .contains("gateway_provider_timeout_total{provider=\"qwen\",phase=\"submission\"} 1"));
         assert!(metrics.contains(
             "gateway_provider_timeout_total{provider=\"qwen\",phase=\"first_content\"} 1"
         ));
-        assert!(metrics.contains(
-            "gateway_provider_timeout_total{provider=\"qwen\",phase=\"generation\"} 1"
-        ));
+        assert!(metrics
+            .contains("gateway_provider_timeout_total{provider=\"qwen\",phase=\"generation\"} 1"));
         assert!(!metrics.contains("session-identifier"));
     }
 
