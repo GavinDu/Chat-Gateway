@@ -43,8 +43,8 @@ import sys
 path = Path(sys.argv[1])
 source = path.read_text(encoding="utf-8")
 modified, changes = re.subn(
-    r"(?m)^(  - name: manus\\n    enabled: )true$",
-    r"\\1false",
+    r"(?m)^(  - name: manus\n    enabled: )true$",
+    r"\1false",
     source,
 )
 if changes != 1:
