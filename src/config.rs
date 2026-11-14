@@ -419,8 +419,8 @@ mod tests {
 
     #[test]
     fn example_configuration_enables_manus_without_changing_other_providers() {
-        let example: AppConfig =
-            serde_yaml::from_str(include_str!("../config.example.yaml")).expect("example YAML parses");
+        let example: AppConfig = serde_yaml::from_str(include_str!("../config.example.yaml"))
+            .expect("example YAML parses");
         example.validate().expect("example configuration validates");
         let manus = example.provider("manus").expect("Manus configured");
         assert!(manus.enabled);
