@@ -122,6 +122,54 @@ test("unreachable configured gateway skips automatic imports and resumes after r
     "startup repair must resume after a successful gateway status check");
 });
 
+test("known gateway outage suppresses cookie-triggered imports until health returns or identity changes", async () => {
+  const f = loadBackground(["chatgpt", "claude"]);
+  let healthy = false;
+  let gateway = "http://127.0.0.1:8080";
+  f.sandbox.chrome.storage.local.get = async () => ({
+    gateway, connectionMode:"local", linkedProviders:["chatgpt","claude"]
+  });
+  f.sandbox.relayFetch = async () => healthy
+    ? {ok:true,status:200,json:async()=>({providers:[]})}
+    : {ok:false,status:503};
+  const diagnostics = () => new Promise(resolve =>
+    f.listeners.message[0]({type:"relay-diagnostics",force:true},{},resolve));
+  assert.equal((await diagnostics()).ok,false);
+
+  f.listeners.cookieChanged[0]({cookie:{domain:".chatgpt.com"}});
+  const firstTimer = [...f.timers.values()].at(-1);
+  firstTimer.callback();
+  await flushAsyncWork();
+  assert.deepEqual(f.calls, [], "known outage must not trigger a queued automatic import");
+
+  // Manual provider recovery is never blocked by the backoff.
+  const manually = await new Promise(resolve =>
+    f.listeners.message[0]({type:"sync-provider",provider:"chatgpt"},{},resolve));
+  assert.equal(manually.ok,true);
+  assert.deepEqual(f.calls, ["chatgpt"]);
+  f.calls.length = 0;
+
+  healthy = true;
+  assert.equal((await diagnostics()).ok,true);
+  f.listeners.cookieChanged[0]({cookie:{domain:".chatgpt.com"}});
+  [...f.timers.values()].at(-1).callback();
+  await flushAsyncWork();
+  assert.deepEqual(f.calls, ["chatgpt"], "successful health check must resume automatic resync");
+  f.calls.length = 0;
+
+  healthy = false;
+  assert.equal((await diagnostics()).ok,false);
+  gateway = "http://127.0.0.1:9090";
+  f.listeners.cookieChanged[0]({cookie:{domain:".claude.ai"}});
+  // Connection identity changes are observed by relayDiagnostics, not by
+  // cookie callbacks. A fresh identity check clears the old outage backoff.
+  healthy = true;
+  assert.equal((await diagnostics()).ok,true);
+  [...f.timers.values()].at(-1).callback();
+  await flushAsyncWork();
+  assert.deepEqual(f.calls, ["claude"]);
+});
+
 test("service-worker install and startup restore each unique linked provider", async () => {
   const { calls, listeners } = loadBackground([
     "chatgpt",
