@@ -108,12 +108,20 @@ async function refreshStatus(force = false) {
       : item.availability === "degraded" ? "Gateway check unavailable; retry" : null;
     const runtimeIssue = item.issue && item.issue !== "authentication_unverified"
       ? "Gateway issue: " + item.issue.replaceAll("_", " ") : null;
-    const extensionIssue = diagnostics?.extension?.provider_sync?.[item.provider]?.issue;
+    const sync = diagnostics?.extension?.provider_sync?.[item.provider];
+    const extensionIssue = sync?.issue;
+    const syncAttempt = typeof sync?.updated_at === "string" && !Number.isNaN(Date.parse(sync.updated_at))
+      ? "Last extension sync attempt: " + sync.updated_at : null;
+    // An upload/check is not a verified login. The health call may fail
+    // while this extension still remembers an earlier successful import.
+    const staleSync = sync?.stale === true ? "Extension sync status stale (gateway check failed)" : null;
     status.textContent = [enabled, linked, browser, auth,
       ...(activation ? [activation] : []),
       ...(blocker ? [blocker] : []),
       ...(runtimeIssue ? [runtimeIssue] : []),
-      ...(extensionIssue ? ["Extension sync: " + extensionIssue.replaceAll("_", " ")] : [])
+      ...(extensionIssue ? ["Extension sync: " + extensionIssue.replaceAll("_", " ")] : []),
+      ...(syncAttempt ? [syncAttempt] : []),
+      ...(staleSync ? [staleSync] : [])
     ].join(" · ");
     li.append(status);
 
