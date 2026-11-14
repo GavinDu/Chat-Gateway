@@ -30,6 +30,27 @@ command -v python3 >/dev/null 2>&1
 # Exercise the actual start helper with an owner-only host config. Direct
 # docker-run fixtures missed the nonroot/host-UID config mount failure.
 cp "$ROOT/config.example.yaml" "$TMP/config.yaml"
+# The shipping example intentionally enables Manus. This smoke tests the
+# *offline, no-enabled-provider* readiness state without a linked account or
+# embedded browser. Disable only Manus in the disposable test copy, leaving
+# the source example and all other provider settings untouched. Fail if the
+# fixture has drifted instead of silently weakening the readiness assertion.
+python3 - "$TMP/config.yaml" <<'OFFLINECONFIGPY'
+from pathlib import Path
+import re
+import sys
+
+path = Path(sys.argv[1])
+source = path.read_text(encoding="utf-8")
+modified, changes = re.subn(
+    r"(?m)^(  - name: manus\n    enabled: )true$",
+    r"\1false",
+    source,
+)
+if changes != 1:
+    raise SystemExit("Manus offline smoke fixture does not match enabled example")
+path.write_text(modified, encoding="utf-8")
+OFFLINECONFIGPY
 chmod 600 "$TMP/config.yaml"
 PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')"
 export PORT CHAT_GATEWAY_IMAGE="$IMAGE" CHAT_GATEWAY_CONTAINER="$NAME"
