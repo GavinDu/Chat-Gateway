@@ -18,6 +18,14 @@ function classifyRelayFailure(error) {
   if (message.includes("(403)") || message.includes("(401)")) return "gateway_unauthorized";
   return "relay_unavailable";
 }
+// Permission state is independent of relay connectivity or saved sessions.
+// Return fixed booleans (or null when this browser cannot inspect permission),
+// never cookie values, credential-bearing URLs or raw browser errors.
+async function hasOriginPermissions(origins) {
+  if (!chrome.permissions?.contains) return null;
+  try { return Boolean(await chrome.permissions.contains({origins})); }
+  catch { return false; }
+}
 function recordProviderDiagnostic(provider, state, errorCode = null) {
   providerDiagnostics.set(provider, {
     state, issue: errorCode, updated_at: new Date().toISOString()
@@ -33,24 +41,41 @@ async function relayDiagnostics(force = false) {
   }
   const extension = {
     connected: hasRelayConnection(current),
-    linked_providers: [...(current.linkedProviders || [])].filter(provider => Boolean(PROVIDERS[provider])),
+    connection_mode: !hasRelayConnection(current) ? "disconnected" : current.connectionMode === "local" ? "local" : "paired",
+    linked_providers: [...new Set(current.linkedProviders || [])].filter(provider => Boolean(PROVIDERS[provider])),
     provider_sync: Object.fromEntries(providerDiagnostics),
+    permissions: {gateway:null, providers:{}},
   };
+  extension.permissions.providers = Object.fromEntries(await Promise.all(
+    extension.linked_providers.map(async provider => {
+      const origins = PROVIDERS[provider].flatMap(domain => [
+        "https://" + domain + "/*", "https://*." + domain + "/*"
+      ]);
+      return [provider, await hasOriginPermissions(origins)];
+    })
+  ));
   if (!extension.connected) return {ok:false, extension, gateway_issue:"not_connected"};
+  extension.permissions.gateway = await hasOriginPermissions([current.gateway + "/*"]);
   if (!force && lastGatewayCheck && Date.now() - lastGatewayCheckAt < CONNECTION_DIAGNOSTICS_TTL_MS) {
+    extension.gateway_checked_at = new Date(lastGatewayCheckAt).toISOString();
     return {ok:true, extension, gateway:lastGatewayCheck};
   }
   try {
     const response = await relayFetch("/relay/v1/diagnostics", {method:"POST",body:"{}"});
     if (!response.ok) {
+      lastGatewayCheck = null;
+      lastGatewayCheckAt = 0;
       return {ok:false, extension, gateway_issue:
         response.status === 401 || response.status === 403 ? "gateway_unauthorized" : "gateway_request_failed"};
     }
     const gateway = await response.json();
     lastGatewayCheck = gateway;
     lastGatewayCheckAt = Date.now();
+    extension.gateway_checked_at = new Date(lastGatewayCheckAt).toISOString();
     return {ok:true, extension, gateway};
   } catch (error) {
+    lastGatewayCheck = null;
+    lastGatewayCheckAt = 0;
     return {ok:false, extension, gateway_issue:classifyRelayFailure(error)};
   }
 }
