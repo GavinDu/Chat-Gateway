@@ -309,6 +309,12 @@ async function connectProvider(provider, openLogin = false) {
     if (result.syncStatus === "no_cookies") {
       throw new Error("Provider cookies disappeared before sync. Sign in to the provider and retry linking.");
     }
+    if (result.syncStatus === "saved_activation_pending") {
+      await refreshStatus();
+      message("Session saved. The provider browser is still unavailable; check gateway diagnostics before retrying.");
+      if (openLogin) await openProviderLogin(provider);
+      return;
+    }
     if (result.syncStatus && result.syncStatus !== "uploaded") {
       throw new Error("Provider session was not uploaded; check the gateway connection and retry.");
     }

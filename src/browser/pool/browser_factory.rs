@@ -39,6 +39,19 @@ pub(super) async fn new_page(browser: &obscura_core::Browser) -> Result<obscura_
     Ok(page)
 }
 
+/// Attach the real transport only to ChatGPT provider pages.
+pub(super) async fn new_provider_page(
+    browser: &obscura_core::Browser,
+    provider: crate::providers::Provider,
+) -> Result<obscura_core::Page> {
+    let mut page = new_page(browser).await?;
+    if provider == crate::providers::Provider::ChatGPT {
+        page.add_preload_script(include_str!("../chatgpt_streams.js"));
+        crate::browser::chatgpt_websocket::attach(browser, &mut page);
+    }
+    Ok(page)
+}
+
 #[cfg(test)]
 mod compatibility_tests {
 

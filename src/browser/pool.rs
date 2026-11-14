@@ -272,7 +272,12 @@ fn record_test_adapter_restore_result(
 /// selector arrays, and the live send uses the restored send path).
 #[derive(Default, Debug, serde::Serialize)]
 pub struct TestAdapterReport {
+    /// Legacy redirect check only; use authentication for positive evidence.
     pub session_ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub authentication: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub composer_context: Option<worker::ComposerContextEvidence>,
     pub probe: Vec<(String, Option<String>)>,
     pub input_found: bool,
     pub send_clicked: bool,

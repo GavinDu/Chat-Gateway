@@ -1972,6 +1972,11 @@ mod live_dom_send_tests {
             .await
             .unwrap();
         let js = r#"(() => {
+          // ChatGPT fixtures still exercise the authenticated readiness guard.
+          globalThis.fetch = async () => new Response(JSON.stringify({
+            user:{fixture:true}, accessToken:'not-a-real-token',
+            expires:new Date(Date.now()+60000).toISOString()
+          }));
           globalThis.unrelatedClicked = false;
           document.getElementById('unrelated-send').addEventListener('click', () => {globalThis.unrelatedClicked=true;});
           document.getElementById('fixture-send').addEventListener('click', () => {

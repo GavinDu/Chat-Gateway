@@ -228,6 +228,15 @@ async function syncProvider(provider, {force = false} = {}) {
       throw new Error("No provider cookies reached the gateway. Sign in to the provider and retry linking.");
     }
   }
+  if (!response.ok && (response.status === 504 || response.status === 500)) {
+    let failure = null;
+    try { failure = await response.json(); } catch {}
+    if (failure?.error?.code === "session_activation_timeout" || failure?.error?.code === "session_refresh_failed") {
+      // Persistence succeeded. Preserve link consent, but do not cache this
+      // snapshot as activated or automatically replay the upload.
+      return "saved_activation_pending";
+    }
+  }
   if (!response.ok) throw new Error("Gateway rejected session update (" + response.status + "). Check vault mode and provider permissions.");
   const latest = await chrome.storage.local.get(["gateway", "token", "connectionMode", "linkedProviders", "relaySnapshotVersions"]);
   if (version && latest.gateway === gateway && latest.token === token && latest.connectionMode === connectionMode &&

@@ -125,6 +125,68 @@ fn composer_preflight_evidence(
     }
 }
 
+/// Fixed structural labels only. These observations cannot authenticate a user
+/// or justify typing into a generic editor; no DOM text or attributes escape.
+#[derive(Debug, serde::Serialize)]
+pub struct ComposerContextEvidence {
+    actionable_controls: Vec<&'static str>,
+    editor_in_form: bool,
+    editor_in_dialog: bool,
+    sign_in_control_present: bool,
+    account_control_present: bool,
+    known_send_controls: Vec<&'static str>,
+    form_textbox_with_submit: bool,
+}
+
+fn composer_context_evidence(page: &obscura_core::Page) -> ComposerContextEvidence {
+    const EDITOR_KINDS: &[(&str, &str)] = &[
+        ("textarea", "textarea"),
+        (
+            "editable_textbox",
+            "[contenteditable='true'][role='textbox']",
+        ),
+        ("editable", "[contenteditable='true']"),
+        ("search_input", "input[type='search']"),
+        ("text_input", "input[type='text']"),
+    ];
+    ComposerContextEvidence {
+        actionable_controls: EDITOR_KINDS
+            .iter()
+            .filter(|(_, selector)| providers::common::visible_composer_exists(page, &[*selector]))
+            .map(|(label, _)| *label)
+            .collect(),
+        editor_in_form: providers::common::visible_composer_exists(
+            page,
+            &["form textarea", "form [contenteditable='true']"],
+        ),
+        editor_in_dialog: providers::common::visible_composer_exists(
+            page,
+            &[
+                "[role='dialog'] textarea",
+                "[role='dialog'] [contenteditable='true']",
+                "dialog textarea",
+                "dialog [contenteditable='true']",
+            ],
+        ),
+        sign_in_control_present: page
+            .query_selector("a[href*='/auth/login'], button[data-testid='login-button']")
+            .is_some(),
+        known_send_controls: [
+            ("composer_submit", "button[data-testid='composer-submit-button']"),
+            ("send_button", "button[data-testid='send-button']"),
+            ("send_message", "button[aria-label='Send message']"),
+            ("send_prompt", "button[aria-label='Send prompt']"),
+            ("submit", "button[type='submit']"),
+        ].into_iter().filter(|(_, selector)| page.query_selector(selector).is_some()).map(|(name, _)| name).collect(),
+        form_textbox_with_submit: providers::common::visible_composer_exists(page, &[
+            "form:has(button[data-testid='composer-submit-button']) [contenteditable='true'][role='textbox']",
+        ]),
+        account_control_present: page
+            .query_selector("[data-testid='accounts-profile-button']")
+            .is_some(),
+    }
+}
+
 /// The browser worker waits for a composer *before* invoking the provider
 /// adapter. A timeout here otherwise bypasses adapter-level diagnostics.
 /// Never record the selector, URL, prompt, page text or upstream error string.
@@ -143,10 +205,12 @@ fn report_composer_preflight_failure(
     );
     if matches!(provider, "chatgpt" | "metaai") {
         let evidence = composer_preflight_evidence(provider, page, configured_inputs);
+        let context = composer_context_evidence(page);
         tracing::warn!(
             provider,
             stage = "composer_preflight",
             category = evidence.category(),
+            composer_context = ?context,
             document_ready = evidence.document_ready,
             provider_origin = evidence.provider_origin,
             login_url = evidence.login_url,
@@ -183,6 +247,48 @@ fn report_composer_preflight_failure(
 #[cfg(test)]
 mod composer_preflight_diagnostic_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn editor_context_is_actionable_structural_evidence_without_page_data() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <textarea hidden>private-hidden-value</textarea>
+            <form><div contenteditable="true" role="textbox" id="private-id">private-draft</div></form>
+            <div role="dialog"><textarea disabled>private-disabled-value</textarea></div>
+            <a href="/auth/login?token=private-token">private-label</a>
+            <button data-testid="accounts-profile-button">private-account</button>
+            </body></html>"#;
+        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        let evidence = composer_context_evidence(&page);
+        assert_eq!(
+            evidence.actionable_controls,
+            vec!["editable_textbox", "editable"]
+        );
+        assert!(evidence.editor_in_form);
+        assert!(!evidence.editor_in_dialog);
+        assert!(evidence.sign_in_control_present);
+        assert!(evidence.account_control_present);
+        assert!(!serde_json::to_string(&evidence)
+            .unwrap()
+            .contains("private"));
+        assert!(!format!("{evidence:?}").contains("private"));
+        page.evaluate("document.querySelector('[role=dialog] textarea').disabled = false");
+        let evidence = composer_context_evidence(&page);
+        assert!(evidence.editor_in_dialog);
+        assert!(evidence.actionable_controls.contains(&"textarea"));
+        // Structural evidence must not add an arbitrary send-path fallback.
+        assert!(!providers::common::visible_composer_exists(
+            &page,
+            &["#prompt-textarea"]
+        ));
+    }
 
     #[tokio::test]
     async fn missing_mistral_composer_retains_original_failure_without_403_evidence() {
@@ -402,30 +508,7 @@ fn diagnostic_input_selector<'a>(
 /// Probe the visible editor, never the first hidden duplicate DOM match.
 /// The test string stays inside the page and is not included in diagnostics.
 fn diagnostic_prompt_retained(page: &obscura_core::Page, selector: &str, prompt: &str) -> bool {
-    let (Ok(selector), Ok(prompt)) = (
-        serde_json::to_string(selector),
-        serde_json::to_string(prompt),
-    ) else {
-        return false;
-    };
-    let script = format!(
-        r#"(() => {{
-            const el = Array.from(document.querySelectorAll({selector})).find(el =>
-                el.getClientRects().length > 0 &&
-                window.getComputedStyle(el).visibility !== 'hidden' &&
-                !el.closest('[hidden], [inert], [aria-hidden="true"], [aria-disabled="true"]') &&
-                !el.disabled && !el.matches(':disabled') &&
-                !el.closest('fieldset[disabled]') && !el.readOnly &&
-                el.getAttribute('aria-disabled') !== 'true' &&
-                el.getAttribute('aria-readonly') !== 'true' &&
-                el.getAttribute('contenteditable') !== 'false'
-            );
-            if (!el) return false;
-            const value = 'value' in el ? el.value : (el.innerText || el.textContent || '');
-            return typeof value === 'string' && value.trim() === {prompt}.trim();
-        }})()"#
-    );
-    page.evaluate(&script).as_bool() == Some(true)
+    providers::common::composer_retains_prompt(page, selector, prompt).unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -582,7 +665,7 @@ async fn ensure_provider_page(
     if pages.borrow().contains_key(&provider) {
         return Ok(false);
     }
-    let mut page = browser_factory::new_page(browser).await?;
+    let mut page = browser_factory::new_provider_page(browser, provider).await?;
     let network_script_403 =
         crate::browser::network_tap::attach_provider_network_tap(&mut page, provider);
     let snapshot = session::load_session_file(provider.name())?;
@@ -657,7 +740,7 @@ pub(super) fn browser_thread(
                 // Keep only a bounded working set; other providers open on demand.
                 for pcfg in cfg.providers.iter().filter(|pcfg| pcfg.enabled).take(cfg.obscura.max_cached_provider_pages) {
                     let Some(provider) = Provider::from_name(&pcfg.name) else { continue };
-                    match super::browser_factory::new_page(&browser).await {
+                    match super::browser_factory::new_provider_page(&browser, provider).await {
                         Ok(mut page) => {
                             let network_script_403 = crate::browser::network_tap::attach_provider_network_tap(&mut page, provider);
                             let session_file = match session::load_session_file(&pcfg.name) {
@@ -807,7 +890,7 @@ pub(super) fn browser_thread(
                                 let res: Result<Vec<String>> = async {
                                     let adapter = registry.get(&provider).cloned()
                                         .ok_or_else(|| anyhow::anyhow!("provider not enabled"))?;
-                                    let mut page = super::browser_factory::new_page(&browser).await?;
+                                    let mut page = super::browser_factory::new_provider_page(&browser, provider).await?;
                                     adapter.discover_models(&mut page).await
                                 }.await;
                                 let _ = reply.send(res);
@@ -1093,7 +1176,7 @@ pub(super) fn browser_thread(
                                 // Fresh page with the saved session applied
                                 // (same warm-up ordering: cookies before
                                 // goto, localStorage after, then re-goto).
-                                let mut page = match super::browser_factory::new_page(&browser).await {
+                                let mut page = match super::browser_factory::new_provider_page(&browser, provider).await {
                                     Ok(p) => p,
                                     Err(e) => {
                                         report.errors.push(format!("open page: {e}"));
@@ -1130,8 +1213,10 @@ pub(super) fn browser_thread(
                                 // thread ids, account tokens or cookie values.
                                 report.page = Some(sanitize_page_location(&page.url()));
                                 report.restored_cookie_count = Some(browser.cookies().get_all().len());
-                                // Phase 0 — session check.
+                                report.authentication = Some("unverified");
+                                // Phase 0 — redirect check, not proof of authentication.
                                 if providers::common::is_login_page(&page) {
+                                    report.authentication = Some("login_required");
                                     report.errors.push("session expired: re-login required before running --test-adapter".to_string());
                                     finish(report);
                                     return;
@@ -1150,11 +1235,13 @@ pub(super) fn browser_thread(
                                     ("response", &responses),
                                 ];
                                 report.probe = providers::common::probe_selector_groups(&page, &sets);
+                                report.composer_context = Some(composer_context_evidence(&page));
                                 report.input_controls = diagnostic_input_controls(&page);
                                 // Phase 1 — input (20s, Go's budget).
                                 let input_sel = match providers::common::wait_for_selector(&mut page, sets[0].1, 20000).await {
                                     Ok(()) => diagnostic_input_selector(&page, sets[0].1).unwrap_or(sets[0].1[0]),
                                     Err(e) => {
+                                        report.composer_context = Some(composer_context_evidence(&page));
                                         report.input_controls = diagnostic_input_controls(&page);
                                         report.errors.push(format!("input: {e}"));
                                         finish(report);
@@ -1163,13 +1250,14 @@ pub(super) fn browser_thread(
                                 };
                                 report.input_found = true;
                                 // Phase 2 — dummy prompt (Go RunAdapterTest).
-                                const DUMMY: &str = "chat-gateway selector test — please reply with the word OK";
+                                const DUMMY: &str = "chat-gateway selector test\nplease reply with the word OK";
                                 if let Err(e) = providers::common::human_type(&page, &[input_sel], DUMMY).await {
                                     report.errors.push(format!("input type: {e}"));
                                     finish(report);
                                     return;
                                 }
                                 providers::common::drive_page(&mut page, Duration::from_millis(400)).await;
+                                report.composer_context = Some(composer_context_evidence(&page));
                                 report.input_controls = diagnostic_input_controls(&page);
                                 report.typed_prompt_retained =
                                     Some(diagnostic_prompt_retained(&page, input_sel, DUMMY));
@@ -1255,7 +1343,7 @@ pub(super) fn browser_thread(
                                     let activated = page_session::activate_if_changed(&applied_imports, provider, &file, || async {
                                     page_session::replace_after_success(
                                     || async {
-                                    let mut page = super::browser_factory::new_page(&browser).await?;
+                                    let mut page = super::browser_factory::new_provider_page(&browser, provider).await?;
                                     // Observe script fetch failures on the restored page too.
                                     let network_script_403 = crate::browser::network_tap::attach_provider_network_tap(&mut page, provider);
                                     page.goto(provider.login_url()).await?;
@@ -1300,7 +1388,7 @@ pub(super) fn browser_thread(
                                         .unwrap_or_else(|| Rc::new(tokio::sync::Mutex::new(())));
                                     let _guard = lock.lock().await;
                                     applied_imports.borrow_mut().remove(&provider);
-                                    let mut page = super::browser_factory::new_page(&browser).await?;
+                                    let mut page = super::browser_factory::new_provider_page(&browser, provider).await?;
                                     let network_script_403 = crate::browser::network_tap::attach_provider_network_tap(&mut page, provider);
                                     page.goto(provider.login_url()).await?;
                                     let storage_cleared = page.evaluate(
@@ -1342,7 +1430,7 @@ pub(super) fn browser_thread(
                                 login_pages.borrow_mut().remove(&provider);
                                 login_meta.borrow_mut().remove(&provider);
                                 let res: Result<String> = async {
-                                    let mut page = super::browser_factory::new_page(&browser).await?;
+                                    let mut page = super::browser_factory::new_provider_page(&browser, provider).await?;
                                     page.goto(provider.login_url()).await?;
                                     let url = page.url();
                                     login_pages.borrow_mut().insert(provider, Rc::new(page));
@@ -1500,7 +1588,7 @@ pub(super) fn browser_thread(
                                             // for SSO hops, which re-drive
                                             // from the URL.
                                             login_pages.borrow_mut().remove(&provider);
-                                            let mut page = super::browser_factory::new_page(&browser).await?;
+                                            let mut page = super::browser_factory::new_provider_page(&browser, provider).await?;
                                             page.goto(&url).await?;
                                             let final_url = page.url();
                                             // A trusted URL may redirect elsewhere. Never leave a
