@@ -192,9 +192,10 @@ mod tests {
             .build()
             .unwrap();
         let pages = Rc::new(RefCell::new(ProviderPageCache::new(2)));
+        let first = Rc::new(browser.new_page().await.unwrap());
         pages.borrow_mut().insert_with_bootstrap_status(
             Provider::MetaAI,
-            Rc::new(browser.new_page().await.unwrap()),
+            first,
             Some(Arc::new(AtomicBool::new(true))),
         );
         let evidence = PageLease::take(&pages, Provider::MetaAI).unwrap();
