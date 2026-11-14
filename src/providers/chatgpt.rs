@@ -5,6 +5,8 @@ use anyhow::Result;
 use async_trait::async_trait;
 use obscura_core::Page;
 
+mod session_readiness;
+
 /// ChatGPT - chatgpt.com. Contenteditable #prompt-textarea; markdown response divs.
 pub struct ChatGPTAdapter {
     pub cfg: ProviderConfig,
@@ -45,6 +47,10 @@ impl SiteAdapter for ChatGPTAdapter {
 
     async fn send_prompt(&self, page: &mut Page, prompt: &str) -> Result<()> {
         common::require_submission_provider_route("chatgpt", page)?;
+        // A visible ChatGPT editor is not proof of a usable authenticated
+        // session. Verify the first-party session before typing any prompt;
+        // do not let cookies or selector presence imply a valid login.
+        session_readiness::wait(page).await?;
         common::send_prompt(
             self.name(),
             page,
