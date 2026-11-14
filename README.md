@@ -17,9 +17,10 @@ relay remains a separate option. Never expose the native login listener publicly
 
 ```bash
 cp config.example.yaml config.yaml
-# Read docs/PROVIDERS_POLICY.md, then explicitly enable only providers
-# whose terms permit your intended use; all providers start disabled.
-# After enabling at least one provider, configure its session if required.
+# Read docs/PROVIDERS_POLICY.md and enable only providers whose terms
+# permit your intended use. The example enables Manus only; the other
+# eight providers start disabled. Linking a browser session is separate.
+# Existing config.yaml files are never replaced by this copy command.
 cargo run -- --config config.yaml
 ```
 
@@ -64,7 +65,10 @@ passed as an environment value.
 
 ```bash
 bash scripts/docker-run.sh init
-# Edit config.yaml: enable only the providers you are authorized to use.
+# Edit config.yaml: enable only providers you are authorized to use.
+# The example enables Manus, but init never overwrites existing config.yaml.
+# If you already initialized an older copy, set the Manus provider's
+# enabled: true explicitly before restart.
 bash scripts/docker-run.sh build
 bash scripts/docker-run.sh start
 bash scripts/docker-run.sh logs
@@ -92,7 +96,10 @@ clients and explicitly configured private remote gateways.
 For example, `bash scripts/docker-run.sh login chatgpt` opens the provider's
 normal sign-in page in the host browser. Supported provider arguments are
 `chatgpt`, `claude`, `gemini`, `grok`, `qwen`, `metaai`, `mistral`,
-and `perplexity`.
+`perplexity`, and `manus`. A Manus browser session still has to be
+linked through the extension; this command only opens the official sign-in
+website. Agent task execution and authenticated chat must be verified before
+considering the provider operational.
 
 The browser extension currently transfers cookies only. Relay localStorage
 import is deliberately disabled until provider-specific storage-key
@@ -289,7 +296,7 @@ for compatibility.
 
 ## Providers
 
-All 8 adapters share one interaction core (`providers/common.rs`):
+All 9 adapters share one interaction core (`providers/common.rs`):
 fallback selector lists for input/send/response/picker, picker-based
 model discovery, evaluate-based typing (focus + `insertText`), and a
 350ms response-poll loop that yields deltas and ends after ~2s without
@@ -308,7 +315,7 @@ cargo run -- --config config.yaml --test-adapter qwen
 
 Open `http://localhost:<port>/login` in a browser to log providers in
 through the gateway itself — the Rust-form successor to Go's dashboard
-login flow. The page lists all 8 providers with session status
+login flow. The page lists all 9 providers with session status
 (`sessions/<provider>.json` present?) and login state, and lets you
 Start / Cancel / Complete a login session per provider.
 
