@@ -78,7 +78,7 @@ impl SiteAdapter for MistralAdapter {
                 "Mistral composer unavailable: {error}; {diagnostics}. Check provider JavaScript asset loading, session and network access; selector overrides cannot repair an HTTP 403"
             );
         }
-        common::send_prompt(page, &effective, prompt).await
+        common::send_prompt(self.name(), page, &effective, prompt).await
     }
 
     fn response_text(&self, page: &Page) -> Option<String> {

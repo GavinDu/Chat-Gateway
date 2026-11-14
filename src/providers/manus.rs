@@ -56,7 +56,13 @@ impl SiteAdapter for ManusAdapter {
     }
 
     async fn send_prompt(&self, page: &mut Page, prompt: &str) -> Result<()> {
-        common::send_prompt(page, &SELECTORS.effective(&self.cfg.selectors), prompt).await
+        common::send_prompt(
+            self.name(),
+            page,
+            &SELECTORS.effective(&self.cfg.selectors),
+            prompt,
+        )
+        .await
     }
 
     fn response_text(&self, page: &Page) -> Option<String> {
