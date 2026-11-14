@@ -247,6 +247,61 @@ test("relay diagnostics reads authenticated gateway status without exposing cred
   assert.ok(!JSON.stringify(first).includes("private-install-token"));
 });
 
+test("diagnostics separates connection, browser host permissions and saved gateway sessions", async () => {
+  const f = loadBackground(["chatgpt", "claude"]);
+  f.sandbox.chrome.storage.local.get = async () => ({
+    gateway:"http://127.0.0.1:8080", connectionMode:"local",
+    linkedProviders:["chatgpt", "claude", "chatgpt"]
+  });
+  f.sandbox.chrome.permissions = {
+    contains: async ({origins}) => !origins.some(origin => origin.includes("claude.ai"))
+  };
+  f.sandbox.relayFetch = async () => ({
+    ok:true, status:200, json:async () => ({
+      providers:[{provider:"chatgpt",linked:true,authentication:"unknown"},
+                 {provider:"claude",linked:false,authentication:"unknown"}]
+    })
+  });
+  const response = await new Promise(resolve => f.listeners.message[0](
+    {type:"relay-diagnostics",force:true}, {}, resolve
+  ));
+  assert.equal(response.ok, true);
+  assert.equal(response.extension.connected, true);
+  assert.equal(response.extension.connection_mode, "local");
+  assert.deepEqual(Array.from(response.extension.linked_providers), ["chatgpt", "claude"]);
+  assert.equal(response.extension.permissions.gateway, true);
+  assert.equal(response.extension.permissions.providers.chatgpt, true);
+  assert.equal(response.extension.permissions.providers.claude, false);
+  assert.equal(response.gateway.providers[1].linked, false,
+    "extension linkage must not rewrite backend saved-session state");
+  assert.match(response.extension.gateway_checked_at, /^\\d{4}-\\d\\d-\\d\\dT/);
+  assert.ok(!JSON.stringify(response).includes("127.0.0.1:8080"),
+    "never include the configured gateway origin in the diagnostics payload");
+});
+
+test("forced diagnostic refresh never reports stale success after a gateway failure", async () => {
+  const f = loadBackground(["chatgpt"]);
+  f.sandbox.chrome.storage.local.get = async () => ({
+    gateway:"http://127.0.0.1:8080", connectionMode:"local", linkedProviders:["chatgpt"]
+  });
+  let reads = 0;
+  f.sandbox.relayFetch = async () => {
+    reads += 1;
+    if (reads === 1) return {ok:true,status:200,json:async () => ({providers:[]})};
+    throw new Error("simulated internal network failure with secret");
+  };
+  const request = force => new Promise(resolve => f.listeners.message[0](
+    {type:"relay-diagnostics",force}, {}, resolve
+  ));
+  assert.equal((await request(true)).ok, true);
+  const failed = await request(true);
+  assert.equal(failed.ok, false);
+  assert.equal(failed.gateway_issue, "relay_unavailable");
+  assert.equal(failed.gateway, undefined);
+  assert.equal(reads, 2);
+  assert.ok(!JSON.stringify(failed).includes("secret"));
+});
+
 test("multiple manual syncs coalesce into one forced refresh behind an automatic import", async () => {
   const f = loadBackground(["chatgpt"]);
   let release;
