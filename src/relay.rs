@@ -1569,10 +1569,14 @@ pub async fn status(State(app): State<Arc<crate::AppState>>, headers: HeaderMap)
         if let Some(code) = issue {
             issues.push(serde_json::json!({"provider":provider,"code":code}));
         }
+        let (activation, activation_issue, activation_pending_age) =
+            app.relay.activation_states.diagnostics(provider);
         providers.push(serde_json::json!({
             "provider": provider,
             "linked": session_present,
-            "activation": app.relay.activation_states.current(provider),
+            "activation": activation,
+            "activation_issue": activation_issue,
+            "activation_pending_age": activation_pending_age,
             "enabled": enabled,
             "authentication": authentication,
             "availability": lifecycle.as_str(),
@@ -1869,6 +1873,29 @@ pub async fn import_session(
                 });
                 let activated =
                     bounded_session_activation(RELAY_SESSION_ACTIVATION_TIMEOUT, &mut refresh).await;
+                // The bounded HTTP timeout is a pending, non-terminal result.
+                // Only the browser refresh's actual completion changes Ready
+                // or Failed; never classify saved cookies as verified login.
+                match &activated {
+                    Ok(Ok(Ok(()))) => {
+                        app.relay.activation_states.finish(&provider, generation, None);
+                    }
+                    Ok(Ok(Err(error))) => {
+                        app.relay.activation_states.finish(
+                            &provider,
+                            generation,
+                            Some(relay_activation_error_kind(error)),
+                        );
+                    }
+                    Ok(Err(_)) => {
+                        app.relay.activation_states.finish(
+                            &provider,
+                            generation,
+                            Some(RelayActivationIssue::WorkerUnavailable),
+                        );
+                    }
+                    Err(_) => app.relay.activation_states.mark_wait_expired(&provider, generation),
+                }
                 let pending_refresh = if activated.is_err() {
                     // A timeout returns to HTTP while activation continues.
                     // Keep the provider gate owned until the real worker joins;
@@ -1876,8 +1903,12 @@ pub async fn import_session(
                     let late_states = Arc::clone(&app.relay.activation_states);
                     let late_provider = provider.clone();
                     Some(tokio::spawn(async move {
-                        let completed = matches!(refresh.await, Ok(Ok(())));
-                        late_states.finish(&late_provider, generation, completed);
+                        let issue = match refresh.await {
+                            Ok(Ok(())) => None,
+                            Ok(Err(error)) => Some(relay_activation_error_kind(&error)),
+                            Err(_) => Some(RelayActivationIssue::WorkerUnavailable),
+                        };
+                        late_states.finish(&late_provider, generation, issue);
                     }))
                 } else {
                     None
@@ -1896,7 +1927,6 @@ pub async fn import_session(
                 );
                 let response = match activated {
                     Ok(Ok(Ok(()))) => {
-                        app.relay.activation_states.finish(&provider, generation, true);
                         tracing::info!(
                             provider,
                             vault_ms,
@@ -1907,7 +1937,6 @@ pub async fn import_session(
                             .into_response()
                     }
                     Ok(Ok(Err(_))) | Ok(Err(_)) => {
-                        app.relay.activation_states.finish(&provider, generation, false);
                         tracing::warn!(
                             provider,
                             vault_ms,
