@@ -125,13 +125,22 @@ fn composer_preflight_evidence(
     }
 }
 
+/// Only direct first-party response evidence can classify denied Meta AI
+/// bootstrap. A login redirect or explicit challenge takes precedence.
+fn metaai_document_denied_before_composer(
+    observed_document_403: bool,
+    evidence: &ComposerPreflightEvidence,
+) -> bool {
+    observed_document_403 && !evidence.login_url && !evidence.challenge_visible
+}
+
 /// The browser worker waits for a composer *before* invoking the provider
 /// adapter. A timeout here otherwise bypasses adapter-level diagnostics.
 /// Never record the selector, URL, prompt, page text or upstream error string.
 fn report_composer_preflight_failure(
     provider: &str,
     page: &obscura_core::Page,
-    observed_script_403: bool,
+    observed_bootstrap_403: bool,
     configured_inputs: &[&str],
     error: anyhow::Error,
 ) -> anyhow::Error {
@@ -160,6 +169,19 @@ fn report_composer_preflight_failure(
             iframe_element_count = ?evidence.iframe_element_count,
             "provider composer readiness evidence"
         );
+        if provider == "metaai"
+            && metaai_document_denied_before_composer(observed_bootstrap_403, &evidence)
+        {
+            // This flag comes from the page-scoped first-party Document
+            // response tap, not DOM guesswork, auth status or error strings.
+            tracing::warn!(
+                provider = "metaai",
+                stage = "document_bootstrap",
+                category = "first_party_document_http_403",
+                "Meta AI document was denied before composer readiness"
+            );
+            return anyhow::Error::new(providers::metaai::MetaAiDocumentDeniedError);
+        }
     }
     if provider == "mistral" {
         let diagnostics = providers::mistral::mistral_readiness_diagnostics(page);
@@ -167,13 +189,13 @@ fn report_composer_preflight_failure(
             provider = "mistral",
             stage = "composer_preflight",
             diagnostics = %diagnostics,
-            network_script_http_403_observed = observed_script_403,
+            network_script_http_403_observed = observed_bootstrap_403,
             "Mistral composer readiness failed"
         );
         // Only observed first-party script HTTP 403 evidence can justify the
         // typed asset-blocked error. DOM faults and missing Resource Timing
         // status are not proof of a CDN or authentication policy denial.
-        if observed_script_403 || diagnostics.contains("blocker=script_http_403") {
+        if observed_bootstrap_403 || diagnostics.contains("blocker=script_http_403") {
             return anyhow::Error::new(providers::mistral::MistralAssetBlockedError);
         }
     }
@@ -325,6 +347,63 @@ mod composer_preflight_diagnostic_tests {
             &page,
             &["div[contenteditable='true'][role='textbox']"]
         ));
+    }
+
+    #[test]
+    fn metaai_document_403_does_not_infer_missing_login_or_challenge() {
+        let mut evidence = ComposerPreflightEvidence {
+            document_ready: "complete",
+            provider_origin: false,
+            login_url: false,
+            challenge_visible: false,
+            configured_input_present: false,
+            generic_editor_present: false,
+            generic_editor_actionable: false,
+            body_element_count: Some(1),
+            script_element_count: Some(0),
+            external_script_count: Some(0),
+            iframe_element_count: Some(0),
+        };
+        assert!(metaai_document_denied_before_composer(true, &evidence));
+        assert!(!metaai_document_denied_before_composer(false, &evidence));
+        evidence.login_url = true;
+        assert!(!metaai_document_denied_before_composer(true, &evidence));
+        evidence.login_url = false;
+        evidence.challenge_visible = true;
+        assert!(!metaai_document_denied_before_composer(true, &evidence));
+    }
+
+    #[tokio::test]
+    async fn observed_first_party_metaai_denial_is_typed_only_with_network_evidence() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        page.goto("data:text/html,<html><body></body></html>")
+            .await
+            .unwrap();
+        let classified = report_composer_preflight_failure(
+            "metaai",
+            &page,
+            true,
+            &[],
+            anyhow::anyhow!("synthetic untrusted secret=bearer"),
+        );
+        assert!(classified
+            .downcast_ref::<providers::metaai::MetaAiDocumentDeniedError>()
+            .is_some());
+        assert!(!classified.to_string().contains("secret"));
+        let missing = report_composer_preflight_failure(
+            "metaai",
+            &page,
+            false,
+            &[],
+            anyhow::anyhow!("composer missing"),
+        );
+        assert!(missing
+            .downcast_ref::<providers::metaai::MetaAiDocumentDeniedError>()
+            .is_none());
     }
 
     #[tokio::test]
@@ -583,7 +662,7 @@ async fn ensure_provider_page(
         return Ok(false);
     }
     let mut page = browser_factory::new_page(browser).await?;
-    let network_script_403 =
+    let network_bootstrap_403 =
         crate::browser::network_tap::attach_provider_network_tap(&mut page, provider);
     let snapshot = session::load_session_file(provider.name())?;
     if let Err(error) = PageSession::open(browser, &mut page, provider, snapshot.as_ref()).await {
@@ -592,7 +671,7 @@ async fn ensure_provider_page(
     }
     pages
         .borrow_mut()
-        .insert_with_script_status(provider, Rc::new(page), network_script_403);
+        .insert_with_bootstrap_status(provider, Rc::new(page), network_bootstrap_403);
     Ok(true)
 }
 
@@ -659,7 +738,7 @@ pub(super) fn browser_thread(
                     let Some(provider) = Provider::from_name(&pcfg.name) else { continue };
                     match super::browser_factory::new_page(&browser).await {
                         Ok(mut page) => {
-                            let network_script_403 = crate::browser::network_tap::attach_provider_network_tap(&mut page, provider);
+                            let network_bootstrap_403 = crate::browser::network_tap::attach_provider_network_tap(&mut page, provider);
                             let session_file = match session::load_session_file(&pcfg.name) {
                                 Ok(file) => file,
                                 Err(error) => {
@@ -777,7 +856,7 @@ pub(super) fn browser_thread(
                                     }
                                 }
                             }
-                            pages.borrow_mut().insert_with_script_status(provider, Rc::new(page), network_script_403);
+                            pages.borrow_mut().insert_with_bootstrap_status(provider, Rc::new(page), network_bootstrap_403);
                             locks.borrow_mut().insert(provider, Rc::new(tokio::sync::Mutex::new(())));
                             tracing::info!(provider = %pcfg.name, url = provider.login_url(), "page warmed");
                         }
@@ -894,7 +973,7 @@ pub(super) fn browser_thread(
                                 if (!just_opened || thread_url.is_some()) && pool_policy::provider_send_requires_navigation(
                                     &page.url(), target_url, thread_url.is_some(),
                                 ) {
-                                    page.clear_mistral_script_403_before_navigation();
+                                    page.clear_bootstrap_403_before_navigation();
                                     let Some(navigation) = send_unless_disconnected(&chunks,
                                         navigation::navigate_provider_document(&mut page, target_url, Duration::from_secs(30))).await else { return; };
                                     if let Err(error) = navigation {
@@ -917,7 +996,7 @@ pub(super) fn browser_thread(
                                     let classified = report_composer_preflight_failure(
                                         provider.name(),
                                         &page,
-                                        page.observed_mistral_script_403(),
+                                        page.observed_bootstrap_403(),
                                         &adapter.effective_selectors().input_refs(),
                                         error,
                                     );
@@ -1257,7 +1336,7 @@ pub(super) fn browser_thread(
                                     || async {
                                     let mut page = super::browser_factory::new_page(&browser).await?;
                                     // Observe script fetch failures on the restored page too.
-                                    let network_script_403 = crate::browser::network_tap::attach_provider_network_tap(&mut page, provider);
+                                    let network_bootstrap_403 = crate::browser::network_tap::attach_provider_network_tap(&mut page, provider);
                                     page.goto(provider.login_url()).await?;
                                     let storage_cleared = page.evaluate(
                                         "(()=>{try{localStorage.clear();return true;}catch(_){return false;}})()"
@@ -1267,13 +1346,13 @@ pub(super) fn browser_thread(
                                     }
                                     session::clear_provider_cookies(&browser, provider.name())?;
                                     PageSession::open(&browser, &mut page, provider, Some(&file)).await?;
-                                    Ok((Rc::new(page), network_script_403))
+                                    Ok((Rc::new(page), network_bootstrap_403))
                                     },
-                                    |(replacement, network_script_403)| {
-                                        pages.borrow_mut().insert_with_script_status(
+                                    |(replacement, network_bootstrap_403)| {
+                                        pages.borrow_mut().insert_with_bootstrap_status(
                                             provider,
                                             replacement,
-                                            network_script_403,
+                                            network_bootstrap_403,
                                         );
                                     },
                                     ).await
@@ -1301,7 +1380,7 @@ pub(super) fn browser_thread(
                                     let _guard = lock.lock().await;
                                     applied_imports.borrow_mut().remove(&provider);
                                     let mut page = super::browser_factory::new_page(&browser).await?;
-                                    let network_script_403 = crate::browser::network_tap::attach_provider_network_tap(&mut page, provider);
+                                    let network_bootstrap_403 = crate::browser::network_tap::attach_provider_network_tap(&mut page, provider);
                                     page.goto(provider.login_url()).await?;
                                     let storage_cleared = page.evaluate(
                                         "(()=>{try{localStorage.clear();return true;}catch(_){return false;}})()"
@@ -1312,10 +1391,10 @@ pub(super) fn browser_thread(
                                     session::clear_provider_cookies(&browser, provider.name())?;
                                     page.goto(provider.login_url()).await?;
                                     let removed = session::delete_session_snapshot(provider.name())?;
-                                    pages.borrow_mut().insert_with_script_status(
+                                    pages.borrow_mut().insert_with_bootstrap_status(
                                         provider,
                                         Rc::new(page),
-                                        network_script_403,
+                                        network_bootstrap_403,
                                     );
                                     login_pages.borrow_mut().remove(&provider);
                                     login_meta.borrow_mut().remove(&provider);
