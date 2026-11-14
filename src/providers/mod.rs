@@ -1842,7 +1842,7 @@ mod timeout_terminal_regression_tests {
     use super::*;
 
     #[tokio::test]
-    async fn generation_timeout_emits_only_a_typed_error_and_phase_metric() {
+    async fn first_content_timeout_emits_only_a_typed_error_and_phase_metric() {
         let browser = obscura_core::Browser::builder()
             .stealth(false)
             .build()
@@ -1886,7 +1886,7 @@ mod timeout_terminal_regression_tests {
         assert!(failure
             .downcast_ref::<common::ProviderTimeoutError>()
             .is_some());
-        assert!(failure.to_string().contains("did not complete"));
+        assert!(failure.to_string().contains("did not return new assistant content"));
         assert!(rx.recv().await.is_none(), "timeout must not emit done");
         assert_eq!(
             page.evaluate("window.cancelCount || 0").as_f64(),
@@ -1895,10 +1895,78 @@ mod timeout_terminal_regression_tests {
         );
         let output = metrics.render_with_provider_states(&[]);
         assert!(output
+            .contains("gateway_provider_timeout_total{provider=\"qwen\",phase=\"first_content\"} 1"));
+        assert!(!output
             .contains("gateway_provider_timeout_total{provider=\"qwen\",phase=\"generation\"} 1"));
         assert!(!output
             .contains("gateway_provider_timeout_total{provider=\"qwen\",phase=\"submission\"} 1"));
     }
+    #[tokio::test]
+    async fn partial_content_timeout_keeps_generation_phase_and_never_emits_done() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body><form>
+            <textarea placeholder="Ask anything"></textarea>
+            <button type="button" aria-label="Send" onclick="window.beginReply()">Send</button>
+            <button type="button" id="stop" aria-label="Stop generation" hidden
+                    onclick="window.cancelCount=(window.cancelCount||0)+1">Stop</button>
+            </form><script>
+              window.beginReply = () => {
+                document.querySelector('#stop').hidden = false;
+                const answer = document.createElement('div');
+                answer.className = 'markdown-body';
+                answer.textContent = 'partial fixture answer';
+                document.body.appendChild(answer);
+              };
+            </script></body></html>"#;
+        let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        let adapter = Arc::new(qwen::QwenAdapter {
+            cfg: serde_yaml::from_str("name: qwen\nmodels: [qwen]").unwrap(),
+        });
+        let metrics = crate::metrics::MetricsRegistry::default();
+        let (tx, mut rx) = mpsc::channel(8);
+        tokio::time::timeout(
+            Duration::from_secs(8),
+            run_send(
+                adapter,
+                &mut page,
+                "SYNTHETIC_PARTIAL".into(),
+                Duration::from_secs(3),
+                Duration::from_millis(50),
+                ProviderSendPolicy {
+                    completion_idle: Duration::from_millis(100),
+                    provider_guard: crate::provider_guard::ProviderGuard::default(),
+                    metrics: metrics.clone(),
+                },
+                tx,
+            ),
+        )
+        .await
+        .unwrap();
+
+        let first = rx.recv().await.expect("partial output is retained").unwrap();
+        assert!(!first.done);
+        assert_eq!(first.content, "partial fixture answer");
+        let failure = rx.recv().await.expect("timeout follows partial output").unwrap_err();
+        assert!(failure
+            .downcast_ref::<common::ProviderTimeoutError>()
+            .is_some());
+        assert!(failure.to_string().contains("did not complete"));
+        assert!(rx.recv().await.is_none(), "partial reply cannot complete after timeout");
+        assert_eq!(page.evaluate("window.cancelCount || 0").as_f64(), Some(1.0));
+        let output = metrics.render_with_provider_states(&[]);
+        assert!(output
+            .contains("gateway_provider_timeout_total{provider=\"qwen\",phase=\"generation\"} 1"));
+        assert!(!output
+            .contains("gateway_provider_timeout_total{provider=\"qwen\",phase=\"first_content\"} 1"));
+    }
+
     #[tokio::test]
     async fn challenge_during_typing_returns_typed_manual_blocker() {
         let browser = obscura_core::Browser::builder()
