@@ -671,6 +671,7 @@ mod tests {
         assert!(!ordinary.is_retryable());
         for phase in [
             crate::providers::common::ProviderTimeoutPhase::Submission,
+            crate::providers::common::ProviderTimeoutPhase::FirstContent,
             crate::providers::common::ProviderTimeoutPhase::Generation,
         ] {
             let timed_out = super::map_backend_error(anyhow::Error::new(

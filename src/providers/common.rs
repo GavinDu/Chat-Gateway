@@ -2,10 +2,48 @@ use obscura_core::Page;
 use std::time::Duration;
 
 /// The distinct browser timeout phases are preserved as typed errors.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderTimeoutPhase {
     Submission,
+    FirstContent,
     Generation,
+}
+
+impl ProviderTimeoutPhase {
+    /// Only confirmed new assistant text advances from first-content to
+    /// generation. A clicked Send, cleared composer or unchanged old answer
+    /// alone cannot prove the current model began responding.
+    pub fn after_submission(new_content_observed: bool) -> Self {
+        if new_content_observed {
+            Self::Generation
+        } else {
+            Self::FirstContent
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Submission => "submission",
+            Self::FirstContent => "first_content",
+            Self::Generation => "generation",
+        }
+    }
+}
+
+#[cfg(test)]
+mod provider_timeout_phase_tests {
+    use super::ProviderTimeoutPhase;
+
+    #[test]
+    fn typed_timeout_distinguishes_no_first_content_from_partial_generation() {
+        assert_eq!(ProviderTimeoutPhase::Submission.as_str(), "submission");
+        let no_content = ProviderTimeoutPhase::after_submission(false);
+        assert_eq!(no_content, ProviderTimeoutPhase::FirstContent);
+        assert_eq!(no_content.as_str(), "first_content");
+        let partial = ProviderTimeoutPhase::after_submission(true);
+        assert_eq!(partial, ProviderTimeoutPhase::Generation);
+        assert_eq!(partial.as_str(), "generation");
+    }
 }
 
 #[derive(Debug)]
@@ -31,6 +69,11 @@ impl std::fmt::Display for ProviderTimeoutError {
             ProviderTimeoutPhase::Submission => write!(
                 f,
                 "provider '{}' timed out while submitting the prompt after {:?}",
+                self.provider, self.timeout
+            ),
+            ProviderTimeoutPhase::FirstContent => write!(
+                f,
+                "provider '{}' did not return new assistant content within {:?}",
                 self.provider, self.timeout
             ),
             ProviderTimeoutPhase::Generation => write!(

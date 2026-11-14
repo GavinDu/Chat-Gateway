@@ -153,7 +153,7 @@ impl MetricsRegistry {
     /// Track only known timeout phases for registered provider attempts.
     /// No prompts, URLs, thread IDs or session data enter these labels.
     pub fn record_provider_timeout(&self, provider: &str, phase: &str) {
-        if !matches!(phase, "submission" | "generation") {
+        if !matches!(phase, "submission" | "first_content" | "generation") {
             return;
         }
         if let Ok(mut data) = self.data.lock() {
@@ -414,18 +414,20 @@ mod tests {
     }
 
     #[test]
-    fn provider_timeout_metrics_distinguish_submission_and_generation_only() {
+    fn provider_timeout_metrics_distinguish_submission_first_content_and_generation() {
         let registry = MetricsRegistry::default();
-        registry.record_provider_timeout("chatgpt", "submission");
-        registry.record_provider_timeout("chatgpt", "generation");
-        registry.record_provider_timeout("chatgpt", "session-identifier");
+        registry.record_provider_timeout("qwen", "submission");
+        registry.record_provider_timeout("qwen", "first_content");
+        registry.record_provider_timeout("qwen", "generation");
+        registry.record_provider_timeout("qwen", "session-identifier");
         let metrics = registry.render_with_provider_states(&[]);
+        assert!(metrics
+            .contains("gateway_provider_timeout_total{provider=\"qwen\",phase=\"submission\"} 1"));
         assert!(metrics.contains(
-            "gateway_provider_timeout_total{provider=\"chatgpt\",phase=\"submission\"} 1"
+            "gateway_provider_timeout_total{provider=\"qwen\",phase=\"first_content\"} 1"
         ));
-        assert!(metrics.contains(
-            "gateway_provider_timeout_total{provider=\"chatgpt\",phase=\"generation\"} 1"
-        ));
+        assert!(metrics
+            .contains("gateway_provider_timeout_total{provider=\"qwen\",phase=\"generation\"} 1"));
         assert!(!metrics.contains("session-identifier"));
     }
 
