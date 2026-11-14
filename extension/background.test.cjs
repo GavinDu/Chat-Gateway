@@ -300,6 +300,11 @@ test("forced diagnostic refresh never reports stale success after a gateway fail
   assert.equal(failed.gateway, undefined);
   assert.equal(reads, 2);
   assert.ok(!JSON.stringify(failed).includes("secret"));
+  const afterFailure = await request(false);
+  assert.equal(afterFailure.ok, false,
+    "a failed forced refresh must invalidate the former successful diagnostics cache");
+  assert.equal(afterFailure.gateway, undefined);
+  assert.equal(reads, 3);
 });
 
 test("multiple manual syncs coalesce into one forced refresh behind an automatic import", async () => {
