@@ -1653,6 +1653,9 @@ pub async fn import_session(
         match imported {
             Ok(()) => {
                 let activation_started = Instant::now();
+                // Record actual activation, not just the saved credential
+                // snapshot. This says nothing about authenticated login.
+                let generation = app.relay.activation_states.begin(&provider);
                 // Keep the queued/active browser refresh alive after the
                 // bounded HTTP wait, including while the browser is executing
                 // an already-dispatched, non-cancellable session replacement.
@@ -1664,7 +1667,15 @@ pub async fn import_session(
                 let activated =
                     bounded_session_activation(RELAY_SESSION_ACTIVATION_TIMEOUT, &mut refresh).await;
                 let pending_refresh = if activated.is_err() {
-                    Some(refresh)
+                    // A timeout returns to HTTP while activation continues.
+                    // Keep the provider gate owned until the real worker joins;
+                    // record its eventual result only for this generation.
+                    let late_states = Arc::clone(&app.relay.activation_states);
+                    let late_provider = provider.clone();
+                    Some(tokio::spawn(async move {
+                        let completed = matches!(refresh.await, Ok(Ok(())));
+                        late_states.finish(&late_provider, generation, completed);
+                    }))
                 } else {
                     None
                 };
@@ -1682,6 +1693,7 @@ pub async fn import_session(
                 );
                 let response = match activated {
                     Ok(Ok(Ok(()))) => {
+                        app.relay.activation_states.finish(&provider, generation, true);
                         tracing::info!(
                             provider,
                             vault_ms,
@@ -1692,6 +1704,7 @@ pub async fn import_session(
                             .into_response()
                     }
                     Ok(Ok(Err(_))) | Ok(Err(_)) => {
+                        app.relay.activation_states.finish(&provider, generation, false);
                         tracing::warn!(
                             provider,
                             vault_ms,
@@ -1810,6 +1823,7 @@ pub async fn unlink(
         match app.pool.unlink_session(&provider).await {
             Ok(removed) => {
                 app.provider_sessions.record_unlinked(&provider);
+                app.relay.activation_states.revoke(&provider);
                 tracing::info!(
                     provider,
                     "browser relay provider unlinked from embedded browser and persistent storage"
