@@ -313,6 +313,58 @@ test("diagnostics separates connection, browser host permissions and saved gatew
     "never include the configured gateway origin in the diagnostics payload");
 });
 
+test("provider sync timestamp is independent of login and turns stale when gateway status fails", async () => {
+  const f = loadBackground(["chatgpt", "claude"]);
+  let healthy = true;
+  let connected = true;
+  f.sandbox.chrome.storage.local.get = async () => connected
+    ? {gateway:"http://127.0.0.1:8080",connectionMode:"local",linkedProviders:["chatgpt","claude"]}
+    : {linkedProviders:["chatgpt","claude"]};
+  f.sandbox.relayFetch = async () => healthy
+    ? {ok:true,status:200,json:async()=>({providers:[
+      {provider:"chatgpt",linked:false,authentication:"unknown"}
+    ]})}
+    : {ok:false,status:503};
+  const diagnostic = () => new Promise(resolve => f.listeners.message[0](
+    {type:"relay-diagnostics",force:true},{},resolve));
+  const clean = await diagnostic();
+  assert.equal(clean.ok,true);
+  assert.equal(clean.extension.provider_sync.chatgpt.state,"not_attempted");
+  assert.equal(clean.extension.provider_sync.chatgpt.updated_at,null);
+  assert.equal(clean.extension.provider_sync.chatgpt.stale,false);
+  const synced = await new Promise(resolve => f.listeners.message[0](
+    {type:"sync-provider",provider:"chatgpt"},{},resolve));
+  assert.equal(synced.ok,true);
+  const after = await diagnostic();
+  const previous = after.extension.provider_sync.chatgpt;
+  assert.equal(previous.stale,false);
+  assert.match(previous.updated_at,/^\\d{4}-\\d{2}-\\d{2}T/);
+  assert.equal(after.gateway.providers[0].authentication,"unknown",
+    "a successful local sync must never imply authenticated login");
+  assert.equal(after.extension.provider_sync.claude.state,"not_attempted");
+  healthy = false;
+  const failed = await diagnostic();
+  assert.equal(failed.ok,false);
+  assert.equal(failed.gateway,undefined);
+  assert.equal(failed.extension.provider_sync.chatgpt.stale,true);
+  assert.equal(failed.extension.provider_sync.chatgpt.updated_at,previous.updated_at);
+  assert.equal(failed.extension.provider_sync.claude.stale,true);
+  healthy = true;
+  assert.equal((await diagnostic()).extension.provider_sync.chatgpt.stale,false);
+  connected = false;
+  const disconnected = await diagnostic();
+  assert.equal(disconnected.ok,false);
+  assert.equal(disconnected.gateway_issue,"not_connected");
+  assert.equal(disconnected.extension.provider_sync.chatgpt.updated_at,null,
+    "disconnect must not leak an old install's provider state");
+  // MV3 worker restart conservatively resets in-memory sync evidence.
+  const restarted = loadBackground(["chatgpt"]);
+  const restartDiagnostic = await new Promise(resolve => restarted.listeners.message[0](
+    {type:"relay-diagnostics"}, {}, resolve));
+  assert.equal(restartDiagnostic.extension.provider_sync.chatgpt.state,"not_attempted");
+  assert.equal(restartDiagnostic.extension.provider_sync.chatgpt.updated_at,null);
+});
+
 test("forced diagnostic refresh never reports stale success after a gateway failure", async () => {
   const f = loadBackground(["chatgpt"]);
   f.sandbox.chrome.storage.local.get = async () => ({
