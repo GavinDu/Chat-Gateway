@@ -63,6 +63,8 @@ async function relayDiagnostics(force = false) {
   try {
     const response = await relayFetch("/relay/v1/diagnostics", {method:"POST",body:"{}"});
     if (!response.ok) {
+      lastGatewayCheck = null;
+      lastGatewayCheckAt = 0;
       return {ok:false, extension, gateway_issue:
         response.status === 401 || response.status === 403 ? "gateway_unauthorized" : "gateway_request_failed"};
     }
@@ -72,6 +74,8 @@ async function relayDiagnostics(force = false) {
     extension.gateway_checked_at = new Date(lastGatewayCheckAt).toISOString();
     return {ok:true, extension, gateway};
   } catch (error) {
+    lastGatewayCheck = null;
+    lastGatewayCheckAt = 0;
     return {ok:false, extension, gateway_issue:classifyRelayFailure(error)};
   }
 }
