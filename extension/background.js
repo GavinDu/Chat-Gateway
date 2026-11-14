@@ -41,7 +41,7 @@ async function relayDiagnostics(force = false) {
   }
   const extension = {
     connected: hasRelayConnection(current),
-    connection_mode: current.connectionMode === "local" ? "local" : "paired",
+    connection_mode: !hasRelayConnection(current) ? "disconnected" : current.connectionMode === "local" ? "local" : "paired",
     linked_providers: [...new Set(current.linkedProviders || [])].filter(provider => Boolean(PROVIDERS[provider])),
     provider_sync: Object.fromEntries(providerDiagnostics),
     permissions: {gateway:null, providers:{}},
