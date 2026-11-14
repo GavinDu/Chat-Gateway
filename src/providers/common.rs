@@ -2146,7 +2146,7 @@ mod pre_send_retention_tests {
             ..Default::default()
         };
         let selectors = crate::providers::chatgpt::SELECTORS.effective(&overrides);
-        let result = super::send_prompt(&mut page, &selectors, "user draft").await;
+        let result = super::send_prompt("chatgpt", &mut page, &selectors, "user draft").await;
         assert!(result.is_err(), "a cleared draft must not be submitted");
         assert_eq!(page.evaluate("window.sent || 0").as_f64(), Some(0.0));
     }
