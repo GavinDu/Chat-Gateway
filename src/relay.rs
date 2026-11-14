@@ -430,7 +430,6 @@ impl RelayState {
                 used_nonces: Mutex::new(HashMap::new()),
                 request_times: Mutex::new(VecDeque::new()),
                 import_gates: ProviderImportGates::default(),
-            activation_states: Arc::new(ProviderActivationStates::default()),
                 activation_states: Arc::new(ProviderActivationStates::default()),
             },
             code,
@@ -2063,6 +2062,7 @@ mod tests {
             used_nonces: Mutex::new(HashMap::new()),
             request_times: Mutex::new(VecDeque::new()),
             import_gates: ProviderImportGates::default(),
+            activation_states: Arc::new(ProviderActivationStates::default()),
         }
     }
 
