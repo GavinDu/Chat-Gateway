@@ -86,8 +86,8 @@ function queueProviderSync(provider, force = false) {
     queuedProviderForces.delete(provider);
     return syncProvider(provider, {force:shouldForce}).then(
       result => {
-        recordProviderDiagnostic(provider, result || "skipped");
-        if (result === "uploaded") lastGatewayCheck = null;
+        recordProviderDiagnostic(provider, result || "skipped", result === "saved_activation_pending" ? "activation_pending" : null);
+        if (result === "uploaded" || result === "saved_activation_pending") lastGatewayCheck = null;
         return result;
       },
       error => {

@@ -217,6 +217,11 @@ pub(crate) fn render_prompt(messages: &[ChatMessage]) -> String {
         rendered.push_str(&escape_context_field(&message.content));
         rendered.push_str("\n</conversation_message>\n");
     }
+    // Editors may discard an empty final paragraph. Keep the transport
+    // delimiter unambiguous without changing whitespace inside user content.
+    if !messages.is_empty() {
+        rendered.pop(); // The final delimiter's generated newline only.
+    }
     rendered
 }
 
@@ -285,7 +290,7 @@ mod tests {
         ];
         let (prompt, messages) = ContextBuilder::build(&history, &incoming, 1000);
         assert_eq!(messages.len(), 3);
-        assert!(prompt.ends_with("second\n</conversation_message>\n"));
+        assert!(prompt.ends_with("second\n</conversation_message>"));
     }
 
     #[test]
@@ -339,6 +344,13 @@ mod tests {
         assert!(report.decisions[..2]
             .iter()
             .all(|decision| decision.reason == super::ContextMessageReason::OmittedBudgetExceeded));
+    }
+
+    #[test]
+    fn prompt_renderer_omits_only_transport_newline_and_preserves_user_whitespace() {
+        let prompt = super::render_prompt(&[m("user", "code  \n\n")]);
+        assert!(prompt.ends_with("code  \n\n\n</conversation_message>"));
+        assert!(!prompt.ends_with('\n'));
     }
 
     #[test]

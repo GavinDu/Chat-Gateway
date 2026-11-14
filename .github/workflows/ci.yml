@@ -44,6 +44,7 @@ jobs:
       - name: Policy and owner tunnel unit tests
         run: |
           node --test browser-login/*.test.mjs
+          node --test scripts/test_chatgpt_websocket.cjs
           python3 -B -m unittest discover -s browser-login -p 'test_*.py'
           python3 -B -m unittest discover -s scripts -p test_native_login.py
       - name: Isolated authenticated HTTP acceptance

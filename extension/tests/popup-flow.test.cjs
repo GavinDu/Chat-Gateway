@@ -4,7 +4,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
 
-function loadPopup({failCookieDomain = null, includeSecondProvider = false, manualVerification = false, localRelay = false} = {}) {
+function loadPopup({failCookieDomain = null, includeSecondProvider = false, manualVerification = false, localRelay = false, syncStatus = undefined} = {}) {
   const elements = new Map();
   const chromeCalls = [];
   const values = {gateway:"http://127.0.0.1:8080",linkedProviders:[]};
@@ -34,7 +34,7 @@ function loadPopup({failCookieDomain = null, includeSecondProvider = false, manu
       values.linkedProviders=values.linkedProviders.filter(p=>p!==request.provider);
     }
     if(request.type==="sync-provider") server.linked=true;
-    return {ok:true};
+    return {ok:true, syncStatus};
   }};
   const context = {
     Promise, Date, Set, Array,
@@ -170,4 +170,14 @@ test("local-only gateway automatically connects without pairing, approval or tok
   assert.equal(popup.server.linked, true);
   await popup.controls.logoutProvider("metaai");
   assert.equal(popup.server.linked, false);
+});
+
+
+test("saved but activation-pending first link preserves provider consent", async () => {
+  const popup = loadPopup({localRelay:true,syncStatus:"saved_activation_pending"});
+  for (let i = 0; i < 6; i++) await new Promise(resolve => setImmediate(resolve));
+  await popup.controls.connectProvider("metaai");
+  assert.ok(popup.values.linkedProviders.includes("metaai"));
+  assert.equal(popup.server.linked, true);
+  assert.match(popup.elements.get("message").textContent, /Session saved/);
 });

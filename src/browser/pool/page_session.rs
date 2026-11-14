@@ -17,20 +17,27 @@ impl PageSession {
         provider: Provider,
         session_file: Option<&session::SessionFile>,
     ) -> Result<()> {
-        let cookie_restore = session_file
-            .map(|file| session::restore_cookies(browser, file, provider.name()))
-            .transpose();
-        // Navigate even when cookie import failed so the caller's fail-closed
-        // cleanup can clear origin-scoped localStorage on the provider origin.
-        page.goto(provider.login_url()).await?;
-        cookie_restore?;
-        if let Some(file) = session_file {
-            if !file.local_storage.is_empty() {
-                session::restore_local_storage(page, file)?;
-                page.goto(provider.login_url()).await?;
+        // Startup and relay refresh hold the browser operation gate too. Bound
+        // their entire restore/navigation/reload sequence, just like sends,
+        // so one unresponsive provider cannot strand every other provider.
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            let cookie_restore = session_file
+                .map(|file| session::restore_cookies(browser, file, provider.name()))
+                .transpose();
+            // Navigate even when cookie import failed so the caller's fail-closed
+            // cleanup can clear origin-scoped localStorage on the provider origin.
+            page.goto(provider.login_url()).await?;
+            cookie_restore?;
+            if let Some(file) = session_file {
+                if !file.local_storage.is_empty() {
+                    session::restore_local_storage(page, file)?;
+                    page.goto(provider.login_url()).await?;
+                }
             }
-        }
-        Ok(())
+            Ok(())
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("provider session navigation timed out"))?
     }
 }
 

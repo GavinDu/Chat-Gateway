@@ -189,6 +189,22 @@ fn decode_response_probe(value: serde_json::Value) -> ResponseProbe {
     }
 }
 
+// ChatGPT's current response root also contains recovery controls. Read
+// only its outermost Markdown blocks, preserving multi-block answers and
+// literal control-label words in the answer. Other selectors keep their text.
+const RESPONSE_CONTENT_JS: &str = r#"
+    const responseContent = node => {
+        if (!node.matches('[class*="DilResponseRoot-"]')) return node.innerText || node.textContent || '';
+        const blocks=Array.from(node.querySelectorAll('[class*="MarkdownRoot-"]')).filter(block => {
+            const ancestor=block.parentElement?.closest('[class*="MarkdownRoot-"]');
+            return (!ancestor || !node.contains(ancestor)) && block.getClientRects().length > 0 &&
+                getComputedStyle(block).visibility !== 'hidden' &&
+                !block.closest('button, [role="button"], [hidden], [inert], [aria-hidden="true"]');
+        });
+        return blocks.map(block => block.innerText || block.textContent || '').join('\n\n');
+    };
+"#;
+
 /// Read response text, response-node count, and streaming state in one
 /// JavaScript evaluation per polling tick.
 pub fn response_probe(
@@ -205,6 +221,7 @@ pub fn response_probe(
     let script = format!(
         r#"(() => {{
             const selectors = {selectors};
+            {response_content_js}
             const visible = el => {{
                 try {{
                     return el.getClientRects().length > 0 &&
@@ -241,7 +258,7 @@ pub fn response_probe(
                         // placeholder as the reply or hiding the earlier text.
                         for (let i = matches.length - 1; i >= 0; i -= 1) {{
                             const node = matches[i];
-                            const content = node.innerText || node.textContent || "";
+                            const content = responseContent(node);
                             if (content.trim()) {{
                                 text = content;
                                 lastResponseNode = node;
@@ -291,6 +308,7 @@ pub fn response_probe(
             }}
             return {{ text, count: nodes.size, streaming, postAnswerAffordance, url, challenge }};
         }})()"#,
+        response_content_js = RESPONSE_CONTENT_JS,
         check_body_challenge = check_body_challenge,
         challenge_text_js = crate::provider_guard::NON_MESSAGE_CHALLENGE_TEXT_JS,
     );
@@ -556,13 +574,17 @@ fn visible_input_query(selector_js: &str) -> String {
 
 /// Re-read the actionable composer after framework renders, not just after
 /// the initial typing event. Never log the prompt when the value changes.
-fn composer_retains_prompt(page: &Page, selector: &str, prompt: &str) -> anyhow::Result<bool> {
+pub(crate) fn composer_retains_prompt(
+    page: &Page,
+    selector: &str,
+    prompt: &str,
+) -> anyhow::Result<bool> {
     let selector_js = serde_json::to_string(selector)?;
     let el_js = visible_input_query(&selector_js);
     let prompt_js = serde_json::to_string(prompt)?;
     Ok(page
         .evaluate(&format!(
-            "(() => {{ const el = {el_js}; if (!el) return false; const value = ('value' in el ? el.value : (el.innerText || el.textContent || '')); return value === {prompt_js}; }})()"
+            "(() => {{ const el = {el_js}; if (!el) return false; return (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') ? el.value === {prompt_js} : (el.innerText === {prompt_js} || el.textContent === {prompt_js}); }})()"
         ))
         .as_bool()
         == Some(true))
@@ -860,7 +882,7 @@ pub async fn human_type(page: &Page, selectors: &[&str], text: &str) -> anyhow::
     tokio::time::sleep(Duration::from_millis(80)).await;
     let text_js = serde_json::to_string(text)?;
     let js = format!(
-        "(function() {{ var el = {el_js}; if (!el) return false; el.focus(); if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {{ try {{ var prototype = el.tagName === 'INPUT' ? window.HTMLInputElement.prototype : window.HTMLTextAreaElement.prototype; var setter = Object.getOwnPropertyDescriptor(prototype, 'value').set; setter.call(el, {text}); }} catch (e) {{ el.value = {text}; }} el.dispatchEvent(new InputEvent('input', {{ bubbles: true, inputType: 'insertText', data: {text} }})); el.dispatchEvent(new Event('change', {{ bubbles: true }})); return true; }} try {{ document.execCommand('selectAll', false, null); }} catch (e) {{}} var ok = false; try {{ ok = document.execCommand('insertText', false, {text}); }} catch (e) {{}} if (!ok) {{ if ('value' in el) {{ el.value = {text}; }} else {{ el.textContent = {text}; }} }} el.dispatchEvent(new InputEvent('input', {{ bubbles: true, inputType: 'insertText', data: {text} }})); el.dispatchEvent(new Event('change', {{ bubbles: true }})); return true; }})()",
+        "(function() {{ var el = {el_js}; if (!el) return false; el.focus(); if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {{ try {{ var prototype = el.tagName === 'INPUT' ? window.HTMLInputElement.prototype : window.HTMLTextAreaElement.prototype; var setter = Object.getOwnPropertyDescriptor(prototype, 'value').set; setter.call(el, {text}); }} catch (e) {{ el.value = {text}; }} el.dispatchEvent(new InputEvent('input', {{ bubbles: true, inputType: 'insertText', data: {text} }})); el.dispatchEvent(new Event('change', {{ bubbles: true }})); return true; }} try {{ document.execCommand('selectAll', false, null); }} catch (e) {{}} if (el.getAttribute('contenteditable') === 'true') {{ var paste = new ClipboardEvent('paste', {{bubbles:true, cancelable:true, composed:true}}); var clipboard = {{types:['text/plain'], files:[], items:[], getData:function(type) {{ return type === 'text/plain' || type === 'Text' ? {text} : ''; }}}}; Object.defineProperty(paste, 'clipboardData', {{value:clipboard}}); if (!el.dispatchEvent(paste)) return true; }} var ok = false; try {{ ok = document.execCommand('insertText', false, {text}); }} catch (e) {{}} if (!ok) {{ if ((el.tagName === 'INPUT' || el.tagName === 'TEXTAREA')) {{ el.value = {text}; }} else {{ el.textContent = {text}; }} }} el.dispatchEvent(new InputEvent('input', {{ bubbles: true, inputType: 'insertText', data: {text} }})); el.dispatchEvent(new Event('change', {{ bubbles: true }})); return true; }})()",
         text = text_js,
         el_js = el_js,
     );
@@ -871,6 +893,21 @@ pub async fn human_type(page: &Page, selectors: &[&str], text: &str) -> anyhow::
     // A successful event dispatch alone is not evidence that the prompt stuck.
     tokio::time::sleep(Duration::from_millis(120)).await;
     if !composer_retains_prompt(page, selector, text)? {
+        let shape = page.evaluate(&format!(
+            "(() => {{ const el = {el_js}; if (!el) return null; const expected = {text_js}; const inner = el.innerText || ''; const content = el.textContent || ''; return {{ inner_matches: inner === expected, content_matches: content === expected, trailing_whitespace_only: inner.trimEnd() === expected.trimEnd() }}; }})()"
+        ));
+        tracing::warn!(
+            inner_matches = shape
+                .get("inner_matches")
+                .and_then(serde_json::Value::as_bool),
+            content_matches = shape
+                .get("content_matches")
+                .and_then(serde_json::Value::as_bool),
+            trailing_whitespace_only = shape
+                .get("trailing_whitespace_only")
+                .and_then(serde_json::Value::as_bool),
+            "provider draft representation mismatch"
+        );
         return Err(anyhow::Error::new(ProviderComposerInputRejectedError));
     }
     Ok(())
@@ -971,7 +1008,7 @@ async fn click_send_or_enter_checked_with_policy(
         for selector in send_selectors {
             let selector_js = serde_json::to_string(selector)?;
             let js = format!(
-                "(() => {{ {route_guard} const input = {input_expr}; if (!input) return 'missing'; const expected = {expected_js}; if (expected !== null && ('value' in input ? input.value : (input.innerText || input.textContent || '')) !== expected) return 'changed'; const inputForm = input.form || input.closest('form'); let root = input; for (let depth = 0; root && depth < 12; depth++, root = root.parentElement) {{ if (root.tagName === 'BODY' || root.tagName === 'HTML') break; for (const button of root.querySelectorAll({selector_js})) {{ const buttonForm = button.form || button.closest('form'); if (buttonForm && buttonForm !== inputForm) continue; if (button.getClientRects().length && window.getComputedStyle(button).visibility !== 'hidden' && window.getComputedStyle(button).pointerEvents !== 'none' && !button.closest('[inert], [hidden], [aria-hidden=true], [aria-disabled=true]') && !button.disabled && !button.matches(':disabled') && !button.closest('fieldset[disabled]') && button.getAttribute('aria-disabled') !== 'true') {{ button.click(); return 'clicked'; }} }} if (root.tagName === 'FORM') break; }} const form = input.form || input.closest('form'); if (form && form.id) {{ for (const button of document.querySelectorAll({selector_js})) {{ if (button.tagName !== 'BUTTON' || (button.form !== form && button.getAttribute('form') !== form.id) || form.contains(button)) continue; if (button.getClientRects().length && window.getComputedStyle(button).visibility !== 'hidden' && window.getComputedStyle(button).pointerEvents !== 'none' && !button.closest('[inert], [hidden], [aria-hidden=true], [aria-disabled=true]') && !button.disabled && !button.matches(':disabled') && !button.closest('fieldset[disabled]') && button.getAttribute('aria-disabled') !== 'true') {{ button.click(); return 'clicked'; }} }} }} return 'waiting'; }})()"
+                "(() => {{ {route_guard} const input = {input_expr}; if (!input) return 'missing'; const expected = {expected_js}; if (expected !== null && !((input.tagName === 'INPUT' || input.tagName === 'TEXTAREA') ? input.value === expected : (input.innerText === expected || input.textContent === expected))) return 'changed'; const inputForm = input.form || input.closest('form'); let root = input; for (let depth = 0; root && depth < 12; depth++, root = root.parentElement) {{ if (root.tagName === 'BODY' || root.tagName === 'HTML') break; for (const button of root.querySelectorAll({selector_js})) {{ const buttonForm = button.form || button.closest('form'); if (buttonForm && buttonForm !== inputForm) continue; if (button.getClientRects().length && window.getComputedStyle(button).visibility !== 'hidden' && window.getComputedStyle(button).pointerEvents !== 'none' && !button.closest('[inert], [hidden], [aria-hidden=true], [aria-disabled=true]') && !button.disabled && !button.matches(':disabled') && !button.closest('fieldset[disabled]') && button.getAttribute('aria-disabled') !== 'true') {{ button.click(); return 'clicked'; }} }} if (root.tagName === 'FORM') break; }} const form = input.form || input.closest('form'); if (form && form.id) {{ for (const button of document.querySelectorAll({selector_js})) {{ if (button.tagName !== 'BUTTON' || (button.form !== form && button.getAttribute('form') !== form.id) || form.contains(button)) continue; if (button.getClientRects().length && window.getComputedStyle(button).visibility !== 'hidden' && window.getComputedStyle(button).pointerEvents !== 'none' && !button.closest('[inert], [hidden], [aria-hidden=true], [aria-disabled=true]') && !button.disabled && !button.matches(':disabled') && !button.closest('fieldset[disabled]') && button.getAttribute('aria-disabled') !== 'true') {{ button.click(); return 'clicked'; }} }} }} return 'waiting'; }})()"
             );
             match page.evaluate(&js).as_str() {
                 Some("clicked") => return Ok(true),
@@ -1564,17 +1601,19 @@ pub fn last_element_text(page: &Page, selector: &str) -> Option<String> {
     let js = format!(
         r#"(() => {{
             const nodes = Array.from(document.querySelectorAll({sel_js}));
+            {response_content_js}
             for (let i = nodes.length - 1; i >= 0; i--) {{
                 const node = nodes[i];
                 if (!node.getClientRects().length ||
                     window.getComputedStyle(node).visibility === 'hidden' ||
                     node.closest('[hidden], [inert], [aria-hidden="true"], [aria-disabled="true"], fieldset[disabled]') ||
                     node.disabled || node.matches(':disabled')) continue;
-                const value = node.innerText || node.textContent || '';
+                const value = responseContent(node);
                 if (value.trim()) return value;
             }}
             return null;
-        }})()"#
+        }})()"#,
+        response_content_js = RESPONSE_CONTENT_JS,
     );
     page.evaluate(&js).as_str().map(str::to_owned)
 }
@@ -1922,7 +1961,15 @@ pub async fn send_prompt(
     }
     if let Some(before) = baseline {
         let start = std::time::Instant::now();
-        while start.elapsed() < Duration::from_secs(5) {
+        // ChatGPT can establish its authenticated socket after the composer
+        // becomes actionable. Keep the acknowledgement strict, but allow that
+        // handshake to finish inside the outer provider request deadline.
+        let acknowledgement_budget = if expected_submission_provider == Some("chatgpt") {
+            Duration::from_secs(60)
+        } else {
+            Duration::from_secs(5)
+        };
+        while start.elapsed() < acknowledgement_budget {
             drive_page(page, Duration::from_millis(150)).await;
             if submission_provider_for_url(&page.url()) != expected_submission_provider {
                 check_session("browser", page)?;
@@ -1964,7 +2011,7 @@ fn submission_snapshot(
     let js = format!(
         r#"(() => {{
             const el = {input_expr};
-            const value = el ? ('value' in el ? el.value : (el.innerText || el.textContent || '')) : null;
+            const value = el ? ((el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') ? el.value : (el.innerText || el.textContent || '')) : null;
             const responses = {responses};
             const visible = node => {{
                 try {{
@@ -1986,7 +2033,8 @@ fn submission_snapshot(
             for (const selector of [
                 '[data-message-author-role="user"]',
                 '[data-testid="user-message"]',
-                '[data-testid="message-user"]'
+                '[data-testid="message-user"]',
+                'main [class~="group/user-message"]'
             ]) {{
                 try {{ document.querySelectorAll(selector).forEach(node => {{
                     if (visible(node)) userTurns.add(node);
@@ -2071,7 +2119,7 @@ fn submission_observed_for_prompt(
             const normalized = text => (text || '').replace(/\s+/g, ' ').trim();
             if (!normalized(expected)) return false;
             const turns = Array.from(document.querySelectorAll(
-                '[data-message-author-role="user"], [data-testid="user-message"], [data-testid="message-user"]'
+                '[data-message-author-role="user"], [data-testid="user-message"], [data-testid="message-user"], main [class~="group/user-message"]'
             )).filter(node => {{
                 try {{
                     return node.getClientRects().length > 0 &&
@@ -2119,6 +2167,43 @@ fn submission_accepted(before: &SubmissionSnapshot, after: &SubmissionSnapshot) 
 }
 
 #[cfg(test)]
+mod current_chatgpt_submission_tests {
+    #[tokio::test]
+    async fn current_user_turn_requires_matching_prompt_and_cleared_input() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html="<html><body><main><textarea id='prompt'>fixture prompt</textarea></main></body></html>";
+        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        let before = super::submission_snapshot(&page, "#prompt", &[]).unwrap();
+        page.evaluate(r#"(() => {const turn=document.createElement('div');turn.className='group/user-message';turn.textContent='fixture prompt';document.querySelector('main').appendChild(turn);})()"#);
+        let uncleared = super::submission_snapshot(&page, "#prompt", &[]).unwrap();
+        assert!(!super::submission_observed_for_prompt(
+            &page,
+            &before,
+            &uncleared,
+            "fixture prompt"
+        )
+        .unwrap());
+        page.evaluate("document.querySelector('#prompt').value=''");
+        let after = super::submission_snapshot(&page, "#prompt", &[]).unwrap();
+        assert!(
+            super::submission_observed_for_prompt(&page, &before, &after, "fixture prompt")
+                .unwrap()
+        );
+        assert!(
+            !super::submission_observed_for_prompt(&page, &before, &after, "different prompt")
+                .unwrap()
+        );
+    }
+}
+
+#[cfg(test)]
 mod pre_send_retention_tests {
     #[tokio::test]
     async fn late_framework_clear_after_typing_does_not_click_send() {
@@ -2154,6 +2239,82 @@ mod pre_send_retention_tests {
 #[cfg(test)]
 mod composer_rejected_input_tests {
     use super::ProviderComposerInputRejectedError;
+
+    #[tokio::test]
+    async fn controlled_editor_handles_paste_without_destructive_dom_fallback() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body><div id="prompt" contenteditable="true"><p id="document-node"></p></div>
+            <script>
+            const editor = document.querySelector('#prompt');
+            editor.addEventListener('paste', event => {
+                window.pasteTrusted = event.isTrusted;
+                window.canonicalDraft = event.clipboardData.getData('text/plain');
+                document.querySelector('#document-node').textContent = window.canonicalDraft;
+                event.preventDefault();
+            });
+            editor.addEventListener('input', () => { window.extraInput = true; });
+            </script></body></html>"#;
+        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        // Obscura exposes value even on DIV; it must never shadow editor text.
+        page.evaluate("document.querySelector('#prompt').value = 'stale field value'");
+        super::human_type(&page, &["#prompt"], "fixture draft")
+            .await
+            .unwrap();
+        assert_eq!(
+            page.evaluate("window.canonicalDraft"),
+            serde_json::json!("fixture draft")
+        );
+        assert!(
+            page.query_selector("#document-node").is_some(),
+            "editor document nodes must survive handled paste"
+        );
+        assert_eq!(
+            page.evaluate("window.pasteTrusted"),
+            serde_json::json!(false)
+        );
+        assert_ne!(page.evaluate("window.extraInput"), serde_json::json!(true));
+    }
+
+    #[tokio::test]
+    async fn exact_editor_text_survives_layout_whitespace_changes_through_send_guard() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body><form><div id="prompt" contenteditable="true"></div>
+            <button id="send" type="button" onclick="window.sent=true">Send</button></form>
+            <script>Object.defineProperty(document.querySelector('#prompt'), 'innerText', {get(){return 'layout-normalized whitespace';}});</script>
+            </body></html>"#;
+        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        super::human_type(&page, &["#prompt"], "exact  draft\nwith whitespace")
+            .await
+            .unwrap();
+        assert!(super::click_send_or_enter_checked(
+            &mut page,
+            &["#send"],
+            "#prompt",
+            100,
+            Some("exact  draft\nwith whitespace")
+        )
+        .await
+        .unwrap());
+        assert_eq!(page.evaluate("window.sent"), serde_json::json!(true));
+        assert_eq!(
+            page.evaluate("document.querySelector('#prompt').textContent"),
+            serde_json::json!("exact  draft\nwith whitespace")
+        );
+    }
 
     #[tokio::test]
     async fn framework_draft_rejection_is_typed_and_contains_no_prompt() {

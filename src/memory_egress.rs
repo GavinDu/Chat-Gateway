@@ -133,6 +133,9 @@ impl MemoryEgressPolicy {
             prompt.push_str(&escape_memory_field(&item.content));
             prompt.push_str("</personal_memory_item>\n");
         }
+        // Remove the generated separator after the last wrapper, preserving
+        // all whitespace inside the escaped personal-memory item itself.
+        prompt.pop();
         Ok(())
     }
 
