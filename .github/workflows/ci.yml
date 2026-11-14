@@ -157,6 +157,8 @@ jobs:
           bash -n scripts/docker-runtime-smoke.sh
           bash -n scripts/docker-release-link.sh
           bash -n scripts/docker-main-e2e.sh
+          bash -n scripts/test_docker_login_helper.sh
+          bash scripts/test_docker_login_helper.sh
 
       - name: Validate browser extension JavaScript and manifest
         run: |
