@@ -1067,6 +1067,10 @@ fn relay_provider_issue(
     } else if last_error.is_some_and(|error| error.contains("JavaScript assets blocked (HTTP 403)"))
     {
         Some("provider_assets_blocked")
+    } else if last_error
+        == Some("provider document denied (HTTP 403); check network and browser access")
+    {
+        Some("provider_document_denied")
     } else if state == ProviderSessionState::NeedsLogin || authentication == "needs_login" {
         Some("needs_login")
     } else if state == ProviderSessionState::Degraded {
@@ -1137,6 +1141,25 @@ mod relay_provider_issue_tests {
             Some("JavaScript assets blocked (HTTP 403): cookie=private"),
         );
         assert_eq!(blocked, Some("provider_assets_blocked"));
+
+        let document = relay_provider_issue(
+            true,
+            true,
+            "unknown",
+            Degraded,
+            false,
+            Some("provider document denied (HTTP 403); check network and browser access"),
+        );
+        assert_eq!(document, Some("provider_document_denied"));
+        let untrusted = relay_provider_issue(
+            true,
+            true,
+            "unknown",
+            Degraded,
+            false,
+            Some("untrusted document denied (HTTP 403) token=secret"),
+        );
+        assert_eq!(untrusted, Some("provider_degraded"));
 
         let manual = relay_provider_issue(
             true,
