@@ -27,9 +27,32 @@ async function hasOriginPermissions(origins) {
   catch { return false; }
 }
 function recordProviderDiagnostic(provider, state, errorCode = null) {
+  // A provider sync attempt is NOT authenticated-login verification.
+  // Store only stable local result codes, never raw upstream responses.
+  const safeState = ["uploaded", "unchanged", "no_cookies", "skipped", "failed"].includes(state)
+    ? state : "unknown";
   providerDiagnostics.set(provider, {
-    state, issue: errorCode, updated_at: new Date().toISOString()
+    state: safeState, issue: errorCode, updated_at: new Date().toISOString()
   });
+}
+// Every diagnostics response has independent per-provider attempt freshness.
+// Failed gateway status makes old local sync snapshots stale, but never
+// deletes the last attempt time or falsely changes a backend login state.
+function finalizeRelayDiagnostics(result) {
+  const extension = result.extension;
+  if (!extension) return result;
+  extension.provider_sync = Object.fromEntries(
+    extension.linked_providers.map(provider => {
+      const previous = providerDiagnostics.get(provider);
+      return [provider, {
+        state: previous?.state || "not_attempted",
+        issue: previous?.issue || null,
+        updated_at: previous?.updated_at || null,
+        stale: !result.ok,
+      }];
+    })
+  );
+  return result;
 }
 async function relayDiagnostics(force = false) {
   const current = await chrome.storage.local.get(["gateway", "token", "connectionMode", "linkedProviders"]);
@@ -54,29 +77,29 @@ async function relayDiagnostics(force = false) {
       return [provider, await hasOriginPermissions(origins)];
     })
   ));
-  if (!extension.connected) return {ok:false, extension, gateway_issue:"not_connected"};
+  if (!extension.connected) return finalizeRelayDiagnostics({ok:false, extension, gateway_issue:"not_connected"});
   extension.permissions.gateway = await hasOriginPermissions([current.gateway + "/*"]);
   if (!force && lastGatewayCheck && Date.now() - lastGatewayCheckAt < CONNECTION_DIAGNOSTICS_TTL_MS) {
     extension.gateway_checked_at = new Date(lastGatewayCheckAt).toISOString();
-    return {ok:true, extension, gateway:lastGatewayCheck};
+    return finalizeRelayDiagnostics({ok:true, extension, gateway:lastGatewayCheck});
   }
   try {
     const response = await relayFetch("/relay/v1/diagnostics", {method:"POST",body:"{}"});
     if (!response.ok) {
       lastGatewayCheck = null;
       lastGatewayCheckAt = 0;
-      return {ok:false, extension, gateway_issue:
-        response.status === 401 || response.status === 403 ? "gateway_unauthorized" : "gateway_request_failed"};
+      return finalizeRelayDiagnostics({ok:false, extension, gateway_issue:
+        response.status === 401 || response.status === 403 ? "gateway_unauthorized" : "gateway_request_failed"});
     }
     const gateway = await response.json();
     lastGatewayCheck = gateway;
     lastGatewayCheckAt = Date.now();
     extension.gateway_checked_at = new Date(lastGatewayCheckAt).toISOString();
-    return {ok:true, extension, gateway};
+    return finalizeRelayDiagnostics({ok:true, extension, gateway});
   } catch (error) {
     lastGatewayCheck = null;
     lastGatewayCheckAt = 0;
-    return {ok:false, extension, gateway_issue:classifyRelayFailure(error)};
+    return finalizeRelayDiagnostics({ok:false, extension, gateway_issue:classifyRelayFailure(error)});
   }
 }
 
