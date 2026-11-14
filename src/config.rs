@@ -417,6 +417,22 @@ fn default_strategy() -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn example_configuration_enables_manus_without_changing_other_providers() {
+        let example: AppConfig =
+            serde_yaml::from_str(include_str!("../config.example.yaml")).expect("example YAML parses");
+        example.validate().expect("example configuration validates");
+        let manus = example.provider("manus").expect("Manus configured");
+        assert!(manus.enabled);
+        assert_eq!(manus.models, vec!["manus"]);
+        assert_eq!(manus.timeout_seconds, 300);
+        assert_eq!(manus.queue_timeout_seconds, 30);
+        assert_eq!(manus.session_pool_size, 1);
+        assert_eq!(manus.min_request_interval_ms, 5_000);
+        assert_eq!(manus.daily_request_cap, 100);
+        assert!(example.providers.iter().filter(|provider| provider.name != "manus").all(|provider| !provider.enabled));
+    }
+
     fn config(yaml: &str) -> AppConfig {
         serde_yaml::from_str(yaml).expect("test config parses")
     }
