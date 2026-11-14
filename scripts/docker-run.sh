@@ -295,7 +295,8 @@ case "${1:-}" in
       metaai) url="https://www.meta.ai/" ;;
       mistral) url="https://chat.mistral.ai/" ;;
       perplexity) url="https://www.perplexity.ai/" ;;
-      *) echo "Usage: $0 login <chatgpt|claude|gemini|grok|qwen|metaai|mistral|perplexity>" >&2; exit 2 ;;
+      manus) url="https://manus.im/app" ;;
+      *) echo "Usage: $0 login <chatgpt|claude|gemini|grok|qwen|metaai|mistral|perplexity|manus>" >&2; exit 2 ;;
     esac
     echo "Sign in in your normal external browser, complete MFA/CAPTCHA there, then use the Chat Gateway Relay extension to link $provider."
     echo "The extension transfers provider cookies to the encrypted Docker vault; passwords are never collected by the gateway."
