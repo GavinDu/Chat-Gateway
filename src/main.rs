@@ -1026,6 +1026,77 @@ async fn reset_provider_for_retry(
     .into_response()
 }
 
+/// Stable request logging policy, independent of request bodies and credentials.
+/// HTTP metrics are recorded for every request regardless of the log level.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HttpRequestLogLevel {
+    Debug,
+    Warn,
+    Info,
+}
+
+fn http_request_log_level(route: &str, status: StatusCode) -> HttpRequestLogLevel {
+    if matches!(route, "/relay/v1/status" | "/relay/v1/diagnostics") && status.is_success() {
+        HttpRequestLogLevel::Debug
+    } else if status.is_client_error() || status.is_server_error() {
+        HttpRequestLogLevel::Warn
+    } else {
+        HttpRequestLogLevel::Info
+    }
+}
+
+#[cfg(test)]
+mod relay_http_log_level_tests {
+    use super::{http_request_log_level, HttpRequestLogLevel};
+    use axum::http::StatusCode;
+
+    #[test]
+    fn successful_relay_status_reads_are_quiet_without_hiding_failures() {
+        for route in ["/relay/v1/status", "/relay/v1/diagnostics"] {
+            assert_eq!(
+                http_request_log_level(route, StatusCode::OK),
+                HttpRequestLogLevel::Debug
+            );
+            assert_eq!(
+                http_request_log_level(route, StatusCode::NO_CONTENT),
+                HttpRequestLogLevel::Debug
+            );
+            assert_eq!(
+                http_request_log_level(route, StatusCode::UNAUTHORIZED),
+                HttpRequestLogLevel::Warn
+            );
+            assert_eq!(
+                http_request_log_level(route, StatusCode::INTERNAL_SERVER_ERROR),
+                HttpRequestLogLevel::Warn
+            );
+            assert_eq!(
+                http_request_log_level(route, StatusCode::TEMPORARY_REDIRECT),
+                HttpRequestLogLevel::Info
+            );
+        }
+    }
+
+    #[test]
+    fn chat_and_mutation_requests_preserve_existing_failure_visibility() {
+        assert_eq!(
+            http_request_log_level("/v1/chat/completions", StatusCode::OK),
+            HttpRequestLogLevel::Info
+        );
+        assert_eq!(
+            http_request_log_level("/relay/v1/session/:provider", StatusCode::OK),
+            HttpRequestLogLevel::Info
+        );
+        assert_eq!(
+            http_request_log_level("/relay/v1/session/:provider", StatusCode::BAD_REQUEST),
+            HttpRequestLogLevel::Warn
+        );
+        assert_eq!(
+            http_request_log_level("/relay/v1/session/:provider", StatusCode::GATEWAY_TIMEOUT),
+            HttpRequestLogLevel::Warn
+        );
+    }
+}
+
 /// Add a gateway-generated request ID to every response, including security
 /// middleware rejections, so callers can correlate failures with server logs
 /// without trusting arbitrary client-supplied IDs.
@@ -1044,37 +1115,33 @@ async fn attach_request_id(mut req: Request<Body>, next: Next) -> Response {
     if let Some(registry) = metrics_registry {
         registry.record_http_request(&route, response.status().as_u16(), duration_ms);
     }
-    // Routine successful relay dashboards are sampled by HTTP metrics, not
-    // emitted every poll. Preserve detailed logs for all failures.
-    if (route == "/relay/v1/status" || route == "/relay/v1/diagnostics")
-        && response.status().is_success()
-    {
-        tracing::debug!(
+    // Keep successful read-only dashboard polls out of INFO while preserving
+    // per-request HTTP metrics and WARN visibility for errors.
+    match http_request_log_level(&route, response.status()) {
+        HttpRequestLogLevel::Debug => tracing::debug!(
             request_id = %request_id,
             method = %method,
             route = %route,
             status = response.status().as_u16(),
             duration_ms,
             "relay status request handled"
-        );
-    } else if response.status().is_server_error() || response.status().is_client_error() {
-        tracing::warn!(
+        ),
+        HttpRequestLogLevel::Warn => tracing::warn!(
             request_id = %request_id,
             method = %method,
             route = %route,
             status = response.status().as_u16(),
             duration_ms,
             "http request failed"
-        );
-    } else {
-        tracing::info!(
+        ),
+        HttpRequestLogLevel::Info => tracing::info!(
             request_id = %request_id,
             method = %method,
             route = %route,
             status = response.status().as_u16(),
             duration_ms,
             "http request handled"
-        );
+        ),
     }
 
     // Axum's DefaultBodyLimit rejection happens before the Bytes handler is
