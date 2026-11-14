@@ -806,9 +806,12 @@ pub async fn run_send(
         }
 
         if start.elapsed() > timeout {
-            // A timeout is not a successful completion. Propagate a typed
-            // provider error so the API won't commit a partial/empty turn.
-            metrics.record_provider_timeout(adapter.name(), "generation");
+            // Distinguish a send that never yielded fresh assistant content
+            // from an answer whose partial text arrived but never completed.
+            // Neither path is successful; preserving the typed failure prevents
+            // committing stale or incomplete assistant turns.
+            let phase = common::ProviderTimeoutPhase::after_submission(last_delta_at.is_some());
+            metrics.record_provider_timeout(adapter.name(), phase.as_str());
             // The request is terminal, but the remote composer may still be
             // generating. Stop it before another send reuses this warm page.
             // Cancellation is best effort; the timeout remains an error.
@@ -817,7 +820,7 @@ pub async fn run_send(
                 .send(Err(anyhow::Error::new(common::ProviderTimeoutError::new(
                     adapter.name(),
                     timeout,
-                    common::ProviderTimeoutPhase::Generation,
+                    phase,
                 ))))
                 .await;
             // Do not fall through to the unconditional "generation complete"
