@@ -1886,7 +1886,9 @@ mod timeout_terminal_regression_tests {
         assert!(failure
             .downcast_ref::<common::ProviderTimeoutError>()
             .is_some());
-        assert!(failure.to_string().contains("did not return new assistant content"));
+        assert!(failure
+            .to_string()
+            .contains("did not return new assistant content"));
         assert!(rx.recv().await.is_none(), "timeout must not emit done");
         assert_eq!(
             page.evaluate("window.cancelCount || 0").as_f64(),
@@ -1894,8 +1896,9 @@ mod timeout_terminal_regression_tests {
             "generation timeout should attempt to stop the in-flight provider response"
         );
         let output = metrics.render_with_provider_states(&[]);
-        assert!(output
-            .contains("gateway_provider_timeout_total{provider=\"qwen\",phase=\"first_content\"} 1"));
+        assert!(output.contains(
+            "gateway_provider_timeout_total{provider=\"qwen\",phase=\"first_content\"} 1"
+        ));
         assert!(!output
             .contains("gateway_provider_timeout_total{provider=\"qwen\",phase=\"generation\"} 1"));
         assert!(!output
@@ -1950,21 +1953,33 @@ mod timeout_terminal_regression_tests {
         .await
         .unwrap();
 
-        let first = rx.recv().await.expect("partial output is retained").unwrap();
+        let first = rx
+            .recv()
+            .await
+            .expect("partial output is retained")
+            .unwrap();
         assert!(!first.done);
         assert_eq!(first.content, "partial fixture answer");
-        let failure = rx.recv().await.expect("timeout follows partial output").unwrap_err();
+        let failure = rx
+            .recv()
+            .await
+            .expect("timeout follows partial output")
+            .unwrap_err();
         assert!(failure
             .downcast_ref::<common::ProviderTimeoutError>()
             .is_some());
         assert!(failure.to_string().contains("did not complete"));
-        assert!(rx.recv().await.is_none(), "partial reply cannot complete after timeout");
+        assert!(
+            rx.recv().await.is_none(),
+            "partial reply cannot complete after timeout"
+        );
         assert_eq!(page.evaluate("window.cancelCount || 0").as_f64(), Some(1.0));
         let output = metrics.render_with_provider_states(&[]);
         assert!(output
             .contains("gateway_provider_timeout_total{provider=\"qwen\",phase=\"generation\"} 1"));
-        assert!(!output
-            .contains("gateway_provider_timeout_total{provider=\"qwen\",phase=\"first_content\"} 1"));
+        assert!(!output.contains(
+            "gateway_provider_timeout_total{provider=\"qwen\",phase=\"first_content\"} 1"
+        ));
     }
 
     #[tokio::test]
