@@ -1053,20 +1053,47 @@ mod relay_http_log_level_tests {
     #[test]
     fn successful_relay_status_reads_are_quiet_without_hiding_failures() {
         for route in ["/relay/v1/status", "/relay/v1/diagnostics"] {
-            assert_eq!(http_request_log_level(route, StatusCode::OK), HttpRequestLogLevel::Debug);
-            assert_eq!(http_request_log_level(route, StatusCode::NO_CONTENT), HttpRequestLogLevel::Debug);
-            assert_eq!(http_request_log_level(route, StatusCode::UNAUTHORIZED), HttpRequestLogLevel::Warn);
-            assert_eq!(http_request_log_level(route, StatusCode::INTERNAL_SERVER_ERROR), HttpRequestLogLevel::Warn);
-            assert_eq!(http_request_log_level(route, StatusCode::TEMPORARY_REDIRECT), HttpRequestLogLevel::Info);
+            assert_eq!(
+                http_request_log_level(route, StatusCode::OK),
+                HttpRequestLogLevel::Debug
+            );
+            assert_eq!(
+                http_request_log_level(route, StatusCode::NO_CONTENT),
+                HttpRequestLogLevel::Debug
+            );
+            assert_eq!(
+                http_request_log_level(route, StatusCode::UNAUTHORIZED),
+                HttpRequestLogLevel::Warn
+            );
+            assert_eq!(
+                http_request_log_level(route, StatusCode::INTERNAL_SERVER_ERROR),
+                HttpRequestLogLevel::Warn
+            );
+            assert_eq!(
+                http_request_log_level(route, StatusCode::TEMPORARY_REDIRECT),
+                HttpRequestLogLevel::Info
+            );
         }
     }
 
     #[test]
     fn chat_and_mutation_requests_preserve_existing_failure_visibility() {
-        assert_eq!(http_request_log_level("/v1/chat/completions", StatusCode::OK), HttpRequestLogLevel::Info);
-        assert_eq!(http_request_log_level("/relay/v1/session/:provider", StatusCode::OK), HttpRequestLogLevel::Info);
-        assert_eq!(http_request_log_level("/relay/v1/session/:provider", StatusCode::BAD_REQUEST), HttpRequestLogLevel::Warn);
-        assert_eq!(http_request_log_level("/relay/v1/session/:provider", StatusCode::GATEWAY_TIMEOUT), HttpRequestLogLevel::Warn);
+        assert_eq!(
+            http_request_log_level("/v1/chat/completions", StatusCode::OK),
+            HttpRequestLogLevel::Info
+        );
+        assert_eq!(
+            http_request_log_level("/relay/v1/session/:provider", StatusCode::OK),
+            HttpRequestLogLevel::Info
+        );
+        assert_eq!(
+            http_request_log_level("/relay/v1/session/:provider", StatusCode::BAD_REQUEST),
+            HttpRequestLogLevel::Warn
+        );
+        assert_eq!(
+            http_request_log_level("/relay/v1/session/:provider", StatusCode::GATEWAY_TIMEOUT),
+            HttpRequestLogLevel::Warn
+        );
     }
 }
 
