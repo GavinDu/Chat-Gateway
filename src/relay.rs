@@ -96,41 +96,150 @@ impl RelayActivationPhase {
     }
 }
 
+/// Fixed, privacy-preserving reasons for an attempted browser activation.
+/// A pending HTTP wait expiry is not a terminal failure: the detached browser
+/// refresh may still succeed, and only that eventual result determines Ready.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RelayActivationIssue {
+    WaitExpired,
+    WorkerUnavailable,
+    RefreshFailed,
+    AssetBlocked,
+    DocumentDenied,
+    ManualVerification,
+    SessionExpired,
+}
+
+impl RelayActivationIssue {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::WaitExpired => "wait_expired",
+            Self::WorkerUnavailable => "browser_worker_unavailable",
+            Self::RefreshFailed => "refresh_failed",
+            Self::AssetBlocked => "provider_assets_blocked",
+            Self::DocumentDenied => "provider_document_denied",
+            Self::ManualVerification => "manual_verification_required",
+            Self::SessionExpired => "provider_session_expired",
+        }
+    }
+}
+
+/// Classify only typed upstream errors; never inspect or expose untrusted
+/// message strings, URLs, cookies, credentials, or error chains.
+fn relay_activation_error_kind(error: &anyhow::Error) -> RelayActivationIssue {
+    if error
+        .downcast_ref::<crate::browser::pool::BrowserWorkerUnavailableError>()
+        .is_some()
+    {
+        RelayActivationIssue::WorkerUnavailable
+    } else if error
+        .downcast_ref::<crate::providers::mistral::MistralAssetBlockedError>()
+        .is_some()
+    {
+        RelayActivationIssue::AssetBlocked
+    } else if error
+        .downcast_ref::<crate::providers::metaai::MetaAiDocumentDeniedError>()
+        .is_some()
+    {
+        RelayActivationIssue::DocumentDenied
+    } else if error
+        .downcast_ref::<crate::providers::ProviderChallengeError>()
+        .is_some()
+    {
+        RelayActivationIssue::ManualVerification
+    } else if error
+        .downcast_ref::<crate::browser::pool::ProviderSessionExpiredError>()
+        .is_some()
+    {
+        RelayActivationIssue::SessionExpired
+    } else {
+        RelayActivationIssue::RefreshFailed
+    }
+}
+
+fn relay_pending_age_bucket(elapsed: Duration) -> &'static str {
+    if elapsed < Duration::from_secs(30) {
+        "recent"
+    } else if elapsed < Duration::from_secs(120) {
+        "delayed"
+    } else {
+        "stale"
+    }
+}
+
+#[derive(Debug)]
+struct ProviderActivationRecord {
+    generation: u64,
+    phase: RelayActivationPhase,
+    issue: Option<RelayActivationIssue>,
+    pending_since: Option<Instant>,
+}
+
+impl Default for ProviderActivationRecord {
+    fn default() -> Self {
+        Self {
+            generation: 0,
+            phase: RelayActivationPhase::NotAttempted,
+            issue: None,
+            pending_since: None,
+        }
+    }
+}
+
 /// A detached activation may finish after the initiating HTTP request times
-/// out. Match its generation before changing state so stale completion can
-/// never resurrect a newer or explicitly unlinked provider.
+/// out. Fence its generation so late completion never resurrects a newer
+/// import or an explicitly unlinked provider.
 #[derive(Default)]
 struct ProviderActivationStates {
-    states: Mutex<HashMap<String, (u64, RelayActivationPhase)>>,
+    states: Mutex<HashMap<String, ProviderActivationRecord>>,
 }
 
 impl ProviderActivationStates {
     fn begin(&self, provider: &str) -> Option<u64> {
         let mut states = self.states.lock().ok()?;
-        let entry = states
-            .entry(provider.to_owned())
-            .or_insert((0, RelayActivationPhase::NotAttempted));
-        entry.0 = entry.0.checked_add(1)?;
-        entry.1 = RelayActivationPhase::Pending;
-        Some(entry.0)
+        let entry = states.entry(provider.to_owned()).or_default();
+        let next = entry.generation.checked_add(1)?;
+        entry.generation = next;
+        entry.phase = RelayActivationPhase::Pending;
+        entry.issue = None;
+        entry.pending_since = Some(Instant::now());
+        Some(next)
     }
 
-    fn finish(&self, provider: &str, generation: Option<u64>, succeeded: bool) {
+    fn mark_wait_expired(&self, provider: &str, generation: Option<u64>) {
         let Some(generation) = generation else {
             return;
         };
         let Ok(mut states) = self.states.lock() else {
             return;
         };
-        let Some((current_generation, phase)) = states.get_mut(provider) else {
+        if let Some(record) = states.get_mut(provider) {
+            if record.generation == generation && record.phase == RelayActivationPhase::Pending {
+                record.issue = Some(RelayActivationIssue::WaitExpired);
+            }
+        }
+    }
+
+    /// None means actual browser refresh succeeded; the typed failure reason
+    /// never derives from a draft, a stored cookie or a generic timeout.
+    fn finish(&self, provider: &str, generation: Option<u64>, issue: Option<RelayActivationIssue>) {
+        let Some(generation) = generation else {
             return;
         };
-        if *current_generation == generation && *phase == RelayActivationPhase::Pending {
-            *phase = if succeeded {
+        let Ok(mut states) = self.states.lock() else {
+            return;
+        };
+        let Some(record) = states.get_mut(provider) else {
+            return;
+        };
+        if record.generation == generation && record.phase == RelayActivationPhase::Pending {
+            record.phase = if issue.is_none() {
                 RelayActivationPhase::Ready
             } else {
                 RelayActivationPhase::Failed
             };
+            record.issue = issue;
+            record.pending_since = None;
         }
     }
 
@@ -138,69 +247,118 @@ impl ProviderActivationStates {
         let Ok(mut states) = self.states.lock() else {
             return;
         };
-        let entry = states
-            .entry(provider.to_owned())
-            .or_insert((0, RelayActivationPhase::NotAttempted));
-        if let Some(next) = entry.0.checked_add(1) {
-            entry.0 = next;
-            entry.1 = RelayActivationPhase::Cancelled;
+        let entry = states.entry(provider.to_owned()).or_default();
+        if let Some(next) = entry.generation.checked_add(1) {
+            entry.generation = next;
+            entry.phase = RelayActivationPhase::Cancelled;
+            entry.issue = None;
+            entry.pending_since = None;
         }
     }
 
-    fn current(&self, provider: &str) -> &'static str {
-        match self.states.lock() {
-            Ok(states) => states
-                .get(provider)
-                .map_or(RelayActivationPhase::NotAttempted, |entry| entry.1)
-                .as_str(),
-            Err(_) => "unknown",
-        }
+    /// Returns fixed labels only; does not return timestamps, session data or
+    /// error strings. Pending age is a bounded bucket, not an identifying time.
+    fn diagnostics(
+        &self,
+        provider: &str,
+    ) -> (&'static str, Option<&'static str>, Option<&'static str>) {
+        let Ok(states) = self.states.lock() else {
+            return ("unknown", Some("state_unavailable"), None);
+        };
+        let Some(record) = states.get(provider) else {
+            return (RelayActivationPhase::NotAttempted.as_str(), None, None);
+        };
+        (
+            record.phase.as_str(),
+            record.issue.map(RelayActivationIssue::as_str),
+            if record.phase == RelayActivationPhase::Pending {
+                record
+                    .pending_since
+                    .map(|since| relay_pending_age_bucket(since.elapsed()))
+            } else {
+                None
+            },
+        )
     }
 }
 
 #[cfg(test)]
 mod relay_activation_state_tests {
-    use super::ProviderActivationStates;
+    use super::{
+        relay_activation_error_kind, relay_pending_age_bucket, ProviderActivationStates,
+        RelayActivationIssue,
+    };
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    #[test]
+    fn pending_reason_generation_fence_and_restart_are_independent_of_authentication() {
+        let states = ProviderActivationStates::default();
+        assert_eq!(states.diagnostics("manus"), ("not_attempted", None, None));
+        let first = states.begin("manus");
+        assert_eq!(states.diagnostics("manus").0, "pending");
+        states.mark_wait_expired("manus", first);
+        assert_eq!(states.diagnostics("manus").1, Some("wait_expired"));
+        states.finish("manus", first, None);
+        assert_eq!(states.diagnostics("manus"), ("ready", None, None));
+        let second = states.begin("manus");
+        states.finish("manus", first, Some(RelayActivationIssue::RefreshFailed));
+        assert_eq!(states.diagnostics("manus").0, "pending");
+        states.finish("manus", second, Some(RelayActivationIssue::WorkerUnavailable));
+        assert_eq!(
+            states.diagnostics("manus"),
+            ("failed", Some("browser_worker_unavailable"), None)
+        );
+        let third = states.begin("manus");
+        states.revoke("manus");
+        states.finish("manus", third, None);
+        assert_eq!(states.diagnostics("manus"), ("cancelled", None, None));
+        assert_eq!(states.diagnostics("qwen"), ("not_attempted", None, None));
+        assert_eq!(
+            ProviderActivationStates::default().diagnostics("manus"),
+            ("not_attempted", None, None),
+            "restart must not claim ready solely from persisted credentials"
+        );
+    }
 
     #[tokio::test]
-    async fn late_worker_completion_cannot_resurrect_a_revoked_session() {
-        use std::sync::Arc;
+    async fn late_browser_finish_never_revives_revoked_provider() {
         let states = Arc::new(ProviderActivationStates::default());
         let generation = states.begin("metaai");
         let (continue_tx, continue_rx) = tokio::sync::oneshot::channel::<()>();
-        let late_states = Arc::clone(&states);
+        let delayed = Arc::clone(&states);
         let worker = tokio::spawn(async move {
             let _ = continue_rx.await;
-            late_states.finish("metaai", generation, true);
+            delayed.finish("metaai", generation, None);
         });
         states.revoke("metaai");
         continue_tx.send(()).unwrap();
         worker.await.unwrap();
-        assert_eq!(states.current("metaai"), "cancelled");
+        assert_eq!(states.diagnostics("metaai"), ("cancelled", None, None));
     }
 
     #[test]
-    fn pending_completion_is_generation_fenced_and_not_authentication() {
-        let states = ProviderActivationStates::default();
-        assert_eq!(states.current("manus"), "not_attempted");
-        let first = states.begin("manus");
-        assert_eq!(states.current("manus"), "pending");
-        states.finish("manus", first, true);
-        assert_eq!(states.current("manus"), "ready");
-        let second = states.begin("manus");
-        states.finish("manus", first, false);
-        assert_eq!(states.current("manus"), "pending");
-        states.finish("manus", second, false);
-        assert_eq!(states.current("manus"), "failed");
-
-        let third = states.begin("manus");
-        states.revoke("manus");
-        states.finish("manus", third, true);
-        assert_eq!(states.current("manus"), "cancelled");
-        let fresh = states.begin("manus");
-        states.finish("manus", fresh, true);
-        assert_eq!(states.current("manus"), "ready");
-        assert_eq!(states.current("qwen"), "not_attempted");
+    fn bounded_age_and_typed_error_labels_do_not_leak_raw_provider_errors() {
+        assert_eq!(relay_pending_age_bucket(Duration::from_secs(29)), "recent");
+        assert_eq!(relay_pending_age_bucket(Duration::from_secs(30)), "delayed");
+        assert_eq!(relay_pending_age_bucket(Duration::from_secs(119)), "delayed");
+        assert_eq!(relay_pending_age_bucket(Duration::from_secs(120)), "stale");
+        let error = anyhow::anyhow!("cookie=private; URL=https://example.invalid/token");
+        let label = relay_activation_error_kind(&error).as_str();
+        assert_eq!(label, "refresh_failed");
+        assert!(!label.contains("private"));
+        assert!(!label.contains("token"));
+        let unavailable =
+            anyhow::Error::new(crate::browser::pool::BrowserWorkerUnavailableError);
+        assert_eq!(
+            relay_activation_error_kind(&unavailable),
+            RelayActivationIssue::WorkerUnavailable
+        );
+        let denied = anyhow::Error::new(crate::providers::metaai::MetaAiDocumentDeniedError);
+        assert_eq!(
+            relay_activation_error_kind(&denied),
+            RelayActivationIssue::DocumentDenied
+        );
     }
 }
 
