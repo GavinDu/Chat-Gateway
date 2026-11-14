@@ -2059,6 +2059,21 @@ mod live_dom_send_tests {
             .unwrap();
         let js = r#"(() => {
           globalThis.unrelatedClicked = false;
+          // A data: fixture cannot reach the real first-party account service.
+          // Exercise the *actual* ChatGPT readiness fetch with a deliberately
+          // synthetic, verified session; never skip or bypass that guard.
+          globalThis.fixtureAuthChecks = 0;
+          globalThis.fetch = async (url, options) => {
+            if (url !== '/api/auth/session' || options?.credentials !== 'include' ||
+                options?.cache !== 'no-store' || !options?.signal) {
+              throw new Error('Unexpected fixture session request');
+            }
+            globalThis.fixtureAuthChecks++;
+            return new Response(JSON.stringify({
+              user:{fixture:true}, accessToken:'not-a-real-token',
+              expires:new Date(Date.now() + 60000).toISOString()
+            }));
+          };
           document.getElementById('unrelated-send').addEventListener('click', () => {globalThis.unrelatedClicked=true;});
           document.getElementById('fixture-send').addEventListener('click', () => {
             globalThis.fixtureClicked = true;
@@ -2075,6 +2090,7 @@ mod live_dom_send_tests {
         })()"#
             .replace("__INPUT__", &serde_json::to_string(input).unwrap());
         assert_eq!(page.evaluate(&js), serde_json::json!(true));
+        let chatgpt_fixture = adapter.name() == "chatgpt";
         let (tx, mut rx) = mpsc::channel(32);
         tokio::time::timeout(
             Duration::from_secs(5),
@@ -2103,6 +2119,13 @@ mod live_dom_send_tests {
         }
         assert_eq!(text, "SYNTHETIC_ASYNC_OK");
         assert!(done);
+        if chatgpt_fixture {
+            assert_eq!(
+                page.evaluate("globalThis.fixtureAuthChecks").as_f64(),
+                Some(1.0),
+                "the real first-party readiness guard must run before fixture Send"
+            );
+        }
         assert_eq!(
             page.evaluate("globalThis.unrelatedClicked"),
             serde_json::json!(false)
