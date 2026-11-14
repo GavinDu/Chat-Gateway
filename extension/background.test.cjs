@@ -88,6 +88,40 @@ test("explicit provider sync reports a skipped upload instead of success", async
   assert.deepEqual(f.calls, ["chatgpt", "chatgpt"]);
 });
 
+test("unreachable configured gateway skips automatic imports and resumes after recovery", async () => {
+  const f = loadBackground(["chatgpt", "claude"]);
+  f.sandbox.chrome.storage.local.get = async () => ({
+    gateway:"http://127.0.0.1:8080", connectionMode:"local",
+    linkedProviders:["chatgpt", "claude"]
+  });
+  let healthy = false;
+  f.sandbox.relayFetch = async path => {
+    assert.equal(path, "/relay/v1/diagnostics");
+    if (!healthy) return {ok:false,status:503};
+    return {ok:true,status:200,json:async()=>({
+      ok:true,providers:[{provider:"chatgpt",linked:true},{provider:"claude",linked:false}]
+    })};
+  };
+  f.listeners.startup[0]();
+  for (let i = 0; i < 3; i++) await flushAsyncWork();
+  assert.deepEqual(f.calls, [],
+    "automatic refresh must not import cookies when the connected gateway is unavailable");
+
+  // A user-invoked sync remains usable independently of the retry policy.
+  const manual = await new Promise(resolve => f.listeners.message[0](
+    {type:"sync-provider",provider:"chatgpt"}, {}, resolve
+  ));
+  assert.equal(manual.ok, true);
+  assert.deepEqual(f.calls, ["chatgpt"]);
+  f.calls.length = 0;
+
+  healthy = true;
+  f.listeners.startup[0]();
+  for (let i = 0; i < 4; i++) await flushAsyncWork();
+  assert.deepEqual(f.calls, ["chatgpt", "claude"],
+    "startup repair must resume after a successful gateway status check");
+});
+
 test("service-worker install and startup restore each unique linked provider", async () => {
   const { calls, listeners } = loadBackground([
     "chatgpt",
