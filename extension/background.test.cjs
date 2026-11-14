@@ -338,7 +338,7 @@ test("provider sync timestamp is independent of login and turns stale when gatew
   const after = await diagnostic();
   const previous = after.extension.provider_sync.chatgpt;
   assert.equal(previous.stale,false);
-  assert.match(previous.updated_at,/^\\d{4}-\\d{2}-\\d{2}T/);
+  assert.match(previous.updated_at,/^\d{4}-\d{2}-\d{2}T/);
   assert.equal(after.gateway.providers[0].authentication,"unknown",
     "a successful local sync must never imply authenticated login");
   assert.equal(after.extension.provider_sync.claude.state,"not_attempted");
