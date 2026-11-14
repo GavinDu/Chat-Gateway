@@ -1,5 +1,6 @@
 //! Canonical chat execution contract independent of the browser engine.
 use crate::providers::common::{ProviderComposerInputRejectedError, ProviderTimeoutError};
+use crate::providers::metaai::MetaAiDocumentDeniedError;
 use crate::providers::mistral::MistralAssetBlockedError;
 use crate::{
     browser::pool::{
@@ -131,6 +132,7 @@ pub enum GatewayErrorKind {
     Memory,
     ProviderFailure,
     ProviderAssetBlocked,
+    ProviderDocumentDenied,
     ProviderInputRejected,
     BackendUnavailable,
 }
@@ -259,6 +261,12 @@ impl axum::response::IntoResponse for GatewayError {
                 "provider_asset_blocked",
                 "provider JavaScript assets are blocked; check provider network, browser compatibility and authentication",
             ),
+            GatewayErrorKind::ProviderDocumentDenied => (
+                StatusCode::BAD_GATEWAY,
+                "provider_error",
+                "provider_document_denied",
+                "provider document was denied by HTTP 403; check network and browser access",
+            ),
             GatewayErrorKind::ProviderInputRejected => (
                 StatusCode::BAD_GATEWAY,
                 "provider_error",
@@ -334,6 +342,13 @@ fn map_backend_error(error: anyhow::Error) -> GatewayError {
         return GatewayError::typed(
             GatewayErrorKind::ProviderAssetBlocked,
             "provider JavaScript assets blocked by HTTP 403",
+            false,
+        );
+    }
+    if error.downcast_ref::<MetaAiDocumentDeniedError>().is_some() {
+        return GatewayError::typed(
+            GatewayErrorKind::ProviderDocumentDenied,
+            "provider first-party document was denied by HTTP 403",
             false,
         );
     }
@@ -632,6 +647,15 @@ mod tests {
             "provider JavaScript assets blocked by HTTP 403"
         );
 
+        let metaai_denied =
+            super::map_backend_error(anyhow::Error::new(super::MetaAiDocumentDeniedError));
+        assert_eq!(metaai_denied.kind, GatewayErrorKind::ProviderDocumentDenied);
+        assert!(!metaai_denied.is_retryable());
+        assert_eq!(
+            metaai_denied.message,
+            "provider first-party document was denied by HTTP 403"
+        );
+
         let input_rejected = super::map_backend_error(anyhow::Error::new(
             super::ProviderComposerInputRejectedError,
         ));
@@ -715,6 +739,11 @@ mod tests {
                 GatewayErrorKind::ProviderAssetBlocked,
                 StatusCode::BAD_GATEWAY,
                 "provider_asset_blocked",
+            ),
+            (
+                GatewayErrorKind::ProviderDocumentDenied,
+                StatusCode::BAD_GATEWAY,
+                "provider_document_denied",
             ),
             (
                 GatewayErrorKind::ProviderInputRejected,
