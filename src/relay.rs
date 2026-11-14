@@ -116,7 +116,9 @@ impl ProviderActivationStates {
     }
 
     fn finish(&self, provider: &str, generation: Option<u64>, succeeded: bool) {
-        let Some(generation) = generation else { return };
+        let Some(generation) = generation else {
+            return;
+        };
         if let Ok(mut states) = self.states.lock() {
             if let Some((current_generation, phase)) = states.get_mut(provider) {
                 if *current_generation == generation && *phase == RelayActivationPhase::Pending {
@@ -156,6 +158,23 @@ impl ProviderActivationStates {
 #[cfg(test)]
 mod relay_activation_state_tests {
     use super::ProviderActivationStates;
+
+    #[tokio::test]
+    async fn late_worker_completion_cannot_resurrect_a_revoked_session() {
+        use std::sync::Arc;
+        let states = Arc::new(ProviderActivationStates::default());
+        let generation = states.begin("metaai");
+        let (continue_tx, continue_rx) = tokio::sync::oneshot::channel::<()>();
+        let late_states = Arc::clone(&states);
+        let worker = tokio::spawn(async move {
+            let _ = continue_rx.await;
+            late_states.finish("metaai", generation, true);
+        });
+        states.revoke("metaai");
+        continue_tx.send(()).unwrap();
+        worker.await.unwrap();
+        assert_eq!(states.current("metaai"), "cancelled");
+    }
 
     #[test]
     fn pending_completion_is_generation_fenced_and_not_authentication() {
