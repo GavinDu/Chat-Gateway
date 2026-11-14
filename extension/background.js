@@ -10,6 +10,11 @@ const CONNECTION_DIAGNOSTICS_TTL_MS = 5_000;
 let lastGatewayCheck = null;
 let lastGatewayCheckAt = 0;
 let lastGatewayIdentity = null;
+// Only throttle automatic cookie-event resync after a gateway health probe
+// has actually failed; a manual Sync or scheduled liveness probe is never
+// suppressed. A new gateway identity cannot inherit the old outage.
+const COOKIE_OUTAGE_BACKOFF_MS = 60_000;
+let automaticCookieSyncSuppressedUntil = 0;
 function classifyRelayFailure(error) {
   const message = String(error?.message || "");
   if (message.includes("timed out") || message.includes("cancelled")) return "gateway_timeout";
@@ -60,6 +65,7 @@ async function relayDiagnostics(force = false) {
   if (identity !== lastGatewayIdentity) {
     lastGatewayCheck = null;
     lastGatewayIdentity = identity;
+    automaticCookieSyncSuppressedUntil = 0;
     providerDiagnostics.clear();
   }
   const extension = {
@@ -88,17 +94,20 @@ async function relayDiagnostics(force = false) {
     if (!response.ok) {
       lastGatewayCheck = null;
       lastGatewayCheckAt = 0;
+      automaticCookieSyncSuppressedUntil = Date.now() + COOKIE_OUTAGE_BACKOFF_MS;
       return finalizeRelayDiagnostics({ok:false, extension, gateway_issue:
         response.status === 401 || response.status === 403 ? "gateway_unauthorized" : "gateway_request_failed"});
     }
     const gateway = await response.json();
     lastGatewayCheck = gateway;
     lastGatewayCheckAt = Date.now();
+    automaticCookieSyncSuppressedUntil = 0;
     extension.gateway_checked_at = new Date(lastGatewayCheckAt).toISOString();
     return finalizeRelayDiagnostics({ok:true, extension, gateway});
   } catch (error) {
     lastGatewayCheck = null;
     lastGatewayCheckAt = 0;
+    automaticCookieSyncSuppressedUntil = Date.now() + COOKIE_OUTAGE_BACKOFF_MS;
     return finalizeRelayDiagnostics({ok:false, extension, gateway_issue:classifyRelayFailure(error)});
   }
 }
@@ -193,6 +202,10 @@ chrome.cookies.onChanged.addListener(({cookie}) => {
     const timer = setTimeout(() => {
       if (debounceTimers.get(provider) !== timer) return;
       debounceTimers.delete(provider);
+      // A recent failed gateway health probe already establishes an outage.
+      // Do not convert every cookie rotation into a doomed automatic import;
+      // retain the next scheduled health check and explicit manual override.
+      if (Date.now() < automaticCookieSyncSuppressedUntil) return;
       queueProviderSync(provider).catch(() => {
         // Never log cookie material or relay credentials. The popup can surface status on demand.
       });
