@@ -274,7 +274,7 @@ test("diagnostics separates connection, browser host permissions and saved gatew
   assert.equal(response.extension.permissions.providers.claude, false);
   assert.equal(response.gateway.providers[1].linked, false,
     "extension linkage must not rewrite backend saved-session state");
-  assert.match(response.extension.gateway_checked_at, /^\\d{4}-\\d\\d-\\d\\dT/);
+  assert.match(response.extension.gateway_checked_at, /^[0-9]{4}-[0-9]{2}-[0-9]{2}T/);
   assert.ok(!JSON.stringify(response).includes("127.0.0.1:8080"),
     "never include the configured gateway origin in the diagnostics payload");
 });
