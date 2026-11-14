@@ -4,7 +4,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
 
-function loadPopup({failCookieDomain = null, includeSecondProvider = false, manualVerification = false, localRelay = false, activation = null} = {}) {
+function loadPopup({failCookieDomain = null, includeSecondProvider = false, manualVerification = false, localRelay = false, activation = null, diagnosticsSync = null} = {}) {
   const elements = new Map();
   const chromeCalls = [];
   const values = {gateway:"http://127.0.0.1:8080",linkedProviders:[]};
@@ -29,6 +29,9 @@ function loadPopup({failCookieDomain = null, includeSecondProvider = false, manu
   }
   const runtime = { async sendMessage(request) {
     chromeCalls.push(request.type + ":" + (request.provider||""));
+    if(request.type==="relay-diagnostics" && diagnosticsSync) {
+      return {ok:false,extension:{provider_sync:{metaai:diagnosticsSync}}};
+    }
     if(request.type==="logout-provider") {
       server.linked=false;
       values.linkedProviders=values.linkedProviders.filter(p=>p!==request.provider);
@@ -129,6 +132,23 @@ test("browser activation statuses stay distinct from login verification", async 
     assert.ok(status.includes(expected), "show only fixed activation categories");
     assert.doesNotMatch(status, /Login verified/);
   }
+});
+
+test("popup displays last extension sync and stale status independently of auth", async () => {
+  const last = "2026-11-14T17:00:00.000Z";
+  const popup = loadPopup({diagnosticsSync:{
+    state:"uploaded",issue:"gateway_request_failed",updated_at:last,stale:true
+  }});
+  popup.server.linked = true;
+  await popup.controls.refreshStatus();
+  const row = popup.elements.get("status").children[0];
+  const status = row.children.find(child => child.className==="provider-detail").textContent;
+  assert.match(status,/Login unverified/);
+  assert.ok(status.includes("Last extension sync attempt: "+last));
+  assert.match(status,/Extension sync status stale/);
+  assert.match(status,/Extension sync: gateway request failed/);
+  assert.doesNotMatch(status,/Login verified/);
+  assert.doesNotMatch(status,/private|token|cookie=secret/);
 });
 
 test("provider challenge is shown as manual verification, not an expired session or automatic retry",async()=>{
