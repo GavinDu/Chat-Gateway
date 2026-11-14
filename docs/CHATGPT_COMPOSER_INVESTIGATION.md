@@ -255,3 +255,44 @@ current-head CI, isolated applicable acceptance and repeated actual JSON and
 streaming completions before claiming reliability. Native MCP browser/SSH
 acceptance remains Not run while the execution host lacks prerequisites. No
 merge, merged-main validation or release installation is claimed.
+
+
+## Authenticated readiness comparison
+
+A private, metadata-only probe now verifies the encrypted extension export in
+an isolated copy using the same BrowserFactory and PageSession as the gateway.
+Both page-side and independent native response checks return session HTTP 200,
+user present, access token present and future expiry. No credential or account
+value is logged. The extension credentials are accepted in the backend runtime.
+An earlier probe with stale expired non-session cookies failed restoration and
+is excluded from that conclusion.
+
+The exact 33553b0 candidate still returned 502 after 63.92 seconds at
+submission_not_acknowledged. Stream prefill fixes do not establish live success.
+Controlled private probes then compared normal run_send with the same synthetic
+full transcript. Without a session check before submission it stalled for 61
+seconds; with the check it completed with exactly OK in 41 seconds. A single-line
+control also stalled without the check. These probes are diagnostic evidence,
+not repeated uninstrumented API acceptance or a reliability claim.
+
+The follow-up checks authenticated readiness before typing using the page's
+first-party /api/auth/session request. It waits for completion, bounded at ten
+seconds, rather than sleeping. Only a fixed outcome and HTTP status leave the
+page. Explicit 401 or an empty session returns the typed expired-session error;
+transport errors, malformed data, incomplete/expired sessions and 403/5xx fail
+closed without falsely classifying authentication. The check aborts on timeout
+and clears its state. Existing provider route and composer safeguards remain.
+
+Native tests cover delayed verified readiness, submission only after readiness,
+no typing/click on explicit authentication failure, unavailable classifications,
+redaction, cancellation, timeout and foreign-origin rejection. In-memory adapter
+fixtures supply verified synthetic sessions; their data-origin exception exists
+only in test builds and requires the existing explicit fixture marker.
+
+Formatting, Clippy, six JS facade tests and the dependency audit pass. The Mac
+unit run has 665 passes and the unchanged Linux-only /dev/shm failure, with no
+tests skipped or weakened. Current-head Linux CI and live JSON/streaming
+repetition for this new change are pending. MCP preflight
+still reports no SSH, no Chromium executable, and no clang/cmake on the execution
+host. Native browser/SSH E2E is Not run. No merge, merged-main validation or
+release installation is claimed.
