@@ -1739,7 +1739,7 @@ pub async fn discover_models(
 /// ChatGPT and Grok require an observable composer/response transition to
 /// acknowledge a send. Match actual provider hosts and Grok's alternate X
 /// route, never incidental substrings in query parameters or attacker hosts.
-fn submission_provider_for_url(url: &str) -> Option<&'static str> {
+pub(crate) fn submission_provider_for_url(url: &str) -> Option<&'static str> {
     let Ok(uri) = url.parse::<axum::http::Uri>() else {
         return None;
     };
