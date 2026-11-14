@@ -1838,6 +1838,7 @@ mod provider_submission_route_tests {
 /// Wait for the input, type the prompt, click send (v1 send steps 1-3;
 /// the response stream is polled by providers::run_send).
 pub async fn send_prompt(
+    provider: &str,
     page: &mut Page,
     set: &EffectiveSelectorSet,
     prompt: &str,
@@ -1850,7 +1851,7 @@ pub async fn send_prompt(
         .await
         .inspect_err(|_| {
             tracing::warn!(
-                provider = expected_submission_provider.unwrap_or("other"),
+                provider = provider,
                 stage = "composer_wait",
                 outcome = "timeout_or_error",
                 "provider composer diagnostic"
@@ -1863,7 +1864,7 @@ pub async fn send_prompt(
     }
     if let Err(error) = human_type(page, &inputs, prompt).await {
         tracing::warn!(
-            provider = expected_submission_provider.unwrap_or("other"),
+            provider = provider,
             stage = "input_dispatch",
             outcome = "failed",
             "provider composer diagnostic"
@@ -1880,7 +1881,7 @@ pub async fn send_prompt(
     // settling after typing. Never click Send with a missing or changed draft.
     if !composer_retains_prompt(page, input_sel, prompt)? {
         tracing::warn!(
-            provider = expected_submission_provider.unwrap_or("other"),
+            provider = provider,
             stage = "framework_render",
             outcome = "draft_not_retained",
             "provider composer diagnostic"
@@ -1911,7 +1912,7 @@ pub async fn send_prompt(
         .await
         .inspect_err(|_| {
             tracing::warn!(
-                provider = expected_submission_provider.unwrap_or("other"),
+                provider = provider,
                 stage = "send_control",
                 outcome = "unavailable_or_rejected",
                 "provider composer diagnostic"
@@ -1933,7 +1934,7 @@ pub async fn send_prompt(
             let after = submission_snapshot(page, input_sel, &set.response_refs())?;
             if submission_observed_for_prompt(page, &before, &after, prompt)? {
                 tracing::debug!(
-                    provider = expected_submission_provider.unwrap_or("other"),
+                    provider = provider,
                     stage = "submission",
                     outcome = "acknowledged",
                     "provider composer diagnostic"
@@ -1942,7 +1943,7 @@ pub async fn send_prompt(
             }
         }
         tracing::warn!(
-            provider = expected_submission_provider.unwrap_or("other"),
+            provider = provider,
             stage = "submission",
             outcome = "not_acknowledged",
             "provider composer diagnostic"
