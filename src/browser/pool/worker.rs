@@ -39,7 +39,7 @@ mod session_worker_error_redaction_tests {
     }
 }
 
-/// Fixed, non-sensitive DOM readiness signals for the two current priority
+/// Fixed, non-sensitive DOM readiness signals for all nine registered
 /// providers. This does not select a new composer or type into arbitrary inputs;
 /// a generic editor may be a search/login field rather than the chat editor.
 struct ComposerPreflightEvidence {
@@ -76,6 +76,17 @@ impl ComposerPreflightEvidence {
     }
 }
 
+/// Reuse the provider's strict HTTPS route classifier. Grok's X route is
+/// intentionally allowed only under /i/grok, never from arbitrary x.com
+/// pages or lookalike hosts; the URL itself never enters diagnostic logs.
+fn composer_diagnostic_origin_matches(provider: &str, url: &str) -> bool {
+    providers::Provider::from_name(provider).is_some_and(|p| {
+        pool_policy::provider_thread_url_is_same_origin(url, p.login_url())
+            || (p == providers::Provider::Grok
+                && providers::common::submission_provider_for_url(url) == Some("grok"))
+    })
+}
+
 fn composer_preflight_evidence(
     provider: &str,
     page: &obscura_core::Page,
@@ -93,9 +104,7 @@ fn composer_preflight_evidence(
         Some("complete") => "complete",
         _ => "unknown",
     };
-    let provider_origin = providers::Provider::from_name(provider).is_some_and(|p| {
-        pool_policy::provider_thread_url_is_same_origin(&page.url(), p.login_url())
-    });
+    let provider_origin = composer_diagnostic_origin_matches(provider, &page.url());
     // Bounded element counts, no DOM text, attribute values, script URLs,
     // cookies, or prompt data. Null means the script did not evaluate.
     let hydration = page.evaluate(
@@ -150,7 +159,7 @@ fn report_composer_preflight_failure(
         outcome = "unavailable",
         "provider composer diagnostic"
     );
-    if matches!(provider, "chatgpt" | "metaai") {
+    if providers::Provider::from_name(provider).is_some() {
         let evidence = composer_preflight_evidence(provider, page, configured_inputs);
         tracing::warn!(
             provider,
@@ -404,6 +413,74 @@ mod composer_preflight_diagnostic_tests {
         assert!(missing
             .downcast_ref::<providers::metaai::MetaAiDocumentDeniedError>()
             .is_none());
+    }
+
+    #[test]
+    fn all_provider_composer_diagnostics_keep_grok_x_route_strict() {
+        assert!(composer_diagnostic_origin_matches(
+            "grok",
+            "https://x.com/i/grok",
+        ));
+        assert!(composer_diagnostic_origin_matches(
+            "grok",
+            "https://www.x.com/i/grok/conversation/123",
+        ));
+        assert!(composer_diagnostic_origin_matches(
+            "grok",
+            "https://grok.com/chat/123",
+        ));
+        for unsafe_origin in [
+            "https://x.com/home",
+            "https://x.com/i/grokk",
+            "https://x.com.attacker.invalid/i/grok",
+            "https://x.com@attacker.invalid/i/grok",
+            "http://x.com/i/grok",
+            "https://x.com:8443/i/grok",
+        ] {
+            assert!(!composer_diagnostic_origin_matches("grok", unsafe_origin));
+        }
+        assert!(!composer_diagnostic_origin_matches(
+            "claude",
+            "https://x.com/i/grok",
+        ));
+        assert!(!composer_diagnostic_origin_matches(
+            "not_a_provider",
+            "https://grok.com",
+        ));
+    }
+
+    #[tokio::test]
+    async fn failure_evidence_for_all_other_providers_is_metadata_only() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <textarea id="search" aria-label="untrusted token private"></textarea>
+            <input type="password" value="hidden-secret">
+            <div role="textbox">Not editable</div>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        for provider in ["claude", "grok", "perplexity", "gemini", "qwen", "manus"] {
+            let evidence = composer_preflight_evidence(provider, &page, &["#missing-editor"]);
+            assert!(!evidence.provider_origin);
+            assert!(evidence.generic_editor_actionable);
+            assert!(!evidence.configured_input_present);
+            assert_eq!(evidence.category(), "unexpected_origin");
+            let original = anyhow::anyhow!("failed without echoing token private");
+            let reported = report_composer_preflight_failure(
+                provider,
+                &page,
+                false,
+                &["#missing-editor"],
+                original,
+            );
+            assert!(reported.to_string().starts_with("failed without echoing"));
+        }
     }
 
     #[tokio::test]
