@@ -72,6 +72,116 @@ impl ProviderImportGates {
     }
 }
 
+/// The browser worker's session activation is independent of both saved
+/// credentials and verified authentication. Only fixed state names enter
+/// extension-facing diagnostics; no account data is retained here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RelayActivationPhase {
+    NotAttempted,
+    Pending,
+    Ready,
+    Failed,
+    Cancelled,
+}
+
+impl RelayActivationPhase {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::NotAttempted => "not_attempted",
+            Self::Pending => "pending",
+            Self::Ready => "ready",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
+/// A detached activation may finish after the initiating HTTP request times
+/// out. Match its generation before changing state so stale completion can
+/// never resurrect a newer or explicitly unlinked provider.
+#[derive(Default)]
+struct ProviderActivationStates {
+    states: Mutex<HashMap<String, (u64, RelayActivationPhase)>>,
+}
+
+impl ProviderActivationStates {
+    fn begin(&self, provider: &str) -> Option<u64> {
+        let mut states = self.states.lock().ok()?;
+        let entry = states
+            .entry(provider.to_owned())
+            .or_insert((0, RelayActivationPhase::NotAttempted));
+        entry.0 = entry.0.checked_add(1)?;
+        entry.1 = RelayActivationPhase::Pending;
+        Some(entry.0)
+    }
+
+    fn finish(&self, provider: &str, generation: Option<u64>, succeeded: bool) {
+        let Some(generation) = generation else { return };
+        if let Ok(mut states) = self.states.lock() {
+            if let Some((current_generation, phase)) = states.get_mut(provider) {
+                if *current_generation == generation && *phase == RelayActivationPhase::Pending {
+                    *phase = if succeeded {
+                        RelayActivationPhase::Ready
+                    } else {
+                        RelayActivationPhase::Failed
+                    };
+                }
+            }
+        }
+    }
+
+    fn revoke(&self, provider: &str) {
+        if let Ok(mut states) = self.states.lock() {
+            let entry = states
+                .entry(provider.to_owned())
+                .or_insert((0, RelayActivationPhase::NotAttempted));
+            if let Some(next) = entry.0.checked_add(1) {
+                entry.0 = next;
+                entry.1 = RelayActivationPhase::Cancelled;
+            }
+        }
+    }
+
+    fn current(&self, provider: &str) -> &'static str {
+        match self.states.lock() {
+            Ok(states) => states
+                .get(provider)
+                .map_or(RelayActivationPhase::NotAttempted, |entry| entry.1)
+                .as_str(),
+            Err(_) => "unknown",
+        }
+    }
+}
+
+#[cfg(test)]
+mod relay_activation_state_tests {
+    use super::ProviderActivationStates;
+
+    #[test]
+    fn pending_completion_is_generation_fenced_and_not_authentication() {
+        let states = ProviderActivationStates::default();
+        assert_eq!(states.current("manus"), "not_attempted");
+        let first = states.begin("manus");
+        assert_eq!(states.current("manus"), "pending");
+        states.finish("manus", first, true);
+        assert_eq!(states.current("manus"), "ready");
+        let second = states.begin("manus");
+        states.finish("manus", first, false);
+        assert_eq!(states.current("manus"), "pending");
+        states.finish("manus", second, false);
+        assert_eq!(states.current("manus"), "failed");
+
+        let third = states.begin("manus");
+        states.revoke("manus");
+        states.finish("manus", third, true);
+        assert_eq!(states.current("manus"), "cancelled");
+        let fresh = states.begin("manus");
+        states.finish("manus", fresh, true);
+        assert_eq!(states.current("manus"), "ready");
+        assert_eq!(states.current("qwen"), "not_attempted");
+    }
+}
+
 /// Keep the provider's serialization guard alive independently of the HTTP
 /// response future. Cancelling the caller must not unlock an already-started
 /// vault write, browser activation, or revocation running in the worker.
@@ -298,6 +408,7 @@ pub struct RelayState {
     used_nonces: Mutex<HashMap<String, Instant>>,
     request_times: Mutex<VecDeque<Instant>>,
     import_gates: ProviderImportGates,
+    activation_states: Arc<ProviderActivationStates>,
 }
 
 impl RelayState {
@@ -319,6 +430,8 @@ impl RelayState {
                 used_nonces: Mutex::new(HashMap::new()),
                 request_times: Mutex::new(VecDeque::new()),
                 import_gates: ProviderImportGates::default(),
+            activation_states: Arc::new(ProviderActivationStates::default()),
+                activation_states: Arc::new(ProviderActivationStates::default()),
             },
             code,
         ))
@@ -1257,6 +1370,7 @@ pub async fn status(State(app): State<Arc<crate::AppState>>, headers: HeaderMap)
         providers.push(serde_json::json!({
             "provider": provider,
             "linked": session_present,
+            "activation": app.relay.activation_states.current(provider),
             "enabled": enabled,
             "authentication": authentication,
             "availability": lifecycle.as_str(),
