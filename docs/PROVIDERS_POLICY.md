@@ -9,9 +9,15 @@ actual review owner/date below.
 
 ## Default posture
 
-- Every provider in `config.example.yaml` is disabled by default. Enable a provider
-  only after reviewing its current terms, applicable usage policy, and whether
-  browser automation is permitted for the intended use.
+- The shipped `config.example.yaml` enables **Manus** only per an explicit
+  owner request; the other eight providers remain disabled. This is a
+  configuration example, **not** a determination that browser automation is
+  authorized by any provider's terms. For your own account, enable or retain
+  a provider only after reviewing its current terms, usage policy, and whether
+  the intended browser automation is permitted.
+- Existing local `config.yaml` files are not overwritten by `docker-run.sh init`.
+  Changing an example or opening the official website does not link a session
+  or prove authenticated Chat/Agent execution.
 - Keep this gateway for personal, single-user use unless you have explicit rights
   and authorization for another deployment model. Do not share accounts or expose
   the gateway as a service to other users.
@@ -41,7 +47,7 @@ for your country and account before enabling a provider.
 | Grok | [Consumer Terms of Service](https://x.ai/legal/terms-of-service) · [SpaceXAI Legal Center](https://x.ai/legal) | Confirm whether the terms for Grok on x.com or the standalone Grok service apply to the account. |
 | Mistral | [Consumer Terms outside the EEA](https://legal.mistral.ai/terms/row-consumer-terms/) · [Legal Center](https://legal.mistral.ai/terms/get-started/) | The reviewed consumer terms restrict extracting content except through permitted product functionality. Obtain clarification before enabling scripted UI extraction. |
 | Perplexity | [Terms of Service](https://www.perplexity.ai/hub/legal/terms-of-service) | Confirm consumer terms and any service-specific terms for the subscribed plan; API terms are separate. |
-| Manus | [Terms of Service](https://manus.im/terms) | Browser integration is disabled by default. Confirm whether scripted web UI use is authorized before enabling; Chat Mode and Agent Mode have different execution semantics. The adapter selectors and task completion behavior still require signed-in validation. |
+| Manus | [Terms of Service](https://manus.im/terms) | The owner-requested example has `enabled: true`, **not blanket permission to automate**. Review the terms and account authorization before running it; disable Manus in your own config if permission cannot be established. Chat Mode and Agent Mode have different execution semantics. Session linking, selector reliability and task completion still require signed-in validation. |
 
 ## Review record
 

@@ -55,4 +55,26 @@ printf 'owner-existing-configuration\n' > "$CHAT_GATEWAY_CONFIG"
 bash "$ROOT/scripts/docker-run.sh" init >/dev/null
 [[ "$(cat "$CHAT_GATEWAY_CONFIG")" == "owner-existing-configuration" ]]
 
-echo "PASS all nine provider login URLs; unknown provider denied; existing config unchanged"
+# Keep the checked-in provider risk register truthful about the owner
+# example. This does not certify that any provider terms permit automation.
+awk '
+  /^  - name: / { provider=$3 }
+  /^    enabled: / {
+    if (provider == "manus" && $2 == "true") manus_enabled=1
+    if (provider != "manus" && $2 == "true") unexpected_enabled=1
+  }
+  END { if (!manus_enabled || unexpected_enabled) exit 1 }
+' "$ROOT/config.example.yaml" || {
+  echo "Shipping example must enable only Manus" >&2
+  exit 1
+}
+grep -Fq 'enables **Manus** only' "$ROOT/docs/PROVIDERS_POLICY.md" || {
+  echo "Policy document disagrees with the shipping example" >&2
+  exit 1
+}
+grep -Fq 'not blanket permission to automate' "$ROOT/docs/PROVIDERS_POLICY.md" || {
+  echo "Manus example must not be misrepresented as terms authorization" >&2
+  exit 1
+}
+
+echo "PASS nine provider URLs; existing config unchanged; Manus example/policy consistent"
