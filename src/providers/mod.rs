@@ -456,14 +456,30 @@ fn is_new_response_node(baseline_count: usize, current_count: usize) -> bool {
     current_count > baseline_count
 }
 
-/// A response-node count remains above the baseline for every subsequent poll.
-/// Reset the text tracker only on the first observation of a new node.
+/// A blank newly rendered assistant placeholder raises the total count but
+/// leaves the last populated reply pointing at the PREVIOUS turn.
+fn has_unpopulated_new_response_placeholder(
+    baseline_count: usize,
+    current_count: usize,
+    baseline_populated_count: usize,
+    current_populated_count: usize,
+) -> bool {
+    is_new_response_node(baseline_count, current_count)
+        && current_populated_count <= baseline_populated_count
+}
+
+/// Reset only after a genuinely populated new response root arrives.
+/// Reused-node responses still use the existing baseline / streaming contract.
 fn should_reset_response_tracker(
     already_detected: bool,
     baseline_count: usize,
     current_count: usize,
+    baseline_populated_count: usize,
+    current_populated_count: usize,
 ) -> bool {
-    !already_detected && is_new_response_node(baseline_count, current_count)
+    !already_detected
+        && is_new_response_node(baseline_count, current_count)
+        && current_populated_count > baseline_populated_count
 }
 
 /// Avoid evaluating the DOM for response-node counts after the new response
@@ -764,6 +780,7 @@ pub async fn run_send(
     let done_signal = adapter.done_signal();
     let baseline_probe = adapter.response_probe(page, true);
     let baseline_response_count = baseline_probe.count;
+    let baseline_populated_count = baseline_probe.populated_count;
     let baseline = baseline_probe.text.filter(|t| !t.is_empty());
     let identical_answer_fallback = baseline.clone();
     let mut baseline = baseline;
@@ -884,17 +901,33 @@ pub async fn run_send(
             let _ = chunks.send(Err(error)).await;
             return;
         }
+        if !response_node_detected
+            && has_unpopulated_new_response_placeholder(
+                baseline_response_count,
+                probe.count,
+                baseline_populated_count,
+                probe.populated_count,
+            )
+        {
+            // The probe still returns the old populated answer while a new
+            // blank placeholder is visible. Neither reset/stream the old
+            // answer nor grant it terminal idle or Copy-control progress.
+            stable_ticks = 0;
+            previous_post_answer_affordance = false;
+            continue;
+        }
         if should_probe_response_count(response_node_detected)
             && should_reset_response_tracker(
                 response_node_detected,
                 baseline_response_count,
                 probe.count,
+                baseline_populated_count,
+                probe.populated_count,
             )
         {
-            // A new DOM node is the strongest signal that the provider started
-            // a fresh answer, even when its text matches the previous turn.
-            // Latch this transition: the node remains present on later polls,
-            // and resetting on every poll would re-emit the full answer.
+            // A *populated* new DOM node proves the response root changed,
+            // even when its text repeats the prior answer verbatim. Latch
+            // once; resetting on every poll would repeat the full delta.
             response_node_detected = true;
             tracker = ResponseDeltaTracker::new(None);
         }
@@ -1153,7 +1186,7 @@ mod response_delta_tracker_tests {
     #[test]
     fn response_tracker_resets_only_once_after_new_node() {
         let mut tracker = ResponseDeltaTracker::new(Some("old answer".to_string()));
-        if should_reset_response_tracker(false, 3, 4) {
+        if should_reset_response_tracker(false, 3, 4, 3, 4) {
             tracker = ResponseDeltaTracker::new(None);
         }
         assert_eq!(
@@ -1163,9 +1196,39 @@ mod response_delta_tracker_tests {
 
         // The DOM node remains present on later polls, but must not reset the
         // tracker again or cause the same complete answer to be emitted twice.
-        assert!(!should_reset_response_tracker(true, 3, 4));
+        assert!(!should_reset_response_tracker(true, 3, 4, 3, 4));
         assert_eq!(tracker.observe("same answer"), DeltaObservation::Stable);
-        assert!(!should_reset_response_tracker(false, 3, 3));
+        assert!(!should_reset_response_tracker(false, 3, 3, 3, 3));
+    }
+
+    #[test]
+    fn blank_new_placeholder_never_resets_or_completes_previous_reply() {
+        let mut tracker = ResponseDeltaTracker::new(Some("old".to_owned()));
+        assert!(has_unpopulated_new_response_placeholder(1, 2, 1, 1));
+        assert!(!should_reset_response_tracker(false, 1, 2, 1, 1));
+        assert_eq!(tracker.observe("old"), DeltaObservation::WaitingForNewResponse);
+
+        // When the newly inserted response root is populated, the tracker
+        // may reset and emit exactly one new answer.
+        assert!(!has_unpopulated_new_response_placeholder(1, 2, 1, 2));
+        assert!(should_reset_response_tracker(false, 1, 2, 1, 2));
+        tracker = ResponseDeltaTracker::new(None);
+        assert_eq!(
+            tracker.observe("fresh"),
+            DeltaObservation::Delta("fresh".to_owned())
+        );
+        assert_eq!(tracker.observe("fresh"), DeltaObservation::Stable);
+        assert!(!should_reset_response_tracker(true, 1, 2, 1, 2));
+
+        // Repeated same text is legitimate ONLY after the new root actually
+        // contains a response, not on the preceding empty placeholder.
+        tracker = ResponseDeltaTracker::new(None);
+        assert_eq!(
+            tracker.observe("old"),
+            DeltaObservation::Delta("old".to_owned())
+        );
+        assert!(!has_unpopulated_new_response_placeholder(1, 1, 1, 1));
+        assert!(!should_reset_response_tracker(false, 1, 1, 1, 1));
     }
 
     #[test]
