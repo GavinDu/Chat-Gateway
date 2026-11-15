@@ -2322,13 +2322,17 @@ mod composer_rejected_input_tests {
             .unwrap();
         page.evaluate(r#"document.querySelector('#target').value = 'private message';"#);
         assert_eq!(
-            page.evaluate("document.querySelector('#target').value").as_str(),
+            page.evaluate("document.querySelector('#target').value")
+                .as_str(),
             Some("private message")
         );
         assert!(!super::composer_retains_prompt(&page, "#target", "private message").unwrap());
         page.evaluate("document.querySelector('#empty').value = 'private message'");
         let snapshot = super::submission_snapshot(&page, "#empty", &[".assistant"]).unwrap();
-        assert!(snapshot.input_empty, "synthetic value on an empty contenteditable must not count as a real draft");
+        assert!(
+            snapshot.input_empty,
+            "synthetic value on an empty contenteditable must not count as a real draft"
+        );
         let rejected_click = super::click_send_or_enter_checked_with_policy(
             &mut page,
             &["#send"],
@@ -2337,20 +2341,24 @@ mod composer_rejected_input_tests {
             Some("private message"),
             false,
             None,
-        ).await;
-        assert!(rejected_click.is_err(), "last-moment Send check must reject synthetic value");
+        )
+        .await;
+        assert!(
+            rejected_click.is_err(),
+            "last-moment Send check must reject synthetic value"
+        );
         assert_eq!(page.evaluate("window.sendCount || 0").as_f64(), Some(0.0));
         let error = super::human_type(&page, &["#target"], "private message")
             .await
             .unwrap_err();
-        assert!(error.downcast_ref::<ProviderComposerInputRejectedError>().is_some());
+        assert!(error
+            .downcast_ref::<ProviderComposerInputRejectedError>()
+            .is_some());
         assert!(!error.to_string().contains("private message"));
+        assert_eq!(page.evaluate("window.sendCount || 0").as_f64(), Some(0.0));
         assert_eq!(
-            page.evaluate("window.sendCount || 0").as_f64(),
-            Some(0.0)
-        );
-        assert_eq!(
-            page.evaluate("document.querySelector('#other').textContent").as_str(),
+            page.evaluate("document.querySelector('#other').textContent")
+                .as_str(),
             Some("Unrelated draft")
         );
     }
@@ -2394,7 +2402,9 @@ mod composer_rejected_input_tests {
         let error = super::human_type(&page, &["#prompt"], "private-message")
             .await
             .unwrap_err();
-        assert!(error.downcast_ref::<ProviderComposerInputRejectedError>().is_some());
+        assert!(error
+            .downcast_ref::<ProviderComposerInputRejectedError>()
+            .is_some());
         assert!(!error.to_string().contains("private-message"));
         assert_eq!(
             page.evaluate("document.querySelector('#send').disabled")
