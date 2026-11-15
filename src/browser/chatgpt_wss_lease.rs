@@ -224,7 +224,8 @@ mod tests {
     #[test]
     fn exact_frame_limits_and_overflow_fail_closed() {
         let mut guard = ChatgptWssLeaseRegistry::new();
-        let lease = guard.open(guard.page_epoch(), 7).unwrap();
+        let epoch = guard.page_epoch();
+        let lease = guard.open(epoch, 7).unwrap();
         for (kind, limit) in [
             (FrameKind::Command, MAX_COMMAND_BYTES),
             (FrameKind::Text, MAX_TEXT_FRAME_BYTES),
@@ -246,8 +247,9 @@ mod tests {
     fn generation_and_serial_never_wrap() {
         let mut guard = ChatgptWssLeaseRegistry::new();
         guard.next_serial = u64::MAX;
+        let epoch = guard.page_epoch();
         assert_eq!(
-            guard.open(guard.page_epoch(), 4),
+            guard.open(epoch, 4),
             Err(LeaseRejection::GenerationExhausted)
         );
         assert_eq!(guard.active_count(), 0);
@@ -258,7 +260,8 @@ mod tests {
     #[test]
     fn diagnostics_never_echo_socket_identity_or_payload() {
         let mut guard = ChatgptWssLeaseRegistry::new();
-        let lease = guard.open(guard.page_epoch(), 987654321).unwrap();
+        let epoch = guard.page_epoch();
+        let lease = guard.open(epoch, 987654321).unwrap();
         let debug = format!("{lease:?}");
         assert!(!debug.contains("987654321"));
         assert!(!debug.contains("epoch"));
