@@ -565,7 +565,9 @@ mod tests {
         );
         assert!(!before.challenge, "polling must agree with the entry guard");
 
-        page.evaluate("document.querySelector('#composer span').textContent = 'Checking your browser now'");
+        page.evaluate(
+            "document.querySelector('#composer span').textContent = 'Checking your browser now'",
+        );
         assert!(
             !is_challenge_page(&page),
             "a changing rich-text draft must not persistently disable the provider"
