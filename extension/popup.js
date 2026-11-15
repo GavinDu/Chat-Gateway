@@ -285,7 +285,7 @@ $("pair").addEventListener("click", async () => {
     }
     // Bind a delayed remote pair response to the previous install identity.
     const expectedConnection = await chrome.storage.local.get(
-      ["gateway", "token", "connectionMode"]);
+      ["gateway", "token", "connectionMode", "pendingConnection"]);
     const response = await fetch(gateway + (remote ? "/relay/v1/pair" : "/relay/v1/connect/request"), {
       method:"POST", headers:{"Content-Type":"application/json"},
       body:JSON.stringify(remote ? {code} : {}), cache:"no-store", redirect:"error"
