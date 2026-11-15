@@ -123,14 +123,19 @@ enable_manus_config() {
   temporary="$(mktemp "${CONFIG}.manus.XXXXXX")"
   chmod 600 "$temporary"
   if ! awk '
-    /^  - name:[[:space:]]*/ {
-      provider = $3 == "manus" ? "manus" : ""
+    # Edit only the literal top-level providers: list. The same nested
+    # "- name: manus" structure under workflows or tools is not a provider.
+    /^[^[:space:]#]/ {
+      in_providers = $0 ~ /^providers:[[:space:]]*(#.*)?$/
+      if (in_providers) provider_sections++
+      provider = ""
+    }
+    in_providers && /^  - / {
+      # Any new list item ends the previous provider, even if malformed.
+      provider = $2 == "name:" && $3 == "manus" ? "manus" : ""
       if (provider == "manus") found++
     }
-    /^[^[:space:]#]/ {
-      if ($0 !~ /^providers:/) provider = ""
-    }
-    provider == "manus" && /^    enabled:[[:space:]]*/ {
+    in_providers && provider == "manus" && /^    enabled:[[:space:]]*/ {
       if ($2 == "false") {
         sub(/enabled:[[:space:]]*false/, "enabled: true")
         enabled++
@@ -144,11 +149,11 @@ enable_manus_config() {
     END {
       # Reject missing/duplicate Manus or enabled fields. A narrower
       # recognized subset is safer than modifying an unexpected YAML layout.
-      if (found != 1 || enabled != 1 || invalid != 0) exit 1
+      if (provider_sections != 1 || found != 1 || enabled != 1 || invalid != 0) exit 1
     }
   ' "$CONFIG" > "$temporary"; then
     rm -f "$temporary"
-    echo "Refused to edit: expected exactly one Manus provider and enabled: true/false in the standard config layout." >&2
+    echo "Refused to edit: expected one top-level providers block with exactly one Manus provider and enabled: true/false in the standard config layout." >&2
     return 1
   fi
   mv "$temporary" "$CONFIG"
