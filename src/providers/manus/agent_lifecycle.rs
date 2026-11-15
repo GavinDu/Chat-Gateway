@@ -114,7 +114,9 @@ impl AgentTaskLifecycle {
         if epoch != self.epoch {
             return Transition::Stale;
         }
-        if task_id.is_empty() {
+        // Never retain an unbounded page-provided identifier in worker memory.
+        // Real Manus identifiers have not yet been verified; err closed.
+        if task_id.is_empty() || task_id.len() > 1024 {
             return Transition::Invalid;
         }
         if self.phase == AgentPhase::Queued {
@@ -166,6 +168,7 @@ mod tests {
         let mut state = AgentTaskLifecycle::queued(7);
         assert_eq!(state.apply(7, "id-a", Event::Terminal), T::Invalid);
         assert_eq!(state.apply(7, "", Event::Accepted), T::Invalid);
+        assert_eq!(state.apply(7, &"x".repeat(1025), Event::Accepted), T::Invalid);
         assert_eq!(state.apply(6, "id-a", Event::Accepted), T::Stale);
         assert_eq!(state.apply(7, "id-a", Event::Accepted), T::Applied);
         assert_eq!(state.phase(), Phase::Accepted);
