@@ -112,6 +112,23 @@ test("local no-pairing 401 does not clear local connection or provider consent",
   assert.deepEqual(Array.from(f.state.linkedProviders),["chatgpt","manus"]);
 });
 
+test("legacy loopback paired token is revoked while tokenless local mode is preserved",async()=>{
+  const legacy=load({gateway:"http://127.0.0.1:8080",
+    token:"a".repeat(64),connectionMode:undefined,relayConnectionEpoch:undefined});
+  const result=await legacy.send(legacy.expected());
+  assert.equal(result.ok,true);
+  assert.equal(result.invalidated,true);
+  assert.equal(legacy.state.token,null);
+  assert.deepEqual(Array.from(legacy.state.linkedProviders),[]);
+
+  const local=load({gateway:"http://127.0.0.1:8080",
+    token:null,connectionMode:"local",relayConnectionEpoch:undefined});
+  const skipped=await local.send(local.expected());
+  assert.equal(skipped.invalidated,false);
+  assert.equal(local.state.connectionMode,"local");
+  assert.deepEqual(Array.from(local.state.linkedProviders),["chatgpt","manus"]);
+});
+
 test("stale 401 after explicit disconnect cannot revive or rotate current state",async()=>{
   const f=load();const before=f.expected();
   f.state.token=null;
