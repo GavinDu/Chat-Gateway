@@ -1457,7 +1457,7 @@ async fn click_send_or_enter_checked_with_unique_composer(
         for selector in send_selectors {
             let selector_js = serde_json::to_string(selector)?;
             let js = format!(
-                "(() => {{ {route_guard} {composer_guard} const input = {input_expr}; if (!input) return 'missing'; const expected = {expected_js}; if (expected !== null && {draft} !== expected) return 'changed'; const inputForm = input.form || input.closest('form'); let root = input; for (let depth = 0; root && depth < 12; depth++, root = root.parentElement) {{ if (root.tagName === 'BODY' || root.tagName === 'HTML') break; for (const button of root.querySelectorAll({selector_js})) {{ const buttonForm = button.form || button.closest('form'); if (buttonForm && buttonForm !== inputForm) continue; if (button.getClientRects().length && window.getComputedStyle(button).visibility !== 'hidden' && window.getComputedStyle(button).pointerEvents !== 'none' && !button.closest('[inert], [hidden], [aria-hidden=true], [aria-disabled=true]') && !button.disabled && !button.matches(':disabled') && !button.closest('fieldset[disabled]') && button.getAttribute('aria-disabled') !== 'true') {{ button.click(); return 'clicked'; }} }} if (root.tagName === 'FORM') break; }} const form = input.form || input.closest('form'); if (form && form.id) {{ for (const button of document.querySelectorAll({selector_js})) {{ if (button.tagName !== 'BUTTON' || (button.form !== form && button.getAttribute('form') !== form.id) || form.contains(button)) continue; if (button.getClientRects().length && window.getComputedStyle(button).visibility !== 'hidden' && window.getComputedStyle(button).pointerEvents !== 'none' && !button.closest('[inert], [hidden], [aria-hidden=true], [aria-disabled=true]') && !button.disabled && !button.matches(':disabled') && !button.closest('fieldset[disabled]') && button.getAttribute('aria-disabled') !== 'true') {{ button.click(); return 'clicked'; }} }} }} return 'waiting'; }})()"
+                "(() => {{ {route_guard} {composer_guard} const input = {input_expr}; if (!input) return 'missing'; const expected = {expected_js}; if (expected !== null && {draft} !== expected) return 'changed'; const inputForm = input.form || input.closest('form'); let root = input; for (let depth = 0; root && depth < 12; depth++, root = root.parentElement) {{ if (root.tagName === 'BODY' || root.tagName === 'HTML') break; const eligible = Array.from(root.querySelectorAll({selector_js})).filter(button => {{ const buttonForm = button.form || button.closest('form'); return (!buttonForm || buttonForm === inputForm) && button.getClientRects().length && window.getComputedStyle(button).visibility !== 'hidden' && window.getComputedStyle(button).pointerEvents !== 'none' && !button.closest('[inert], [hidden], [aria-hidden=true], [aria-disabled=true]') && !button.disabled && !button.matches(':disabled') && !button.closest('fieldset[disabled]') && button.getAttribute('aria-disabled') !== 'true'; }}); if (eligible.length > 1) return 'ambiguous-send'; if (eligible.length === 1) {{ eligible[0].click(); return 'clicked'; }} if (root.tagName === 'FORM') break; }} const form = input.form || input.closest('form'); if (form && form.id) {{ const eligible = Array.from(document.querySelectorAll({selector_js})).filter(button => button.tagName === 'BUTTON' && (button.form === form || button.getAttribute('form') === form.id) && !form.contains(button) && button.getClientRects().length && window.getComputedStyle(button).visibility !== 'hidden' && window.getComputedStyle(button).pointerEvents !== 'none' && !button.closest('[inert], [hidden], [aria-hidden=true], [aria-disabled=true]') && !button.disabled && !button.matches(':disabled') && !button.closest('fieldset[disabled]') && button.getAttribute('aria-disabled') !== 'true'); if (eligible.length > 1) return 'ambiguous-send'; if (eligible.length === 1) {{ eligible[0].click(); return 'clicked'; }} }} return 'waiting'; }})()"
             );
             match page.evaluate(&js).as_str() {
                 Some("clicked") => return Ok(true),
@@ -1466,6 +1466,9 @@ async fn click_send_or_enter_checked_with_unique_composer(
                 }
                 Some("ambiguous-composer") => {
                     anyhow::bail!("provider actionable composer ambiguous or unavailable")
+                }
+                Some("ambiguous-send") => {
+                    anyhow::bail!("provider actionable Send control ambiguous or unavailable")
                 }
                 Some("changed" | "missing") if expected_prompt.is_some() => {
                     anyhow::bail!("provider draft changed or disappeared while waiting for send")
@@ -1602,6 +1605,131 @@ mod manus_unique_composer_tests {
 #[cfg(test)]
 mod draft_at_click_tests {
     use super::{click_send_or_enter_checked, click_send_or_enter_checked_with_policy};
+
+    #[tokio::test]
+    async fn form_less_panel_rejects_two_actionable_send_buttons_before_click() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <section id="panel">
+                <textarea id="prompt">private draft</textarea>
+                <button id="wrong" class="send" type="button"
+                    onclick="window.wrong++">Another task</button>
+                <button id="right" class="send" type="button"
+                    onclick="window.sent++">Send</button>
+                <button class="send" hidden type="button">Hidden</button>
+                <button class="send" disabled type="button">Disabled</button>
+            </section>
+            <script>
+                window.wrong = 0; window.sent = 0; window.enters = 0;
+                document.querySelector('#prompt').addEventListener(
+                    'keydown', () => { window.enters++; });
+            </script>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+
+        let error = click_send_or_enter_checked_with_policy(
+            &mut page,
+            &["button.send"],
+            "#prompt",
+            100,
+            Some("private draft"),
+            true,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("Send control ambiguous"));
+        assert!(!error.to_string().contains("private draft"));
+        assert_eq!(page.evaluate("window.wrong").as_f64(), Some(0.0));
+        assert_eq!(page.evaluate("window.sent").as_f64(), Some(0.0));
+        assert_eq!(page.evaluate("window.enters").as_f64(), Some(0.0));
+
+        // Only one visible enabled candidate remains; it is still legitimate
+        // even though hidden and disabled clones match the same selector.
+        page.evaluate("document.querySelector('#wrong').disabled = true");
+        assert!(click_send_or_enter_checked_with_policy(
+            &mut page,
+            &["button.send"],
+            "#prompt",
+            100,
+            Some("private draft"),
+            false,
+            None,
+        )
+        .await
+        .unwrap());
+        assert_eq!(page.evaluate("window.wrong").as_f64(), Some(0.0));
+        assert_eq!(page.evaluate("window.sent").as_f64(), Some(1.0));
+    }
+
+    #[tokio::test]
+    async fn form_associated_external_send_controls_must_be_unambiguous() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <form id="target"><textarea id="prompt">draft</textarea></form>
+            <form id="other"><textarea>unrelated</textarea></form>
+            <button form="other" class="send" type="button"
+                onclick="window.other++">Unrelated form</button>
+            <button id="wrong" form="target" class="send" type="button"
+                onclick="window.wrong++">Another task</button>
+            <button id="right" form="target" class="send" type="button"
+                onclick="window.sent++">Send</button>
+            <script>
+                window.other = 0; window.wrong = 0; window.sent = 0;
+            </script>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+
+        let error = click_send_or_enter_checked_with_policy(
+            &mut page,
+            &["button.send"],
+            "#prompt",
+            100,
+            Some("draft"),
+            false,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("Send control ambiguous"));
+        for key in ["other", "wrong", "sent"] {
+            assert_eq!(
+                page.evaluate(&format!("window.{key}")).as_f64(),
+                Some(0.0),
+                "ambiguous external Send must never click a candidate"
+            );
+        }
+
+        page.evaluate("document.querySelector('#wrong').hidden = true");
+        assert!(click_send_or_enter_checked_with_policy(
+            &mut page,
+            &["button.send"],
+            "#prompt",
+            100,
+            Some("draft"),
+            false,
+            None,
+        )
+        .await
+        .unwrap());
+        assert_eq!(page.evaluate("window.other").as_f64(), Some(0.0));
+        assert_eq!(page.evaluate("window.wrong").as_f64(), Some(0.0));
+        assert_eq!(page.evaluate("window.sent").as_f64(), Some(1.0));
+    }
 
     #[tokio::test]
     async fn perplexity_send_click_rejects_newly_ambiguous_editors_atomically() {
