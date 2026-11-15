@@ -2965,7 +2965,7 @@ fn submission_observed_for_prompt(
             // child nodes cannot spoof a matching user turn.
             const hasNestedElements = !!last.querySelector('*');
             const actual = hasNestedElements
-                ? (last.innerText || last.textContent || '')
+                ? (last.innerText || '')
                 : (last.textContent || '');
             return canonical(actual) === canonical(expected);
         }})()"#
@@ -3365,6 +3365,15 @@ mod prompt_bound_submission_tests {
         assert!(!submission_observed_for_prompt(&page, &before, &after, "你好 emoji ☃️").unwrap());
         assert!(
             !submission_observed_for_prompt(&page, &before, &after, "你好\n\nemoji ☃").unwrap()
+        );
+
+        // Hidden nested text must never become a user-turn acknowledgement
+        // simply because innerText is empty and textContent is populated.
+        page.evaluate(
+            "document.body.lastElementChild.innerHTML = '<span hidden>secret-hidden</span>'",
+        );
+        assert!(
+            !submission_observed_for_prompt(&page, &before, &after, "secret-hidden").unwrap()
         );
     }
 
