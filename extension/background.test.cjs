@@ -107,16 +107,18 @@ test("concurrent cross-provider links serialize one shared membership and epoch 
     Object.assign(state,update);
   };
   const expected={gateway:state.gateway,connectionMode:"local"};
-  const send=(type,provider)=>new Promise(resolve=>
-    f.listeners.message[0]({type,provider,connection:expected},{},resolve));
-  const first=send("link-provider","chatgpt");
+  const send=(type,provider,attemptId)=>new Promise(resolve=>
+    f.listeners.message[0]({type,provider,connection:expected,attemptId},{},resolve));
+  const first=send("link-provider","chatgpt","attempt-chatgpt");
   await started;
-  const second=send("link-provider","claude");
+  const second=send("link-provider","claude","attempt-claude");
   for(let i=0;i<4;i++)await flushAsyncWork();
   assert.equal(writes,1,"second link must not run a storage get/set during first write");
   releaseFirst();
   assert.equal((await first).ok,true);
   assert.equal((await second).ok,true);
+  assert.equal((await send("commit-provider-link","chatgpt","attempt-chatgpt")).committed,true);
+  assert.equal((await send("commit-provider-link","claude","attempt-claude")).committed,true);
   assert.deepEqual(Array.from(state.linkedProviders).sort(),["chatgpt","claude"]);
   assert.ok(state.providerLinkEpochs.chatgpt);
   assert.ok(state.providerLinkEpochs.claude);
@@ -126,7 +128,8 @@ test("concurrent cross-provider links serialize one shared membership and epoch 
   restarted.sandbox.chrome.storage.local.get=async()=>({...state});
   restarted.sandbox.chrome.storage.local.set=async next=>Object.assign(state,next);
   const repeated=await new Promise(resolve=>restarted.listeners.message[0]({
-    type:"link-provider",provider:"chatgpt",connection:expected},{},resolve));
+    type:"link-provider",provider:"chatgpt",connection:expected,
+    attemptId:"attempt-after-restart"},{},resolve));
   assert.equal(repeated.ok,true);
   assert.equal(repeated.alreadyLinked,true);
   assert.deepEqual({...state.providerLinkEpochs},before,"MV3 restart preserves epochs");
@@ -149,7 +152,8 @@ test("logout of provider B racing link of A does not resurrect B consent",async(
   };
   f.sandbox.relayFetch=async()=>({ok:true,status:200});
   const send=(type,provider,connection)=>new Promise(resolve=>
-    f.listeners.message[0]({type,provider,connection},{},resolve));
+    f.listeners.message[0]({type,provider,connection,
+      attemptId:type==="link-provider" ? "attempt-link-a" : undefined},{},resolve));
   const newLink=send("link-provider","chatgpt",{
     gateway:state.gateway,connectionMode:"local"});
   await started;
