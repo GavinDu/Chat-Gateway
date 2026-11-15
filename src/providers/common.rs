@@ -613,6 +613,7 @@ mod streaming_visibility_regression_tests {
         let html = r#"<html><body>
             <article><div class="answer">prior answer</div></article>
             <article><div class="fallback">another selector answer</div></article>
+            <article><div class="answer" id="fresh" hidden>new current reply</div></article>
         </body></html>"#;
         let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
         page.goto(&format!("data:text/html,{encoded}"))
@@ -626,7 +627,7 @@ mod streaming_visibility_regression_tests {
             probe.populated_count, 1,
             "the lower-priority fallback may not reset the old reply tracker"
         );
-        page.evaluate("document.querySelector('body').insertAdjacentHTML('beforeend', '<div class=answer>new current reply</div>')");
+        page.evaluate("document.querySelector('#fresh').hidden = false");
         let next = response_probe(&page, &[".answer", ".fallback"], false);
         assert_eq!(next.text.as_deref(), Some("new current reply"));
         assert_eq!(next.populated_count, 2);
