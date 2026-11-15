@@ -1263,22 +1263,68 @@ async fn click_send_or_enter_checked_with_policy(
     allow_untrusted_enter: bool,
     expected_provider: Option<&str>,
 ) -> anyhow::Result<bool> {
+    click_send_or_enter_checked_with_unique_composer(
+        page,
+        send_selectors,
+        input_selector,
+        timeout_ms,
+        expected_prompt,
+        SendClickPolicy {
+            allow_untrusted_enter,
+            expected_provider,
+            unique_input_selectors: None,
+        },
+    )
+    .await
+}
+
+struct SendClickPolicy<'a> {
+    allow_untrusted_enter: bool,
+    expected_provider: Option<&'a str>,
+    unique_input_selectors: Option<&'a [&'a str]>,
+}
+
+/// Perplexity-only Send guard. The earlier composer check is not enough when
+/// a controlled SPA renders a second visible editor while Send is pending.
+/// The click check runs inside the same synchronous evaluation as the click.
+async fn click_send_or_enter_checked_with_unique_composer(
+    page: &mut Page,
+    send_selectors: &[&str],
+    input_selector: &str,
+    timeout_ms: u64,
+    expected_prompt: Option<&str>,
+    policy: SendClickPolicy<'_>,
+) -> anyhow::Result<bool> {
+    let SendClickPolicy {
+        allow_untrusted_enter,
+        expected_provider,
+        unique_input_selectors,
+    } = policy;
     let start = std::time::Instant::now();
     let input_js = serde_json::to_string(input_selector)?;
     let input_expr = visible_input_query(&input_js);
     let expected_js = serde_json::to_string(&expected_prompt)?;
     let draft = composer_draft_expression("input");
     let route_guard = provider_origin_guard_js(expected_provider)?;
+    let composer_guard = if let Some(inputs) = unique_input_selectors {
+        let expr = actionable_composer_count_expression(inputs)?;
+        format!("if ({expr} !== 1) return 'ambiguous-composer';")
+    } else {
+        String::new()
+    };
     while start.elapsed().as_millis() < timeout_ms as u128 {
         for selector in send_selectors {
             let selector_js = serde_json::to_string(selector)?;
             let js = format!(
-                "(() => {{ {route_guard} const input = {input_expr}; if (!input) return 'missing'; const expected = {expected_js}; if (expected !== null && {draft} !== expected) return 'changed'; const inputForm = input.form || input.closest('form'); let root = input; for (let depth = 0; root && depth < 12; depth++, root = root.parentElement) {{ if (root.tagName === 'BODY' || root.tagName === 'HTML') break; for (const button of root.querySelectorAll({selector_js})) {{ const buttonForm = button.form || button.closest('form'); if (buttonForm && buttonForm !== inputForm) continue; if (button.getClientRects().length && window.getComputedStyle(button).visibility !== 'hidden' && window.getComputedStyle(button).pointerEvents !== 'none' && !button.closest('[inert], [hidden], [aria-hidden=true], [aria-disabled=true]') && !button.disabled && !button.matches(':disabled') && !button.closest('fieldset[disabled]') && button.getAttribute('aria-disabled') !== 'true') {{ button.click(); return 'clicked'; }} }} if (root.tagName === 'FORM') break; }} const form = input.form || input.closest('form'); if (form && form.id) {{ for (const button of document.querySelectorAll({selector_js})) {{ if (button.tagName !== 'BUTTON' || (button.form !== form && button.getAttribute('form') !== form.id) || form.contains(button)) continue; if (button.getClientRects().length && window.getComputedStyle(button).visibility !== 'hidden' && window.getComputedStyle(button).pointerEvents !== 'none' && !button.closest('[inert], [hidden], [aria-hidden=true], [aria-disabled=true]') && !button.disabled && !button.matches(':disabled') && !button.closest('fieldset[disabled]') && button.getAttribute('aria-disabled') !== 'true') {{ button.click(); return 'clicked'; }} }} }} return 'waiting'; }})()"
+                "(() => {{ {route_guard} {composer_guard} const input = {input_expr}; if (!input) return 'missing'; const expected = {expected_js}; if (expected !== null && {draft} !== expected) return 'changed'; const inputForm = input.form || input.closest('form'); let root = input; for (let depth = 0; root && depth < 12; depth++, root = root.parentElement) {{ if (root.tagName === 'BODY' || root.tagName === 'HTML') break; for (const button of root.querySelectorAll({selector_js})) {{ const buttonForm = button.form || button.closest('form'); if (buttonForm && buttonForm !== inputForm) continue; if (button.getClientRects().length && window.getComputedStyle(button).visibility !== 'hidden' && window.getComputedStyle(button).pointerEvents !== 'none' && !button.closest('[inert], [hidden], [aria-hidden=true], [aria-disabled=true]') && !button.disabled && !button.matches(':disabled') && !button.closest('fieldset[disabled]') && button.getAttribute('aria-disabled') !== 'true') {{ button.click(); return 'clicked'; }} }} if (root.tagName === 'FORM') break; }} const form = input.form || input.closest('form'); if (form && form.id) {{ for (const button of document.querySelectorAll({selector_js})) {{ if (button.tagName !== 'BUTTON' || (button.form !== form && button.getAttribute('form') !== form.id) || form.contains(button)) continue; if (button.getClientRects().length && window.getComputedStyle(button).visibility !== 'hidden' && window.getComputedStyle(button).pointerEvents !== 'none' && !button.closest('[inert], [hidden], [aria-hidden=true], [aria-disabled=true]') && !button.disabled && !button.matches(':disabled') && !button.closest('fieldset[disabled]') && button.getAttribute('aria-disabled') !== 'true') {{ button.click(); return 'clicked'; }} }} }} return 'waiting'; }})()"
             );
             match page.evaluate(&js).as_str() {
                 Some("clicked") => return Ok(true),
                 Some("off-provider") => {
                     anyhow::bail!("provider left its chat origin before Send click")
+                }
+                Some("ambiguous-composer") => {
+                    anyhow::bail!("provider actionable composer ambiguous or unavailable")
                 }
                 Some("changed" | "missing") if expected_prompt.is_some() => {
                     anyhow::bail!("provider draft changed or disappeared while waiting for send")
@@ -1287,6 +1333,10 @@ async fn click_send_or_enter_checked_with_policy(
             }
         }
         drive_page(page, Duration::from_millis(150)).await;
+    }
+    // Recheck after the final asynchronous wait before any Enter fallback.
+    if let Some(inputs) = unique_input_selectors {
+        require_unique_actionable_composer(page, inputs)?;
     }
     // A disabled send control is an explicit refusal by the application.
     // Synthetic Enter is not trusted and must not bypass that state.
@@ -1319,6 +1369,59 @@ async fn click_send_or_enter_checked_with_policy(
 #[cfg(test)]
 mod draft_at_click_tests {
     use super::{click_send_or_enter_checked, click_send_or_enter_checked_with_policy};
+
+    #[tokio::test]
+    async fn perplexity_send_click_rejects_newly_ambiguous_editors_atomically() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <form><textarea id="thread" class="candidate">draft</textarea>
+                <button id="send" type="button" onclick="window.sent=true">Send</button>
+            </form>
+            <textarea id="search" class="candidate"></textarea>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        let result = super::click_send_or_enter_checked_with_unique_composer(
+            &mut page,
+            &["#send"],
+            "#thread",
+            100,
+            Some("draft"),
+            super::SendClickPolicy {
+                allow_untrusted_enter: true,
+                expected_provider: None,
+                unique_input_selectors: Some(&["textarea.candidate", "#thread"]),
+            },
+        )
+        .await;
+        assert!(result.unwrap_err().to_string().contains("ambiguous"));
+        assert_eq!(page.evaluate("window.sent === true").as_bool(), Some(false));
+
+        // The same editor matched by two configured selectors counts once.
+        page.evaluate("document.querySelector('#search').setAttribute('hidden', '')");
+        let clicked = super::click_send_or_enter_checked_with_unique_composer(
+            &mut page,
+            &["#send"],
+            "#thread",
+            100,
+            Some("draft"),
+            super::SendClickPolicy {
+                allow_untrusted_enter: true,
+                expected_provider: None,
+                unique_input_selectors: Some(&["textarea.candidate", "#thread"]),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(clicked);
+        assert_eq!(page.evaluate("window.sent === true").as_bool(), Some(true));
+    }
 
     #[tokio::test]
     async fn pointer_events_blocked_send_is_not_clicked_or_bypassed() {
@@ -2566,6 +2669,20 @@ pub async fn send_prompt(
                 "provider composer diagnostic"
             );
         })?;
+    } else if provider == "perplexity" {
+        click_send_or_enter_checked_with_unique_composer(
+            page,
+            &sends,
+            input_sel,
+            5_000,
+            Some(prompt),
+            SendClickPolicy {
+                allow_untrusted_enter: true,
+                expected_provider: send_guard_provider,
+                unique_input_selectors: Some(&inputs),
+            },
+        )
+        .await?;
     } else {
         click_send_or_enter_checked_with_policy(
             page,
