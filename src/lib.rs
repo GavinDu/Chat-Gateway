@@ -11,3 +11,6 @@ pub mod chatgpt_wss_policy;
 
 #[path = "browser/chatgpt_wss_lease.rs"]
 pub mod chatgpt_wss_lease;
+
+#[path = "providers/composer_evidence.rs"]
+pub mod composer_evidence;
