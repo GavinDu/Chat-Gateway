@@ -52,6 +52,14 @@ pub struct RequestIdentity {
     epoch: u64,
 }
 
+impl PartialEq for RequestIdentity {
+    fn eq(&self, other: &Self) -> bool {
+        self.epoch == other.epoch && Arc::ptr_eq(&self.owner, &other.owner)
+    }
+}
+
+impl Eq for RequestIdentity {}
+
 impl fmt::Debug for RequestIdentity {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("RequestIdentity(<redacted>)")
