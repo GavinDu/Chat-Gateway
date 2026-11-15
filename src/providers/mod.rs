@@ -482,6 +482,17 @@ fn should_reset_response_tracker(
         && current_populated_count > baseline_populated_count
 }
 
+/// If an empty placeholder was observed, its disappearance must not revive
+/// the earlier answer as a completion after a transient Stop indicator.
+fn stale_baseline_after_disappearing_placeholder(
+    saw_placeholder: bool,
+    populated_new_root_detected: bool,
+    old_text: Option<&str>,
+    current_text: Option<&str>,
+) -> bool {
+    saw_placeholder && !populated_new_root_detected && current_text == old_text
+}
+
 /// Avoid evaluating the DOM for response-node counts after the new response
 /// node has already been detected; the count remains elevated on every poll.
 fn should_probe_response_count(response_node_detected: bool) -> bool {
@@ -834,6 +845,7 @@ pub async fn run_send(
     let mut previous_post_answer_affordance = false;
     let mut saw_post_answer_affordance_absent = !baseline_probe.post_answer_affordance;
     let mut response_node_detected = false;
+    let mut saw_unpopulated_placeholder = false;
     let mut poll_count = 0u32;
 
     loop {
@@ -912,6 +924,7 @@ pub async fn run_send(
             // The probe still returns the old populated answer while a new
             // blank placeholder is visible. Neither reset/stream the old
             // answer nor grant it terminal idle or Copy-control progress.
+            saw_unpopulated_placeholder = true;
             stable_ticks = 0;
             previous_post_answer_affordance = false;
             continue;
@@ -930,6 +943,19 @@ pub async fn run_send(
             // once; resetting on every poll would repeat the full delta.
             response_node_detected = true;
             tracker = ResponseDeltaTracker::new(None);
+        }
+        if stale_baseline_after_disappearing_placeholder(
+            saw_unpopulated_placeholder,
+            response_node_detected,
+            identical_answer_fallback.as_deref(),
+            probe.text.as_deref(),
+        ) {
+            // A canceled/rerendered empty new root is not evidence that the
+            // previous answer was generated again. Wait for new content or
+            // fail with the existing typed first-content timeout.
+            stable_ticks = 0;
+            previous_post_answer_affordance = false;
+            continue;
         }
 
         let streaming = probe.streaming;
@@ -1229,6 +1255,27 @@ mod response_delta_tracker_tests {
         );
         assert!(!has_unpopulated_new_response_placeholder(1, 1, 1, 1));
         assert!(!should_reset_response_tracker(false, 1, 1, 1, 1));
+
+        // A transient placeholder disappearing after Stop cannot certify
+        // the old reply as a new identical answer.
+        assert!(stale_baseline_after_disappearing_placeholder(
+            true,
+            false,
+            Some("old"),
+            Some("old")
+        ));
+        assert!(!stale_baseline_after_disappearing_placeholder(
+            true,
+            false,
+            Some("old"),
+            Some("fresh")
+        ));
+        assert!(!stale_baseline_after_disappearing_placeholder(
+            true,
+            true,
+            Some("old"),
+            Some("old")
+        ));
     }
 
     #[test]
