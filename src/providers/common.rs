@@ -2075,7 +2075,10 @@ mod login_url_classification_tests {
                 Some(provider),
                 "login route must remain first-party: {provider}"
             );
-            assert!(is_login_url(url), "known provider login not recognized: {url}");
+            assert!(
+                is_login_url(url),
+                "known provider login not recognized: {url}"
+            );
         }
     }
 
@@ -2099,7 +2102,10 @@ mod login_url_classification_tests {
             "https://manus.im:444/auth/login",
             "https://www.meta.ai../login",
         ] {
-            assert!(!is_login_url(url), "unverified auth origin classified: {url}");
+            assert!(
+                !is_login_url(url),
+                "unverified auth origin classified: {url}"
+            );
         }
     }
 
