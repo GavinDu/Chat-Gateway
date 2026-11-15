@@ -263,14 +263,18 @@ pub(crate) fn is_known_external_challenge_url(url: &str) -> bool {
 /// explicit challenge URLs are always checked independently.
 pub(crate) const NON_MESSAGE_CHALLENGE_TEXT_JS: &str = r#"(() => {
     if (!document.body) return '';
-    const messages = "[data-message-author-role], [data-testid='assistant-message'], [data-testid='user-message'], [data-testid*='conversation-turn']";
+    // A chat draft or prior assistant reply quoting CAPTCHA wording is not a
+    // security overlay. Use explicit message-role roots already recognized
+    // by the provider adapters; do not exclude generic dialogs or page text.
+    const messages = "[data-message-author-role], [data-message-role], [data-role='assistant'], [data-role='user'], [data-testid='assistant-message'], [data-testid='user-message'], [data-testid*='assistant-response' i], [data-testid*='conversation-turn']";
+    const editors = "[contenteditable], [role='textbox'], textarea, input";
     const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
     let text = '';
     let visited = 0;
     while (walker.nextNode() && visited++ < 16000 && text.length < 12000) {
         const node = walker.currentNode;
         const parent = node.parentElement;
-        if (!parent || parent.closest(messages) ||
+        if (!parent || parent.closest(messages) || parent.closest(editors) ||
             parent.closest('[hidden], [inert], [aria-hidden="true"]') ||
             !parent.getClientRects().length ||
             window.getComputedStyle(parent).visibility === 'hidden') continue;
@@ -515,6 +519,81 @@ mod tests {
             !super::is_challenge_page(&page),
             "hidden challenge text is not a blocker"
         );
+    }
+
+    #[tokio::test]
+    async fn editable_drafts_and_manus_meta_role_replies_are_not_challenge_overlays() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <div id="composer" contenteditable="true" role="textbox">
+                <span>Verify you are human to continue</span>
+            </div>
+            <div id="rich-draft" contenteditable="plaintext-only">
+                Complete the captcha
+            </div>
+            <div id="role-draft" role="textbox">Unusual traffic</div>
+            <textarea id="native-draft">Security challenge</textarea>
+            <div data-message-role="assistant" class="answer">
+                A prior reply explains checking your browser
+            </div>
+            <div data-role="assistant">A security challenge is a verification step</div>
+            <div data-role="user">Please verify you are human</div>
+            <div data-testid="assistant-response-27">
+                Confirm you are not a robot is a quotation
+            </div>
+            <div id="manual-dialog" role="dialog" hidden>
+                Verify you are human
+            </div>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+
+        assert!(
+            !is_challenge_page(&page),
+            "visible user-authored draft and completed answer text are not security UI"
+        );
+        let before = crate::providers::common::response_probe(
+            &page,
+            &["[data-message-role='assistant']"],
+            true,
+        );
+        assert!(!before.challenge, "polling must agree with the entry guard");
+
+        page.evaluate("document.querySelector('#composer span').textContent = 'Checking your browser now'");
+        assert!(
+            !is_challenge_page(&page),
+            "a changing rich-text draft must not persistently disable the provider"
+        );
+        assert!(
+            !crate::providers::common::response_probe(
+                &page,
+                &["[data-message-role='assistant']"],
+                true,
+            )
+            .challenge
+        );
+
+        page.evaluate("document.querySelector('#manual-dialog').hidden = false");
+        assert!(
+            is_challenge_page(&page),
+            "visible verification dialog outside the draft/message still requires manual handling"
+        );
+        assert!(
+            crate::providers::common::response_probe(
+                &page,
+                &["[data-message-role='assistant']"],
+                true,
+            )
+            .challenge
+        );
+        page.evaluate("document.querySelector('#manual-dialog').hidden = true");
+        assert!(!is_challenge_page(&page), "hidden dialogs are excluded");
     }
 
     #[test]
