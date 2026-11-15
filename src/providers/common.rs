@@ -1074,12 +1074,25 @@ mod scoped_contenteditable_selection_tests {
 /// not trusted keystrokes. Frameworks listening only to trusted input
 /// may ignore it.
 pub fn press_enter(page: &Page, selector: &str) -> anyhow::Result<()> {
+    press_enter_with_provider(page, selector, None)
+}
+
+fn press_enter_with_provider(
+    page: &Page,
+    selector: &str,
+    expected_provider: Option<&str>,
+) -> anyhow::Result<()> {
     let sel_js = serde_json::to_string(selector)?;
     let el_js = visible_input_query(&sel_js);
+    let route_guard = provider_origin_guard_js(expected_provider)?;
     let js = format!(
-        "(function() {{ var el = {el_js}; if (!el) return false; el.focus(); ['keydown','keypress','keyup'].forEach(function(t) {{ el.dispatchEvent(new KeyboardEvent(t, {{key:'Enter', code:'Enter', keyCode:13, which:13, bubbles:true, cancelable:true}})); }}); return true; }})()"
+        "(function() {{ {route_guard} var el = {el_js}; if (!el) return false; el.focus(); ['keydown','keypress','keyup'].forEach(function(t) {{ el.dispatchEvent(new KeyboardEvent(t, {{key:'Enter', code:'Enter', keyCode:13, which:13, bubbles:true, cancelable:true}})); }}); return true; }})()"
     );
-    if page.evaluate(&js).as_bool() != Some(true) {
+    let result = page.evaluate(&js);
+    if result.as_str() == Some("off-provider") {
+        anyhow::bail!("provider left its chat origin before Enter fallback");
+    }
+    if result.as_bool() != Some(true) {
         anyhow::bail!("press Enter failed: input element not found");
     }
     Ok(())
@@ -1180,7 +1193,7 @@ async fn click_send_or_enter_checked_with_policy(
         );
     }
     // Enter dispatch remains a best-effort legacy fallback for other sites.
-    press_enter(page, input_selector)?;
+    press_enter_with_provider(page, input_selector, expected_provider)?;
     Ok(false)
 }
 
@@ -1946,7 +1959,7 @@ fn provider_origin_guard_js(expected_provider: Option<&str>) -> anyhow::Result<S
                let currentUrl;
                try {{ currentUrl = new URL(location.href); }}
                catch (_) {{ return 'off-provider'; }}
-               const host = currentUrl.hostname.toLowerCase().replace(/\\.$/, '');
+               const host = currentUrl.hostname.toLowerCase().replace(/\.$/, '');
                const path = currentUrl.pathname;
                let actualProvider = null;
                switch (host) {{
@@ -2015,6 +2028,28 @@ mod all_provider_origin_fence_tests {
         }
     }
 
+
+    #[tokio::test]
+    async fn redirected_composer_cannot_receive_prompt_or_send() {
+        let browser = obscura_core::Browser::builder().stealth(false).build().unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        page.goto("data:text/html,<html><body><form><textarea id='prompt'></textarea><button id='send' type='button' onclick='window.sent=true'>Send</button></form></body></html>").await.unwrap();
+        let error = super::human_type_with_provider(&page, &["#prompt"], "private draft", Some("qwen")).await.unwrap_err();
+        assert!(error.to_string().contains("chat origin"));
+        assert!(!error.to_string().contains("private draft"));
+        assert_eq!(page.evaluate("document.querySelector('#prompt').value").as_str(), Some(""));
+
+        page.evaluate("document.querySelector('#prompt').value = 'private draft'");
+        let rejected = super::click_send_or_enter_checked_with_policy(
+            &mut page, &["#send"], "#prompt", 100, Some("private draft"), true, Some("qwen")
+        ).await.unwrap_err();
+        assert!(rejected.to_string().contains("chat origin"));
+        assert_eq!(page.evaluate("window.sent === true").as_bool(), Some(false));
+
+        let enter = super::press_enter_with_provider(&page, "#prompt", Some("qwen")).unwrap_err();
+        assert!(enter.to_string().contains("chat origin"));
+    }
+
     #[tokio::test]
     async fn inline_page_guard_matches_rust_policy_for_each_provider() {
         let browser = obscura_core::Browser::builder().stealth(false).build().unwrap();
@@ -2052,6 +2087,7 @@ fn requires_submission_acknowledgement(url: &str) -> bool {
 /// another adapter simply because it exposes a matching generic composer.
 /// This is NOT an all-provider origin allowlist: unknown origins still need
 /// their own provider-specific browser-route checks and live evidence.
+#[cfg(test)]
 fn require_matching_known_provider_origin(adapter: &str, url: &str) -> anyhow::Result<()> {
     if submission_provider_for_url(url).is_some_and(|observed| observed != adapter) {
         anyhow::bail!("provider adapter does not match current chat origin");
