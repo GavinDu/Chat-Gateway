@@ -29,6 +29,7 @@ Usage:
   scripts/docker-run.sh logs
   scripts/docker-run.sh pairing-code (legacy paired-mode only)
   scripts/docker-run.sh login <provider>
+  scripts/docker-run.sh enable-manus (edit existing config only; restart separately)
 
 Environment:
   PORT                         Published loopback port (default: 8080)
@@ -108,6 +109,51 @@ init_config() {
   cp "$ROOT/config.example.yaml" "$CONFIG"
   chmod 600 "$CONFIG" 2>/dev/null || true
   echo "Created $CONFIG. Enable only providers you are authorized to use."
+}
+
+enable_manus_config() {
+  # Existing owner config takes priority over the shipping example. Change
+  # only the uniquely identified Manus provider when explicitly requested.
+  # Never implicitly create a new provider, overwrite secrets or restart Docker.
+  if [[ ! -f "$CONFIG" || -L "$CONFIG" ]]; then
+    echo "Existing regular config.yaml required; run init or inspect CHAT_GATEWAY_CONFIG." >&2
+    return 1
+  fi
+  local temporary
+  temporary="$(mktemp "${CONFIG}.manus.XXXXXX")"
+  chmod 600 "$temporary"
+  if ! awk '
+    /^  - name:[[:space:]]*/ {
+      provider = $3 == "manus" ? "manus" : ""
+      if (provider == "manus") found++
+    }
+    /^[^[:space:]#]/ {
+      if ($0 !~ /^providers:/) provider = ""
+    }
+    provider == "manus" && /^    enabled:[[:space:]]*/ {
+      if ($2 == "false") {
+        sub(/enabled:[[:space:]]*false/, "enabled: true")
+        enabled++
+      } else if ($2 == "true") {
+        enabled++
+      } else {
+        invalid++
+      }
+    }
+    { print }
+    END {
+      # Reject missing/duplicate Manus or enabled fields. A narrower
+      # recognized subset is safer than modifying an unexpected YAML layout.
+      if (found != 1 || enabled != 1 || invalid != 0) exit 1
+    }
+  ' "$CONFIG" > "$temporary"; then
+    rm -f "$temporary"
+    echo "Refused to edit: expected exactly one Manus provider and enabled: true/false in the standard config layout." >&2
+    return 1
+  fi
+  mv "$temporary" "$CONFIG"
+  echo "Manus enabled in $CONFIG (other providers unchanged)."
+  echo "Restart Chat Gateway explicitly to apply. Sign in and link Manus separately; enabling does not prove account login or permission to automate."
 }
 
 ensure_volumes_and_key() {
@@ -232,6 +278,9 @@ start_gateway() {
 case "${1:-}" in
   init)
     init_config
+    ;;
+  enable-manus)
+    enable_manus_config
     ;;
   build)
     build_image
