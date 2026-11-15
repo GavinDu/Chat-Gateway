@@ -266,7 +266,10 @@ mod tests {
         );
         assert!(!new_owner.close(&old));
         assert_eq!(new_owner.active_count(), 1);
-        assert_eq!(new_owner.check_frame(&new_lease, FrameKind::Text, 1), Ok(()));
+        assert_eq!(
+            new_owner.check_frame(&new_lease, FrameKind::Text, 1),
+            Ok(())
+        );
     }
 
     #[test]
