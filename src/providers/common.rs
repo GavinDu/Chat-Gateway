@@ -1482,11 +1482,13 @@ mod manus_unique_composer_tests {
         assert!(error.to_string().contains("ambiguous"));
         assert!(!error.to_string().contains("private prompt"));
         assert_eq!(
-            page.evaluate("document.querySelector('#chat').value").as_str(),
+            page.evaluate("document.querySelector('#chat').value")
+                .as_str(),
             Some("")
         );
         assert_eq!(
-            page.evaluate("document.querySelector('#search').value").as_str(),
+            page.evaluate("document.querySelector('#search').value")
+                .as_str(),
             Some("")
         );
         assert_eq!(page.evaluate("window.sent === true").as_bool(), Some(false));
@@ -1520,10 +1522,15 @@ mod manus_unique_composer_tests {
             .unwrap_err();
         assert!(error.to_string().contains("ambiguous"));
         assert_eq!(
-            page.evaluate("document.querySelector('#chat').value").as_str(),
+            page.evaluate("document.querySelector('#chat').value")
+                .as_str(),
             Some("private prompt")
         );
-        assert_eq!(page.evaluate("document.querySelector('#dialog').hidden").as_bool(), Some(false));
+        assert_eq!(
+            page.evaluate("document.querySelector('#dialog').hidden")
+                .as_bool(),
+            Some(false)
+        );
         assert_eq!(page.evaluate("window.sent === true").as_bool(), Some(false));
     }
 }
