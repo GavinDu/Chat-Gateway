@@ -1160,7 +1160,6 @@ pub async fn run_send(
     let mut tracker = ResponseDeltaTracker::new(baseline.take());
     let mut stable_ticks = 0u32;
     let mut last_delta_at: Option<Instant> = None;
-    let mut saw_streaming = false;
     let mut fresh_stop = FreshStopSignal::new(baseline_probe.streaming);
     let mut previous_post_answer_affordance = false;
     let mut saw_post_answer_affordance_absent = !baseline_probe.post_answer_affordance;
@@ -1290,7 +1289,6 @@ pub async fn run_send(
         }
 
         let streaming = probe.streaming;
-        saw_streaming |= streaming;
         if !probe.post_answer_affordance {
             saw_post_answer_affordance_absent = true;
         }
@@ -1330,7 +1328,7 @@ pub async fn run_send(
                     if stable_ticks
                         >= completion_idle_ticks(
                             done_signal,
-                            saw_streaming,
+                            fresh_stop.saw_fresh_generation(),
                             confirmed_post_answer_affordance,
                             poll_tick,
                             completion_idle,
@@ -1384,7 +1382,7 @@ pub async fn run_send(
                             probe.populated_count,
                             &final_probe,
                             done_signal,
-                            saw_streaming,
+                            fresh_stop.saw_fresh_generation(),
                             confirmed_post_answer_affordance,
                         ) {
                             // Continue polling rather than emitting the old
@@ -1464,7 +1462,7 @@ pub async fn run_send(
                 stable_ticks,
                 streaming,
                 done_signal,
-                saw_streaming,
+                fresh_stop.saw_fresh_generation(),
                 confirmed_post_answer_affordance,
                 poll_tick,
                 completion_idle,
@@ -1517,7 +1515,7 @@ pub async fn run_send(
                     probe.populated_count,
                     &final_probe,
                     done_signal,
-                    saw_streaming,
+                    fresh_stop.saw_fresh_generation(),
                     confirmed_post_answer_affordance,
                 ) {
                     stable_ticks = 0;
@@ -1896,6 +1894,96 @@ mod response_completion_tests {
             false,
             DEFAULT_POLL_TICK,
             Duration::from_millis(15_000),
+        ));
+    }
+
+    #[test]
+    fn inherited_stop_never_unlocks_fast_done_without_fresh_generation_edge() {
+        use super::FreshStopSignal;
+        let done = DoneSignal::StopControlDisappeared;
+        let full_grace = Duration::from_millis(15_000);
+
+        let mut inherited = FreshStopSignal::new(true);
+        inherited.observe(true);
+        inherited.observe(false);
+        assert!(
+            !inherited.saw_fresh_generation(),
+            "a Stop control present before Send cannot prove new generation"
+        );
+        assert_eq!(
+            completion_idle_ticks(
+                done,
+                inherited.saw_fresh_generation(),
+                true,
+                DEFAULT_POLL_TICK,
+                full_grace,
+            ),
+            COMPLETION_IDLE_TICKS,
+        );
+        assert!(!completion_ready(
+            EXPLICIT_DONE_IDLE_TICKS,
+            false,
+            done,
+            inherited.saw_fresh_generation(),
+            true,
+            DEFAULT_POLL_TICK,
+            full_grace,
+        ));
+        assert!(completion_ready(
+            COMPLETION_IDLE_TICKS,
+            false,
+            done,
+            inherited.saw_fresh_generation(),
+            true,
+            DEFAULT_POLL_TICK,
+            full_grace,
+        ));
+
+        let mut fresh_after_inherited = FreshStopSignal::new(true);
+        fresh_after_inherited.observe(false);
+        fresh_after_inherited.observe(true);
+        fresh_after_inherited.observe(false);
+        assert!(fresh_after_inherited.saw_fresh_generation());
+        assert!(completion_ready(
+            EXPLICIT_DONE_IDLE_TICKS,
+            false,
+            done,
+            fresh_after_inherited.saw_fresh_generation(),
+            true,
+            DEFAULT_POLL_TICK,
+            full_grace,
+        ));
+
+        let mut fresh_from_idle = FreshStopSignal::new(false);
+        fresh_from_idle.observe(true);
+        fresh_from_idle.observe(false);
+        assert!(fresh_from_idle.saw_fresh_generation());
+        assert!(completion_ready(
+            EXPLICIT_DONE_IDLE_TICKS,
+            false,
+            done,
+            fresh_from_idle.saw_fresh_generation(),
+            true,
+            DEFAULT_POLL_TICK,
+            full_grace,
+        ));
+        assert!(!completion_ready(
+            EXPLICIT_DONE_IDLE_TICKS,
+            false,
+            done,
+            fresh_from_idle.saw_fresh_generation(),
+            false,
+            DEFAULT_POLL_TICK,
+            full_grace,
+        ));
+        assert!(!completion_ready(
+            EXPLICIT_DONE_IDLE_TICKS,
+            false,
+            DoneSignal::StableResponseText,
+            fresh_from_idle.saw_fresh_generation(),
+            true,
+            DEFAULT_POLL_TICK,
+            full_grace,
         ));
     }
 
