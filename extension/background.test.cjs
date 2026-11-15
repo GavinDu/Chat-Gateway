@@ -413,6 +413,60 @@ test("known gateway outage suppresses cookie-triggered imports until health retu
   assert.deepEqual(f.calls, ["claude"]);
 });
 
+test("startup repair resnapshots provider consent after a delayed health response",async()=>{
+  for(const scenario of [
+    {initial:["chatgpt"],latest:[],expected:[]},
+    {initial:["chatgpt"],latest:["claude"],expected:["claude"]},
+  ]) {
+    const f=loadBackground(scenario.initial,[],true);
+    let linked=[...scenario.initial];
+    let release;
+    let started;
+    const waiting=new Promise(resolve=>{started=resolve});
+    const gate=new Promise(resolve=>{release=resolve});
+    f.sandbox.chrome.storage.local.get=async()=>({
+      gateway:"http://127.0.0.1:8080",connectionMode:"local",
+      linkedProviders:[...linked]
+    });
+    f.sandbox.relayFetch=async()=>{
+      started();
+      await gate;
+      return {ok:true,status:200,json:async()=>({providers:[]})};
+    };
+    f.listeners.startup[0]();
+    await waiting;
+    linked=[...scenario.latest];
+    release();
+    for(let i=0;i<8;i++)await flushAsyncWork();
+    assert.deepEqual(f.calls,scenario.expected,
+      "old linked providers cannot queue automatic imports after consent changes");
+  }
+});
+
+test("startup repair refuses to use old status after gateway identity changes",async()=>{
+  const f=loadBackground(["chatgpt"],[],true);
+  let gateway="http://127.0.0.1:8080";
+  let release;
+  let started;
+  const waiting=new Promise(resolve=>{started=resolve});
+  const gate=new Promise(resolve=>{release=resolve});
+  f.sandbox.chrome.storage.local.get=async()=>({
+    gateway,connectionMode:"local",linkedProviders:["chatgpt"]
+  });
+  f.sandbox.relayFetch=async()=>{
+    started();
+    await gate;
+    return {ok:true,status:200,json:async()=>({providers:[]})};
+  };
+  f.listeners.startup[0]();
+  await waiting;
+  gateway="http://127.0.0.1:9090";
+  release();
+  for(let i=0;i<8;i++)await flushAsyncWork();
+  assert.deepEqual(f.calls,[],
+    "health check from an old gateway must not trigger new automatic imports");
+});
+
 test("disconnected startup and install never fan out automatic provider imports", async () => {
   const f = loadBackground(["chatgpt", "claude"]);
   f.listeners.startup[0]();
