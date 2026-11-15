@@ -492,7 +492,7 @@ test("forced diagnostic refresh never reports stale success after a gateway fail
 });
 
 test("multiple manual syncs coalesce into one forced refresh behind an automatic import", async () => {
-  const f = loadBackground(["chatgpt"]);
+  const f = loadBackground(["chatgpt"], [], true);
   let release;
   const held = new Promise(resolve => { release = resolve; });
   const attempts = [];
