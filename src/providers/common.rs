@@ -2789,7 +2789,7 @@ pub(crate) fn require_page_provider_origin(provider: &str, page: &Page) -> anyho
 /// Both URLs must belong to the same expected HTTPS provider. The probe's
 /// `location.href` was captured atomically with its response text; a later
 /// `Page::url()` reading alone cannot attest to that earlier DOM snapshot.
-fn require_response_origin_pair(
+pub(crate) fn require_response_origin_pair(
     provider: &str,
     page_url: &str,
     snapshot_url: &str,
