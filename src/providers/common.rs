@@ -1132,7 +1132,7 @@ async fn click_send_or_enter_checked(
     .await
 }
 
-/// Controlled ChatGPT/Grok editors cannot rely on synthetic Enter to submit:
+/// Controlled ChatGPT/Grok/Qwen editors cannot rely on synthetic Enter to submit:
 /// a missing Send control must not trigger an untrusted keystroke sequence.
 /// Keep the existing legacy fallback only for the other provider adapters.
 async fn click_send_or_enter_checked_with_policy(
@@ -1186,7 +1186,7 @@ async fn click_send_or_enter_checked_with_policy(
         }
     }
     // Missing controls are not permission to synthesize keyboard input on
-    // ChatGPT/Grok: those editors must offer an actionable Send button.
+    // ChatGPT/Grok/Qwen: those editors must offer an actionable Send button.
     if !allow_untrusted_enter {
         anyhow::bail!(
             "provider Send control unavailable; synthetic Enter is not a supported submission path"
@@ -1876,8 +1876,8 @@ pub async fn discover_models(
     }
 }
 
-/// ChatGPT and Grok require an observable composer/response transition to
-/// acknowledge a send. Match actual provider hosts and Grok's alternate X
+/// ChatGPT, Grok and Qwen require an observable composer/response transition
+/// to acknowledge a send. Match actual provider hosts and Grok's alternate X
 /// route, never incidental substrings in query parameters or attacker hosts.
 pub(crate) fn submission_provider_for_url(url: &str) -> Option<&'static str> {
     let Ok(uri) = url.parse::<axum::http::Uri>() else {
@@ -1898,6 +1898,7 @@ pub(crate) fn submission_provider_for_url(url: &str) -> Option<&'static str> {
     match host.as_str() {
         "chatgpt.com" | "www.chatgpt.com" => Some("chatgpt"),
         "grok.com" | "www.grok.com" => Some("grok"),
+        "chat.qwen.ai" => Some("qwen"),
         "x.com" | "www.x.com" if uri.path() == "/i/grok" || uri.path().starts_with("/i/grok/") => {
             Some("grok")
         }
@@ -1907,7 +1908,7 @@ pub(crate) fn submission_provider_for_url(url: &str) -> Option<&'static str> {
 
 /** Declare a closed set of browser origins for all provider adapters.
  * A matching generic text box on an unrelated page is never authorization
- * to type. ChatGPT/Grok retain their separate strict submission contract.
+ * to type. ChatGPT/Grok/Qwen retain their separate strict submission contract.
  */
 fn provider_origin_for_url(url: &str) -> Option<&'static str> {
     if let Some(provider) = submission_provider_for_url(url) {
@@ -2123,7 +2124,7 @@ fn requires_submission_acknowledgement(url: &str) -> bool {
     submission_provider_for_url(url).is_some()
 }
 
-/// A browser page recognized as ChatGPT or Grok must never be operated by
+/// A browser page recognized as ChatGPT, Grok or Qwen must never be operated by
 /// another adapter simply because it exposes a matching generic composer.
 /// This is NOT an all-provider origin allowlist: unknown origins still need
 /// their own provider-specific browser-route checks and live evidence.
@@ -2147,6 +2148,7 @@ mod provider_adapter_origin_consistency_tests {
             ("https://grok.com/chat/123", "grok"),
             ("https://x.com/i/grok/thread/123", "grok"),
             ("https://www.x.com/i/grok", "grok"),
+            ("https://chat.qwen.ai/chat/abc", "qwen"),
         ] {
             assert!(require(expected, url).is_ok());
             for wrong in ["manus", "claude", "qwen", "chatgpt", "grok"] {
@@ -2180,7 +2182,7 @@ mod provider_adapter_origin_consistency_tests {
     }
 }
 
-/// A composer's DOM selectors are not trusted evidence of a ChatGPT/Grok
+/// A composer's DOM selectors are not trusted evidence of a ChatGPT/Grok/Qwen
 /// origin. Reject unrelated pages before input or click, and preserve the
 /// typed expired-session error for explicit authentication redirects.
 pub fn require_submission_provider_route(provider: &str, page: &Page) -> anyhow::Result<()> {
@@ -2217,6 +2219,8 @@ mod provider_submission_route_tests {
             "https://x.com/i/grok",
             "https://x.com/i/grok/",
             "https://www.x.com/i/grok/conversation/123",
+            "https://chat.qwen.ai/",
+            "https://chat.qwen.ai/chat/abc",
         ] {
             assert!(
                 requires_submission_acknowledgement(url),
@@ -2240,6 +2244,10 @@ mod provider_submission_route_tests {
             submission_provider_for_url("https://x.com/i/grok/abc"),
             Some("grok")
         );
+        assert_eq!(
+            submission_provider_for_url("https://chat.qwen.ai/chat/abc"),
+            Some("qwen")
+        );
         assert_ne!(
             submission_provider_for_url("https://chatgpt.com/"),
             submission_provider_for_url("https://x.com/i/grok")
@@ -2252,6 +2260,25 @@ mod provider_submission_route_tests {
         ] {
             assert!(submission_provider_for_url(url).is_none(), "{url}");
         }
+    }
+
+    #[test]
+    fn qwen_strict_submission_scope_never_accepts_spoofed_host_or_enter_only() {
+        for url in ["https://chat.qwen.ai/", "https://chat.qwen.ai/chat/current"] {
+            assert_eq!(super::submission_provider_for_url(url), Some("qwen"));
+            assert!(requires_submission_acknowledgement(url));
+        }
+        for url in [
+            "http://chat.qwen.ai/",
+            "https://chat.qwen.ai:8443/",
+            "https://chat.qwen.ai.attacker.invalid/",
+            "https://elsewhere.invalid/?origin=chat.qwen.ai",
+        ] {
+            assert_ne!(super::submission_provider_for_url(url), Some("qwen"));
+            assert!(!requires_submission_acknowledgement(url));
+        }
+        // Strict send_prompt requires actionable Send and prompt-bound snapshot,
+        // never a best-effort synthetic Enter fallback.
     }
 
     #[tokio::test]
@@ -2366,7 +2393,7 @@ pub async fn send_prompt(
     }
     let sends = set.send_refs();
     // The click/Enter dispatch is not proof that a controlled SPA accepted
-    // the prompt. ChatGPT and Grok require a visible submission transition.
+    // the prompt. ChatGPT, Grok and Qwen require a visible submission transition.
     let baseline = if verify_submission {
         Some(submission_snapshot(page, input_sel, &set.response_refs())?)
     } else {
@@ -2414,7 +2441,7 @@ pub async fn send_prompt(
                 );
             }
             let after = submission_snapshot(page, input_sel, &set.response_refs())?;
-            if submission_observed_for_prompt(page, &before, &after, prompt)? {
+            if submission_observed_for_adapter(provider, page, &before, &after, prompt)? {
                 tracing::debug!(
                     provider = provider,
                     stage = "submission",
@@ -2513,6 +2540,26 @@ fn submission_snapshot(
             .and_then(|x| x.as_bool())
             .unwrap_or(false),
     })
+}
+
+/// For Qwen, a response-node increase plus an emptied composer can also
+/// happen when history hydrates over a dropped draft. Require a fresh
+/// prompt-bound user turn or a newly activated generation indicator instead.
+/// This intentionally fails closed until Qwen's signed-in DOM is evidenced.
+fn submission_observed_for_adapter(
+    provider: &str,
+    page: &Page,
+    before: &SubmissionSnapshot,
+    after: &SubmissionSnapshot,
+    prompt: &str,
+) -> anyhow::Result<bool> {
+    if provider == "qwen"
+        && after.user_turn_count <= before.user_turn_count
+        && !(after.streaming && !before.streaming)
+    {
+        return Ok(false);
+    }
+    submission_observed_for_prompt(page, before, after, prompt)
 }
 
 /// A new user-turn node may come from unrelated SPA history hydration. Only
@@ -2857,7 +2904,9 @@ mod native_input_setter_tests {
 
 #[cfg(test)]
 mod prompt_bound_submission_tests {
-    use super::{submission_observed_for_prompt, submission_snapshot};
+    use super::{
+        submission_observed_for_adapter, submission_observed_for_prompt, submission_snapshot,
+    };
 
     #[tokio::test]
     async fn unrelated_hydrated_turn_cannot_acknowledge_a_cleared_draft() {
@@ -2969,6 +3018,77 @@ mod prompt_bound_submission_tests {
         page.evaluate("document.querySelector('#prompt').value = ''");
         let consumed = submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
         assert!(submission_observed_for_prompt(&page, &before, &consumed, "draft").unwrap());
+    }
+
+    #[tokio::test]
+    async fn qwen_style_send_ack_rejects_unchanged_draft_and_history_hydration() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <textarea id="qwen-prompt">fresh request</textarea>
+            <div data-testid="user-message">old request</div>
+            <div class="answer">old answer</div>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        let before = submission_snapshot(&page, "#qwen-prompt", &[".answer"]).unwrap();
+        assert!(
+            !submission_observed_for_adapter("qwen", &page, &before, &before, "fresh request")
+                .unwrap()
+        );
+
+        // History hydration while the draft remains cannot certify that an
+        // unrelated completed answer belongs to the current request.
+        page.evaluate(r#"document.body.insertAdjacentHTML('beforeend', '<div class="answer">hydrated old answer</div>')"#);
+        let hydrated = submission_snapshot(&page, "#qwen-prompt", &[".answer"]).unwrap();
+        assert!(!submission_observed_for_adapter(
+            "qwen",
+            &page,
+            &before,
+            &hydrated,
+            "fresh request"
+        )
+        .unwrap());
+
+        // Even if the composer drops its value while historical content
+        // hydrates, Qwen has no prompt-correlated acceptance signal yet.
+        page.evaluate("document.querySelector('#qwen-prompt').value = ''");
+        let dropped = submission_snapshot(&page, "#qwen-prompt", &[".answer"]).unwrap();
+        assert!(!submission_observed_for_adapter(
+            "qwen",
+            &page,
+            &before,
+            &dropped,
+            "fresh request"
+        )
+        .unwrap());
+
+        // A dropped draft and the wrong user's turn must not count as success.
+        page.evaluate("document.querySelector('#qwen-prompt').value = ''");
+        page.evaluate(r#"document.body.insertAdjacentHTML('beforeend', '<div data-testid="user-message">unrelated request</div>')"#);
+        let unrelated = submission_snapshot(&page, "#qwen-prompt", &[".answer"]).unwrap();
+        assert!(!submission_observed_for_adapter(
+            "qwen",
+            &page,
+            &before,
+            &unrelated,
+            "fresh request"
+        )
+        .unwrap());
+        page.evaluate("document.body.lastElementChild.textContent = 'fresh request'");
+        assert!(submission_observed_for_adapter(
+            "qwen",
+            &page,
+            &before,
+            &unrelated,
+            "fresh request"
+        )
+        .unwrap());
     }
 
     #[tokio::test]
