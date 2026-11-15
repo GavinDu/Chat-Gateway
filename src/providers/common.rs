@@ -2314,6 +2314,7 @@ mod composer_rejected_input_tests {
               <button id="send" type="button" onclick="window.sendCount=(window.sendCount||0)+1">Send</button>
             </form>
             <div id="other" contenteditable="true">Unrelated draft</div>
+            <div id="empty" contenteditable="true"></div>
         </body></html>"#;
         let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
         page.goto(&format!("data:text/html,{encoded}"))
@@ -2325,6 +2326,20 @@ mod composer_rejected_input_tests {
             Some("private message")
         );
         assert!(!super::composer_retains_prompt(&page, "#target", "private message").unwrap());
+        page.evaluate("document.querySelector('#empty').value = 'private message'");
+        let snapshot = super::submission_snapshot(&page, "#empty", &[".assistant"]).unwrap();
+        assert!(snapshot.input_empty, "synthetic value on an empty contenteditable must not count as a real draft");
+        let rejected_click = super::click_send_or_enter_checked_with_policy(
+            &mut page,
+            &["#send"],
+            "#target",
+            250,
+            Some("private message"),
+            false,
+            None,
+        ).await;
+        assert!(rejected_click.is_err(), "last-moment Send check must reject synthetic value");
+        assert_eq!(page.evaluate("window.sendCount || 0").as_f64(), Some(0.0));
         let error = super::human_type(&page, &["#target"], "private message")
             .await
             .unwrap_err();
