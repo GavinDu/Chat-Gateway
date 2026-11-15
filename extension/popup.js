@@ -329,23 +329,23 @@ async function connectProvider(provider, openLogin = false) {
   const snapshot = await providerCookieSnapshot(provider);
   // Only the worker mutates shared linked-provider membership and epochs.
   // Popup direct storage writes can race worker logout or another popup.
+  // The attempt remains private to the popup-worker message channel. It
+  // identifies THIS provisional link; no epoch/token enters diagnostics.
+  const attemptId = randomHex(16);
   const linked = await chrome.runtime.sendMessage({
-    type:"link-provider",provider,connection
+    type:"link-provider",provider,connection,attemptId
   });
   if (!linked?.ok) {
     throw new Error(linked?.error || "Gateway could not save provider consent. Reload the extension.");
   }
-  const priorLinked = linked.alreadyLinked === true;
-  // Used only to conditionally roll back THIS first link on an upload error.
-  // The worker compares against the current epoch before mutating anything.
-  const {providerLinkEpochs = {}} = await chrome.storage.local.get(["providerLinkEpochs"]);
-  const linkEpoch = providerLinkEpochs[provider];
+  const tentative = linked.tentative === true;
   if (snapshot.cookies.length === 0) {
     await openProviderLogin(provider);
     // openProviderLogin already provides a manual clickable link when a tab
     // cannot open; do not overwrite that link with a second status message.
     return;
   }
+  let sessionUploaded = false;
   try {
     // The service worker serializes imports and logout per provider. Never
     // send a manual import in parallel with a logout request.
@@ -360,13 +360,22 @@ async function connectProvider(provider, openLogin = false) {
     if (result.syncStatus && result.syncStatus !== "uploaded") {
       throw new Error("Provider session was not uploaded; check the gateway connection and retry.");
     }
+    sessionUploaded = true;
+    if (tentative) {
+      const committed = await chrome.runtime.sendMessage({
+        type:"commit-provider-link",provider,connection,attemptId
+      });
+      if (!committed?.ok || committed.committed !== true) {
+        throw new Error("Provider session uploaded, but link confirmation changed. Refresh status.");
+      }
+    }
   } catch (error) {
-    // Only the worker owns the rollback mutation; a stale failed popup
-    // cannot undo a newer gateway or consent epoch. Already linked accounts
-    // retain consent even if a manual refresh fails.
-    if (!priorLinked && typeof linkEpoch === "string") {
+    // Roll back only a failed upload owned by THIS attempt. If the upload
+    // succeeded, do not revoke consent because its commit acknowledgement
+    // was delayed or lost. A newer adopted link has a different owner id.
+    if (tentative && !sessionUploaded) {
       await chrome.runtime.sendMessage({
-        type:"rollback-provider-link",provider,connection,epoch:linkEpoch
+        type:"rollback-provider-link",provider,connection,attemptId
       }).catch(() => null);
     }
     throw error;
