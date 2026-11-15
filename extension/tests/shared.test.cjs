@@ -361,6 +361,81 @@ test("unlinked provider sync does not read or transmit cookies", async () => {
   assert.equal(api.fetchCalls.length, 0);
 });
 
+test("same-gateway unlink/relink during cookie read rejects old link epoch", async () => {
+  const storage = {
+    gateway:"http://127.0.0.1:8080", connectionMode:"local",
+    linkedProviders:["chatgpt"], providerLinkEpochs:{chatgpt:"consent-old"}
+  };
+  const api = loadShared([
+    {name:"session",value:"synthetic",domain:".chatgpt.com",path:"/",secure:true}
+  ], true, storage, {
+    onCookieRead: () => {
+      storage.linkedProviders = [];
+      storage.providerLinkEpochs = {chatgpt:"revoked"};
+      storage.linkedProviders = ["chatgpt"];
+      storage.providerLinkEpochs = {chatgpt:"consent-new"};
+    }
+  });
+  assert.equal(await api.syncProvider("chatgpt"),"skipped");
+  assert.equal(api.fetchCalls.length,0,
+    "old snapshot cannot upload even when same gateway and consent list reappear");
+});
+
+test("same-gateway consent revocation at final relay host permission check blocks POST", async () => {
+  const storage = {
+    gateway:"http://127.0.0.1:8080",connectionMode:"local",
+    linkedProviders:["chatgpt"],providerLinkEpochs:{chatgpt:"consent-old"}
+  };
+  const api = loadShared([
+    {name:"session",value:"synthetic",domain:".chatgpt.com",path:"/",secure:true}
+  ], true, storage, {
+    onPermissionCheck: origins => {
+      if (origins.some(origin => origin.startsWith("http://127.0.0.1"))) {
+        storage.providerLinkEpochs = {chatgpt:"consent-new"};
+      }
+    }
+  });
+  await assert.rejects(() => api.syncProvider("chatgpt"),
+    /consent or gateway connection changed/);
+  assert.equal(api.fetchCalls.length,0,
+    "gateway host permission await must not let stale cookies cross the upload boundary");
+});
+
+test("same cookies after re-link require fresh upload rather than inherited digest", async () => {
+  const storage = {
+    gateway:"http://127.0.0.1:8080",connectionMode:"local",
+    linkedProviders:["chatgpt"],providerLinkEpochs:{chatgpt:"link-a"}
+  };
+  const api = loadShared([
+    {name:"session",value:"synthetic",domain:".chatgpt.com",path:"/",secure:true}
+  ], true, storage);
+  assert.equal(await api.syncProvider("chatgpt"),"uploaded");
+  const first = storage.relaySnapshotVersions.chatgpt;
+  assert.equal(await api.syncProvider("chatgpt"),"unchanged");
+  storage.providerLinkEpochs = {chatgpt:"link-b"};
+  assert.equal(await api.syncProvider("chatgpt"),"uploaded");
+  assert.notEqual(storage.relaySnapshotVersions.chatgpt,first);
+  assert.equal(api.fetchCalls.length,2);
+});
+
+test("post-POST old consent response cannot replace new provider digest", async () => {
+  const storage = {
+    gateway:"http://127.0.0.1:8080",connectionMode:"local",
+    linkedProviders:["chatgpt"],providerLinkEpochs:{chatgpt:"link-a"}
+  };
+  const api = loadShared([
+    {name:"session",value:"synthetic",domain:".chatgpt.com",path:"/",secure:true}
+  ], true, storage, {
+    onFetch: async () => {
+      storage.providerLinkEpochs = {chatgpt:"link-b"};
+      return {ok:true,status:200};
+    }
+  });
+  assert.equal(await api.syncProvider("chatgpt"),"uploaded");
+  assert.equal(storage.relaySnapshotVersions,undefined,
+    "a completed old HTTP request is not a current-link snapshot cache hit");
+});
+
 test("provider sync never uploads old cookies to a newly paired gateway", async () => {
   const storage = {
     gateway: "http://127.0.0.1:8080",
