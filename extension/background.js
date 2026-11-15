@@ -199,13 +199,32 @@ chrome.cookies.onChanged.addListener(({cookie}) => {
   for (const [provider, roots] of domains) {
     if (!roots.some(root => host === root || host.endsWith("." + root))) continue;
     clearTimeout(debounceTimers.get(provider));
-    const timer = setTimeout(() => {
+    const timer = setTimeout(async () => {
       if (debounceTimers.get(provider) !== timer) return;
-      debounceTimers.delete(provider);
       // A recent failed gateway health probe already establishes an outage.
       // Do not convert every cookie rotation into a doomed automatic import;
       // retain the next scheduled health check and explicit manual override.
-      if (Date.now() < automaticCookieSyncSuppressedUntil) return;
+      if (Date.now() < automaticCookieSyncSuppressedUntil) {
+        debounceTimers.delete(provider);
+        return;
+      }
+      // The cookie domain may belong to a provider the user explicitly
+      // unlinked, or the gateway may have been disconnected during debounce.
+      // Read current consent before scheduling a browser/vault mutation.
+      let state;
+      try {
+        state = await chrome.storage.local.get(["gateway", "token", "connectionMode", "linkedProviders"]);
+      } catch (_) {
+        // Storage failures do not authorize a background session import.
+        if (debounceTimers.get(provider) === timer) debounceTimers.delete(provider);
+        return;
+      }
+      // Recheck after the await: another cookie event may have replaced this
+      // generation while the storage request was pending.
+      if (debounceTimers.get(provider) !== timer) return;
+      debounceTimers.delete(provider);
+      if (!hasRelayConnection(state) || !state.linkedProviders?.includes(provider) ||
+          Date.now() < automaticCookieSyncSuppressedUntil) return;
       queueProviderSync(provider).catch(() => {
         // Never log cookie material or relay credentials. The popup can surface status on demand.
       });
