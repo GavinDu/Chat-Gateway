@@ -1856,9 +1856,8 @@ pub fn is_login_url(url: &str) -> bool {
     // Authenticate only explicit root-level routes. A chat conversation ID
     // such as /c/login, /chat/auth, or /app/oauth is not a login redirect.
     // Nested provider-specific auth routes need observed first-party evidence.
-    let Some(root_segment) = uri.path().strip_prefix('/').and_then(|path| path.split('/').next()) else {
-        return false;
-    };
+    let root_path = uri.path().strip_prefix('/').unwrap_or_default();
+    let root_segment = root_path.split('/').next().unwrap_or_default();
     matches!(
         root_segment.to_ascii_lowercase().as_str(),
         "login" | "signin" | "sign-in" | "auth" | "oauth" | "oauth2" | "authorize" | "sso"
