@@ -199,13 +199,13 @@ mod tests {
     fn apply_at(state: &mut AgentTaskLifecycle, epoch: u64, task: &str, event: Event) -> T {
         let mut request = state.request_identity();
         request.epoch = epoch;
-        apply_at(&mut state,&request, task, event)
+        state.apply(&request, task, event)
     }
 
     fn cancel_at(state: &mut AgentTaskLifecycle, epoch: u64) -> T {
         let mut request = state.request_identity();
         request.epoch = epoch;
-        cancel_at(&mut state,&request)
+        state.cancel_local(&request)
     }
 
     #[test]
