@@ -2234,7 +2234,9 @@ mod hidden_child_response_text_tests {
         assert!(last_element_text(&page, ".answer").is_none());
         assert!(response_text(&page, &[".answer"]).is_none());
 
-        page.evaluate("document.querySelector('#nested').innerHTML = '<span>visible nested answer</span>'");
+        page.evaluate(
+            "document.querySelector('#nested').innerHTML = '<span>visible nested answer</span>'",
+        );
         assert_eq!(
             response_probe(&page, &[".answer"], false).text.as_deref(),
             Some("visible nested answer")
