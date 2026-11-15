@@ -228,32 +228,50 @@ test("known gateway outage suppresses cookie-triggered imports until health retu
   assert.deepEqual(f.calls, ["claude"]);
 });
 
+test("disconnected startup and install never fan out automatic provider imports", async () => {
+  const f = loadBackground(["chatgpt", "claude"]);
+  f.listeners.startup[0]();
+  f.listeners.installed[0]();
+  for (let i = 0; i < 5; i++) await flushAsyncWork();
+  assert.deepEqual(f.calls, [], "no gateway means no automatic cookie read or import");
+  const diagnostics = await new Promise(resolve =>
+    f.listeners.message[0]({type:"relay-diagnostics"},{},resolve));
+  assert.equal(diagnostics.ok, false);
+  assert.equal(diagnostics.gateway_issue, "not_connected");
+  assert.equal(diagnostics.extension.provider_sync.chatgpt.state, "not_attempted");
+  assert.equal(diagnostics.extension.provider_sync.claude.state, "not_attempted");
+});
+
 test("service-worker install and startup restore each unique linked provider", async () => {
-  const { calls, listeners } = loadBackground([
+  const { calls, listeners, sandbox } = loadBackground([
     "chatgpt",
     "chatgpt",
     "unsupported-provider",
     "claude",
-  ]);
+  ], [], true);
+  sandbox.relayFetch = async () => ({
+    ok:true,status:200,json:async()=>({providers:[]})
+  });
 
   assert.equal(listeners.installed.length, 1);
   assert.equal(listeners.startup.length, 1);
 
   listeners.installed[0]();
-  await flushAsyncWork();
+  for (let i = 0; i < 4; i++) await flushAsyncWork();
   assert.deepEqual(calls, ["chatgpt", "claude"]);
 
   calls.length = 0;
   listeners.startup[0]();
-  await flushAsyncWork();
+  for (let i = 0; i < 4; i++) await flushAsyncWork();
   assert.deepEqual(calls, ["chatgpt", "claude"]);
 });
 
 test("one provider refresh failure does not prevent other linked providers", async () => {
-  const { calls, listeners } = loadBackground(["chatgpt", "claude"], ["chatgpt"]);
+  const { calls, listeners, sandbox } = loadBackground(["chatgpt", "claude"], ["chatgpt"], true);
+  sandbox.relayFetch = async () => ({ok:true,status:200,json:async()=>({providers:[]})});
 
   listeners.startup[0]();
-  await flushAsyncWork();
+  for (let i = 0; i < 4; i++) await flushAsyncWork();
 
   assert.deepEqual(calls, ["chatgpt", "claude"]);
 });
@@ -399,8 +417,11 @@ test("slow provider sync coalesces a cookie burst into one latest trailing snaps
 
 test("relay diagnostics message reports redacted local sync failures without raw errors", async () => {
   const f = loadBackground(["chatgpt"], ["chatgpt"]);
-  f.listeners.startup[0]();
-  await flushAsyncWork();
+  // Manual explicit sync remains independent of automatic disconnect skip.
+  const manual = await new Promise(resolve => {
+    f.listeners.message[0]({type:"sync-provider",provider:"chatgpt"},{},resolve);
+  });
+  assert.equal(manual.ok,false);
   const response = await new Promise(resolve => {
     const asyncReply = f.listeners.message[0]({type:"relay-diagnostics"}, {}, resolve);
     assert.equal(asyncReply, true);
