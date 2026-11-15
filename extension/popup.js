@@ -327,21 +327,19 @@ async function connectProvider(provider, openLogin = false) {
     throw new Error("Provider permissions were not granted.");
   }
   const snapshot = await providerCookieSnapshot(provider);
-  const stored = await chrome.storage.local.get(["gateway", "token", "connectionMode", "linkedProviders", "providerLinkEpochs"]);
-  if (stored.gateway !== connection.gateway || stored.token !== connection.token || stored.connectionMode !== connection.connectionMode) {
-    throw new Error("Gateway connection changed while linking the provider. Reconnect and retry.");
-  }
-  const prior = stored.linkedProviders || [];
-  // Explicit opt-in gets a durable, unpredictable consent generation. Keep
-  // existing epochs for already-linked providers unless migrating a legacy
-  // entry. A logout/relink on the same gateway must never reuse an old epoch.
-  const epochs = stored.providerLinkEpochs || {};
-  const linkEpoch = prior.includes(provider) && typeof epochs[provider] === "string"
-    ? epochs[provider] : randomHex(16);
-  await chrome.storage.local.set({
-    linkedProviders:Array.from(new Set([...prior,provider])),
-    providerLinkEpochs:{...epochs, [provider]:linkEpoch}
+  // Only the worker mutates shared linked-provider membership and epochs.
+  // Popup direct storage writes can race worker logout or another popup.
+  const linked = await chrome.runtime.sendMessage({
+    type:"link-provider",provider,connection
   });
+  if (!linked?.ok) {
+    throw new Error(linked?.error || "Gateway could not save provider consent. Reload the extension.");
+  }
+  const priorLinked = linked.alreadyLinked === true;
+  // Used only to conditionally roll back THIS first link on an upload error.
+  // The worker compares against the current epoch before mutating anything.
+  const {providerLinkEpochs = {}} = await chrome.storage.local.get(["providerLinkEpochs"]);
+  const linkEpoch = providerLinkEpochs[provider];
   if (snapshot.cookies.length === 0) {
     await openProviderLogin(provider);
     // openProviderLogin already provides a manual clickable link when a tab
@@ -363,18 +361,13 @@ async function connectProvider(provider, openLogin = false) {
       throw new Error("Provider session was not uploaded; check the gateway connection and retry.");
     }
   } catch (error) {
-    // A failed first connection must not opt this provider into background
-    // uploads. Leave prior consent unchanged on an existing connection.
-    const latest = await chrome.storage.local.get(["gateway", "token", "connectionMode", "linkedProviders", "providerLinkEpochs"]);
-    // Never roll back a newer consent generation, even if it uses the same
-    // gateway identity. Invalidate this first-time link with a fresh epoch.
-    if (latest.gateway === connection.gateway && latest.token === connection.token &&
-        latest.connectionMode === connection.connectionMode &&
-        latest.providerLinkEpochs?.[provider] === linkEpoch && !prior.includes(provider)) {
-      await chrome.storage.local.set({
-        linkedProviders:(latest.linkedProviders || []).filter(value => value !== provider),
-        providerLinkEpochs:{...(latest.providerLinkEpochs || {}), [provider]:randomHex(16)}
-      });
+    // Only the worker owns the rollback mutation; a stale failed popup
+    // cannot undo a newer gateway or consent epoch. Already linked accounts
+    // retain consent even if a manual refresh fails.
+    if (!priorLinked && typeof linkEpoch === "string") {
+      await chrome.runtime.sendMessage({
+        type:"rollback-provider-link",provider,connection,epoch:linkEpoch
+      }).catch(() => null);
     }
     throw error;
   }
