@@ -587,16 +587,21 @@ mod tests {
             .challenge
         );
 
-        page.evaluate(
-            "document.querySelector('#manual-dialog').setAttribute('data-message-role', 'system'); document.querySelector('#manual-dialog').setAttribute('contenteditable', 'false'); document.querySelector('#manual-dialog').removeAttribute('hidden')",
+        // Pinned Obscura does not reliably reflow a previously hidden node
+        // after a synthetic DOM attribute mutation. Use a freshly navigated,
+        // initially visible security dialog to test the actual scanner.
+        let challenge_html = html.replace(
+            "id=\"manual-dialog\" role=\"dialog\" hidden",
+            "id=\"manual-dialog\" role=\"dialog\" data-message-role=\"system\"",
         );
-        let unhidden =
-            page.evaluate("!document.querySelector('#manual-dialog').hasAttribute('hidden')");
-        assert_eq!(
-            unhidden.as_bool(),
-            Some(true),
-            "test fixture must genuinely unhide independent verification UI"
-        );
+        assert_ne!(challenge_html, html, "challenge fixture must differ");
+        let challenge_encoded: String = challenge_html
+            .bytes()
+            .map(|byte| format!("%{byte:02X}"))
+            .collect();
+        page.goto(&format!("data:text/html,{challenge_encoded}"))
+            .await
+            .unwrap();
         let security_text = page.evaluate(NON_MESSAGE_CHALLENGE_TEXT_JS);
         assert!(
             security_text
@@ -616,7 +621,9 @@ mod tests {
             )
             .challenge
         );
-        page.evaluate("document.querySelector('#manual-dialog').hidden = true");
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
         assert!(!is_challenge_page(&page), "hidden dialogs are excluded");
     }
 
