@@ -818,7 +818,9 @@ mod response_origin_guard_tests {
         for spec in crate::providers::ADAPTERS {
             assert!(
                 super::require_expected_response_snapshot_origin(
-                    spec.id, &page, "https://unrelated.invalid/c/old"
+                    spec.id,
+                    &page,
+                    "https://unrelated.invalid/c/old"
                 )
                 .is_err(),
                 "{} must not trust a foreign data page just because it has a reply selector",
@@ -831,7 +833,9 @@ mod response_origin_guard_tests {
         for spec in crate::providers::ADAPTERS {
             assert!(
                 super::require_expected_response_snapshot_origin(
-                    spec.id, &page, "data:text/html,offline"
+                    spec.id,
+                    &page,
+                    "data:text/html,offline"
                 )
                 .is_ok(),
                 "{} must preserve explicitly tagged offline test fixture access",
