@@ -220,6 +220,52 @@ function finishProviderLink(provider, expected, attemptId, rollback) {
     return true;
   }));
 }
+// Local loopback connection transitions must use the same writer as consent
+// updates. Otherwise a delayed link's storage.set can resurrect consent after
+// the owner disconnects, or stale auto-connect can undo explicit opt-out.
+function connectLocalRelay(gateway, manual) {
+  return queueConsentMutation(async () => {
+    if (!isLocalGateway(gateway)) {
+      throw new Error("Only a loopback gateway supports local no-pairing mode.");
+    }
+    const current = await chrome.storage.local.get(
+      ["gateway", "token", "connectionMode", "linkedProviders", "localDisconnected"]);
+    if (current.localDisconnected && !manual) {
+      throw new Error("Local gateway was explicitly disconnected.");
+    }
+    if (current.gateway === gateway && current.connectionMode === "local" && !current.token) {
+      return {unchanged:true};
+    }
+    const linkedProviders = current.gateway === gateway ? (current.linkedProviders || []) : [];
+    // Write the complete disconnected/connected view at once, then remove
+    // compatibility keys. No intervening provider consent mutation can run.
+    await chrome.storage.local.set({
+      gateway, connectionMode:"local", token:null, pendingConnection:null,
+      relaySnapshotVersions:{}, linkedProviders, localDisconnected:false
+    });
+    await chrome.storage.local.remove(["token", "pendingConnection", "relaySnapshotVersions"]);
+    lastGatewayCheck = null;
+    return {unchanged:false};
+  });
+}
+function disconnectLocalRelay(expected) {
+  return queueConsentMutation(async () => {
+    const current = await chrome.storage.local.get(
+      ["gateway", "token", "connectionMode"]);
+    if (current.connectionMode !== "local" || !isLocalGateway(current.gateway) ||
+        !sameRelayIdentity(expected, current)) {
+      throw new Error("Local gateway connection changed before disconnect.");
+    }
+    await chrome.storage.local.set({
+      connectionMode:null, token:null, linkedProviders:[],
+      relaySnapshotVersions:{}, pendingConnection:null, localDisconnected:true
+    });
+    await chrome.storage.local.remove(
+      ["connectionMode", "token", "linkedProviders", "relaySnapshotVersions", "pendingConnection"]);
+    lastGatewayCheck = null;
+    return true;
+  });
+}
 // Keep one trailing refresh per provider. It reads the latest cookie snapshot
 // when it starts, rather than replaying every rotation behind a slow import.
 const queuedProviderSyncs = new Map();
@@ -366,6 +412,18 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
   if (message?.type === "poll-connection") {
     pollConnection().then(() => sendResponse({ok:true})).catch(error => sendResponse({ok:false,error:error.message}));
+    return true;
+  }
+  if (message?.type === "connect-local-relay") {
+    connectLocalRelay(message.gateway, message.manual === true)
+      .then(({unchanged}) => sendResponse({ok:true, unchanged}))
+      .catch(() => sendResponse({ok:false, error:"Local gateway connection changed or was disconnected."}));
+    return true;
+  }
+  if (message?.type === "disconnect-local-relay") {
+    disconnectLocalRelay(message.connection)
+      .then(() => sendResponse({ok:true}))
+      .catch(() => sendResponse({ok:false, error:"Local gateway connection changed before disconnect."}));
     return true;
   }
   if (message?.type === "link-provider" && Object.hasOwn(PROVIDERS, message.provider)) {
