@@ -10,6 +10,9 @@ const CONNECTION_DIAGNOSTICS_TTL_MS = 5_000;
 let lastGatewayCheck = null;
 let lastGatewayCheckAt = 0;
 let lastGatewayIdentity = null;
+// Same-identity status reads share one in-flight request, including forced
+// popup/automatic probes. Real connection changes always start a new probe.
+let inFlightGatewayStatus = null;
 // Only the newest read-only gateway health request for the current identity
 // can update the cached status or cookie-event outage backoff.
 let gatewayProbeSerial = 0;
@@ -88,10 +91,24 @@ async function relayDiagnostics(force = false) {
   ));
   if (!extension.connected) return finalizeRelayDiagnostics({ok:false, extension, gateway_issue:"not_connected"});
   extension.permissions.gateway = await hasOriginPermissions([current.gateway + "/*"]);
+  // The health probe is read-only. Its network result may be shared for the
+  // same identity, but each caller must retain its own linked-provider and
+  // permission snapshot, never reuse another popup's consent metadata.
+  if (inFlightGatewayStatus?.identity === identity) {
+    const shared = await inFlightGatewayStatus.promise;
+    if (shared.extension?.gateway_checked_at) {
+      extension.gateway_checked_at = shared.extension.gateway_checked_at;
+    }
+    return finalizeRelayDiagnostics({
+      ok: shared.ok, extension, gateway: shared.gateway,
+      gateway_issue: shared.gateway_issue
+    });
+  }
   if (!force && lastGatewayCheck && Date.now() - lastGatewayCheckAt < CONNECTION_DIAGNOSTICS_TTL_MS) {
     extension.gateway_checked_at = new Date(lastGatewayCheckAt).toISOString();
     return finalizeRelayDiagnostics({ok:true, extension, gateway:lastGatewayCheck});
   }
+  const probe = (async () => {
   const probeSerial = ++gatewayProbeSerial;
   const isCurrentProbe = async () => {
     try {
@@ -135,6 +152,13 @@ async function relayDiagnostics(force = false) {
     lastGatewayCheckAt = 0;
     automaticCookieSyncSuppressedUntil = Date.now() + COOKIE_OUTAGE_BACKOFF_MS;
     return finalizeRelayDiagnostics({ok:false, extension, gateway_issue:classifyRelayFailure(error)});
+  }
+  })();
+  inFlightGatewayStatus = {identity, promise:probe};
+  try { return await probe; }
+  finally {
+    // A stale completion must never release a newer identity's lease.
+    if (inFlightGatewayStatus?.promise === probe) inFlightGatewayStatus = null;
   }
 }
 
