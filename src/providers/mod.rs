@@ -1853,6 +1853,11 @@ mod timeout_terminal_regression_tests {
         page.goto(&format!("data:text/html,{encoded}"))
             .await
             .unwrap();
+        // This is an explicitly labelled offline fixture, not a foreign
+        // provider route: real browser pages never receive this test marker.
+        page.evaluate(
+            "document.documentElement.setAttribute('data-chat-gateway-test-fixture', '')",
+        );
 
         let adapter = Arc::new(qwen::QwenAdapter {
             cfg: serde_yaml::from_str("name: qwen\nmodels: [qwen]").unwrap(),
@@ -1929,6 +1934,11 @@ mod timeout_terminal_regression_tests {
         page.goto(&format!("data:text/html,{encoded}"))
             .await
             .unwrap();
+        // This is an explicitly labelled offline fixture, not a foreign
+        // provider route: real browser pages never receive this test marker.
+        page.evaluate(
+            "document.documentElement.setAttribute('data-chat-gateway-test-fixture', '')",
+        );
         let adapter = Arc::new(qwen::QwenAdapter {
             cfg: serde_yaml::from_str("name: qwen\nmodels: [qwen]").unwrap(),
         });
@@ -1994,6 +2004,11 @@ mod timeout_terminal_regression_tests {
         page.goto(&format!("data:text/html,{encoded}"))
             .await
             .unwrap();
+        // This is an explicitly labelled offline fixture, not a foreign
+        // provider route: real browser pages never receive this test marker.
+        page.evaluate(
+            "document.documentElement.setAttribute('data-chat-gateway-test-fixture', '')",
+        );
 
         let adapter = Arc::new(qwen::QwenAdapter {
             cfg: serde_yaml::from_str("name: qwen\nmodels: [qwen]").unwrap(),
