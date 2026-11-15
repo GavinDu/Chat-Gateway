@@ -4,7 +4,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
 
-function loadPopup({failCookieDomain = null, includeSecondProvider = false, manualVerification = false, localRelay = false, activation = null, diagnosticsSync = null} = {}) {
+function loadPopup({failCookieDomain = null, includeSecondProvider = false, manualVerification = false, localRelay = false, activation = null, diagnosticsSync = null, diagnosticsFailure = null} = {}) {
   const elements = new Map();
   const chromeCalls = [];
   const values = {gateway:"http://127.0.0.1:8080",linkedProviders:[]};
@@ -29,6 +29,7 @@ function loadPopup({failCookieDomain = null, includeSecondProvider = false, manu
   }
   const runtime = { async sendMessage(request) {
     chromeCalls.push(request.type + ":" + (request.provider||""));
+    if(request.type==="relay-diagnostics" && diagnosticsFailure) return diagnosticsFailure;
     if(request.type==="relay-diagnostics" && diagnosticsSync) {
       return {ok:false,extension:{provider_sync:{metaai:diagnosticsSync}}};
     }
@@ -51,14 +52,14 @@ function loadPopup({failCookieDomain = null, includeSecondProvider = false, manu
     PROVIDER_LOGIN_URLS:{metaai:"https://www.meta.ai/"},
     PROVIDERS:{metaai:["meta.ai"],claude:["claude.ai"]},
     providerCookieSnapshot:async()=>({cookies:[{name:"token",value:"test-only"}]}),
-    relayFetch:async()=>({ok:true,status:200,json:async()=>({
+    relayFetch:async()=>{chromeCalls.push("http:relay-status");return {ok:true,status:200,json:async()=>({
       providers:[
         {provider:"metaai",enabled:true,linked:server.linked,authentication:server.linked?"unknown":"needs_login",
           availability:manualVerification?"degraded":"unknown",manual_verification_required:manualVerification,activation},
         ...(includeSecondProvider ? [{provider:"claude",enabled:true,linked:false,authentication:"needs_login",availability:"unknown"}] : []),
       ],
       vault_mode:true,
-    })}),
+    })};},
     fetch:async url => ({ok:true,json:async()=>url.endsWith("/relay/v1/mode")
       ? {mode:localRelay?"local":"paired",no_pairing:localRelay}
       : {request_id:"a".repeat(64),poll_secret:"b".repeat(64)}}),
@@ -83,6 +84,45 @@ function loadPopup({failCookieDomain = null, includeSecondProvider = false, manu
     "\nglobalThis.testControls={refreshStatus,connectProvider,logoutProvider};",context);
   return {values,server,elements,chromeCalls,controls:context.testControls};
 }
+
+test("worker diagnostic failure avoids a second redundant popup status HTTP request", async () => {
+  for (const [gateway_issue, message] of [
+    ["gateway_timeout", /timed out/],
+    ["gateway_request_failed", /status request failed/],
+    ["not_connected", /not connected/],
+    ["relay_unavailable", /status is unavailable/],
+    ["unknown_code_from_future_worker", /status is unavailable/],
+  ]) {
+    const popup=loadPopup({diagnosticsFailure:{ok:false,gateway_issue}});
+    await assert.rejects(() => popup.controls.refreshStatus(), message);
+    assert.equal(popup.chromeCalls.filter(x=>x==="relay-diagnostics:").length,1);
+    assert.equal(popup.chromeCalls.filter(x=>x==="http:relay-status").length,0,
+      "an explicit worker failure already reflects a completed or intentionally skipped health probe");
+  }
+});
+
+test("known worker unauthorized preserves local mode and revokes paired credentials without HTTP retry", async () => {
+  const local=loadPopup({diagnosticsFailure:{ok:false,gateway_issue:"gateway_unauthorized"}});
+  local.values.connectionMode="local";
+  local.values.token="must-not-be-removed";
+  await assert.rejects(() => local.controls.refreshStatus(), /Local relay access rejected/);
+  assert.equal(local.values.token,"must-not-be-removed");
+  assert.equal(local.chromeCalls.filter(x=>x==="http:relay-status").length,0);
+
+  const paired=loadPopup({diagnosticsFailure:{ok:false,gateway_issue:"gateway_unauthorized"}});
+  paired.values.connectionMode="paired";
+  paired.values.token="temporary-test-token";
+  await assert.rejects(() => paired.controls.refreshStatus(), /expired or was revoked/);
+  assert.equal(paired.values.token,undefined, "paired authorization revocation must still clear local token");
+  assert.equal(paired.elements.get("pairing").hidden,false);
+  assert.equal(paired.chromeCalls.filter(x=>x==="http:relay-status").length,0);
+});
+
+test("older worker without a recognized gateway_issue keeps one direct status fallback", async () => {
+  const popup=loadPopup({diagnosticsFailure:{ok:false}});
+  await popup.controls.refreshStatus();
+  assert.equal(popup.chromeCalls.filter(x=>x==="http:relay-status").length,1);
+});
 
 test("Connect to gateway opens local approval page automatically",async()=>{
   const popup=loadPopup();
