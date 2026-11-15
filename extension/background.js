@@ -361,9 +361,19 @@ function invalidatePairedRelay(expected) {
       "gateway", "token", "connectionMode", "relayConnectionEpoch",
       "linkedProviders", "providerLinkEpochs", "providerLinkPendingAttempts"
     ]);
-    if (!expected || typeof current.gateway !== "string" ||
-        !current.gateway.startsWith("https://") || isLocalGateway(current.gateway) ||
-        !current.token || current.connectionMode === "local" ||
+    // Pre-no-pairing installations may still hold an owner-approved token
+    // for an HTTP *loopback* gateway. Revoke that legacy paired identity too,
+    // but never confuse tokenless local mode with a paired installation.
+    const legacyLoopbackPair = current.gateway &&
+      isLocalGateway(current.gateway) && Boolean(current.token) &&
+      current.connectionMode !== "local";
+    const remotePair = typeof current.gateway === "string" &&
+      current.gateway.startsWith("https://") && Boolean(current.token);
+    let validOrigin = false;
+    try { validOrigin = normalizeGateway(current.gateway) === current.gateway; }
+    catch (_) {}
+    if (!expected || !validOrigin || (!remotePair && !legacyLoopbackPair) ||
+        current.connectionMode === "local" ||
         !sameRelayIdentity(expected, current) ||
         (expected.relayConnectionEpoch || null) !== (current.relayConnectionEpoch || null)) {
       return false;
