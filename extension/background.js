@@ -166,38 +166,57 @@ function sameRelayIdentity(expected, actual) {
     expected?.token === actual.token &&
     expected?.connectionMode === actual.connectionMode;
 }
-function linkProviderConsent(provider, expected) {
+// A popup can close or fail after creating a first-time consent. Persist a
+// provisional owner until its upload commits or that exact attempt rolls back.
+// A second explicit link adopts a fresh epoch, so an old failed popup can
+// never revoke a later successful opt-in, even on the same gateway.
+function validLinkAttempt(attemptId) {
+  return typeof attemptId === "string" && attemptId.length >= 8 && attemptId.length <= 128;
+}
+function linkProviderConsent(provider, expected, attemptId) {
   return queueProviderTask(provider, () => queueConsentMutation(async () => {
+    if (!validLinkAttempt(attemptId)) throw new Error("Invalid provider link attempt.");
     const current = await chrome.storage.local.get(
-      ["gateway", "token", "connectionMode", "linkedProviders", "providerLinkEpochs"]);
+      ["gateway", "token", "connectionMode", "linkedProviders", "providerLinkEpochs", "providerLinkPendingAttempts"]);
     if (!hasRelayConnection(current) || !sameRelayIdentity(expected, current)) {
       throw new Error("Gateway connection changed before provider consent was saved.");
     }
     const linked = current.linkedProviders || [];
     const epochs = current.providerLinkEpochs || {};
+    const pending = current.providerLinkPendingAttempts || {};
     const alreadyLinked = linked.includes(provider);
-    const epoch = alreadyLinked && typeof epochs[provider] === "string" && epochs[provider]
-      ? epochs[provider] : randomHex(16);
+    const sameAttempt = pending[provider] === attemptId;
+    const tentative = !alreadyLinked || Boolean(pending[provider]);
+    const newGeneration = !alreadyLinked || (Boolean(pending[provider]) && !sameAttempt);
+    const epoch = newGeneration || !epochs[provider] ? randomHex(16) : epochs[provider];
     await chrome.storage.local.set({
-      linkedProviders: Array.from(new Set([...linked, provider])),
-      providerLinkEpochs: {...epochs, [provider]:epoch}
+      linkedProviders:Array.from(new Set([...linked, provider])),
+      providerLinkEpochs:{...epochs, [provider]:epoch},
+      providerLinkPendingAttempts: tentative
+        ? {...pending, [provider]:attemptId} : pending
     });
-    return {alreadyLinked};
+    return {alreadyLinked:alreadyLinked && !tentative, tentative};
   }));
 }
-function rollbackProviderConsent(provider, expected, epoch) {
+function finishProviderLink(provider, expected, attemptId, rollback) {
   return queueProviderTask(provider, () => queueConsentMutation(async () => {
+    if (!validLinkAttempt(attemptId)) return false;
     const current = await chrome.storage.local.get(
-      ["gateway", "token", "connectionMode", "linkedProviders", "providerLinkEpochs"]);
-    // A failed old popup must never unlink a provider on a newer gateway,
-    // or a newer explicit consent epoch on the same gateway.
+      ["gateway", "token", "connectionMode", "linkedProviders", "providerLinkEpochs", "providerLinkPendingAttempts"]);
     if (!sameRelayIdentity(expected, current) ||
-        current.providerLinkEpochs?.[provider] !== epoch ||
+        current.providerLinkPendingAttempts?.[provider] !== attemptId ||
         !current.linkedProviders?.includes(provider)) return false;
-    await chrome.storage.local.set({
-      linkedProviders: current.linkedProviders.filter(p => p !== provider),
-      providerLinkEpochs: {...current.providerLinkEpochs, [provider]:randomHex(16)}
-    });
+    const remaining = {...current.providerLinkPendingAttempts};
+    delete remaining[provider];
+    if (rollback) {
+      await chrome.storage.local.set({
+        linkedProviders:current.linkedProviders.filter(p => p !== provider),
+        providerLinkEpochs:{...(current.providerLinkEpochs || {}), [provider]:randomHex(16)},
+        providerLinkPendingAttempts:remaining
+      });
+    } else {
+      await chrome.storage.local.set({providerLinkPendingAttempts:remaining});
+    }
     return true;
   }));
 }
@@ -271,13 +290,16 @@ function logoutProviderFromRelay(provider) {
     // Their array/epoch writes must not race the logout mutation.
     await queueConsentMutation(async () => {
       const current = await chrome.storage.local.get(
-        ["gateway", "token", "connectionMode", "linkedProviders", "providerLinkEpochs"]);
+        ["gateway", "token", "connectionMode", "linkedProviders", "providerLinkEpochs", "providerLinkPendingAttempts"]);
       if (!sameRelayIdentity(expected, current)) {
         throw new Error("Gateway connection changed before provider logout. Retry on the new connection.");
       }
       await chrome.storage.local.set({
         linkedProviders:(current.linkedProviders || []).filter(value => value !== provider),
-        providerLinkEpochs:{...(current.providerLinkEpochs || {}), [provider]:randomHex(16)}
+        providerLinkEpochs:{...(current.providerLinkEpochs || {}), [provider]:randomHex(16)},
+        providerLinkPendingAttempts: Object.fromEntries(
+          Object.entries(current.providerLinkPendingAttempts || {}).filter(([name]) => name !== provider)
+        )
       });
     });
     // A re-pair during the awaited storage write must never redirect the
@@ -347,13 +369,19 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
   if (message?.type === "link-provider" && Object.hasOwn(PROVIDERS, message.provider)) {
-    linkProviderConsent(message.provider, message.connection)
-      .then(({alreadyLinked}) => sendResponse({ok:true, alreadyLinked}))
-      .catch(() => sendResponse({ok:false, error:"Gateway connection changed before provider link."}));
+    linkProviderConsent(message.provider, message.connection, message.attemptId)
+      .then(({alreadyLinked, tentative}) => sendResponse({ok:true, alreadyLinked, tentative}))
+      .catch(() => sendResponse({ok:false, error:"Gateway connection or link attempt invalid."}));
+    return true;
+  }
+  if (message?.type === "commit-provider-link" && Object.hasOwn(PROVIDERS, message.provider)) {
+    finishProviderLink(message.provider, message.connection, message.attemptId, false)
+      .then(committed => sendResponse({ok:true, committed}))
+      .catch(() => sendResponse({ok:false, error:"Provider link commit unavailable."}));
     return true;
   }
   if (message?.type === "rollback-provider-link" && Object.hasOwn(PROVIDERS, message.provider)) {
-    rollbackProviderConsent(message.provider, message.connection, message.epoch)
+    finishProviderLink(message.provider, message.connection, message.attemptId, true)
       .then(rolledBack => sendResponse({ok:true, rolledBack}))
       .catch(() => sendResponse({ok:false, error:"Provider link rollback unavailable."}));
     return true;
