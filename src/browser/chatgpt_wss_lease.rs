@@ -248,9 +248,11 @@ mod tests {
     #[test]
     fn new_registry_can_never_replay_old_instance_lease() {
         let mut old_owner = ChatgptWssLeaseRegistry::new();
-        let old = old_owner.open(old_owner.page_epoch(), 45).unwrap();
+        let old_epoch = old_owner.page_epoch();
+        let old = old_owner.open(old_epoch, 45).unwrap();
         let mut new_owner = ChatgptWssLeaseRegistry::new();
-        let new_lease = new_owner.open(new_owner.page_epoch(), 45).unwrap();
+        let new_epoch = new_owner.page_epoch();
+        let new_lease = new_owner.open(new_epoch, 45).unwrap();
         assert_ne!(old, new_lease);
         assert_eq!(
             new_owner.check_frame(&old, FrameKind::Text, 1),
