@@ -1065,6 +1065,149 @@ mod response_origin_guard_tests {
     }
 }
 
+#[cfg(test)]
+mod baseline_provenance_before_send_tests {
+    use super::{AdapterSelectors, ProviderSendPolicy, SiteAdapter};
+    use crate::providers::common::{self, EffectiveSelectorSet, ResponseProbe, SelectorSet};
+    use anyhow::Result;
+    use obscura_core::Page;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    use std::time::Duration;
+
+    struct BaselineSpyAdapter {
+        cfg: crate::config::ProviderConfig,
+        sends: Arc<AtomicUsize>,
+        forced_probe: Option<ResponseProbe>,
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl SiteAdapter for BaselineSpyAdapter {
+        fn name(&self) -> &str {
+            "manus"
+        }
+        fn aliases(&self) -> &[String] {
+            &self.cfg.models
+        }
+        async fn discover_models(&self, _page: &mut Page) -> Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+        async fn send_prompt(&self, _page: &mut Page, _prompt: &str) -> Result<()> {
+            self.sends.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        fn response_text(&self, _page: &Page) -> Option<String> {
+            None
+        }
+        fn response_probe(&self, page: &Page, challenge: bool) -> ResponseProbe {
+            self.forced_probe.clone().unwrap_or_else(|| {
+                common::response_probe(page, &[".answer"], challenge)
+            })
+        }
+        fn selectors(&self) -> AdapterSelectors {
+            self.effective_selectors().adapter_selectors()
+        }
+        fn selector_set(&self) -> &SelectorSet {
+            &crate::providers::manus::SELECTORS
+        }
+        fn effective_selectors(&self) -> EffectiveSelectorSet {
+            crate::providers::manus::SELECTORS.effective(&self.cfg.selectors)
+        }
+    }
+
+    async fn exercise_baseline(
+        html: &str,
+        forced_probe: Option<ResponseProbe>,
+    ) -> (anyhow::Error, usize, Option<&'static str>) {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        let sends = Arc::new(AtomicUsize::new(0));
+        let cfg = serde_yaml::from_str("name: manus").unwrap();
+        let guard = crate::provider_guard::ProviderGuard::default();
+        let adapter: Arc<dyn SiteAdapter> = Arc::new(BaselineSpyAdapter {
+            cfg,
+            sends: Arc::clone(&sends),
+            forced_probe,
+        });
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(8);
+        super::run_send(
+            adapter,
+            &mut page,
+            "private prompt must never leave foreign baseline".to_owned(),
+            Duration::from_millis(75),
+            Duration::from_millis(20),
+            ProviderSendPolicy {
+                completion_idle: Duration::from_millis(75),
+                provider_guard: guard.clone(),
+                metrics: crate::metrics::MetricsRegistry::default(),
+            },
+            sender,
+        )
+        .await;
+        let error = receiver
+            .recv()
+            .await
+            .expect("a rejection must be emitted")
+            .expect_err("untrusted baseline or bounded test timeout cannot succeed");
+        assert!(
+            receiver.try_recv().is_err(),
+            "baseline failure cannot be followed by assistant output"
+        );
+        (
+            error,
+            sends.load(Ordering::SeqCst),
+            guard.provider_disabled_reason("manus"),
+        )
+    }
+
+    #[tokio::test]
+    async fn foreign_baseline_refuses_to_dispatch_prompt_even_with_visible_reply() {
+        let html = "<html><body><div class='answer'>foreign old answer</div></body></html>";
+        let (error, sends, disabled) = exercise_baseline(html, None).await;
+        assert!(error.to_string().contains("chat origin unavailable"));
+        assert!(!error.to_string().contains("foreign old answer"));
+        assert!(!error.to_string().contains("private prompt"));
+        assert_eq!(sends, 0, "no prompt may reach a foreign baseline adapter");
+        assert_eq!(disabled, None);
+    }
+
+    #[tokio::test]
+    async fn untrusted_captcha_baseline_cannot_stick_manus_breaker_or_send() {
+        let html = "<html><body><div class='answer'>foreign content</div></body></html>";
+        let probe = ResponseProbe {
+            url: "https://attacker.invalid/captcha".into(),
+            challenge: true,
+            text: Some("Verify you are human".into()),
+            ..ResponseProbe::default()
+        };
+        let (error, sends, disabled) = exercise_baseline(html, Some(probe)).await;
+        assert!(error.to_string().contains("chat origin unavailable"));
+        assert_eq!(sends, 0);
+        assert_eq!(disabled, None);
+    }
+
+    #[tokio::test]
+    async fn explicit_test_only_fixture_still_reaches_the_spy_adapter() {
+        let html = "<html data-chat-gateway-test-fixture><body><div class='answer'>previous</div></body></html>";
+        let (error, sends, disabled) = exercise_baseline(html, None).await;
+        assert_eq!(sends, 1, "an explicit in-memory fixture may reach mock Send");
+        assert!(
+            error.downcast_ref::<common::ProviderTimeoutError>().is_some(),
+            "a mock Send without a reply must finish by typed timeout"
+        );
+        assert_eq!(disabled, None);
+    }
+}
+
 pub async fn run_send(
     adapter: Arc<dyn SiteAdapter>,
     page: &mut Page,
