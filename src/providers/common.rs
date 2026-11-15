@@ -662,6 +662,45 @@ fn visible_input_query(selector_js: &str) -> String {
     )
 }
 
+/// Fail closed when multiple search, thread, or dialog editors are actionable.
+/// A single editor matching multiple configured selectors counts only once.
+fn actionable_composer_count_expression(selectors: &[&str]) -> anyhow::Result<String> {
+    let selectors = serde_json::to_string(selectors)?;
+    let editable = editable_composer_condition("el");
+    Ok(format!(
+        r#"(() => {{
+            const matches = new Set();
+            for (const selector of {selectors}) {{
+                try {{
+                    for (const el of document.querySelectorAll(selector)) {{
+                        if ({editable} &&
+                            el.getClientRects().length > 0 &&
+                            window.getComputedStyle(el).visibility !== 'hidden' &&
+                            !el.closest('[hidden], [inert], [aria-hidden="true"], [aria-disabled="true"], [aria-readonly="true"]') &&
+                            !el.disabled && !el.matches(':disabled') &&
+                            !el.closest('fieldset[disabled]') &&
+                            !el.readOnly && el.getAttribute('aria-disabled') !== 'true' &&
+                            el.getAttribute('aria-readonly') !== 'true' &&
+                            el.getAttribute('contenteditable') !== 'false') {{
+                            matches.add(el);
+                        }}
+                    }}
+                }} catch (_) {{}}
+            }}
+            return matches.size;
+        }})()"#
+    ))
+}
+
+fn require_unique_actionable_composer(page: &Page, selectors: &[&str]) -> anyhow::Result<()> {
+    let expr = actionable_composer_count_expression(selectors)?;
+    if page.evaluate(&expr).as_f64() == Some(1.0) {
+        Ok(())
+    } else {
+        anyhow::bail!("provider actionable composer ambiguous or unavailable")
+    }
+}
+
 /// The pinned Obscura engine may attach a synthetic `value` property to a
 /// contenteditable node without mutating the visible DOM or its framework
 /// model. Only native input/textarea controls may prove draft retention by
@@ -691,6 +730,36 @@ fn composer_retains_prompt(page: &Page, selector: &str, prompt: &str) -> anyhow:
 #[cfg(test)]
 mod visible_composer_tests {
     use super::{click_send_or_enter, visible_composer_exists};
+
+    #[tokio::test]
+    async fn perplexity_ambiguous_visible_editors_fail_closed_and_overrides_deduplicate() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <textarea id="thread" class="candidate"></textarea>
+            <textarea id="search" class="candidate"></textarea>
+            <textarea id="hidden" class="candidate" hidden></textarea>
+            <textarea id="readonly" class="candidate" readonly></textarea>
+            <input type="email" class="candidate">
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        let inputs = &["textarea.candidate", "#thread", ".candidate"];
+        assert!(super::require_unique_actionable_composer(&page, inputs).is_err());
+        page.evaluate("document.querySelector('#search').setAttribute('hidden', '')");
+        assert!(super::require_unique_actionable_composer(&page, inputs).is_ok());
+        page.evaluate("document.querySelector('#thread').setAttribute('disabled', '')");
+        assert!(super::require_unique_actionable_composer(&page, inputs).is_err());
+        page.evaluate("document.querySelector('#thread').removeAttribute('disabled')");
+        page.evaluate("document.querySelector('#search').removeAttribute('hidden')");
+        assert!(super::require_unique_actionable_composer(&page, &["#thread"]).is_ok());
+        assert!(super::require_unique_actionable_composer(&page, &["#search", "#thread"]).is_err());
+    }
 
     #[tokio::test]
     async fn hidden_disabled_and_readonly_composers_are_not_reported_ready() {
@@ -998,14 +1067,23 @@ async fn human_type_with_provider(
     tokio::time::sleep(Duration::from_millis(80)).await;
     let text_js = serde_json::to_string(text)?;
     let route_guard = provider_origin_guard_js(expected_provider)?;
+    let composer_guard = if expected_provider == Some("perplexity") {
+        let count = actionable_composer_count_expression(selectors)?;
+        format!("if ({count} !== 1) return 'ambiguous-composer';")
+    } else {
+        String::new()
+    };
     let js = format!(
-        "(function() {{ {route_guard} var el = {el_js}; if (!el) return false; el.focus(); if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {{ try {{ var prototype = el.tagName === 'INPUT' ? window.HTMLInputElement.prototype : window.HTMLTextAreaElement.prototype; var setter = Object.getOwnPropertyDescriptor(prototype, 'value').set; setter.call(el, {text}); }} catch (e) {{ el.value = {text}; }} el.dispatchEvent(new InputEvent('input', {{ bubbles: true, inputType: 'insertText', data: {text} }})); el.dispatchEvent(new Event('change', {{ bubbles: true }})); return true; }} var selection = window.getSelection(); if (!selection) return false; try {{ var range = document.createRange(); range.selectNodeContents(el); selection.removeAllRanges(); selection.addRange(range); }} catch (e) {{ return false; }} var ok = false; try {{ ok = document.execCommand('insertText', false, {text}); }} catch (e) {{}} if (!ok) {{ if ('value' in el) {{ el.value = {text}; }} else {{ el.textContent = {text}; }} }} el.dispatchEvent(new InputEvent('input', {{ bubbles: true, inputType: 'insertText', data: {text} }})); el.dispatchEvent(new Event('change', {{ bubbles: true }})); return true; }})()",
+        "(function() {{ {route_guard} {composer_guard} var el = {el_js}; if (!el) return false; el.focus(); if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {{ try {{ var prototype = el.tagName === 'INPUT' ? window.HTMLInputElement.prototype : window.HTMLTextAreaElement.prototype; var setter = Object.getOwnPropertyDescriptor(prototype, 'value').set; setter.call(el, {text}); }} catch (e) {{ el.value = {text}; }} el.dispatchEvent(new InputEvent('input', {{ bubbles: true, inputType: 'insertText', data: {text} }})); el.dispatchEvent(new Event('change', {{ bubbles: true }})); return true; }} var selection = window.getSelection(); if (!selection) return false; try {{ var range = document.createRange(); range.selectNodeContents(el); selection.removeAllRanges(); selection.addRange(range); }} catch (e) {{ return false; }} var ok = false; try {{ ok = document.execCommand('insertText', false, {text}); }} catch (e) {{}} if (!ok) {{ if ('value' in el) {{ el.value = {text}; }} else {{ el.textContent = {text}; }} }} el.dispatchEvent(new InputEvent('input', {{ bubbles: true, inputType: 'insertText', data: {text} }})); el.dispatchEvent(new Event('change', {{ bubbles: true }})); return true; }})()",
         text = text_js,
         el_js = el_js,
     );
     let typed = page.evaluate(&js);
     if typed.as_str() == Some("off-provider") {
         anyhow::bail!("provider left its chat origin before typing");
+    }
+    if typed.as_str() == Some("ambiguous-composer") {
+        anyhow::bail!("provider actionable composer ambiguous or unavailable");
     }
     if typed.as_bool() != Some(true) {
         anyhow::bail!("typing into the provider input failed");
@@ -2353,6 +2431,11 @@ pub async fn send_prompt(
     // into another provider's composer.
     check_session(provider, page)?;
     require_page_provider_origin(provider, page)?;
+    // A search/dialog editor can coexist with a thread editor. Never pick
+    // whichever is first without a source-grounded thread-scoped selector.
+    if provider == "perplexity" {
+        require_unique_actionable_composer(page, &inputs)?;
+    }
     // Waiting for the composer can navigate to a foreign site containing an
     // equally generic input. Verify the initial provider before typing.
     if let Some(provider) = expected_submission_provider {
@@ -2370,6 +2453,9 @@ pub async fn send_prompt(
     drive_page(page, Duration::from_millis(200)).await;
     check_session(provider, page)?;
     require_page_provider_origin(provider, page)?;
+    if provider == "perplexity" {
+        require_unique_actionable_composer(page, &inputs)?;
+    }
     let input_sel = inputs
         .iter()
         .copied()
@@ -2390,6 +2476,9 @@ pub async fn send_prompt(
     require_page_provider_origin(provider, page)?;
     if let Some(provider) = expected_submission_provider {
         require_submission_provider_route(provider, page)?;
+    }
+    if provider == "perplexity" {
+        require_unique_actionable_composer(page, &inputs)?;
     }
     let sends = set.send_refs();
     // The click/Enter dispatch is not proof that a controlled SPA accepted
