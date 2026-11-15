@@ -151,6 +151,56 @@ function queueProviderTask(provider, work) {
   );
   return pending;
 }
+// Chrome storage.local has no compare-and-swap. All explicit provider
+// link/unlink/rollback writes to the shared linkedProviders array and epoch
+// map are serialized through this single worker-owned queue. The per-provider
+// task queue separately orders logout after a pending cookie upload.
+let lastConsentMutation = Promise.resolve();
+function queueConsentMutation(work) {
+  const next = lastConsentMutation.catch(() => {}).then(work);
+  lastConsentMutation = next.catch(() => {});
+  return next;
+}
+function sameRelayIdentity(expected, actual) {
+  return expected?.gateway === actual.gateway &&
+    expected?.token === actual.token &&
+    expected?.connectionMode === actual.connectionMode;
+}
+function linkProviderConsent(provider, expected) {
+  return queueProviderTask(provider, () => queueConsentMutation(async () => {
+    const current = await chrome.storage.local.get(
+      ["gateway", "token", "connectionMode", "linkedProviders", "providerLinkEpochs"]);
+    if (!hasRelayConnection(current) || !sameRelayIdentity(expected, current)) {
+      throw new Error("Gateway connection changed before provider consent was saved.");
+    }
+    const linked = current.linkedProviders || [];
+    const epochs = current.providerLinkEpochs || {};
+    const alreadyLinked = linked.includes(provider);
+    const epoch = alreadyLinked && typeof epochs[provider] === "string" && epochs[provider]
+      ? epochs[provider] : randomHex(16);
+    await chrome.storage.local.set({
+      linkedProviders: Array.from(new Set([...linked, provider])),
+      providerLinkEpochs: {...epochs, [provider]:epoch}
+    });
+    return {alreadyLinked};
+  }));
+}
+function rollbackProviderConsent(provider, expected, epoch) {
+  return queueProviderTask(provider, () => queueConsentMutation(async () => {
+    const current = await chrome.storage.local.get(
+      ["gateway", "token", "connectionMode", "linkedProviders", "providerLinkEpochs"]);
+    // A failed old popup must never unlink a provider on a newer gateway,
+    // or a newer explicit consent epoch on the same gateway.
+    if (!sameRelayIdentity(expected, current) ||
+        current.providerLinkEpochs?.[provider] !== epoch ||
+        !current.linkedProviders?.includes(provider)) return false;
+    await chrome.storage.local.set({
+      linkedProviders: current.linkedProviders.filter(p => p !== provider),
+      providerLinkEpochs: {...current.providerLinkEpochs, [provider]:randomHex(16)}
+    });
+    return true;
+  }));
+}
 // Keep one trailing refresh per provider. It reads the latest cookie snapshot
 // when it starts, rather than replaying every rotation behind a slow import.
 const queuedProviderSyncs = new Map();
@@ -216,16 +266,19 @@ function logoutProviderFromRelay(provider) {
     if (!hasRelayConnection(expected)) {
       throw new Error("Gateway connection missing; reconnect before provider logout.");
     }
-    const current = await chrome.storage.local.get(["gateway", "token", "connectionMode", "linkedProviders", "providerLinkEpochs"]);
-    if (current.gateway !== expected.gateway || current.token !== expected.token || current.connectionMode !== expected.connectionMode) {
-      throw new Error("Gateway connection changed before provider logout. Retry on the new connection.");
-    }
-    // Opt out before revocation; even if gateway deletion fails, do not
-    // upload more cookies until the user explicitly reconnects this provider.
-    const linkedProviders = current.linkedProviders || [];
-    await chrome.storage.local.set({
-      linkedProviders:linkedProviders.filter(value => value !== provider),
-      providerLinkEpochs:{...(current.providerLinkEpochs || {}), [provider]:randomHex(16)}
+    // Take the provider off the consent list BEFORE the network DELETE.
+    // Other provider links may proceed while network revocation awaits.
+    // Their array/epoch writes must not race the logout mutation.
+    await queueConsentMutation(async () => {
+      const current = await chrome.storage.local.get(
+        ["gateway", "token", "connectionMode", "linkedProviders", "providerLinkEpochs"]);
+      if (!sameRelayIdentity(expected, current)) {
+        throw new Error("Gateway connection changed before provider logout. Retry on the new connection.");
+      }
+      await chrome.storage.local.set({
+        linkedProviders:(current.linkedProviders || []).filter(value => value !== provider),
+        providerLinkEpochs:{...(current.providerLinkEpochs || {}), [provider]:randomHex(16)}
+      });
     });
     // A re-pair during the awaited storage write must never redirect the
     // DELETE request to a different gateway or a newly issued install token.
@@ -291,6 +344,18 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
   if (message?.type === "poll-connection") {
     pollConnection().then(() => sendResponse({ok:true})).catch(error => sendResponse({ok:false,error:error.message}));
+    return true;
+  }
+  if (message?.type === "link-provider" && Object.hasOwn(PROVIDERS, message.provider)) {
+    linkProviderConsent(message.provider, message.connection)
+      .then(({alreadyLinked}) => sendResponse({ok:true, alreadyLinked}))
+      .catch(() => sendResponse({ok:false, error:"Gateway connection changed before provider link."}));
+    return true;
+  }
+  if (message?.type === "rollback-provider-link" && Object.hasOwn(PROVIDERS, message.provider)) {
+    rollbackProviderConsent(message.provider, message.connection, message.epoch)
+      .then(rolledBack => sendResponse({ok:true, rolledBack}))
+      .catch(() => sendResponse({ok:false, error:"Provider link rollback unavailable."}));
     return true;
   }
   if (message?.type === "sync-provider" && PROVIDERS[message.provider]) {
