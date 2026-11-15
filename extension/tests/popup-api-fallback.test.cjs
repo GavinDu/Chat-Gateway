@@ -38,7 +38,26 @@ function loadPopup({pollResult = {ok:true}} = {}) {
       async set(next) { Object.assign(values, next); },
       async remove(keys) { for (const key of Array.isArray(keys) ? keys : [keys]) delete values[key]; },
     }},
-    runtime: { sendMessage: async () => pollResult },
+    runtime: { sendMessage: async message => {
+      if (message.type === "reserve-pending-approval") {
+        values.pendingApprovalRequest={gateway:message.gateway,generation:"f".repeat(32)};
+        return {ok:true,generation:"f".repeat(32)};
+      }
+      if (message.type === "install-pending-approval") {
+        if (message.generation!==values.pendingApprovalRequest?.generation) return {ok:false};
+        values.pendingConnection={gateway:message.gateway,request_id:message.request_id,
+          poll_secret:message.poll_secret,expires:Date.now()+300000,
+          approvalGeneration:message.generation};
+        values.pendingApprovalRequest=null;
+        return {ok:true,pending:{gateway:message.gateway,request_id:message.request_id,
+          expires:values.pendingConnection.expires}};
+      }
+      if (message.type === "release-pending-approval") {
+        if (values.pendingApprovalRequest?.generation===message.generation) values.pendingApprovalRequest=null;
+        return {ok:true,released:true};
+      }
+      return pollResult;
+    } },
     // Intentionally no tabs or alarms API: reproduces reading 'create' of undefined.
   };
   const context = {
