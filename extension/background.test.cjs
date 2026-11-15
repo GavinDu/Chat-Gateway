@@ -356,6 +356,87 @@ test("same-gateway unlink and relink epoch cannot attribute the old upload to ne
     "a worker may observe but must not regenerate a persisted consent epoch");
 });
 
+test("simultaneous same-identity diagnostics share one POST but retain each consent snapshot", async () => {
+  const f = loadBackground(["chatgpt"], [], true);
+  const state = {
+    gateway:"http://127.0.0.1:8080",
+    connectionMode:"local", linkedProviders:["chatgpt"]
+  };
+  f.sandbox.chrome.storage.local.get = async () => ({...state});
+  let fetches = 0;
+  let release;
+  f.sandbox.relayFetch = async path => {
+    assert.equal(path, "/relay/v1/diagnostics");
+    fetches++;
+    return await new Promise(resolve => { release = resolve; });
+  };
+  const diagnostics = force => new Promise(resolve =>
+    f.listeners.message[0]({type:"relay-diagnostics",force},{},resolve));
+
+  const first = diagnostics(true);
+  await flushAsyncWork();
+  assert.equal(fetches, 1);
+  // Replacing the linked-provider list does not change the gateway token.
+  // A second popup view must retain its newer consent snapshot even though
+  // it shares the same read-only gateway health request.
+  state.linkedProviders = ["claude"];
+  const second = diagnostics(true);
+  await flushAsyncWork();
+  assert.equal(fetches, 1, "same gateway identity must not duplicate health requests");
+
+  release({ok:true,status:200,json:async()=>({marker:"same-identity",providers:[]})});
+  const [oldView, newView] = await Promise.all([first,second]);
+  assert.equal(oldView.ok, true);
+  assert.equal(newView.ok, true);
+  assert.equal(oldView.gateway.marker, "same-identity");
+  assert.equal(newView.gateway.marker, "same-identity");
+  assert.deepEqual(Array.from(oldView.extension.linked_providers), ["chatgpt"]);
+  assert.deepEqual(Array.from(newView.extension.linked_providers), ["claude"]);
+  assert.notEqual(newView.gateway_issue, "gateway_connection_changed");
+  await diagnostics(false);
+  assert.equal(fetches, 1, "the completed probe still supplies the normal short-lived cache");
+
+  f.sandbox.relayFetch = async () => {
+    fetches++;
+    return {ok:true,status:200,json:async()=>({marker:"fresh-forced",providers:[]})};
+  };
+  const refreshed = await diagnostics(true);
+  assert.equal(refreshed.ok, true);
+  assert.equal(refreshed.gateway.marker, "fresh-forced");
+  assert.equal(fetches, 2, "a later forced refresh must make a new request");
+});
+
+test("same-identity concurrent failed diagnostics release single-flight for recovery", async () => {
+  const f = loadBackground(["chatgpt"], [], true);
+  let fetches = 0;
+  let release;
+  f.sandbox.relayFetch = async () => {
+    fetches++;
+    return await new Promise(resolve => { release = resolve; });
+  };
+  const diagnostics = force => new Promise(resolve =>
+    f.listeners.message[0]({type:"relay-diagnostics",force},{},resolve));
+  const first = diagnostics(true);
+  const second = diagnostics(false);
+  await flushAsyncWork();
+  assert.equal(fetches, 1, "same identity's forced and unforced calls join");
+  release({ok:false,status:503});
+  const [a,b] = await Promise.all([first,second]);
+  assert.equal(a.ok, false);
+  assert.equal(b.ok, false);
+  assert.equal(a.gateway_issue, "gateway_request_failed");
+  assert.equal(b.gateway_issue, "gateway_request_failed");
+
+  f.sandbox.relayFetch = async () => {
+    fetches++;
+    return {ok:true,status:200,json:async()=>({marker:"recovered",providers:[]})};
+  };
+  const recovered = await diagnostics(false);
+  assert.equal(recovered.ok, true);
+  assert.equal(recovered.gateway.marker, "recovered");
+  assert.equal(fetches, 2, "failure must release the lease and allow retry");
+});
+
 test("stale gateway A diagnostics cannot overwrite B cache or poison B cookie recovery", async () => {
   for (const oldFailure of [false, true]) {
     const f = loadBackground(["chatgpt"]);
