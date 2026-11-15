@@ -3321,6 +3321,8 @@ mod prompt_bound_submission_tests {
                 document.querySelector('#prompt').value = '';
                 const turn = document.createElement('div');
                 turn.setAttribute('data-message-author-role', 'user');
+                // Preserve significant layout newlines as real visible text.
+                turn.style.whiteSpace = 'pre-wrap';
                 turn.textContent = 'line one line two';
                 document.body.appendChild(turn);
             })()"#,
