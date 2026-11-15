@@ -292,7 +292,10 @@ async function resyncLinkedProviders() {
   // automatic cookie reads/imports doomed to fail against the same endpoint.
   // Keep linked-provider consent intact so the next successful check repairs
   // missing snapshots normally. Manual provider Sync remains independent.
-  if (!status.ok && status.extension?.connected) return;
+  // No configured gateway is not permission to enqueue every remembered
+  // provider. Preserve linked consent for a later successful reconnect, but
+  // never report synthetic skipped imports while disconnected.
+  if (!status.ok) return;
   const missing = new Set(status.ok
     ? (status.gateway.providers || []).filter(item => !item.linked).map(item => item.provider)
     : []);
