@@ -14,8 +14,8 @@ function load(status, data, expires = Date.now() + 300000, beforeResponse = null
       alarms:{onAlarm:{addListener(){}},clear:async()=>{}},
       storage:{local:{get:async()=>({...values}),set:async value=>Object.assign(values,value),remove:async key=>{delete values[key];}}}}};
   vm.createContext(context);
-  vm.runInContext(fs.readFileSync(require.resolve('../background.js'),'utf8')+'\nglobalThis.poll = pollConnection;', context);
-  return {values,calls,poll:context.poll};
+  vm.runInContext(fs.readFileSync(require.resolve('../background.js'),'utf8')+'\nglobalThis.poll = pollConnection; globalThis.holdConsent = queueConsentMutation;', context);
+  return {values,calls,poll:context.poll,holdConsent:context.holdConsent};
 }
 test('pending approval polling refuses redirects that could leak the secret',async()=>{
   const api=load(202,{pending:true});
@@ -90,3 +90,44 @@ test('late successful response cannot approve an expired request',async()=>{
   assert.equal(api.values.token,undefined,'expired approval must not become a connection');
   assert.equal(api.values.pendingConnection,undefined);
 });
+
+test('queued approval uses latest provider consent written before its final commit',async()=>{
+  const api=load(200,{token:'c'.repeat(64)});
+  api.values.gateway='http://127.0.0.1:8080';
+  api.values.linkedProviders=[];
+  let release;
+  const gate=new Promise(resolve=>{release=resolve;});
+  const earlier=api.holdConsent(async()=>{
+    await gate;
+    api.values.linkedProviders=['chatgpt'];
+  });
+  const approved=api.poll();
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(api.calls.length,1);
+  release();
+  await earlier;
+  await approved;
+  assert.equal(api.values.token,'c'.repeat(64));
+  assert.deepEqual(Array.from(api.values.linkedProviders),['chatgpt'],
+    'accepted approval must not clobber a later linked-provider mutation');
+  assert.equal(api.values.connectionMode,'paired');
+});
+
+test('queued approval cannot overwrite a replaced pending request after fetch succeeds',async()=>{
+  const api=load(200,{token:'c'.repeat(64)});
+  let release;
+  const gate=new Promise(resolve=>{release=resolve;});
+  const held=api.holdConsent(async()=>{await gate;});
+  const running=api.poll();
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(api.calls.length,1);
+  const current=api.values.pendingConnection;
+  api.values.pendingConnection={...current,request_id:'d'.repeat(64),poll_secret:'e'.repeat(64)};
+  release();
+  await held;
+  await running;
+  assert.equal(api.values.token,undefined,'old approval must not install its token');
+  assert.equal(api.values.pendingConnection.request_id,'d'.repeat(64));
+  assert.equal(api.values.pendingConnection.poll_secret,'e'.repeat(64));
+});
+
