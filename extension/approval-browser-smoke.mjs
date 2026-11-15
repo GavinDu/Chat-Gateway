@@ -72,7 +72,10 @@ try {
  // An upgraded legacy installation may retain a token but have no learned ID.
  // Fail closed and offer owner approval instead of trapping the popup on 403.
  await rm(join(temp,'sessions/relay-extension-id'));
- await reopened.locator('#pairing:not([hidden])').waitFor({timeout:15000});
+ // Revocation is now checked by the connected-only 30s popup heartbeat.
+ // Allow one complete bounded period plus scheduling jitter, instead of
+ // assuming the removed unconditional 10s interval still exists.
+ await reopened.locator('#pairing:not([hidden])').waitFor({timeout:40000});
  assert.equal(await reopened.locator('#linked').isVisible(),false);
  const stored=await worker.evaluate(()=>chrome.storage.local.get(['token']));
  assert.equal(Boolean(stored.token),false);
