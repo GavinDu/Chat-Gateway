@@ -737,12 +737,23 @@ async function resyncLinkedProviders() {
   );
 }
 
+// Startup, installation and periodic alarms may overlap while a gateway
+// diagnostics request is still in flight. Coalesce only these automatic
+// refreshes. Explicit manual Sync and post-approval resync remain independent
+// so a changed connection cannot be hidden behind an old scheduled request.
+let scheduledProviderRefresh = null;
 function scheduleLinkedProviderResync() {
   chrome.alarms?.create?.("relay-session-refresh", {periodInMinutes:15});
   pollConnection().catch(() => {});
-  resyncLinkedProviders().catch(() => {
-    // Do not log provider session material or relay credentials.
-  });
+  if (scheduledProviderRefresh) return;
+  const run = resyncLinkedProviders();
+  scheduledProviderRefresh = run;
+  // Both success and failure release the lease. Attaching a rejection handler
+  // also prevents an unhandled promise if the gateway/storage is unavailable.
+  const release = () => {
+    if (scheduledProviderRefresh === run) scheduledProviderRefresh = null;
+  };
+  void run.then(release, release);
 }
 
 // MV3 service workers can be recreated independently of a browser startup.

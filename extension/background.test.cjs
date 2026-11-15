@@ -633,6 +633,63 @@ test("disconnected startup and install never fan out automatic provider imports"
   assert.equal(diagnostics.extension.provider_sync.claude.state, "not_attempted");
 });
 
+test("overlapping startup and install share one automatic status and provider refresh", async () => {
+  const f = loadBackground(["chatgpt"], [], true);
+  let releaseStatus;
+  const heldStatus = new Promise(resolve => { releaseStatus = resolve; });
+  let probes = 0;
+  f.sandbox.relayFetch = async () => {
+    probes++;
+    if (probes === 1) await heldStatus;
+    return {ok:true,status:200,json:async()=>({providers:[]})};
+  };
+
+  f.listeners.startup[0]();
+  f.listeners.installed[0]();
+  for (let i = 0; i < 6; i++) await flushAsyncWork();
+  assert.equal(probes, 1, "overlapping lifecycle events must not duplicate gateway diagnostics");
+  assert.deepEqual(f.calls, [], "provider import must await the single status probe");
+
+  // Explicit manual recovery is never blocked by an automatic heartbeat.
+  const manual = await new Promise(resolve => f.listeners.message[0](
+    {type:"sync-provider", provider:"chatgpt"}, {}, resolve));
+  assert.equal(manual.ok, true);
+  assert.deepEqual(f.calls, ["chatgpt"]);
+
+  releaseStatus();
+  for (let i = 0; i < 8; i++) await flushAsyncWork();
+  assert.equal(probes, 1);
+  assert.deepEqual(f.calls, ["chatgpt", "chatgpt"],
+    "one automatic refresh still repairs the missing provider snapshot");
+
+  // No persistent cache: a later alarm/startup can verify newly missing data.
+  f.listeners.startup[0]();
+  for (let i = 0; i < 8; i++) await flushAsyncWork();
+  assert.equal(probes, 2);
+  assert.deepEqual(f.calls, ["chatgpt", "chatgpt", "chatgpt"]);
+});
+
+test("failed automatic diagnostics releases scheduled single-flight lease", async () => {
+  const f = loadBackground(["chatgpt"], [], true);
+  let probes = 0;
+  let unavailable = true;
+  f.sandbox.relayFetch = async () => {
+    probes++;
+    if (unavailable) throw new Error("simulated gateway outage with secret");
+    return {ok:true,status:200,json:async()=>({providers:[]})};
+  };
+  f.listeners.startup[0]();
+  for (let i = 0; i < 8; i++) await flushAsyncWork();
+  assert.equal(probes, 1);
+  assert.deepEqual(f.calls, [], "failed health check must not queue cookie imports");
+
+  unavailable = false;
+  f.listeners.installed[0]();
+  for (let i = 0; i < 8; i++) await flushAsyncWork();
+  assert.equal(probes, 2, "a later alarm/install must retry after failure");
+  assert.deepEqual(f.calls, ["chatgpt"]);
+});
+
 test("service-worker install and startup restore each unique linked provider", async () => {
   const { calls, listeners, sandbox } = loadBackground([
     "chatgpt",
