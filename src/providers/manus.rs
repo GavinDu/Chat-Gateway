@@ -1,3 +1,10 @@
+/// Pure task-correlated Agent lifecycle contract. It is compiled and
+/// regression-tested, but the live DOM adapter must not consume task events
+/// until first-party authenticated task-ID/evidence fixtures exist (#1041).
+/// Suppress dormant public contract warnings only in this isolated module.
+#[allow(dead_code)]
+pub mod agent_lifecycle;
+
 use crate::config::ProviderConfig;
 use crate::providers::common::{self, SelectorSet};
 use crate::providers::{AdapterSelectors, SiteAdapter};
@@ -81,5 +88,46 @@ impl SiteAdapter for ManusAdapter {
     }
     fn effective_selectors(&self) -> common::EffectiveSelectorSet {
         SELECTORS.effective(&self.cfg.selectors)
+    }
+}
+
+#[cfg(test)]
+mod agent_lifecycle_wiring_tests {
+    use super::agent_lifecycle::{AgentEvent, AgentPhase, AgentTaskLifecycle, Transition};
+
+    #[test]
+    fn compiled_manus_agent_contract_never_treats_acceptance_as_completion() {
+        let mut task = AgentTaskLifecycle::queued(11);
+        let request = task.request_identity();
+        assert_eq!(
+            task.apply(&request, "opaque-current-task", AgentEvent::Accepted),
+            Transition::Applied
+        );
+        assert_eq!(task.phase(), AgentPhase::Accepted);
+        assert_eq!(
+            task.apply(&request, "opaque-current-task", AgentEvent::Terminal),
+            Transition::Invalid,
+            "accepted task is not a completed Agent response"
+        );
+        assert_eq!(
+            task.apply(&request, "different-task", AgentEvent::Running),
+            Transition::Stale,
+            "another task must not make the current request eligible to finish"
+        );
+        assert_eq!(
+            task.apply(&request, "opaque-current-task", AgentEvent::Running),
+            Transition::Applied
+        );
+        assert_eq!(
+            task.apply(&request, "opaque-current-task", AgentEvent::Terminal),
+            Transition::Applied
+        );
+        assert_eq!(task.phase(), AgentPhase::Terminal);
+        assert_eq!(task.begin_new(12), Transition::Applied);
+        assert_eq!(
+            task.apply(&request, "opaque-current-task", AgentEvent::Terminal),
+            Transition::Stale,
+            "the previous owner's epoch cannot finish a new task"
+        );
     }
 }
