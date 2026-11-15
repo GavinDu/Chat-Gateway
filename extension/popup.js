@@ -50,6 +50,11 @@ function showGatewayConnection(connected) {
 }
 
 async function refreshStatus(force = false) {
+  // Bind any authorization failure to the exact paired installation whose
+  // health was requested, not a newer connection made during the await.
+  const checkedConnection = await chrome.storage.local.get([
+    "gateway", "token", "connectionMode", "relayConnectionEpoch"
+  ]);
   // The service-worker API exposes gateway status together with its own
   // redacted connectivity/sync failures. Fall back to direct status for older
   // worker versions or when the worker is unavailable.
@@ -64,13 +69,25 @@ async function refreshStatus(force = false) {
     ? {ok:true, status:200, json:async () => diagnostics.gateway}
     : diagnosticFailure
       ? {ok:false, status:diagnostics.gateway_issue === "gateway_unauthorized" ? 401 : 503}
-      : await relayFetch("/relay/v1/status", {method:"POST",body:"{}"});
+      : await relayFetch("/relay/v1/status", {method:"POST",body:"{}"}, checkedConnection);
   if (response.status === 401 || response.status === 403) {
-    const state = await chrome.storage.local.get(["gateway", "connectionMode"]);
-    if (state.connectionMode === "local" && isLocalGateway(state.gateway)) {
+    if (checkedConnection.connectionMode === "local" &&
+        isLocalGateway(checkedConnection.gateway)) {
       throw new Error("Local relay access rejected. Check the gateway mode and optional extension ID restriction.");
     }
-    await chrome.storage.local.remove("token");
+    // Gateway status 401 is not permission to remove an arbitrary current
+    // token. Only the worker's single consent writer can revoke the exact
+    // earlier paired identity; stale results fail closed without disconnecting
+    // a newer healthy installation.
+    const revoked = await chrome.runtime.sendMessage({
+      type:"invalidate-paired-relay", connection:checkedConnection
+    }).catch(() => null);
+    if (!revoked?.ok) {
+      throw new Error("Gateway authorization check could not be applied safely. Refresh status.");
+    }
+    if (!revoked.invalidated) {
+      throw new Error("Gateway connection changed during status check. Refresh status.");
+    }
     showGatewayConnection(false);
     throw new Error("Gateway connection expired or was revoked. Choose Connect to gateway to approve it again.");
   }

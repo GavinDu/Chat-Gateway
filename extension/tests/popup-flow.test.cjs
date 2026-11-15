@@ -33,6 +33,22 @@ function loadPopup({failCookieDomain = null, includeSecondProvider = false, manu
     if(request.type==="relay-diagnostics" && diagnosticsSync) {
       return {ok:false,extension:{provider_sync:{metaai:diagnosticsSync}}};
     }
+    if(request.type==="invalidate-paired-relay") {
+      const expected=request.connection;
+      const valid=expected && values.token && values.connectionMode!=="local" &&
+        values.gateway===expected.gateway && values.token===expected.token &&
+        values.connectionMode===expected.connectionMode &&
+        (values.relayConnectionEpoch||null)===(expected.relayConnectionEpoch||null);
+      if(!valid) return {ok:true,invalidated:false};
+      values.token=null;
+      values.connectionMode=null;
+      values.relayConnectionEpoch="revoked-epoch";
+      values.linkedProviders=[];
+      values.providerLinkEpochs={};
+      values.providerLinkPendingAttempts={};
+      values.relaySnapshotVersions={};
+      return {ok:true,invalidated:true};
+    }
     if(request.type==="connect-local-relay") {
       if (values.localDisconnected && !request.manual) {
         return {ok:false,error:"Local gateway was explicitly disconnected."};
@@ -189,7 +205,7 @@ function loadPopup({failCookieDomain = null, includeSecondProvider = false, manu
   vm.createContext(context);
   vm.runInContext(fs.readFileSync(path.join(__dirname,"..","popup.js"),"utf8")+
     "\nglobalThis.testControls={refreshStatus,connectProvider,logoutProvider};",context);
-  return {values,server,elements,byId,chromeCalls,controls:context.testControls};
+  return {values,server,elements,byId,chromeCalls,controls:context.testControls,context};
 }
 
 test("worker diagnostic failure avoids a second redundant popup status HTTP request", async () => {
@@ -220,7 +236,7 @@ test("known worker unauthorized preserves local mode and revokes paired credenti
   paired.values.connectionMode="paired";
   paired.values.token="temporary-test-token";
   await assert.rejects(() => paired.controls.refreshStatus(), /expired or was revoked/);
-  assert.equal(paired.values.token,undefined, "paired authorization revocation must still clear local token");
+  assert.equal(paired.values.token,null, "paired authorization revocation must still clear current local token");
   assert.equal(paired.elements.get("pairing").hidden,false);
   assert.equal(paired.chromeCalls.filter(x=>x==="http:relay-status").length,0);
 });
@@ -444,4 +460,60 @@ test("local-only gateway automatically connects without pairing, approval or tok
   assert.equal(popup.server.linked, true);
   await popup.controls.logoutProvider("metaai");
   assert.equal(popup.server.linked, false);
+});
+
+
+test("stale remote 401 must not revoke a newer paired install",async()=>{
+  const popup=loadPopup();
+  popup.values.gateway="https://first.example";
+  popup.values.token="a".repeat(64);
+  popup.values.connectionMode="paired";
+  popup.values.relayConnectionEpoch="gen-a";
+  let release, started;
+  const waiting=new Promise(resolve=>{started=resolve;});
+  const gate=new Promise(resolve=>{release=resolve;});
+  const original=popup.context.chrome.runtime.sendMessage;
+  popup.context.chrome.runtime.sendMessage=async request=>{
+    if(request.type==="relay-diagnostics") {
+      started();
+      return gate;
+    }
+    return original(request);
+  };
+  const pending=popup.controls.refreshStatus();
+  await waiting;
+  popup.values.gateway="https://new.example";
+  popup.values.token="b".repeat(64);
+  popup.values.connectionMode="paired";
+  popup.values.relayConnectionEpoch="gen-b";
+  popup.values.linkedProviders=["metaai"];
+  release({ok:false,gateway_issue:"gateway_unauthorized"});
+  await assert.rejects(pending,/connection changed during status check/);
+  assert.equal(popup.values.gateway,"https://new.example");
+  assert.equal(popup.values.token,"b".repeat(64));
+  assert.deepEqual(Array.from(popup.values.linkedProviders),["metaai"]);
+  assert.ok(popup.chromeCalls.includes("invalidate-paired-relay:"));
+});
+
+test("paired 401 worker unavailable cannot trigger popup-side token deletion",async()=>{
+  const popup=loadPopup({diagnosticsFailure:{ok:false,gateway_issue:"gateway_unauthorized"}});
+  popup.values.gateway="https://private.example";
+  popup.values.token="a".repeat(64);
+  popup.values.connectionMode="paired";
+  const original=popup.context.chrome.runtime.sendMessage;
+  popup.context.chrome.runtime.sendMessage=async request=>
+    request.type==="invalidate-paired-relay" ? {ok:false} : original(request);
+  await assert.rejects(()=>popup.controls.refreshStatus(),/could not be applied safely/);
+  assert.equal(popup.values.token,"a".repeat(64));
+  assert.ok(popup.chromeCalls.filter(x=>x==="http:relay-status").length===0);
+});
+
+test("local 401 remains an actionable mismatch without worker invalidation",async()=>{
+  const popup=loadPopup({diagnosticsFailure:{ok:false,gateway_issue:"gateway_unauthorized"}});
+  popup.values.gateway="http://127.0.0.1:8080";
+  popup.values.connectionMode="local";
+  popup.values.linkedProviders=["metaai"];
+  await assert.rejects(()=>popup.controls.refreshStatus(),/Local relay access rejected/);
+  assert.deepEqual(Array.from(popup.values.linkedProviders),["metaai"]);
+  assert.equal(popup.chromeCalls.filter(x=>x==="invalidate-paired-relay:").length,0);
 });
