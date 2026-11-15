@@ -316,21 +316,24 @@ pub fn response_probe(
             let postAnswerAffordance = false;
             if (lastResponseNode) {{
                 const scopeSelector = "article, [data-message-author-role='assistant'], [data-testid='assistant-message'], [data-testid*='conversation-turn'], [data-testid*='message']";
-                let scope = lastResponseNode;
-                for (let depth = 0; depth < 6 && scope; depth += 1, scope = scope.parentElement) {{
+                // A Copy/Retry control is terminal evidence ONLY when scoped to
+                // the same visible response turn. Climbing past an <article>
+                // can discover an old reply's Copy button in the conversation
+                // root and falsely complete the current partial answer.
+                let scope = null;
+                try {{ scope = lastResponseNode.closest(scopeSelector); }} catch (_) {{}}
+                if (scope) {{
                     let buttons = [];
                     try {{ buttons = Array.from(scope.querySelectorAll("button, [role='button']")); }} catch (_) {{}}
-                    if (buttons.some(button => visible(button) &&
+                    postAnswerAffordance = buttons.some(button => visible(button) &&
                         /copy|regenerate|retry|good response|bad response|thumbs up|thumbs down/.test(
                             ((button.getAttribute("aria-label") || "") + " " +
                             (button.getAttribute("data-testid") || "") + " " +
                             (button.innerText || button.textContent || "")).toLowerCase()
-                        ))) {{
-                        postAnswerAffordance = true;
-                        break;
-                    }}
-                    if (scope.matches && scope.matches(scopeSelector) && depth >= 3) break;
+                        ));
                 }}
+                // An unrecognized turn root cannot safely borrow controls
+                // from an ancestor. Retain the conservative idle fallback.
             }}
             return {{ text, count: nodes.size, streaming, postAnswerAffordance, url, challenge }};
         }})()"#,
@@ -434,6 +437,68 @@ mod streaming_visibility_regression_tests {
         page.evaluate("document.querySelector('fieldset').disabled = false");
         let active = response_probe(&page, &[".answer"], false);
         assert!(active.streaming);
+    }
+
+    #[tokio::test]
+    async fn copy_from_previous_turn_cannot_complete_latest_partial_response() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <section id="conversation">
+              <article id="old"><div class="answer">completed earlier reply</div>
+                <button id="old-copy" aria-label="Copy">Copy</button></article>
+              <article id="current"><div><div class="answer">new partial reply</div></div>
+                <button id="current-copy" aria-label="Copy" hidden>Copy</button></article>
+            </section>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+
+        let before = response_probe(&page, &[".answer"], false);
+        assert_eq!(before.text.as_deref(), Some("new partial reply"));
+        assert!(
+            !before.post_answer_affordance,
+            "old article's visible Copy must not finish a new partial response"
+        );
+        page.evaluate("document.querySelector('#current-copy').hidden = false");
+        let current = response_probe(&page, &[".answer"], false);
+        assert!(
+            current.post_answer_affordance,
+            "same-article Copy is a scoped post-answer signal"
+        );
+        page.evaluate("document.querySelector('#current-copy').disabled = true");
+        let disabled = response_probe(&page, &[".answer"], false);
+        assert!(
+            !disabled.post_answer_affordance,
+            "disabled current Copy must not borrow an enabled old Copy"
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_turn_root_fails_closed_for_post_answer_affordance() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body><section>
+            <div class="answer">incomplete response without known turn root</div>
+            <button aria-label="Copy">Copy older message</button>
+        </section></body></html>"#;
+        let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        let probe = response_probe(&page, &[".answer"], false);
+        assert!(
+            !probe.post_answer_affordance,
+            "a generic parent container cannot prove completion"
+        );
     }
 
     #[tokio::test]
