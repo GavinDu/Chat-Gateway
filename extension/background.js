@@ -220,6 +220,82 @@ function finishProviderLink(provider, expected, attemptId, rollback) {
     return true;
   }));
 }
+// The local approval request crosses a popup HTTP await. Reserve its one-time
+// generation in the MV3 worker before network I/O, then commit only if no
+// owner-controlled connection transition occurred while the popup was away.
+// A persisted reservation also survives worker suspension; it expires after
+// two minutes if the popup closes before receiving the gateway response.
+function reservePendingApproval(gateway) {
+  return queueConsentMutation(async () => {
+    if (!isLocalGateway(gateway) || normalizeGateway(gateway) !== gateway) {
+      throw new Error("Only a normalized loopback gateway supports local approval.");
+    }
+    if (!await chrome.permissions.contains({origins:[gateway + "/*"]})) {
+      throw new Error("Gateway host permission is missing.");
+    }
+    const current = await chrome.storage.local.get([
+      "gateway", "token", "connectionMode", "relayConnectionEpoch",
+      "localDisconnected", "pendingConnection", "pendingApprovalRequest"
+    ]);
+    if (hasRelayConnection(current)) throw new Error("Gateway is already connected.");
+    if (current.pendingConnection && Date.now() < current.pendingConnection.expires) {
+      throw new Error("Finish the existing approval before requesting another.");
+    }
+    if (current.pendingApprovalRequest && Date.now() < current.pendingApprovalRequest.expires) {
+      throw new Error("Another local approval request is already in progress.");
+    }
+    const generation = randomHex(16);
+    await chrome.storage.local.set({pendingApprovalRequest:{
+      gateway, generation, expires:Date.now() + 120_000,
+      installedGateway:current.gateway || null,
+      connectionEpoch:current.relayConnectionEpoch || null,
+      connectionMode:current.connectionMode || null,
+      localDisconnected:Boolean(current.localDisconnected)
+    }});
+    return generation;
+  });
+}
+function samePendingApprovalReservation(reservation, current, gateway, generation) {
+  return reservation?.gateway === gateway && reservation.generation === generation &&
+    Date.now() < reservation.expires &&
+    (current.gateway || null) === reservation.installedGateway &&
+    (current.relayConnectionEpoch || null) === reservation.connectionEpoch &&
+    (current.connectionMode || null) === reservation.connectionMode &&
+    Boolean(current.localDisconnected) === reservation.localDisconnected &&
+    !hasRelayConnection(current);
+}
+function installPendingApproval(gateway, generation, requestId, pollSecret) {
+  return queueConsentMutation(async () => {
+    if (!/^[a-f0-9]{64}$/.test(requestId) || !/^[a-f0-9]{64}$/.test(pollSecret) ||
+        typeof generation !== "string" || !/^[a-f0-9]{32}$/.test(generation)) {
+      throw new Error("Invalid local approval response.");
+    }
+    const current = await chrome.storage.local.get([
+      "gateway", "token", "connectionMode", "relayConnectionEpoch",
+      "localDisconnected", "pendingApprovalRequest", "pendingConnection"
+    ]);
+    const reservation = current.pendingApprovalRequest;
+    if (!samePendingApprovalReservation(reservation, current, gateway, generation) ||
+        (current.pendingConnection && Date.now() < current.pendingConnection.expires)) {
+      throw new Error("Local approval identity changed while requesting approval.");
+    }
+    const pending = {
+      gateway, request_id:requestId, poll_secret:pollSecret,
+      expires:Date.now() + 300_000,
+      approvalGeneration:generation, connectionEpoch:reservation.connectionEpoch
+    };
+    await chrome.storage.local.set({pendingConnection:pending, pendingApprovalRequest:null});
+    return {gateway, request_id:requestId, expires:pending.expires};
+  });
+}
+function releasePendingApproval(generation) {
+  return queueConsentMutation(async () => {
+    const {pendingApprovalRequest:reservation} = await chrome.storage.local.get(["pendingApprovalRequest"]);
+    if (!reservation || reservation.generation !== generation) return false;
+    await chrome.storage.local.set({pendingApprovalRequest:null});
+    return true;
+  });
+}
 // Local loopback connection transitions must use the same writer as consent
 // updates. Otherwise a delayed link's storage.set can resurrect consent after
 // the owner disconnects, or stale auto-connect can undo explicit opt-out.
@@ -241,6 +317,7 @@ function connectLocalRelay(gateway, manual) {
     // compatibility keys. No intervening provider consent mutation can run.
     await chrome.storage.local.set({
       gateway, connectionMode:"local", token:null, pendingConnection:null,
+      pendingApprovalRequest:null, relayConnectionEpoch:randomHex(16),
       relaySnapshotVersions:{}, linkedProviders, localDisconnected:false
     });
     await chrome.storage.local.remove(["token", "pendingConnection", "relaySnapshotVersions"]);
@@ -258,6 +335,7 @@ function disconnectLocalRelay(expected) {
     }
     await chrome.storage.local.set({
       connectionMode:null, token:null, linkedProviders:[],
+      relayConnectionEpoch:randomHex(16), pendingApprovalRequest:null,
       relaySnapshotVersions:{}, pendingConnection:null, localDisconnected:true
     });
     await chrome.storage.local.remove(
@@ -300,7 +378,7 @@ function connectPairedRelay(gateway, token, expected) {
       relayConnectionEpoch:randomHex(16),
       linkedProviders:[], providerLinkEpochs:epochs,
       providerLinkPendingAttempts:{}, relaySnapshotVersions:{},
-      pendingConnection:null, localDisconnected:false
+      pendingApprovalRequest:null, pendingConnection:null, localDisconnected:false
     });
     lastGatewayCheck = null;
     providerDiagnostics.clear();
@@ -340,7 +418,7 @@ function disconnectPairedRelay(expected) {
       connectionMode:null, token:null, linkedProviders:[],
       relayConnectionEpoch:randomHex(16),
       providerLinkEpochs:epochs, providerLinkPendingAttempts:{},
-      relaySnapshotVersions:{}
+      pendingApprovalRequest:null, relaySnapshotVersions:{}
     };
     if (clearPending) patch.pendingConnection = null;
     // A single write publishes a fully disconnected view atomically.
@@ -389,7 +467,8 @@ function invalidatePairedRelay(expected) {
     await chrome.storage.local.set({
       token:null, connectionMode:null, relayConnectionEpoch:randomHex(16),
       linkedProviders:[], providerLinkEpochs:epochs,
-      providerLinkPendingAttempts:{}, relaySnapshotVersions:{}
+      providerLinkPendingAttempts:{}, pendingApprovalRequest:null,
+      relaySnapshotVersions:{}
     });
     lastGatewayCheck = null;
     providerDiagnostics.clear();
@@ -540,6 +619,24 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     relayDiagnostics(message.force === true).then(sendResponse).catch(() => sendResponse({ok:false, gateway_issue:"diagnostics_unavailable"}));
     return true;
   }
+  if (message?.type === "reserve-pending-approval") {
+    reservePendingApproval(message.gateway)
+      .then(generation => sendResponse({ok:true, generation}))
+      .catch(() => sendResponse({ok:false,error:"Local approval reservation unavailable."}));
+    return true;
+  }
+  if (message?.type === "install-pending-approval") {
+    installPendingApproval(message.gateway, message.generation, message.request_id, message.poll_secret)
+      .then(pending => sendResponse({ok:true,pending}))
+      .catch(() => sendResponse({ok:false,error:"Local approval changed or expired before it was saved."}));
+    return true;
+  }
+  if (message?.type === "release-pending-approval") {
+    releasePendingApproval(message.generation)
+      .then(released => sendResponse({ok:true,released}))
+      .catch(() => sendResponse({ok:false,error:"Local approval cleanup unavailable."}));
+    return true;
+  }
   if (message?.type === "poll-connection") {
     pollConnection().then(() => sendResponse({ok:true})).catch(error => sendResponse({ok:false,error:error.message}));
     return true;
@@ -662,21 +759,41 @@ async function pollConnection() {
   connectionPoll = completePendingConnection();
   try { await connectionPoll; } finally { connectionPoll = undefined; }
 }
-// A request can be replaced from the popup while this worker is awaiting the
-// gateway. Never let an older poll clear a newer approval request or its alarm.
-async function clearPendingApprovalIfCurrent(pending) {
-  const {pendingConnection: current} = await chrome.storage.local.get(["pendingConnection"]);
-  if (current?.request_id !== pending.request_id ||
-      current?.gateway !== pending.gateway ||
-      current?.poll_secret !== pending.poll_secret ||
-      current?.expires !== pending.expires) return false;
+// Read/compare/remove is one worker-owned consent mutation. Call the
+// inner version only when already holding the queue; nesting would deadlock.
+function samePendingApproval(current, expected) {
+  return Boolean(current && expected &&
+    current.request_id === expected.request_id &&
+    current.gateway === expected.gateway &&
+    current.poll_secret === expected.poll_secret &&
+    current.expires === expected.expires &&
+    current.approvalGeneration === expected.approvalGeneration &&
+    (current.connectionEpoch || null) === (expected.connectionEpoch || null));
+}
+function pendingApprovalConnectionValid(pending, current) {
+  // Legacy pending records can complete until their original expiry only if
+  // the connection has not acquired a replacement durable generation.
+  if (!pending?.approvalGeneration) return !current.relayConnectionEpoch;
+  return (pending.connectionEpoch || null) === (current.relayConnectionEpoch || null);
+}
+async function clearPendingApprovalIfCurrentLocked(pending) {
+  const {pendingConnection:current} = await chrome.storage.local.get(["pendingConnection"]);
+  if (!samePendingApproval(current, pending)) return false;
   await chrome.storage.local.remove("pendingConnection");
   await chrome.alarms?.clear?.("relay-connection");
   return true;
 }
+function clearPendingApprovalIfCurrent(pending) {
+  return queueConsentMutation(() => clearPendingApprovalIfCurrentLocked(pending));
+}
 async function completePendingConnection() {
-  const {pendingConnection: pending} = await chrome.storage.local.get(["pendingConnection"]);
+  const initial = await chrome.storage.local.get(["pendingConnection", "relayConnectionEpoch"]);
+  const pending = initial.pendingConnection;
   if (!pending) return;
+  if (!pendingApprovalConnectionValid(pending, initial)) {
+    await clearPendingApprovalIfCurrent(pending);
+    throw new Error("Local approval connection changed. Connect again.");
+  }
   if (Date.now() >= pending.expires) {
     await clearPendingApprovalIfCurrent(pending);
     throw new Error("Connection approval expired. Choose Connect to gateway again.");
@@ -695,13 +812,13 @@ async function completePendingConnection() {
   }
   const data = await response.json();
   if (!/^[a-f0-9]{64}$/.test(data.token)) throw new Error("Invalid connection token.");
-  const latest = await chrome.storage.local.get(["pendingConnection","gateway","linkedProviders"]);
+  const latest = await chrome.storage.local.get(["pendingConnection","gateway","linkedProviders","relayConnectionEpoch"]);
   const current = latest.pendingConnection;
   // A prior approval response is not valid for a renewed request, even if a
   // request ID is reused. Fence the successful exchange to the full secret
   // and expiry identity rather than just its public ID and origin.
-  if (current?.request_id !== pending.request_id || current?.gateway !== gateway ||
-      current?.poll_secret !== pending.poll_secret || current?.expires !== pending.expires) return;
+  if (!samePendingApproval(current, pending) ||
+      !pendingApprovalConnectionValid(current, latest)) return;
   // A slow network response cannot extend the five-minute approval window.
   if (Date.now() >= current.expires) {
     await clearPendingApprovalIfCurrent(current);
@@ -714,19 +831,20 @@ async function completePendingConnection() {
   // disconnect, re-pair or a linked-provider mutation.
   const committed = await queueConsentMutation(async () => {
     const now = await chrome.storage.local.get(
-      ["pendingConnection", "gateway", "linkedProviders"]);
+      ["pendingConnection", "gateway", "linkedProviders", "relayConnectionEpoch"]);
     const active = now.pendingConnection;
-    if (active?.request_id !== pending.request_id || active?.gateway !== gateway ||
-        active?.poll_secret !== pending.poll_secret || active?.expires !== pending.expires) {
+    if (!samePendingApproval(active, pending) ||
+        !pendingApprovalConnectionValid(active, now)) {
       return false;
     }
     if (Date.now() >= active.expires) {
-      await clearPendingApprovalIfCurrent(active);
+      await clearPendingApprovalIfCurrentLocked(active);
       throw new Error("Connection approval expired. Choose Connect to gateway again.");
     }
     const linkedProviders = now.gateway === gateway ? (now.linkedProviders || []) : [];
     await chrome.storage.local.set({
-      gateway, token:data.token, connectionMode:"paired", linkedProviders
+      gateway, token:data.token, connectionMode:"paired", linkedProviders,
+      relayConnectionEpoch:randomHex(16), pendingApprovalRequest:null
     });
     await chrome.storage.local.remove("pendingConnection");
     lastGatewayCheck = null;
