@@ -1943,12 +1943,14 @@ pub fn is_login_url(url: &str) -> bool {
     }
     let host = uri.host().unwrap_or_default().to_ascii_lowercase();
     let host = host.trim_end_matches('.');
+    // Only known identity hosts are independently diagnostic. An arbitrary
+    // login.* or auth.* hostname is not evidence of the current provider's
+    // expired session: it may be unrelated navigation. Explicit root login
+    // paths below remain recognizable without trusting the host prefix.
     if matches!(
         host,
         "accounts.google.com" | "accounts.x.com" | "login.microsoftonline.com"
-    ) || host.starts_with("login.")
-        || host.starts_with("auth.")
-        || host.ends_with(".auth0.com")
+    ) || host.ends_with(".auth0.com")
     {
         return true;
     }
@@ -1982,6 +1984,7 @@ mod login_url_classification_tests {
             "https://www.perplexity.ai/signin",
             "https://manus.im/auth/login",
             "https://grok.com/oauth2/authorize",
+            "https://tenant.auth0.com/profile",
             "https://login.auth0.com/authorize",
         ] {
             assert!(is_login_url(url), "missed authentication redirect: {url}");
@@ -2002,6 +2005,13 @@ mod login_url_classification_tests {
             "https://www.perplexity.ai/search/sso",
             "https://chat.qwen.ai/c/oauth2",
             "https://claude.ai/new?redirect=https%3A%2F%2Fauth.openai.com%2Flogin",
+            "https://login.attacker.invalid/home",
+            "https://auth.attacker.invalid/profile",
+            "https://LOGIN.UNKNOWN.invalid/",
+            "https://login.microsoftonline.com.attacker.invalid/",
+            "https://tenant.auth0.com.attacker.invalid/home",
+            "http://auth.unknown.invalid/",
+            "https://auth.other.invalid/chat/login",
             "https://accounts.x.com.attacker.invalid/",
             "data:text/html,<textarea></textarea>",
         ] {
