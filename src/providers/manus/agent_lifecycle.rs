@@ -211,45 +211,45 @@ mod tests {
     #[test]
     fn accepted_running_terminal_requires_exact_task_and_epoch() {
         let mut state = AgentTaskLifecycle::queued(7);
-        assert_eq!(apply_at(&mut state,7, "id-a", Event::Terminal), T::Invalid);
-        assert_eq!(apply_at(&mut state,7, "", Event::Accepted), T::Invalid);
+        assert_eq!(apply_at(&mut state, 7, "id-a", Event::Terminal), T::Invalid);
+        assert_eq!(apply_at(&mut state, 7, "", Event::Accepted), T::Invalid);
         assert_eq!(
-            apply_at(&mut state,7, &"x".repeat(1025), Event::Accepted),
+            apply_at(&mut state, 7, &"x".repeat(1025), Event::Accepted),
             T::Invalid
         );
-        assert_eq!(apply_at(&mut state,6, "id-a", Event::Accepted), T::Stale);
-        assert_eq!(apply_at(&mut state,7, "id-a", Event::Accepted), T::Applied);
+        assert_eq!(apply_at(&mut state, 6, "id-a", Event::Accepted), T::Stale);
+        assert_eq!(apply_at(&mut state, 7, "id-a", Event::Accepted), T::Applied);
         assert_eq!(state.phase(), Phase::Accepted);
-        assert_eq!(apply_at(&mut state,7, "id-b", Event::Running), T::Stale);
-        assert_eq!(apply_at(&mut state,7, "id-a", Event::Accepted), T::Invalid);
-        assert_eq!(apply_at(&mut state,7, "id-a", Event::Terminal), T::Invalid);
-        assert_eq!(apply_at(&mut state,7, "id-a", Event::Running), T::Applied);
-        assert_eq!(apply_at(&mut state,7, "id-a", Event::Running), T::Invalid);
-        assert_eq!(apply_at(&mut state,7, "id-a", Event::Terminal), T::Applied);
+        assert_eq!(apply_at(&mut state, 7, "id-b", Event::Running), T::Stale);
+        assert_eq!(apply_at(&mut state, 7, "id-a", Event::Accepted), T::Invalid);
+        assert_eq!(apply_at(&mut state, 7, "id-a", Event::Terminal), T::Invalid);
+        assert_eq!(apply_at(&mut state, 7, "id-a", Event::Running), T::Applied);
+        assert_eq!(apply_at(&mut state, 7, "id-a", Event::Running), T::Invalid);
+        assert_eq!(apply_at(&mut state, 7, "id-a", Event::Terminal), T::Applied);
         assert_eq!(state.phase(), Phase::Terminal);
-        assert_eq!(apply_at(&mut state,7, "id-a", Event::Terminal), T::Stale);
-        assert_eq!(cancel_at(&mut state,7), T::Stale);
+        assert_eq!(apply_at(&mut state, 7, "id-a", Event::Terminal), T::Stale);
+        assert_eq!(cancel_at(&mut state, 7), T::Stale);
         assert!(!format!("{state:?}").contains("id-a"));
     }
 
     #[test]
     fn failing_or_cancelling_task_can_never_later_complete() {
         let mut state = AgentTaskLifecycle::queued(1);
-        assert_eq!(apply_at(&mut state,1, "task-1", Event::Accepted), T::Applied);
-        assert_eq!(apply_at(&mut state,1, "task-1", Event::Failed), T::Applied);
-        assert_eq!(apply_at(&mut state,1, "task-1", Event::Running), T::Stale);
+        assert_eq!(apply_at(&mut state, 1, "task-1", Event::Accepted), T::Applied);
+        assert_eq!(apply_at(&mut state, 1, "task-1", Event::Failed), T::Applied);
+        assert_eq!(apply_at(&mut state, 1, "task-1", Event::Running), T::Stale);
         assert_eq!(state.begin_new(2), T::Applied);
-        assert_eq!(apply_at(&mut state,2, "task-2", Event::Accepted), T::Applied);
-        assert_eq!(apply_at(&mut state,2, "task-2", Event::Running), T::Applied);
-        assert_eq!(cancel_at(&mut state,2), T::Applied);
+        assert_eq!(apply_at(&mut state, 2, "task-2", Event::Accepted), T::Applied);
+        assert_eq!(apply_at(&mut state, 2, "task-2", Event::Running), T::Applied);
+        assert_eq!(cancel_at(&mut state, 2), T::Applied);
         assert_eq!(state.phase(), Phase::Cancelled);
-        assert_eq!(apply_at(&mut state,2, "task-2", Event::Terminal), T::Stale);
-        assert_eq!(apply_at(&mut state,1, "task-1", Event::Terminal), T::Stale);
+        assert_eq!(apply_at(&mut state, 2, "task-2", Event::Terminal), T::Stale);
+        assert_eq!(apply_at(&mut state, 1, "task-1", Event::Terminal), T::Stale);
         assert_eq!(state.begin_new(2), T::Stale);
         assert_eq!(state.begin_new(3), T::Applied);
-        assert_eq!(apply_at(&mut state,3, "task-3", Event::Accepted), T::Applied);
-        assert_eq!(apply_at(&mut state,3, "task-2", Event::Running), T::Stale);
-        assert_eq!(apply_at(&mut state,3, "task-3", Event::Cancelled), T::Applied);
+        assert_eq!(apply_at(&mut state, 3, "task-3", Event::Accepted), T::Applied);
+        assert_eq!(apply_at(&mut state, 3, "task-2", Event::Running), T::Stale);
+        assert_eq!(apply_at(&mut state, 3, "task-3", Event::Cancelled), T::Applied);
     }
 
     #[test]
@@ -285,29 +285,29 @@ mod tests {
     fn restart_requires_verification_not_assumed_completion() {
         let mut state = AgentTaskLifecycle::queued(21);
         assert_eq!(
-            apply_at(&mut state,21, "opaque-test-id", Event::Accepted),
+            apply_at(&mut state, 21, "opaque-test-id", Event::Accepted),
             T::Applied
         );
         assert_eq!(
-            apply_at(&mut state,21, "opaque-test-id", Event::Running),
+            apply_at(&mut state, 21, "opaque-test-id", Event::Running),
             T::Applied
         );
         assert_eq!(state.restart(21), T::Stale);
         assert_eq!(state.restart(22), T::Applied);
         assert_eq!(state.epoch(), 22);
         assert_eq!(state.phase(), Phase::VerificationRequired);
-        assert_eq!(apply_at(&mut state,21, "opaque-test-id", Event::Terminal), T::Stale);
+        assert_eq!(apply_at(&mut state, 21, "opaque-test-id", Event::Terminal), T::Stale);
         assert_eq!(
-            apply_at(&mut state,22, "opaque-test-id", Event::Terminal),
+            apply_at(&mut state, 22, "opaque-test-id", Event::Terminal),
             T::Invalid
         );
         assert_eq!(
-            apply_at(&mut state,22, "opaque-test-id", Event::Accepted),
+            apply_at(&mut state, 22, "opaque-test-id", Event::Accepted),
             T::Invalid
         );
         assert_eq!(state.begin_new(23), T::Applied);
         assert_eq!(state.phase(), Phase::Queued);
-        assert_eq!(apply_at(&mut state,23, "new-id", Event::Accepted), T::Applied);
+        assert_eq!(apply_at(&mut state, 23, "new-id", Event::Accepted), T::Applied);
         assert!(!format!("{state:?}").contains("new-id"));
     }
 }
