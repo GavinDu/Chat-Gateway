@@ -490,7 +490,7 @@ mod tests {
             "https://www.meta.ai/chat/challenge-platform",
             "https://www.perplexity.ai/search/checkpoint",
             "https://example.test/blog/cdn-cgi/challenge-platform",
-            "https://challenges.cloudflare.com.attacker.invalid/checkpoint",
+            "https://challenges.cloudflare.com.attacker.invalid/chat/checkpoint",
             "https://chatgpt.com/c/challenge-essay",
             "https://gemini.google.com/app?q=security%20challenge",
             "https://grok.com/chat?next=https%3A%2F%2Fexample.test%2Fcaptcha",
