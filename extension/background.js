@@ -352,6 +352,40 @@ function disconnectPairedRelay(expected) {
   });
 }
 
+// A 401/403 from the *gateway diagnostics route* invalidates only the
+// install identity that was actually probed. A delayed popup status response
+// must never revoke a newer pairing, nor mutate local no-pairing consent.
+function invalidatePairedRelay(expected) {
+  return queueConsentMutation(async () => {
+    const current = await chrome.storage.local.get([
+      "gateway", "token", "connectionMode", "relayConnectionEpoch",
+      "linkedProviders", "providerLinkEpochs", "providerLinkPendingAttempts"
+    ]);
+    if (!expected || typeof current.gateway !== "string" ||
+        !current.gateway.startsWith("https://") || isLocalGateway(current.gateway) ||
+        !current.token || current.connectionMode === "local" ||
+        !sameRelayIdentity(expected, current) ||
+        (expected.relayConnectionEpoch || null) !== (current.relayConnectionEpoch || null)) {
+      return false;
+    }
+    const epochs = {...(current.providerLinkEpochs || {})};
+    for (const provider of new Set([
+      ...(current.linkedProviders || []), ...Object.keys(epochs)
+    ])) {
+      if (Object.hasOwn(PROVIDERS, provider)) epochs[provider] = randomHex(16);
+    }
+    // Preserve newer pending approval. A gateway status probe was not an
+    // explicit cancellation of a separate pending owner authorization.
+    await chrome.storage.local.set({
+      token:null, connectionMode:null, relayConnectionEpoch:randomHex(16),
+      linkedProviders:[], providerLinkEpochs:epochs,
+      providerLinkPendingAttempts:{}, relaySnapshotVersions:{}
+    });
+    lastGatewayCheck = null;
+    providerDiagnostics.clear();
+    return true;
+  });
+}
 // Keep one trailing refresh per provider. It reads the latest cookie snapshot
 // when it starts, rather than replaying every rotation behind a slow import.
 const queuedProviderSyncs = new Map();
@@ -510,6 +544,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     disconnectLocalRelay(message.connection)
       .then(() => sendResponse({ok:true}))
       .catch(() => sendResponse({ok:false, error:"Local gateway connection changed before disconnect."}));
+    return true;
+  }
+  if (message?.type === "invalidate-paired-relay") {
+    invalidatePairedRelay(message.connection)
+      .then(invalidated => sendResponse({ok:true, invalidated}))
+      .catch(() => sendResponse({ok:false, error:"Paired gateway status invalidation unavailable."}));
     return true;
   }
   if (message?.type === "connect-paired-relay") {
