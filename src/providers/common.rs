@@ -891,6 +891,14 @@ pub async fn human_type(page: &Page, selectors: &[&str], text: &str) -> anyhow::
         .ok_or_else(|| anyhow::anyhow!("actionable provider composer disappeared before typing"))?;
     let selector_js = serde_json::to_string(selector)?;
     let el_js = visible_input_query(&selector_js);
+    // Preserve the pinned Obscura editing fallback unchanged: if execCommand
+    // reports unsupported, some embedded elements provide a value property
+    // even when exposed as contenteditable. Do NOT force textContent here;
+    // the existing prompt retention check observes rendered editor text.
+    // Only the pre-insertion DOM Range selection changes in this patch.
+    // The contenteditable fallback below uses a DOM Range scoped to the
+    // selected composer, not document.execCommand('selectAll'). A focus race
+    // must not select unrelated page text or another editor.
     // Preserve Obscura's native click for ordinary single inputs. When the
     // first matching node is hidden, avoid clicking that stale placeholder;
     // the JS input path below focuses the visible match instead.
@@ -903,7 +911,7 @@ pub async fn human_type(page: &Page, selectors: &[&str], text: &str) -> anyhow::
     tokio::time::sleep(Duration::from_millis(80)).await;
     let text_js = serde_json::to_string(text)?;
     let js = format!(
-        "(function() {{ var el = {el_js}; if (!el) return false; el.focus(); if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {{ try {{ var prototype = el.tagName === 'INPUT' ? window.HTMLInputElement.prototype : window.HTMLTextAreaElement.prototype; var setter = Object.getOwnPropertyDescriptor(prototype, 'value').set; setter.call(el, {text}); }} catch (e) {{ el.value = {text}; }} el.dispatchEvent(new InputEvent('input', {{ bubbles: true, inputType: 'insertText', data: {text} }})); el.dispatchEvent(new Event('change', {{ bubbles: true }})); return true; }} try {{ document.execCommand('selectAll', false, null); }} catch (e) {{}} var ok = false; try {{ ok = document.execCommand('insertText', false, {text}); }} catch (e) {{}} if (!ok) {{ if ('value' in el) {{ el.value = {text}; }} else {{ el.textContent = {text}; }} }} el.dispatchEvent(new InputEvent('input', {{ bubbles: true, inputType: 'insertText', data: {text} }})); el.dispatchEvent(new Event('change', {{ bubbles: true }})); return true; }})()",
+        "(function() {{ var el = {el_js}; if (!el) return false; el.focus(); if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {{ try {{ var prototype = el.tagName === 'INPUT' ? window.HTMLInputElement.prototype : window.HTMLTextAreaElement.prototype; var setter = Object.getOwnPropertyDescriptor(prototype, 'value').set; setter.call(el, {text}); }} catch (e) {{ el.value = {text}; }} el.dispatchEvent(new InputEvent('input', {{ bubbles: true, inputType: 'insertText', data: {text} }})); el.dispatchEvent(new Event('change', {{ bubbles: true }})); return true; }} var selection = window.getSelection(); if (!selection) return false; try {{ var range = document.createRange(); range.selectNodeContents(el); selection.removeAllRanges(); selection.addRange(range); }} catch (e) {{ return false; }} var ok = false; try {{ ok = document.execCommand('insertText', false, {text}); }} catch (e) {{}} if (!ok) {{ if ('value' in el) {{ el.value = {text}; }} else {{ el.textContent = {text}; }} }} el.dispatchEvent(new InputEvent('input', {{ bubbles: true, inputType: 'insertText', data: {text} }})); el.dispatchEvent(new Event('change', {{ bubbles: true }})); return true; }})()",
         text = text_js,
         el_js = el_js,
     );
@@ -917,6 +925,53 @@ pub async fn human_type(page: &Page, selectors: &[&str], text: &str) -> anyhow::
         return Err(anyhow::Error::new(ProviderComposerInputRejectedError));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod scoped_contenteditable_selection_tests {
+    #[tokio::test]
+    async fn scoped_selection_never_overwrites_unrelated_editor_or_page_text() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <h1 id="outside-heading">Original heading</h1>
+            <div id="outside" contenteditable="true">Unrelated editor</div>
+            <div id="target" contenteditable="true"><p>Old draft</p></div>
+            <button id="send" type="button" onclick="window.sent=true">Send</button>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        page.evaluate("document.querySelector('#outside').focus()");
+        super::human_type(&page, &["#target"], "scoped draft")
+            .await
+            .unwrap();
+
+        // The pinned Obscura contenteditable implementation can expose a
+        // synthetic retained value without updating visible nested markup.
+        // That provider-input correctness gap is tracked separately in #988.
+        // This atomic fixture verifies only that text selection never
+        // overwrites unrelated page content or dispatches a Send click.
+        assert_eq!(
+            page.evaluate("document.querySelector('#outside').textContent")
+                .as_str(),
+            Some("Unrelated editor")
+        );
+        assert_eq!(
+            page.evaluate("document.querySelector('#outside-heading').textContent")
+                .as_str(),
+            Some("Original heading")
+        );
+        assert_eq!(
+            page.evaluate("window.sent === true").as_bool(),
+            Some(false),
+            "typing must not submit the prompt or click a send button"
+        );
+    }
 }
 
 /// Dispatch an Enter keypress sequence on the element matching
