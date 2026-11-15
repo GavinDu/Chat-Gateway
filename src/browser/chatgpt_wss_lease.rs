@@ -228,7 +228,10 @@ mod tests {
         let old = guard.open(old_epoch, 9).unwrap();
         guard.cancel_page();
         assert_eq!(guard.active_count(), 0);
-        assert_eq!(guard.open(old_epoch, 9), Err(LeaseRejection::StaleOrCancelled));
+        assert_eq!(
+            guard.open(old_epoch, 9),
+            Err(LeaseRejection::StaleOrCancelled)
+        );
         assert_eq!(
             guard.check_frame(&old, FrameKind::Binary, 0),
             Err(LeaseRejection::StaleOrCancelled)
@@ -238,7 +241,10 @@ mod tests {
         assert!(!guard.close(&old));
         assert_eq!(guard.check_frame(&fresh, FrameKind::Text, 10), Ok(()));
         assert_ne!(next_epoch, old_epoch);
-        assert_eq!(guard.open(old_epoch, 10), Err(LeaseRejection::StaleOrCancelled));
+        assert_eq!(
+            guard.open(old_epoch, 10),
+            Err(LeaseRejection::StaleOrCancelled)
+        );
         for _ in 0..50 {
             guard.rotate_page().unwrap();
             assert_eq!(guard.active_count(), 0);
@@ -296,7 +302,10 @@ mod tests {
         );
         assert_eq!(guard.active_count(), 0);
         guard.epoch = u64::MAX;
-        assert_eq!(guard.rotate_page(), Err(LeaseRejection::GenerationExhausted));
+        assert_eq!(
+            guard.rotate_page(),
+            Err(LeaseRejection::GenerationExhausted)
+        );
     }
 
     #[test]
@@ -307,7 +316,12 @@ mod tests {
         let debug = format!("{lease:?}");
         assert!(!debug.contains("987654321"));
         assert!(!debug.contains("epoch"));
-        let error = guard.check_frame(&lease, FrameKind::Binary, usize::MAX).unwrap_err();
-        assert_eq!(error.to_string(), "ChatGPT WebSocket lease operation rejected");
+        let error = guard
+            .check_frame(&lease, FrameKind::Binary, usize::MAX)
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "ChatGPT WebSocket lease operation rejected"
+        );
     }
 }
