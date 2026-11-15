@@ -81,6 +81,74 @@ cp "$CHAT_GATEWAY_CONFIG" "$TMP/manus-enabled-expected"
 bash "$ROOT/scripts/docker-run.sh" enable-manus >/dev/null
 cmp -s "$CHAT_GATEWAY_CONFIG" "$TMP/manus-enabled-expected"
 
+# A lookalike list is not a Manus provider. The old unscoped AWK matcher
+# would change this unrelated workflow and falsely report success.
+cat > "$CHAT_GATEWAY_CONFIG" <<'CONFIG'
+workflows:
+  - name: manus
+    enabled: false
+  - name: nightly-audit
+    enabled: true
+CONFIG
+cp "$CHAT_GATEWAY_CONFIG" "$TMP/decoy-without-provider"
+if bash "$ROOT/scripts/docker-run.sh" enable-manus >/dev/null 2>&1; then
+  echo "Non-provider Manus workflow was mistaken for the provider" >&2; exit 1
+fi
+cmp -s "$CHAT_GATEWAY_CONFIG" "$TMP/decoy-without-provider"
+
+# Only the real top-level providers entry may change. A decoy elsewhere
+# must neither block legitimate opt-in nor have its enabled flag touched.
+cat > "$CHAT_GATEWAY_CONFIG" <<'CONFIG'
+workflows:
+  - name: manus
+    enabled: false
+providers: # explicitly configured provider list
+  - name: chatgpt
+    enabled: false
+  - name: manus
+    enabled: false
+other:
+  - name: manus
+    enabled: false
+CONFIG
+cat > "$TMP/expected-manus-scope" <<'CONFIG'
+workflows:
+  - name: manus
+    enabled: false
+providers: # explicitly configured provider list
+  - name: chatgpt
+    enabled: false
+  - name: manus
+    enabled: true
+other:
+  - name: manus
+    enabled: false
+CONFIG
+bash "$ROOT/scripts/docker-run.sh" enable-manus >/dev/null
+cmp -s "$CHAT_GATEWAY_CONFIG" "$TMP/expected-manus-scope" || {
+  echo "Enable Manus changed a decoy or failed to change the real provider" >&2
+  exit 1
+}
+
+# YAML duplicate top-level providers mappings have ambiguous parser semantics.
+# Reject rather than edit one of two independent blocks.
+cat > "$CHAT_GATEWAY_CONFIG" <<'CONFIG'
+providers:
+  - name: manus
+    enabled: false
+plugins:
+  - name: something
+    enabled: true
+providers:
+  - name: chatgpt
+    enabled: false
+CONFIG
+cp "$CHAT_GATEWAY_CONFIG" "$TMP/duplicate-providers-section"
+if bash "$ROOT/scripts/docker-run.sh" enable-manus >/dev/null 2>&1; then
+  echo "Duplicated top-level providers mapping was accepted" >&2; exit 1
+fi
+cmp -s "$CHAT_GATEWAY_CONFIG" "$TMP/duplicate-providers-section"
+
 # Unexpected/ambiguous configs must be rejected without modifying the owner
 # file or quietly installing a new provider entry.
 printf 'providers:\n  - name: chatgpt\n    enabled: false\n' > "$CHAT_GATEWAY_CONFIG"
