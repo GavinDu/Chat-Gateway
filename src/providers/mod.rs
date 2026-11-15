@@ -659,15 +659,12 @@ pub struct ProviderSendPolicy {
     pub metrics: crate::metrics::MetricsRegistry,
 }
 
-/// Once ChatGPT/Grok have accepted Send, a later redirect to an unrelated
+/// After any adapter accepts Send, a later redirect to an unrelated
 /// origin must never be treated as a provider response or terminal state.
-/// Reuse the same exact host/route guard as the Send click; other adapters
-/// retain their existing login/challenge classification behavior.
+/// Reuse the same strict nine-provider HTTPS host/route guard as Send; the
+/// login/challenge checks still precede this response-side origin check.
 fn require_expected_response_origin(provider: &str, page: &Page) -> anyhow::Result<()> {
-    if matches!(provider, "chatgpt" | "grok") {
-        common::require_submission_provider_route(provider, page)?;
-    }
-    Ok(())
+    common::require_submission_provider_route(provider, page)
 }
 
 #[cfg(test)]
@@ -686,19 +683,46 @@ mod response_origin_guard_tests {
         )
         .await
         .unwrap();
-        for provider in ["chatgpt", "grok"] {
+        // All nine adapters must refuse foreign-page assistant text, not
+        // merely the ChatGPT/Grok paths that were guarded originally.
+        for provider in [
+            "chatgpt",
+            "grok",
+            "claude",
+            "gemini",
+            "qwen",
+            "metaai",
+            "manus",
+            "mistral",
+            "perplexity",
+        ] {
             let error = require_expected_response_origin(provider, &page).unwrap_err();
-            assert!(error.to_string().contains("chat origin unavailable"));
+            assert!(
+                error.to_string().contains("chat origin unavailable"),
+                "{provider}"
+            );
             assert!(!error.to_string().contains("unrelated content"));
         }
-        assert!(require_expected_response_origin("claude", &page).is_ok());
 
         // Keep the explicit synthetic fixture exception restricted to tests.
         page.evaluate(
             "document.documentElement.setAttribute('data-chat-gateway-test-fixture', '')",
         );
-        for provider in ["chatgpt", "grok"] {
-            assert!(require_expected_response_origin(provider, &page).is_ok());
+        for provider in [
+            "chatgpt",
+            "grok",
+            "claude",
+            "gemini",
+            "qwen",
+            "metaai",
+            "manus",
+            "mistral",
+            "perplexity",
+        ] {
+            assert!(
+                require_expected_response_origin(provider, &page).is_ok(),
+                "{provider}"
+            );
         }
     }
 }
