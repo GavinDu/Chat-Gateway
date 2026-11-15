@@ -389,7 +389,7 @@ test("local-only gateway automatically connects without pairing, approval or tok
 test("legacy remote pairing uses worker-owned credential and consent transition",async()=>{
   const popup=loadPopup();
   popup.elements.get("gateway").value="https://gateway.example";
-  popup.elements.get("code").value="12345678";
+  popup.context.document.getElementById("code").value="12345678";
   popup.values.linkedProviders=["metaai"];
   popup.values.token="a".repeat(64);
   popup.values.connectionMode="paired";
@@ -413,18 +413,21 @@ test("legacy remote pairing uses worker-owned credential and consent transition"
 test("stale remote HTTP pairing result cannot undo a newer local connection",async()=>{
   const popup=loadPopup();
   popup.elements.get("gateway").value="https://gateway.example";
-  popup.elements.get("code").value="12345678";
+  popup.context.document.getElementById("code").value="12345678";
   let release;
+  let notifyStarted;
+  const pairStarted=new Promise(resolve=>{notifyStarted=resolve});
   const pending=new Promise(resolve=>{release=resolve});
   popup.context.fetch=async url=>{
     if(url.endsWith("/relay/v1/pair")) {
+      notifyStarted();
       await pending;
       return {ok:true,json:async()=>({token:"b".repeat(64)})};
     }
     return {ok:true,json:async()=>({no_pairing:false})};
   };
   const started=popup.elements.get("pair").handlers.click();
-  for(let i=0;i<4;i++)await new Promise(resolve=>setImmediate(resolve));
+  await pairStarted;
   popup.values.gateway="http://127.0.0.1:8080";
   popup.values.connectionMode="local";
   delete popup.values.token;
