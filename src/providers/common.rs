@@ -1252,7 +1252,9 @@ mod scoped_contenteditable_selection_tests {
             .await
             .unwrap();
         let prompt = "你好\n\nemoji ☃️";
-        super::human_type(&page, &["#native"], prompt).await.unwrap();
+        super::human_type(&page, &["#native"], prompt)
+            .await
+            .unwrap();
         assert_eq!(
             page.evaluate("document.querySelector('#native').value")
                 .as_str(),
