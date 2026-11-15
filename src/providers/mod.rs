@@ -686,11 +686,21 @@ mod response_origin_guard_tests {
         // All nine adapters must refuse foreign-page assistant text, not
         // merely the ChatGPT/Grok paths that were guarded originally.
         for provider in [
-            "chatgpt", "grok", "claude", "gemini", "qwen", "metaai",
-            "manus", "mistral", "perplexity",
+            "chatgpt",
+            "grok",
+            "claude",
+            "gemini",
+            "qwen",
+            "metaai",
+            "manus",
+            "mistral",
+            "perplexity",
         ] {
             let error = require_expected_response_origin(provider, &page).unwrap_err();
-            assert!(error.to_string().contains("chat origin unavailable"), "{provider}");
+            assert!(
+                error.to_string().contains("chat origin unavailable"),
+                "{provider}"
+            );
             assert!(!error.to_string().contains("unrelated content"));
         }
 
@@ -699,10 +709,20 @@ mod response_origin_guard_tests {
             "document.documentElement.setAttribute('data-chat-gateway-test-fixture', '')",
         );
         for provider in [
-            "chatgpt", "grok", "claude", "gemini", "qwen", "metaai",
-            "manus", "mistral", "perplexity",
+            "chatgpt",
+            "grok",
+            "claude",
+            "gemini",
+            "qwen",
+            "metaai",
+            "manus",
+            "mistral",
+            "perplexity",
         ] {
-            assert!(require_expected_response_origin(provider, &page).is_ok(), "{provider}");
+            assert!(
+                require_expected_response_origin(provider, &page).is_ok(),
+                "{provider}"
+            );
         }
     }
 }
