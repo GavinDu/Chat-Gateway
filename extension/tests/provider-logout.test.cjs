@@ -18,6 +18,7 @@ function loadWorker({failDelete = false} = {}) {
   const gate = new Promise(resolve => { releaseSync = resolve; });
   const sandbox = {
     Map, Promise, Set,
+    randomHex: (() => { let counter = 0; return () => "test-epoch-" + (++counter); })(),
     importScripts() {},
     hasRelayConnection: state => Boolean(state.gateway && (state.token || state.connectionMode === "local")),
     relayIdentity: state => state.connectionMode === "local" ? "local" : state.token,
