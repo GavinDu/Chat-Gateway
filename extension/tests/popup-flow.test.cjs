@@ -63,6 +63,34 @@ function loadPopup({failCookieDomain = null, includeSecondProvider = false, manu
       values.localDisconnected=true;
       return {ok:true};
     }
+    if(request.type==="connect-paired-relay") {
+      const previous=request.connection;
+      if(previous.gateway!==values.gateway || previous.token!==values.token ||
+          previous.connectionMode!==values.connectionMode) {
+        return {ok:false,error:"Remote pairing was superseded."};
+      }
+      values.gateway=request.gateway;
+      values.token=request.token;
+      values.connectionMode="paired";
+      values.linkedProviders=[];
+      values.providerLinkEpochs={};
+      values.providerLinkPendingAttempts={};
+      delete values.pendingConnection;
+      return {ok:true};
+    }
+    if(request.type==="disconnect-paired-relay") {
+      const previous=request.connection;
+      if(previous.gateway!==values.gateway || previous.token!==values.token ||
+          previous.connectionMode!==values.connectionMode ||
+          values.connectionMode==="local" || !values.token) {
+        return {ok:false,error:"Remote disconnect was superseded."};
+      }
+      for(const key of ["token","connectionMode","linkedProviders",
+        "providerLinkEpochs","providerLinkPendingAttempts","pendingConnection","relaySnapshotVersions"]) {
+        delete values[key];
+      }
+      return {ok:true};
+    }
     if(request.type==="link-provider") {
       const expected=request.connection;
       if(expected.gateway!==values.gateway || expected.token!==values.token ||
@@ -155,7 +183,7 @@ function loadPopup({failCookieDomain = null, includeSecondProvider = false, manu
   vm.createContext(context);
   vm.runInContext(fs.readFileSync(path.join(__dirname,"..","popup.js"),"utf8")+
     "\nglobalThis.testControls={refreshStatus,connectProvider,logoutProvider};",context);
-  return {values,server,elements,chromeCalls,controls:context.testControls};
+  return {values,server,elements,chromeCalls,controls:context.testControls,context};
 }
 
 test("worker diagnostic failure avoids a second redundant popup status HTTP request", async () => {
@@ -355,4 +383,54 @@ test("local-only gateway automatically connects without pairing, approval or tok
   assert.equal(popup.server.linked, true);
   await popup.controls.logoutProvider("metaai");
   assert.equal(popup.server.linked, false);
+});
+
+
+test("legacy remote pairing uses worker-owned credential and consent transition",async()=>{
+  const popup=loadPopup();
+  popup.elements.get("gateway").value="https://gateway.example";
+  popup.elements.get("code").value="12345678";
+  popup.values.linkedProviders=["metaai"];
+  popup.values.token="a".repeat(64);
+  popup.values.connectionMode="paired";
+  popup.values.providerLinkEpochs={metaai:"old-epoch"};
+  popup.context.fetch=async url=>({
+    ok:true,json:async()=>url.endsWith("/relay/v1/pair")
+      ? {token:"b".repeat(64)}:{no_pairing:false}
+  });
+  await popup.elements.get("pair").handlers.click();
+  assert.ok(popup.chromeCalls.includes("connect-paired-relay:"));
+  assert.equal(popup.values.gateway,"https://gateway.example");
+  assert.equal(popup.values.token,"b".repeat(64));
+  assert.equal(popup.values.connectionMode,"paired");
+  assert.deepEqual(Array.from(popup.values.linkedProviders),[]);
+  await popup.elements.get("unpair").handlers.click();
+  assert.ok(popup.chromeCalls.includes("disconnect-paired-relay:"));
+  assert.equal(popup.values.token,undefined);
+  assert.equal(popup.values.linkedProviders,undefined);
+});
+
+test("stale remote HTTP pairing result cannot undo a newer local connection",async()=>{
+  const popup=loadPopup();
+  popup.elements.get("gateway").value="https://gateway.example";
+  popup.elements.get("code").value="12345678";
+  let release;
+  const pending=new Promise(resolve=>{release=resolve});
+  popup.context.fetch=async url=>{
+    if(url.endsWith("/relay/v1/pair")) {
+      await pending;
+      return {ok:true,json:async()=>({token:"b".repeat(64)})};
+    }
+    return {ok:true,json:async()=>({no_pairing:false})};
+  };
+  const started=popup.elements.get("pair").handlers.click();
+  for(let i=0;i<4;i++)await new Promise(resolve=>setImmediate(resolve));
+  popup.values.gateway="http://127.0.0.1:8080";
+  popup.values.connectionMode="local";
+  delete popup.values.token;
+  release();
+  await started;
+  assert.equal(popup.values.gateway,"http://127.0.0.1:8080");
+  assert.equal(popup.values.connectionMode,"local");
+  assert.equal(popup.values.token,undefined);
 });
