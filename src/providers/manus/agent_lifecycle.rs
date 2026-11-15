@@ -147,7 +147,13 @@ impl AgentTaskLifecycle {
         }
         // Never retain an unbounded page-provided identifier in worker memory.
         // Real Manus identifiers have not yet been verified; err closed.
-        if task_id.is_empty() || task_id.len() > 1024 {
+        // A nonempty but blank/control-bearing placeholder cannot establish
+        // task identity. Preserve exact printable Unicode bytes: never trim
+        // or normalize an opaque first-party identifier.
+        if task_id.len() > 1024
+            || task_id.chars().all(char::is_whitespace)
+            || task_id.chars().any(char::is_control)
+        {
             return Transition::Invalid;
         }
         if self.phase == AgentPhase::Queued {
@@ -206,6 +212,34 @@ mod tests {
         let mut request = state.request_identity();
         request.epoch = epoch;
         state.cancel_local(&request)
+    }
+
+    #[test]
+    fn blank_and_control_task_ids_cannot_mutate_owner_state() {
+        let mut state = AgentTaskLifecycle::queued(5);
+        let request = state.request_identity();
+        for id in ["", " ", "\t", "\r\n", "\0", "\u{7f}", "task\nid"] {
+            assert_eq!(state.apply(&request, id, Event::Accepted), T::Invalid);
+            assert_eq!(state.phase(), Phase::Queued);
+        }
+        let opaque = "manus task-α";
+        assert_eq!(state.apply(&request, opaque, Event::Accepted), T::Applied);
+        assert_eq!(state.phase(), Phase::Accepted);
+        for id in [" ", "\0", "task\nid", "manus task-α "] {
+            let expected = if id.chars().all(char::is_whitespace)
+                || id.chars().any(char::is_control)
+            {
+                T::Invalid
+            } else {
+                T::Stale
+            };
+            assert_eq!(state.apply(&request, id, Event::Running), expected);
+            assert_eq!(state.phase(), Phase::Accepted);
+        }
+        assert_eq!(state.apply(&request, opaque, Event::Running), T::Applied);
+        assert_eq!(state.apply(&request, opaque, Event::Terminal), T::Applied);
+        assert_eq!(state.phase(), Phase::Terminal);
+        assert!(!format!("{state:?}").contains(opaque));
     }
 
     #[test]
