@@ -440,6 +440,68 @@ mod streaming_visibility_regression_tests {
     }
 
     #[tokio::test]
+    async fn copy_from_previous_turn_cannot_complete_latest_partial_response() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <section id="conversation">
+              <article id="old"><div class="answer">completed earlier reply</div>
+                <button id="old-copy" aria-label="Copy">Copy</button></article>
+              <article id="current"><div><div class="answer">new partial reply</div></div>
+                <button id="current-copy" aria-label="Copy" hidden>Copy</button></article>
+            </section>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+
+        let before = response_probe(&page, &[".answer"], false);
+        assert_eq!(before.text.as_deref(), Some("new partial reply"));
+        assert!(
+            !before.post_answer_affordance,
+            "old article's visible Copy must not finish a new partial response"
+        );
+        page.evaluate("document.querySelector('#current-copy').hidden = false");
+        let current = response_probe(&page, &[".answer"], false);
+        assert!(
+            current.post_answer_affordance,
+            "same-article Copy is a scoped post-answer signal"
+        );
+        page.evaluate("document.querySelector('#current-copy').disabled = true");
+        let disabled = response_probe(&page, &[".answer"], false);
+        assert!(
+            !disabled.post_answer_affordance,
+            "disabled current Copy must not borrow an enabled old Copy"
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_turn_root_fails_closed_for_post_answer_affordance() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body><section>
+            <div class="answer">incomplete response without known turn root</div>
+            <button aria-label="Copy">Copy older message</button>
+        </section></body></html>"#;
+        let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        let probe = response_probe(&page, &[".answer"], false);
+        assert!(
+            !probe.post_answer_affordance,
+            "a generic parent container cannot prove completion"
+        );
+    }
+
+    #[tokio::test]
     async fn visible_empty_trailing_response_does_not_hide_last_populated_reply() {
         let browser = obscura_core::Browser::builder()
             .stealth(false)
