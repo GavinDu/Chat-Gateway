@@ -90,6 +90,62 @@ test("explicit provider sync reports a skipped upload instead of success", async
   assert.deepEqual(f.calls, ["chatgpt", "chatgpt"]);
 });
 
+test("stale gateway A diagnostics cannot overwrite B cache or poison B cookie recovery", async () => {
+  for (const oldFailure of [false, true]) {
+    const f = loadBackground(["chatgpt"]);
+    const firstGateway = "http://127.0.0.1:8080";
+    const secondGateway = "http://127.0.0.1:9090";
+    let gateway = firstGateway;
+    const releases = new Map();
+    let fetches = 0;
+    f.sandbox.chrome.storage.local.get = async () => ({
+      gateway, connectionMode:"local", linkedProviders:["chatgpt"]
+    });
+    f.sandbox.relayFetch = async (_path, _options, expected) => {
+      fetches += 1;
+      return await new Promise(resolve => releases.set(expected.gateway, resolve));
+    };
+    const diagnostics = force => new Promise(resolve =>
+      f.listeners.message[0]({type:"relay-diagnostics",force},{},resolve));
+
+    const old = diagnostics(true);
+    await flushAsyncWork();
+    assert.equal(typeof releases.get(firstGateway), "function");
+
+    gateway = secondGateway;
+    const newer = diagnostics(true);
+    await flushAsyncWork();
+    assert.equal(typeof releases.get(secondGateway), "function");
+    releases.get(secondGateway)({ok:true,status:200,json:async()=>({
+      marker:"new-current-gateway",providers:[{provider:"chatgpt",linked:true}]
+    })});
+    const latest = await newer;
+    assert.equal(latest.ok, true);
+    assert.equal(latest.gateway.marker, "new-current-gateway");
+
+    releases.get(firstGateway)(oldFailure
+      ? {ok:false,status:401}
+      : {ok:true,status:200,json:async()=>({
+          marker:"stale-previous-gateway",providers:[]
+        })});
+    const stale = await old;
+    assert.equal(stale.ok, false);
+    assert.equal(stale.gateway_issue, "gateway_connection_changed",
+      "stale authorization errors and old successes must be discarded");
+
+    const cached = await diagnostics(false);
+    assert.equal(cached.ok, true);
+    assert.equal(cached.gateway.marker, "new-current-gateway");
+    assert.equal(fetches, 2, "stale result must not invalidate the new cache");
+
+    f.listeners.cookieChanged[0]({cookie:{domain:".chatgpt.com"}});
+    [...f.timers.values()].at(-1).callback();
+    await flushAsyncWork();
+    assert.deepEqual(f.calls, ["chatgpt"],
+      "old identity failures cannot impose a new identity's automatic sync backoff");
+  }
+});
+
 test("unreachable configured gateway skips automatic imports and resumes after recovery", async () => {
   const f = loadBackground(["chatgpt", "claude"]);
   f.sandbox.chrome.storage.local.get = async () => ({

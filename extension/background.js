@@ -10,6 +10,9 @@ const CONNECTION_DIAGNOSTICS_TTL_MS = 5_000;
 let lastGatewayCheck = null;
 let lastGatewayCheckAt = 0;
 let lastGatewayIdentity = null;
+// Only the newest read-only gateway health request for the current identity
+// can update the cached status or cookie-event outage backoff.
+let gatewayProbeSerial = 0;
 // Only throttle automatic cookie-event resync after a gateway health probe
 // has actually failed; a manual Sync or scheduled liveness probe is never
 // suppressed. A new gateway identity cannot inherit the old outage.
@@ -89,8 +92,27 @@ async function relayDiagnostics(force = false) {
     extension.gateway_checked_at = new Date(lastGatewayCheckAt).toISOString();
     return finalizeRelayDiagnostics({ok:true, extension, gateway:lastGatewayCheck});
   }
+  const probeSerial = ++gatewayProbeSerial;
+  const isCurrentProbe = async () => {
+    try {
+      const latest = await chrome.storage.local.get(["gateway", "token", "connectionMode"]);
+      return probeSerial === gatewayProbeSerial && identity === lastGatewayIdentity &&
+        latest.gateway === current.gateway && latest.token === current.token &&
+        latest.connectionMode === current.connectionMode;
+    } catch (_) {
+      return false; // Storage failure cannot authorize a stale cache write.
+    }
+  };
+  const changed = () => finalizeRelayDiagnostics({
+    ok:false, extension, gateway_issue:"gateway_connection_changed"
+  });
   try {
-    const response = await relayFetch("/relay/v1/diagnostics", {method:"POST",body:"{}"});
+    // Check the identity before dispatching the status request, as well as
+    // after it resolves. A reconnect must not reuse an old target/token.
+    const response = await relayFetch(
+      "/relay/v1/diagnostics", {method:"POST",body:"{}"}, current
+    );
+    if (!await isCurrentProbe()) return changed();
     if (!response.ok) {
       lastGatewayCheck = null;
       lastGatewayCheckAt = 0;
@@ -99,12 +121,16 @@ async function relayDiagnostics(force = false) {
         response.status === 401 || response.status === 403 ? "gateway_unauthorized" : "gateway_request_failed"});
     }
     const gateway = await response.json();
+    if (!await isCurrentProbe()) return changed();
     lastGatewayCheck = gateway;
     lastGatewayCheckAt = Date.now();
     automaticCookieSyncSuppressedUntil = 0;
     extension.gateway_checked_at = new Date(lastGatewayCheckAt).toISOString();
     return finalizeRelayDiagnostics({ok:true, extension, gateway});
   } catch (error) {
+    // In-flight failure from a prior connection must not mark the new one
+    // offline or revoke its healthy cache/automatic cookie sync.
+    if (!await isCurrentProbe()) return changed();
     lastGatewayCheck = null;
     lastGatewayCheckAt = 0;
     automaticCookieSyncSuppressedUntil = Date.now() + COOKIE_OUTAGE_BACKOFF_MS;
