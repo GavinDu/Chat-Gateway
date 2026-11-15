@@ -19,6 +19,8 @@ function loadBackground(linkedProviders, failingProviders = [], connected = fals
     Map,
     Set,
     randomHex: (() => { let counter = 0; return () => "test-epoch-" + (++counter); })(),
+    isLocalGateway: gateway => typeof gateway==="string" &&
+      (/^http:\/\/127\.0\.0\.1:[0-9]+$/.test(gateway) || /^http:\/\/localhost:[0-9]+$/.test(gateway)),
     Promise,
     Object,
     setTimeout(callback, delay) {
@@ -89,6 +91,88 @@ test("explicit provider sync reports a skipped upload instead of success", async
   assert.equal(uploaded.ok, true);
   assert.equal(uploaded.syncStatus, "uploaded");
   assert.deepEqual(f.calls, ["chatgpt", "chatgpt"]);
+});
+
+test("local disconnect cannot be undone by a delayed queued provider link",async()=>{
+  const f=loadBackground([],[],true);
+  const state={gateway:"http://127.0.0.1:8080",connectionMode:"local",
+    linkedProviders:[],providerLinkEpochs:{}};
+  f.sandbox.chrome.storage.local.get=async()=>({...state});
+  let begin;
+  let release;
+  const started=new Promise(resolve=>{begin=resolve});
+  const gate=new Promise(resolve=>{release=resolve});
+  let writes=0;
+  f.sandbox.chrome.storage.local.set=async change=>{
+    writes++;
+    if(writes===1){begin();await gate;}
+    Object.assign(state,change);
+  };
+  f.sandbox.chrome.storage.local.remove=async keys=>{
+    for(const key of Array.isArray(keys)?keys:[keys])delete state[key];
+  };
+  const send=message=>new Promise(resolve=>f.listeners.message[0](message,{},resolve));
+  const expected={gateway:state.gateway,connectionMode:"local"};
+  const link=send({type:"link-provider",provider:"chatgpt",
+    connection:expected,attemptId:"attempt-to-link"});
+  await started;
+  const disconnect=send({type:"disconnect-local-relay",connection:expected});
+  for(let i=0;i<4;i++)await flushAsyncWork();
+  assert.equal(writes,1,"disconnect must queue behind pending provider consent mutation");
+  release();
+  assert.equal((await link).ok,true);
+  assert.equal((await disconnect).ok,true);
+  assert.equal(state.localDisconnected,true);
+  assert.equal(state.connectionMode,undefined);
+  assert.equal(state.linkedProviders,undefined);
+  assert.ok(!state.token);
+
+  const stale=await send({type:"link-provider",provider:"chatgpt",
+    connection:expected,attemptId:"late-attempt"});
+  assert.equal(stale.ok,false,"a stale popup cannot re-link after disconnect");
+  assert.equal(state.linkedProviders,undefined);
+});
+
+test("stale automatic local connect cannot reverse explicit opt-out; manual connect can",async()=>{
+  const f=loadBackground([],[],true);
+  const state={gateway:"http://127.0.0.1:8080",localDisconnected:true,
+    linkedProviders:[],providerLinkEpochs:{}};
+  f.sandbox.chrome.storage.local.get=async()=>({...state});
+  f.sandbox.chrome.storage.local.set=async next=>Object.assign(state,next);
+  f.sandbox.chrome.storage.local.remove=async keys=>{
+    for(const k of Array.isArray(keys)?keys:[keys])delete state[k];
+  };
+  const send=message=>new Promise(resolve=>f.listeners.message[0](message,{},resolve));
+  const stale=await send({type:"connect-local-relay",gateway:state.gateway,manual:false});
+  assert.equal(stale.ok,false);
+  assert.equal(state.localDisconnected,true);
+  assert.equal(state.connectionMode,undefined);
+  const manual=await send({type:"connect-local-relay",gateway:state.gateway,manual:true});
+  assert.equal(manual.ok,true);
+  assert.equal(state.localDisconnected,false);
+  assert.equal(state.connectionMode,"local");
+  assert.deepEqual(Array.from(state.linkedProviders),[]);
+  assert.equal(state.token,undefined);
+});
+
+test("local gateway switch resets linked-provider consent rather than carrying cookies to new install",async()=>{
+  const f=loadBackground([],[],true);
+  const state={gateway:"http://127.0.0.1:8080",connectionMode:"local",
+    linkedProviders:["chatgpt"],providerLinkEpochs:{chatgpt:"older-consent"}};
+  f.sandbox.chrome.storage.local.get=async()=>({...state});
+  f.sandbox.chrome.storage.local.set=async next=>Object.assign(state,next);
+  f.sandbox.chrome.storage.local.remove=async keys=>{
+    for(const k of Array.isArray(keys)?keys:[keys])delete state[k];
+  };
+  const result=await new Promise(resolve=>f.listeners.message[0]({
+    type:"connect-local-relay",gateway:"http://127.0.0.1:9090",manual:true
+  },{},resolve));
+  assert.equal(result.ok,true);
+  assert.equal(state.gateway,"http://127.0.0.1:9090");
+  assert.equal(state.connectionMode,"local");
+  assert.deepEqual(Array.from(state.linkedProviders),[]);
+  assert.equal(state.providerLinkEpochs.chatgpt,"older-consent",
+    "epochs may be retained as private history but old link consent must not be active");
 });
 
 test("concurrent cross-provider links serialize one shared membership and epoch map", async () => {

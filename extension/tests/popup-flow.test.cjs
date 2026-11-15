@@ -33,6 +33,36 @@ function loadPopup({failCookieDomain = null, includeSecondProvider = false, manu
     if(request.type==="relay-diagnostics" && diagnosticsSync) {
       return {ok:false,extension:{provider_sync:{metaai:diagnosticsSync}}};
     }
+    if(request.type==="connect-local-relay") {
+      if (values.localDisconnected && !request.manual) {
+        return {ok:false,error:"Local gateway was explicitly disconnected."};
+      }
+      const unchanged=values.gateway===request.gateway &&
+        values.connectionMode==="local" && !values.token;
+      const oldGateway=values.gateway;
+      values.gateway=request.gateway;
+      values.connectionMode="local";
+      values.linkedProviders=oldGateway===request.gateway ? (values.linkedProviders || []) : [];
+      values.localDisconnected=false;
+      delete values.token;
+      delete values.pendingConnection;
+      delete values.relaySnapshotVersions;
+      return {ok:true,unchanged};
+    }
+    if(request.type==="disconnect-local-relay") {
+      const expected=request.connection;
+      if(expected.gateway!==values.gateway || expected.token!==values.token ||
+          expected.connectionMode!==values.connectionMode || values.connectionMode!=="local") {
+        return {ok:false,error:"Local gateway connection changed before disconnect."};
+      }
+      delete values.connectionMode;
+      delete values.token;
+      delete values.linkedProviders;
+      delete values.relaySnapshotVersions;
+      delete values.pendingConnection;
+      values.localDisconnected=true;
+      return {ok:true};
+    }
     if(request.type==="link-provider") {
       const expected=request.connection;
       if(expected.gateway!==values.gateway || expected.token!==values.token ||
@@ -294,6 +324,22 @@ test("explicit gateway disconnect removes pending approval and stops polling",as
   assert.equal(popup.values.pendingConnection,undefined);
   assert.deepEqual(Array.from(popup.values.linkedProviders||[]),[]);
   assert.ok(popup.chromeCalls.includes("alarm-clear:relay-connection"));
+});
+
+test("local connection and explicit disconnect are worker-owned rather than popup map writes",async()=>{
+  const popup=loadPopup({localRelay:true});
+  for(let i=0;i<6;i++)await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(popup.values.connectionMode,"local");
+  assert.ok(popup.chromeCalls.some(x=>x==="connect-local-relay:"),
+    "local connection must be committed by worker message");
+  popup.values.linkedProviders=["metaai"];
+  await popup.elements.get("unpair").handlers.click();
+  assert.ok(popup.chromeCalls.some(x=>x==="disconnect-local-relay:"),
+    "explicit local disconnect must be committed by worker message");
+  assert.equal(popup.values.localDisconnected,true);
+  assert.equal(popup.values.linkedProviders,undefined);
+  assert.equal(popup.values.connectionMode,undefined);
+  assert.equal(popup.values.token,undefined);
 });
 
 test("local-only gateway automatically connects without pairing, approval or token", async () => {
