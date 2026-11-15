@@ -1232,7 +1232,10 @@ mod response_delta_tracker_tests {
         let mut tracker = ResponseDeltaTracker::new(Some("old".to_owned()));
         assert!(has_unpopulated_new_response_placeholder(1, 2, 1, 1));
         assert!(!should_reset_response_tracker(false, 1, 2, 1, 1));
-        assert_eq!(tracker.observe("old"), DeltaObservation::WaitingForNewResponse);
+        assert_eq!(
+            tracker.observe("old"),
+            DeltaObservation::WaitingForNewResponse
+        );
 
         // When the newly inserted response root is populated, the tracker
         // may reset and emit exactly one new answer.
