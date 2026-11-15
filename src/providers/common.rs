@@ -1210,7 +1210,7 @@ async fn click_send_or_enter_checked(
     .await
 }
 
-/// Controlled ChatGPT/Grok/Qwen editors cannot rely on synthetic Enter to submit:
+/// Controlled ChatGPT/Grok/Qwen/Manus editors cannot rely on synthetic Enter:
 /// a missing Send control must not trigger an untrusted keystroke sequence.
 /// Keep the existing legacy fallback only for the other provider adapters.
 async fn click_send_or_enter_checked_with_policy(
@@ -1264,7 +1264,7 @@ async fn click_send_or_enter_checked_with_policy(
         }
     }
     // Missing controls are not permission to synthesize keyboard input on
-    // ChatGPT/Grok/Qwen: those editors must offer an actionable Send button.
+    // ChatGPT/Grok/Qwen/Manus: those editors must offer an actionable Send button.
     if !allow_untrusted_enter {
         anyhow::bail!(
             "provider Send control unavailable; synthetic Enter is not a supported submission path"
@@ -1954,8 +1954,8 @@ pub async fn discover_models(
     }
 }
 
-/// ChatGPT, Grok and Qwen require an observable composer/response transition
-/// to acknowledge a send. Match actual provider hosts and Grok's alternate X
+/// ChatGPT, Grok, Qwen and Manus require an observable composer/response
+/// transition to acknowledge a send. Match actual provider hosts and Grok's alternate X
 /// route, never incidental substrings in query parameters or attacker hosts.
 pub(crate) fn submission_provider_for_url(url: &str) -> Option<&'static str> {
     let Ok(uri) = url.parse::<axum::http::Uri>() else {
@@ -1977,6 +1977,7 @@ pub(crate) fn submission_provider_for_url(url: &str) -> Option<&'static str> {
         "chatgpt.com" | "www.chatgpt.com" => Some("chatgpt"),
         "grok.com" | "www.grok.com" => Some("grok"),
         "chat.qwen.ai" => Some("qwen"),
+        "manus.im" | "www.manus.im" => Some("manus"),
         "x.com" | "www.x.com" if uri.path() == "/i/grok" || uri.path().starts_with("/i/grok/") => {
             Some("grok")
         }
@@ -2359,6 +2360,23 @@ mod provider_submission_route_tests {
         // never a best-effort synthetic Enter fallback.
     }
 
+    #[test]
+    fn manus_strict_submission_scope_rejects_spoofed_origin() {
+        for url in ["https://manus.im/app", "https://www.manus.im/app"] {
+            assert_eq!(super::submission_provider_for_url(url), Some("manus"));
+            assert!(requires_submission_acknowledgement(url));
+        }
+        for url in [
+            "http://manus.im/app",
+            "https://manus.im:8443/app",
+            "https://manus.im.attacker.invalid/app",
+            "https://elsewhere.invalid/?next=manus.im",
+        ] {
+            assert_ne!(super::submission_provider_for_url(url), Some("manus"));
+            assert!(!requires_submission_acknowledgement(url));
+        }
+    }
+
     #[tokio::test]
     async fn unrelated_page_with_matching_send_button_cannot_serve_as_chatgpt() {
         let browser = obscura_core::Browser::builder()
@@ -2482,7 +2500,7 @@ pub async fn send_prompt(
     }
     let sends = set.send_refs();
     // The click/Enter dispatch is not proof that a controlled SPA accepted
-    // the prompt. ChatGPT, Grok and Qwen require a visible submission transition.
+    // the prompt. ChatGPT, Grok, Qwen and Manus require a visible transition.
     let baseline = if verify_submission {
         Some(submission_snapshot(page, input_sel, &set.response_refs())?)
     } else {
@@ -2631,10 +2649,10 @@ fn submission_snapshot(
     })
 }
 
-/// For Qwen, a response-node increase plus an emptied composer can also
+/// For Qwen and Manus, a response-node increase plus an emptied composer can
 /// happen when history hydrates over a dropped draft. Require a fresh
 /// prompt-bound user turn or a newly activated generation indicator instead.
-/// This intentionally fails closed until Qwen's signed-in DOM is evidenced.
+/// This intentionally fails closed until signed-in DOM is evidenced.
 fn submission_observed_for_adapter(
     provider: &str,
     page: &Page,
@@ -2642,7 +2660,7 @@ fn submission_observed_for_adapter(
     after: &SubmissionSnapshot,
     prompt: &str,
 ) -> anyhow::Result<bool> {
-    if provider == "qwen"
+    if matches!(provider, "qwen" | "manus")
         && after.user_turn_count <= before.user_turn_count
         && !(after.streaming && !before.streaming)
     {
@@ -3178,6 +3196,43 @@ mod prompt_bound_submission_tests {
             "fresh request"
         )
         .unwrap());
+    }
+
+    #[tokio::test]
+    async fn manus_chat_ack_requires_current_prompt_not_history_hydration() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <textarea id="manus">fresh chat</textarea>
+            <div class="answer">old output</div>
+            <div data-testid="user-message">old turn</div>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        let before = submission_snapshot(&page, "#manus", &[".answer"]).unwrap();
+        page.evaluate(r#"document.body.insertAdjacentHTML('beforeend', '<div class="answer">hydrated output</div>')"#);
+        page.evaluate("document.querySelector('#manus').value = ''");
+        let hydrated = submission_snapshot(&page, "#manus", &[".answer"]).unwrap();
+        assert!(
+            !submission_observed_for_adapter("manus", &page, &before, &hydrated, "fresh chat")
+                .unwrap()
+        );
+
+        page.evaluate(r#"document.body.insertAdjacentHTML('beforeend', '<div data-testid="user-message">unrelated</div>')"#);
+        let wrong = submission_snapshot(&page, "#manus", &[".answer"]).unwrap();
+        assert!(
+            !submission_observed_for_adapter("manus", &page, &before, &wrong, "fresh chat")
+                .unwrap()
+        );
+        page.evaluate("document.body.lastElementChild.textContent = 'fresh chat'");
+        assert!(
+            submission_observed_for_adapter("manus", &page, &before, &wrong, "fresh chat").unwrap()
+        );
     }
 
     #[tokio::test]
