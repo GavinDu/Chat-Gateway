@@ -196,17 +196,26 @@ pub(crate) fn is_challenge_url(url: &str) -> bool {
     ) {
         return true;
     }
-    uri.path().split('/').any(|segment| {
-        matches!(
-            segment.to_ascii_lowercase().as_str(),
-            "captcha"
-                | "challenge"
-                | "checkpoint"
-                | "verify-human"
-                | "verify_you_are_human"
-                | "challenge-platform"
-        )
-    })
+    // Only a security *route* is challenge evidence. Conversation IDs like
+    // /c/challenge or /chat/captcha must never trip a sticky provider breaker.
+    // A CDN challenge is mounted under /cdn-cgi/challenge-platform; preserve
+    // the known Google sign-in challenge route without scanning arbitrary paths.
+    let mut segments = uri.path().trim_start_matches('/').split('/');
+    let root = segments.next().unwrap_or_default().to_ascii_lowercase();
+    let second = segments.next().unwrap_or_default().to_ascii_lowercase();
+    matches!(
+        root.as_str(),
+        "captcha"
+            | "challenge"
+            | "checkpoint"
+            | "verify-human"
+            | "verify_you_are_human"
+            | "challenge-platform"
+    ) || (root == "cdn-cgi" && second == "challenge-platform")
+        || (host == "accounts.google.com"
+            && root == "v3"
+            && second == "signin"
+            && segments.next().is_some_and(|segment| segment.eq_ignore_ascii_case("challenge")))
 }
 
 /// Visible security text outside known chat-turn containers. A user or
@@ -472,6 +481,16 @@ mod tests {
     #[test]
     fn challenge_url_detection_ignores_non_route_keywords() {
         for url in [
+            "https://chatgpt.com/c/challenge",
+            "https://grok.com/chat/captcha",
+            "https://manus.im/app/checkpoint",
+            "https://gemini.google.com/app/verify-human",
+            "https://claude.ai/new/challenge",
+            "https://chat.qwen.ai/chat/verify_you_are_human",
+            "https://www.meta.ai/chat/challenge-platform",
+            "https://www.perplexity.ai/search/checkpoint",
+            "https://example.test/blog/cdn-cgi/challenge-platform",
+            "https://challenges.cloudflare.com.attacker.invalid/checkpoint",
             "https://chatgpt.com/c/challenge-essay",
             "https://gemini.google.com/app?q=security%20challenge",
             "https://grok.com/chat?next=https%3A%2F%2Fexample.test%2Fcaptcha",
@@ -485,6 +504,9 @@ mod tests {
             );
         }
         for url in [
+            "https://accounts.google.com/v3/signin/challenge",
+            "https://example.test/verify_you_are_human",
+            "https://example.test/challenge-platform/start",
             "https://example.test/cdn-cgi/challenge-platform/h/g/",
             "https://example.test/verify-human",
             "https://example.test/checkpoint?next=/chat",
