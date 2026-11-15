@@ -590,9 +590,10 @@ mod tests {
         page.evaluate(
             "document.querySelector('#manual-dialog').setAttribute('data-message-role', 'system'); document.querySelector('#manual-dialog').setAttribute('contenteditable', 'false'); document.querySelector('#manual-dialog').removeAttribute('hidden')",
         );
+        let unhidden =
+            page.evaluate("!document.querySelector('#manual-dialog').hasAttribute('hidden')");
         assert_eq!(
-            page.evaluate("!document.querySelector('#manual-dialog').hasAttribute('hidden')")
-                .as_bool(),
+            unhidden.as_bool(),
             Some(true),
             "test fixture must genuinely unhide independent verification UI"
         );
