@@ -320,7 +320,9 @@ mod tests {
             state.observe_visible_draft(&e, 77, expected, "你好\n☃️ café"),
             Err(ComposerEvidenceError::DraftNotVisible)
         );
-        state.observe_visible_draft(&e, 77, expected, expected).unwrap();
+        state
+            .observe_visible_draft(&e, 77, expected, expected)
+            .unwrap();
         assert_eq!(
             state.observe_send(&e, 77, false),
             Err(ComposerEvidenceError::SendUnavailable)
@@ -330,7 +332,9 @@ mod tests {
             state.dispatch_send(&e, 77, expected, "synthetic value only"),
             Err(ComposerEvidenceError::DraftNotVisible)
         );
-        state.observe_visible_draft(&e, 77, expected, expected).unwrap();
+        state
+            .observe_visible_draft(&e, 77, expected, expected)
+            .unwrap();
         state.observe_send(&e, 77, true).unwrap();
         state.dispatch_send(&e, 77, expected, expected).unwrap();
         assert_eq!(state.phase(), ComposerPhase::Dispatched);
@@ -341,7 +345,9 @@ mod tests {
         let mut state = ComposerEvidence::new();
         let e = state.request_identity();
         state.resolve_editor(&e, 1, 1).unwrap();
-        state.observe_visible_draft(&e, 1, "prompt", "prompt").unwrap();
+        state
+            .observe_visible_draft(&e, 1, "prompt", "prompt")
+            .unwrap();
         state.observe_send(&e, 1, true).unwrap();
         state.dispatch_send(&e, 1, "prompt", "prompt").unwrap();
         assert_eq!(
