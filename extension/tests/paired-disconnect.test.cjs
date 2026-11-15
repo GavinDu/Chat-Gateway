@@ -21,7 +21,12 @@ function load(values) {
     importScripts(){},
     PROVIDERS:{chatgpt:["chatgpt.com"],manus:["manus.im"]},
     randomHex:()=>("new-epoch-"+(++rotation)),
-    normalizeGateway:value=>value,
+    normalizeGateway:value=>{
+      const url=new URL(value);
+      if(url.username || url.password || url.search || url.hash ||
+          (url.pathname!=="/" && url.pathname!=="")) throw new Error("Not an origin");
+      return url.origin;
+    },
     isLocalGateway:value=>value.startsWith("http://127.0.0.1:"),
     hasRelayConnection:value=>Boolean(value.gateway && (value.token || value.connectionMode==="local")),
     relayIdentity:value=>value.connectionMode==="local" ? "local" : value.token,
