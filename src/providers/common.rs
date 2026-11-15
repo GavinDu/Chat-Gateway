@@ -2492,13 +2492,14 @@ pub async fn send_prompt(
                 return Ok(());
             }
         }
+        let error = ProviderSubmissionUnacknowledgedError;
         tracing::warn!(
             provider = provider,
-            stage = "submission",
+            stage = error.phase().as_str(),
             outcome = "not_acknowledged",
             "provider composer diagnostic"
         );
-        return Err(anyhow::Error::new(ProviderSubmissionUnacknowledgedError));
+        return Err(anyhow::Error::new(error));
     }
     Ok(())
 }
