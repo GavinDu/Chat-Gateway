@@ -341,9 +341,10 @@ mod tests {
             .await
             .unwrap();
         let worker = guard.clone();
-        let pending = tokio::spawn(async move {
-            worker.wait_for_request_slot("late-challenge", 250, 3).await
-        });
+        let pending =
+            tokio::spawn(
+                async move { worker.wait_for_request_slot("late-challenge", 250, 3).await },
+            );
         let mut reserved = false;
         for _ in 0..100 {
             reserved = guard
