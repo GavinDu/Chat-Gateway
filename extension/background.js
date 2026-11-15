@@ -161,11 +161,15 @@ const queuedProviderForces = new Set();
 // its separate permission and destination checks.
 async function providerDiagnosticScopeCurrent(provider, attempt) {
   try {
-    const latest = await chrome.storage.local.get(["gateway", "token", "connectionMode", "linkedProviders"]);
+    const latest = await chrome.storage.local.get(["gateway", "token", "connectionMode", "linkedProviders", "providerLinkEpochs"]);
     return attempt.gateway === latest.gateway &&
       attempt.token === latest.token &&
       attempt.connectionMode === latest.connectionMode &&
-      latest.linkedProviders?.includes(provider);
+      latest.linkedProviders?.includes(provider) &&
+      // Legacy linked entries without epochs are allowed only until their
+      // first explicit link/logout transition; that transition always writes
+      // a fresh epoch, so an old in-flight result cannot pass this check.
+      attempt.providerLinkEpochs?.[provider] === latest.providerLinkEpochs?.[provider];
   } catch (_) {
     return false; // Failed storage read cannot authorize a status mutation.
   }
@@ -182,7 +186,7 @@ function queueProviderSync(provider, force = false) {
     if (queuedProviderSyncs.get(provider) === pending) queuedProviderSyncs.delete(provider);
     const shouldForce = force || queuedProviderForces.has(provider);
     queuedProviderForces.delete(provider);
-    const attempt = await chrome.storage.local.get(["gateway", "token", "connectionMode", "linkedProviders"]);
+    const attempt = await chrome.storage.local.get(["gateway", "token", "connectionMode", "linkedProviders", "providerLinkEpochs"]);
     try {
       const result = await syncProvider(provider, {force:shouldForce});
       if (await providerDiagnosticScopeCurrent(provider, attempt)) {
@@ -212,14 +216,17 @@ function logoutProviderFromRelay(provider) {
     if (!hasRelayConnection(expected)) {
       throw new Error("Gateway connection missing; reconnect before provider logout.");
     }
-    const current = await chrome.storage.local.get(["gateway", "token", "connectionMode", "linkedProviders"]);
+    const current = await chrome.storage.local.get(["gateway", "token", "connectionMode", "linkedProviders", "providerLinkEpochs"]);
     if (current.gateway !== expected.gateway || current.token !== expected.token || current.connectionMode !== expected.connectionMode) {
       throw new Error("Gateway connection changed before provider logout. Retry on the new connection.");
     }
     // Opt out before revocation; even if gateway deletion fails, do not
     // upload more cookies until the user explicitly reconnects this provider.
     const linkedProviders = current.linkedProviders || [];
-    await chrome.storage.local.set({linkedProviders:linkedProviders.filter(value => value !== provider)});
+    await chrome.storage.local.set({
+      linkedProviders:linkedProviders.filter(value => value !== provider),
+      providerLinkEpochs:{...(current.providerLinkEpochs || {}), [provider]:randomHex(16)}
+    });
     // A re-pair during the awaited storage write must never redirect the
     // DELETE request to a different gateway or a newly issued install token.
     const response = await relayFetch("/relay/v1/session/" + encodeURIComponent(provider), {

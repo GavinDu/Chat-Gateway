@@ -42,6 +42,7 @@ function loadPopup({failCookieDomain = null, includeSecondProvider = false, manu
   }};
   const context = {
     Promise, Date, Set, Array,
+    randomHex: (() => { let counter = 0; return () => "test-epoch-" + (++counter); })(),
     confirm:()=>true,
     document:{getElementById:byId,createElement:node},
     window:{addEventListener(){}},
@@ -154,6 +155,24 @@ test("connected dashboard exposes login and small logout, then allows reconnecti
   assert.equal(popup.server.linked,true);
   assert.ok(popup.chromeCalls.includes("logout-provider:metaai"));
   assert.equal(popup.chromeCalls.filter(x=>x==="sync-provider:metaai").length,2);
+});
+
+test("explicit provider link persists one epoch and only re-link after logout rotates it", async () => {
+  const popup=loadPopup();
+  popup.values.token="c".repeat(64);
+  await popup.controls.connectProvider("metaai");
+  const first = popup.values.providerLinkEpochs.metaai;
+  assert.ok(first);
+  await popup.controls.connectProvider("metaai");
+  assert.equal(popup.values.providerLinkEpochs.metaai,first,
+    "manual Sync of already linked provider must not revoke an in-flight generation");
+
+  // The background worker rotates the epoch on logout, then clears consent.
+  popup.values.linkedProviders = [];
+  popup.values.providerLinkEpochs.metaai = "test-revocation-epoch";
+  await popup.controls.connectProvider("metaai");
+  assert.notEqual(popup.values.providerLinkEpochs.metaai,first);
+  assert.notEqual(popup.values.providerLinkEpochs.metaai,"test-revocation-epoch");
 });
 
 test("browser activation statuses stay distinct from login verification", async () => {

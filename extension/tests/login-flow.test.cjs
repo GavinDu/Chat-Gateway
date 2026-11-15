@@ -52,6 +52,7 @@ function fixture({connected = false, linked = false, cookies = true, authenticat
   };
   const context = {
     chrome, Set, Promise, Date, Array,
+    randomHex: (() => { let counter = 0; return () => "test-epoch-" + (++counter); })(),
     document:{getElementById:node,createElement:newNode},
     window:{addEventListener(){}}, setInterval(){},
     confirm:()=>true,
