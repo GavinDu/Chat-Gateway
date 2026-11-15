@@ -1008,6 +1008,7 @@ mod response_probe_tests {
             ResponseProbe {
                 text: Some("answer".to_string()),
                 count: 4,
+                populated_count: 0,
                 streaming: true,
                 post_answer_affordance: true,
                 url: "https://provider.example/challenge".to_owned(),
