@@ -49,7 +49,10 @@ function fixture(extra = {}) {
   vm.createContext(context);
   vm.runInContext(fs.readFileSync(path.join(__dirname,"..","background.js"),"utf8")+
     "\nglobalThis.holdConsent=queueConsentMutation;",context);
-  const expected=()=>({gateway:state.gateway,token:state.token,connectionMode:state.connectionMode});
+  const expected=()=>({
+    gateway:state.gateway,token:state.token,connectionMode:state.connectionMode,
+    pendingConnection:state.pendingConnection
+  });
   const connect=(gateway,token,old=expected(),sender={url:"chrome-extension://fixture/popup.html"})=>
     new Promise(resolve=>listener({type:"connect-paired-relay",gateway,token,connection:old},sender,resolve));
   return {state,connect,expected,hold:context.holdConsent,allow:v=>{canUseOrigin=v;}};
@@ -112,6 +115,21 @@ test("content-script sender, bad token, unapproved origin and local mode fail cl
   f.allow(true);
   result=await f.connect("http://127.0.0.1:8080","b".repeat(64),f.expected());
   assert.equal(result.ok,false);
+  assert.equal(f.state.gateway,"https://old.example");
+  assert.equal(f.state.token,"a".repeat(64));
+});
+
+test("new pending approval cannot be cleared by a stale remote pair response",async()=>{
+  const first={gateway:"https://old.example",request_id:"a".repeat(64),
+    poll_secret:"b".repeat(64),expires:10000};
+  const f=fixture({pendingConnection:first});
+  const expected=f.expected();
+  const latest={gateway:"https://old.example",request_id:"c".repeat(64),
+    poll_secret:"d".repeat(64),expires:11000};
+  f.state.pendingConnection=latest;
+  const result=await f.connect("https://next.example","e".repeat(64),expected);
+  assert.equal(result.ok,false);
+  assert.equal(f.state.pendingConnection.request_id,"c".repeat(64));
   assert.equal(f.state.gateway,"https://old.example");
   assert.equal(f.state.token,"a".repeat(64));
 });
