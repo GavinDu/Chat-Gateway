@@ -241,3 +241,73 @@ mod warmup_timeout_tests {
         assert_eq!(warm.borrow().as_str(), "retry-success");
     }
 }
+
+#[cfg(test)]
+mod chatgpt_stream_preload_tests {
+    use std::time::Duration;
+
+    fn encoded_data_page(html: &str) -> String {
+        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+        format!("data:text/html,{encoded}")
+    }
+
+    #[tokio::test]
+    async fn first_party_guard_does_not_modify_unrelated_embedded_pages() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        page.add_preload_script(include_str!("chatgpt_streams.js"));
+        page.goto(&encoded_data_page(
+            r#"<html><body><script>
+            globalThis.__wasPatched = ReadableStream.__chatGatewayPullCompat === true;
+            </script></body></html>"#,
+        ))
+        .await
+        .unwrap();
+        assert_eq!(page.evaluate("globalThis.__wasPatched").as_bool(), Some(false));
+    }
+
+    #[tokio::test]
+    async fn pinned_obscura_preload_runs_before_author_scripts_and_unblocks_pull() {
+        // The *only* host bypass lives in this in-memory data: fixture.
+        // Production always evaluates the exact HTTPS ChatGPT origin guard.
+        let original = include_str!("chatgpt_streams.js");
+        let origin_guard = "  if (typeof location === 'undefined' || location.protocol !== 'https:' ||\n      !['chatgpt.com', 'www.chatgpt.com'].includes(location.hostname)) return;";
+        assert!(original.contains(origin_guard));
+        let fixture_script = original.replacen(origin_guard, "", 1);
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        page.add_preload_script(&fixture_script);
+        page.goto(&encoded_data_page(
+            r#"<html><body><script>
+            globalThis.__wasPatched = ReadableStream.__chatGatewayPullCompat === true;
+            const stream = new ReadableStream({
+                pull(controller) {
+                    globalThis.__pulls = (globalThis.__pulls || 0) + 1;
+                    controller.enqueue('pinned-compat-answer');
+                    controller.close();
+                }
+            });
+            stream.getReader().read().then(result => {
+                globalThis.__streamAnswer = result.value;
+            }).catch(() => {
+                globalThis.__streamAnswer = 'failed';
+            });
+            </script></body></html>"#,
+        ))
+        .await
+        .unwrap();
+        crate::providers::common::drive_page(&mut page, Duration::from_millis(60)).await;
+        assert_eq!(page.evaluate("globalThis.__wasPatched").as_bool(), Some(true));
+        assert_eq!(
+            page.evaluate("globalThis.__streamAnswer").as_str(),
+            Some("pinned-compat-answer")
+        );
+        assert_eq!(page.evaluate("globalThis.__pulls").as_f64(), Some(1.0));
+    }
+}
