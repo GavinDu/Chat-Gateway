@@ -275,6 +275,7 @@ async function initialize() {
 }
 
 $("pair").addEventListener("click", async () => {
+  let pendingApprovalGeneration = null;
   try {
     const gateway = normalizeGateway($("gateway").value);
     if (await connectLocalGateway(gateway, true)) return;
@@ -306,6 +307,17 @@ $("pair").addEventListener("click", async () => {
     const beforePair = remote ? await chrome.storage.local.get(
       ["gateway", "token", "connectionMode", "relayConnectionEpoch", "localDisconnected"]
     ) : null;
+    if (!remote) {
+      // Reserve the attempt before the network await. Only the service worker
+      // may save or revoke pending approval; a stale popup never writes it.
+      const reservation = await chrome.runtime.sendMessage({
+        type:"reserve-pending-approval",gateway
+      });
+      if (!reservation?.ok || !/^[a-f0-9]{32}$/.test(reservation.generation || "")) {
+        throw new Error(reservation?.error || "Local approval worker did not respond.");
+      }
+      pendingApprovalGeneration = reservation.generation;
+    }
     const response = await fetch(gateway + (remote ? "/relay/v1/pair" : "/relay/v1/connect/request"), {
       method:"POST", headers:{"Content-Type":"application/json"},
       body:JSON.stringify(remote ? {code} : {}), cache:"no-store", redirect:"error"
@@ -327,17 +339,35 @@ $("pair").addEventListener("click", async () => {
       return;
     }
     if (!/^[a-f0-9]{64}$/.test(data.request_id) || !/^[a-f0-9]{64}$/.test(data.poll_secret)) throw new Error("Invalid connection response.");
-    await chrome.storage.local.set({pendingConnection:{gateway, ...data, expires:Date.now()+300000}});
-    // The popup itself polls every five seconds. Alarms are only a background
-    // convenience, not a prerequisite for local approval.
+    const saved = await chrome.runtime.sendMessage({
+      type:"install-pending-approval", gateway,
+      generation:pendingApprovalGeneration,
+      request_id:data.request_id, poll_secret:data.poll_secret
+    });
+    if (!saved?.ok || saved.pending?.gateway !== gateway ||
+        saved.pending?.request_id !== data.request_id) {
+      throw new Error(saved?.error || "Local approval worker did not save the request.");
+    }
+    pendingApprovalGeneration = null;
+    // The popup itself polls every five seconds. Alarms are a convenience.
+    // Only the worker owns pending-approval storage; no popup fallback write.
     await chrome.alarms?.create?.("relay-connection", {periodInMinutes:1});
-    const pending = {gateway, ...data};
+    const pending = saved.pending;
     if (await openExtensionTab(pendingApprovalUrl(pending))) {
       message("Approve the connection in the local tab, then return here.");
     } else {
       showPendingApproval(pending);
     }
-  } catch (error) { message(error.message); }
+  } catch (error) {
+    if (pendingApprovalGeneration) {
+      // A failed response may release only its own reservation. If another
+      // popup already replaced it, the worker's compare-clear returns false.
+      await chrome.runtime.sendMessage({
+        type:"release-pending-approval",generation:pendingApprovalGeneration
+      }).catch(() => null);
+    }
+    message(error.message);
+  }
 });
 
 // Linking consents to automatic updates from this provider. The browser only
