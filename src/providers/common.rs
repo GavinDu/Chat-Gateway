@@ -3129,34 +3129,21 @@ mod prompt_bound_submission_tests {
         page.evaluate(r#"document.body.insertAdjacentHTML('beforeend', '<div class="answer">hydrated output</div>')"#);
         page.evaluate("document.querySelector('#manus').value = ''");
         let hydrated = submission_snapshot(&page, "#manus", &[".answer"]).unwrap();
-        assert!(!submission_observed_for_adapter(
-            "manus",
-            &page,
-            &before,
-            &hydrated,
-            "fresh chat"
-        )
-        .unwrap());
+        assert!(
+            !submission_observed_for_adapter("manus", &page, &before, &hydrated, "fresh chat")
+                .unwrap()
+        );
 
         page.evaluate(r#"document.body.insertAdjacentHTML('beforeend', '<div data-testid="user-message">unrelated</div>')"#);
         let wrong = submission_snapshot(&page, "#manus", &[".answer"]).unwrap();
-        assert!(!submission_observed_for_adapter(
-            "manus",
-            &page,
-            &before,
-            &wrong,
-            "fresh chat"
-        )
-        .unwrap());
+        assert!(
+            !submission_observed_for_adapter("manus", &page, &before, &wrong, "fresh chat")
+                .unwrap()
+        );
         page.evaluate("document.body.lastElementChild.textContent = 'fresh chat'");
-        assert!(submission_observed_for_adapter(
-            "manus",
-            &page,
-            &before,
-            &wrong,
-            "fresh chat"
-        )
-        .unwrap());
+        assert!(
+            submission_observed_for_adapter("manus", &page, &before, &wrong, "fresh chat").unwrap()
+        );
     }
 
     #[tokio::test]
