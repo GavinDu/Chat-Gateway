@@ -2204,7 +2204,7 @@ mod hidden_child_response_text_tests {
             <div class="answer" id="real">legitimate earlier answer</div>
             <div class="answer" id="nested">
                 <span hidden>secret hidden</span>
-                <span aria-hidden="true">secret aria</span>
+                <span aria-hidden="true" style="display:none">secret aria</span>
                 <span style="display:none">secret css</span>
             </div>
         </body></html>"#;
