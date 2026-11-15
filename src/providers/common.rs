@@ -1064,13 +1064,11 @@ mod response_probe_tests {
             3
         );
         assert_eq!(
-            decode_response_probe(serde_json::json!({"populatedCount": 2.0}))
-                .populated_count,
+            decode_response_probe(serde_json::json!({"populatedCount": 2.0})).populated_count,
             2
         );
         assert_eq!(
-            decode_response_probe(serde_json::json!({"populatedCount": -1}))
-                .populated_count,
+            decode_response_probe(serde_json::json!({"populatedCount": -1})).populated_count,
             0
         );
         assert_eq!(
