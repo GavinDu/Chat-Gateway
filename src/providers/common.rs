@@ -316,21 +316,24 @@ pub fn response_probe(
             let postAnswerAffordance = false;
             if (lastResponseNode) {{
                 const scopeSelector = "article, [data-message-author-role='assistant'], [data-testid='assistant-message'], [data-testid*='conversation-turn'], [data-testid*='message']";
-                let scope = lastResponseNode;
-                for (let depth = 0; depth < 6 && scope; depth += 1, scope = scope.parentElement) {{
+                // A Copy/Retry control is terminal evidence ONLY when scoped to
+                // the same visible response turn. Climbing past an <article>
+                // can discover an old reply's Copy button in the conversation
+                // root and falsely complete the current partial answer.
+                let scope = null;
+                try {{ scope = lastResponseNode.closest(scopeSelector); }} catch (_) {{}}
+                if (scope) {{
                     let buttons = [];
                     try {{ buttons = Array.from(scope.querySelectorAll("button, [role='button']")); }} catch (_) {{}}
-                    if (buttons.some(button => visible(button) &&
+                    postAnswerAffordance = buttons.some(button => visible(button) &&
                         /copy|regenerate|retry|good response|bad response|thumbs up|thumbs down/.test(
                             ((button.getAttribute("aria-label") || "") + " " +
                             (button.getAttribute("data-testid") || "") + " " +
                             (button.innerText || button.textContent || "")).toLowerCase()
-                        ))) {{
-                        postAnswerAffordance = true;
-                        break;
-                    }}
-                    if (scope.matches && scope.matches(scopeSelector) && depth >= 3) break;
+                        ));
                 }}
+                // An unrecognized turn root cannot safely borrow controls
+                // from an ancestor. Retain the conservative idle fallback.
             }}
             return {{ text, count: nodes.size, streaming, postAnswerAffordance, url, challenge }};
         }})()"#,
