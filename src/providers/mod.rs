@@ -1080,6 +1080,12 @@ pub async fn run_send(
                                 .min(u64::MAX as u128) as u64,
                         );
                         if probe_has_challenge(&final_probe) {
+                            if let Some(error) =
+                                untrusted_challenge_origin_error(adapter.name(), page)
+                            {
+                                let _ = chunks.send(Err(error)).await;
+                                return;
+                            }
                             provider_guard.disable_provider(
                                 adapter.name(),
                                 "challenge page detected; manual review required",
@@ -1196,6 +1202,10 @@ pub async fn run_send(
                         .min(u64::MAX as u128) as u64,
                 );
                 if probe_has_challenge(&final_probe) {
+                    if let Some(error) = untrusted_challenge_origin_error(adapter.name(), page) {
+                        let _ = chunks.send(Err(error)).await;
+                        return;
+                    }
                     provider_guard.disable_provider(
                         adapter.name(),
                         "challenge page detected; manual review required",
