@@ -2229,6 +2229,15 @@ mod last_visible_response_text_tests {
     }
 }
 
+/// Model discovery is read-only, but a redirected login or unrelated page
+/// must never supply model picker labels to a different provider's catalog.
+/// Reuse the exact origin policy already enforced for prompt submission.
+fn require_model_discovery_origin(page: &Page, set: &SelectorSet) -> anyhow::Result<()> {
+    let provider = submission_provider_for_url(set.url)
+        .ok_or_else(|| anyhow::anyhow!("provider model discovery configuration origin invalid"))?;
+    require_submission_provider_route(provider, page)
+}
+
 /// Discover models without sending a message (v1 body): navigate, open
 /// the model picker, scrape visible labels filtered by keyword regex,
 /// merge with the configured aliases.
@@ -2240,15 +2249,18 @@ pub async fn discover_models(
 ) -> anyhow::Result<Vec<String>> {
     page.goto(set.url).await?;
     drive_page(page, Duration::from_millis(1200)).await;
+    require_model_discovery_origin(page, set)?;
 
     // Try to open model picker without sending message
     let effective = set.effective(overrides);
     for sel in effective.picker_refs() {
         if click_first(page, &[sel]).is_ok() {
             drive_page(page, Duration::from_millis(600)).await;
+            require_model_discovery_origin(page, set)?;
             break;
         }
     }
+    require_model_discovery_origin(page, set)?;
 
     // Extract visible model labels (obscura evaluate takes an expression
     // and returns a Value synchronously, so call the v1 arrow function)
@@ -2277,6 +2289,56 @@ pub async fn discover_models(
             }
         }
         Ok(merged)
+    }
+}
+
+#[cfg(test)]
+mod model_discovery_origin_tests {
+    use super::{require_model_discovery_origin, SelectorSet};
+
+    #[tokio::test]
+    async fn off_provider_model_picker_requires_explicit_test_only_fixture() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <button aria-label="model">Choose model</button>
+            <div role="option">misleading model option</div>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+
+        for spec in crate::providers::ADAPTERS {
+            let error = require_model_discovery_origin(&page, spec.selectors).unwrap_err();
+            assert!(
+                error.to_string().contains("chat origin unavailable"),
+                "{} must reject a foreign model picker",
+                spec.id
+            );
+            assert!(!error.to_string().contains("misleading model option"));
+        }
+
+        page.evaluate(
+            "document.documentElement.setAttribute('data-chat-gateway-test-fixture', '')",
+        );
+        for spec in crate::providers::ADAPTERS {
+            assert!(
+                require_model_discovery_origin(&page, spec.selectors).is_ok(),
+                "{} must accept a deliberately marked offline data fixture",
+                spec.id
+            );
+        }
+        let invalid = SelectorSet {
+            url: "https://wrong-provider.invalid/",
+            ..crate::providers::manus::SELECTORS
+        };
+        let error = require_model_discovery_origin(&page, &invalid).unwrap_err();
+        assert!(error.to_string().contains("configuration origin invalid"));
+        assert!(!error.to_string().contains("wrong-provider.invalid"));
     }
 }
 
