@@ -597,15 +597,27 @@ fn visible_input_query(selector_js: &str) -> String {
     )
 }
 
+/// The pinned Obscura engine may attach a synthetic `value` property to a
+/// contenteditable node without mutating the visible DOM or its framework
+/// model. Only native input/textarea controls may prove draft retention by
+/// value. All other actionable contenteditables must prove *visible* text.
+/// This expression is reused at typing, Send, and submission snapshot time.
+fn composer_draft_expression(element: &str) -> String {
+    format!(
+        "({element}.tagName === 'TEXTAREA' || {element}.tagName === 'INPUT' ? {element}.value : ({element}.innerText ?? {element}.textContent ?? ''))"
+    )
+}
+
 /// Re-read the actionable composer after framework renders, not just after
 /// the initial typing event. Never log the prompt when the value changes.
 fn composer_retains_prompt(page: &Page, selector: &str, prompt: &str) -> anyhow::Result<bool> {
     let selector_js = serde_json::to_string(selector)?;
     let el_js = visible_input_query(&selector_js);
     let prompt_js = serde_json::to_string(prompt)?;
+    let draft = composer_draft_expression("el");
     Ok(page
         .evaluate(&format!(
-            "(() => {{ const el = {el_js}; if (!el) return false; const value = ('value' in el ? el.value : (el.innerText || el.textContent || '')); return value === {prompt_js}; }})()"
+            "(() => {{ const el = {el_js}; if (!el) return false; const value = {draft}; return value === {prompt_js}; }})()"
         ))
         .as_bool()
         == Some(true))
@@ -882,7 +894,8 @@ pub fn click_first(page: &Page, selectors: &[&str]) -> anyhow::Result<()> {
 /// Go's `inputType: 'insertText'` + `data` fields (free, and
 /// framework-observable), and plain TEXTAREA or INPUT composers use the
 /// native value setter branch instead of execCommand. Everything else
-/// keeps merged's path (selectAll clear + execCommand insertText).
+/// uses editor-scoped Range selection + execCommand insertText. That dispatch
+/// does NOT establish valid visible draft retention by itself.
 pub async fn human_type(page: &Page, selectors: &[&str], text: &str) -> anyhow::Result<()> {
     let selector = selectors
         .iter()
@@ -947,10 +960,12 @@ mod scoped_contenteditable_selection_tests {
             .await
             .unwrap();
         page.evaluate("document.querySelector('#outside').focus()");
-        super::human_type(&page, &["#target"], "scoped draft")
+        let error = super::human_type(&page, &["#target"], "scoped draft")
             .await
-            .unwrap();
-
+            .unwrap_err();
+        assert!(error
+            .downcast_ref::<super::ProviderComposerInputRejectedError>()
+            .is_some());
         // The pinned Obscura contenteditable implementation can expose a
         // synthetic retained value without updating visible nested markup.
         // That provider-input correctness gap is tracked separately in #988.
@@ -1041,6 +1056,7 @@ async fn click_send_or_enter_checked_with_policy(
     let input_js = serde_json::to_string(input_selector)?;
     let input_expr = visible_input_query(&input_js);
     let expected_js = serde_json::to_string(&expected_prompt)?;
+    let draft = composer_draft_expression("input");
     let provider_js = serde_json::to_string(&expected_provider)?;
     // The last Rust-side route check precedes the five-second Send-button
     // wait. Validate the *current* browser URL within the same page evaluation
@@ -1069,7 +1085,7 @@ async fn click_send_or_enter_checked_with_policy(
         for selector in send_selectors {
             let selector_js = serde_json::to_string(selector)?;
             let js = format!(
-                "(() => {{ {route_guard} const input = {input_expr}; if (!input) return 'missing'; const expected = {expected_js}; if (expected !== null && ('value' in input ? input.value : (input.innerText || input.textContent || '')) !== expected) return 'changed'; const inputForm = input.form || input.closest('form'); let root = input; for (let depth = 0; root && depth < 12; depth++, root = root.parentElement) {{ if (root.tagName === 'BODY' || root.tagName === 'HTML') break; for (const button of root.querySelectorAll({selector_js})) {{ const buttonForm = button.form || button.closest('form'); if (buttonForm && buttonForm !== inputForm) continue; if (button.getClientRects().length && window.getComputedStyle(button).visibility !== 'hidden' && window.getComputedStyle(button).pointerEvents !== 'none' && !button.closest('[inert], [hidden], [aria-hidden=true], [aria-disabled=true]') && !button.disabled && !button.matches(':disabled') && !button.closest('fieldset[disabled]') && button.getAttribute('aria-disabled') !== 'true') {{ button.click(); return 'clicked'; }} }} if (root.tagName === 'FORM') break; }} const form = input.form || input.closest('form'); if (form && form.id) {{ for (const button of document.querySelectorAll({selector_js})) {{ if (button.tagName !== 'BUTTON' || (button.form !== form && button.getAttribute('form') !== form.id) || form.contains(button)) continue; if (button.getClientRects().length && window.getComputedStyle(button).visibility !== 'hidden' && window.getComputedStyle(button).pointerEvents !== 'none' && !button.closest('[inert], [hidden], [aria-hidden=true], [aria-disabled=true]') && !button.disabled && !button.matches(':disabled') && !button.closest('fieldset[disabled]') && button.getAttribute('aria-disabled') !== 'true') {{ button.click(); return 'clicked'; }} }} }} return 'waiting'; }})()"
+                "(() => {{ {route_guard} const input = {input_expr}; if (!input) return 'missing'; const expected = {expected_js}; if (expected !== null && {draft} !== expected) return 'changed'; const inputForm = input.form || input.closest('form'); let root = input; for (let depth = 0; root && depth < 12; depth++, root = root.parentElement) {{ if (root.tagName === 'BODY' || root.tagName === 'HTML') break; for (const button of root.querySelectorAll({selector_js})) {{ const buttonForm = button.form || button.closest('form'); if (buttonForm && buttonForm !== inputForm) continue; if (button.getClientRects().length && window.getComputedStyle(button).visibility !== 'hidden' && window.getComputedStyle(button).pointerEvents !== 'none' && !button.closest('[inert], [hidden], [aria-hidden=true], [aria-disabled=true]') && !button.disabled && !button.matches(':disabled') && !button.closest('fieldset[disabled]') && button.getAttribute('aria-disabled') !== 'true') {{ button.click(); return 'clicked'; }} }} if (root.tagName === 'FORM') break; }} const form = input.form || input.closest('form'); if (form && form.id) {{ for (const button of document.querySelectorAll({selector_js})) {{ if (button.tagName !== 'BUTTON' || (button.form !== form && button.getAttribute('form') !== form.id) || form.contains(button)) continue; if (button.getClientRects().length && window.getComputedStyle(button).visibility !== 'hidden' && window.getComputedStyle(button).pointerEvents !== 'none' && !button.closest('[inert], [hidden], [aria-hidden=true], [aria-disabled=true]') && !button.disabled && !button.matches(':disabled') && !button.closest('fieldset[disabled]') && button.getAttribute('aria-disabled') !== 'true') {{ button.click(); return 'clicked'; }} }} }} return 'waiting'; }})()"
             );
             match page.evaluate(&js).as_str() {
                 Some("clicked") => return Ok(true),
@@ -2059,11 +2075,12 @@ fn submission_snapshot(
 ) -> anyhow::Result<SubmissionSnapshot> {
     let input = serde_json::to_string(input_selector)?;
     let input_expr = visible_input_query(&input);
+    let draft = composer_draft_expression("el");
     let responses = serde_json::to_string(response_selectors)?;
     let js = format!(
         r#"(() => {{
             const el = {input_expr};
-            const value = el ? ('value' in el ? el.value : (el.innerText || el.textContent || '')) : null;
+            const value = el ? {draft} : null;
             const responses = {responses};
             const visible = node => {{
                 try {{
@@ -2285,6 +2302,77 @@ mod composer_rejected_input_tests {
     }
 
     #[tokio::test]
+    async fn synthetic_value_spoof_on_nested_contenteditable_never_authorizes_send() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <form>
+              <div id="target" role="textbox" contenteditable="true"><p>Old draft</p></div>
+              <button id="send" type="button" onclick="window.sendCount=(window.sendCount||0)+1">Send</button>
+            </form>
+            <div id="other" contenteditable="true">Unrelated draft</div>
+            <div id="empty" contenteditable="true"></div>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        page.evaluate(r#"document.querySelector('#target').value = 'private message';"#);
+        assert_eq!(
+            page.evaluate("document.querySelector('#target').value")
+                .as_str(),
+            Some("private message")
+        );
+        assert!(!super::composer_retains_prompt(&page, "#target", "private message").unwrap());
+        page.evaluate("document.querySelector('#empty').value = 'private message'");
+        let snapshot = super::submission_snapshot(&page, "#empty", &[".assistant"]).unwrap();
+        assert!(
+            snapshot.input_empty,
+            "synthetic value on an empty contenteditable must not count as a real draft"
+        );
+        let rejected_click = super::click_send_or_enter_checked_with_policy(
+            &mut page,
+            &["#send"],
+            "#target",
+            250,
+            Some("private message"),
+            false,
+            None,
+        )
+        .await;
+        assert!(
+            rejected_click.is_err(),
+            "last-moment Send check must reject synthetic value"
+        );
+        assert_eq!(page.evaluate("window.sendCount || 0").as_f64(), Some(0.0));
+        let error = super::human_type(&page, &["#target"], "private message")
+            .await
+            .unwrap_err();
+        assert!(error
+            .downcast_ref::<ProviderComposerInputRejectedError>()
+            .is_some());
+        assert!(!error.to_string().contains("private message"));
+        assert_eq!(page.evaluate("window.sendCount || 0").as_f64(), Some(0.0));
+        assert_eq!(
+            page.evaluate("document.querySelector('#other').textContent")
+                .as_str(),
+            Some("Unrelated draft")
+        );
+    }
+
+    #[test]
+    fn read_only_draft_contract_never_uses_synthetic_value_for_contenteditable() {
+        let expression = super::composer_draft_expression("input");
+        assert!(expression.contains("input.tagName === 'TEXTAREA'"));
+        assert!(expression.contains("input.tagName === 'INPUT'"));
+        assert!(expression.contains("input.innerText ?? input.textContent"));
+        assert!(!expression.contains("'value' in"));
+    }
+
+    #[tokio::test]
     async fn controlled_contenteditable_draft_with_disabled_send_is_not_submitted() {
         let browser = obscura_core::Browser::builder()
             .stealth(false)
@@ -2311,9 +2399,13 @@ mod composer_rejected_input_tests {
         // The pinned embedded browser may retain a synthetic DOM draft even
         // when the controlled editor never enables submission. DOM retention
         // is not proof that the framework accepted the prompt.
-        super::human_type(&page, &["#prompt"], "private-message")
+        let error = super::human_type(&page, &["#prompt"], "private-message")
             .await
-            .unwrap();
+            .unwrap_err();
+        assert!(error
+            .downcast_ref::<ProviderComposerInputRejectedError>()
+            .is_some());
+        assert!(!error.to_string().contains("private-message"));
         assert_eq!(
             page.evaluate("document.querySelector('#send').disabled")
                 .as_bool(),
