@@ -216,7 +216,10 @@ function loadPopup({failCookieDomain = null, includeSecondProvider = false, manu
       runtime,
       alarms:{create:async()=>{},clear:async name=>{chromeCalls.push("alarm-clear:"+name);}},
       storage:{local:{
-        async get(keys){return Object.fromEntries(keys.map(k=>[k,values[k]]));},
+        async get(keys){
+          const names=Array.isArray(keys) ? keys : [keys];
+          return Object.fromEntries(names.map(k=>[k,values[k]]));
+        },
         async set(next){Object.assign(values,next);},
         async remove(keys){for(const k of Array.isArray(keys)?keys:[keys])delete values[k];},
       }},
