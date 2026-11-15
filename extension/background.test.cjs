@@ -180,6 +180,77 @@ test("unreachable configured gateway skips automatic imports and resumes after r
     "startup repair must resume after a successful gateway status check");
 });
 
+test("old provider import result cannot overwrite new gateway dashboard or cache", async () => {
+  for (const oldFailure of [false, true]) {
+    const f = loadBackground(["chatgpt"], [], true);
+    let gateway = "http://127.0.0.1:8080";
+    const oldGateway = gateway;
+    let release;
+    const held = new Promise(resolve => {release = resolve;});
+    f.sandbox.chrome.storage.local.get = async () => ({
+      gateway, connectionMode:"local", linkedProviders:["chatgpt"]
+    });
+    f.sandbox.syncProvider = async provider => {
+      f.calls.push(provider);
+      await held;
+      if (oldFailure) throw new Error("old install sync failure");
+      return "uploaded";
+    };
+    f.sandbox.relayFetch = async () => ({
+      ok:true,status:200,json:async()=>({
+        marker:"connected-gateway-B",providers:[{provider:"chatgpt",linked:true}]
+      })
+    });
+    const send = (request) => new Promise(resolve =>
+      f.listeners.message[0](request,{},resolve));
+    const previous = send({type:"sync-provider",provider:"chatgpt"});
+    for (let i = 0; i < 3; i++) await flushAsyncWork();
+    assert.deepEqual(f.calls, ["chatgpt"], "old gateway import started");
+
+    gateway = "http://127.0.0.1:9090";
+    assert.notEqual(gateway, oldGateway);
+    const fresh = await send({type:"relay-diagnostics",force:true});
+    assert.equal(fresh.ok, true);
+    assert.equal(fresh.gateway.marker,"connected-gateway-B");
+    assert.equal(fresh.extension.provider_sync.chatgpt.state, "not_attempted");
+
+    release();
+    const completed = await previous;
+    assert.equal(completed.ok, !oldFailure);
+    const cached = await send({type:"relay-diagnostics",force:false});
+    assert.equal(cached.ok, true);
+    assert.equal(cached.gateway.marker,"connected-gateway-B");
+    assert.equal(cached.extension.provider_sync.chatgpt.state,"not_attempted",
+      "old gateway upload or error may not become new connection status");
+  }
+});
+
+test("unlink during in-flight import does not leave a synthetic linked sync result", async () => {
+  const f = loadBackground(["chatgpt"], [], true);
+  let linkedProviders = ["chatgpt"];
+  f.sandbox.chrome.storage.local.get = async () => ({
+    gateway:"http://127.0.0.1:8080",connectionMode:"local",linkedProviders
+  });
+  let release;
+  const held = new Promise(resolve => {release=resolve});
+  f.sandbox.syncProvider = async provider => {
+    f.calls.push(provider);
+    await held;
+    return "uploaded";
+  };
+  const send = request => new Promise(resolve =>
+    f.listeners.message[0](request,{},resolve));
+  const old = send({type:"sync-provider",provider:"chatgpt"});
+  for (let i = 0; i < 3; i++) await flushAsyncWork();
+  linkedProviders = [];
+  release();
+  await old;
+  linkedProviders = ["chatgpt"];
+  const after = await send({type:"relay-diagnostics"});
+  assert.equal(after.extension.provider_sync.chatgpt.state,"not_attempted",
+    "relinked provider must not inherit the old unlinked import result");
+});
+
 test("known gateway outage suppresses cookie-triggered imports until health returns or identity changes", async () => {
   const f = loadBackground(["chatgpt", "claude"]);
   let healthy = false;

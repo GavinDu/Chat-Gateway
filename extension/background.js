@@ -155,6 +155,21 @@ function queueProviderTask(provider, work) {
 // when it starts, rather than replaying every rotation behind a slow import.
 const queuedProviderSyncs = new Map();
 const queuedProviderForces = new Set();
+// An in-flight cookie import can finish after an owner switches gateways.
+// Scope only its local redacted diagnostics/cache writes to the connection
+// captured when the task actually began. Sync/cookie transport already owns
+// its separate permission and destination checks.
+async function providerDiagnosticScopeCurrent(provider, attempt) {
+  try {
+    const latest = await chrome.storage.local.get(["gateway", "token", "connectionMode", "linkedProviders"]);
+    return attempt.gateway === latest.gateway &&
+      attempt.token === latest.token &&
+      attempt.connectionMode === latest.connectionMode &&
+      latest.linkedProviders?.includes(provider);
+  } catch (_) {
+    return false; // Failed storage read cannot authorize a status mutation.
+  }
+}
 function queueProviderSync(provider, force = false) {
   const queued = queuedProviderSyncs.get(provider);
   if (queued) {
@@ -163,21 +178,24 @@ function queueProviderSync(provider, force = false) {
     if (force) queuedProviderForces.add(provider);
     return queued;
   }
-  const pending = queueProviderTask(provider, () => {
+  const pending = queueProviderTask(provider, async () => {
     if (queuedProviderSyncs.get(provider) === pending) queuedProviderSyncs.delete(provider);
     const shouldForce = force || queuedProviderForces.has(provider);
     queuedProviderForces.delete(provider);
-    return syncProvider(provider, {force:shouldForce}).then(
-      result => {
+    const attempt = await chrome.storage.local.get(["gateway", "token", "connectionMode", "linkedProviders"]);
+    try {
+      const result = await syncProvider(provider, {force:shouldForce});
+      if (await providerDiagnosticScopeCurrent(provider, attempt)) {
         recordProviderDiagnostic(provider, result || "skipped");
         if (result === "uploaded") lastGatewayCheck = null;
-        return result;
-      },
-      error => {
-        recordProviderDiagnostic(provider, "failed", classifyRelayFailure(error));
-        throw error;
       }
-    );
+      return result;
+    } catch (error) {
+      if (await providerDiagnosticScopeCurrent(provider, attempt)) {
+        recordProviderDiagnostic(provider, "failed", classifyRelayFailure(error));
+      }
+      throw error;
+    }
   });
   queuedProviderSyncs.set(provider, pending);
   return pending;
