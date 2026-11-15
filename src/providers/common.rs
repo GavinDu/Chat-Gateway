@@ -2192,6 +2192,11 @@ fn safe_provider_https_authority(uri: &axum::http::Uri) -> bool {
     let Some(host) = uri.host() else {
         return false;
     };
+    // Preserve a single fully-qualified DNS trailing dot (the browser's
+    // location guard does too), but never normalize two or more away.
+    if host.is_empty() || host.ends_with("..") {
+        return false;
+    }
     authority.as_str().eq_ignore_ascii_case(host)
         || authority.as_str().eq_ignore_ascii_case(&format!("{host}:443"))
 }
@@ -2376,6 +2381,8 @@ mod all_provider_origin_fence_tests {
             "https://chat.mistral.ai:65536/",
             "https://www.perplexity.ai:65536/search",
             "https://user:password@manus.im/app",
+            "https://chatgpt.com../c",
+            "https://www.meta.ai../",
             "https://chatgpt.com.attacker.invalid/c",
             "http://chatgpt.com/c",
         ] {
