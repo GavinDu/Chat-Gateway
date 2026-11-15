@@ -1210,7 +1210,7 @@ mod scoped_contenteditable_selection_tests {
             .await
             .unwrap();
 
-        let error = super::human_type(&page, &["#target"], "secret multiline\\n新 prompt")
+        let error = super::human_type(&page, &["#target"], "secret multiline\n新 prompt")
             .await
             .unwrap_err();
         assert!(error
@@ -1251,7 +1251,7 @@ mod scoped_contenteditable_selection_tests {
         page.goto(&format!("data:text/html,{encoded}"))
             .await
             .unwrap();
-        let prompt = "你好\\n\\nemoji ☃️";
+        let prompt = "你好\n\nemoji ☃️";
         super::human_type(&page, &["#native"], prompt).await.unwrap();
         assert_eq!(
             page.evaluate("document.querySelector('#native').value")
