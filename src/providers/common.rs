@@ -1088,14 +1088,10 @@ async fn human_type_with_provider(
         .ok_or_else(|| anyhow::anyhow!("actionable provider composer disappeared before typing"))?;
     let selector_js = serde_json::to_string(selector)?;
     let el_js = visible_input_query(&selector_js);
-    // Preserve the pinned Obscura editing fallback unchanged: if execCommand
-    // reports unsupported, some embedded elements provide a value property
-    // even when exposed as contenteditable. Do NOT force textContent here;
-    // the existing prompt retention check observes rendered editor text.
-    // Only the pre-insertion DOM Range selection changes in this patch.
-    // The contenteditable fallback below uses a DOM Range scoped to the
-    // selected composer, not document.execCommand('selectAll'). A focus race
-    // must not select unrelated page text or another editor.
+    // An unsupported scoped contenteditable edit must fail closed. Setting
+    // synthetic .value or raw textContent may look correct while bypassing
+    // framework/ProseMirror state; do not dispatch input/change on that path.
+    // The DOM Range is confined to the selected editor, not the entire page.
     // Preserve Obscura's native click for ordinary single inputs. When the
     // first matching node is hidden, avoid clicking that stale placeholder;
     // the JS input path below focuses the visible match instead.
@@ -1115,7 +1111,7 @@ async fn human_type_with_provider(
         String::new()
     };
     let js = format!(
-        "(function() {{ {route_guard} {composer_guard} var el = {el_js}; if (!el) return false; el.focus(); if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {{ try {{ var prototype = el.tagName === 'INPUT' ? window.HTMLInputElement.prototype : window.HTMLTextAreaElement.prototype; var setter = Object.getOwnPropertyDescriptor(prototype, 'value').set; setter.call(el, {text}); }} catch (e) {{ el.value = {text}; }} el.dispatchEvent(new InputEvent('input', {{ bubbles: true, inputType: 'insertText', data: {text} }})); el.dispatchEvent(new Event('change', {{ bubbles: true }})); return true; }} var selection = window.getSelection(); if (!selection) return false; try {{ var range = document.createRange(); range.selectNodeContents(el); selection.removeAllRanges(); selection.addRange(range); }} catch (e) {{ return false; }} var ok = false; try {{ ok = document.execCommand('insertText', false, {text}); }} catch (e) {{}} if (!ok) {{ if ('value' in el) {{ el.value = {text}; }} else {{ el.textContent = {text}; }} }} el.dispatchEvent(new InputEvent('input', {{ bubbles: true, inputType: 'insertText', data: {text} }})); el.dispatchEvent(new Event('change', {{ bubbles: true }})); return true; }})()",
+        "(function() {{ {route_guard} {composer_guard} var el = {el_js}; if (!el) return false; el.focus(); if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {{ try {{ var prototype = el.tagName === 'INPUT' ? window.HTMLInputElement.prototype : window.HTMLTextAreaElement.prototype; var setter = Object.getOwnPropertyDescriptor(prototype, 'value').set; setter.call(el, {text}); }} catch (e) {{ el.value = {text}; }} el.dispatchEvent(new InputEvent('input', {{ bubbles: true, inputType: 'insertText', data: {text} }})); el.dispatchEvent(new Event('change', {{ bubbles: true }})); return true; }} var selection = window.getSelection(); if (!selection) return false; try {{ var range = document.createRange(); range.selectNodeContents(el); selection.removeAllRanges(); selection.addRange(range); }} catch (e) {{ return false; }} var ok = false; try {{ ok = document.execCommand('insertText', false, {text}); }} catch (e) {{}} if (!ok) return 'editor-unsupported'; el.dispatchEvent(new InputEvent('input', {{ bubbles: true, inputType: 'insertText', data: {text} }})); el.dispatchEvent(new Event('change', {{ bubbles: true }})); return true; }})()",
         text = text_js,
         el_js = el_js,
     );
@@ -1125,6 +1121,9 @@ async fn human_type_with_provider(
     }
     if typed.as_str() == Some("ambiguous-composer") {
         anyhow::bail!("provider actionable composer ambiguous or unavailable");
+    }
+    if typed.as_str() == Some("editor-unsupported") {
+        return Err(anyhow::Error::new(ProviderComposerInputRejectedError));
     }
     if typed.as_bool() != Some(true) {
         anyhow::bail!("typing into the provider input failed");
@@ -1184,6 +1183,84 @@ mod scoped_contenteditable_selection_tests {
             Some(false),
             "typing must not submit the prompt or click a send button"
         );
+    }
+
+    #[tokio::test]
+    async fn unsupported_rich_editor_never_mutates_raw_dom_or_synthetic_value() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <div id="target" contenteditable="true"><p>Original nested draft</p></div>
+            <button id="send" type="button" onclick="window.sent=true">Send</button>
+            <script>
+                const editor = document.querySelector('#target');
+                editor.value = 'original synthetic value';
+                window.editorInputs = 0;
+                window.editorChanges = 0;
+                editor.addEventListener('input', () => window.editorInputs++);
+                editor.addEventListener('change', () => window.editorChanges++);
+                document.execCommand = function() { return false; };
+            </script>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+
+        let error = super::human_type(&page, &["#target"], "secret multiline\n新 prompt")
+            .await
+            .unwrap_err();
+        assert!(error
+            .downcast_ref::<super::ProviderComposerInputRejectedError>()
+            .is_some());
+        assert!(!error.to_string().contains("secret"));
+        assert_eq!(
+            page.evaluate("document.querySelector('#target').innerHTML")
+                .as_str(),
+            Some("<p>Original nested draft</p>")
+        );
+        assert_eq!(
+            page.evaluate("document.querySelector('#target').value")
+                .as_str(),
+            Some("original synthetic value")
+        );
+        assert_eq!(page.evaluate("window.editorInputs").as_f64(), Some(0.0));
+        assert_eq!(page.evaluate("window.editorChanges").as_f64(), Some(0.0));
+        assert_eq!(page.evaluate("window.sent === true").as_bool(), Some(false));
+    }
+
+    #[tokio::test]
+    async fn native_textarea_still_accepts_exact_multiline_unicode() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <textarea id="native"></textarea>
+            <script>
+                window.nativeInputs = 0;
+                document.querySelector('#native').addEventListener(
+                    'input', () => window.nativeInputs++);
+            </script>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        let prompt = "你好\n\nemoji ☃️";
+        super::human_type(&page, &["#native"], prompt)
+            .await
+            .unwrap();
+        assert_eq!(
+            page.evaluate("document.querySelector('#native').value")
+                .as_str(),
+            Some(prompt)
+        );
+        assert_eq!(page.evaluate("window.nativeInputs").as_f64(), Some(1.0));
     }
 }
 
