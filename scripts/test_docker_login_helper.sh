@@ -55,6 +55,53 @@ printf 'owner-existing-configuration\n' > "$CHAT_GATEWAY_CONFIG"
 bash "$ROOT/scripts/docker-run.sh" init >/dev/null
 [[ "$(cat "$CHAT_GATEWAY_CONFIG")" == "owner-existing-configuration" ]]
 
+# A previously installed config is not replaced by init; only an explicit
+# enable-manus command changes the unique Manus enabled flag.
+cat > "$CHAT_GATEWAY_CONFIG" <<'CONFIG'
+providers:
+  - name: chatgpt
+    enabled: false
+  - name: manus
+    enabled: false # explicitly opted out in the old install
+  - name: claude
+    enabled: false
+server:
+  port: 8080
+CONFIG
+bash "$ROOT/scripts/docker-run.sh" enable-manus > "$TMP/manus-message"
+grep -Fq "Manus enabled" "$TMP/manus-message"
+grep -Fq "Restart Chat Gateway explicitly" "$TMP/manus-message"
+grep -Fq "permission to automate" "$TMP/manus-message"
+[[ "$(grep -c '^    enabled: true' "$CHAT_GATEWAY_CONFIG")" -eq 1 ]]
+grep -Fq 'enabled: true # explicitly opted out in the old install' "$CHAT_GATEWAY_CONFIG"
+grep -Fq '  - name: chatgpt' "$CHAT_GATEWAY_CONFIG"
+grep -Fq 'server:' "$CHAT_GATEWAY_CONFIG"
+# Idempotent and tightly scoped: repeated enable does not touch other fields.
+cp "$CHAT_GATEWAY_CONFIG" "$TMP/manus-enabled-expected"
+bash "$ROOT/scripts/docker-run.sh" enable-manus >/dev/null
+cmp -s "$CHAT_GATEWAY_CONFIG" "$TMP/manus-enabled-expected"
+
+# Unexpected/ambiguous configs must be rejected without modifying the owner
+# file or quietly installing a new provider entry.
+printf 'providers:\n  - name: chatgpt\n    enabled: false\n' > "$CHAT_GATEWAY_CONFIG"
+cp "$CHAT_GATEWAY_CONFIG" "$TMP/no-manus"
+if bash "$ROOT/scripts/docker-run.sh" enable-manus >/dev/null 2>&1; then
+  echo "Missing Manus config was silently edited" >&2; exit 1
+fi
+cmp -s "$CHAT_GATEWAY_CONFIG" "$TMP/no-manus"
+printf 'providers:\n  - name: manus\n    enabled: false\n  - name: manus\n    enabled: false\n' > "$CHAT_GATEWAY_CONFIG"
+cp "$CHAT_GATEWAY_CONFIG" "$TMP/duplicate-manus"
+if bash "$ROOT/scripts/docker-run.sh" enable-manus >/dev/null 2>&1; then
+  echo "Duplicate Manus entries were not rejected" >&2; exit 1
+fi
+cmp -s "$CHAT_GATEWAY_CONFIG" "$TMP/duplicate-manus"
+rm "$CHAT_GATEWAY_CONFIG"
+ln -s "$TMP/duplicate-manus" "$CHAT_GATEWAY_CONFIG"
+if bash "$ROOT/scripts/docker-run.sh" enable-manus >/dev/null 2>&1; then
+  echo "Symlink config was not rejected" >&2; exit 1
+fi
+rm "$CHAT_GATEWAY_CONFIG"
+
 # Keep the checked-in provider risk register truthful about the owner
 # example. This does not certify that any provider terms permit automation.
 awk '

@@ -74,6 +74,14 @@ bash scripts/docker-run.sh start
 bash scripts/docker-run.sh logs
 ```
 
+To enable Manus in an **already initialized** local `config.yaml` without
+overwriting any other provider, run `bash scripts/docker-run.sh enable-manus`
+and then explicitly `bash scripts/docker-run.sh restart`. The helper only
+accepts a single existing Manus entry in the standard YAML layout; it refuses
+missing/duplicate entries and never logs into Manus or starts the gateway on
+its own. Sign in on the official website and link the browser session through
+the extension separately, after checking your permitted usage.
+
 Load the repository's `extension/` directory from `chrome://extensions`. In its popup,
 enter `http://127.0.0.1:8080`, choose **Connect to gateway**, and approve the local
 confirmation tab once. The gateway remembers the approved extension ID, and the
