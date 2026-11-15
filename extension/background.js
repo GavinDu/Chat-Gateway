@@ -559,11 +559,33 @@ async function completePendingConnection() {
     await clearPendingApprovalIfCurrent(current);
     throw new Error("Connection approval expired. Choose Connect to gateway again.");
   }
-  const linkedProviders = latest.gateway === gateway ? (latest.linkedProviders || []) : [];
-  await chrome.storage.local.set({gateway, token:data.token, linkedProviders});
-  await chrome.storage.local.remove("pendingConnection");
+  // A successful external approval is not permission to overwrite newer
+  // provider consent or a replacement pending request. Finalize it through
+  // the SAME writer as link/logout and revalidate every approval field after
+  // awaiting that queue. The network response may be older than a popup
+  // disconnect, re-pair or a linked-provider mutation.
+  const committed = await queueConsentMutation(async () => {
+    const now = await chrome.storage.local.get(
+      ["pendingConnection", "gateway", "linkedProviders"]);
+    const active = now.pendingConnection;
+    if (active?.request_id !== pending.request_id || active?.gateway !== gateway ||
+        active?.poll_secret !== pending.poll_secret || active?.expires !== pending.expires) {
+      return false;
+    }
+    if (Date.now() >= active.expires) {
+      await clearPendingApprovalIfCurrent(active);
+      throw new Error("Connection approval expired. Choose Connect to gateway again.");
+    }
+    const linkedProviders = now.gateway === gateway ? (now.linkedProviders || []) : [];
+    await chrome.storage.local.set({
+      gateway, token:data.token, connectionMode:"paired", linkedProviders
+    });
+    await chrome.storage.local.remove("pendingConnection");
+    lastGatewayCheck = null;
+    return true;
+  });
+  if (!committed) return;
   await chrome.alarms?.clear?.("relay-connection");
-  lastGatewayCheck = null;
   resyncLinkedProviders().catch(() => {});
 }
 chrome.alarms?.onAlarm?.addListener?.(alarm => {
