@@ -2444,7 +2444,7 @@ pub async fn send_prompt(
                 );
             }
             let after = submission_snapshot(page, input_sel, &set.response_refs())?;
-            if submission_observed_for_prompt(page, &before, &after, prompt)? {
+            if submission_observed_for_adapter(provider, page, &before, &after, prompt)? {
                 tracing::debug!(
                     provider = provider,
                     stage = "submission",
@@ -2543,6 +2543,26 @@ fn submission_snapshot(
             .and_then(|x| x.as_bool())
             .unwrap_or(false),
     })
+}
+
+/// For Qwen, a response-node increase plus an emptied composer can also
+/// happen when history hydrates over a dropped draft. Require a fresh
+/// prompt-bound user turn or a newly activated generation indicator instead.
+/// This intentionally fails closed until Qwen's signed-in DOM is evidenced.
+fn submission_observed_for_adapter(
+    provider: &str,
+    page: &Page,
+    before: &SubmissionSnapshot,
+    after: &SubmissionSnapshot,
+    prompt: &str,
+) -> anyhow::Result<bool> {
+    if provider == "qwen"
+        && after.user_turn_count <= before.user_turn_count
+        && !(after.streaming && !before.streaming)
+    {
+        return Ok(false);
+    }
+    submission_observed_for_prompt(page, before, after, prompt)
 }
 
 /// A new user-turn node may come from unrelated SPA history hydration. Only
@@ -2887,7 +2907,9 @@ mod native_input_setter_tests {
 
 #[cfg(test)]
 mod prompt_bound_submission_tests {
-    use super::{submission_observed_for_prompt, submission_snapshot};
+    use super::{
+        submission_observed_for_adapter, submission_observed_for_prompt, submission_snapshot,
+    };
 
     #[tokio::test]
     async fn unrelated_hydrated_turn_cannot_acknowledge_a_cleared_draft() {
@@ -3013,21 +3035,27 @@ mod prompt_bound_submission_tests {
         let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
         page.goto(&format!("data:text/html,{encoded}")).await.unwrap();
         let before = submission_snapshot(&page, "#qwen-prompt", &[".answer"]).unwrap();
-        assert!(!submission_observed_for_prompt(&page, &before, &before, "fresh request").unwrap());
+        assert!(!submission_observed_for_adapter("qwen", &page, &before, &before, "fresh request").unwrap());
 
         // History hydration while the draft remains cannot certify that an
         // unrelated completed answer belongs to the current request.
         page.evaluate(r#"document.body.insertAdjacentHTML('beforeend', '<div class="answer">hydrated old answer</div>')"#);
         let hydrated = submission_snapshot(&page, "#qwen-prompt", &[".answer"]).unwrap();
-        assert!(!submission_observed_for_prompt(&page, &before, &hydrated, "fresh request").unwrap());
+        assert!(!submission_observed_for_adapter("qwen", &page, &before, &hydrated, "fresh request").unwrap());
+
+        // Even if the composer drops its value while historical content
+        // hydrates, Qwen has no prompt-correlated acceptance signal yet.
+        page.evaluate("document.querySelector('#qwen-prompt').value = ''");
+        let dropped = submission_snapshot(&page, "#qwen-prompt", &[".answer"]).unwrap();
+        assert!(!submission_observed_for_adapter("qwen", &page, &before, &dropped, "fresh request").unwrap());
 
         // A dropped draft and the wrong user's turn must not count as success.
         page.evaluate("document.querySelector('#qwen-prompt').value = ''");
         page.evaluate(r#"document.body.insertAdjacentHTML('beforeend', '<div data-testid="user-message">unrelated request</div>')"#);
         let unrelated = submission_snapshot(&page, "#qwen-prompt", &[".answer"]).unwrap();
-        assert!(!submission_observed_for_prompt(&page, &before, &unrelated, "fresh request").unwrap());
+        assert!(!submission_observed_for_adapter("qwen", &page, &before, &unrelated, "fresh request").unwrap());
         page.evaluate("document.body.lastElementChild.textContent = 'fresh request'");
-        assert!(submission_observed_for_prompt(&page, &before, &unrelated, "fresh request").unwrap());
+        assert!(submission_observed_for_adapter("qwen", &page, &before, &unrelated, "fresh request").unwrap());
     }
 
     #[tokio::test]
