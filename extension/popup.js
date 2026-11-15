@@ -327,12 +327,21 @@ async function connectProvider(provider, openLogin = false) {
     throw new Error("Provider permissions were not granted.");
   }
   const snapshot = await providerCookieSnapshot(provider);
-  const stored = await chrome.storage.local.get(["gateway", "token", "connectionMode", "linkedProviders"]);
+  const stored = await chrome.storage.local.get(["gateway", "token", "connectionMode", "linkedProviders", "providerLinkEpochs"]);
   if (stored.gateway !== connection.gateway || stored.token !== connection.token || stored.connectionMode !== connection.connectionMode) {
     throw new Error("Gateway connection changed while linking the provider. Reconnect and retry.");
   }
   const prior = stored.linkedProviders || [];
-  await chrome.storage.local.set({linkedProviders:Array.from(new Set([...prior,provider]))});
+  // Explicit opt-in gets a durable, unpredictable consent generation. Keep
+  // existing epochs for already-linked providers unless migrating a legacy
+  // entry. A logout/relink on the same gateway must never reuse an old epoch.
+  const epochs = stored.providerLinkEpochs || {};
+  const linkEpoch = prior.includes(provider) && typeof epochs[provider] === "string"
+    ? epochs[provider] : randomHex(16);
+  await chrome.storage.local.set({
+    linkedProviders:Array.from(new Set([...prior,provider])),
+    providerLinkEpochs:{...epochs, [provider]:linkEpoch}
+  });
   if (snapshot.cookies.length === 0) {
     await openProviderLogin(provider);
     // openProviderLogin already provides a manual clickable link when a tab
@@ -356,12 +365,15 @@ async function connectProvider(provider, openLogin = false) {
   } catch (error) {
     // A failed first connection must not opt this provider into background
     // uploads. Leave prior consent unchanged on an existing connection.
-    const latest = await chrome.storage.local.get(["gateway", "token", "connectionMode", "linkedProviders"]);
-    // A delayed old-install failure must not revoke consent granted by a
-    // newly paired gateway. Roll back only the install that initiated sync.
-    if (latest.gateway === connection.gateway && latest.token === connection.token && latest.connectionMode === connection.connectionMode) {
+    const latest = await chrome.storage.local.get(["gateway", "token", "connectionMode", "linkedProviders", "providerLinkEpochs"]);
+    // Never roll back a newer consent generation, even if it uses the same
+    // gateway identity. Invalidate this first-time link with a fresh epoch.
+    if (latest.gateway === connection.gateway && latest.token === connection.token &&
+        latest.connectionMode === connection.connectionMode &&
+        latest.providerLinkEpochs?.[provider] === linkEpoch && !prior.includes(provider)) {
       await chrome.storage.local.set({
-        linkedProviders:(latest.linkedProviders || []).filter(value => value !== provider || prior.includes(provider))
+        linkedProviders:(latest.linkedProviders || []).filter(value => value !== provider),
+        providerLinkEpochs:{...(latest.providerLinkEpochs || {}), [provider]:randomHex(16)}
       });
     }
     throw error;
