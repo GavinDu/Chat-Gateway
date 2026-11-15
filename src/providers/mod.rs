@@ -749,6 +749,45 @@ mod response_origin_guard_tests {
     }
 
     #[tokio::test]
+    async fn foreign_challenge_cannot_disable_manus_at_request_entry() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = "<html><body><div role='dialog'>Verify you are human</div></body></html>";
+        let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        assert!(crate::provider_guard::is_challenge_page(&page));
+
+        let guard = crate::provider_guard::ProviderGuard::default();
+        let cfg: crate::config::ProviderConfig = serde_yaml::from_str("name: manus").unwrap();
+        let adapter: std::sync::Arc<dyn super::SiteAdapter> =
+            std::sync::Arc::new(crate::providers::manus::ManusAdapter { cfg });
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(2);
+        super::run_send(
+            adapter,
+            &mut page,
+            "never dispatch this prompt".to_owned(),
+            std::time::Duration::from_millis(100),
+            std::time::Duration::from_millis(50),
+            super::ProviderSendPolicy {
+                completion_idle: std::time::Duration::from_millis(150),
+                provider_guard: guard.clone(),
+                metrics: crate::metrics::MetricsRegistry::default(),
+            },
+            sender,
+        )
+        .await;
+        let error = receiver.recv().await.unwrap().unwrap_err();
+        assert!(error.to_string().contains("chat origin unavailable"));
+        assert_eq!(guard.provider_disabled_reason("manus"), None);
+        assert!(receiver.try_recv().is_err(), "no assistant content may escape");
+    }
+
+    #[tokio::test]
     async fn foreign_page_with_response_nodes_cannot_complete_strict_provider() {
         let browser = obscura_core::Browser::builder()
             .stealth(false)
