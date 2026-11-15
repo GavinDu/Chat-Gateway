@@ -33,9 +33,37 @@ function loadPopup({failCookieDomain = null, includeSecondProvider = false, manu
     if(request.type==="relay-diagnostics" && diagnosticsSync) {
       return {ok:false,extension:{provider_sync:{metaai:diagnosticsSync}}};
     }
+    if(request.type==="link-provider") {
+      const expected = request.connection;
+      if (expected.gateway !== values.gateway ||
+          expected.token !== values.token ||
+          expected.connectionMode !== values.connectionMode) {
+        return {ok:false,error:"Gateway connection changed before provider link."};
+      }
+      const alreadyLinked=(values.linkedProviders || []).includes(request.provider);
+      const old=values.providerLinkEpochs || {};
+      const epoch = alreadyLinked && old[request.provider]
+        ? old[request.provider] : "test-link-" + (chromeCalls.length);
+      values.linkedProviders=Array.from(new Set([...(values.linkedProviders || []),request.provider]));
+      values.providerLinkEpochs={...old,[request.provider]:epoch};
+      return {ok:true,alreadyLinked};
+    }
+    if(request.type==="rollback-provider-link") {
+      const current=(values.providerLinkEpochs || {})[request.provider];
+      const expected=request.connection;
+      if (expected.gateway === values.gateway && expected.token === values.token &&
+          expected.connectionMode === values.connectionMode && current === request.epoch) {
+        values.linkedProviders=(values.linkedProviders || []).filter(p=>p!==request.provider);
+        values.providerLinkEpochs={...(values.providerLinkEpochs || {}),
+          [request.provider]:"test-revoked-"+chromeCalls.length};
+      }
+      return {ok:true};
+    }
     if(request.type==="logout-provider") {
       server.linked=false;
       values.linkedProviders=values.linkedProviders.filter(p=>p!==request.provider);
+      values.providerLinkEpochs={...(values.providerLinkEpochs || {}),
+        [request.provider]:"test-logout-"+chromeCalls.length};
     }
     if(request.type==="sync-provider") server.linked=true;
     return {ok:true};
