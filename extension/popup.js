@@ -283,6 +283,10 @@ $("pair").addEventListener("click", async () => {
         }
       }
     }
+    // Capture connection identity before the asynchronous pairing HTTP call.
+    // A second popup/unpair can supersede this request while it is in flight.
+    const expectedConnection = await chrome.storage.local.get(
+      ["gateway", "token", "connectionMode"]);
     const response = await fetch(gateway + (remote ? "/relay/v1/pair" : "/relay/v1/connect/request"), {
       method:"POST", headers:{"Content-Type":"application/json"},
       body:JSON.stringify(remote ? {code} : {}), cache:"no-store", redirect:"error"
@@ -293,8 +297,13 @@ $("pair").addEventListener("click", async () => {
     const data = await response.json();
     if (remote) {
       if (!/^[a-f0-9]{64}$/.test(data.token)) throw new Error("Invalid connection response.");
-      await chrome.storage.local.set({gateway,token:data.token,linkedProviders:[]});
-      await chrome.storage.local.remove("pendingConnection");
+      // The worker owns the same FIFO as provider consent and approval.
+      // A late response cannot overwrite a newer connection or restored link.
+      const committed = await chrome.runtime.sendMessage({
+        type:"connect-paired-relay",gateway,token:data.token,connection:expectedConnection
+      });
+      if (!committed?.ok) throw new Error(committed?.error ||
+        "Remote connection changed during pairing. Retry.");
       await chrome.alarms?.clear?.("relay-connection");
       $("code").value = "";
       await updateConnection();
@@ -412,7 +421,7 @@ $("refresh").addEventListener("click", async () => {
 
 $("unpair").addEventListener("click", async () => {
   try {
-    const connection = await chrome.storage.local.get(["gateway", "connectionMode"]);
+    const connection = await chrome.storage.local.get(["gateway", "token", "connectionMode"]);
     if (connection.connectionMode === "local" && isLocalGateway(connection.gateway)) {
       const result = await chrome.runtime.sendMessage({
         type:"disconnect-local-relay",
@@ -424,11 +433,15 @@ $("unpair").addEventListener("click", async () => {
       message("Local extension disconnected; provider sessions remain in the encrypted gateway vault.");
       return;
     }
-    const response = await relayFetch("/relay/v1/unpair",{method:"POST",body:"{}"});
+    const response = await relayFetch("/relay/v1/unpair",{method:"POST",body:"{}"},connection);
     if (!response.ok) throw new Error("Could not revoke the install token.");
-    // A stale approval should not be able to silently reconnect a gateway
-    // after the user explicitly revoked this install.
-    await chrome.storage.local.remove(["token","linkedProviders","pendingConnection","relaySnapshotVersions"]);
+    // The worker fences the remote disconnect against the exact token and
+    // connection identity so a newer pair or link cannot be undone.
+    const disconnected = await chrome.runtime.sendMessage({
+      type:"disconnect-paired-relay",connection
+    });
+    if (!disconnected?.ok) throw new Error(disconnected?.error ||
+      "Remote connection changed before disconnect.");
     await chrome.alarms?.clear?.("relay-connection");
     showGatewayConnection(false);
     message("Gateway disconnected. Saved provider sessions remain in the gateway vault. Reconnect to manage them.");
