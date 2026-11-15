@@ -43,17 +43,23 @@ impl ValidatedChatgptWssTarget {
         }
         let uri: Uri = value.parse().map_err(|_| InvalidChatgptWssTarget)?;
         let authority = uri.authority().ok_or(InvalidChatgptWssTarget)?;
-        if uri.scheme_str() != Some("wss")
-            || authority.as_str().contains('@')
-            || authority.port_u16().is_some_and(|port| port != 443)
-        {
+        if uri.scheme_str() != Some("wss") || authority.as_str().contains('@') {
             return Err(InvalidChatgptWssTarget);
         }
         let host = uri
             .host()
             .ok_or(InvalidChatgptWssTarget)?
             .to_ascii_lowercase();
-        if !valid_chatgpt_host(&host) {
+        // Authority::port_u16() returns None for out-of-range port values,
+        // making a naive optional-port check silently accept :65536.
+        // Compare the entire authority instead: only no port or literal
+        // default :443 is valid, regardless of parser port conversion.
+        if !valid_chatgpt_host(&host)
+            || !(authority.as_str().eq_ignore_ascii_case(&host)
+                || authority
+                    .as_str()
+                    .eq_ignore_ascii_case(&format!("{host}:443")))
+        {
             return Err(InvalidChatgptWssTarget);
         }
         Ok(Self { uri, host })
@@ -172,6 +178,8 @@ mod tests {
             "wss://[::1]/ws",
             "wss://chatgpt.com/path#fragment",
             "wss://chatgpt.com:65536/",
+            "wss://chatgpt.com:0443/",
+            "wss://chatgpt.com:443junk/",
             "wss://example.invalid/",
             "wss:///missing-host",
         ] {
