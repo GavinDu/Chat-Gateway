@@ -555,7 +555,9 @@ mod tests {
             .unwrap();
 
         assert!(
-            page.evaluate(NON_MESSAGE_CHALLENGE_TEXT_JS).as_str().is_some(),
+            page.evaluate(NON_MESSAGE_CHALLENGE_TEXT_JS)
+                .as_str()
+                .is_some(),
             "the static body scanner must evaluate successfully in pinned Obscura"
         );
         assert!(
