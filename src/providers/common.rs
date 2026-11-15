@@ -1905,7 +1905,6 @@ pub(crate) fn submission_provider_for_url(url: &str) -> Option<&'static str> {
     }
 }
 
-
 /** Declare a closed set of browser origins for all provider adapters.
  * A matching generic text box on an unrelated page is never authorization
  * to type. ChatGPT/Grok retain their separate strict submission contract.
@@ -1922,7 +1921,12 @@ fn provider_origin_for_url(url: &str) -> Option<&'static str> {
     {
         return None;
     }
-    match uri.host()?.trim_end_matches('.').to_ascii_lowercase().as_str() {
+    match uri
+        .host()?
+        .trim_end_matches('.')
+        .to_ascii_lowercase()
+        .as_str()
+    {
         "claude.ai" | "www.claude.ai" => Some("claude"),
         "gemini.google.com" => Some("gemini"),
         "chat.qwen.ai" => Some("qwen"),
@@ -2026,7 +2030,10 @@ mod all_provider_origin_fence_tests {
         for (provider, url) in [
             ("qwen", "https://chatgpt.com/c/abc"),
             ("claude", "https://manus.im/app"),
-            ("perplexity", "https://www.perplexity.ai.attacker.invalid/search"),
+            (
+                "perplexity",
+                "https://www.perplexity.ai.attacker.invalid/search",
+            ),
             ("metaai", "https://attacker.invalid/?next=www.meta.ai"),
             ("gemini", "https://gemini.google.com@attacker.invalid/app"),
             ("manus", "http://manus.im/app"),
@@ -2040,21 +2047,38 @@ mod all_provider_origin_fence_tests {
         }
     }
 
-
     #[tokio::test]
     async fn redirected_composer_cannot_receive_prompt_or_send() {
-        let browser = obscura_core::Browser::builder().stealth(false).build().unwrap();
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
         let mut page = browser.new_page().await.unwrap();
         page.goto("data:text/html,<html><body><form><textarea id='prompt'></textarea><button id='send' type='button' onclick='window.sent=true'>Send</button></form></body></html>").await.unwrap();
-        let error = super::human_type_with_provider(&page, &["#prompt"], "private draft", Some("qwen")).await.unwrap_err();
+        let error =
+            super::human_type_with_provider(&page, &["#prompt"], "private draft", Some("qwen"))
+                .await
+                .unwrap_err();
         assert!(error.to_string().contains("chat origin"));
         assert!(!error.to_string().contains("private draft"));
-        assert_eq!(page.evaluate("document.querySelector('#prompt').value").as_str(), Some(""));
+        assert_eq!(
+            page.evaluate("document.querySelector('#prompt').value")
+                .as_str(),
+            Some("")
+        );
 
         page.evaluate("document.querySelector('#prompt').value = 'private draft'");
         let rejected = super::click_send_or_enter_checked_with_policy(
-            &mut page, &["#send"], "#prompt", 100, Some("private draft"), true, Some("qwen")
-        ).await.unwrap_err();
+            &mut page,
+            &["#send"],
+            "#prompt",
+            100,
+            Some("private draft"),
+            true,
+            Some("qwen"),
+        )
+        .await
+        .unwrap_err();
         assert!(rejected.to_string().contains("chat origin"));
         assert_eq!(page.evaluate("window.sent === true").as_bool(), Some(false));
 
@@ -2064,7 +2088,10 @@ mod all_provider_origin_fence_tests {
 
     #[tokio::test]
     async fn inline_page_guard_matches_rust_policy_for_each_provider() {
-        let browser = obscura_core::Browser::builder().stealth(false).build().unwrap();
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
         let page = browser.new_page().await.unwrap();
         for (provider, url, allowed) in [
             ("qwen", "https://chat.qwen.ai/chat", true),
@@ -2086,7 +2113,10 @@ mod all_provider_origin_fence_tests {
             let result = page.evaluate(&format!(
                 "(() => {{ const location = {{href: {url}}}; {guard} return 'allowed'; }})()"
             ));
-            assert_eq!(result.as_str(), Some(if allowed { "allowed" } else { "off-provider" }));
+            assert_eq!(
+                result.as_str(),
+                Some(if allowed { "allowed" } else { "off-provider" })
+            );
         }
     }
 }
@@ -2365,8 +2395,15 @@ pub async fn send_prompt(
         })?;
     } else {
         click_send_or_enter_checked_with_policy(
-            page, &sends, input_sel, 5_000, Some(prompt), true, send_guard_provider,
-        ).await?;
+            page,
+            &sends,
+            input_sel,
+            5_000,
+            Some(prompt),
+            true,
+            send_guard_provider,
+        )
+        .await?;
     }
     if let Some(before) = baseline {
         let start = std::time::Instant::now();
@@ -2594,7 +2631,9 @@ mod pre_send_retention_tests {
             ..Default::default()
         };
         let selectors = crate::providers::chatgpt::SELECTORS.effective(&overrides);
-        page.evaluate("document.documentElement.setAttribute('data-chat-gateway-test-fixture', '')");
+        page.evaluate(
+            "document.documentElement.setAttribute('data-chat-gateway-test-fixture', '')",
+        );
         let result = super::send_prompt("chatgpt", &mut page, &selectors, "user draft").await;
         assert!(result.is_err(), "a cleared draft must not be submitted");
         assert_eq!(page.evaluate("window.sent || 0").as_f64(), Some(0.0));
