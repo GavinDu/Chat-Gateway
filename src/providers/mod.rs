@@ -605,7 +605,9 @@ mod send_auth_redirect_tests {
         ));
         let error = super::probe_login_redirect_error(&final_probe)
             .expect("a final first-party auth route must override stable stale text");
-        assert!(error.downcast_ref::<ProviderSessionExpiredError>().is_some());
+        assert!(error
+            .downcast_ref::<ProviderSessionExpiredError>()
+            .is_some());
         assert!(
             super::probe_login_redirect_error(&initial).is_none(),
             "normal final conversation sample must not be an auth redirect"
