@@ -266,6 +266,64 @@ function disconnectLocalRelay(expected) {
     return true;
   });
 }
+// Legacy remote HTTPS mode is opt-in and distinct from local no-pairing.
+// Only the popup that fetched a fresh gateway-issued token may ask the worker
+// to commit it. A content script/remote website cannot install a relay token.
+function fromTrustedPopup(sender) {
+  try { return sender?.url === chrome.runtime.getURL("popup.html") && !sender.tab; }
+  catch { return false; }
+}
+function connectPairedRelay(gateway, token, expected) {
+  return queueConsentMutation(async () => {
+    // Reject credentials, redirects, query/path tricks and unapproved origins.
+    if (typeof gateway !== "string" || normalizeGateway(gateway) !== gateway ||
+        !gateway.startsWith("https://") || isLocalGateway(gateway) ||
+        typeof token !== "string" || !/^[a-f0-9]{64}$/.test(token)) {
+      throw new Error("Invalid paired relay origin or response.");
+    }
+    if (!await chrome.permissions.contains({origins:[gateway + "/*"]})) {
+      throw new Error("Remote relay permission is missing.");
+    }
+    const current = await chrome.storage.local.get(["gateway", "token", "connectionMode"]);
+    if (!sameRelayIdentity(expected, current)) {
+      throw new Error("Remote relay connection changed while pairing.");
+    }
+    // Even a same-host re-pair is a new install identity: consent never carries
+    // over to a different bearer token, and old in-flight sync epochs die.
+    await chrome.storage.local.set({
+      gateway, token, connectionMode:"paired", linkedProviders:[],
+      providerLinkEpochs:{}, providerLinkPendingAttempts:{},
+      pendingConnection:null, relaySnapshotVersions:{}, localDisconnected:false
+    });
+    await chrome.storage.local.remove(["pendingConnection","relaySnapshotVersions"]);
+    lastGatewayCheck = null;
+    return true;
+  });
+}
+function disconnectPairedRelay(expected) {
+  return queueConsentMutation(async () => {
+    const current = await chrome.storage.local.get(
+      ["gateway", "token", "connectionMode"]);
+    // Treat the older extension's token-without-mode state as a paired
+    // connection, but never touch loopback/no-pairing credentials.
+    if (!current.token || isLocalGateway(current.gateway) ||
+        current.connectionMode === "local" ||
+        !sameRelayIdentity(expected, current)) {
+      throw new Error("Remote relay connection changed before disconnect.");
+    }
+    await chrome.storage.local.set({
+      token:null, connectionMode:null, linkedProviders:[],
+      providerLinkEpochs:{}, providerLinkPendingAttempts:{},
+      pendingConnection:null, relaySnapshotVersions:{}
+    });
+    await chrome.storage.local.remove([
+      "token","connectionMode","linkedProviders","providerLinkEpochs",
+      "providerLinkPendingAttempts","pendingConnection","relaySnapshotVersions"
+    ]);
+    lastGatewayCheck = null;
+    return true;
+  });
+}
 // Keep one trailing refresh per provider. It reads the latest cookie snapshot
 // when it starts, rather than replaying every rotation behind a slow import.
 const queuedProviderSyncs = new Map();
@@ -405,7 +463,7 @@ chrome.cookies.onChanged.addListener(({cookie}) => {
   }
 });
 
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === "relay-diagnostics") {
     relayDiagnostics(message.force === true).then(sendResponse).catch(() => sendResponse({ok:false, gateway_issue:"diagnostics_unavailable"}));
     return true;
@@ -424,6 +482,26 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     disconnectLocalRelay(message.connection)
       .then(() => sendResponse({ok:true}))
       .catch(() => sendResponse({ok:false, error:"Local gateway connection changed before disconnect."}));
+    return true;
+  }
+  if (message?.type === "connect-paired-relay") {
+    if (!fromTrustedPopup(sender)) {
+      sendResponse({ok:false,error:"Remote pairing requires the extension popup."});
+      return false;
+    }
+    connectPairedRelay(message.gateway, message.token, message.connection)
+      .then(() => sendResponse({ok:true}))
+      .catch(() => sendResponse({ok:false,error:"Remote pairing changed or was rejected."}));
+    return true;
+  }
+  if (message?.type === "disconnect-paired-relay") {
+    if (!fromTrustedPopup(sender)) {
+      sendResponse({ok:false,error:"Remote disconnect requires the extension popup."});
+      return false;
+    }
+    disconnectPairedRelay(message.connection)
+      .then(() => sendResponse({ok:true}))
+      .catch(() => sendResponse({ok:false,error:"Remote relay changed before disconnect."}));
     return true;
   }
   if (message?.type === "link-provider" && Object.hasOwn(PROVIDERS, message.provider)) {
