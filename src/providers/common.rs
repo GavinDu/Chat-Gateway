@@ -1974,9 +1974,10 @@ fn provider_origin_guard_js(expected_provider: Option<&str>) -> anyhow::Result<S
     Ok(format!(
         r#"const expectedProvider = {provider};
            if (expectedProvider !== null) {{
-               let currentUrl;
-               try {{ currentUrl = new URL(location.href); }}
-               catch (_) {{ return 'off-provider'; }}
+               // The pinned embedded browser exposes Location fields but
+               // does not implement the WHATWG URL constructor.
+               const currentUrl = location;
+               if (!currentUrl || !currentUrl.hostname) return 'off-provider';
                const host = currentUrl.hostname.toLowerCase().replace(/\.$/, '');
                const path = currentUrl.pathname;
                let actualProvider = null;
@@ -2093,25 +2094,30 @@ mod all_provider_origin_fence_tests {
             .build()
             .unwrap();
         let page = browser.new_page().await.unwrap();
-        for (provider, url, allowed) in [
-            ("qwen", "https://chat.qwen.ai/chat", true),
-            ("qwen", "https://manus.im/app", false),
-            ("manus", "https://manus.im/app", true),
-            ("manus", "https://manus.im.attacker.invalid/app", false),
-            ("perplexity", "https://www.perplexity.ai/search", true),
-            ("perplexity", "https://claude.ai/chat", false),
-            ("grok", "https://x.com/i/grok/chat", true),
-            ("grok", "https://x.com/home", false),
-            ("chatgpt", "http://chatgpt.com/", false),
-            ("claude", "https://claude.ai:8443/chat", false),
-            ("gemini", "https://gemini.google.com/app", true),
-            ("metaai", "https://meta.ai/chat", true),
-            ("mistral", "https://chat.mistral.ai/chat", true),
+        for (provider, protocol, hostname, pathname, port, allowed) in [
+            ("qwen", "https:", "chat.qwen.ai", "/chat", "", true),
+            ("qwen", "https:", "manus.im", "/app", "", false),
+            ("manus", "https:", "manus.im", "/app", "", true),
+            ("manus", "https:", "manus.im.attacker.invalid", "/app", "", false),
+            ("perplexity", "https:", "www.perplexity.ai", "/search", "", true),
+            ("perplexity", "https:", "claude.ai", "/chat", "", false),
+            ("grok", "https:", "x.com", "/i/grok/chat", "", true),
+            ("grok", "https:", "x.com", "/home", "", false),
+            ("chatgpt", "http:", "chatgpt.com", "/", "", false),
+            ("claude", "https:", "claude.ai", "/chat", "8443", false),
+            ("gemini", "https:", "gemini.google.com", "/app", "", true),
+            ("metaai", "https:", "meta.ai", "/chat", "", true),
+            ("mistral", "https:", "chat.mistral.ai", "/chat", "", true),
         ] {
             let guard = provider_origin_guard_js(Some(provider)).unwrap();
-            let url = serde_json::to_string(url).unwrap();
+            // Obscura's in-memory JS bridge has no global URL constructor.
+            // Supply the standard Location fields consumed in production.
+            let protocol = serde_json::to_string(protocol).unwrap();
+            let hostname = serde_json::to_string(hostname).unwrap();
+            let pathname = serde_json::to_string(pathname).unwrap();
+            let port = serde_json::to_string(port).unwrap();
             let result = page.evaluate(&format!(
-                "(() => {{ const location = {{href: {url}}}; {guard} return 'allowed'; }})()"
+                "(() => {{ const location = {{protocol:{protocol},hostname:{hostname},pathname:{pathname},port:{port},username:'',password:''}}; {guard} return 'allowed'; }})()"
             ));
             assert_eq!(
                 result.as_str(),
