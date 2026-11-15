@@ -5,6 +5,8 @@
 //! on sanitized signed-in task traces (#1041); this module does not issue
 //! requests, persist credentials, or infer the current authenticated session.
 
+use std::sync::Arc;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentPhase {
     Queued,
@@ -32,9 +34,23 @@ pub enum Transition {
     Invalid,
 }
 
+/// An unforgeable in-process owner generation held by each async event.
+#[derive(Clone)]
+pub struct AgentRequestIdentity {
+    owner: Arc<()>,
+    epoch: u64,
+}
+
+impl std::fmt::Debug for AgentRequestIdentity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AgentRequestIdentity(<redacted>)")
+    }
+}
+
 /// The opaque task ID is retained only for comparison; Debug never prints it.
 /// Epochs are supplied by the owning worker, not derived from provider markup.
 pub struct AgentTaskLifecycle {
+    owner: Arc<()>,
     epoch: u64,
     task_id: Option<String>,
     phase: AgentPhase,
@@ -53,6 +69,7 @@ impl std::fmt::Debug for AgentTaskLifecycle {
 impl AgentTaskLifecycle {
     pub fn queued(epoch: u64) -> Self {
         Self {
+            owner: Arc::new(()),
             epoch,
             task_id: None,
             phase: AgentPhase::Queued,
@@ -65,6 +82,15 @@ impl AgentTaskLifecycle {
 
     pub fn phase(&self) -> AgentPhase {
         self.phase
+    }
+
+    /// Capture this identity when scheduling an event. A later registry
+    /// instance cannot accept the old callback even if epoch/task ID repeat.
+    pub fn request_identity(&self) -> AgentRequestIdentity {
+        AgentRequestIdentity {
+            owner: Arc::clone(&self.owner),
+            epoch: self.epoch,
+        }
     }
 
     /// A new owner generation may begin a fresh task. Never reactivate a
@@ -93,8 +119,8 @@ impl AgentTaskLifecycle {
 
     /// Local cancellation releases authority to complete this attempt.
     /// Later success events with the same task ID and epoch are stale.
-    pub fn cancel_local(&mut self, epoch: u64) -> Transition {
-        if epoch != self.epoch {
+    pub fn cancel_local(&mut self, request: &AgentRequestIdentity) -> Transition {
+        if request.epoch != self.epoch || !Arc::ptr_eq(&request.owner, &self.owner) {
             return Transition::Stale;
         }
         match self.phase {
@@ -110,8 +136,13 @@ impl AgentTaskLifecycle {
     /// A terminal response cannot arrive out of thin air: we require a
     /// previously accepted and running task. This errs on the safe side
     /// when a provider omits a running event, pending first-party evidence.
-    pub fn apply(&mut self, epoch: u64, task_id: &str, event: AgentEvent) -> Transition {
-        if epoch != self.epoch {
+    pub fn apply(
+        &mut self,
+        request: &AgentRequestIdentity,
+        task_id: &str,
+        event: AgentEvent,
+    ) -> Transition {
+        if request.epoch != self.epoch || !Arc::ptr_eq(&request.owner, &self.owner) {
             return Transition::Stale;
         }
         // Never retain an unbounded page-provided identifier in worker memory.
@@ -163,77 +194,150 @@ impl AgentTaskLifecycle {
 mod tests {
     use super::{AgentEvent as Event, AgentPhase as Phase, AgentTaskLifecycle, Transition as T};
 
+    // Test-only fixtures may synthesize a stale numeric generation. The public
+    // production API accepts only captured opaque ownership capabilities.
+    fn apply_at(state: &mut AgentTaskLifecycle, epoch: u64, task: &str, event: Event) -> T {
+        let mut request = state.request_identity();
+        request.epoch = epoch;
+        state.apply(&request, task, event)
+    }
+
+    fn cancel_at(state: &mut AgentTaskLifecycle, epoch: u64) -> T {
+        let mut request = state.request_identity();
+        request.epoch = epoch;
+        state.cancel_local(&request)
+    }
+
     #[test]
     fn accepted_running_terminal_requires_exact_task_and_epoch() {
         let mut state = AgentTaskLifecycle::queued(7);
-        assert_eq!(state.apply(7, "id-a", Event::Terminal), T::Invalid);
-        assert_eq!(state.apply(7, "", Event::Accepted), T::Invalid);
+        assert_eq!(apply_at(&mut state, 7, "id-a", Event::Terminal), T::Invalid);
+        assert_eq!(apply_at(&mut state, 7, "", Event::Accepted), T::Invalid);
         assert_eq!(
-            state.apply(7, &"x".repeat(1025), Event::Accepted),
+            apply_at(&mut state, 7, &"x".repeat(1025), Event::Accepted),
             T::Invalid
         );
-        assert_eq!(state.apply(6, "id-a", Event::Accepted), T::Stale);
-        assert_eq!(state.apply(7, "id-a", Event::Accepted), T::Applied);
+        assert_eq!(apply_at(&mut state, 6, "id-a", Event::Accepted), T::Stale);
+        assert_eq!(apply_at(&mut state, 7, "id-a", Event::Accepted), T::Applied);
         assert_eq!(state.phase(), Phase::Accepted);
-        assert_eq!(state.apply(7, "id-b", Event::Running), T::Stale);
-        assert_eq!(state.apply(7, "id-a", Event::Accepted), T::Invalid);
-        assert_eq!(state.apply(7, "id-a", Event::Terminal), T::Invalid);
-        assert_eq!(state.apply(7, "id-a", Event::Running), T::Applied);
-        assert_eq!(state.apply(7, "id-a", Event::Running), T::Invalid);
-        assert_eq!(state.apply(7, "id-a", Event::Terminal), T::Applied);
+        assert_eq!(apply_at(&mut state, 7, "id-b", Event::Running), T::Stale);
+        assert_eq!(apply_at(&mut state, 7, "id-a", Event::Accepted), T::Invalid);
+        assert_eq!(apply_at(&mut state, 7, "id-a", Event::Terminal), T::Invalid);
+        assert_eq!(apply_at(&mut state, 7, "id-a", Event::Running), T::Applied);
+        assert_eq!(apply_at(&mut state, 7, "id-a", Event::Running), T::Invalid);
+        assert_eq!(apply_at(&mut state, 7, "id-a", Event::Terminal), T::Applied);
         assert_eq!(state.phase(), Phase::Terminal);
-        assert_eq!(state.apply(7, "id-a", Event::Terminal), T::Stale);
-        assert_eq!(state.cancel_local(7), T::Stale);
+        assert_eq!(apply_at(&mut state, 7, "id-a", Event::Terminal), T::Stale);
+        assert_eq!(cancel_at(&mut state, 7), T::Stale);
         assert!(!format!("{state:?}").contains("id-a"));
     }
 
     #[test]
     fn failing_or_cancelling_task_can_never_later_complete() {
         let mut state = AgentTaskLifecycle::queued(1);
-        assert_eq!(state.apply(1, "task-1", Event::Accepted), T::Applied);
-        assert_eq!(state.apply(1, "task-1", Event::Failed), T::Applied);
-        assert_eq!(state.apply(1, "task-1", Event::Running), T::Stale);
+        assert_eq!(
+            apply_at(&mut state, 1, "task-1", Event::Accepted),
+            T::Applied
+        );
+        assert_eq!(apply_at(&mut state, 1, "task-1", Event::Failed), T::Applied);
+        assert_eq!(apply_at(&mut state, 1, "task-1", Event::Running), T::Stale);
         assert_eq!(state.begin_new(2), T::Applied);
-        assert_eq!(state.apply(2, "task-2", Event::Accepted), T::Applied);
-        assert_eq!(state.apply(2, "task-2", Event::Running), T::Applied);
-        assert_eq!(state.cancel_local(2), T::Applied);
+        assert_eq!(
+            apply_at(&mut state, 2, "task-2", Event::Accepted),
+            T::Applied
+        );
+        assert_eq!(
+            apply_at(&mut state, 2, "task-2", Event::Running),
+            T::Applied
+        );
+        assert_eq!(cancel_at(&mut state, 2), T::Applied);
         assert_eq!(state.phase(), Phase::Cancelled);
-        assert_eq!(state.apply(2, "task-2", Event::Terminal), T::Stale);
-        assert_eq!(state.apply(1, "task-1", Event::Terminal), T::Stale);
+        assert_eq!(apply_at(&mut state, 2, "task-2", Event::Terminal), T::Stale);
+        assert_eq!(apply_at(&mut state, 1, "task-1", Event::Terminal), T::Stale);
         assert_eq!(state.begin_new(2), T::Stale);
         assert_eq!(state.begin_new(3), T::Applied);
-        assert_eq!(state.apply(3, "task-3", Event::Accepted), T::Applied);
-        assert_eq!(state.apply(3, "task-2", Event::Running), T::Stale);
-        assert_eq!(state.apply(3, "task-3", Event::Cancelled), T::Applied);
+        assert_eq!(
+            apply_at(&mut state, 3, "task-3", Event::Accepted),
+            T::Applied
+        );
+        assert_eq!(apply_at(&mut state, 3, "task-2", Event::Running), T::Stale);
+        assert_eq!(
+            apply_at(&mut state, 3, "task-3", Event::Cancelled),
+            T::Applied
+        );
+    }
+
+    #[test]
+    fn old_owner_events_cannot_replay_across_new_registry_with_same_epoch_task_id() {
+        let mut old = AgentTaskLifecycle::queued(1);
+        let old_request = old.request_identity();
+        assert_eq!(
+            old.apply(&old_request, "same-id", Event::Accepted),
+            T::Applied
+        );
+
+        let mut fresh = AgentTaskLifecycle::queued(1);
+        let current = fresh.request_identity();
+        assert_eq!(
+            fresh.apply(&old_request, "same-id", Event::Accepted),
+            T::Stale
+        );
+        assert_eq!(fresh.cancel_local(&old_request), T::Stale);
+        assert_eq!(fresh.phase(), Phase::Queued);
+        assert_eq!(
+            fresh.apply(&current, "same-id", Event::Accepted),
+            T::Applied
+        );
+        assert_eq!(
+            fresh.apply(&old_request, "same-id", Event::Running),
+            T::Stale
+        );
+        assert_eq!(fresh.apply(&current, "same-id", Event::Running), T::Applied);
+        assert_eq!(
+            fresh.apply(&old_request, "same-id", Event::Terminal),
+            T::Stale
+        );
+        assert_eq!(
+            fresh.apply(&current, "same-id", Event::Terminal),
+            T::Applied
+        );
+        assert_eq!(fresh.phase(), Phase::Terminal);
+        assert!(!format!("{old_request:?}").contains("same-id"));
     }
 
     #[test]
     fn restart_requires_verification_not_assumed_completion() {
         let mut state = AgentTaskLifecycle::queued(21);
         assert_eq!(
-            state.apply(21, "opaque-test-id", Event::Accepted),
+            apply_at(&mut state, 21, "opaque-test-id", Event::Accepted),
             T::Applied
         );
         assert_eq!(
-            state.apply(21, "opaque-test-id", Event::Running),
+            apply_at(&mut state, 21, "opaque-test-id", Event::Running),
             T::Applied
         );
         assert_eq!(state.restart(21), T::Stale);
         assert_eq!(state.restart(22), T::Applied);
         assert_eq!(state.epoch(), 22);
         assert_eq!(state.phase(), Phase::VerificationRequired);
-        assert_eq!(state.apply(21, "opaque-test-id", Event::Terminal), T::Stale);
         assert_eq!(
-            state.apply(22, "opaque-test-id", Event::Terminal),
+            apply_at(&mut state, 21, "opaque-test-id", Event::Terminal),
+            T::Stale
+        );
+        assert_eq!(
+            apply_at(&mut state, 22, "opaque-test-id", Event::Terminal),
             T::Invalid
         );
         assert_eq!(
-            state.apply(22, "opaque-test-id", Event::Accepted),
+            apply_at(&mut state, 22, "opaque-test-id", Event::Accepted),
             T::Invalid
         );
         assert_eq!(state.begin_new(23), T::Applied);
         assert_eq!(state.phase(), Phase::Queued);
-        assert_eq!(state.apply(23, "new-id", Event::Accepted), T::Applied);
+        assert_eq!(
+            apply_at(&mut state, 23, "new-id", Event::Accepted),
+            T::Applied
+        );
         assert!(!format!("{state:?}").contains("new-id"));
     }
 }
