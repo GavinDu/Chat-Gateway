@@ -75,7 +75,7 @@ test("old response cannot install after local connect-disconnect to same URL (AB
   const generation=await f.api.reservePendingApproval(gateway);
   await f.api.connectLocalRelay(gateway,true);
   const connectedEpoch=f.state.relayConnectionEpoch;
-  await f.api.disconnectLocalRelay({gateway,token:null,connectionMode:"local"});
+  await f.api.disconnectLocalRelay({gateway,token:f.state.token,connectionMode:"local"});
   assert.notEqual(f.state.relayConnectionEpoch,connectedEpoch);
   await assert.rejects(f.api.installPendingApproval(gateway,generation,requestId,pollSecret),/changed/);
   assert.equal(f.state.pendingConnection,undefined);
