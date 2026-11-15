@@ -266,8 +266,8 @@ pub(crate) const NON_MESSAGE_CHALLENGE_TEXT_JS: &str = r#"(() => {
     // A chat draft or prior assistant reply quoting CAPTCHA wording is not a
     // security overlay. Use explicit message-role roots already recognized
     // by the provider adapters; do not exclude generic dialogs or page text.
-    const messages = "[data-message-author-role], [data-message-role], [data-role='assistant'], [data-role='user'], [data-testid='assistant-message'], [data-testid='user-message'], [data-testid*='assistant-response' i], [data-testid*='conversation-turn']";
-    const editors = "[contenteditable], [role='textbox'], textarea, input";
+    const messages = "[data-message-author-role], [data-message-role='assistant'], [data-message-role='user'], [data-role='assistant'], [data-role='user'], [data-testid='assistant-message'], [data-testid='user-message'], [data-testid*='assistant-response' i], [data-testid*='conversation-turn']";
+    const editors = "[contenteditable='true' i], [contenteditable='plaintext-only' i], [contenteditable=''], [role='textbox'], textarea, input";
     const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
     let text = '';
     let visited = 0;
@@ -581,7 +581,9 @@ mod tests {
             .challenge
         );
 
-        page.evaluate("document.querySelector('#manual-dialog').hidden = false");
+        page.evaluate(
+            "document.querySelector('#manual-dialog').setAttribute('data-message-role', 'system'); document.querySelector('#manual-dialog').setAttribute('contenteditable', 'false'); document.querySelector('#manual-dialog').hidden = false",
+        );
         assert!(
             is_challenge_page(&page),
             "visible verification dialog outside the draft/message still requires manual handling"
