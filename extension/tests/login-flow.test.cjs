@@ -36,6 +36,24 @@ function fixture({connected = false, linked = false, cookies = true, authenticat
     alarms:{create:async()=>{},clear:async()=>{}},
     runtime:{sendMessage:async message=>{
       messages.push(message);
+      if (message.type === "reserve-pending-approval") {
+        if (values.pendingApprovalRequest || values.pendingConnection) return {ok:false};
+        values.pendingApprovalRequest={gateway:message.gateway,generation:"f".repeat(32)};
+        return {ok:true,generation:"f".repeat(32)};
+      }
+      if (message.type === "install-pending-approval") {
+        if (message.generation !== values.pendingApprovalRequest?.generation) return {ok:false};
+        values.pendingConnection={gateway:message.gateway,request_id:message.request_id,
+          poll_secret:message.poll_secret,expires:Date.now()+300000,
+          approvalGeneration:message.generation};
+        values.pendingApprovalRequest=null;
+        return {ok:true,pending:{gateway:message.gateway,request_id:message.request_id,
+          expires:values.pendingConnection.expires}};
+      }
+      if (message.type === "release-pending-approval") {
+        if (values.pendingApprovalRequest?.generation===message.generation) values.pendingApprovalRequest=null;
+        return {ok:true,released:true};
+      }
       if (message.type === "link-provider") {
         const expected=message.connection;
         if (expected.gateway !== values.gateway || expected.token !== values.token ||
