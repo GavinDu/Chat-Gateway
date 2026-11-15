@@ -14,6 +14,31 @@ struct ProviderBudget {
     disabled_reason: Option<&'static str>,
 }
 
+/// A quota reservation is not an admitted request until its paced wait ends.
+/// Dropping a canceled async future releases only its matching UTC-day slot.
+/// The conservative next_start timestamp is retained to preserve spacing.
+struct PendingRequestReservation {
+    budgets: Arc<Mutex<HashMap<String, ProviderBudget>>>,
+    provider: String,
+    utc_day: u64,
+    committed: bool,
+}
+
+impl Drop for PendingRequestReservation {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        if let Ok(mut budgets) = self.budgets.lock() {
+            if let Some(budget) = budgets.get_mut(&self.provider) {
+                if budget.utc_day == self.utc_day {
+                    budget.daily_requests = budget.daily_requests.saturating_sub(1);
+                }
+            }
+        }
+    }
+}
+
 /// Provider-scoped runtime guard. Clones share state within one gateway
 /// instance; separate gateway instances no longer share process-global budgets.
 #[derive(Clone, Debug, Default)]
@@ -69,7 +94,44 @@ impl ProviderGuard {
                 % 251;
             (wait, jitter_ms)
         };
+        // Scope the permit across await: an abort/timeout must not silently
+        // spend a provider's daily request quota without admitting work.
+        let mut pending = PendingRequestReservation {
+            budgets: Arc::clone(&self.budgets),
+            provider: provider.to_owned(),
+            utc_day,
+            committed: false,
+        };
         tokio::time::sleep(wait + Duration::from_millis(jitter_ms.into())).await;
+        {
+            // A challenge detected while queued must still deny the request.
+            // Recheck after sleep without holding the mutex across await.
+            let mut budgets = self
+                .budgets
+                .lock()
+                .map_err(|_| anyhow::anyhow!("provider pacing state is unavailable"))?;
+            let entry = budgets
+                .get_mut(provider)
+                .ok_or_else(|| anyhow::anyhow!("provider pacing state is unavailable"))?;
+            if let Some(reason) = entry.disabled_reason {
+                anyhow::bail!("provider '{provider}' is disabled: {reason}");
+            }
+            // A long queued wait crossing UTC midnight must consume today's
+            // cap, not an expired reservation on yesterday's budget.
+            let today = current_utc_day();
+            if entry.utc_day != today {
+                entry.utc_day = today;
+                entry.daily_requests = 0;
+            }
+            if pending.utc_day != today {
+                if entry.daily_requests >= daily_cap {
+                    anyhow::bail!("provider '{provider}' reached its daily request cap");
+                }
+                entry.daily_requests += 1;
+                pending.utc_day = today;
+            }
+        }
+        pending.committed = true;
         Ok(())
     }
 
@@ -235,6 +297,124 @@ mod tests {
             .wait_for_request_slot("shared-budget", 1, 1)
             .await
             .is_ok());
+    }
+
+    #[tokio::test]
+    async fn timed_out_pacing_wait_refunds_only_the_unstarted_reservation() {
+        let guard = ProviderGuard::default();
+        guard
+            .wait_for_request_slot("cancelled-pace", 250, 2)
+            .await
+            .unwrap();
+        // The second call must queue behind the first's bounded interval.
+        let outcome = tokio::time::timeout(
+            Duration::from_millis(10),
+            guard.wait_for_request_slot("cancelled-pace", 250, 2),
+        )
+        .await;
+        assert!(outcome.is_err(), "second request should still be queued");
+        let count = guard
+            .budgets
+            .lock()
+            .unwrap()
+            .get("cancelled-pace")
+            .unwrap()
+            .daily_requests;
+        assert_eq!(count, 1, "only the admitted request consumes quota");
+        // Reusing the refunded cap cannot bypass the provider's configured
+        // limit; this third request must still pass the reserved paced start.
+        guard
+            .wait_for_request_slot("cancelled-pace", 250, 2)
+            .await
+            .unwrap();
+        assert!(guard
+            .wait_for_request_slot("cancelled-pace", 250, 2)
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn challenge_during_queued_wait_rejects_and_refunds() {
+        let guard = ProviderGuard::default();
+        guard
+            .wait_for_request_slot("late-challenge", 250, 3)
+            .await
+            .unwrap();
+        let worker = guard.clone();
+        let pending =
+            tokio::spawn(
+                async move { worker.wait_for_request_slot("late-challenge", 250, 3).await },
+            );
+        let mut reserved = false;
+        for _ in 0..100 {
+            reserved = guard
+                .budgets
+                .lock()
+                .unwrap()
+                .get("late-challenge")
+                .is_some_and(|entry| entry.daily_requests == 2);
+            if reserved {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        assert!(reserved, "pending request must reserve before challenge");
+        guard.disable_provider("late-challenge", "challenge page detected");
+        let result = tokio::time::timeout(Duration::from_secs(3), pending)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(result.is_err());
+        assert_eq!(
+            guard
+                .budgets
+                .lock()
+                .unwrap()
+                .get("late-challenge")
+                .unwrap()
+                .daily_requests,
+            1,
+            "blocked queued work cannot consume admission quota"
+        );
+    }
+
+    #[test]
+    fn cancelled_old_day_does_not_refund_new_day_usage() {
+        let guard = ProviderGuard::default();
+        let current_day = current_utc_day();
+        let old_day = current_day.saturating_sub(1);
+        guard.budgets.lock().unwrap().insert(
+            "day-boundary".to_owned(),
+            ProviderBudget {
+                next_start: Instant::now(),
+                utc_day: old_day,
+                daily_requests: 1,
+                disabled_reason: None,
+            },
+        );
+        let old = PendingRequestReservation {
+            budgets: Arc::clone(&guard.budgets),
+            provider: "day-boundary".to_owned(),
+            utc_day: old_day,
+            committed: false,
+        };
+        {
+            let mut budgets = guard.budgets.lock().unwrap();
+            let entry = budgets.get_mut("day-boundary").unwrap();
+            entry.utc_day = current_day;
+            entry.daily_requests = 2;
+        }
+        drop(old);
+        assert_eq!(
+            guard
+                .budgets
+                .lock()
+                .unwrap()
+                .get("day-boundary")
+                .unwrap()
+                .daily_requests,
+            2
+        );
     }
 
     #[test]
