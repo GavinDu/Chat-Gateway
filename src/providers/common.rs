@@ -229,7 +229,7 @@ pub const STREAMING_SELECTOR: &str = r#"[data-is-streaming="true"]"#;
 pub struct ResponseProbe {
     pub text: Option<String>,
     pub count: usize,
-    /// Visible response roots containing non-whitespace rendered text, excluding blank placeholders.
+    /// Visible response roots with non-whitespace rendered text; excludes blank placeholders.
     pub populated_count: usize,
     pub streaming: bool,
     pub post_answer_affordance: bool,
@@ -575,7 +575,10 @@ mod streaming_visibility_regression_tests {
 
         let previous = response_probe(&page, &[".answer"], false);
         assert_eq!(previous.text.as_deref(), Some("previous reply"));
-        assert_eq!(previous.populated_count, 1, "blank placeholder must not count as a populated response root");
+        assert_eq!(
+            previous.populated_count, 1,
+            "blank placeholder must not count as a populated response root"
+        );
         assert_eq!(
             previous.count, 2,
             "visible placeholders still count as nodes"
@@ -1024,6 +1027,16 @@ mod response_probe_tests {
         assert_eq!(
             decode_response_probe(serde_json::json!({"count": 3.0})).count,
             3
+        );
+        assert_eq!(
+            decode_response_probe(serde_json::json!({"populatedCount": 2.0}))
+                .populated_count,
+            2
+        );
+        assert_eq!(
+            decode_response_probe(serde_json::json!({"populatedCount": -1}))
+                .populated_count,
+            0
         );
         assert_eq!(
             decode_response_probe(serde_json::json!({"count": 2.5})).count,
