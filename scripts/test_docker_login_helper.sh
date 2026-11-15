@@ -124,4 +124,15 @@ grep -Fq 'not blanket permission to automate' "$ROOT/docs/PROVIDERS_POLICY.md" |
   exit 1
 }
 
-echo "PASS nine provider URLs; existing config unchanged; Manus example/policy consistent"
+# The current local-only Docker and popup contract must agree with the
+# operator README. Legacy approval is not a prerequisite for local no-pairing.
+grep -Fq 'CHAT_GATEWAY_LOCAL_RELAY_NO_PAIRING=1' "$ROOT/scripts/docker-run.sh"
+grep -Fq 'connectLocalGateway(gateway, true)' "$ROOT/extension/popup.js"
+grep -Fq 'without a pairing code,' "$ROOT/README.md"
+grep -Fq 'approval tab, or installation token' "$ROOT/README.md"
+if grep -Fq 'approve the local' "$ROOT/README.md"; then
+  echo "README incorrectly requires local approval/pairing" >&2
+  exit 1
+fi
+
+echo "PASS nine provider URLs; existing config unchanged; Manus example/policy and local no-pairing docs consistent"
