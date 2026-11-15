@@ -3,7 +3,23 @@
 //! Keep the existing cookie/import/navigation/localStorage ordering here so
 //! startup, refresh and login-complete do not drift apart.
 use crate::{providers::Provider, session};
-use anyhow::Result;
+use anyhow::{Context as _, Result};
+use std::time::Duration;
+
+/// Time-bound the entire session replay, not only the first navigation.
+/// This runs on the worker's existing thread; non-Send Obscura pages never
+/// cross runtimes. Cancellation can stop cooperative futures but cannot
+/// preempt synchronous JavaScript that blocks the worker thread.
+const SESSION_WARMUP_TIMEOUT: Duration = Duration::from_secs(30);
+
+async fn bounded_warmup<F>(timeout: Duration, warmup: F) -> Result<()>
+where
+    F: std::future::Future<Output = Result<()>>,
+{
+    tokio::time::timeout(timeout, warmup)
+        .await
+        .context("provider session navigation timed out")?
+}
 
 pub(super) struct PageSession;
 
@@ -17,20 +33,23 @@ impl PageSession {
         provider: Provider,
         session_file: Option<&session::SessionFile>,
     ) -> Result<()> {
-        let cookie_restore = session_file
-            .map(|file| session::restore_cookies(browser, file, provider.name()))
-            .transpose();
-        // Navigate even when cookie import failed so the caller's fail-closed
-        // cleanup can clear origin-scoped localStorage on the provider origin.
-        page.goto(provider.login_url()).await?;
-        cookie_restore?;
-        if let Some(file) = session_file {
-            if !file.local_storage.is_empty() {
-                session::restore_local_storage(page, file)?;
-                page.goto(provider.login_url()).await?;
+        bounded_warmup(SESSION_WARMUP_TIMEOUT, async {
+            let cookie_restore = session_file
+                .map(|file| session::restore_cookies(browser, file, provider.name()))
+                .transpose();
+            // Navigate even when cookie import failed so the caller's fail-closed
+            // cleanup can clear origin-scoped localStorage on the provider origin.
+            page.goto(provider.login_url()).await?;
+            cookie_restore?;
+            if let Some(file) = session_file {
+                if !file.local_storage.is_empty() {
+                    session::restore_local_storage(page, file)?;
+                    page.goto(provider.login_url()).await?;
+                }
             }
-        }
-        Ok(())
+            Ok(())
+        })
+        .await
     }
 }
 
@@ -147,5 +166,71 @@ mod activation_tests {
             3,
             "unlink/new login invalidates activation idempotency"
         );
+    }
+}
+
+#[cfg(test)]
+mod warmup_timeout_tests {
+    use super::{bounded_warmup, replace_after_success, SESSION_WARMUP_TIMEOUT};
+    use std::{cell::RefCell, future::pending, time::Duration};
+
+    #[test]
+    fn session_warmup_has_bounded_window() {
+        assert_eq!(SESSION_WARMUP_TIMEOUT, Duration::from_secs(30));
+    }
+
+    #[tokio::test]
+    async fn unresponsive_navigation_is_bounded_and_returns_fixed_redacted_error() {
+        let result = bounded_warmup(Duration::from_millis(1), async {
+            pending::<anyhow::Result<()>>().await
+        })
+        .await;
+        let error = result.unwrap_err().to_string();
+        assert_eq!(error, "provider session navigation timed out");
+        assert!(!error.contains("cookie"));
+        assert!(!error.contains("token"));
+    }
+
+    #[tokio::test]
+    async fn successful_warmup_is_not_treated_as_timeout() {
+        let result = bounded_warmup(Duration::from_millis(50), async { Ok(()) }).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn provider_error_is_not_swallowed_or_reclassified_as_timeout() {
+        let result = bounded_warmup(Duration::from_millis(50), async {
+            anyhow::bail!("synthetic provider error")
+        })
+        .await;
+        assert_eq!(result.unwrap_err().to_string(), "synthetic provider error");
+    }
+
+    #[tokio::test]
+    async fn timed_out_warmup_does_not_replace_prior_page_or_cache_a_fingerprint() {
+        let warm = RefCell::new(String::from("prior-valid-page"));
+        let result = replace_after_success(
+            || async {
+                bounded_warmup(Duration::from_millis(1), async {
+                    pending::<anyhow::Result<()>>().await
+                })
+                .await?;
+                Ok(String::from("new-page"))
+            },
+            |replacement| *warm.borrow_mut() = replacement,
+        )
+        .await;
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "provider session navigation timed out"
+        );
+        assert_eq!(warm.borrow().as_str(), "prior-valid-page");
+        replace_after_success(
+            || async { Ok(String::from("retry-success")) },
+            |replacement| *warm.borrow_mut() = replacement,
+        )
+        .await
+        .unwrap();
+        assert_eq!(warm.borrow().as_str(), "retry-success");
     }
 }
