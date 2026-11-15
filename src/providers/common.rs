@@ -2459,7 +2459,7 @@ fn is_provider_test_fixture(page: &Page) -> bool {
             == Some(true)
 }
 
-fn require_page_provider_origin(provider: &str, page: &Page) -> anyhow::Result<()> {
+pub(crate) fn require_page_provider_origin(provider: &str, page: &Page) -> anyhow::Result<()> {
     #[cfg(test)]
     if is_provider_test_fixture(page) {
         return Ok(());
@@ -2506,6 +2506,18 @@ fn provider_origin_guard_js(expected_provider: Option<&str>) -> anyhow::Result<S
 #[cfg(test)]
 mod all_provider_origin_fence_tests {
     use super::{provider_origin_for_url, provider_origin_guard_js, require_provider_origin};
+
+    #[test]
+    fn current_catalog_provider_urls_map_to_their_exact_adapter_identity() {
+        for spec in crate::providers::ADAPTERS {
+            assert_eq!(
+                provider_origin_for_url(spec.url),
+                Some(spec.id),
+                "catalog provider {} has an unrecognized model/chat URL",
+                spec.id
+            );
+        }
+    }
 
     #[test]
     fn every_provider_has_explicit_matching_https_origin() {
