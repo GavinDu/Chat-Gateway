@@ -931,8 +931,7 @@ mod visible_composer_tests {
         assert!(visible_composer_exists(&page, &["#ghost-text"]));
         assert!(visible_composer_exists(&page, &["#ghost-rich"]));
         assert!(
-            super::require_unique_actionable_composer(&page, &["#ghost-text", "#active"])
-                .is_err(),
+            super::require_unique_actionable_composer(&page, &["#ghost-text", "#active"]).is_err(),
             "two nontransparent editors must fail closed as ambiguous"
         );
     }
