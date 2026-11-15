@@ -168,7 +168,10 @@ mod tests {
         let mut state = AgentTaskLifecycle::queued(7);
         assert_eq!(state.apply(7, "id-a", Event::Terminal), T::Invalid);
         assert_eq!(state.apply(7, "", Event::Accepted), T::Invalid);
-        assert_eq!(state.apply(7, &"x".repeat(1025), Event::Accepted), T::Invalid);
+        assert_eq!(
+            state.apply(7, &"x".repeat(1025), Event::Accepted),
+            T::Invalid
+        );
         assert_eq!(state.apply(6, "id-a", Event::Accepted), T::Stale);
         assert_eq!(state.apply(7, "id-a", Event::Accepted), T::Applied);
         assert_eq!(state.phase(), Phase::Accepted);
@@ -207,15 +210,27 @@ mod tests {
     #[test]
     fn restart_requires_verification_not_assumed_completion() {
         let mut state = AgentTaskLifecycle::queued(21);
-        assert_eq!(state.apply(21, "opaque-test-id", Event::Accepted), T::Applied);
-        assert_eq!(state.apply(21, "opaque-test-id", Event::Running), T::Applied);
+        assert_eq!(
+            state.apply(21, "opaque-test-id", Event::Accepted),
+            T::Applied
+        );
+        assert_eq!(
+            state.apply(21, "opaque-test-id", Event::Running),
+            T::Applied
+        );
         assert_eq!(state.restart(21), T::Stale);
         assert_eq!(state.restart(22), T::Applied);
         assert_eq!(state.epoch(), 22);
         assert_eq!(state.phase(), Phase::VerificationRequired);
         assert_eq!(state.apply(21, "opaque-test-id", Event::Terminal), T::Stale);
-        assert_eq!(state.apply(22, "opaque-test-id", Event::Terminal), T::Invalid);
-        assert_eq!(state.apply(22, "opaque-test-id", Event::Accepted), T::Invalid);
+        assert_eq!(
+            state.apply(22, "opaque-test-id", Event::Terminal),
+            T::Invalid
+        );
+        assert_eq!(
+            state.apply(22, "opaque-test-id", Event::Accepted),
+            T::Invalid
+        );
         assert_eq!(state.begin_new(23), T::Applied);
         assert_eq!(state.phase(), Phase::Queued);
         assert_eq!(state.apply(23, "new-id", Event::Accepted), T::Applied);
