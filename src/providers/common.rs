@@ -2097,11 +2097,21 @@ mod all_provider_origin_fence_tests {
         assert!(guard.contains("const currentUrl = location;"));
         assert!(!guard.contains("new URL("));
         for provider in [
-            "chatgpt", "grok", "claude", "gemini", "qwen", "metaai",
-            "mistral", "perplexity", "manus",
+            "chatgpt",
+            "grok",
+            "claude",
+            "gemini",
+            "qwen",
+            "metaai",
+            "mistral",
+            "perplexity",
+            "manus",
         ] {
             let named = format!("actualProvider = '{provider}'");
-            assert!(guard.contains(&named), "missing inline route for {provider}");
+            assert!(
+                guard.contains(&named),
+                "missing inline route for {provider}"
+            );
         }
         assert!(guard.contains("currentUrl.protocol !== 'https:'"));
         assert!(guard.contains("currentUrl.username"));
