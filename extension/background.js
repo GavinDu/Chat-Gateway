@@ -266,6 +266,48 @@ function disconnectLocalRelay(expected) {
     return true;
   });
 }
+// Legacy HTTPS Pair results are committed by the same owner-controlled
+// writer as consent, pending approval and Unpair. An older network callback
+// must not resurrect a revoked install after the user disconnects.
+function connectPairedRelay(gateway, token, expected) {
+  return queueConsentMutation(async () => {
+    if (typeof gateway !== "string" || !gateway.startsWith("https://") ||
+        normalizeGateway(gateway) !== gateway || !/^[a-f0-9]{64}$/.test(token)) {
+      throw new Error("Invalid paired gateway target or token.");
+    }
+    if (!await chrome.permissions.contains({origins:[gateway + "/*"]})) {
+      throw new Error("Paired gateway host permission missing.");
+    }
+    const current = await chrome.storage.local.get([
+      "gateway", "token", "connectionMode", "relayConnectionEpoch",
+      "localDisconnected", "linkedProviders", "providerLinkEpochs"
+    ]);
+    if (!expected || !sameRelayIdentity(expected, current) ||
+        (expected.relayConnectionEpoch || null) !== (current.relayConnectionEpoch || null) ||
+        Boolean(expected.localDisconnected) !== Boolean(current.localDisconnected)) {
+      throw new Error("Paired connection changed while pairing.");
+    }
+    const epochs = {...(current.providerLinkEpochs || {})};
+    for (const provider of new Set([
+      ...(current.linkedProviders || []), ...Object.keys(epochs)
+    ])) {
+      if (Object.hasOwn(PROVIDERS, provider)) epochs[provider] = randomHex(16);
+    }
+    // One storage write makes a complete new connection snapshot. This
+    // invalidates both old provider consents and any older pending approval.
+    await chrome.storage.local.set({
+      gateway, token, connectionMode:"paired",
+      relayConnectionEpoch:randomHex(16),
+      linkedProviders:[], providerLinkEpochs:epochs,
+      providerLinkPendingAttempts:{}, relaySnapshotVersions:{},
+      pendingConnection:null, localDisconnected:false
+    });
+    lastGatewayCheck = null;
+    providerDiagnostics.clear();
+    return true;
+  });
+}
+
 // Explicit remote Unpair is a connection transition, not a popup-side
 // storage cleanup. Its old HTTPS response must not clear a new connection
 // or race a worker-owned provider link/approval commit.
@@ -296,6 +338,7 @@ function disconnectPairedRelay(expected) {
       pending.expires === oldPending.expires);
     const patch = {
       connectionMode:null, token:null, linkedProviders:[],
+      relayConnectionEpoch:randomHex(16),
       providerLinkEpochs:epochs, providerLinkPendingAttempts:{},
       relaySnapshotVersions:{}
     };
@@ -467,6 +510,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     disconnectLocalRelay(message.connection)
       .then(() => sendResponse({ok:true}))
       .catch(() => sendResponse({ok:false, error:"Local gateway connection changed before disconnect."}));
+    return true;
+  }
+  if (message?.type === "connect-paired-relay") {
+    connectPairedRelay(message.gateway, message.token, message.expected)
+      .then(() => sendResponse({ok:true}))
+      .catch(() => sendResponse({ok:false, error:"Paired gateway connection changed or was rejected."}));
     return true;
   }
   if (message?.type === "disconnect-paired-relay") {

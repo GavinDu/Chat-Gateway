@@ -4,7 +4,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
 
-function loadPopup({failCookieDomain = null, includeSecondProvider = false, manualVerification = false, localRelay = false, activation = null, diagnosticsSync = null, diagnosticsFailure = null, pairedDisconnectReject = false} = {}) {
+function loadPopup({failCookieDomain = null, includeSecondProvider = false, manualVerification = false, localRelay = false, activation = null, diagnosticsSync = null, diagnosticsFailure = null, pairedDisconnectReject = false, pairedConnectReject = false, remotePairToken = "b".repeat(64)} = {}) {
   const elements = new Map();
   const chromeCalls = [];
   const values = {gateway:"http://127.0.0.1:8080",linkedProviders:[]};
@@ -61,6 +61,22 @@ function loadPopup({failCookieDomain = null, includeSecondProvider = false, manu
       delete values.relaySnapshotVersions;
       delete values.pendingConnection;
       values.localDisconnected=true;
+      return {ok:true};
+    }
+    if(request.type==="connect-paired-relay") {
+      if(pairedConnectReject) return {ok:false,error:"Paired connection changed while pairing."};
+      const expected=request.expected;
+      if(expected.gateway!==values.gateway || expected.token!==values.token ||
+          expected.connectionMode!==values.connectionMode ||
+          expected.relayConnectionEpoch!==values.relayConnectionEpoch) {
+        return {ok:false,error:"Paired connection changed while pairing."};
+      }
+      values.gateway=request.gateway;
+      values.token=request.token;
+      values.connectionMode="paired";
+      values.relayConnectionEpoch="new-remote-epoch";
+      values.linkedProviders=[];
+      values.pendingConnection=null;
       return {ok:true};
     }
     if(request.type==="disconnect-paired-relay") {
@@ -152,6 +168,7 @@ function loadPopup({failCookieDomain = null, includeSecondProvider = false, manu
     })};},
     fetch:async url => ({ok:true,json:async()=>url.endsWith("/relay/v1/mode")
       ? {mode:localRelay?"local":"paired",no_pairing:localRelay}
+      : url.endsWith("/relay/v1/pair") ? {token:remotePairToken}
       : {request_id:"a".repeat(64),poll_secret:"b".repeat(64)}}),
     chrome:{
       tabs:{async create({url}) {chromeCalls.push("tab:"+url);}},
@@ -172,7 +189,7 @@ function loadPopup({failCookieDomain = null, includeSecondProvider = false, manu
   vm.createContext(context);
   vm.runInContext(fs.readFileSync(path.join(__dirname,"..","popup.js"),"utf8")+
     "\nglobalThis.testControls={refreshStatus,connectProvider,logoutProvider};",context);
-  return {values,server,elements,chromeCalls,controls:context.testControls};
+  return {values,server,elements,byId,chromeCalls,controls:context.testControls};
 }
 
 test("worker diagnostic failure avoids a second redundant popup status HTTP request", async () => {
@@ -347,6 +364,43 @@ test("explicit gateway disconnect removes pending approval and stops polling",as
     "paired Unpair must use a worker-owned consent transition");
 });
 
+
+
+test("remote legacy Pair uses worker-owned generation-fenced commit",async()=>{
+  const popup=loadPopup();
+  await Promise.resolve();
+  popup.elements.get("gateway").value="https://private.example";
+  popup.byId("code").value="12345678";
+  await popup.elements.get("pair").handlers.click();
+  assert.equal(popup.values.gateway,"https://private.example");
+  assert.equal(popup.values.connectionMode,"paired");
+  assert.equal(popup.values.token,"b".repeat(64));
+  assert.ok(popup.chromeCalls.some(x=>x==="connect-paired-relay:"));
+  assert.equal(popup.byId("code").value,"");
+});
+
+test("remote Pair worker rejection never becomes a popup-side connection write",async()=>{
+  const popup=loadPopup({pairedConnectReject:true});
+  await Promise.resolve();
+  popup.elements.get("gateway").value="https://private.example";
+  popup.byId("code").value="12345678";
+  await popup.elements.get("pair").handlers.click();
+  assert.equal(popup.values.token,undefined);
+  assert.equal(popup.values.gateway,"http://127.0.0.1:8080");
+  assert.equal(popup.values.linkedProviders.length,0);
+  assert.match(popup.elements.get("message").textContent,/connection changed/);
+});
+
+test("remote Pair rejects malformed worker token before it can be committed",async()=>{
+  const popup=loadPopup({remotePairToken:"not-a-token"});
+  await Promise.resolve();
+  popup.elements.get("gateway").value="https://private.example";
+  popup.byId("code").value="12345678";
+  await popup.elements.get("pair").handlers.click();
+  assert.equal(popup.values.token,undefined);
+  assert.ok(!popup.chromeCalls.some(x=>x==="connect-paired-relay:"));
+  assert.match(popup.elements.get("message").textContent,/Invalid connection response/);
+});
 
 test("missing paired worker acknowledgement never falls back to popup consent deletion",async()=>{
   const popup=loadPopup({pairedDisconnectReject:true});

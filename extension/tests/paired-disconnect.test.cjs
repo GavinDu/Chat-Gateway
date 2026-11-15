@@ -21,7 +21,12 @@ function load(values) {
     importScripts(){},
     PROVIDERS:{chatgpt:["chatgpt.com"],manus:["manus.im"]},
     randomHex:()=>("new-epoch-"+(++rotation)),
-    normalizeGateway:value=>value,
+    normalizeGateway:value=>{
+      const url=new URL(value);
+      if(url.username || url.password || url.search || url.hash ||
+          (url.pathname!=="/" && url.pathname!=="")) throw new Error("Not an origin");
+      return url.origin;
+    },
     isLocalGateway:value=>value.startsWith("http://127.0.0.1:"),
     hasRelayConnection:value=>Boolean(value.gateway && (value.token || value.connectionMode==="local")),
     relayIdentity:value=>value.connectionMode==="local" ? "local" : value.token,
@@ -42,9 +47,11 @@ function load(values) {
   };
   vm.createContext(context);
   vm.runInContext(fs.readFileSync(require.resolve("../background.js"),"utf8")+
-    "\nglobalThis.disconnectPaired=disconnectPairedRelay; globalThis.holdConsent=queueConsentMutation;",context);
+    "\nglobalThis.disconnectPaired=disconnectPairedRelay; globalThis.connectPaired=connectPairedRelay; globalThis.holdConsent=queueConsentMutation;",context);
   const expected = () => ({
     gateway:state.gateway,token:state.token,connectionMode:state.connectionMode,
+    relayConnectionEpoch:state.relayConnectionEpoch,
+    localDisconnected:state.localDisconnected,
     pendingRequest:state.pendingConnection && {
       request_id:state.pendingConnection.request_id,
       expires:state.pendingConnection.expires
@@ -53,7 +60,8 @@ function load(values) {
   const send=message=>new Promise(resolve=>{
     assert.equal(onMessage(message,{},resolve),true);
   });
-  return {state,disconnect:context.disconnectPaired,hold:context.holdConsent,expected,send};
+  return {state,disconnect:context.disconnectPaired,connect:context.connectPaired,
+    hold:context.holdConsent,expected,send};
 }
 
 test("paired Unpair is serialized after an in-flight provider consent writer",async()=>{
@@ -120,4 +128,82 @@ test("worker message returns no token and rejects stale explicit Unpair identity
   const rejected=await fixture.send({type:"disconnect-paired-relay",connection:expected});
   assert.equal(rejected.ok,false);
   assert.ok(!JSON.stringify(rejected).includes("a".repeat(64)));
+});
+
+test("remote Pair is committed behind consent writer and rotates the generation",async()=>{
+  const fixture=load({relayConnectionEpoch:"first-gen"});
+  const before=fixture.expected();
+  let release;
+  const gate=new Promise(resolve=>{release=resolve;});
+  const earlier=fixture.hold(async()=>{
+    await gate;
+    fixture.state.linkedProviders=["chatgpt","manus"];
+  });
+  const pending=fixture.connect("https://replacement.example","d".repeat(64),before);
+  await new Promise(resolve=>setImmediate(resolve));
+  release();
+  await earlier;
+  await pending;
+  assert.equal(fixture.state.gateway,"https://replacement.example");
+  assert.equal(fixture.state.token,"d".repeat(64));
+  assert.equal(fixture.state.connectionMode,"paired");
+  assert.deepEqual(Array.from(fixture.state.linkedProviders),[]);
+  assert.notEqual(fixture.state.relayConnectionEpoch,"first-gen");
+  assert.deepEqual(Object.keys(fixture.state.providerLinkPendingAttempts),[]);
+  assert.equal(fixture.state.pendingConnection,null);
+});
+
+test("stale Pair after explicit Unpair cannot resurrect an install through ABA",async()=>{
+  const fixture=load({relayConnectionEpoch:"old-gen"});
+  const before=fixture.expected();
+  await fixture.disconnect(before);
+  assert.equal(fixture.state.token,null);
+  assert.notEqual(fixture.state.relayConnectionEpoch,"old-gen");
+  await assert.rejects(fixture.connect("https://gateway.example","e".repeat(64),before),/changed/);
+  assert.equal(fixture.state.token,null);
+});
+
+test("a delayed Pair response cannot replace newer remote Pair or local mode",async()=>{
+  const fixture=load();
+  const before=fixture.expected();
+  await fixture.connect("https://new.example","e".repeat(64),before);
+  await assert.rejects(fixture.connect("https://old.example","f".repeat(64),before),/changed/);
+  assert.equal(fixture.state.token,"e".repeat(64));
+  assert.equal(fixture.state.gateway,"https://new.example");
+
+  const local=load({gateway:"http://127.0.0.1:8080",connectionMode:"local",token:null});
+  const old=local.expected();
+  local.state.localDisconnected=true;
+  await assert.rejects(local.connect("https://new.example","f".repeat(64),old),/changed/);
+  assert.equal(local.state.connectionMode,"local");
+});
+
+test("invalid remote Pair origin or token fails closed",async()=>{
+  const fixture=load();
+  const before=fixture.expected();
+  for(const [host,token] of [
+    ["http://private.example","c".repeat(64)],
+    ["https://private.example.attacker.invalid/path","c".repeat(64)],
+    ["https://gateway.example","not-a-token"],
+  ]) {
+    await assert.rejects(fixture.connect(host,token,before));
+    assert.equal(fixture.state.token,"a".repeat(64));
+  }
+});
+
+test("remote Pair worker acknowledgement is redacted and rejects stale identity",async()=>{
+  const fixture=load();
+  const expected=fixture.expected();
+  const ok=await fixture.send({
+    type:"connect-paired-relay",gateway:"https://new.example",
+    token:"d".repeat(64),expected
+  });
+  assert.deepEqual(Object.keys(ok),["ok"]);
+  assert.equal(ok.ok,true);
+  const stale=await fixture.send({
+    type:"connect-paired-relay",gateway:"https://old.example",
+    token:"e".repeat(64),expected
+  });
+  assert.equal(stale.ok,false);
+  assert.ok(!JSON.stringify(stale).includes("d".repeat(64)));
 });
