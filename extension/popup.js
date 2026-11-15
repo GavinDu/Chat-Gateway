@@ -283,6 +283,12 @@ $("pair").addEventListener("click", async () => {
         }
       }
     }
+    // Capture the full pre-network install identity. The worker checks its
+    // persisted generation after the response returns; old Pair callbacks
+    // cannot silently reconnect after explicit Unpair or a newer Pair.
+    const beforePair = remote ? await chrome.storage.local.get(
+      ["gateway", "token", "connectionMode", "relayConnectionEpoch", "localDisconnected"]
+    ) : null;
     const response = await fetch(gateway + (remote ? "/relay/v1/pair" : "/relay/v1/connect/request"), {
       method:"POST", headers:{"Content-Type":"application/json"},
       body:JSON.stringify(remote ? {code} : {}), cache:"no-store", redirect:"error"
@@ -293,8 +299,11 @@ $("pair").addEventListener("click", async () => {
     const data = await response.json();
     if (remote) {
       if (!/^[a-f0-9]{64}$/.test(data.token)) throw new Error("Invalid connection response.");
-      await chrome.storage.local.set({gateway,token:data.token,linkedProviders:[]});
-      await chrome.storage.local.remove("pendingConnection");
+      const committed = await chrome.runtime.sendMessage({
+        type:"connect-paired-relay", gateway, token:data.token, expected:beforePair
+      });
+      // A missing/restarted worker must never trigger direct popup writes.
+      if (!committed?.ok) throw new Error(committed?.error || "Remote Pair worker did not respond.");
       await chrome.alarms?.clear?.("relay-connection");
       $("code").value = "";
       await updateConnection();
