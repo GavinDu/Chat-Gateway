@@ -799,6 +799,35 @@ fn untrusted_challenge_origin_error(provider: &str, page: &Page) -> Option<anyho
     require_expected_response_origin(provider, page).err()
 }
 
+/// A polling DOM snapshot can precede a navigation to a different page.
+/// Challenge evidence may persistently disable a provider only if *both*
+/// URL observations belong to the expected provider or known HTTPS verifier.
+/// Do not let an off-provider verification overlay borrow the later page URL.
+fn challenge_probe_urls_attributable(provider: &str, current_url: &str, snapshot_url: &str) -> bool {
+    common::require_response_origin_pair(provider, current_url, snapshot_url).is_ok()
+        || (crate::provider_guard::is_known_external_challenge_url(current_url)
+            && crate::provider_guard::is_known_external_challenge_url(snapshot_url))
+}
+
+fn untrusted_challenge_probe_origin_error(
+    provider: &str,
+    page: &Page,
+    snapshot_url: &str,
+) -> Option<anyhow::Error> {
+    #[cfg(test)]
+    if common::require_response_probe_origins(provider, page, snapshot_url).is_ok() {
+        // Existing explicitly marked in-memory offline test fixtures only.
+        return None;
+    }
+    if challenge_probe_urls_attributable(provider, &page.url(), snapshot_url) {
+        None
+    } else {
+        Some(anyhow::anyhow!(
+            "provider chat origin unavailable before prompt dispatch"
+        ))
+    }
+}
+
 #[cfg(test)]
 mod response_origin_guard_tests {
     use super::require_expected_response_origin;
@@ -838,6 +867,57 @@ mod response_origin_guard_tests {
             "document.documentElement.setAttribute('data-chat-gateway-test-fixture', '')",
         );
         assert!(super::untrusted_challenge_origin_error("manus", &page).is_none());
+    }
+
+    #[test]
+    fn challenge_sticky_attribution_requires_both_url_samples_to_be_trusted() {
+        for spec in crate::providers::ADAPTERS {
+            assert!(
+                super::challenge_probe_urls_attributable(spec.id, spec.url, spec.url),
+                "{} genuine challenge overlay on own site is attributable",
+                spec.id
+            );
+            for bad_url in [
+                "https://attacker.invalid/captcha",
+                "https://www.manus.im.attacker.invalid/captcha",
+                "http://manus.im/captcha",
+                "https://user@manus.im/captcha",
+                "https://manus.im:65536/captcha",
+                "https://accounts.google.com.attacker.invalid/v3/signin/challenge",
+            ] {
+                assert!(
+                    !super::challenge_probe_urls_attributable(spec.id, spec.url, bad_url),
+                    "{} may not disable after an untrusted captured challenge snapshot",
+                    spec.id
+                );
+                assert!(
+                    !super::challenge_probe_urls_attributable(spec.id, bad_url, spec.url),
+                    "{} may not disable after an untrusted current URL",
+                    spec.id
+                );
+            }
+        }
+        let provider = "manus";
+        for verifier in [
+            "https://challenges.cloudflare.com/captcha",
+            "https://challenge.cloudflare.com/",
+            "https://accounts.google.com/v3/signin/challenge",
+        ] {
+            assert!(
+                super::challenge_probe_urls_attributable(provider, verifier, verifier),
+                "known external HTTPS verifier remains attributable"
+            );
+            assert!(
+                !super::challenge_probe_urls_attributable(
+                    provider, verifier, "https://attacker.invalid/captcha"
+                ),
+                "a known verifier cannot bless an arbitrary captured URL"
+            );
+            assert!(
+                !super::challenge_probe_urls_attributable(provider, verifier, "https://manus.im/"),
+                "inconsistent verifier/first-party samples are not sticky proof"
+            );
+        }
     }
 
     #[tokio::test]
@@ -1128,7 +1208,9 @@ pub async fn run_send(
             poll_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
         );
         if probe_has_challenge(&probe) {
-            if let Some(error) = untrusted_challenge_origin_error(adapter.name(), page) {
+            if let Some(error) =
+                untrusted_challenge_probe_origin_error(adapter.name(), page, &probe.url)
+            {
                 let _ = chunks.send(Err(error)).await;
                 return;
             }
@@ -1261,9 +1343,11 @@ pub async fn run_send(
                                 .min(u64::MAX as u128) as u64,
                         );
                         if probe_has_challenge(&final_probe) {
-                            if let Some(error) =
-                                untrusted_challenge_origin_error(adapter.name(), page)
-                            {
+                            if let Some(error) = untrusted_challenge_probe_origin_error(
+                                adapter.name(),
+                                page,
+                                &final_probe.url,
+                            ) {
                                 let _ = chunks.send(Err(error)).await;
                                 return;
                             }
@@ -1392,7 +1476,11 @@ pub async fn run_send(
                         .min(u64::MAX as u128) as u64,
                 );
                 if probe_has_challenge(&final_probe) {
-                    if let Some(error) = untrusted_challenge_origin_error(adapter.name(), page) {
+                    if let Some(error) = untrusted_challenge_probe_origin_error(
+                        adapter.name(),
+                        page,
+                        &final_probe.url,
+                    ) {
                         let _ = chunks.send(Err(error)).await;
                         return;
                     }
