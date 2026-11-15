@@ -1051,6 +1051,9 @@ pub async fn run_send(
             let _ = chunks.send(Err(error)).await;
             return;
         }
+        // Observe Stop visibility even while a new blank reply placeholder
+        // is pending; the placeholder itself must not reset/stream old text.
+        fresh_stop.observe(probe.streaming);
         if !response_node_detected
             && has_unpopulated_new_response_placeholder(
                 baseline_response_count,
@@ -1097,7 +1100,6 @@ pub async fn run_send(
         }
 
         let streaming = probe.streaming;
-        fresh_stop.observe(streaming);
         saw_streaming |= streaming;
         if !probe.post_answer_affordance {
             saw_post_answer_affordance_absent = true;
