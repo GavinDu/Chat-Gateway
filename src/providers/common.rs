@@ -1228,11 +1228,19 @@ async fn click_send_or_enter_checked_with_policy(
         input_selector,
         timeout_ms,
         expected_prompt,
-        allow_untrusted_enter,
-        expected_provider,
-        None,
+        SendClickPolicy {
+            allow_untrusted_enter,
+            expected_provider,
+            unique_input_selectors: None,
+        },
     )
     .await
+}
+
+struct SendClickPolicy<'a> {
+    allow_untrusted_enter: bool,
+    expected_provider: Option<&'a str>,
+    unique_input_selectors: Option<&'a [&'a str]>,
 }
 
 /// Perplexity-only Send guard. The earlier composer check is not enough when
@@ -1244,10 +1252,13 @@ async fn click_send_or_enter_checked_with_unique_composer(
     input_selector: &str,
     timeout_ms: u64,
     expected_prompt: Option<&str>,
-    allow_untrusted_enter: bool,
-    expected_provider: Option<&str>,
-    unique_input_selectors: Option<&[&str]>,
+    policy: SendClickPolicy<'_>,
 ) -> anyhow::Result<bool> {
+    let SendClickPolicy {
+        allow_untrusted_enter,
+        expected_provider,
+        unique_input_selectors,
+    } = policy;
     let start = std::time::Instant::now();
     let input_js = serde_json::to_string(input_selector)?;
     let input_expr = visible_input_query(&input_js);
@@ -1341,9 +1352,11 @@ mod draft_at_click_tests {
             "#thread",
             100,
             Some("draft"),
-            true,
-            None,
-            Some(&["textarea.candidate", "#thread"]),
+            super::SendClickPolicy {
+                allow_untrusted_enter: true,
+                expected_provider: None,
+                unique_input_selectors: Some(&["textarea.candidate", "#thread"]),
+            },
         )
         .await;
         assert!(result.unwrap_err().to_string().contains("ambiguous"));
@@ -1357,9 +1370,11 @@ mod draft_at_click_tests {
             "#thread",
             100,
             Some("draft"),
-            true,
-            None,
-            Some(&["textarea.candidate", "#thread"]),
+            super::SendClickPolicy {
+                allow_untrusted_enter: true,
+                expected_provider: None,
+                unique_input_selectors: Some(&["textarea.candidate", "#thread"]),
+            },
         )
         .await
         .unwrap();
@@ -2602,9 +2617,11 @@ pub async fn send_prompt(
             input_sel,
             5_000,
             Some(prompt),
-            true,
-            send_guard_provider,
-            Some(&inputs),
+            SendClickPolicy {
+                allow_untrusted_enter: true,
+                expected_provider: send_guard_provider,
+                unique_input_selectors: Some(&inputs),
+            },
         )
         .await?;
     } else {
