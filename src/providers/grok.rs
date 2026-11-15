@@ -115,21 +115,25 @@ mod labelled_composer_priority_tests {
             .await
             .unwrap();
         assert_eq!(
-            page.evaluate("document.querySelector('#chat-input').value").as_str(),
+            page.evaluate("document.querySelector('#chat-input').value")
+                .as_str(),
             Some("fixture request")
         );
         assert_eq!(
-            page.evaluate("document.querySelector('#search-input').value").as_str(),
+            page.evaluate("document.querySelector('#search-input').value")
+                .as_str(),
             Some("")
         );
-        assert!(common::click_send_or_enter(
-            &mut page,
-            &effective.send_refs(),
-            inputs[0],
-            500,
-        ).await.unwrap());
+        assert!(
+            common::click_send_or_enter(&mut page, &effective.send_refs(), inputs[0], 500,)
+                .await
+                .unwrap()
+        );
         assert_eq!(page.evaluate("window.chatClicks || 0").as_f64(), Some(1.0));
-        assert_eq!(page.evaluate("window.searchClicks || 0").as_f64(), Some(0.0));
+        assert_eq!(
+            page.evaluate("window.searchClicks || 0").as_f64(),
+            Some(0.0)
+        );
     }
 
     #[test]
