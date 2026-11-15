@@ -189,7 +189,7 @@ function loadPopup({failCookieDomain = null, includeSecondProvider = false, manu
   vm.createContext(context);
   vm.runInContext(fs.readFileSync(path.join(__dirname,"..","popup.js"),"utf8")+
     "\nglobalThis.testControls={refreshStatus,connectProvider,logoutProvider};",context);
-  return {values,server,elements,chromeCalls,controls:context.testControls};
+  return {values,server,elements,byId,chromeCalls,controls:context.testControls};
 }
 
 test("worker diagnostic failure avoids a second redundant popup status HTTP request", async () => {
@@ -370,20 +370,20 @@ test("remote legacy Pair uses worker-owned generation-fenced commit",async()=>{
   const popup=loadPopup();
   await Promise.resolve();
   popup.elements.get("gateway").value="https://private.example";
-  popup.elements.get("code").value="12345678";
+  popup.byId("code").value="12345678";
   await popup.elements.get("pair").handlers.click();
   assert.equal(popup.values.gateway,"https://private.example");
   assert.equal(popup.values.connectionMode,"paired");
   assert.equal(popup.values.token,"b".repeat(64));
   assert.ok(popup.chromeCalls.some(x=>x==="connect-paired-relay:"));
-  assert.equal(popup.elements.get("code").value,"");
+  assert.equal(popup.byId("code").value,"");
 });
 
 test("remote Pair worker rejection never becomes a popup-side connection write",async()=>{
   const popup=loadPopup({pairedConnectReject:true});
   await Promise.resolve();
   popup.elements.get("gateway").value="https://private.example";
-  popup.elements.get("code").value="12345678";
+  popup.byId("code").value="12345678";
   await popup.elements.get("pair").handlers.click();
   assert.equal(popup.values.token,undefined);
   assert.equal(popup.values.gateway,"http://127.0.0.1:8080");
@@ -395,7 +395,7 @@ test("remote Pair rejects malformed worker token before it can be committed",asy
   const popup=loadPopup({remotePairToken:"not-a-token"});
   await Promise.resolve();
   popup.elements.get("gateway").value="https://private.example";
-  popup.elements.get("code").value="12345678";
+  popup.byId("code").value="12345678";
   await popup.elements.get("pair").handlers.click();
   assert.equal(popup.values.token,undefined);
   assert.ok(!popup.chromeCalls.some(x=>x==="connect-paired-relay:"));
