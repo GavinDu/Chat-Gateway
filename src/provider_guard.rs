@@ -220,6 +220,43 @@ pub(crate) fn is_challenge_url(url: &str) -> bool {
                 .is_some_and(|segment| segment.eq_ignore_ascii_case("challenge")))
 }
 
+/// Only well-known, strictly authenticated *external* challenge endpoints
+/// may disable an adapter while the browser is off the provider's own origin.
+/// A foreign page with a generic /captcha path is not provider evidence.
+pub(crate) fn is_known_external_challenge_url(url: &str) -> bool {
+    let Ok(uri) = url.parse::<axum::http::Uri>() else {
+        return false;
+    };
+    if uri.scheme_str() != Some("https") {
+        return false;
+    }
+    let (Some(host), Some(authority)) = (uri.host(), uri.authority()) else {
+        return false;
+    };
+    if host.is_empty() || host.ends_with("..") {
+        return false;
+    }
+    if !authority.as_str().eq_ignore_ascii_case(host)
+        && !authority
+            .as_str()
+            .eq_ignore_ascii_case(&format!("{host}:443"))
+    {
+        return false;
+    }
+    let normalized_host = host.trim_end_matches('.').to_ascii_lowercase();
+    match normalized_host.as_str() {
+        "challenges.cloudflare.com" | "challenge.cloudflare.com" => true,
+        "accounts.google.com" => {
+            let path = uri.path();
+            path.eq_ignore_ascii_case("/v3/signin/challenge")
+                || path
+                    .to_ascii_lowercase()
+                    .starts_with("/v3/signin/challenge/")
+        }
+        _ => false,
+    }
+}
+
 /// Visible security text outside known chat-turn containers. A user or
 /// assistant quoting challenge wording must never trip the sticky provider
 /// circuit breaker. True verification overlays remain in the scan, and
@@ -478,6 +515,43 @@ mod tests {
             !super::is_challenge_page(&page),
             "hidden challenge text is not a blocker"
         );
+    }
+
+    #[test]
+    fn foreign_challenge_authority_must_be_exact_https_identity() {
+        for url in [
+            "https://challenges.cloudflare.com/",
+            "https://challenge.cloudflare.com/captcha",
+            "https://challenges.cloudflare.com:443/",
+            "https://accounts.google.com/v3/signin/challenge",
+            "https://accounts.google.com/v3/signin/challenge/continue",
+        ] {
+            assert!(
+                is_known_external_challenge_url(url),
+                "known external challenge must retain sticky protection: {url}"
+            );
+        }
+        for url in [
+            "https://attacker.invalid/captcha",
+            "https://attacker.invalid/challenge",
+            "https://other-provider.invalid/verify-human",
+            "http://challenges.cloudflare.com/",
+            "https://challenges.cloudflare.com:444/",
+            "https://challenges.cloudflare.com:65536/",
+            "https://x@challenges.cloudflare.com/",
+            "https://challenges.cloudflare.com.attacker.invalid/",
+            "https://challenges.cloudflare.com../",
+            "https://accounts.google.com/v3/signin",
+            "https://accounts.google.com/captcha",
+            "https://accounts.google.com:444/v3/signin/challenge",
+            "https://accounts.google.com.attacker.invalid/v3/signin/challenge",
+            "data:text/html,<div>captcha</div>",
+        ] {
+            assert!(
+                !is_known_external_challenge_url(url),
+                "unverified challenge URL must not disable a provider: {url}"
+            );
+        }
     }
 
     #[test]
