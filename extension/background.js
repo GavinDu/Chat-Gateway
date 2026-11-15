@@ -767,7 +767,12 @@ async function resyncLinkedProviders() {
 // so a changed connection cannot be hidden behind an old scheduled request.
 let scheduledProviderRefresh = null;
 function scheduleLinkedProviderResync() {
+  // Register a repeating alarm at install/startup, not on every alarm
+  // firing. Chrome already reschedules alarms with periodInMinutes.
   chrome.alarms?.create?.("relay-session-refresh", {periodInMinutes:15});
+  refreshLinkedProviders();
+}
+function refreshLinkedProviders() {
   pollConnection().catch(() => {});
   if (scheduledProviderRefresh) return;
   const run = resyncLinkedProviders();
@@ -891,5 +896,5 @@ async function completePendingConnection() {
 }
 chrome.alarms?.onAlarm?.addListener?.(alarm => {
   if (alarm.name === "relay-connection") pollConnection().catch(() => {});
-  if (alarm.name === "relay-session-refresh") scheduleLinkedProviderResync();
+  if (alarm.name === "relay-session-refresh") refreshLinkedProviders();
 });
