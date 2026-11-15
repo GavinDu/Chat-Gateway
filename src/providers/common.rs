@@ -436,16 +436,25 @@ mod transparent_response_probe_tests {
 
         let prior = response_probe(&page, &[".answer"], false);
         assert_eq!(prior.text.as_deref(), Some("visible prior answer"));
-        assert_eq!(prior.count, 1, "transparent reply must not raise root count");
+        assert_eq!(
+            prior.count, 1,
+            "transparent reply must not raise root count"
+        );
         assert_eq!(prior.populated_count, 1);
-        assert!(!prior.streaming, "transparent Stop must not extend generation");
+        assert!(
+            !prior.streaming,
+            "transparent Stop must not extend generation"
+        );
 
         page.evaluate("document.querySelector('#ghost').className = 'translucent'");
         let new_turn = response_probe(&page, &[".answer"], false);
         assert_eq!(new_turn.text.as_deref(), Some("invisible ghost answer"));
         assert_eq!(new_turn.count, 2);
         assert_eq!(new_turn.populated_count, 2);
-        assert!(new_turn.streaming, "nonzero-opacity Stop remains actionable");
+        assert!(
+            new_turn.streaming,
+            "nonzero-opacity Stop remains actionable"
+        );
     }
 
     #[tokio::test]
@@ -474,7 +483,10 @@ mod transparent_response_probe_tests {
 
         let hidden = response_probe(&page, &[".answer"], false);
         assert_eq!(hidden.text.as_deref(), Some("partial answer"));
-        assert!(!hidden.post_answer_affordance, "transparent Copy/Retry is not terminal evidence");
+        assert!(
+            !hidden.post_answer_affordance,
+            "transparent Copy/Retry is not terminal evidence"
+        );
 
         page.evaluate("document.querySelector('#ghost-actions').className = 'translucent'");
         let visible = response_probe(&page, &[".answer"], false);
