@@ -1547,7 +1547,7 @@ async fn click_send_or_enter_checked_with_unique_composer(
     // Synthetic Enter is not trusted and must not bypass that state.
     let send_js = serde_json::to_string(send_selectors)?;
     let disabled = page.evaluate(&format!(
-        "(() => {{ const input = {input_expr}; if (!input) return true; const selectors = {send_js}; const inputForm = input.form || input.closest('form'); let root = input; for (let depth = 0; root && depth < 12; depth++, root = root.parentElement) {{ if (root.tagName === 'BODY' || root.tagName === 'HTML') break; for (const selector of selectors) {{ for (const button of root.querySelectorAll(selector)) {{ const buttonForm = button.form || button.closest('form'); if (buttonForm && buttonForm !== inputForm) continue; if (button.getClientRects().length && window.getComputedStyle(button).visibility !== 'hidden' && window.getComputedStyle(button).pointerEvents !== 'none' && !button.closest('[inert], [aria-hidden=true]') && (button.disabled || button.matches(':disabled') || !!button.closest('fieldset[disabled]') || button.getAttribute('aria-disabled') === 'true' || !!button.closest('[aria-disabled=true]') || window.getComputedStyle(button).pointerEvents === 'none')) return true; }} }} if (root.tagName === 'FORM') break; }} const form = input.form || input.closest('form'); if (form && form.id) {{ for (const selector of selectors) {{ for (const button of document.querySelectorAll(selector)) {{ if (button.tagName !== 'BUTTON' || (button.form !== form && button.getAttribute('form') !== form.id) || form.contains(button)) continue; if (button.getClientRects().length && window.getComputedStyle(button).visibility !== 'hidden' && window.getComputedStyle(button).pointerEvents !== 'none' && !button.closest('[inert], [aria-hidden=true]') && (button.disabled || button.matches(':disabled') || !!button.closest('fieldset[disabled]') || button.getAttribute('aria-disabled') === 'true' || !!button.closest('[aria-disabled=true]') || window.getComputedStyle(button).pointerEvents === 'none')) return true; }} }} }} return false; }})()"
+        "(() => {{ const input = {input_expr}; if (!input) return true; const selectors = {send_js}; const inputForm = input.form || input.closest('form'); let root = input; for (let depth = 0; root && depth < 12; depth++, root = root.parentElement) {{ if (root.tagName === 'BODY' || root.tagName === 'HTML') break; for (const selector of selectors) {{ for (const button of root.querySelectorAll(selector)) {{ const buttonForm = button.form || button.closest('form'); if (buttonForm && buttonForm !== inputForm) continue; if (button.getClientRects().length && window.getComputedStyle(button).visibility !== 'hidden' && !button.closest('[inert], [aria-hidden=true]') && (button.disabled || button.matches(':disabled') || !!button.closest('fieldset[disabled]') || button.getAttribute('aria-disabled') === 'true' || !!button.closest('[aria-disabled=true]') || window.getComputedStyle(button).pointerEvents === 'none')) return true; }} }} if (root.tagName === 'FORM') break; }} const form = input.form || input.closest('form'); if (form && form.id) {{ for (const selector of selectors) {{ for (const button of document.querySelectorAll(selector)) {{ if (button.tagName !== 'BUTTON' || (button.form !== form && button.getAttribute('form') !== form.id) || form.contains(button)) continue; if (button.getClientRects().length && window.getComputedStyle(button).visibility !== 'hidden' && !button.closest('[inert], [aria-hidden=true]') && (button.disabled || button.matches(':disabled') || !!button.closest('fieldset[disabled]') || button.getAttribute('aria-disabled') === 'true' || !!button.closest('[aria-disabled=true]') || window.getComputedStyle(button).pointerEvents === 'none')) return true; }} }} }} return false; }})()"
     ));
     if disabled.as_bool() == Some(true) {
         anyhow::bail!("provider send control is disabled or composer is missing");
@@ -1843,6 +1843,101 @@ mod draft_at_click_tests {
         .unwrap();
         assert!(clicked);
         assert_eq!(page.evaluate("window.sent === true").as_bool(), Some(true));
+    }
+
+    #[tokio::test]
+    async fn css_blocked_send_never_authorizes_legacy_enter_fallback() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        for html in [
+            r#"<html><body><form>
+                <textarea id="prompt">draft</textarea>
+                <section style="pointer-events:none">
+                    <button id="send" type="button" onclick="window.sent++">Send</button>
+                </section>
+                <script>
+                    window.sent = 0; window.enters = 0;
+                    document.querySelector('#prompt').addEventListener(
+                        'keydown', () => window.enters++);
+                </script>
+            </form></body></html>"#,
+            r#"<html><body>
+                <form id="target"><textarea id="prompt">draft</textarea></form>
+                <form id="unrelated"></form>
+                <button form="unrelated" class="send" type="button"
+                    onclick="window.unrelated++">Other form</button>
+                <button id="send" class="send" form="target" type="button"
+                    style="pointer-events:none" onclick="window.sent++">Send</button>
+                <script>
+                    window.sent = 0; window.unrelated = 0; window.enters = 0;
+                    document.querySelector('#prompt').addEventListener(
+                        'keydown', () => window.enters++);
+                </script>
+            </body></html>"#,
+        ] {
+            let mut page = browser.new_page().await.unwrap();
+            let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+            page.goto(&format!("data:text/html,{encoded}"))
+                .await
+                .unwrap();
+            let error = click_send_or_enter_checked_with_policy(
+                &mut page,
+                &["#send"],
+                "#prompt",
+                80,
+                Some("draft"),
+                true,
+                None,
+            )
+            .await
+            .expect_err("CSS-blocked Send cannot enable legacy synthetic Enter");
+            assert!(
+                error.to_string().contains("send control is disabled"),
+                "the refusal must identify the blocked Send without leaking the draft: {error}"
+            );
+            assert!(!error.to_string().contains("draft"));
+            assert_eq!(page.evaluate("window.sent").as_f64(), Some(0.0));
+            assert_eq!(page.evaluate("window.enters").as_f64(), Some(0.0));
+            assert_eq!(page.evaluate("window.unrelated || 0").as_f64(), Some(0.0));
+        }
+    }
+
+    #[tokio::test]
+    async fn unrelated_css_blocked_send_does_not_disable_missing_target_send() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <form id="target"><textarea id="prompt">draft</textarea></form>
+            <form id="other"></form>
+            <button class="send" form="other" type="button"
+                style="pointer-events:none">Unrelated</button>
+            <script>
+                window.enters = 0;
+                document.querySelector('#prompt').addEventListener(
+                    'keydown', () => window.enters++);
+            </script>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        assert!(!click_send_or_enter_checked_with_policy(
+            &mut page,
+            &["button.send"],
+            "#prompt",
+            80,
+            Some("draft"),
+            true,
+            None,
+        )
+        .await
+        .unwrap());
+        assert!(page.evaluate("window.enters").as_f64().unwrap_or(0.0) > 0.0);
     }
 
     #[tokio::test]
