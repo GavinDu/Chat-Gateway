@@ -33,6 +33,13 @@ impl PageSession {
         provider: Provider,
         session_file: Option<&session::SessionFile>,
     ) -> Result<()> {
+        // Pinned Obscura ReadableStream lacks underlyingSource.pull(). Only
+        // ChatGPT may receive the shape-gated compatibility preload, and it
+        // must run before page scripts (including on the storage reload).
+        // The JS itself also verifies the exact HTTPS first-party origin.
+        if provider == Provider::ChatGPT {
+            page.add_preload_script(include_str!("chatgpt_streams.js"));
+        }
         bounded_warmup(SESSION_WARMUP_TIMEOUT, async {
             let cookie_restore = session_file
                 .map(|file| session::restore_cookies(browser, file, provider.name()))
