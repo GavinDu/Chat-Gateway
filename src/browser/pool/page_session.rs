@@ -266,7 +266,10 @@ mod chatgpt_stream_preload_tests {
         ))
         .await
         .unwrap();
-        assert_eq!(page.evaluate("globalThis.__wasPatched").as_bool(), Some(false));
+        assert_eq!(
+            page.evaluate("globalThis.__wasPatched").as_bool(),
+            Some(false)
+        );
     }
 
     #[tokio::test]
@@ -303,7 +306,10 @@ mod chatgpt_stream_preload_tests {
         .await
         .unwrap();
         crate::providers::common::drive_page(&mut page, Duration::from_millis(60)).await;
-        assert_eq!(page.evaluate("globalThis.__wasPatched").as_bool(), Some(true));
+        assert_eq!(
+            page.evaluate("globalThis.__wasPatched").as_bool(),
+            Some(true)
+        );
         assert_eq!(
             page.evaluate("globalThis.__streamAnswer").as_str(),
             Some("pinned-compat-answer")
