@@ -91,6 +91,79 @@ test("explicit provider sync reports a skipped upload instead of success", async
   assert.deepEqual(f.calls, ["chatgpt", "chatgpt"]);
 });
 
+test("concurrent cross-provider links serialize one shared membership and epoch map", async () => {
+  const f=loadBackground([],[],true);
+  const state={gateway:"http://127.0.0.1:8080",connectionMode:"local",
+    linkedProviders:[],providerLinkEpochs:{}};
+  let releaseFirst;
+  let began;
+  const started=new Promise(resolve=>{began=resolve});
+  const blocked=new Promise(resolve=>{releaseFirst=resolve});
+  let writes=0;
+  f.sandbox.chrome.storage.local.get=async()=>({...state});
+  f.sandbox.chrome.storage.local.set=async update=>{
+    writes++;
+    if(writes===1){began(); await blocked;}
+    Object.assign(state,update);
+  };
+  const expected={gateway:state.gateway,connectionMode:"local"};
+  const send=(type,provider)=>new Promise(resolve=>
+    f.listeners.message[0]({type,provider,connection:expected},{},resolve));
+  const first=send("link-provider","chatgpt");
+  await started;
+  const second=send("link-provider","claude");
+  for(let i=0;i<4;i++)await flushAsyncWork();
+  assert.equal(writes,1,"second link must not run a storage get/set during first write");
+  releaseFirst();
+  assert.equal((await first).ok,true);
+  assert.equal((await second).ok,true);
+  assert.deepEqual(Array.from(state.linkedProviders).sort(),["chatgpt","claude"]);
+  assert.ok(state.providerLinkEpochs.chatgpt);
+  assert.ok(state.providerLinkEpochs.claude);
+  assert.notEqual(state.providerLinkEpochs.chatgpt,state.providerLinkEpochs.claude);
+  const before={...state.providerLinkEpochs};
+  const restarted=loadBackground([],[],true);
+  restarted.sandbox.chrome.storage.local.get=async()=>({...state});
+  restarted.sandbox.chrome.storage.local.set=async next=>Object.assign(state,next);
+  const repeated=await new Promise(resolve=>restarted.listeners.message[0]({
+    type:"link-provider",provider:"chatgpt",connection:expected},{},resolve));
+  assert.equal(repeated.ok,true);
+  assert.equal(repeated.alreadyLinked,true);
+  assert.deepEqual({...state.providerLinkEpochs},before,"MV3 restart preserves epochs");
+});
+
+test("logout of provider B racing link of A does not resurrect B consent",async()=>{
+  const f=loadBackground([],[],true);
+  const state={gateway:"http://127.0.0.1:8080",connectionMode:"local",
+    linkedProviders:["claude"],providerLinkEpochs:{claude:"old-consent"}};
+  let release;
+  let entered;
+  const started=new Promise(resolve=>{entered=resolve});
+  const gate=new Promise(resolve=>{release=resolve});
+  let writes=0;
+  f.sandbox.chrome.storage.local.get=async()=>({...state});
+  f.sandbox.chrome.storage.local.set=async update=>{
+    writes++;
+    if(writes===1){entered(); await gate;}
+    Object.assign(state,update);
+  };
+  f.sandbox.relayFetch=async()=>({ok:true,status:200});
+  const send=(type,provider,connection)=>new Promise(resolve=>
+    f.listeners.message[0]({type,provider,connection},{},resolve));
+  const newLink=send("link-provider","chatgpt",{
+    gateway:state.gateway,connectionMode:"local"});
+  await started;
+  const logout=send("logout-provider","claude");
+  for(let i=0;i<4;i++)await flushAsyncWork();
+  assert.equal(writes,1);
+  release();
+  assert.equal((await newLink).ok,true);
+  assert.equal((await logout).ok,true);
+  assert.deepEqual(Array.from(state.linkedProviders),["chatgpt"]);
+  assert.ok(state.providerLinkEpochs.chatgpt);
+  assert.notEqual(state.providerLinkEpochs.claude,"old-consent");
+});
+
 test("same-gateway unlink and relink epoch cannot attribute the old upload to new consent", async () => {
   const f = loadBackground(["chatgpt"], [], true);
   const state = {
