@@ -29,6 +29,25 @@ function loadPopup({failCookieDomain = null, includeSecondProvider = false, manu
   }
   const runtime = { async sendMessage(request) {
     chromeCalls.push(request.type + ":" + (request.provider||""));
+    if(request.type==="reserve-pending-approval") {
+      if(values.pendingApprovalRequest || values.pendingConnection) return {ok:false};
+      values.pendingApprovalRequest={gateway:request.gateway,generation:"f".repeat(32)};
+      return {ok:true,generation:"f".repeat(32)};
+    }
+    if(request.type==="install-pending-approval") {
+      if(request.generation!==values.pendingApprovalRequest?.generation ||
+          request.gateway!==values.pendingApprovalRequest.gateway) return {ok:false};
+      const pending={gateway:request.gateway,request_id:request.request_id,
+        poll_secret:request.poll_secret,expires:Date.now()+300000,
+        approvalGeneration:request.generation};
+      values.pendingConnection=pending;
+      values.pendingApprovalRequest=null;
+      return {ok:true,pending:{gateway:pending.gateway,request_id:pending.request_id,expires:pending.expires}};
+    }
+    if(request.type==="release-pending-approval") {
+      if(values.pendingApprovalRequest?.generation===request.generation) values.pendingApprovalRequest=null;
+      return {ok:true,released:true};
+    }
     if(request.type==="relay-diagnostics" && diagnosticsFailure) return diagnosticsFailure;
     if(request.type==="relay-diagnostics" && diagnosticsSync) {
       return {ok:false,extension:{provider_sync:{metaai:diagnosticsSync}}};
