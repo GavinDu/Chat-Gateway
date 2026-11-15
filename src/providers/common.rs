@@ -734,6 +734,7 @@ pub fn visible_composer_exists(page: &Page, selectors: &[&str]) -> bool {
                         if ({editable} &&
                             input.getClientRects().length > 0 &&
                             window.getComputedStyle(input).visibility !== "hidden" &&
+                            window.getComputedStyle(input).pointerEvents !== "none" &&
                             !input.closest('[hidden], [inert], [aria-hidden="true"], [aria-disabled="true"], [aria-readonly="true"]') &&
                             !input.disabled && !input.matches(':disabled') &&
                             !input.closest('fieldset[disabled]') && !input.readOnly &&
@@ -754,7 +755,7 @@ pub fn visible_composer_exists(page: &Page, selectors: &[&str]) -> bool {
 fn visible_input_query(selector_js: &str) -> String {
     let editable = editable_composer_condition("el");
     format!(
-        "Array.from(document.querySelectorAll({selector_js})).find(el => {editable} && el.getClientRects().length > 0 && window.getComputedStyle(el).visibility !== 'hidden' && !el.closest('[hidden], [inert], [aria-hidden=\"true\"], [aria-disabled=\"true\"], [aria-readonly=\"true\"]') && !el.disabled && !el.matches(':disabled') && !el.closest('fieldset[disabled]') && !el.readOnly && el.getAttribute('aria-disabled') !== 'true' && el.getAttribute('aria-readonly') !== 'true' && el.getAttribute('contenteditable') !== 'false')"
+        "Array.from(document.querySelectorAll({selector_js})).find(el => {editable} && el.getClientRects().length > 0 && window.getComputedStyle(el).visibility !== 'hidden' && window.getComputedStyle(el).pointerEvents !== 'none' && !el.closest('[hidden], [inert], [aria-hidden=\"true\"], [aria-disabled=\"true\"], [aria-readonly=\"true\"]') && !el.disabled && !el.matches(':disabled') && !el.closest('fieldset[disabled]') && !el.readOnly && el.getAttribute('aria-disabled') !== 'true' && el.getAttribute('aria-readonly') !== 'true' && el.getAttribute('contenteditable') !== 'false')"
     )
 }
 
@@ -772,6 +773,7 @@ fn actionable_composer_count_expression(selectors: &[&str]) -> anyhow::Result<St
                         if ({editable} &&
                             el.getClientRects().length > 0 &&
                             window.getComputedStyle(el).visibility !== 'hidden' &&
+                            window.getComputedStyle(el).pointerEvents !== 'none' &&
                             !el.closest('[hidden], [inert], [aria-hidden="true"], [aria-disabled="true"], [aria-readonly="true"]') &&
                             !el.disabled && !el.matches(':disabled') &&
                             !el.closest('fieldset[disabled]') &&
@@ -855,6 +857,67 @@ mod visible_composer_tests {
         page.evaluate("document.querySelector('#search').removeAttribute('hidden')");
         assert!(super::require_unique_actionable_composer(&page, &["#thread"]).is_ok());
         assert!(super::require_unique_actionable_composer(&page, &["#search", "#thread"]).is_err());
+    }
+
+    #[tokio::test]
+    async fn pointer_events_disabled_composers_are_not_ready_or_synthetic_type_targets() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <section id="locked-root" style="pointer-events:none">
+                <textarea id="locked"></textarea>
+                <div id="rich" contenteditable="true" role="textbox">Old draft</div>
+            </section>
+            <textarea id="active"></textarea>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+
+        assert!(!visible_composer_exists(&page, &["#locked", "#rich"]));
+        assert!(visible_composer_exists(&page, &["#locked", "#active"]));
+        assert!(
+            super::require_unique_actionable_composer(&page, &["#locked", "#rich", "#active"])
+                .is_ok(),
+            "a pointer-disabled clone must not count as a second actionable editor"
+        );
+
+        let error = super::human_type(&page, &["#locked"], "private draft")
+            .await
+            .expect_err("pointer-disabled editor must not be selected for typing");
+        assert!(!error.to_string().contains("private draft"));
+        assert_eq!(
+            page.evaluate("document.querySelector('#locked').value")
+                .as_str(),
+            Some("")
+        );
+        assert!(
+            super::human_type(&page, &["#active"], "allowed draft")
+                .await
+                .is_ok()
+        );
+        assert_eq!(
+            page.evaluate("document.querySelector('#active').value")
+                .as_str(),
+            Some("allowed draft")
+        );
+
+        page.evaluate("document.querySelector('#locked-root').style.pointerEvents = 'auto'");
+        assert!(visible_composer_exists(&page, &["#locked"]));
+        assert!(visible_composer_exists(&page, &["#rich"]));
+        assert!(
+            super::require_unique_actionable_composer(&page, &["#locked", "#active"]).is_err(),
+            "two currently clickable composers must still fail closed as ambiguous"
+        );
+        page.evaluate("document.querySelector('#locked').disabled = true");
+        assert!(
+            super::require_unique_actionable_composer(&page, &["#locked", "#active"]).is_ok(),
+            "only a genuinely actionable editor remains"
+        );
     }
 
     #[tokio::test]
