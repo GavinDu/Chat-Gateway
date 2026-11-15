@@ -34,36 +34,50 @@ function loadPopup({failCookieDomain = null, includeSecondProvider = false, manu
       return {ok:false,extension:{provider_sync:{metaai:diagnosticsSync}}};
     }
     if(request.type==="link-provider") {
-      const expected = request.connection;
-      if (expected.gateway !== values.gateway ||
-          expected.token !== values.token ||
-          expected.connectionMode !== values.connectionMode) {
+      const expected=request.connection;
+      if(expected.gateway!==values.gateway || expected.token!==values.token ||
+          expected.connectionMode!==values.connectionMode) {
         return {ok:false,error:"Gateway connection changed before provider link."};
       }
       const alreadyLinked=(values.linkedProviders || []).includes(request.provider);
-      const old=values.providerLinkEpochs || {};
-      const epoch = alreadyLinked && old[request.provider]
-        ? old[request.provider] : "test-link-" + (chromeCalls.length);
+      const previous=(values.providerLinkPendingAttempts || {})[request.provider];
+      const tentative=!alreadyLinked || Boolean(previous);
+      const epochs=values.providerLinkEpochs || {};
+      const epoch=tentative && previous!==request.attemptId
+        ? "test-link-"+chromeCalls.length
+        : (epochs[request.provider] || "test-link-"+chromeCalls.length);
       values.linkedProviders=Array.from(new Set([...(values.linkedProviders || []),request.provider]));
-      values.providerLinkEpochs={...old,[request.provider]:epoch};
-      return {ok:true,alreadyLinked};
+      values.providerLinkEpochs={...epochs,[request.provider]:epoch};
+      if(tentative) values.providerLinkPendingAttempts={
+        ...(values.providerLinkPendingAttempts || {}),[request.provider]:request.attemptId
+      };
+      return {ok:true,alreadyLinked:alreadyLinked&&!tentative,tentative};
     }
-    if(request.type==="rollback-provider-link") {
-      const current=(values.providerLinkEpochs || {})[request.provider];
+    if(request.type==="commit-provider-link" || request.type==="rollback-provider-link") {
+      const current=(values.providerLinkPendingAttempts || {})[request.provider];
       const expected=request.connection;
-      if (expected.gateway === values.gateway && expected.token === values.token &&
-          expected.connectionMode === values.connectionMode && current === request.epoch) {
-        values.linkedProviders=(values.linkedProviders || []).filter(p=>p!==request.provider);
-        values.providerLinkEpochs={...(values.providerLinkEpochs || {}),
-          [request.provider]:"test-revoked-"+chromeCalls.length};
+      const owned=expected.gateway===values.gateway && expected.token===values.token &&
+        expected.connectionMode===values.connectionMode && current===request.attemptId;
+      if(owned) {
+        const remaining={...(values.providerLinkPendingAttempts || {})};
+        delete remaining[request.provider];
+        values.providerLinkPendingAttempts=remaining;
+        if(request.type==="rollback-provider-link") {
+          values.linkedProviders=(values.linkedProviders || []).filter(p=>p!==request.provider);
+          values.providerLinkEpochs={...(values.providerLinkEpochs || {}),
+            [request.provider]:"test-revoked-"+chromeCalls.length};
+        }
       }
-      return {ok:true};
+      return {ok:true,[request.type==="commit-provider-link" ? "committed":"rolledBack"]:owned};
     }
     if(request.type==="logout-provider") {
       server.linked=false;
       values.linkedProviders=values.linkedProviders.filter(p=>p!==request.provider);
       values.providerLinkEpochs={...(values.providerLinkEpochs || {}),
         [request.provider]:"test-logout-"+chromeCalls.length};
+      const pending={...(values.providerLinkPendingAttempts || {})};
+      delete pending[request.provider];
+      values.providerLinkPendingAttempts=pending;
     }
     if(request.type==="sync-provider") server.linked=true;
     return {ok:true};
