@@ -64,6 +64,13 @@ fn login_redirect_error(url: &str) -> Option<anyhow::Error> {
         .then(|| anyhow::Error::new(crate::browser::pool::ProviderSessionExpiredError))
 }
 
+/// Both the periodic and final completion samples must classify a new
+/// first-party authentication redirect. A stable old SPA reply may otherwise
+/// survive in the same origin while the route changes to /auth/login.
+fn probe_login_redirect_error(probe: &common::ResponseProbe) -> Option<anyhow::Error> {
+    login_redirect_error(&probe.url)
+}
+
 /// Primary selectors for an adapter (diagnostics + readiness reporting).
 // Selector metadata is retained for upcoming adapter contract/readiness diagnostics.
 #[allow(dead_code)]
@@ -606,6 +613,47 @@ mod send_auth_redirect_tests {
     }
 
     #[test]
+    fn final_response_snapshot_must_reject_auth_route_at_unchanged_old_text() {
+        use crate::providers::common::ResponseProbe;
+        let initial = ResponseProbe {
+            url: "https://chatgpt.com/c/turn".to_owned(),
+            text: Some("previous answer".to_owned()),
+            count: 1,
+            populated_count: 1,
+            ..ResponseProbe::default()
+        };
+        let mut final_probe = initial.clone();
+        final_probe.url = "https://chatgpt.com/auth/login".to_owned();
+        // Text and counts can remain stable during an SPA auth transition.
+        assert!(super::final_probe_confirms_completion(
+            initial.text.as_deref().unwrap(),
+            initial.count,
+            initial.populated_count,
+            &final_probe,
+            super::DoneSignal::StableResponseText,
+            false,
+            false,
+        ));
+        let error = super::probe_login_redirect_error(&final_probe)
+            .expect("a final first-party auth route must override stable stale text");
+        assert!(error
+            .downcast_ref::<ProviderSessionExpiredError>()
+            .is_some());
+        assert!(
+            super::probe_login_redirect_error(&initial).is_none(),
+            "normal final conversation sample must not be an auth redirect"
+        );
+        final_probe.url =
+            "https://chatgpt.com/c/turn?next=https%3A%2F%2Faccounts.google.com%2F".into();
+        assert!(super::probe_login_redirect_error(&final_probe).is_none());
+        final_probe.url = "https://attacker.invalid/login".into();
+        assert!(
+            super::probe_login_redirect_error(&final_probe).is_none(),
+            "unknown origin remains a redacted off-provider error, not expired auth"
+        );
+    }
+
+    #[test]
     fn normal_conversations_and_redirect_strings_are_not_auth_failures() {
         for url in [
             "https://chatgpt.com/c/authoring",
@@ -1043,7 +1091,7 @@ pub async fn run_send(
         }
         // A login redirect after Send must not look like a slow model or
         // allow the previous warm-page response to complete successfully.
-        if let Some(auth_error) = login_redirect_error(&probe.url) {
+        if let Some(auth_error) = probe_login_redirect_error(&probe) {
             let _ = chunks.send(Err(auth_error)).await;
             return;
         }
@@ -1174,6 +1222,10 @@ pub async fn run_send(
                                 .await;
                             return;
                         }
+                        if let Some(auth_error) = probe_login_redirect_error(&final_probe) {
+                            let _ = chunks.send(Err(auth_error)).await;
+                            return;
+                        }
                         if let Err(error) = require_expected_response_origin(adapter.name(), page) {
                             let _ = chunks.send(Err(error)).await;
                             return;
@@ -1293,6 +1345,10 @@ pub async fn run_send(
                     let _ = chunks
                         .send(Err(provider_challenge_error(adapter.name())))
                         .await;
+                    return;
+                }
+                if let Some(auth_error) = probe_login_redirect_error(&final_probe) {
+                    let _ = chunks.send(Err(auth_error)).await;
                     return;
                 }
                 if let Err(error) = require_expected_response_origin(adapter.name(), page) {
