@@ -2765,7 +2765,6 @@ mod all_provider_origin_fence_tests {
         }
     }
 
-
     #[test]
     fn current_catalog_provider_urls_map_to_their_exact_adapter_identity() {
         for spec in crate::providers::ADAPTERS {
