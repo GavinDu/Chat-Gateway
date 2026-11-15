@@ -129,7 +129,7 @@ test("concurrent cross-provider links serialize one shared membership and epoch 
     type:"link-provider",provider:"chatgpt",connection:expected},{},resolve));
   assert.equal(repeated.ok,true);
   assert.equal(repeated.alreadyLinked,true);
-  assert.deepEqual(state.providerLinkEpochs,before,"MV3 restart preserves epochs");
+  assert.deepEqual({...state.providerLinkEpochs},before,"MV3 restart preserves epochs");
 });
 
 test("logout of provider B racing link of A does not resurrect B consent",async()=>{
