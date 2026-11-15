@@ -2178,15 +2178,36 @@ pub async fn discover_models(
 /// ChatGPT, Grok, Qwen and Manus require an observable composer/response
 /// transition to acknowledge a send. Match actual provider hosts and Grok's alternate X
 /// route, never incidental substrings in query parameters or attacker hosts.
+/// A parsed HTTP authority can report no u16 port for an *invalid* literal
+/// such as :65536. Compare the complete authority so an overflowing, empty,
+/// noncanonical or malformed port can never masquerade as a missing port.
+/// This check is shared by submission and all-provider route classification.
+fn safe_provider_https_authority(uri: &axum::http::Uri) -> bool {
+    if uri.scheme_str() != Some("https") {
+        return false;
+    }
+    let Some(authority) = uri.authority() else {
+        return false;
+    };
+    let Some(host) = uri.host() else {
+        return false;
+    };
+    // Preserve a single fully-qualified DNS trailing dot (the browser's
+    // location guard does too), but never normalize two or more away.
+    if host.is_empty() || host.ends_with("..") {
+        return false;
+    }
+    authority.as_str().eq_ignore_ascii_case(host)
+        || authority
+            .as_str()
+            .eq_ignore_ascii_case(&format!("{host}:443"))
+}
+
 pub(crate) fn submission_provider_for_url(url: &str) -> Option<&'static str> {
     let Ok(uri) = url.parse::<axum::http::Uri>() else {
         return None;
     };
-    if uri.scheme_str() != Some("https")
-        || uri.authority().is_none_or(|authority| {
-            authority.as_str().contains('@') || authority.port_u16().is_some_and(|port| port != 443)
-        })
-    {
+    if !safe_provider_https_authority(&uri) {
         return None;
     }
     let host = uri
@@ -2215,11 +2236,7 @@ fn provider_origin_for_url(url: &str) -> Option<&'static str> {
         return Some(provider);
     }
     let uri = url.parse::<axum::http::Uri>().ok()?;
-    if uri.scheme_str() != Some("https")
-        || uri.authority().is_none_or(|authority| {
-            authority.as_str().contains('@') || authority.port_u16().is_some_and(|port| port != 443)
-        })
-    {
+    if !safe_provider_https_authority(&uri) {
         return None;
     }
     match uri
@@ -2346,6 +2363,47 @@ mod all_provider_origin_fence_tests {
         ] {
             assert_ne!(provider_origin_for_url(url), Some(provider), "{url}");
             assert!(require_provider_origin(provider, url).is_err(), "{url}");
+        }
+    }
+
+    #[test]
+    fn noncanonical_or_overflowed_port_never_authorizes_provider_origin() {
+        use super::submission_provider_for_url;
+
+        for url in [
+            "https://chatgpt.com:65536/c/abc",
+            "https://grok.com:65536/chat",
+            "https://x.com:65536/i/grok",
+            "https://chat.qwen.ai:0443/",
+            "https://manus.im:443junk/app",
+            "https://www.manus.im:/app",
+            "https://claude.ai:65536/new",
+            "https://gemini.google.com:0443/app",
+            "https://www.meta.ai:65536/",
+            "https://chat.mistral.ai:65536/",
+            "https://www.perplexity.ai:65536/search",
+            "https://user:password@manus.im/app",
+            "https://chatgpt.com../c",
+            "https://www.meta.ai../",
+            "https://chatgpt.com.attacker.invalid/c",
+            "http://chatgpt.com/c",
+        ] {
+            assert_eq!(provider_origin_for_url(url), None, "{url}");
+            assert_eq!(submission_provider_for_url(url), None, "{url}");
+        }
+
+        for (provider, url) in [
+            ("chatgpt", "https://chatgpt.com:443/c/abc"),
+            ("grok", "https://x.com:443/i/grok/thread"),
+            ("qwen", "https://chat.qwen.ai:443/"),
+            ("manus", "https://www.manus.im:443/app"),
+            ("claude", "https://CLAUDE.AI:443/new"),
+            ("gemini", "https://gemini.google.com:443/app"),
+            ("metaai", "https://www.meta.ai:443/"),
+            ("mistral", "https://chat.mistral.ai:443/"),
+            ("perplexity", "https://www.perplexity.ai:443/search"),
+        ] {
+            assert_eq!(provider_origin_for_url(url), Some(provider), "{url}");
         }
     }
 
