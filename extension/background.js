@@ -266,6 +266,41 @@ function disconnectLocalRelay(expected) {
     return true;
   });
 }
+// A remote legacy pairing response may cross the popup/worker boundary only
+// from the extension's own popup, never from an injected provider content script.
+function fromTrustedPopup(sender) {
+  try { return sender?.url === chrome.runtime.getURL("popup.html") && !sender.tab; }
+  catch { return false; }
+}
+function connectPairedRelay(gateway, token, expected) {
+  return queueConsentMutation(async () => {
+    if (typeof gateway !== "string" || normalizeGateway(gateway) !== gateway ||
+        !gateway.startsWith("https://") || isLocalGateway(gateway) ||
+        typeof token !== "string" || !/^[a-f0-9]{64}$/.test(token)) {
+      throw new Error("Invalid paired relay origin or response.");
+    }
+    if (!await chrome.permissions.contains({origins:[gateway + "/*"]})) {
+      throw new Error("Remote gateway host permission is missing.");
+    }
+    const current = await chrome.storage.local.get(
+      ["gateway", "token", "connectionMode", "linkedProviders", "pendingConnection"]);
+    if (!sameRelayIdentity(expected, current)) {
+      throw new Error("Remote gateway identity changed while pairing.");
+    }
+    // A remote paired token is a new installation identity, even when its
+    // hostname matches. Never migrate old provider consent into this token.
+    // A newer pending approval must not silently commit underneath a remote
+    // manual pair. The queued commit owns only the state observed here.
+    await chrome.storage.local.set({
+      gateway, token, connectionMode:"paired", linkedProviders:[],
+      providerLinkEpochs:{}, providerLinkPendingAttempts:{},
+      pendingConnection:null, relaySnapshotVersions:{}, localDisconnected:false
+    });
+    lastGatewayCheck = null;
+    providerDiagnostics.clear();
+    return true;
+  });
+}
 // Explicit remote Unpair is a connection transition, not a popup-side
 // storage cleanup. Its old HTTPS response must not clear a new connection
 // or race a worker-owned provider link/approval commit.
@@ -448,7 +483,7 @@ chrome.cookies.onChanged.addListener(({cookie}) => {
   }
 });
 
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === "relay-diagnostics") {
     relayDiagnostics(message.force === true).then(sendResponse).catch(() => sendResponse({ok:false, gateway_issue:"diagnostics_unavailable"}));
     return true;
@@ -467,6 +502,16 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     disconnectLocalRelay(message.connection)
       .then(() => sendResponse({ok:true}))
       .catch(() => sendResponse({ok:false, error:"Local gateway connection changed before disconnect."}));
+    return true;
+  }
+  if (message?.type === "connect-paired-relay") {
+    if (!fromTrustedPopup(sender)) {
+      sendResponse({ok:false,error:"Remote pairing requires the extension popup."});
+      return false;
+    }
+    connectPairedRelay(message.gateway, message.token, message.connection)
+      .then(() => sendResponse({ok:true}))
+      .catch(() => sendResponse({ok:false,error:"Remote pairing was rejected or superseded."}));
     return true;
   }
   if (message?.type === "disconnect-paired-relay") {
