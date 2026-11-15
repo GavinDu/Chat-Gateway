@@ -229,7 +229,7 @@ pub const STREAMING_SELECTOR: &str = r#"[data-is-streaming="true"]"#;
 pub struct ResponseProbe {
     pub text: Option<String>,
     pub count: usize,
-    /// Visible response roots with non-whitespace rendered text; excludes blank placeholders.
+    /// Nonempty visible roots of the selector that supplied `text`, not unrelated fallback selectors.
     pub populated_count: usize,
     pub streaming: bool,
     pub post_answer_affordance: bool,
@@ -315,6 +315,7 @@ pub fn response_probe(
             const nodes = new Set();
             let text = null;
             let lastResponseNode = null;
+            let populatedCount = 0;
             for (const selector of selectors) {{
                 try {{
                     let matches = [];
@@ -343,6 +344,11 @@ pub fn response_probe(
                             if (content.trim()) {{
                                 text = content;
                                 lastResponseNode = node;
+                                // Count only roots belonging to the selector
+                                // that actually supplied text. A different
+                                // fallback selector must never certify the
+                                // old text as a fresh response.
+                                populatedCount = matches.filter(item => renderedText(item).trim()).length;
                                 break;
                             }}
                         }}
@@ -390,7 +396,6 @@ pub fn response_probe(
                 // An unrecognized turn root cannot safely borrow controls
                 // from an ancestor. Retain the conservative idle fallback.
             }}
-            const populatedCount = Array.from(nodes).filter(node => renderedText(node).trim()).length;
             return {{ text, count: nodes.size, populatedCount, streaming, postAnswerAffordance, url, challenge }};
         }})()"#,
         check_body_challenge = check_body_challenge,
@@ -596,6 +601,35 @@ mod streaming_visibility_regression_tests {
             blank.text, None,
             "whitespace cannot masquerade as generated text"
         );
+    }
+
+    #[tokio::test]
+    async fn populated_fallback_selector_cannot_certify_old_primary_text() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <article><div class="answer">prior answer</div></article>
+            <article><div class="fallback">another selector answer</div></article>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+
+        let probe = response_probe(&page, &[".answer", ".fallback"], false);
+        assert_eq!(probe.text.as_deref(), Some("prior answer"));
+        assert_eq!(probe.count, 2);
+        assert_eq!(
+            probe.populated_count, 1,
+            "the lower-priority fallback may not reset the old reply tracker"
+        );
+        page.evaluate("document.querySelector('body').insertAdjacentHTML('beforeend', '<div class=answer>new current reply</div>')");
+        let next = response_probe(&page, &[".answer", ".fallback"], false);
+        assert_eq!(next.text.as_deref(), Some("new current reply"));
+        assert_eq!(next.populated_count, 2);
     }
 
     #[tokio::test]
