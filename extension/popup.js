@@ -431,7 +431,9 @@ $("unpair").addEventListener("click", async () => {
     if (state.connectionMode === "local" || !state.gateway?.startsWith("https://") || !state.token) {
       throw new Error("Paired gateway connection changed; refresh before disconnecting.");
     }
-    const response = await relayFetch("/relay/v1/unpair",{method:"POST",body:"{}"});
+    // Bind the network revoke to the same install identity that the worker
+    // will later clear; never revoke a newer token after a popup await.
+    const response = await relayFetch("/relay/v1/unpair",{method:"POST",body:"{}"},state);
     if (!response.ok) throw new Error("Could not revoke the install token.");
     const pending = state.pendingConnection;
     const result = await chrome.runtime.sendMessage({
