@@ -2233,9 +2233,10 @@ mod last_visible_response_text_tests {
 /// must never supply model picker labels to a different provider's catalog.
 /// Reuse the exact origin policy already enforced for prompt submission.
 fn require_model_discovery_origin(page: &Page, set: &SelectorSet) -> anyhow::Result<()> {
-    let provider = submission_provider_for_url(set.url)
+    let provider = provider_origin_for_url(set.url)
         .ok_or_else(|| anyhow::anyhow!("provider model discovery configuration origin invalid"))?;
-    require_submission_provider_route(provider, page)
+    check_session(provider, page)?;
+    require_page_provider_origin(provider, page)
 }
 
 /// Discover models without sending a message (v1 body): navigate, open
