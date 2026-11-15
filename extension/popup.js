@@ -424,11 +424,28 @@ $("unpair").addEventListener("click", async () => {
       message("Local extension disconnected; provider sessions remain in the encrypted gateway vault.");
       return;
     }
+    // Capture the exact prior paired identity before awaiting network
+    // revocation. A delayed callback must never clear a re-paired gateway.
+    const state = await chrome.storage.local.get(
+      ["gateway", "token", "connectionMode", "pendingConnection"]);
+    if (state.connectionMode === "local" || !state.gateway?.startsWith("https://") || !state.token) {
+      throw new Error("Paired gateway connection changed; refresh before disconnecting.");
+    }
     const response = await relayFetch("/relay/v1/unpair",{method:"POST",body:"{}"});
     if (!response.ok) throw new Error("Could not revoke the install token.");
-    // A stale approval should not be able to silently reconnect a gateway
-    // after the user explicitly revoked this install.
-    await chrome.storage.local.remove(["token","linkedProviders","pendingConnection","relaySnapshotVersions"]);
+    const pending = state.pendingConnection;
+    const result = await chrome.runtime.sendMessage({
+      type:"disconnect-paired-relay",
+      connection:{
+        gateway:state.gateway, token:state.token, connectionMode:state.connectionMode,
+        pendingRequest:pending && {
+          request_id:pending.request_id, expires:pending.expires
+        }
+      }
+    });
+    // Do not use a popup-side storage cleanup as a fallback: the worker is
+    // the only permitted mutator of shared consent and connection state.
+    if (!result?.ok) throw new Error(result?.error || "Paired disconnect worker did not respond.");
     await chrome.alarms?.clear?.("relay-connection");
     showGatewayConnection(false);
     message("Gateway disconnected. Saved provider sessions remain in the gateway vault. Reconnect to manage them.");
