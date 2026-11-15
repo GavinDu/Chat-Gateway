@@ -698,6 +698,17 @@ fn require_expected_response_origin(provider: &str, page: &Page) -> anyhow::Resu
     common::require_page_provider_origin(provider, page)
 }
 
+/// A page can navigate after the DOM probe captured assistant text. Check the
+/// atomically captured probe URL as well as the current page URL; do not allow
+/// an earlier foreign response to inherit a later permitted page location.
+fn require_expected_response_snapshot_origin(
+    provider: &str,
+    page: &Page,
+    snapshot_url: &str,
+) -> anyhow::Result<()> {
+    common::require_response_probe_origins(provider, page, snapshot_url)
+}
+
 /// A challenge-looking URL or overlay on a foreign page must not persistently
 /// disable the requested provider. Only its own strict HTTPS page or a
 /// narrowly known external verification endpoint may trip the sticky breaker.
@@ -790,6 +801,41 @@ mod response_origin_guard_tests {
             receiver.try_recv().is_err(),
             "no assistant content may escape"
         );
+    }
+
+    #[tokio::test]
+    async fn response_snapshot_origin_uses_explicit_offline_fixture_only_in_tests() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        page.goto("data:text/html,<html><body><div class='answer'>old reply</div></body></html>")
+            .await
+            .unwrap();
+        for spec in crate::providers::ADAPTERS {
+            assert!(
+                super::require_expected_response_snapshot_origin(
+                    spec.id, &page, "https://unrelated.invalid/c/old"
+                )
+                .is_err(),
+                "{} must not trust a foreign data page just because it has a reply selector",
+                spec.id
+            );
+        }
+        page.evaluate(
+            "document.documentElement.setAttribute('data-chat-gateway-test-fixture', '')",
+        );
+        for spec in crate::providers::ADAPTERS {
+            assert!(
+                super::require_expected_response_snapshot_origin(
+                    spec.id, &page, "data:text/html,offline"
+                )
+                .is_ok(),
+                "{} must preserve explicitly tagged offline test fixture access",
+                spec.id
+            );
+        }
     }
 
     #[tokio::test]
@@ -1015,7 +1061,9 @@ pub async fn run_send(
             let _ = chunks.send(Err(auth_error)).await;
             return;
         }
-        if let Err(error) = require_expected_response_origin(adapter.name(), page) {
+        if let Err(error) =
+            require_expected_response_snapshot_origin(adapter.name(), page, &probe.url)
+        {
             let _ = chunks.send(Err(error)).await;
             return;
         }
@@ -1139,7 +1187,11 @@ pub async fn run_send(
                                 .await;
                             return;
                         }
-                        if let Err(error) = require_expected_response_origin(adapter.name(), page) {
+                        if let Err(error) = require_expected_response_snapshot_origin(
+                            adapter.name(),
+                            page,
+                            &final_probe.url,
+                        ) {
                             let _ = chunks.send(Err(error)).await;
                             return;
                         }
@@ -1260,7 +1312,11 @@ pub async fn run_send(
                         .await;
                     return;
                 }
-                if let Err(error) = require_expected_response_origin(adapter.name(), page) {
+                if let Err(error) = require_expected_response_snapshot_origin(
+                    adapter.name(),
+                    page,
+                    &final_probe.url,
+                ) {
                     let _ = chunks.send(Err(error)).await;
                     return;
                 }
