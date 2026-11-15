@@ -370,7 +370,10 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
 
 async function resyncLinkedProviders() {
-  const {linkedProviders = []} = await chrome.storage.local.get(["linkedProviders"]);
+  // An owner can revoke consent or replace the gateway while an awaited
+  // diagnostics request is in flight. Do not schedule imports from the
+  // linked-provider list captured before that await.
+  const initial = await chrome.storage.local.get(["gateway", "token", "connectionMode"]);
   // Startup restoration is best-effort: providers remain independently usable
   // if one domain is unavailable, and no session material is written to logs.
   // Repair an unexpectedly missing vault snapshot even when Chrome cookie
@@ -386,11 +389,19 @@ async function resyncLinkedProviders() {
   // provider. Preserve linked consent for a later successful reconnect, but
   // never report synthetic skipped imports while disconnected.
   if (!status.ok) return;
-  const missing = new Set(status.ok
-    ? (status.gateway.providers || []).filter(item => !item.linked).map(item => item.provider)
-    : []);
+  let latest;
+  try {
+    latest = await chrome.storage.local.get(["gateway", "token", "connectionMode", "linkedProviders"]);
+  } catch (_) {
+    // A failed storage read cannot authorize automatic cookie collection.
+    return;
+  }
+  if (!hasRelayConnection(latest) || !sameRelayIdentity(initial, latest)) return;
+  const missing = new Set((status.gateway.providers || [])
+    .filter(item => !item.linked).map(item => item.provider));
   await Promise.allSettled(
-    [...new Set(linkedProviders)].filter(provider => PROVIDERS[provider])
+    [...new Set(latest.linkedProviders || [])]
+      .filter(provider => Object.hasOwn(PROVIDERS, provider))
       .map(provider => queueProviderSync(provider, missing.has(provider)))
   );
 }
