@@ -1993,7 +1993,7 @@ fn provider_origin_guard_js(expected_provider: Option<&str>) -> anyhow::Result<S
                if (currentUrl.protocol !== 'https:' || currentUrl.username ||
                    currentUrl.password || (currentUrl.port && currentUrl.port !== '443') ||
                    actualProvider !== expectedProvider) return 'off-provider';
-           }"#
+           }}"#
     ))
 }
 
