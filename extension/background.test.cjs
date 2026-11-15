@@ -4,7 +4,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
 
-function loadBackground(linkedProviders, failingProviders = []) {
+function loadBackground(linkedProviders, failingProviders = [], connected = false) {
   const calls = [];
   const timers = new Map();
   const clearedTimers = new Set();
@@ -50,7 +50,9 @@ function loadBackground(linkedProviders, failingProviders = []) {
       storage: {
         local: {
           async get() {
-            return { linkedProviders };
+            return connected
+              ? {gateway:"http://127.0.0.1:8080",connectionMode:"local",linkedProviders}
+              : { linkedProviders };
           },
         },
       },
@@ -200,8 +202,56 @@ test("one provider refresh failure does not prevent other linked providers", asy
   assert.deepEqual(calls, ["chatgpt", "claude"]);
 });
 
+test("unlinked or disconnected providers never queue automatic cookie imports", async () => {
+  const f = loadBackground(["chatgpt"], [], true);
+  let linkedProviders = [];
+  let connected = true;
+  f.sandbox.chrome.storage.local.get = async () => ({
+    linkedProviders,
+    ...(connected ? {gateway:"http://127.0.0.1:8080",connectionMode:"local"} : {})
+  });
+  const fire = async () => {
+    f.listeners.cookieChanged[0]({cookie:{domain:".chatgpt.com"}});
+    [...f.timers.values()].at(-1).callback();
+    await flushAsyncWork();
+  };
+  await fire();
+  assert.deepEqual(f.calls, [], "revoked provider consent blocks automatic sync");
+  linkedProviders = ["chatgpt"];
+  connected = false;
+  await fire();
+  assert.deepEqual(f.calls, [], "disconnected gateway blocks automatic sync");
+  connected = true;
+  await fire();
+  assert.deepEqual(f.calls, ["chatgpt"], "linked provider resync resumes when connected");
+});
+
+test("superseded cookie debounce cannot enqueue after a delayed consent read", async () => {
+  const f = loadBackground(["chatgpt"], [], true);
+  let release;
+  let first = true;
+  f.sandbox.chrome.storage.local.get = async () => {
+    if (first) {
+      first = false;
+      await new Promise(resolve => {release = resolve;});
+    }
+    return {gateway:"http://127.0.0.1:8080",connectionMode:"local",linkedProviders:["chatgpt"]};
+  };
+  f.listeners.cookieChanged[0]({cookie:{domain:"chatgpt.com"}});
+  const oldTimer = [...f.timers.values()].at(-1);
+  const slow = oldTimer.callback();
+  await flushAsyncWork();
+  f.listeners.cookieChanged[0]({cookie:{domain:".chatgpt.com"}});
+  const newest = [...f.timers.values()].at(-1);
+  await newest.callback();
+  release();
+  await slow;
+  await flushAsyncWork();
+  assert.deepEqual(f.calls, ["chatgpt"], "only the latest generation can sync after async storage");
+});
+
 test("cookie rotation is debounced and rejects lookalike domains", async () => {
-  const { calls, listeners, timers, clearedTimers } = loadBackground([]);
+  const { calls, listeners, timers, clearedTimers } = loadBackground(["chatgpt"], [], true);
   const onCookieChanged = listeners.cookieChanged[0];
 
   onCookieChanged({ cookie: { domain: ".evilchatgpt.com" } });
@@ -223,7 +273,7 @@ test("cookie rotation is debounced and rejects lookalike domains", async () => {
 });
 
 test("two linked providers rotate independently without cross-provider sync", async () => {
-  const { calls, listeners, timers } = loadBackground(["chatgpt", "claude"]);
+  const { calls, listeners, timers } = loadBackground(["chatgpt", "claude"], [], true);
   const onCookieChanged = listeners.cookieChanged[0];
 
   onCookieChanged({ cookie: { domain: ".chatgpt.com" } });
@@ -240,7 +290,7 @@ test("two linked providers rotate independently without cross-provider sync", as
 });
 
 test("rapid cookie rotations coalesce per provider while preserving the other provider", async () => {
-  const { calls, listeners, timers, clearedTimers } = loadBackground(["chatgpt", "claude"]);
+  const { calls, listeners, timers, clearedTimers } = loadBackground(["chatgpt", "claude"], [], true);
   const onCookieChanged = listeners.cookieChanged[0];
 
   onCookieChanged({ cookie: { domain: ".chatgpt.com" } });
@@ -261,7 +311,7 @@ test("rapid cookie rotations coalesce per provider while preserving the other pr
 });
 
 test("slow provider sync coalesces a cookie burst into one latest trailing snapshot", async () => {
-  const f = loadBackground(["chatgpt", "claude"]);
+  const f = loadBackground(["chatgpt", "claude"], [], true);
   let release;
   const held = new Promise(resolve => { release = resolve; });
   const snapshots = [];
