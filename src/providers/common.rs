@@ -895,11 +895,9 @@ mod visible_composer_tests {
                 .as_str(),
             Some("")
         );
-        assert!(
-            super::human_type(&page, &["#active"], "allowed draft")
-                .await
-                .is_ok()
-        );
+        assert!(super::human_type(&page, &["#active"], "allowed draft")
+            .await
+            .is_ok());
         assert_eq!(
             page.evaluate("document.querySelector('#active').value")
                 .as_str(),
