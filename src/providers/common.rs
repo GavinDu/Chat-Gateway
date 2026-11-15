@@ -3329,25 +3329,35 @@ mod prompt_bound_submission_tests {
         );
         let after = submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
         assert!(after.user_turn_count > before.user_turn_count);
-        assert!(!submission_observed_for_prompt(&page, &before, &after, "line one\nline two").unwrap());
+        assert!(
+            !submission_observed_for_prompt(&page, &before, &after, "line one\nline two").unwrap()
+        );
 
         // A framework-rendered actual multiline turn can acknowledge it.
-        page.evaluate(
-            "document.body.lastElementChild.textContent = 'line one\\nline two'",
+        page.evaluate("document.body.lastElementChild.textContent = 'line one\\nline two'");
+        assert!(
+            submission_observed_for_prompt(&page, &before, &after, "line one\nline two").unwrap()
         );
-        assert!(submission_observed_for_prompt(&page, &before, &after, "line one\nline two").unwrap());
-        assert!(!submission_observed_for_prompt(&page, &before, &after, "line one line two").unwrap());
-        assert!(!submission_observed_for_prompt(&page, &before, &after, "line one  line two").unwrap());
-        assert!(!submission_observed_for_prompt(&page, &before, &after, "line one\n line two").unwrap());
+        assert!(
+            !submission_observed_for_prompt(&page, &before, &after, "line one line two").unwrap()
+        );
+        assert!(
+            !submission_observed_for_prompt(&page, &before, &after, "line one  line two").unwrap()
+        );
+        assert!(
+            !submission_observed_for_prompt(&page, &before, &after, "line one\n line two").unwrap()
+        );
 
         // CRLF is only a transport line ending; the actual significant
         // newline, emoji and non-ASCII characters remain exact.
-        page.evaluate(
-            "document.body.lastElementChild.textContent = '你好\\n\\nemoji ☃️'",
+        page.evaluate("document.body.lastElementChild.textContent = '你好\\n\\nemoji ☃️'");
+        assert!(
+            submission_observed_for_prompt(&page, &before, &after, "你好\r\n\r\nemoji ☃️").unwrap()
         );
-        assert!(submission_observed_for_prompt(&page, &before, &after, "你好\r\n\r\nemoji ☃️").unwrap());
         assert!(!submission_observed_for_prompt(&page, &before, &after, "你好 emoji ☃️").unwrap());
-        assert!(!submission_observed_for_prompt(&page, &before, &after, "你好\n\nemoji ☃").unwrap());
+        assert!(
+            !submission_observed_for_prompt(&page, &before, &after, "你好\n\nemoji ☃").unwrap()
+        );
     }
 
     #[tokio::test]
