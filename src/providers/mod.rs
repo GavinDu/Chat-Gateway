@@ -661,10 +661,10 @@ pub struct ProviderSendPolicy {
 
 /// After any adapter accepts Send, a later redirect to an unrelated
 /// origin must never be treated as a provider response or terminal state.
-/// Reuse the same strict nine-provider HTTPS host/route guard as Send; the
-/// login/challenge checks still precede this response-side origin check.
+/// Use the complete nine-provider HTTPS origin policy from the Send path:
+/// the strict submission-acknowledgment classifier recognizes only four.
 fn require_expected_response_origin(provider: &str, page: &Page) -> anyhow::Result<()> {
-    common::require_submission_provider_route(provider, page)
+    common::require_page_provider_origin(provider, page)
 }
 
 #[cfg(test)]
