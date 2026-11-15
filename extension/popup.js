@@ -283,6 +283,9 @@ $("pair").addEventListener("click", async () => {
         }
       }
     }
+    // Bind a delayed remote pair response to the previous install identity.
+    const expectedConnection = await chrome.storage.local.get(
+      ["gateway", "token", "connectionMode"]);
     const response = await fetch(gateway + (remote ? "/relay/v1/pair" : "/relay/v1/connect/request"), {
       method:"POST", headers:{"Content-Type":"application/json"},
       body:JSON.stringify(remote ? {code} : {}), cache:"no-store", redirect:"error"
@@ -293,8 +296,13 @@ $("pair").addEventListener("click", async () => {
     const data = await response.json();
     if (remote) {
       if (!/^[a-f0-9]{64}$/.test(data.token)) throw new Error("Invalid connection response.");
-      await chrome.storage.local.set({gateway,token:data.token,linkedProviders:[]});
-      await chrome.storage.local.remove("pendingConnection");
+      // Final consent/connection state is worker-owned. The response does not
+      // authorize overwriting another pairing that won while HTTP was pending.
+      const committed = await chrome.runtime.sendMessage({
+        type:"connect-paired-relay",gateway,token:data.token,connection:expectedConnection
+      });
+      if (!committed?.ok) throw new Error(committed?.error ||
+        "Remote pairing was superseded; refresh and retry.");
       await chrome.alarms?.clear?.("relay-connection");
       $("code").value = "";
       await updateConnection();
