@@ -96,8 +96,10 @@ pub fn is_public_socket_address(ip: IpAddr) -> bool {
             }
             let segments = ipv6.segments();
             (segments[0] & 0xe000) == 0x2000
+                // 6to4 may tunnel an embedded private IPv4 destination.
+                && segments[0] != 0x2002
                 && !(segments[0] == 0x2001 && segments[1] == 0x0db8)
-                && !(segments[0] == 0x2001 && segments[1] == 0)
+                && !(segments[0] == 0x2001 && matches!(segments[1], 0 | 0x10 | 0x20))
         }
     }
 }
@@ -209,6 +211,9 @@ mod tests {
             "fe80::1",
             "ff02::1",
             "2001:db8::1",
+            "2002:c0a8:0101::1",
+            "2001:10::1",
+            "2001:20::1",
             "::ffff:127.0.0.1",
         ] {
             assert!(!is_public_socket_address(ip(address)), "{address}");
