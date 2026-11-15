@@ -1995,21 +1995,30 @@ pub fn is_login_url(url: &str) -> bool {
     let Ok(uri) = url.parse::<axum::http::Uri>() else {
         return false;
     };
-    if !matches!(uri.scheme_str(), Some("https" | "http")) {
+    // An unverified foreign HTTP page or malformed authority must never
+    // become proof that the requested provider's authenticated session expired.
+    if !safe_provider_https_authority(&uri) {
         return false;
     }
-    let host = uri.host().unwrap_or_default().to_ascii_lowercase();
-    let host = host.trim_end_matches('.');
-    // Only known identity hosts are independently diagnostic. An arbitrary
-    // login.* or auth.* hostname is not evidence of the current provider's
-    // expired session: it may be unrelated navigation. Explicit root login
-    // paths below remain recognizable without trusting the host prefix.
+    let host = uri
+        .host()
+        .unwrap_or_default()
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    // Preserve the explicitly enumerated identity destinations while
+    // separately tracking any further first-party IdP hosts in issue #1090.
     if matches!(
-        host,
+        host.as_str(),
         "accounts.google.com" | "accounts.x.com" | "login.microsoftonline.com"
     ) || host.ends_with(".auth0.com")
     {
         return true;
+    }
+    // Root /login on a foreign origin is an unexpected navigation, not
+    // provider-auth proof. The caller's strict origin gate reports that
+    // category without embedding URL, account identity or prompt material.
+    if provider_origin_for_url(url).is_none() {
+        return false;
     }
     // Authenticate only explicit root-level routes. A chat conversation ID
     // such as /c/login, /chat/auth, or /app/oauth is not a login redirect.
@@ -2045,6 +2054,52 @@ mod login_url_classification_tests {
             "https://login.auth0.com/authorize",
         ] {
             assert!(is_login_url(url), "missed authentication redirect: {url}");
+        }
+    }
+
+    #[test]
+    fn every_known_provider_root_login_is_authenticated_only_on_its_own_origin() {
+        for (provider, url) in [
+            ("qwen", "https://chat.qwen.ai/login"),
+            ("metaai", "https://www.meta.ai/login"),
+            ("claude", "https://claude.ai/signin"),
+            ("chatgpt", "https://chatgpt.com/auth/login"),
+            ("gemini", "https://gemini.google.com/login"),
+            ("grok", "https://grok.com/oauth2/authorize"),
+            ("mistral", "https://chat.mistral.ai/login"),
+            ("perplexity", "https://www.perplexity.ai/signin"),
+            ("manus", "https://manus.im/auth/login"),
+        ] {
+            assert_eq!(
+                super::provider_origin_for_url(url),
+                Some(provider),
+                "login route must remain first-party: {provider}"
+            );
+            assert!(is_login_url(url), "known provider login not recognized: {url}");
+        }
+    }
+
+    #[test]
+    fn unknown_login_paths_and_malformed_authorities_are_not_session_expiry() {
+        for url in [
+            "https://attacker.invalid/login",
+            "https://auth.attacker.invalid/login",
+            "https://login.attacker.invalid/",
+            "https://another.invalid/oauth2/authorize",
+            "https://accounts.google.com.attacker.invalid/login",
+            "https://unrelated.invalid/auth",
+            "http://accounts.google.com/",
+            "http://chatgpt.com/auth/login",
+            "https://chatgpt.com:444/login",
+            "https://chatgpt.com:65536/login",
+            "https://visitor@chatgpt.com/login",
+            "https://accounts.google.com:65536/",
+            "https://user@accounts.x.com/",
+            "https://login.microsoftonline.com.attacker.invalid/authorize",
+            "https://manus.im:444/auth/login",
+            "https://www.meta.ai../login",
+        ] {
+            assert!(!is_login_url(url), "unverified auth origin classified: {url}");
         }
     }
 
