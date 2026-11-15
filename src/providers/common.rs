@@ -229,6 +229,8 @@ pub const STREAMING_SELECTOR: &str = r#"[data-is-streaming="true"]"#;
 pub struct ResponseProbe {
     pub text: Option<String>,
     pub count: usize,
+    /// Nonempty visible roots of the selector that supplied `text`, not unrelated fallback selectors.
+    pub populated_count: usize,
     pub streaming: bool,
     pub post_answer_affordance: bool,
     pub url: String,
@@ -253,6 +255,11 @@ fn decode_response_probe(value: serde_json::Value) -> ResponseProbe {
         // mistaken for zero during generation polling.
         count: value
             .get("count")
+            .and_then(decode_dom_count)
+            .and_then(|count| usize::try_from(count).ok())
+            .unwrap_or(0),
+        populated_count: value
+            .get("populatedCount")
             .and_then(decode_dom_count)
             .and_then(|count| usize::try_from(count).ok())
             .unwrap_or(0),
@@ -308,6 +315,7 @@ pub fn response_probe(
             const nodes = new Set();
             let text = null;
             let lastResponseNode = null;
+            let populatedCount = 0;
             for (const selector of selectors) {{
                 try {{
                     let matches = [];
@@ -336,6 +344,11 @@ pub fn response_probe(
                             if (content.trim()) {{
                                 text = content;
                                 lastResponseNode = node;
+                                // Count only roots belonging to the selector
+                                // that actually supplied text. A different
+                                // fallback selector must never certify the
+                                // old text as a fresh response.
+                                populatedCount = matches.filter(item => renderedText(item).trim()).length;
                                 break;
                             }}
                         }}
@@ -383,7 +396,7 @@ pub fn response_probe(
                 // An unrecognized turn root cannot safely borrow controls
                 // from an ancestor. Retain the conservative idle fallback.
             }}
-            return {{ text, count: nodes.size, streaming, postAnswerAffordance, url, challenge }};
+            return {{ text, count: nodes.size, populatedCount, streaming, postAnswerAffordance, url, challenge }};
         }})()"#,
         check_body_challenge = check_body_challenge,
         challenge_text_js = crate::provider_guard::NON_MESSAGE_CHALLENGE_TEXT_JS,
@@ -568,6 +581,10 @@ mod streaming_visibility_regression_tests {
         let previous = response_probe(&page, &[".answer"], false);
         assert_eq!(previous.text.as_deref(), Some("previous reply"));
         assert_eq!(
+            previous.populated_count, 1,
+            "blank placeholder must not count as a populated response root"
+        );
+        assert_eq!(
             previous.count, 2,
             "visible placeholders still count as nodes"
         );
@@ -575,6 +592,7 @@ mod streaming_visibility_regression_tests {
         page.evaluate("document.querySelector('#placeholder').textContent = 'new reply'");
         let new_reply = response_probe(&page, &[".answer"], false);
         assert_eq!(new_reply.text.as_deref(), Some("new reply"));
+        assert_eq!(new_reply.populated_count, 2);
 
         page.evaluate("document.querySelectorAll('.answer')[0].textContent = '  '");
         page.evaluate("document.querySelector('#placeholder').textContent = '  '");
@@ -583,6 +601,36 @@ mod streaming_visibility_regression_tests {
             blank.text, None,
             "whitespace cannot masquerade as generated text"
         );
+    }
+
+    #[tokio::test]
+    async fn populated_fallback_selector_cannot_certify_old_primary_text() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <article><div class="answer">prior answer</div></article>
+            <article><div class="fallback">another selector answer</div></article>
+            <article><div class="answer" id="fresh" hidden>new current reply</div></article>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+
+        let probe = response_probe(&page, &[".answer", ".fallback"], false);
+        assert_eq!(probe.text.as_deref(), Some("prior answer"));
+        assert_eq!(probe.count, 2);
+        assert_eq!(
+            probe.populated_count, 1,
+            "the lower-priority fallback may not reset the old reply tracker"
+        );
+        page.evaluate("document.querySelector('#fresh').hidden = false");
+        let next = response_probe(&page, &[".answer", ".fallback"], false);
+        assert_eq!(next.text.as_deref(), Some("new current reply"));
+        assert_eq!(next.populated_count, 2);
     }
 
     #[tokio::test]
@@ -998,6 +1046,7 @@ mod response_probe_tests {
             ResponseProbe {
                 text: Some("answer".to_string()),
                 count: 4,
+                populated_count: 0,
                 streaming: true,
                 post_answer_affordance: true,
                 url: "https://provider.example/challenge".to_owned(),
@@ -1013,6 +1062,14 @@ mod response_probe_tests {
         assert_eq!(
             decode_response_probe(serde_json::json!({"count": 3.0})).count,
             3
+        );
+        assert_eq!(
+            decode_response_probe(serde_json::json!({"populatedCount": 2.0})).populated_count,
+            2
+        );
+        assert_eq!(
+            decode_response_probe(serde_json::json!({"populatedCount": -1})).populated_count,
+            0
         );
         assert_eq!(
             decode_response_probe(serde_json::json!({"count": 2.5})).count,
