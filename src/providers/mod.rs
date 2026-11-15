@@ -1102,9 +1102,9 @@ mod baseline_provenance_before_send_tests {
             None
         }
         fn response_probe(&self, page: &Page, challenge: bool) -> ResponseProbe {
-            self.forced_probe.clone().unwrap_or_else(|| {
-                common::response_probe(page, &[".answer"], challenge)
-            })
+            self.forced_probe
+                .clone()
+                .unwrap_or_else(|| common::response_probe(page, &[".answer"], challenge))
         }
         fn selectors(&self) -> AdapterSelectors {
             self.effective_selectors().adapter_selectors()
@@ -1199,9 +1199,14 @@ mod baseline_provenance_before_send_tests {
     async fn explicit_test_only_fixture_still_reaches_the_spy_adapter() {
         let html = "<html data-chat-gateway-test-fixture><body><div class='answer'>previous</div></body></html>";
         let (error, sends, disabled) = exercise_baseline(html, None).await;
-        assert_eq!(sends, 1, "an explicit in-memory fixture may reach mock Send");
+        assert_eq!(
+            sends, 1,
+            "an explicit in-memory fixture may reach mock Send"
+        );
         assert!(
-            error.downcast_ref::<common::ProviderTimeoutError>().is_some(),
+            error
+                .downcast_ref::<common::ProviderTimeoutError>()
+                .is_some(),
             "a mock Send without a reply must finish by typed timeout"
         );
         assert_eq!(disabled, None);
