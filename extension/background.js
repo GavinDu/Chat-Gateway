@@ -284,8 +284,16 @@ function connectPairedRelay(gateway, token, expected) {
     }
     const current = await chrome.storage.local.get(
       ["gateway", "token", "connectionMode", "linkedProviders", "pendingConnection"]);
-    if (!sameRelayIdentity(expected, current)) {
-      throw new Error("Remote gateway identity changed while pairing.");
+    const pending = current.pendingConnection;
+    const previouslyPending = expected?.pendingConnection;
+    const pendingUnchanged = (!pending && !previouslyPending) ||
+      (pending && previouslyPending &&
+       pending.gateway === previouslyPending.gateway &&
+       pending.request_id === previouslyPending.request_id &&
+       pending.poll_secret === previouslyPending.poll_secret &&
+       pending.expires === previouslyPending.expires);
+    if (!sameRelayIdentity(expected, current) || !pendingUnchanged) {
+      throw new Error("Remote gateway identity or pending approval changed while pairing.");
     }
     // A remote paired token is a new installation identity, even when its
     // hostname matches. Never migrate old provider consent into this token.
