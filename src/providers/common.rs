@@ -1104,7 +1104,7 @@ async fn human_type_with_provider(
     tokio::time::sleep(Duration::from_millis(80)).await;
     let text_js = serde_json::to_string(text)?;
     let route_guard = provider_origin_guard_js(expected_provider)?;
-    let composer_guard = if expected_provider == Some("perplexity") {
+    let composer_guard = if matches!(expected_provider, Some("perplexity" | "manus")) {
         let count = actionable_composer_count_expression(selectors)?;
         format!("if ({count} !== 1) return 'ambiguous-composer';")
     } else {
@@ -1361,7 +1361,7 @@ struct SendClickPolicy<'a> {
     unique_input_selectors: Option<&'a [&'a str]>,
 }
 
-/// Perplexity-only Send guard. The earlier composer check is not enough when
+/// Multi-editor Send guard. The earlier composer check is not enough when
 /// a controlled SPA renders a second visible editor while Send is pending.
 /// The click check runs inside the same synchronous evaluation as the click.
 async fn click_send_or_enter_checked_with_unique_composer(
@@ -1441,6 +1441,91 @@ async fn click_send_or_enter_checked_with_unique_composer(
     // Enter dispatch remains a best-effort legacy fallback for other sites.
     press_enter_with_provider(page, input_selector, expected_provider)?;
     Ok(false)
+}
+
+#[cfg(test)]
+mod manus_unique_composer_tests {
+    use super::{send_prompt, EffectiveSelectorSet};
+
+    fn selectors() -> EffectiveSelectorSet {
+        EffectiveSelectorSet {
+            picker: vec![],
+            input: vec!["textarea".to_owned(), "#chat".to_owned()],
+            send: vec!["#send".to_owned()],
+            response: vec![],
+        }
+    }
+
+    #[tokio::test]
+    async fn two_actionable_manus_editors_reject_before_any_private_input_or_send() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html data-chat-gateway-test-fixture><body>
+            <form><textarea id="chat"></textarea>
+                <button id="send" type="button" onclick="window.sent=true">Send</button>
+            </form>
+            <textarea id="search"></textarea>
+            <textarea id="hidden" hidden></textarea>
+            <textarea id="readonly" readonly></textarea>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+
+        let error = send_prompt("manus", &mut page, &selectors(), "private prompt")
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("ambiguous"));
+        assert!(!error.to_string().contains("private prompt"));
+        assert_eq!(
+            page.evaluate("document.querySelector('#chat').value").as_str(),
+            Some("")
+        );
+        assert_eq!(
+            page.evaluate("document.querySelector('#search').value").as_str(),
+            Some("")
+        );
+        assert_eq!(page.evaluate("window.sent === true").as_bool(), Some(false));
+    }
+
+    #[tokio::test]
+    async fn framework_revealing_second_manus_editor_prevents_send() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html data-chat-gateway-test-fixture><body>
+            <form><textarea id="chat"></textarea>
+                <button id="send" type="button" onclick="window.sent=true">Send</button>
+            </form>
+            <textarea id="dialog" hidden></textarea>
+            <script>
+                document.querySelector('#chat').addEventListener('input', () => {
+                    document.querySelector('#dialog').hidden = false;
+                });
+            </script>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+
+        let error = send_prompt("manus", &mut page, &selectors(), "private prompt")
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("ambiguous"));
+        assert_eq!(
+            page.evaluate("document.querySelector('#chat').value").as_str(),
+            Some("private prompt")
+        );
+        assert_eq!(page.evaluate("document.querySelector('#dialog').hidden").as_bool(), Some(false));
+        assert_eq!(page.evaluate("window.sent === true").as_bool(), Some(false));
+    }
 }
 
 #[cfg(test)]
@@ -2743,7 +2828,7 @@ pub async fn send_prompt(
     require_page_provider_origin(provider, page)?;
     // A search/dialog editor can coexist with a thread editor. Never pick
     // whichever is first without a source-grounded thread-scoped selector.
-    if provider == "perplexity" {
+    if matches!(provider, "perplexity" | "manus") {
         require_unique_actionable_composer(page, &inputs)?;
     }
     // Waiting for the composer can navigate to a foreign site containing an
@@ -2763,7 +2848,7 @@ pub async fn send_prompt(
     drive_page(page, Duration::from_millis(200)).await;
     check_session(provider, page)?;
     require_page_provider_origin(provider, page)?;
-    if provider == "perplexity" {
+    if matches!(provider, "perplexity" | "manus") {
         require_unique_actionable_composer(page, &inputs)?;
     }
     let input_sel = inputs
@@ -2787,7 +2872,7 @@ pub async fn send_prompt(
     if let Some(provider) = expected_submission_provider {
         require_submission_provider_route(provider, page)?;
     }
-    if provider == "perplexity" {
+    if matches!(provider, "perplexity" | "manus") {
         require_unique_actionable_composer(page, &inputs)?;
     }
     let sends = set.send_refs();
@@ -2799,17 +2884,35 @@ pub async fn send_prompt(
         None
     };
     if verify_submission {
-        click_send_or_enter_checked_with_policy(
-            page,
-            &sends,
-            input_sel,
-            5_000,
-            Some(prompt),
-            false,
-            send_guard_provider,
-        )
-        .await
-        .inspect_err(|_| {
+        let result = if provider == "manus" {
+            // The same unique-editor gate must run atomically with the click.
+            // A task dialog may become visible while the Send button settles.
+            click_send_or_enter_checked_with_unique_composer(
+                page,
+                &sends,
+                input_sel,
+                5_000,
+                Some(prompt),
+                SendClickPolicy {
+                    allow_untrusted_enter: false,
+                    expected_provider: send_guard_provider,
+                    unique_input_selectors: Some(&inputs),
+                },
+            )
+            .await
+        } else {
+            click_send_or_enter_checked_with_policy(
+                page,
+                &sends,
+                input_sel,
+                5_000,
+                Some(prompt),
+                false,
+                send_guard_provider,
+            )
+            .await
+        };
+        result.inspect_err(|_| {
             tracing::warn!(
                 provider = provider,
                 stage = "send_control",
@@ -2817,7 +2920,7 @@ pub async fn send_prompt(
                 "provider composer diagnostic"
             );
         })?;
-    } else if provider == "perplexity" {
+    } else if matches!(provider, "perplexity" | "manus") {
         click_send_or_enter_checked_with_unique_composer(
             page,
             &sends,
@@ -2825,7 +2928,7 @@ pub async fn send_prompt(
             5_000,
             Some(prompt),
             SendClickPolicy {
-                allow_untrusted_enter: true,
+                allow_untrusted_enter: provider == "perplexity",
                 expected_provider: send_guard_provider,
                 unique_input_selectors: Some(&inputs),
             },
