@@ -3000,8 +3000,12 @@ fn submission_observed_for_prompt(
     let matched = page.evaluate(&format!(
         r#"(() => {{
             const expected = {prompt_js};
-            const normalized = text => (text || '').replace(/\s+/g, ' ').trim();
-            if (!normalized(expected)) return false;
+            // Whitespace collapse can acknowledge a DIFFERENT prompt: a
+            // multiline rich-text request is not the same as one line.
+            // Only canonicalize transport CRLF/CR, preserving all other
+            // intentional Unicode, spaces, indentation and line breaks.
+            const canonical = text => (text || '').replace(/\r\n?/g, '\n');
+            if (!expected || !expected.trim()) return false;
             const turns = Array.from(document.querySelectorAll(
                 '[data-message-author-role="user"], [data-testid="user-message"], [data-testid="message-user"]'
             )).filter(node => {{
@@ -3013,7 +3017,15 @@ fn submission_observed_for_prompt(
             }});
             if (!turns.length) return false;
             const last = turns[turns.length - 1];
-            return normalized(last.innerText || last.textContent || '') === normalized(expected);
+            // For a text-only turn, rendered innerText may collapse meaningful
+            // newlines/spaces. Its actual text node preserves the submitted
+            // prompt. For nested markup, require rendered text so invisible
+            // child nodes cannot spoof a matching user turn.
+            const hasNestedElements = !!last.querySelector('*');
+            const actual = hasNestedElements
+                ? (last.innerText || '')
+                : (last.textContent || '');
+            return canonical(actual) === canonical(expected);
         }})()"#
     ));
     Ok(matched.as_bool() == Some(true))
@@ -3352,6 +3364,73 @@ mod prompt_bound_submission_tests {
         assert!(
             !submission_observed_for_prompt(&page, &before, &after, "fixture request").unwrap()
         );
+    }
+
+    #[tokio::test]
+    async fn user_turn_evidence_preserves_multiline_unicode_and_significant_spacing() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <textarea id="prompt">original request</textarea>
+            <div data-message-author-role="user">older turn</div>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        let before = submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
+        page.evaluate(
+            r#"(() => {
+                document.querySelector('#prompt').value = '';
+                const turn = document.createElement('div');
+                turn.setAttribute('data-message-author-role', 'user');
+                // Preserve significant layout newlines as real visible text.
+                turn.style.whiteSpace = 'pre-wrap';
+                turn.textContent = 'line one line two';
+                document.body.appendChild(turn);
+            })()"#,
+        );
+        let after = submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
+        assert!(after.user_turn_count > before.user_turn_count);
+        assert!(
+            !submission_observed_for_prompt(&page, &before, &after, "line one\nline two").unwrap()
+        );
+
+        // A framework-rendered actual multiline turn can acknowledge it.
+        page.evaluate("document.body.lastElementChild.textContent = 'line one\\nline two'");
+        assert!(
+            submission_observed_for_prompt(&page, &before, &after, "line one\nline two").unwrap()
+        );
+        assert!(
+            !submission_observed_for_prompt(&page, &before, &after, "line one line two").unwrap()
+        );
+        assert!(
+            !submission_observed_for_prompt(&page, &before, &after, "line one  line two").unwrap()
+        );
+        assert!(
+            !submission_observed_for_prompt(&page, &before, &after, "line one\n line two").unwrap()
+        );
+
+        // CRLF is only a transport line ending; the actual significant
+        // newline, emoji and non-ASCII characters remain exact.
+        page.evaluate("document.body.lastElementChild.textContent = '你好\\n\\nemoji ☃️'");
+        assert!(
+            submission_observed_for_prompt(&page, &before, &after, "你好\r\n\r\nemoji ☃️").unwrap()
+        );
+        assert!(!submission_observed_for_prompt(&page, &before, &after, "你好 emoji ☃️").unwrap());
+        assert!(
+            !submission_observed_for_prompt(&page, &before, &after, "你好\n\nemoji ☃").unwrap()
+        );
+
+        // Hidden nested text must never become a user-turn acknowledgement
+        // simply because innerText is empty and textContent is populated.
+        page.evaluate(
+            "document.body.lastElementChild.innerHTML = '<span hidden>secret-hidden</span>'",
+        );
+        assert!(!submission_observed_for_prompt(&page, &before, &after, "secret-hidden").unwrap());
     }
 
     #[tokio::test]
