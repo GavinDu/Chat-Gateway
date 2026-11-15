@@ -83,10 +83,13 @@ its own. Sign in on the official website and link the browser session through
 the extension separately, after checking your permitted usage.
 
 Load the repository's `extension/` directory from `chrome://extensions`. In its popup,
-enter `http://127.0.0.1:8080`, choose **Connect to gateway**, and approve the local
-confirmation tab once. The gateway remembers the approved extension ID, and the
-extension keeps its connection across restarts. An explicit
-`CHAT_GATEWAY_EXTENSION_ID` can still pin the installation to one ID.
+enter `http://127.0.0.1:8080` and choose **Connect to gateway**. In the
+current local-only Docker mode the extension connects **without a pairing code,
+approval tab, or installation token**. Chrome may request permission to access
+the loopback gateway origin; this browser host permission is not a gateway
+authentication/pairing step. The extension remembers the local connection
+across restarts. An explicit `CHAT_GATEWAY_EXTENSION_ID` can optionally pin
+access to one installed extension ID.
 
 Provider status appears in the extension and refreshes automatically. Choose
 **Connect account** for a provider and grant its required permissions. On the first
@@ -97,9 +100,11 @@ sync automatically. Provider sessions are encrypted in the gateway's vault;
 passwords and MFA values remain on the provider website. A saved session or
 browser cookies are shown separately from a verified login.
 
-A pairing code is not needed for local approval. The legacy
-`bash scripts/docker-run.sh pairing-code` command remains available for compatible
-clients and explicitly configured private remote gateways.
+A pairing code is not needed for a current local-only connection. The legacy
+`bash scripts/docker-run.sh pairing-code` command remains available for older
+compatible clients and explicitly configured private remote gateways, not
+for the current no-pairing local Docker mode. Provider-site sign-in and
+explicit provider cookie permissions still require separate user action.
 
 For example, `bash scripts/docker-run.sh login chatgpt` opens the provider's
 normal sign-in page in the host browser. Supported provider arguments are
