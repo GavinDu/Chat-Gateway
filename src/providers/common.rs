@@ -718,6 +718,15 @@ fn editable_composer_condition(element: &str) -> String {
     )
 }
 
+/// An editor may have a box and pointer events yet be invisible because an
+/// ancestor is entirely transparent. Opacity does not inherit, so inspect
+/// the whole parent chain. Translucent (nonzero) editors stay actionable.
+fn nontransparent_ancestors_expression(element: &str) -> String {
+    format!(
+        "(() => {{ for (let node = {element}; node; node = node.parentElement) {{ if (Number(window.getComputedStyle(node).opacity) === 0) return false; }} return true; }})()"
+    )
+}
+
 /// A DOM match alone is not a usable chat composer. Login/status probes
 /// must ignore hidden, disabled and read-only inputs left in SPA shells.
 /// This reports UI readiness only, never proof of account authentication.
@@ -726,6 +735,7 @@ pub fn visible_composer_exists(page: &Page, selectors: &[&str]) -> bool {
         return false;
     };
     let editable = editable_composer_condition("input");
+    let nontransparent = nontransparent_ancestors_expression("input");
     let script = format!(
         r#"(() => {{
             for (const selector of {selectors}) {{
@@ -735,6 +745,7 @@ pub fn visible_composer_exists(page: &Page, selectors: &[&str]) -> bool {
                             input.getClientRects().length > 0 &&
                             window.getComputedStyle(input).visibility !== "hidden" &&
                             window.getComputedStyle(input).pointerEvents !== "none" &&
+                            {nontransparent} &&
                             !input.closest('[hidden], [inert], [aria-hidden="true"], [aria-disabled="true"], [aria-readonly="true"]') &&
                             !input.disabled && !input.matches(':disabled') &&
                             !input.closest('fieldset[disabled]') && !input.readOnly &&
@@ -754,8 +765,9 @@ pub fn visible_composer_exists(page: &Page, selectors: &[&str]) -> bool {
 /// both a hidden sizing placeholder and the actual visible composer.
 fn visible_input_query(selector_js: &str) -> String {
     let editable = editable_composer_condition("el");
+    let nontransparent = nontransparent_ancestors_expression("el");
     format!(
-        "Array.from(document.querySelectorAll({selector_js})).find(el => {editable} && el.getClientRects().length > 0 && window.getComputedStyle(el).visibility !== 'hidden' && window.getComputedStyle(el).pointerEvents !== 'none' && !el.closest('[hidden], [inert], [aria-hidden=\"true\"], [aria-disabled=\"true\"], [aria-readonly=\"true\"]') && !el.disabled && !el.matches(':disabled') && !el.closest('fieldset[disabled]') && !el.readOnly && el.getAttribute('aria-disabled') !== 'true' && el.getAttribute('aria-readonly') !== 'true' && el.getAttribute('contenteditable') !== 'false')"
+        "Array.from(document.querySelectorAll({selector_js})).find(el => {editable} && el.getClientRects().length > 0 && window.getComputedStyle(el).visibility !== 'hidden' && window.getComputedStyle(el).pointerEvents !== 'none' && {nontransparent} && !el.closest('[hidden], [inert], [aria-hidden=\"true\"], [aria-disabled=\"true\"], [aria-readonly=\"true\"]') && !el.disabled && !el.matches(':disabled') && !el.closest('fieldset[disabled]') && !el.readOnly && el.getAttribute('aria-disabled') !== 'true' && el.getAttribute('aria-readonly') !== 'true' && el.getAttribute('contenteditable') !== 'false')"
     )
 }
 
@@ -764,6 +776,7 @@ fn visible_input_query(selector_js: &str) -> String {
 fn actionable_composer_count_expression(selectors: &[&str]) -> anyhow::Result<String> {
     let selectors = serde_json::to_string(selectors)?;
     let editable = editable_composer_condition("el");
+    let nontransparent = nontransparent_ancestors_expression("el");
     Ok(format!(
         r#"(() => {{
             const matches = new Set();
@@ -774,6 +787,7 @@ fn actionable_composer_count_expression(selectors: &[&str]) -> anyhow::Result<St
                             el.getClientRects().length > 0 &&
                             window.getComputedStyle(el).visibility !== 'hidden' &&
                             window.getComputedStyle(el).pointerEvents !== 'none' &&
+                            {nontransparent} &&
                             !el.closest('[hidden], [inert], [aria-hidden="true"], [aria-disabled="true"], [aria-readonly="true"]') &&
                             !el.disabled && !el.matches(':disabled') &&
                             !el.closest('fieldset[disabled]') &&
@@ -857,6 +871,70 @@ mod visible_composer_tests {
         page.evaluate("document.querySelector('#search').removeAttribute('hidden')");
         assert!(super::require_unique_actionable_composer(&page, &["#thread"]).is_ok());
         assert!(super::require_unique_actionable_composer(&page, &["#search", "#thread"]).is_err());
+    }
+
+    #[tokio::test]
+    async fn zero_opacity_composer_and_ancestor_clones_are_not_actionable() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><head><style>
+            .transparent { opacity: 0; }
+            .translucent { opacity: 0.5; }
+            </style></head><body>
+            <section id="ghost-root" class="transparent">
+                <textarea id="ghost-text"></textarea>
+                <div id="ghost-rich" contenteditable="true" role="textbox">Old ghost</div>
+            </section>
+            <textarea id="self-ghost" style="opacity:0"></textarea>
+            <section class="translucent"><textarea id="active"></textarea></section>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+
+        assert!(!visible_composer_exists(
+            &page,
+            &["#ghost-text", "#ghost-rich", "#self-ghost"]
+        ));
+        assert!(visible_composer_exists(&page, &["#active"]));
+        assert!(
+            super::require_unique_actionable_composer(
+                &page,
+                &["#ghost-text", "#ghost-rich", "#self-ghost", "#active"]
+            )
+            .is_ok(),
+            "fully transparent editors may not count as actionable"
+        );
+        let error = super::human_type(&page, &["#ghost-text"], "sensitive prompt")
+            .await
+            .expect_err("a transparent editor must not accept synthetic typing");
+        assert!(!error.to_string().contains("sensitive prompt"));
+        assert_eq!(
+            page.evaluate("document.querySelector('#ghost-text').value")
+                .as_str(),
+            Some("")
+        );
+        assert!(super::human_type(&page, &["#active"], "visible draft")
+            .await
+            .is_ok());
+        assert_eq!(
+            page.evaluate("document.querySelector('#active').value")
+                .as_str(),
+            Some("visible draft")
+        );
+
+        page.evaluate("document.querySelector('#ghost-root').className = 'translucent'");
+        assert!(visible_composer_exists(&page, &["#ghost-text"]));
+        assert!(visible_composer_exists(&page, &["#ghost-rich"]));
+        assert!(
+            super::require_unique_actionable_composer(&page, &["#ghost-text", "#active"])
+                .is_err(),
+            "two nontransparent editors must fail closed as ambiguous"
+        );
     }
 
     #[tokio::test]
