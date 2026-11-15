@@ -539,11 +539,29 @@ async function checkConnection() {
   } catch (error) { message(error.message); return false; }
 }
 initialize().then(updateConnection);
-// Connected gateway dashboards use a bounded ten-second check for revocation without five-second polling.
-// Preserve prompt five-second approval completion only while pairing is pending.
-setInterval(updateConnection, 10_000);
-setInterval(async () => {
-  const {pendingConnection} = await chrome.storage.local.get("pendingConnection");
-  if (pendingConnection) await updateConnection();
-}, 5_000);
+// Only a connected dashboard needs a periodic gateway heartbeat. The popup
+// separately checks local approval every five seconds; combining both timers
+// previously duplicated requests and checked disconnected installations.
+const CONNECTED_STATUS_POLL_MS = 30_000;
+async function pollConnectedStatus() {
+  try {
+    const state = await chrome.storage.local.get([
+      "gateway", "token", "connectionMode", "pendingConnection"
+    ]);
+    if (!state.pendingConnection && hasRelayConnection(state)) await updateConnection();
+  } catch {
+    // Transient Chrome storage failure cannot authorize a gateway request.
+    // Manual Refresh and the next bounded tick remain available.
+  }
+}
+async function pollPendingApproval() {
+  try {
+    const {pendingConnection} = await chrome.storage.local.get("pendingConnection");
+    if (pendingConnection) await updateConnection();
+  } catch {
+    // A failed read cannot start a poll with unknown approval identity.
+  }
+}
+setInterval(pollConnectedStatus, CONNECTED_STATUS_POLL_MS);
+setInterval(pollPendingApproval, 5_000);
 window.addEventListener("focus", updateConnection);

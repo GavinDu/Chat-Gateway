@@ -7,6 +7,7 @@ const vm = require("node:vm");
 function loadPopup({failCookieDomain = null, includeSecondProvider = false, manualVerification = false, localRelay = false, activation = null, diagnosticsSync = null, diagnosticsFailure = null, pairedDisconnectReject = false, pairedConnectReject = false, remotePairToken = "b".repeat(64)} = {}) {
   const elements = new Map();
   const chromeCalls = [];
+  const intervals = [];
   const values = {gateway:"http://127.0.0.1:8080",linkedProviders:[]};
   const server = {linked:false};
   function node() {
@@ -186,7 +187,7 @@ function loadPopup({failCookieDomain = null, includeSecondProvider = false, manu
     confirm:()=>true,
     document:{getElementById:byId,createElement:node},
     window:{addEventListener(){}},
-    setInterval(){},
+    setInterval(fn,ms){intervals.push({fn,ms});},
     isLocalGateway: value => value.startsWith("http://127.0.0.1:") || value.startsWith("http://localhost:"),
     hasRelayConnection: state => Boolean(state.gateway && (state.token || state.connectionMode === "local")),
     normalizeGateway: v=>v,
@@ -215,7 +216,10 @@ function loadPopup({failCookieDomain = null, includeSecondProvider = false, manu
       runtime,
       alarms:{create:async()=>{},clear:async name=>{chromeCalls.push("alarm-clear:"+name);}},
       storage:{local:{
-        async get(keys){return Object.fromEntries(keys.map(k=>[k,values[k]]));},
+        async get(keys){
+          const names=Array.isArray(keys) ? keys : [keys];
+          return Object.fromEntries(names.map(k=>[k,values[k]]));
+        },
         async set(next){Object.assign(values,next);},
         async remove(keys){for(const k of Array.isArray(keys)?keys:[keys])delete values[k];},
       }},
@@ -224,7 +228,7 @@ function loadPopup({failCookieDomain = null, includeSecondProvider = false, manu
   vm.createContext(context);
   vm.runInContext(fs.readFileSync(path.join(__dirname,"..","popup.js"),"utf8")+
     "\nglobalThis.testControls={refreshStatus,connectProvider,logoutProvider};",context);
-  return {values,server,elements,byId,chromeCalls,controls:context.testControls,context};
+  return {values,server,elements,byId,chromeCalls,intervals,controls:context.testControls,context};
 }
 
 test("worker diagnostic failure avoids a second redundant popup status HTTP request", async () => {
@@ -535,4 +539,49 @@ test("local 401 remains an actionable mismatch without worker invalidation",asyn
   await assert.rejects(()=>popup.controls.refreshStatus(),/Local relay access rejected/);
   assert.deepEqual(Array.from(popup.values.linkedProviders),["metaai"]);
   assert.equal(popup.chromeCalls.filter(x=>x==="invalidate-paired-relay:").length,0);
+});
+
+test("popup uses independent 30-second connected and 5-second approval timers",async()=>{
+  const popup=loadPopup();
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.deepEqual(popup.intervals.map(x=>x.ms),[30_000,5_000]);
+  const connected=popup.intervals.find(x=>x.ms===30_000);
+  const approval=popup.intervals.find(x=>x.ms===5_000);
+  popup.chromeCalls.length=0;
+  await connected.fn();
+  await approval.fn();
+  assert.equal(popup.chromeCalls.length,0,
+    "disconnected popup must not poll or request diagnostics every 10 seconds");
+
+  popup.values.connectionMode="local";
+  await connected.fn();
+  assert.equal(popup.chromeCalls.filter(x=>x==="relay-diagnostics:").length,1,
+    "an active local dashboard still checks gateway status within 30 seconds");
+  popup.chromeCalls.length=0;
+  await approval.fn();
+  assert.equal(popup.chromeCalls.length,0,
+    "five-second watcher does not poll when there is no pending approval");
+});
+
+test("pending approval gets fast completion checks without a duplicate connected heartbeat",async()=>{
+  const popup=loadPopup();
+  await new Promise(resolve=>setImmediate(resolve));
+  popup.values.pendingConnection={gateway:"http://127.0.0.1:8080",
+    request_id:"a".repeat(64),poll_secret:"b".repeat(64),expires:Date.now()+300_000};
+  popup.chromeCalls.length=0;
+  await popup.intervals.find(x=>x.ms===30_000).fn();
+  assert.equal(popup.chromeCalls.length,0,
+    "the connected timer must defer to the pending approval watcher");
+  await popup.intervals.find(x=>x.ms===5_000).fn();
+  assert.equal(popup.chromeCalls.filter(x=>x==="poll-connection:").length,1,
+    "approval polling stays bounded at five seconds");
+});
+
+test("popup timer storage read errors do not cause unhandled worker requests",async()=>{
+  const popup=loadPopup();
+  await new Promise(resolve=>setImmediate(resolve));
+  popup.context.chrome.storage.local.get=async()=>{throw new Error("storage unavailable")};
+  popup.chromeCalls.length=0;
+  await Promise.all(popup.intervals.map(x=>x.fn()));
+  assert.equal(popup.chromeCalls.length,0);
 });
