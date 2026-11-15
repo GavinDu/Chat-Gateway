@@ -36,9 +36,36 @@ function fixture({connected = false, linked = false, cookies = true, authenticat
     alarms:{create:async()=>{},clear:async()=>{}},
     runtime:{sendMessage:async message=>{
       messages.push(message);
+      if (message.type === "link-provider") {
+        const expected=message.connection;
+        if (expected.gateway !== values.gateway || expected.token !== values.token ||
+            expected.connectionMode !== values.connectionMode) {
+          return {ok:false,error:"Gateway connection changed before provider link."};
+        }
+        const prior=values.linkedProviders || [];
+        const alreadyLinked=prior.includes(message.provider);
+        const epochs=values.providerLinkEpochs || {};
+        values.linkedProviders=Array.from(new Set([...prior,message.provider]));
+        values.providerLinkEpochs={...epochs,[message.provider]:alreadyLinked && epochs[message.provider]
+          ? epochs[message.provider] : "fixture-link-"+messages.length};
+        return {ok:true,alreadyLinked};
+      }
+      if (message.type === "rollback-provider-link") {
+        const expected=message.connection;
+        if (expected.gateway === values.gateway && expected.token === values.token &&
+            expected.connectionMode === values.connectionMode &&
+            values.providerLinkEpochs?.[message.provider] === message.epoch) {
+          values.linkedProviders=(values.linkedProviders || []).filter(value=>value!==message.provider);
+          values.providerLinkEpochs={...(values.providerLinkEpochs || {}),
+            [message.provider]:"fixture-rollback-"+messages.length};
+        }
+        return {ok:true};
+      }
       if (message.type === "logout-provider") {
         linked = false;
         values.linkedProviders = (values.linkedProviders || []).filter(value => value !== message.provider);
+        values.providerLinkEpochs = {...(values.providerLinkEpochs || {}),
+          [message.provider]:"fixture-logout-"+messages.length};
       }
       if (message.type === "sync-provider") {
         if (syncStatus === "uploaded") {
