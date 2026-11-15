@@ -235,28 +235,46 @@ mod tests {
     #[test]
     fn failing_or_cancelling_task_can_never_later_complete() {
         let mut state = AgentTaskLifecycle::queued(1);
-        assert_eq!(apply_at(&mut state, 1, "task-1", Event::Accepted), T::Applied);
+        assert_eq!(
+            apply_at(&mut state, 1, "task-1", Event::Accepted),
+            T::Applied
+        );
         assert_eq!(apply_at(&mut state, 1, "task-1", Event::Failed), T::Applied);
         assert_eq!(apply_at(&mut state, 1, "task-1", Event::Running), T::Stale);
         assert_eq!(state.begin_new(2), T::Applied);
-        assert_eq!(apply_at(&mut state, 2, "task-2", Event::Accepted), T::Applied);
-        assert_eq!(apply_at(&mut state, 2, "task-2", Event::Running), T::Applied);
+        assert_eq!(
+            apply_at(&mut state, 2, "task-2", Event::Accepted),
+            T::Applied
+        );
+        assert_eq!(
+            apply_at(&mut state, 2, "task-2", Event::Running),
+            T::Applied
+        );
         assert_eq!(cancel_at(&mut state, 2), T::Applied);
         assert_eq!(state.phase(), Phase::Cancelled);
         assert_eq!(apply_at(&mut state, 2, "task-2", Event::Terminal), T::Stale);
         assert_eq!(apply_at(&mut state, 1, "task-1", Event::Terminal), T::Stale);
         assert_eq!(state.begin_new(2), T::Stale);
         assert_eq!(state.begin_new(3), T::Applied);
-        assert_eq!(apply_at(&mut state, 3, "task-3", Event::Accepted), T::Applied);
+        assert_eq!(
+            apply_at(&mut state, 3, "task-3", Event::Accepted),
+            T::Applied
+        );
         assert_eq!(apply_at(&mut state, 3, "task-2", Event::Running), T::Stale);
-        assert_eq!(apply_at(&mut state, 3, "task-3", Event::Cancelled), T::Applied);
+        assert_eq!(
+            apply_at(&mut state, 3, "task-3", Event::Cancelled),
+            T::Applied
+        );
     }
 
     #[test]
     fn old_owner_events_cannot_replay_across_new_registry_with_same_epoch_task_id() {
         let mut old = AgentTaskLifecycle::queued(1);
         let old_request = old.request_identity();
-        assert_eq!(old.apply(&old_request, "same-id", Event::Accepted), T::Applied);
+        assert_eq!(
+            old.apply(&old_request, "same-id", Event::Accepted),
+            T::Applied
+        );
 
         let mut fresh = AgentTaskLifecycle::queued(1);
         let current = fresh.request_identity();
@@ -266,7 +284,10 @@ mod tests {
         );
         assert_eq!(fresh.cancel_local(&old_request), T::Stale);
         assert_eq!(fresh.phase(), Phase::Queued);
-        assert_eq!(fresh.apply(&current, "same-id", Event::Accepted), T::Applied);
+        assert_eq!(
+            fresh.apply(&current, "same-id", Event::Accepted),
+            T::Applied
+        );
         assert_eq!(
             fresh.apply(&old_request, "same-id", Event::Running),
             T::Stale
@@ -276,7 +297,10 @@ mod tests {
             fresh.apply(&old_request, "same-id", Event::Terminal),
             T::Stale
         );
-        assert_eq!(fresh.apply(&current, "same-id", Event::Terminal), T::Applied);
+        assert_eq!(
+            fresh.apply(&current, "same-id", Event::Terminal),
+            T::Applied
+        );
         assert_eq!(fresh.phase(), Phase::Terminal);
         assert!(!format!("{old_request:?}").contains("same-id"));
     }
@@ -296,7 +320,10 @@ mod tests {
         assert_eq!(state.restart(22), T::Applied);
         assert_eq!(state.epoch(), 22);
         assert_eq!(state.phase(), Phase::VerificationRequired);
-        assert_eq!(apply_at(&mut state, 21, "opaque-test-id", Event::Terminal), T::Stale);
+        assert_eq!(
+            apply_at(&mut state, 21, "opaque-test-id", Event::Terminal),
+            T::Stale
+        );
         assert_eq!(
             apply_at(&mut state, 22, "opaque-test-id", Event::Terminal),
             T::Invalid
@@ -307,7 +334,10 @@ mod tests {
         );
         assert_eq!(state.begin_new(23), T::Applied);
         assert_eq!(state.phase(), Phase::Queued);
-        assert_eq!(apply_at(&mut state, 23, "new-id", Event::Accepted), T::Applied);
+        assert_eq!(
+            apply_at(&mut state, 23, "new-id", Event::Accepted),
+            T::Applied
+        );
         assert!(!format!("{state:?}").contains("new-id"));
     }
 }
