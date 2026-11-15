@@ -51,8 +51,9 @@ impl fmt::Debug for SocketLease {
     }
 }
 
-/// Single-owner guard; it is intentionally not Sync and performs no IO.
-/// The embedding browser worker must serialize access to one registry.
+/// A logical single-owner guard with no internal synchronization or IO.
+/// The embedding browser worker MUST serialize all registry mutations and
+/// authenticate the page-generation event before rotating ownership.
 pub struct ChatgptWssLeaseRegistry {
     epoch: u64,
     next_serial: u64,
