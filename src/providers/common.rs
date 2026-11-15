@@ -101,6 +101,47 @@ impl std::fmt::Display for ProviderComposerInputRejectedError {
 
 impl std::error::Error for ProviderComposerInputRejectedError {}
 
+/// A syntactically successful Send click is not proof the provider accepted
+/// this prompt. This is a distinct failure from a submission *timeout* or a
+/// no-first-content timeout after acknowledged submission. The error carries
+/// no prompt, page URL, cookies, DOM text, account identifier or model output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProviderSubmissionUnacknowledgedError;
+
+impl ProviderSubmissionUnacknowledgedError {
+    pub fn phase(self) -> ProviderTimeoutPhase {
+        ProviderTimeoutPhase::Submission
+    }
+}
+
+impl std::fmt::Display for ProviderSubmissionUnacknowledgedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("provider did not acknowledge prompt submission with a current-turn signal")
+    }
+}
+
+impl std::error::Error for ProviderSubmissionUnacknowledgedError {}
+
+#[cfg(test)]
+mod provider_submission_unacknowledged_error_tests {
+    use super::{ProviderSubmissionUnacknowledgedError, ProviderTimeoutError};
+
+    #[test]
+    fn redacted_typed_error_is_distinct_from_timeout_and_does_not_echo_prompt() {
+        let error = anyhow::Error::new(ProviderSubmissionUnacknowledgedError);
+        let typed = error
+            .downcast_ref::<ProviderSubmissionUnacknowledgedError>()
+            .expect("unacknowledged submission must remain downcastable");
+        assert_eq!(typed.phase().as_str(), "submission");
+        assert!(error.downcast_ref::<ProviderTimeoutError>().is_none());
+        assert_eq!(
+            error.to_string(),
+            "provider did not acknowledge prompt submission with a current-turn signal"
+        );
+        assert!(!error.to_string().contains("secret fixture prompt"));
+    }
+}
+
 /// Static per-provider selector/URL data. Each adapter is a SelectorSet
 /// plus the shared interaction logic in this module (ported from v1's
 /// per-adapter discover/send bodies, re-expressed in the real obscura
@@ -2457,7 +2498,7 @@ pub async fn send_prompt(
             outcome = "not_acknowledged",
             "provider composer diagnostic"
         );
-        anyhow::bail!("provider did not acknowledge prompt submission (composer unchanged and no new response)");
+        return Err(anyhow::Error::new(ProviderSubmissionUnacknowledgedError));
     }
     Ok(())
 }
