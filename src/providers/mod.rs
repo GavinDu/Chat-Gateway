@@ -1105,6 +1105,36 @@ pub async fn run_send(
     // Rust v1's 350ms / stability / indicator completion.
     let done_signal = adapter.done_signal();
     let baseline_probe = adapter.response_probe(page, true);
+    // The assistant baseline is part of the security-sensitive provenance
+    // for this request. Verify the same-DOM-sample URL and the current page
+    // before trusting prior reply text or handing the new prompt to an adapter.
+    // Navigation may have occurred since the earlier entry guard.
+    if probe_has_challenge(&baseline_probe) {
+        if let Some(error) =
+            untrusted_challenge_probe_origin_error(adapter.name(), page, &baseline_probe.url)
+        {
+            let _ = chunks.send(Err(error)).await;
+            return;
+        }
+        provider_guard.disable_provider(
+            adapter.name(),
+            "challenge page detected; manual review required",
+        );
+        let _ = chunks
+            .send(Err(provider_challenge_error(adapter.name())))
+            .await;
+        return;
+    }
+    if let Some(auth_error) = probe_login_redirect_error(&baseline_probe) {
+        let _ = chunks.send(Err(auth_error)).await;
+        return;
+    }
+    if let Err(error) =
+        require_expected_response_snapshot_origin(adapter.name(), page, &baseline_probe.url)
+    {
+        let _ = chunks.send(Err(error)).await;
+        return;
+    }
     let baseline_response_count = baseline_probe.count;
     let baseline_populated_count = baseline_probe.populated_count;
     let baseline = baseline_probe.text.filter(|t| !t.is_empty());
