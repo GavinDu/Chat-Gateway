@@ -962,6 +962,15 @@ pub fn click_first(page: &Page, selectors: &[&str]) -> anyhow::Result<()> {
 /// uses editor-scoped Range selection + execCommand insertText. That dispatch
 /// does NOT establish valid visible draft retention by itself.
 pub async fn human_type(page: &Page, selectors: &[&str], text: &str) -> anyhow::Result<()> {
+    human_type_with_provider(page, selectors, text, None).await
+}
+
+async fn human_type_with_provider(
+    page: &Page,
+    selectors: &[&str],
+    text: &str,
+    expected_provider: Option<&str>,
+) -> anyhow::Result<()> {
     let selector = selectors
         .iter()
         .copied()
@@ -988,12 +997,17 @@ pub async fn human_type(page: &Page, selectors: &[&str], text: &str) -> anyhow::
     }
     tokio::time::sleep(Duration::from_millis(80)).await;
     let text_js = serde_json::to_string(text)?;
+    let route_guard = provider_origin_guard_js(expected_provider)?;
     let js = format!(
-        "(function() {{ var el = {el_js}; if (!el) return false; el.focus(); if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {{ try {{ var prototype = el.tagName === 'INPUT' ? window.HTMLInputElement.prototype : window.HTMLTextAreaElement.prototype; var setter = Object.getOwnPropertyDescriptor(prototype, 'value').set; setter.call(el, {text}); }} catch (e) {{ el.value = {text}; }} el.dispatchEvent(new InputEvent('input', {{ bubbles: true, inputType: 'insertText', data: {text} }})); el.dispatchEvent(new Event('change', {{ bubbles: true }})); return true; }} var selection = window.getSelection(); if (!selection) return false; try {{ var range = document.createRange(); range.selectNodeContents(el); selection.removeAllRanges(); selection.addRange(range); }} catch (e) {{ return false; }} var ok = false; try {{ ok = document.execCommand('insertText', false, {text}); }} catch (e) {{}} if (!ok) {{ if ('value' in el) {{ el.value = {text}; }} else {{ el.textContent = {text}; }} }} el.dispatchEvent(new InputEvent('input', {{ bubbles: true, inputType: 'insertText', data: {text} }})); el.dispatchEvent(new Event('change', {{ bubbles: true }})); return true; }})()",
+        "(function() {{ {route_guard} var el = {el_js}; if (!el) return false; el.focus(); if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {{ try {{ var prototype = el.tagName === 'INPUT' ? window.HTMLInputElement.prototype : window.HTMLTextAreaElement.prototype; var setter = Object.getOwnPropertyDescriptor(prototype, 'value').set; setter.call(el, {text}); }} catch (e) {{ el.value = {text}; }} el.dispatchEvent(new InputEvent('input', {{ bubbles: true, inputType: 'insertText', data: {text} }})); el.dispatchEvent(new Event('change', {{ bubbles: true }})); return true; }} var selection = window.getSelection(); if (!selection) return false; try {{ var range = document.createRange(); range.selectNodeContents(el); selection.removeAllRanges(); selection.addRange(range); }} catch (e) {{ return false; }} var ok = false; try {{ ok = document.execCommand('insertText', false, {text}); }} catch (e) {{}} if (!ok) {{ if ('value' in el) {{ el.value = {text}; }} else {{ el.textContent = {text}; }} }} el.dispatchEvent(new InputEvent('input', {{ bubbles: true, inputType: 'insertText', data: {text} }})); el.dispatchEvent(new Event('change', {{ bubbles: true }})); return true; }})()",
         text = text_js,
         el_js = el_js,
     );
-    if page.evaluate(&js).as_bool() != Some(true) {
+    let typed = page.evaluate(&js);
+    if typed.as_str() == Some("off-provider") {
+        anyhow::bail!("provider left its chat origin before typing");
+    }
+    if typed.as_bool() != Some(true) {
         anyhow::bail!("typing into the provider input failed");
     }
     // Controlled editors may discard synthetic input on their next render.
@@ -1122,30 +1136,7 @@ async fn click_send_or_enter_checked_with_policy(
     let input_expr = visible_input_query(&input_js);
     let expected_js = serde_json::to_string(&expected_prompt)?;
     let draft = composer_draft_expression("input");
-    let provider_js = serde_json::to_string(&expected_provider)?;
-    // The last Rust-side route check precedes the five-second Send-button
-    // wait. Validate the *current* browser URL within the same page evaluation
-    // that clicks Send, so an intervening foreign redirect is never clicked.
-    let route_guard = format!(
-        r#"const provider = {provider_js};
-           if (provider !== null) {{
-               let currentUrl;
-               try {{ currentUrl = new URL(location.href); }}
-               catch (_) {{ return 'off-provider'; }}
-               const rawHost = currentUrl.hostname.toLowerCase();
-               const host = rawHost.endsWith('.') ? rawHost.slice(0, -1) : rawHost;
-               const path = currentUrl.pathname;
-               const expectedHost = provider === 'chatgpt'
-                   ? (host === 'chatgpt.com' || host === 'www.chatgpt.com')
-                   : provider === 'grok' &&
-                       ((host === 'grok.com' || host === 'www.grok.com') ||
-                       ((host === 'x.com' || host === 'www.x.com') &&
-                           (path === '/i/grok' || path.startsWith('/i/grok/'))));
-               if (currentUrl.protocol !== 'https:' || currentUrl.username ||
-                   currentUrl.password || (currentUrl.port && currentUrl.port !== '443') ||
-                   !expectedHost) return 'off-provider';
-           }}"#
-    );
+    let route_guard = provider_origin_guard_js(expected_provider)?;
     while start.elapsed().as_millis() < timeout_ms as u128 {
         for selector in send_selectors {
             let selector_js = serde_json::to_string(selector)?;
@@ -1901,6 +1892,158 @@ pub(crate) fn submission_provider_for_url(url: &str) -> Option<&'static str> {
     }
 }
 
+
+/** Declare a closed set of browser origins for all provider adapters.
+ * A matching generic text box on an unrelated page is never authorization
+ * to type. ChatGPT/Grok retain their separate strict submission contract.
+ */
+fn provider_origin_for_url(url: &str) -> Option<&'static str> {
+    if let Some(provider) = submission_provider_for_url(url) {
+        return Some(provider);
+    }
+    let uri = url.parse::<axum::http::Uri>().ok()?;
+    if uri.scheme_str() != Some("https")
+        || uri.authority().is_none_or(|authority| {
+            authority.as_str().contains('@') || authority.port_u16().is_some_and(|port| port != 443)
+        })
+    {
+        return None;
+    }
+    match uri.host()?.trim_end_matches('.').to_ascii_lowercase().as_str() {
+        "claude.ai" | "www.claude.ai" => Some("claude"),
+        "gemini.google.com" => Some("gemini"),
+        "chat.qwen.ai" => Some("qwen"),
+        "www.meta.ai" | "meta.ai" => Some("metaai"),
+        "chat.mistral.ai" => Some("mistral"),
+        "www.perplexity.ai" | "perplexity.ai" => Some("perplexity"),
+        "manus.im" | "www.manus.im" => Some("manus"),
+        _ => None,
+    }
+}
+
+/// The test-only data URL exemption keeps in-memory DOM fixtures independent
+/// of provider networks; production rejects all data: and about: documents.
+fn require_provider_origin(provider: &str, url: &str) -> anyhow::Result<()> {
+    #[cfg(test)]
+    if url.starts_with("data:") {
+        return Ok(());
+    }
+    if provider_origin_for_url(url) == Some(provider) {
+        Ok(())
+    } else {
+        anyhow::bail!("provider chat origin unavailable before prompt dispatch")
+    }
+}
+
+/// Inline page guard reused for typing *and* the atomic Send click. A
+/// Rust-side check before an await is insufficient if navigation occurs
+/// while a framework-controlled composer is settling.
+fn provider_origin_guard_js(expected_provider: Option<&str>) -> anyhow::Result<String> {
+    let provider = serde_json::to_string(&expected_provider)?;
+    Ok(format!(
+        r#"const expectedProvider = {provider};
+           if (expectedProvider !== null) {{
+               let currentUrl;
+               try {{ currentUrl = new URL(location.href); }}
+               catch (_) {{ return 'off-provider'; }}
+               const host = currentUrl.hostname.toLowerCase().replace(/\\.$/, '');
+               const path = currentUrl.pathname;
+               let actualProvider = null;
+               switch (host) {{
+                   case 'chatgpt.com': case 'www.chatgpt.com': actualProvider = 'chatgpt'; break;
+                   case 'grok.com': case 'www.grok.com': actualProvider = 'grok'; break;
+                   case 'x.com': case 'www.x.com':
+                       if (path === '/i/grok' || path.startsWith('/i/grok/')) actualProvider = 'grok';
+                       break;
+                   case 'claude.ai': case 'www.claude.ai': actualProvider = 'claude'; break;
+                   case 'gemini.google.com': actualProvider = 'gemini'; break;
+                   case 'chat.qwen.ai': actualProvider = 'qwen'; break;
+                   case 'www.meta.ai': case 'meta.ai': actualProvider = 'metaai'; break;
+                   case 'chat.mistral.ai': actualProvider = 'mistral'; break;
+                   case 'www.perplexity.ai': case 'perplexity.ai': actualProvider = 'perplexity'; break;
+                   case 'manus.im': case 'www.manus.im': actualProvider = 'manus'; break;
+               }}
+               if (currentUrl.protocol !== 'https:' || currentUrl.username ||
+                   currentUrl.password || (currentUrl.port && currentUrl.port !== '443') ||
+                   actualProvider !== expectedProvider) return 'off-provider';
+           }"#
+    ))
+}
+
+#[cfg(test)]
+mod all_provider_origin_fence_tests {
+    use super::{provider_origin_for_url, provider_origin_guard_js, require_provider_origin};
+
+    #[test]
+    fn every_provider_has_explicit_matching_https_origin() {
+        for (provider, url) in [
+            ("chatgpt", "https://chatgpt.com/c/abc"),
+            ("chatgpt", "https://www.chatgpt.com/"),
+            ("grok", "https://grok.com/chat/abc"),
+            ("grok", "https://x.com/i/grok/abc"),
+            ("claude", "https://claude.ai/new"),
+            ("gemini", "https://gemini.google.com/app"),
+            ("qwen", "https://chat.qwen.ai/"),
+            ("metaai", "https://www.meta.ai/"),
+            ("mistral", "https://chat.mistral.ai/chat"),
+            ("perplexity", "https://www.perplexity.ai/search/abc"),
+            ("manus", "https://manus.im/app"),
+        ] {
+            assert_eq!(provider_origin_for_url(url), Some(provider), "{url}");
+            require_provider_origin(provider, url).unwrap();
+        }
+    }
+
+    #[test]
+    fn rejects_cross_provider_redirects_and_spoofed_origins() {
+        for (provider, url) in [
+            ("qwen", "https://chatgpt.com/c/abc"),
+            ("claude", "https://manus.im/app"),
+            ("perplexity", "https://www.perplexity.ai.attacker.invalid/search"),
+            ("metaai", "https://attacker.invalid/?next=www.meta.ai"),
+            ("gemini", "https://gemini.google.com@attacker.invalid/app"),
+            ("manus", "http://manus.im/app"),
+            ("mistral", "https://chat.mistral.ai:8443/chat"),
+            ("grok", "https://x.com/home"),
+            ("chatgpt", "data:text/html,hello"),
+            ("qwen", "about:blank"),
+        ] {
+            assert_ne!(provider_origin_for_url(url), Some(provider), "{url}");
+            if !url.starts_with("data:") {
+                assert!(require_provider_origin(provider, url).is_err(), "{url}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn inline_page_guard_matches_rust_policy_for_each_provider() {
+        let browser = obscura_core::Browser::builder().stealth(false).build().unwrap();
+        let page = browser.new_page().await.unwrap();
+        for (provider, url, allowed) in [
+            ("qwen", "https://chat.qwen.ai/chat", true),
+            ("qwen", "https://manus.im/app", false),
+            ("manus", "https://manus.im/app", true),
+            ("manus", "https://manus.im.attacker.invalid/app", false),
+            ("perplexity", "https://www.perplexity.ai/search", true),
+            ("perplexity", "https://claude.ai/chat", false),
+            ("grok", "https://x.com/i/grok/chat", true),
+            ("grok", "https://x.com/home", false),
+            ("chatgpt", "http://chatgpt.com/", false),
+            ("claude", "https://claude.ai:8443/chat", false),
+            ("gemini", "https://gemini.google.com/app", true),
+            ("metaai", "https://meta.ai/chat", true),
+            ("mistral", "https://chat.mistral.ai/chat", true),
+        ] {
+            let guard = provider_origin_guard_js(Some(provider)).unwrap();
+            let url = serde_json::to_string(url).unwrap();
+            let result = page.evaluate(&format!(
+                "(() => {{ const location = {{href: {url}}}; {guard} return 'allowed'; }})()"
+            ));
+            assert_eq!(result.as_str(), Some(if allowed { "allowed" } else { "off-provider" }));
+        }
+    }
+}
+
 fn requires_submission_acknowledgement(url: &str) -> bool {
     submission_provider_for_url(url).is_some()
 }
@@ -2079,7 +2222,12 @@ pub async fn send_prompt(
     prompt: &str,
 ) -> anyhow::Result<()> {
     let initial_url = page.url();
-    require_matching_known_provider_origin(provider, &initial_url)?;
+    check_session(provider, page)?;
+    require_provider_origin(provider, &initial_url)?;
+    #[cfg(test)]
+    let send_guard_provider = if initial_url.starts_with("data:") { None } else { Some(provider) };
+    #[cfg(not(test))]
+    let send_guard_provider = Some(provider);
     let verify_submission = requires_submission_acknowledgement(&initial_url);
     let expected_submission_provider = submission_provider_for_url(&initial_url);
     let inputs = set.input_refs();
@@ -2096,13 +2244,14 @@ pub async fn send_prompt(
     // Waiting can redirect into a *different recognized provider* that
     // exposes a similar editor. Never type the requested provider's prompt
     // into another provider's composer.
-    require_matching_known_provider_origin(provider, &page.url())?;
+    check_session(provider, page)?;
+    require_provider_origin(provider, &page.url())?;
     // Waiting for the composer can navigate to a foreign site containing an
     // equally generic input. Verify the initial provider before typing.
     if let Some(provider) = expected_submission_provider {
         require_submission_provider_route(provider, page)?;
     }
-    if let Err(error) = human_type(page, &inputs, prompt).await {
+    if let Err(error) = human_type_with_provider(page, &inputs, prompt, send_guard_provider).await {
         tracing::warn!(
             provider = provider,
             stage = "input_dispatch",
@@ -2112,6 +2261,8 @@ pub async fn send_prompt(
         return Err(error);
     }
     drive_page(page, Duration::from_millis(200)).await;
+    check_session(provider, page)?;
+    require_provider_origin(provider, &page.url())?;
     let input_sel = inputs
         .iter()
         .copied()
@@ -2128,7 +2279,8 @@ pub async fn send_prompt(
         );
         return Err(anyhow::Error::new(ProviderComposerInputRejectedError));
     }
-    require_matching_known_provider_origin(provider, &page.url())?;
+    check_session(provider, page)?;
+    require_provider_origin(provider, &page.url())?;
     if let Some(provider) = expected_submission_provider {
         require_submission_provider_route(provider, page)?;
     }
@@ -2148,7 +2300,7 @@ pub async fn send_prompt(
             5_000,
             Some(prompt),
             false,
-            expected_submission_provider,
+            send_guard_provider,
         )
         .await
         .inspect_err(|_| {
@@ -2160,7 +2312,9 @@ pub async fn send_prompt(
             );
         })?;
     } else {
-        click_send_or_enter_checked(page, &sends, input_sel, 5_000, Some(prompt)).await?;
+        click_send_or_enter_checked_with_policy(
+            page, &sends, input_sel, 5_000, Some(prompt), true, send_guard_provider,
+        ).await?;
     }
     if let Some(before) = baseline {
         let start = std::time::Instant::now();
