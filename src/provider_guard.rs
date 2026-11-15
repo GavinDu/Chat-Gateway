@@ -215,7 +215,9 @@ pub(crate) fn is_challenge_url(url: &str) -> bool {
         || (host == "accounts.google.com"
             && root == "v3"
             && second == "signin"
-            && segments.next().is_some_and(|segment| segment.eq_ignore_ascii_case("challenge")))
+            && segments
+                .next()
+                .is_some_and(|segment| segment.eq_ignore_ascii_case("challenge")))
 }
 
 /// Visible security text outside known chat-turn containers. A user or
