@@ -54,9 +54,17 @@ async function refreshStatus(force = false) {
   // redacted connectivity/sync failures. Fall back to direct status for older
   // worker versions or when the worker is unavailable.
   const diagnostics = await chrome.runtime.sendMessage({type:"relay-diagnostics", force}).catch(() => null);
+  // A modern worker has already checked the gateway, including the failure
+  // case. Falling through to the legacy endpoint here doubles noisy requests
+  // during an outage and obscures the worker's typed local diagnostic.
+  // Keep direct status fallback only for absent/older workers.
+  const diagnosticFailure = diagnostics?.ok === false &&
+    typeof diagnostics.gateway_issue === "string";
   const response = diagnostics?.ok && diagnostics.gateway
     ? {ok:true, status:200, json:async () => diagnostics.gateway}
-    : await relayFetch("/relay/v1/status", {method:"POST",body:"{}"});
+    : diagnosticFailure
+      ? {ok:false, status:diagnostics.gateway_issue === "gateway_unauthorized" ? 401 : 503}
+      : await relayFetch("/relay/v1/status", {method:"POST",body:"{}"});
   if (response.status === 401 || response.status === 403) {
     const state = await chrome.storage.local.get(["gateway", "connectionMode"]);
     if (state.connectionMode === "local" && isLocalGateway(state.gateway)) {
@@ -66,7 +74,22 @@ async function refreshStatus(force = false) {
     showGatewayConnection(false);
     throw new Error("Gateway connection expired or was revoked. Choose Connect to gateway to approve it again.");
   }
-  if (!response.ok) throw new Error("Status request failed (" + response.status + ").");
+  if (!response.ok) {
+    if (diagnosticFailure) {
+      // Fixed messages only. Never pass through upstream URLs or raw errors.
+      const reason = {
+        not_connected: "Gateway is not connected.",
+        gateway_timeout: "Gateway status check timed out.",
+        gateway_request_failed: "Gateway status request failed.",
+        relay_unavailable: "Gateway status is unavailable.",
+        permission_or_consent: "Gateway permission or consent is missing.",
+        activation_timeout: "Gateway activation timed out.",
+        diagnostics_unavailable: "Gateway diagnostics are unavailable.",
+      }[diagnostics.gateway_issue] || "Gateway status is unavailable.";
+      throw new Error(reason);
+    }
+    throw new Error("Status request failed (" + response.status + ").");
+  }
   const data = await response.json();
   const items = await Promise.all(data.providers.map(async item => {
     const li = document.createElement("li");
