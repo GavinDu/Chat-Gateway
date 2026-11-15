@@ -49,7 +49,8 @@ function load(extra = {}) {
   const send=connection=>new Promise(resolve=>{
     assert.equal(listener({type:"invalidate-paired-relay",connection},{},resolve),true);
   });
-  return {state,expected,send,hold:context.holdConsent,invalidate:context.invalidatePaired};
+  return {state,expected,send,hold:context.holdConsent,invalidate:context.invalidatePaired,
+    storage:context.chrome.storage.local};
 }
 
 test("gateway 401 invalidation serializes behind consent writer and revokes only current paired identity",async()=>{
@@ -121,19 +122,14 @@ test("stale 401 after explicit disconnect cannot revive or rotate current state"
   assert.equal(f.state.relayConnectionEpoch,"gen-new");
 });
 
-test("failed consent storage fails closed instead of claiming invalidation",async()=>{
-  const f=load();const before=f.expected();
-  const snapshot={...f.state};
-  const contextError=new Error("private store error");
-  // Replace worker-owned commit with failure; no partial local deletion.
-  const oldToken=f.state.token;
-  const error=await new Promise(resolve=>{
-    // The message response must remain fixed and not leak raw error text.
-    // Call its direct function with a poisoned write via test-only storage hook.
-    resolve({oldToken, contextError:contextError.message});
-  });
-  assert.equal(error.oldToken,oldToken);
-  assert.equal(f.state.token,snapshot.token);
-  assert.ok(!JSON.stringify({ok:false,error:"Paired gateway status invalidation unavailable."})
-    .includes(before.token));
+test("storage commit failure returns fixed redacted error without clearing current token",async()=>{
+  const f=load();
+  const before=f.expected();
+  f.storage.set=async()=>{throw new Error("secret-error-with-token-"+before.token);};
+  const reply=await f.send(before);
+  assert.equal(reply.ok,false);
+  assert.equal(reply.error,"Paired gateway status invalidation unavailable.");
+  assert.ok(!JSON.stringify(reply).includes(before.token));
+  assert.equal(f.state.token,before.token);
+  assert.deepEqual(Array.from(f.state.linkedProviders),["chatgpt","manus"]);
 });
