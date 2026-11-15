@@ -157,7 +157,7 @@ impl ChatgptWssLeaseRegistry {
 
     /// Late completion of a previous socket must not close a re-used ID.
     pub fn close(&mut self, lease: &SocketLease) -> bool {
-        if !self.is_live(&lease) {
+        if !self.is_live(lease) {
             return false;
         }
         self.active.remove(&lease.id);
