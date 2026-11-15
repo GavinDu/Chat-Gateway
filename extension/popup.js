@@ -217,11 +217,14 @@ async function connectLocalGateway(gateway, requestPermission = false) {
     await refreshStatus();
     return true;
   }
-  const linkedProviders = previous.gateway === gateway ? (previous.linkedProviders || []) : [];
-  await chrome.storage.local.set({
-    gateway, connectionMode:"local", linkedProviders, localDisconnected:false
+  // Never mutate shared provider consent from the popup. The service
+  // worker serializes local connection changes with link, rollback and logout.
+  const connected = await chrome.runtime.sendMessage({
+    type:"connect-local-relay",gateway,manual:requestPermission === true
   });
-  await chrome.storage.local.remove(["token", "pendingConnection", "relaySnapshotVersions"]);
+  if (!connected?.ok) {
+    throw new Error(connected?.error || "Local connection worker did not respond.");
+  }
   await chrome.alarms?.clear?.("relay-connection");
   showGatewayConnection(true);
   await refreshStatus(true);
@@ -411,8 +414,11 @@ $("unpair").addEventListener("click", async () => {
   try {
     const connection = await chrome.storage.local.get(["gateway", "connectionMode"]);
     if (connection.connectionMode === "local" && isLocalGateway(connection.gateway)) {
-      await chrome.storage.local.remove(["connectionMode", "token", "linkedProviders", "relaySnapshotVersions", "pendingConnection"]);
-      await chrome.storage.local.set({localDisconnected:true});
+      const result = await chrome.runtime.sendMessage({
+        type:"disconnect-local-relay",
+        connection:await chrome.storage.local.get(["gateway","token","connectionMode"])
+      });
+      if (!result?.ok) throw new Error(result?.error || "Local disconnect worker did not respond.");
       await chrome.alarms?.clear?.("relay-connection");
       showGatewayConnection(false);
       message("Local extension disconnected; provider sessions remain in the encrypted gateway vault.");
