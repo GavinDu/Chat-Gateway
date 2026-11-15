@@ -1840,6 +1840,62 @@ fn requires_submission_acknowledgement(url: &str) -> bool {
     submission_provider_for_url(url).is_some()
 }
 
+/// A browser page recognized as ChatGPT or Grok must never be operated by
+/// another adapter simply because it exposes a matching generic composer.
+/// This is NOT an all-provider origin allowlist: unknown origins still need
+/// their own provider-specific browser-route checks and live evidence.
+fn require_matching_known_provider_origin(adapter: &str, url: &str) -> anyhow::Result<()> {
+    if submission_provider_for_url(url).is_some_and(|observed| observed != adapter) {
+        anyhow::bail!("provider adapter does not match current chat origin");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod provider_adapter_origin_consistency_tests {
+    use super::require_matching_known_provider_origin as require;
+
+    #[test]
+    fn recognized_chat_origins_accept_only_the_matching_adapter() {
+        for (url, expected) in [
+            ("https://chatgpt.com/c/abc", "chatgpt"),
+            ("https://www.chatgpt.com/", "chatgpt"),
+            ("https://grok.com/chat/123", "grok"),
+            ("https://x.com/i/grok/thread/123", "grok"),
+            ("https://www.x.com/i/grok", "grok"),
+        ] {
+            assert!(require(expected, url).is_ok());
+            for wrong in ["manus", "claude", "qwen", "chatgpt", "grok"] {
+                if wrong == expected {
+                    continue;
+                }
+                let error = require(wrong, url).unwrap_err();
+                assert_eq!(
+                    error.to_string(),
+                    "provider adapter does not match current chat origin"
+                );
+                assert!(!error.to_string().contains(url));
+            }
+        }
+    }
+
+    #[test]
+    fn unrelated_and_spoofed_urls_are_not_mistaken_for_known_provider_origins() {
+        // No match is NOT authorization to send: unknown providers retain
+        // separate unresolved signed-in route acceptance.
+        for url in [
+            "https://chatgpt.com.attacker.invalid/c/abc",
+            "https://x.com/home?q=/i/grok",
+            "https://grok.com.attacker.invalid/",
+            "http://chatgpt.com/",
+            "https://chatgpt.com:8443/",
+            "data:text/html,<textarea>grok.com</textarea>",
+        ] {
+            assert!(require("manus", url).is_ok(), "{url}");
+        }
+    }
+}
+
 /// A composer's DOM selectors are not trusted evidence of a ChatGPT/Grok
 /// origin. Reject unrelated pages before input or click, and preserve the
 /// typed expired-session error for explicit authentication redirects.
@@ -1958,6 +2014,7 @@ pub async fn send_prompt(
     prompt: &str,
 ) -> anyhow::Result<()> {
     let initial_url = page.url();
+    require_matching_known_provider_origin(provider, &initial_url)?;
     let verify_submission = requires_submission_acknowledgement(&initial_url);
     let expected_submission_provider = submission_provider_for_url(&initial_url);
     let inputs = set.input_refs();
@@ -1971,6 +2028,10 @@ pub async fn send_prompt(
                 "provider composer diagnostic"
             );
         })?;
+    // Waiting can redirect into a *different recognized provider* that
+    // exposes a similar editor. Never type the requested provider's prompt
+    // into another provider's composer.
+    require_matching_known_provider_origin(provider, &page.url())?;
     // Waiting for the composer can navigate to a foreign site containing an
     // equally generic input. Verify the initial provider before typing.
     if let Some(provider) = expected_submission_provider {
@@ -2002,6 +2063,7 @@ pub async fn send_prompt(
         );
         return Err(anyhow::Error::new(ProviderComposerInputRejectedError));
     }
+    require_matching_known_provider_origin(provider, &page.url())?;
     if let Some(provider) = expected_submission_provider {
         require_submission_provider_route(provider, page)?;
     }
