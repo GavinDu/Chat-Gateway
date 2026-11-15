@@ -2264,10 +2264,7 @@ mod provider_submission_route_tests {
 
     #[test]
     fn qwen_strict_submission_scope_never_accepts_spoofed_host_or_enter_only() {
-        for url in [
-            "https://chat.qwen.ai/",
-            "https://chat.qwen.ai/chat/current",
-        ] {
+        for url in ["https://chat.qwen.ai/", "https://chat.qwen.ai/chat/current"] {
             assert_eq!(super::submission_provider_for_url(url), Some("qwen"));
             assert!(requires_submission_acknowledgement(url));
         }
@@ -3025,7 +3022,10 @@ mod prompt_bound_submission_tests {
 
     #[tokio::test]
     async fn qwen_style_send_ack_rejects_unchanged_draft_and_history_hydration() {
-        let browser = obscura_core::Browser::builder().stealth(false).build().unwrap();
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
         let mut page = browser.new_page().await.unwrap();
         let html = r#"<html><body>
             <textarea id="qwen-prompt">fresh request</textarea>
@@ -3033,29 +3033,62 @@ mod prompt_bound_submission_tests {
             <div class="answer">old answer</div>
         </body></html>"#;
         let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
-        page.goto(&format!("data:text/html,{encoded}")).await.unwrap();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
         let before = submission_snapshot(&page, "#qwen-prompt", &[".answer"]).unwrap();
-        assert!(!submission_observed_for_adapter("qwen", &page, &before, &before, "fresh request").unwrap());
+        assert!(
+            !submission_observed_for_adapter("qwen", &page, &before, &before, "fresh request")
+                .unwrap()
+        );
 
         // History hydration while the draft remains cannot certify that an
         // unrelated completed answer belongs to the current request.
         page.evaluate(r#"document.body.insertAdjacentHTML('beforeend', '<div class="answer">hydrated old answer</div>')"#);
         let hydrated = submission_snapshot(&page, "#qwen-prompt", &[".answer"]).unwrap();
-        assert!(!submission_observed_for_adapter("qwen", &page, &before, &hydrated, "fresh request").unwrap());
+        assert!(!submission_observed_for_adapter(
+            "qwen",
+            &page,
+            &before,
+            &hydrated,
+            "fresh request"
+        )
+        .unwrap());
 
         // Even if the composer drops its value while historical content
         // hydrates, Qwen has no prompt-correlated acceptance signal yet.
         page.evaluate("document.querySelector('#qwen-prompt').value = ''");
         let dropped = submission_snapshot(&page, "#qwen-prompt", &[".answer"]).unwrap();
-        assert!(!submission_observed_for_adapter("qwen", &page, &before, &dropped, "fresh request").unwrap());
+        assert!(!submission_observed_for_adapter(
+            "qwen",
+            &page,
+            &before,
+            &dropped,
+            "fresh request"
+        )
+        .unwrap());
 
         // A dropped draft and the wrong user's turn must not count as success.
         page.evaluate("document.querySelector('#qwen-prompt').value = ''");
         page.evaluate(r#"document.body.insertAdjacentHTML('beforeend', '<div data-testid="user-message">unrelated request</div>')"#);
         let unrelated = submission_snapshot(&page, "#qwen-prompt", &[".answer"]).unwrap();
-        assert!(!submission_observed_for_adapter("qwen", &page, &before, &unrelated, "fresh request").unwrap());
+        assert!(!submission_observed_for_adapter(
+            "qwen",
+            &page,
+            &before,
+            &unrelated,
+            "fresh request"
+        )
+        .unwrap());
         page.evaluate("document.body.lastElementChild.textContent = 'fresh request'");
-        assert!(submission_observed_for_adapter("qwen", &page, &before, &unrelated, "fresh request").unwrap());
+        assert!(submission_observed_for_adapter(
+            "qwen",
+            &page,
+            &before,
+            &unrelated,
+            "fresh request"
+        )
+        .unwrap());
     }
 
     #[tokio::test]
