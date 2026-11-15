@@ -694,9 +694,59 @@ fn require_expected_response_origin(provider: &str, page: &Page) -> anyhow::Resu
     common::require_page_provider_origin(provider, page)
 }
 
+/// A challenge-looking URL or overlay on a foreign page must not persistently
+/// disable the requested provider. Only its own strict HTTPS page or a
+/// narrowly known external verification endpoint may trip the sticky breaker.
+/// The returned off-provider error contains no URL, prompt or page content.
+fn untrusted_challenge_origin_error(provider: &str, page: &Page) -> Option<anyhow::Error> {
+    if crate::provider_guard::is_known_external_challenge_url(&page.url()) {
+        return None;
+    }
+    require_expected_response_origin(provider, page).err()
+}
+
 #[cfg(test)]
 mod response_origin_guard_tests {
     use super::require_expected_response_origin;
+
+    #[tokio::test]
+    async fn foreign_challenge_overlay_must_not_stick_to_unrelated_adapter() {
+        use crate::provider_guard::ProviderGuard;
+
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        page.goto(
+            "data:text/html,<html><body><div>Verify you are human</div></body></html>",
+        )
+        .await
+        .unwrap();
+        let guard = ProviderGuard::default();
+        assert!(crate::provider_guard::is_challenge_page(&page));
+        for spec in crate::providers::ADAPTERS {
+            let error = super::untrusted_challenge_origin_error(spec.id, &page)
+                .expect("foreign challenge-looking page is not provider proof");
+            assert!(
+                error.to_string().contains("chat origin unavailable"),
+                "{} unexpectedly trusted off-provider challenge",
+                spec.id
+            );
+            assert_eq!(
+                guard.provider_disabled_reason(spec.id),
+                None,
+                "a foreign challenge page cannot stick the provider breaker"
+            );
+        }
+
+        // The offline fixture exemption is explicitly test-only. It does not
+        // widen any production provider or external challenge origin.
+        page.evaluate(
+            "document.documentElement.setAttribute('data-chat-gateway-test-fixture', '')",
+        );
+        assert!(super::untrusted_challenge_origin_error("manus", &page).is_none());
+    }
 
     #[tokio::test]
     async fn foreign_page_with_response_nodes_cannot_complete_strict_provider() {
@@ -769,6 +819,10 @@ pub async fn run_send(
         metrics,
     } = policy;
     if crate::provider_guard::is_challenge_page(page) {
+        if let Some(error) = untrusted_challenge_origin_error(adapter.name(), page) {
+            let _ = chunks.send(Err(error)).await;
+            return;
+        }
         provider_guard.disable_provider(
             adapter.name(),
             "challenge page detected; manual review required",
@@ -808,6 +862,10 @@ pub async fn run_send(
             // Preserve the typed challenge category rather than exposing
             // a misleading missing-composer or submission error.
             if crate::provider_guard::is_challenge_page(page) {
+                if let Some(error) = untrusted_challenge_origin_error(adapter.name(), page) {
+                    let _ = chunks.send(Err(error)).await;
+                    return;
+                }
                 provider_guard.disable_provider(
                     adapter.name(),
                     "challenge page detected; manual review required",
@@ -894,6 +952,10 @@ pub async fn run_send(
             poll_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
         );
         if probe_has_challenge(&probe) {
+            if let Some(error) = untrusted_challenge_origin_error(adapter.name(), page) {
+                let _ = chunks.send(Err(error)).await;
+                return;
+            }
             provider_guard.disable_provider(
                 adapter.name(),
                 "challenge page detected; manual review required",
