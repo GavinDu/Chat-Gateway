@@ -27,6 +27,26 @@ command -v docker >/dev/null 2>&1
 command -v curl >/dev/null 2>&1
 command -v python3 >/dev/null 2>&1
 
+# The actual Docker startup helper uses alpine:3.22 to initialize temporary
+# private vault/config volumes. A transient Docker Hub token/manifest outage
+# must not make an otherwise valid ARM64 link untestable without an attempted
+# bounded recovery. Keep the full runtime smoke mandatory: after four failed
+# pulls, fail rather than masking the gate or substituting a different image.
+if ! docker image inspect alpine:3.22 >/dev/null 2>&1; then
+  helper_available=0
+  for attempt in 1 2 3 4; do
+    if docker pull --quiet alpine:3.22 >/dev/null 2>&1; then
+      helper_available=1
+      break
+    fi
+    if (( attempt < 4 )); then sleep "$((attempt * 3))"; fi
+  done
+  if (( helper_available != 1 )); then
+    echo "Required alpine:3.22 helper image unavailable after bounded Docker Hub retries" >&2
+    exit 1
+  fi
+fi
+
 # Exercise the actual start helper with an owner-only host config. Direct
 # docker-run fixtures missed the nonroot/host-UID config mount failure.
 cp "$ROOT/config.example.yaml" "$TMP/config.yaml"
