@@ -266,8 +266,8 @@ pub(crate) const NON_MESSAGE_CHALLENGE_TEXT_JS: &str = r#"(() => {
     // A chat draft or prior assistant reply quoting CAPTCHA wording is not a
     // security overlay. Use explicit message-role roots already recognized
     // by the provider adapters; do not exclude generic dialogs or page text.
-    const messages = "[data-message-author-role], [data-message-role='assistant'], [data-message-role='user'], [data-role='assistant'], [data-role='user'], [data-testid='assistant-message'], [data-testid='user-message'], [data-testid*='assistant-response' i], [data-testid*='conversation-turn']";
-    const editors = "[contenteditable='true' i], [contenteditable='plaintext-only' i], [contenteditable=''], [role='textbox'], textarea, input";
+    const messages = "[data-message-author-role], [data-message-role='assistant'], [data-message-role='user'], [data-role='assistant'], [data-role='user'], [data-testid='assistant-message'], [data-testid='user-message'], [data-testid*='assistant-response'], [data-testid*='conversation-turn']";
+    const editors = "[contenteditable='true'], [contenteditable='plaintext-only'], [contenteditable=''], [role='textbox'], textarea, input";
     const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
     let text = '';
     let visited = 0;
@@ -555,6 +555,10 @@ mod tests {
             .unwrap();
 
         assert!(
+            page.evaluate(NON_MESSAGE_CHALLENGE_TEXT_JS).as_str().is_some(),
+            "the static body scanner must evaluate successfully in pinned Obscura"
+        );
+        assert!(
             !is_challenge_page(&page),
             "visible user-authored draft and completed answer text are not security UI"
         );
@@ -583,6 +587,13 @@ mod tests {
 
         page.evaluate(
             "document.querySelector('#manual-dialog').setAttribute('data-message-role', 'system'); document.querySelector('#manual-dialog').setAttribute('contenteditable', 'false'); document.querySelector('#manual-dialog').hidden = false",
+        );
+        let security_text = page.evaluate(NON_MESSAGE_CHALLENGE_TEXT_JS);
+        assert!(
+            security_text
+                .as_str()
+                .is_some_and(|value| value.contains("Verify you are human")),
+            "visible system manual verification must remain in the scanned body text"
         );
         assert!(
             is_challenge_page(&page),
