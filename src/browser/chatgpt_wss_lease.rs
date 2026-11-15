@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::Arc;
 
 pub const MAX_ACTIVE_SOCKETS: usize = 8;
 pub const MAX_COMMAND_BYTES: usize = 64 * 1024;
@@ -38,12 +39,24 @@ impl std::error::Error for LeaseRejection {}
 
 /// An opaque capability: both generation and serial must match. The serial
 /// prevents old async callbacks from claiming a re-used ID within one page.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct SocketLease {
+    owner: Arc<()>,
     epoch: u64,
     id: u64,
     serial: u64,
 }
+
+impl PartialEq for SocketLease {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.owner, &other.owner)
+            && self.epoch == other.epoch
+            && self.id == other.id
+            && self.serial == other.serial
+    }
+}
+
+impl Eq for SocketLease {}
 
 impl fmt::Debug for SocketLease {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -55,6 +68,7 @@ impl fmt::Debug for SocketLease {
 /// The embedding browser worker MUST serialize all registry mutations and
 /// authenticate the page-generation event before rotating ownership.
 pub struct ChatgptWssLeaseRegistry {
+    owner: Arc<()>,
     epoch: u64,
     next_serial: u64,
     active: HashMap<u64, u64>,
@@ -70,6 +84,9 @@ impl Default for ChatgptWssLeaseRegistry {
 impl ChatgptWssLeaseRegistry {
     pub fn new() -> Self {
         Self {
+            // A distinct in-process capability survives in old outstanding
+            // leases, so rebuilding a registry cannot recreate its identity.
+            owner: Arc::new(()),
             epoch: 1,
             next_serial: 0,
             active: HashMap::new(),
@@ -101,11 +118,17 @@ impl ChatgptWssLeaseRegistry {
             .ok_or(LeaseRejection::GenerationExhausted)?;
         self.next_serial = serial;
         self.active.insert(id, serial);
-        Ok(SocketLease { epoch, id, serial })
+        Ok(SocketLease {
+            owner: Arc::clone(&self.owner),
+            epoch,
+            id,
+            serial,
+        })
     }
 
     fn is_live(&self, lease: &SocketLease) -> bool {
         !self.cancelled
+            && Arc::ptr_eq(&self.owner, &lease.owner)
             && lease.epoch == self.epoch
             && self.active.get(&lease.id) == Some(&lease.serial)
     }
@@ -133,7 +156,7 @@ impl ChatgptWssLeaseRegistry {
     }
 
     /// Late completion of a previous socket must not close a re-used ID.
-    pub fn close(&mut self, lease: SocketLease) -> bool {
+    pub fn close(&mut self, lease: &SocketLease) -> bool {
         if !self.is_live(&lease) {
             return false;
         }
@@ -176,7 +199,7 @@ mod tests {
         }
         assert_eq!(guard.active_count(), MAX_ACTIVE_SOCKETS);
         assert_eq!(guard.open(epoch, 999), Err(LeaseRejection::SocketLimit));
-        assert!(guard.close(first));
+        assert!(guard.close(&first));
         assert_eq!(guard.active_count(), MAX_ACTIVE_SOCKETS - 1);
         guard.open(epoch, 999).unwrap();
     }
@@ -186,10 +209,10 @@ mod tests {
         let mut guard = ChatgptWssLeaseRegistry::new();
         let epoch = guard.page_epoch();
         let old = guard.open(epoch, 123456789).unwrap();
-        assert!(guard.close(old));
+        assert!(guard.close(&old));
         let fresh = guard.open(epoch, 123456789).unwrap();
         assert_ne!(old, fresh);
-        assert!(!guard.close(old));
+        assert!(!guard.close(&old));
         assert_eq!(
             guard.check_frame(&old, FrameKind::Command, 1),
             Err(LeaseRejection::StaleOrCancelled)
@@ -212,7 +235,7 @@ mod tests {
         );
         let next_epoch = guard.rotate_page().unwrap();
         let fresh = guard.open(next_epoch, 9).unwrap();
-        assert!(!guard.close(old));
+        assert!(!guard.close(&old));
         assert_eq!(guard.check_frame(&fresh, FrameKind::Text, 10), Ok(()));
         assert_ne!(next_epoch, old_epoch);
         assert_eq!(guard.open(old_epoch, 10), Err(LeaseRejection::StaleOrCancelled));
@@ -220,6 +243,22 @@ mod tests {
             guard.rotate_page().unwrap();
             assert_eq!(guard.active_count(), 0);
         }
+    }
+
+    #[test]
+    fn new_registry_can_never_replay_old_instance_lease() {
+        let mut old_owner = ChatgptWssLeaseRegistry::new();
+        let old = old_owner.open(old_owner.page_epoch(), 45).unwrap();
+        let mut new_owner = ChatgptWssLeaseRegistry::new();
+        let new_lease = new_owner.open(new_owner.page_epoch(), 45).unwrap();
+        assert_ne!(old, new_lease);
+        assert_eq!(
+            new_owner.check_frame(&old, FrameKind::Text, 1),
+            Err(LeaseRejection::StaleOrCancelled)
+        );
+        assert!(!new_owner.close(&old));
+        assert_eq!(new_owner.active_count(), 1);
+        assert_eq!(new_owner.check_frame(&new_lease, FrameKind::Text, 1), Ok(()));
     }
 
     #[test]
