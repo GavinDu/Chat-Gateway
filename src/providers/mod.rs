@@ -595,6 +595,7 @@ mod send_auth_redirect_tests {
 fn final_probe_confirms_completion(
     initial_text: &str,
     initial_count: usize,
+    initial_populated_count: usize,
     final_probe: &common::ResponseProbe,
     done_signal: DoneSignal,
     saw_streaming: bool,
@@ -603,7 +604,10 @@ fn final_probe_confirms_completion(
     if final_probe.streaming
         || final_probe.text.as_deref() != Some(initial_text)
         || final_probe.count != initial_count
+        || final_probe.populated_count != initial_populated_count
     {
+        // A blank/newly populated root can change without changing the
+        // total node count or the earlier turn's last nonempty text.
         return false;
     }
     // A fast explicit-done path must not accept a final snapshot in which the
@@ -1142,6 +1146,7 @@ pub async fn run_send(
                         if !final_probe_confirms_completion(
                             &txt,
                             probe.count,
+                            probe.populated_count,
                             &final_probe,
                             done_signal,
                             saw_streaming,
@@ -1262,6 +1267,7 @@ pub async fn run_send(
                 if !final_probe_confirms_completion(
                     &txt,
                     probe.count,
+                    probe.populated_count,
                     &final_probe,
                     done_signal,
                     saw_streaming,
@@ -1660,6 +1666,7 @@ mod response_completion_tests {
         let initial = ResponseProbe {
             text: Some("first part".to_owned()),
             count: 3,
+            populated_count: 2,
             streaming: false,
             post_answer_affordance: true,
             ..ResponseProbe::default()
@@ -1668,6 +1675,7 @@ mod response_completion_tests {
         assert!(final_probe_confirms_completion(
             initial.text.as_deref().unwrap(),
             initial.count,
+            initial.populated_count,
             &stable,
             DoneSignal::StopControlDisappeared,
             true,
@@ -1679,6 +1687,7 @@ mod response_completion_tests {
         assert!(!final_probe_confirms_completion(
             initial.text.as_deref().unwrap(),
             initial.count,
+            initial.populated_count,
             &late_token,
             DoneSignal::StopControlDisappeared,
             true,
@@ -1690,7 +1699,35 @@ mod response_completion_tests {
         assert!(!final_probe_confirms_completion(
             initial.text.as_deref().unwrap(),
             initial.count,
+            initial.populated_count,
             &new_node,
+            DoneSignal::StableResponseText,
+            false,
+            false,
+        ));
+
+        // A root that becomes populated (or clears) while the total DOM
+        // count and previous visible reply are unchanged invalidates final
+        // completion; wait for new stable evidence instead.
+        let mut newly_populated = stable.clone();
+        newly_populated.populated_count += 1;
+        assert!(!final_probe_confirms_completion(
+            initial.text.as_deref().unwrap(),
+            initial.count,
+            initial.populated_count,
+            &newly_populated,
+            DoneSignal::StableResponseText,
+            false,
+            false,
+        ));
+
+        let mut cleared_root = stable.clone();
+        cleared_root.populated_count -= 1;
+        assert!(!final_probe_confirms_completion(
+            initial.text.as_deref().unwrap(),
+            initial.count,
+            initial.populated_count,
+            &cleared_root,
             DoneSignal::StableResponseText,
             false,
             false,
@@ -1701,6 +1738,7 @@ mod response_completion_tests {
         assert!(!final_probe_confirms_completion(
             initial.text.as_deref().unwrap(),
             initial.count,
+            initial.populated_count,
             &resumed,
             DoneSignal::StableResponseText,
             true,
@@ -1712,6 +1750,7 @@ mod response_completion_tests {
         assert!(!final_probe_confirms_completion(
             initial.text.as_deref().unwrap(),
             initial.count,
+            initial.populated_count,
             &gone,
             DoneSignal::StableResponseText,
             false,
@@ -1727,6 +1766,7 @@ mod response_completion_tests {
         let initial = ResponseProbe {
             text: Some("complete response".into()),
             count: 1,
+            populated_count: 1,
             post_answer_affordance: true,
             ..ResponseProbe::default()
         };
@@ -1735,6 +1775,7 @@ mod response_completion_tests {
         assert!(!final_probe_confirms_completion(
             initial.text.as_deref().unwrap(),
             initial.count,
+            initial.populated_count,
             &final_probe,
             DoneSignal::StopControlDisappeared,
             true,
@@ -1745,6 +1786,7 @@ mod response_completion_tests {
         assert!(final_probe_confirms_completion(
             initial.text.as_deref().unwrap(),
             initial.count,
+            initial.populated_count,
             &final_probe,
             DoneSignal::StableResponseText,
             true,
