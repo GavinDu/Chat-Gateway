@@ -2658,6 +2658,33 @@ pub(crate) fn require_page_provider_origin(provider: &str, page: &Page) -> anyho
     require_provider_origin(provider, &page.url())
 }
 
+/// Both URLs must belong to the same expected HTTPS provider. The probe's
+/// `location.href` was captured atomically with its response text; a later
+/// `Page::url()` reading alone cannot attest to that earlier DOM snapshot.
+fn require_response_origin_pair(
+    provider: &str,
+    page_url: &str,
+    snapshot_url: &str,
+) -> anyhow::Result<()> {
+    require_provider_origin(provider, page_url)?;
+    require_provider_origin(provider, snapshot_url)
+}
+
+/// Only explicitly tagged offline data fixtures bypass the pair in test
+/// builds. In production, the DOM snapshot and current page must *both*
+/// independently satisfy the fixed nine-provider origin policy.
+pub(crate) fn require_response_probe_origins(
+    provider: &str,
+    page: &Page,
+    snapshot_url: &str,
+) -> anyhow::Result<()> {
+    #[cfg(test)]
+    if is_provider_test_fixture(page) {
+        return Ok(());
+    }
+    require_response_origin_pair(provider, &page.url(), snapshot_url)
+}
+
 /// Inline page guard reused for typing *and* the atomic Send click. A
 /// Rust-side check before an await is insufficient if navigation occurs
 /// while a framework-controlled composer is settling.
@@ -2696,7 +2723,48 @@ fn provider_origin_guard_js(expected_provider: Option<&str>) -> anyhow::Result<S
 
 #[cfg(test)]
 mod all_provider_origin_fence_tests {
-    use super::{provider_origin_for_url, provider_origin_guard_js, require_provider_origin};
+    use super::{
+        provider_origin_for_url, provider_origin_guard_js, require_provider_origin,
+        require_response_origin_pair,
+    };
+
+    #[test]
+    fn reply_snapshot_and_current_page_must_both_be_expected_https_provider() {
+        for spec in crate::providers::ADAPTERS {
+            assert!(
+                require_response_origin_pair(spec.id, spec.url, spec.url).is_ok(),
+                "{} must allow its own configured site on both views",
+                spec.id
+            );
+            for bad_snapshot in [
+                "https://unrelated.invalid/c/old-reply",
+                "http://chatgpt.com/c/previous",
+                "https://chatgpt.com:65536/c/previous",
+                "https://attacker@chatgpt.com/c/previous",
+                "https://chatgpt.com.attacker.invalid/c/previous",
+            ] {
+                let err = require_response_origin_pair(spec.id, spec.url, bad_snapshot)
+                    .expect_err("foreign snapshot cannot borrow the permitted current page");
+                assert!(err.to_string().contains("chat origin unavailable"));
+                assert!(!err.to_string().contains(bad_snapshot));
+            }
+            let wrong_provider_url = crate::providers::ADAPTERS
+                .iter()
+                .find(|other| other.id != spec.id)
+                .expect("there are nine distinct adapters")
+                .url;
+            assert!(
+                require_response_origin_pair(spec.id, spec.url, wrong_provider_url).is_err(),
+                "another known provider is not the expected assistant snapshot"
+            );
+            assert!(
+                require_response_origin_pair(spec.id, "https://unrelated.invalid/", spec.url)
+                    .is_err(),
+                "a valid snapshot cannot bless a foreign current page"
+            );
+        }
+    }
+
 
     #[test]
     fn current_catalog_provider_urls_map_to_their_exact_adapter_identity() {
