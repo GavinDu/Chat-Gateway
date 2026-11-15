@@ -810,7 +810,9 @@ mod response_origin_guard_tests {
             .build()
             .unwrap();
         let mut page = browser.new_page().await.unwrap();
-        page.goto("data:text/html,<html><body><div class='answer'>old reply</div></body></html>")
+        let html = "<html><body><div class='answer'>old reply</div></body></html>";
+        let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
             .await
             .unwrap();
         for spec in crate::providers::ADAPTERS {
