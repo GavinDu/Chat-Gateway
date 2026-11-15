@@ -499,6 +499,37 @@ fn should_probe_response_count(response_node_detected: bool) -> bool {
     !response_node_detected
 }
 
+/// An inherited Stop control at the baseline cannot prove the next request
+/// generated the same text again. Require an observable inactive->active
+/// transition before allowing the identical-answer fallback. This is a
+/// bounded safety signal, not full accepted-turn or DOM root identity.
+#[derive(Debug, Clone, Copy)]
+struct FreshStopSignal {
+    saw_inactive: bool,
+    saw_fresh_active: bool,
+}
+
+impl FreshStopSignal {
+    fn new(baseline_active: bool) -> Self {
+        Self {
+            saw_inactive: !baseline_active,
+            saw_fresh_active: false,
+        }
+    }
+
+    fn observe(&mut self, active: bool) {
+        if !active {
+            self.saw_inactive = true;
+        } else if self.saw_inactive {
+            self.saw_fresh_active = true;
+        }
+    }
+
+    fn saw_fresh_generation(&self) -> bool {
+        self.saw_fresh_active
+    }
+}
+
 /// Challenge-page body extraction is slower than URL inspection; sample it every five polls.
 fn should_check_body_challenge(poll_count: u32) -> bool {
     poll_count.is_multiple_of(5)
@@ -944,6 +975,7 @@ pub async fn run_send(
     let mut stable_ticks = 0u32;
     let mut last_delta_at: Option<Instant> = None;
     let mut saw_streaming = false;
+    let mut fresh_stop = FreshStopSignal::new(baseline_probe.streaming);
     let mut previous_post_answer_affordance = false;
     let mut saw_post_answer_affordance_absent = !baseline_probe.post_answer_affordance;
     let mut response_node_detected = false;
@@ -1065,6 +1097,7 @@ pub async fn run_send(
         }
 
         let streaming = probe.streaming;
+        fresh_stop.observe(streaming);
         saw_streaming |= streaming;
         if !probe.post_answer_affordance {
             saw_post_answer_affordance_absent = true;
@@ -1096,7 +1129,7 @@ pub async fn run_send(
                     // indicator has been observed, allow a full idle grace for
                     // that indicator to disappear before treating the unchanged
                     // baseline as the new answer.
-                    if saw_streaming && !streaming {
+                    if fresh_stop.saw_fresh_generation() && !streaming {
                         stable_ticks += 1;
                     } else {
                         stable_ticks = 0;
@@ -1304,6 +1337,62 @@ pub async fn run_send(
 #[cfg(test)]
 mod response_delta_tracker_tests {
     use super::*;
+
+    #[test]
+    fn identical_answer_requires_fresh_post_baseline_stop_edge() {
+        let mut idle_baseline = FreshStopSignal::new(false);
+        assert!(!idle_baseline.saw_fresh_generation());
+        idle_baseline.observe(false);
+        assert!(!idle_baseline.saw_fresh_generation());
+        idle_baseline.observe(true);
+        assert!(idle_baseline.saw_fresh_generation());
+        idle_baseline.observe(false);
+        assert!(idle_baseline.saw_fresh_generation());
+
+        let mut inherited_stop = FreshStopSignal::new(true);
+        inherited_stop.observe(true);
+        inherited_stop.observe(true);
+        inherited_stop.observe(false);
+        assert!(
+            !inherited_stop.saw_fresh_generation(),
+            "the previous turn's Stop disappearing is not a new generation"
+        );
+
+        inherited_stop.observe(true);
+        assert!(
+            inherited_stop.saw_fresh_generation(),
+            "an observed post-baseline inactive-to-active edge permits repeated text"
+        );
+        inherited_stop.observe(false);
+        assert!(inherited_stop.saw_fresh_generation());
+
+        let no_stop = FreshStopSignal::new(false);
+        assert!(!no_stop.saw_fresh_generation());
+    }
+
+    #[test]
+    fn inherited_stop_must_not_release_baseline_text_tracker() {
+        let mut tracker = ResponseDeltaTracker::new(Some("previous answer".to_owned()));
+        let mut stop = FreshStopSignal::new(true);
+        stop.observe(true);
+        stop.observe(false);
+        assert_eq!(
+            tracker.observe("previous answer"),
+            DeltaObservation::WaitingForNewResponse
+        );
+        assert!(
+            !stop.saw_fresh_generation(),
+            "unchanged old text and inherited Stop cannot certify a new answer"
+        );
+        // A truly populated fresh root still uses its independent count
+        // evidence even when the previous Stop was active.
+        assert!(should_reset_response_tracker(false, 1, 2, 1, 2));
+        tracker = ResponseDeltaTracker::new(None);
+        assert_eq!(
+            tracker.observe("previous answer"),
+            DeltaObservation::Delta("previous answer".to_owned())
+        );
+    }
 
     #[test]
     fn response_node_count_detects_new_node_but_not_reused_node() {
