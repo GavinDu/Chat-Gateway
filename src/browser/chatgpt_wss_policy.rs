@@ -182,11 +182,7 @@ mod tests {
             );
             assert!(!error.to_string().contains(target));
         }
-        assert!(Target::parse(&format!(
-            "wss://chatgpt.com/?{}",
-            "x".repeat(8192)
-        ))
-        .is_err());
+        assert!(Target::parse(&format!("wss://chatgpt.com/?{}", "x".repeat(8192))).is_err());
     }
 
     #[test]
@@ -223,9 +219,6 @@ mod tests {
         }
         assert!(!resolution_is_public(&[]));
         assert!(resolution_is_public(&[ip("8.8.8.8"), ip("1.1.1.1")]));
-        assert!(!resolution_is_public(&[
-            ip("8.8.8.8"),
-            ip("192.168.1.8"),
-        ]));
+        assert!(!resolution_is_public(&[ip("8.8.8.8"), ip("192.168.1.8")]));
     }
 }
