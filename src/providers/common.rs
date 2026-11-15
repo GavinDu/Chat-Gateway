@@ -3372,9 +3372,7 @@ mod prompt_bound_submission_tests {
         page.evaluate(
             "document.body.lastElementChild.innerHTML = '<span hidden>secret-hidden</span>'",
         );
-        assert!(
-            !submission_observed_for_prompt(&page, &before, &after, "secret-hidden").unwrap()
-        );
+        assert!(!submission_observed_for_prompt(&page, &before, &after, "secret-hidden").unwrap());
     }
 
     #[tokio::test]
