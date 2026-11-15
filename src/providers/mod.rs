@@ -718,11 +718,9 @@ mod response_origin_guard_tests {
             .build()
             .unwrap();
         let mut page = browser.new_page().await.unwrap();
-        page.goto(
-            "data:text/html,<html><body><div>Verify you are human</div></body></html>",
-        )
-        .await
-        .unwrap();
+        page.goto("data:text/html,<html><body><div>Verify you are human</div></body></html>")
+            .await
+            .unwrap();
         let guard = ProviderGuard::default();
         assert!(crate::provider_guard::is_challenge_page(&page));
         for spec in crate::providers::ADAPTERS {
@@ -784,7 +782,10 @@ mod response_origin_guard_tests {
         let error = receiver.recv().await.unwrap().unwrap_err();
         assert!(error.to_string().contains("chat origin unavailable"));
         assert_eq!(guard.provider_disabled_reason("manus"), None);
-        assert!(receiver.try_recv().is_err(), "no assistant content may escape");
+        assert!(
+            receiver.try_recv().is_err(),
+            "no assistant content may escape"
+        );
     }
 
     #[tokio::test]
