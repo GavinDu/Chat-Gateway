@@ -2959,7 +2959,15 @@ fn submission_observed_for_prompt(
             }});
             if (!turns.length) return false;
             const last = turns[turns.length - 1];
-            return canonical(last.innerText || last.textContent || '') === canonical(expected);
+            // For a text-only turn, rendered innerText may collapse meaningful
+            // newlines/spaces. Its actual text node preserves the submitted
+            // prompt. For nested markup, require rendered text so invisible
+            // child nodes cannot spoof a matching user turn.
+            const hasNestedElements = !!last.querySelector('*');
+            const actual = hasNestedElements
+                ? (last.innerText || last.textContent || '')
+                : (last.textContent || '');
+            return canonical(actual) === canonical(expected);
         }})()"#
     ));
     Ok(matched.as_bool() == Some(true))
