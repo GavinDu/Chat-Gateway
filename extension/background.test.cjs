@@ -981,3 +981,92 @@ test("multiple manual syncs coalesce into one forced refresh behind an automatic
   for (let i = 0; i < 4; i++) await flushAsyncWork();
   assert.deepEqual(attempts, [false, true], "manual recovery runs once after the automatic import");
 });
+
+
+test("legacy remote pair/unpair messages are popup-only and worker serialized",async()=>{
+  const f=loadBackground([],[],false);
+  const oldToken="a".repeat(64), newToken="b".repeat(64);
+  const state={gateway:"https://old.example",token:oldToken,connectionMode:"paired",
+    linkedProviders:["chatgpt"],providerLinkEpochs:{chatgpt:"old-epoch"},
+    providerLinkPendingAttempts:{chatgpt:"old-attempt"}};
+  f.sandbox.normalizeGateway=value=>{
+    const url=new URL(value);
+    if(url.protocol!=="https:" || url.pathname!=="/" || url.search || url.hash ||
+       url.username || url.password)throw new Error("Invalid origin");
+    return url.origin;
+  };
+  f.sandbox.chrome.permissions={contains:async()=>true};
+  f.sandbox.chrome.runtime.getURL=path=>"chrome-extension://fixture/"+path;
+  f.sandbox.chrome.storage.local.get=async keys=>Object.fromEntries(keys.map(k=>[k,state[k]]));
+  f.sandbox.chrome.storage.local.set=async values=>Object.assign(state,values);
+  f.sandbox.chrome.storage.local.remove=async keys=>{
+    for(const key of Array.isArray(keys)?keys:[keys])delete state[key];
+  };
+  const send=(request,sender={url:"chrome-extension://fixture/popup.html"})=>new Promise(resolve=>{
+    const asynchronous=f.listeners.message[0](request,sender,resolve);
+    if(!asynchronous && !sender.url)throw new Error("Missing response");
+  });
+  const expected={gateway:state.gateway,token:oldToken,connectionMode:"paired"};
+  const attacker=await send({type:"connect-paired-relay",
+    gateway:"https://new.example",token:newToken,connection:expected},
+    {url:"https://chat.qwen.ai/app",tab:{id:1}});
+  assert.equal(attacker.ok,false);
+  assert.equal(state.gateway,"https://old.example");
+  assert.equal(state.token,oldToken);
+
+  // Block the global consent writer while the remote response arrives.
+  // Its commit must use the writer, not overwrite provider work in parallel.
+  let release;
+  const gate=new Promise(resolve=>{release=resolve});
+  const held=f.sandbox.queueConsentMutation(()=>gate);
+  const pair=send({type:"connect-paired-relay",
+    gateway:"https://new.example",token:newToken,connection:expected});
+  await flushAsyncWork();
+  assert.equal(state.gateway,"https://old.example");
+  release();
+  await held;
+  const paired=await pair;
+  assert.equal(paired.ok,true);
+  assert.equal(state.gateway,"https://new.example");
+  assert.equal(state.token,newToken);
+  assert.equal(state.connectionMode,"paired");
+  assert.deepEqual(Array.from(state.linkedProviders),[]);
+  assert.deepEqual(Object.keys(state.providerLinkEpochs),[]);
+  assert.deepEqual(Object.keys(state.providerLinkPendingAttempts),[]);
+
+  const stale=await send({type:"disconnect-paired-relay",connection:expected});
+  assert.equal(stale.ok,false,"old unpair must not remove new gateway token");
+  assert.equal(state.token,newToken);
+
+  const disconnect=await send({type:"disconnect-paired-relay",connection:{
+    gateway:state.gateway,token:state.token,connectionMode:"paired"
+  }});
+  assert.equal(disconnect.ok,true);
+  assert.equal(state.token,undefined);
+  assert.equal(state.connectionMode,undefined);
+  assert.equal(state.linkedProviders,undefined);
+});
+
+test("stale remote pairing cannot overwrite a newer explicit relay connection",async()=>{
+  const f=loadBackground([],[],false);
+  const state={gateway:"https://old.example",token:"a".repeat(64),connectionMode:"paired"};
+  f.sandbox.normalizeGateway=value=>new URL(value).origin;
+  f.sandbox.chrome.permissions={contains:async()=>true};
+  f.sandbox.chrome.runtime.getURL=path=>"chrome-extension://fixture/"+path;
+  f.sandbox.chrome.storage.local.get=async keys=>Object.fromEntries(keys.map(k=>[k,state[k]]));
+  f.sandbox.chrome.storage.local.set=async values=>Object.assign(state,values);
+  f.sandbox.chrome.storage.local.remove=async keys=>{
+    for(const k of Array.isArray(keys)?keys:[keys])delete state[k];
+  };
+  const before={...state};
+  // The popup's old /pair response arrives after the current identity moves.
+  state.gateway="https://another.example";
+  state.token="c".repeat(64);
+  const result=await new Promise(resolve=>f.listeners.message[0]({
+    type:"connect-paired-relay",gateway:"https://old.example",
+    token:"b".repeat(64),connection:before
+  },{url:"chrome-extension://fixture/popup.html"},resolve));
+  assert.equal(result.ok,false);
+  assert.equal(state.gateway,"https://another.example");
+  assert.equal(state.token,"c".repeat(64));
+});
