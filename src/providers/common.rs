@@ -293,6 +293,7 @@ pub fn response_probe(
     let Ok(streaming_selector) = serde_json::to_string(STREAMING_SELECTOR) else {
         return ResponseProbe::default();
     };
+    let nontransparent = nontransparent_ancestors_expression("el");
     let script = format!(
         r#"(() => {{
             const selectors = {selectors};
@@ -300,6 +301,7 @@ pub fn response_probe(
                 try {{
                     return el.getClientRects().length > 0 &&
                         window.getComputedStyle(el).visibility !== "hidden" &&
+                        {nontransparent} &&
                         !el.closest('[hidden], [inert], [aria-hidden="true"]') &&
                         !el.disabled && !el.matches(':disabled') &&
                         !el.closest('fieldset[disabled], [aria-disabled="true"]');
@@ -402,6 +404,97 @@ pub fn response_probe(
         challenge_text_js = crate::provider_guard::NON_MESSAGE_CHALLENGE_TEXT_JS,
     );
     decode_response_probe(page.evaluate(&script))
+}
+
+#[cfg(test)]
+mod transparent_response_probe_tests {
+    use super::response_probe;
+
+    #[tokio::test]
+    async fn transparent_answer_and_stop_clones_do_not_replace_visible_turn() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><head><style>
+            .transparent { opacity: 0; }
+            .translucent { opacity: 0.5; }
+        </style></head><body>
+            <article id="old"><div class="answer">visible prior answer</div></article>
+            <article id="ghost" class="transparent">
+                <div class="answer">invisible ghost answer</div>
+                <button aria-label="Stop generating">Stop</button>
+            </article>
+            <article><div class="answer" style="opacity:0">self-invisible answer</div></article>
+            <button data-is-streaming="true" style="opacity:0">invisible streaming signal</button>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+
+        let prior = response_probe(&page, &[".answer"], false);
+        assert_eq!(prior.text.as_deref(), Some("visible prior answer"));
+        assert_eq!(
+            prior.count, 1,
+            "transparent reply must not raise root count"
+        );
+        assert_eq!(prior.populated_count, 1);
+        assert!(
+            !prior.streaming,
+            "transparent Stop must not extend generation"
+        );
+
+        page.evaluate("document.querySelector('#ghost').className = 'translucent'");
+        let new_turn = response_probe(&page, &[".answer"], false);
+        assert_eq!(new_turn.text.as_deref(), Some("invisible ghost answer"));
+        assert_eq!(new_turn.count, 2);
+        assert_eq!(new_turn.populated_count, 2);
+        assert!(
+            new_turn.streaming,
+            "nonzero-opacity Stop remains actionable"
+        );
+    }
+
+    #[tokio::test]
+    async fn transparent_copy_controls_cannot_certify_turn_completion() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><head><style>
+            .transparent { opacity: 0; }
+            .translucent { opacity: 0.5; }
+        </style></head><body>
+            <article>
+                <div class="answer">partial answer</div>
+                <section id="ghost-actions" class="transparent">
+                    <button aria-label="Copy">Copy</button>
+                </section>
+                <button style="opacity:0" aria-label="Regenerate">Regenerate</button>
+            </article>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+
+        let hidden = response_probe(&page, &[".answer"], false);
+        assert_eq!(hidden.text.as_deref(), Some("partial answer"));
+        assert!(
+            !hidden.post_answer_affordance,
+            "transparent Copy/Retry is not terminal evidence"
+        );
+
+        page.evaluate("document.querySelector('#ghost-actions').className = 'translucent'");
+        let visible = response_probe(&page, &[".answer"], false);
+        assert!(
+            visible.post_answer_affordance,
+            "nonzero-opacity same-turn Copy remains completion evidence"
+        );
+    }
 }
 
 #[cfg(test)]
