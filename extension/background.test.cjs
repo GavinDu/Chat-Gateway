@@ -8,12 +8,14 @@ function loadBackground(linkedProviders, failingProviders = [], connected = fals
   const calls = [];
   const timers = new Map();
   const clearedTimers = new Set();
+  const createdAlarms = [];
   let nextTimerId = 0;
   const listeners = {
     installed: [],
     startup: [],
     cookieChanged: [],
     message: [],
+    alarm: [],
   };
   const sandbox = {
     Map,
@@ -42,6 +44,10 @@ function loadBackground(linkedProviders, failingProviders = [], connected = fals
       }
     },
     chrome: {
+      alarms: {
+        create: (name, options) => createdAlarms.push({name, ...options}),
+        onAlarm: { addListener: callback => listeners.alarm.push(callback) },
+      },
       cookies: {
         onChanged: { addListener: callback => listeners.cookieChanged.push(callback) },
       },
@@ -63,12 +69,43 @@ function loadBackground(linkedProviders, failingProviders = [], connected = fals
   };
   const source = fs.readFileSync(path.join(__dirname, "background.js"), "utf8");
   vm.runInNewContext(source, sandbox, { filename: "background.js" });
-  return { calls, listeners, timers, clearedTimers, sandbox };
+  return { calls, listeners, timers, clearedTimers, createdAlarms, sandbox };
 }
 
 function flushAsyncWork() {
   return new Promise(resolve => setImmediate(resolve));
 }
+
+test("periodic relay alarm refreshes status without recreating repeating alarm", async () => {
+  const f = loadBackground(["chatgpt"], [], true);
+  let probes = 0;
+  f.sandbox.relayFetch = async () => {
+    probes++;
+    return {ok:true,status:200,json:async()=>({providers:[{provider:"chatgpt",linked:true}]})};
+  };
+
+  f.listeners.startup[0]();
+  for (let i = 0; i < 8; i++) await flushAsyncWork();
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(f.createdAlarms)),
+    [{name:"relay-session-refresh",periodInMinutes:15}],
+    "startup must register one bounded repeating refresh"
+  );
+  assert.equal(probes, 1);
+
+  f.listeners.alarm[0]({name:"relay-session-refresh"});
+  for (let i = 0; i < 8; i++) await flushAsyncWork();
+  assert.equal(probes, 2, "periodic wake must still query fresh gateway health");
+  assert.equal(
+    f.createdAlarms.length, 1,
+    "a repeating alarm must not rearm/reset itself on every firing"
+  );
+
+  f.listeners.alarm[0]({name:"relay-unknown"});
+  for (let i = 0; i < 4; i++) await flushAsyncWork();
+  assert.equal(probes, 2, "unknown alarms are not provider heartbeat signals");
+  assert.equal(f.createdAlarms.length, 1);
+});
 
 test("explicit provider sync reports a skipped upload instead of success", async () => {
   const f = loadBackground(["chatgpt"]);
