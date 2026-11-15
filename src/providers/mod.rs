@@ -803,7 +803,11 @@ fn untrusted_challenge_origin_error(provider: &str, page: &Page) -> Option<anyho
 /// Challenge evidence may persistently disable a provider only if *both*
 /// URL observations belong to the expected provider or known HTTPS verifier.
 /// Do not let an off-provider verification overlay borrow the later page URL.
-fn challenge_probe_urls_attributable(provider: &str, current_url: &str, snapshot_url: &str) -> bool {
+fn challenge_probe_urls_attributable(
+    provider: &str,
+    current_url: &str,
+    snapshot_url: &str,
+) -> bool {
     common::require_response_origin_pair(provider, current_url, snapshot_url).is_ok()
         || (crate::provider_guard::is_known_external_challenge_url(current_url)
             && crate::provider_guard::is_known_external_challenge_url(snapshot_url))
@@ -909,7 +913,9 @@ mod response_origin_guard_tests {
             );
             assert!(
                 !super::challenge_probe_urls_attributable(
-                    provider, verifier, "https://attacker.invalid/captcha"
+                    provider,
+                    verifier,
+                    "https://attacker.invalid/captcha"
                 ),
                 "a known verifier cannot bless an arbitrary captured URL"
             );
