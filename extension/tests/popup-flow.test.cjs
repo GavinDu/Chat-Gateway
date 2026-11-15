@@ -4,7 +4,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
 
-function loadPopup({failCookieDomain = null, includeSecondProvider = false, manualVerification = false, localRelay = false, activation = null, diagnosticsSync = null, diagnosticsFailure = null} = {}) {
+function loadPopup({failCookieDomain = null, includeSecondProvider = false, manualVerification = false, localRelay = false, activation = null, diagnosticsSync = null, diagnosticsFailure = null, pairedDisconnectReject = false} = {}) {
   const elements = new Map();
   const chromeCalls = [];
   const values = {gateway:"http://127.0.0.1:8080",linkedProviders:[]};
@@ -61,6 +61,23 @@ function loadPopup({failCookieDomain = null, includeSecondProvider = false, manu
       delete values.relaySnapshotVersions;
       delete values.pendingConnection;
       values.localDisconnected=true;
+      return {ok:true};
+    }
+    if(request.type==="disconnect-paired-relay") {
+      if(pairedDisconnectReject) return {ok:false,error:"Paired gateway connection changed before disconnect."};
+      const expected=request.connection;
+      if(expected.gateway!==values.gateway || expected.token!==values.token ||
+          expected.connectionMode!==values.connectionMode) {
+        return {ok:false,error:"Paired gateway connection changed before disconnect."};
+      }
+      values.token=null;
+      values.connectionMode=null;
+      values.linkedProviders=[];
+      values.relaySnapshotVersions={};
+      if(values.pendingConnection?.request_id===expected.pendingRequest?.request_id &&
+          values.pendingConnection?.expires===expected.pendingRequest?.expires) {
+        values.pendingConnection=null;
+      }
       return {ok:true};
     }
     if(request.type==="link-provider") {
@@ -311,19 +328,37 @@ test("provider dashboard keeps healthy providers actionable when one cookie prob
 test("explicit gateway disconnect removes pending approval and stops polling",async()=>{
   const popup=loadPopup();
   await Promise.resolve();
+  popup.values.gateway="https://private.example";
+  popup.values.connectionMode="paired";
   popup.values.token="c".repeat(64);
   popup.values.linkedProviders=["metaai"];
   popup.values.pendingConnection={
-    gateway:"http://127.0.0.1:8080",
+    gateway:"https://private.example",
     request_id:"a".repeat(64),
     poll_secret:"b".repeat(64),
     expires:Date.now()+300000
   };
   await popup.elements.get("unpair").handlers.click();
-  assert.equal(popup.values.token,undefined);
-  assert.equal(popup.values.pendingConnection,undefined);
+  assert.equal(popup.values.token,null);
+  assert.equal(popup.values.pendingConnection,null);
   assert.deepEqual(Array.from(popup.values.linkedProviders||[]),[]);
   assert.ok(popup.chromeCalls.includes("alarm-clear:relay-connection"));
+  assert.ok(popup.chromeCalls.some(x=>x==="disconnect-paired-relay:"),
+    "paired Unpair must use a worker-owned consent transition");
+});
+
+
+test("missing paired worker acknowledgement never falls back to popup consent deletion",async()=>{
+  const popup=loadPopup({pairedDisconnectReject:true});
+  await Promise.resolve();
+  popup.values.gateway="https://private.example";
+  popup.values.connectionMode="paired";
+  popup.values.token="c".repeat(64);
+  popup.values.linkedProviders=["metaai"];
+  await popup.elements.get("unpair").handlers.click();
+  assert.equal(popup.values.token,"c".repeat(64));
+  assert.deepEqual(Array.from(popup.values.linkedProviders),["metaai"]);
+  assert.match(popup.elements.get("message").textContent,/connection changed/);
 });
 
 test("local connection and explicit disconnect are worker-owned rather than popup map writes",async()=>{

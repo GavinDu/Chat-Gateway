@@ -266,6 +266,49 @@ function disconnectLocalRelay(expected) {
     return true;
   });
 }
+// Explicit remote Unpair is a connection transition, not a popup-side
+// storage cleanup. Its old HTTPS response must not clear a new connection
+// or race a worker-owned provider link/approval commit.
+function disconnectPairedRelay(expected) {
+  return queueConsentMutation(async () => {
+    const current = await chrome.storage.local.get([
+      "gateway", "token", "connectionMode", "linkedProviders",
+      "providerLinkEpochs", "providerLinkPendingAttempts", "pendingConnection"
+    ]);
+    const gateway = expected?.gateway;
+    if (typeof gateway !== "string" || !gateway.startsWith("https://") ||
+        normalizeGateway(gateway) !== gateway || !current.token ||
+        current.connectionMode === "local" || !sameRelayIdentity(expected, current)) {
+      throw new Error("Paired gateway connection changed before disconnect.");
+    }
+    const epochs = {...(current.providerLinkEpochs || {})};
+    for (const provider of new Set([
+      ...(current.linkedProviders || []), ...Object.keys(epochs)
+    ])) {
+      if (Object.hasOwn(PROVIDERS, provider)) epochs[provider] = randomHex(16);
+    }
+    // A newer pending approval belongs to a different owner attempt. Clear
+    // only the exact request visible when the user initiated Unpair.
+    const pending = current.pendingConnection;
+    const oldPending = expected.pendingRequest;
+    const clearPending = Boolean(pending && oldPending &&
+      pending.gateway === gateway && pending.request_id === oldPending.request_id &&
+      pending.expires === oldPending.expires);
+    const patch = {
+      connectionMode:null, token:null, linkedProviders:[],
+      providerLinkEpochs:epochs, providerLinkPendingAttempts:{},
+      relaySnapshotVersions:{}
+    };
+    if (clearPending) patch.pendingConnection = null;
+    // A single write publishes a fully disconnected view atomically.
+    // Null tokens and pending approvals are treated as absent by callers.
+    await chrome.storage.local.set(patch);
+    lastGatewayCheck = null;
+    providerDiagnostics.clear();
+    return {clearedPending:clearPending};
+  });
+}
+
 // Keep one trailing refresh per provider. It reads the latest cookie snapshot
 // when it starts, rather than replaying every rotation behind a slow import.
 const queuedProviderSyncs = new Map();
@@ -424,6 +467,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     disconnectLocalRelay(message.connection)
       .then(() => sendResponse({ok:true}))
       .catch(() => sendResponse({ok:false, error:"Local gateway connection changed before disconnect."}));
+    return true;
+  }
+  if (message?.type === "disconnect-paired-relay") {
+    disconnectPairedRelay(message.connection)
+      .then(() => sendResponse({ok:true}))
+      .catch(() => sendResponse({ok:false, error:"Paired gateway connection changed before disconnect."}));
     return true;
   }
   if (message?.type === "link-provider" && Object.hasOwn(PROVIDERS, message.provider)) {
