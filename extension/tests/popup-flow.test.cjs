@@ -42,6 +42,7 @@ function loadPopup({failCookieDomain = null, includeSecondProvider = false, manu
   }};
   const context = {
     Promise, Date, Set, Array,
+    randomHex: (() => { let counter = 0; return () => "test-epoch-" + (++counter); })(),
     confirm:()=>true,
     document:{getElementById:byId,createElement:node},
     window:{addEventListener(){}},
