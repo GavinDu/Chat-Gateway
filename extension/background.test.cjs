@@ -91,6 +91,46 @@ test("explicit provider sync reports a skipped upload instead of success", async
   assert.deepEqual(f.calls, ["chatgpt", "chatgpt"]);
 });
 
+test("same-gateway unlink and relink epoch cannot attribute the old upload to new consent", async () => {
+  const f = loadBackground(["chatgpt"], [], true);
+  const state = {
+    gateway:"http://127.0.0.1:8080",connectionMode:"local",
+    linkedProviders:["chatgpt"],providerLinkEpochs:{chatgpt:"epoch-old"}
+  };
+  f.sandbox.chrome.storage.local.get = async () => ({...state});
+  f.sandbox.chrome.storage.local.set = async update => Object.assign(state,update);
+  const pending = [];
+  f.sandbox.syncProvider = async () => new Promise(resolve => pending.push(resolve));
+  const send = request => new Promise(resolve =>
+    f.listeners.message[0](request, {}, resolve));
+  const old = send({type:"sync-provider",provider:"chatgpt"});
+  for (let i = 0; i < 4; i++) await flushAsyncWork();
+  assert.equal(pending.length,1);
+
+  // This is the same HTTP gateway and install; only the consent generation
+  // distinguishes an old account link from the newly explicit opt-in.
+  state.linkedProviders = [];
+  state.providerLinkEpochs = {chatgpt:"epoch-revoked"};
+  state.linkedProviders = ["chatgpt"];
+  state.providerLinkEpochs = {chatgpt:"epoch-new"};
+  pending.shift()("uploaded");
+  assert.equal((await old).ok,true);
+  const first = await send({type:"relay-diagnostics"});
+  assert.equal(first.extension.provider_sync.chatgpt.state,"not_attempted",
+    "stale A completion must not become an uploaded result for new B consent");
+
+  const fresh = send({type:"sync-provider",provider:"chatgpt"});
+  for (let i = 0; i < 4; i++) await flushAsyncWork();
+  assert.equal(pending.length,1);
+  pending.shift()("uploaded");
+  assert.equal((await fresh).ok,true);
+  const latest = await send({type:"relay-diagnostics"});
+  assert.equal(latest.extension.provider_sync.chatgpt.state,"uploaded");
+  assert.ok(latest.extension.provider_sync.chatgpt.updated_at);
+  assert.equal(state.providerLinkEpochs.chatgpt,"epoch-new",
+    "a worker may observe but must not regenerate a persisted consent epoch");
+});
+
 test("stale gateway A diagnostics cannot overwrite B cache or poison B cookie recovery", async () => {
   for (const oldFailure of [false, true]) {
     const f = loadBackground(["chatgpt"]);
