@@ -2198,7 +2198,9 @@ fn safe_provider_https_authority(uri: &axum::http::Uri) -> bool {
         return false;
     }
     authority.as_str().eq_ignore_ascii_case(host)
-        || authority.as_str().eq_ignore_ascii_case(&format!("{host}:443"))
+        || authority
+            .as_str()
+            .eq_ignore_ascii_case(&format!("{host}:443"))
 }
 
 pub(crate) fn submission_provider_for_url(url: &str) -> Option<&'static str> {
