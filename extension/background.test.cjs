@@ -18,6 +18,7 @@ function loadBackground(linkedProviders, failingProviders = [], connected = fals
   const sandbox = {
     Map,
     Set,
+    randomHex: (() => { let counter = 0; return () => "test-epoch-" + (++counter); })(),
     Promise,
     Object,
     setTimeout(callback, delay) {
