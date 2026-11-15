@@ -298,6 +298,13 @@ pub fn response_probe(
                         !el.closest('fieldset[disabled], [aria-disabled="true"]');
                 }} catch (_) {{ return false; }}
             }};
+            // A visible wrapper can contain only hidden descendants. Raw
+            // textContent must not become a fabricated provider response when
+            // innerText is empty. Text-only roots are safe and preserve exact
+            // newlines in the pinned embedded Obscura runtime.
+            const renderedText = node => node.querySelector('*')
+                ? (node.innerText || '')
+                : (node.textContent || '');
             const nodes = new Set();
             let text = null;
             let lastResponseNode = null;
@@ -310,7 +317,7 @@ pub fn response_probe(
                             const tag = parts.shift();
                             const needle = parts.join("=");
                             matches = Array.from(document.querySelectorAll(tag)).filter(el =>
-                                ((el.innerText || el.textContent || "").trim()).includes(needle)
+                                (renderedText(el).trim()).includes(needle)
                             );
                         }}
                     }} else {{
@@ -325,7 +332,7 @@ pub fn response_probe(
                         // placeholder as the reply or hiding the earlier text.
                         for (let i = matches.length - 1; i >= 0; i -= 1) {{
                             const node = matches[i];
-                            const content = node.innerText || node.textContent || "";
+                            const content = renderedText(node);
                             if (content.trim()) {{
                                 text = content;
                                 lastResponseNode = node;
@@ -2151,13 +2158,16 @@ pub fn last_element_text(page: &Page, selector: &str) -> Option<String> {
     let js = format!(
         r#"(() => {{
             const nodes = Array.from(document.querySelectorAll({sel_js}));
+            const renderedText = node => node.querySelector('*')
+                ? (node.innerText || '')
+                : (node.textContent || '');
             for (let i = nodes.length - 1; i >= 0; i--) {{
                 const node = nodes[i];
                 if (!node.getClientRects().length ||
                     window.getComputedStyle(node).visibility === 'hidden' ||
                     node.closest('[hidden], [inert], [aria-hidden="true"], [aria-disabled="true"], fieldset[disabled]') ||
                     node.disabled || node.matches(':disabled')) continue;
-                const value = node.innerText || node.textContent || '';
+                const value = renderedText(node);
                 if (value.trim()) return value;
             }}
             return null;
@@ -2177,6 +2187,72 @@ pub fn response_text(page: &Page, selectors: &[&str]) -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod hidden_child_response_text_tests {
+    use super::{last_element_text, response_probe, response_text};
+
+    #[tokio::test]
+    async fn nested_hidden_child_must_not_be_used_as_assistant_answer() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <div class="answer" id="real">legitimate earlier answer</div>
+            <div class="answer" id="nested">
+                <span hidden>secret hidden</span>
+                <span aria-hidden="true">secret aria</span>
+                <span style="display:none">secret css</span>
+            </div>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response_probe(&page, &[".answer"], false).text.as_deref(),
+            Some("legitimate earlier answer")
+        );
+        assert_eq!(
+            last_element_text(&page, ".answer").as_deref(),
+            Some("legitimate earlier answer")
+        );
+        assert_eq!(
+            response_text(&page, &[".answer"]).as_deref(),
+            Some("legitimate earlier answer")
+        );
+
+        page.evaluate("document.querySelector('#real').hidden = true");
+        assert!(
+            response_probe(&page, &[".answer"], false).text.is_none(),
+            "hidden nested child must not become response poll text"
+        );
+        assert!(last_element_text(&page, ".answer").is_none());
+        assert!(response_text(&page, &[".answer"]).is_none());
+
+        page.evaluate("document.querySelector('#nested').innerHTML = '<span>visible nested answer</span>'");
+        assert_eq!(
+            response_probe(&page, &[".answer"], false).text.as_deref(),
+            Some("visible nested answer")
+        );
+        assert_eq!(
+            response_text(&page, &[".answer"]).as_deref(),
+            Some("visible nested answer")
+        );
+        page.evaluate("document.querySelector('#nested').textContent = 'plain text answer'");
+        assert_eq!(
+            response_probe(&page, &[".answer"], false).text.as_deref(),
+            Some("plain text answer")
+        );
+        assert_eq!(
+            last_element_text(&page, ".answer").as_deref(),
+            Some("plain text answer")
+        );
+    }
 }
 
 #[cfg(test)]
