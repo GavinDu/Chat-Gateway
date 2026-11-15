@@ -1934,18 +1934,32 @@ fn provider_origin_for_url(url: &str) -> Option<&'static str> {
     }
 }
 
-/// The test-only data URL exemption keeps in-memory DOM fixtures independent
-/// of provider networks; production rejects all data: and about: documents.
+/// Reject every unrecognized origin, regardless of matching page selectors.
 fn require_provider_origin(provider: &str, url: &str) -> anyhow::Result<()> {
-    #[cfg(test)]
-    if url.starts_with("data:") {
-        return Ok(());
-    }
     if provider_origin_for_url(url) == Some(provider) {
         Ok(())
     } else {
         anyhow::bail!("provider chat origin unavailable before prompt dispatch")
     }
+}
+
+/// Only an explicit in-memory fixture can bypass real-origin navigation in
+/// unit tests. The check is removed from production builds entirely.
+#[cfg(test)]
+fn is_provider_test_fixture(page: &Page) -> bool {
+    page.url().starts_with("data:text/html,")
+        && page
+            .evaluate("document.documentElement.hasAttribute('data-chat-gateway-test-fixture')")
+            .as_bool()
+            == Some(true)
+}
+
+fn require_page_provider_origin(provider: &str, page: &Page) -> anyhow::Result<()> {
+    #[cfg(test)]
+    if is_provider_test_fixture(page) {
+        return Ok(());
+    }
+    require_provider_origin(provider, &page.url())
 }
 
 /// Inline page guard reused for typing *and* the atomic Send click. A
@@ -2022,9 +2036,7 @@ mod all_provider_origin_fence_tests {
             ("qwen", "about:blank"),
         ] {
             assert_ne!(provider_origin_for_url(url), Some(provider), "{url}");
-            if !url.starts_with("data:") {
-                assert!(require_provider_origin(provider, url).is_err(), "{url}");
-            }
+            assert!(require_provider_origin(provider, url).is_err(), "{url}");
         }
     }
 
@@ -2259,9 +2271,13 @@ pub async fn send_prompt(
 ) -> anyhow::Result<()> {
     let initial_url = page.url();
     check_session(provider, page)?;
-    require_provider_origin(provider, &initial_url)?;
+    require_page_provider_origin(provider, page)?;
     #[cfg(test)]
-    let send_guard_provider = if initial_url.starts_with("data:") { None } else { Some(provider) };
+    let send_guard_provider = if is_provider_test_fixture(page) {
+        None
+    } else {
+        Some(provider)
+    };
     #[cfg(not(test))]
     let send_guard_provider = Some(provider);
     let verify_submission = requires_submission_acknowledgement(&initial_url);
@@ -2281,7 +2297,7 @@ pub async fn send_prompt(
     // exposes a similar editor. Never type the requested provider's prompt
     // into another provider's composer.
     check_session(provider, page)?;
-    require_provider_origin(provider, &page.url())?;
+    require_page_provider_origin(provider, page)?;
     // Waiting for the composer can navigate to a foreign site containing an
     // equally generic input. Verify the initial provider before typing.
     if let Some(provider) = expected_submission_provider {
@@ -2298,7 +2314,7 @@ pub async fn send_prompt(
     }
     drive_page(page, Duration::from_millis(200)).await;
     check_session(provider, page)?;
-    require_provider_origin(provider, &page.url())?;
+    require_page_provider_origin(provider, page)?;
     let input_sel = inputs
         .iter()
         .copied()
@@ -2316,7 +2332,7 @@ pub async fn send_prompt(
         return Err(anyhow::Error::new(ProviderComposerInputRejectedError));
     }
     check_session(provider, page)?;
-    require_provider_origin(provider, &page.url())?;
+    require_page_provider_origin(provider, page)?;
     if let Some(provider) = expected_submission_provider {
         require_submission_provider_route(provider, page)?;
     }
@@ -2578,6 +2594,7 @@ mod pre_send_retention_tests {
             ..Default::default()
         };
         let selectors = crate::providers::chatgpt::SELECTORS.effective(&overrides);
+        page.evaluate("document.documentElement.setAttribute('data-chat-gateway-test-fixture', '')");
         let result = super::send_prompt("chatgpt", &mut page, &selectors, "user draft").await;
         assert!(result.is_err(), "a cleared draft must not be submitted");
         assert_eq!(page.evaluate("window.sent || 0").as_f64(), Some(0.0));
