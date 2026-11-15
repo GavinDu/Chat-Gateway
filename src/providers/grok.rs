@@ -19,10 +19,12 @@ pub const SELECTORS: SelectorSet = SelectorSet {
         "div.model-picker",
     ],
     input: &[
-        "textarea[placeholder*=\"Ask\"]",
-        "div[contenteditable=\"true\"][role=\"textbox\"]",
-        "textarea[name=\"message\"]",
+        // Exact existing chat identifiers beat broad Ask/search candidates.
+        // Never derive new production selectors from synthetic fixtures.
         "textarea[aria-label=\"Ask Grok anything\"]",
+        "textarea[name=\"message\"]",
+        "div[contenteditable=\"true\"][role=\"textbox\"]",
+        "textarea[placeholder*=\"Ask\"]",
     ],
     send: &["button[aria-label=\"Send\"]", "button.send-button"],
     response: &[
@@ -76,5 +78,67 @@ impl SiteAdapter for GrokAdapter {
     }
     fn effective_selectors(&self) -> common::EffectiveSelectorSet {
         SELECTORS.effective(&self.cfg.selectors)
+    }
+}
+
+#[cfg(test)]
+mod labelled_composer_priority_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn labelled_chat_editor_wins_over_search_and_clicks_its_own_send() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <form id="search">
+              <textarea id="search-input" placeholder="Ask about docs"></textarea>
+              <textarea aria-label="Ask Grok anything" hidden></textarea>
+              <button id="search-send" type="button" aria-label="Send"
+                onclick="window.searchClicks=(window.searchClicks||0)+1">Search</button>
+            </form>
+            <form id="chat">
+              <textarea id="chat-input" name="message" aria-label="Ask Grok anything"></textarea>
+              <button id="chat-send" type="button" aria-label="Send"
+                onclick="window.chatClicks=(window.chatClicks||0)+1">Chat</button>
+            </form>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        let effective = SELECTORS.effective(&Default::default());
+        let inputs = effective.input_refs();
+        common::human_type(&page, &inputs, "fixture request")
+            .await
+            .unwrap();
+        assert_eq!(
+            page.evaluate("document.querySelector('#chat-input').value").as_str(),
+            Some("fixture request")
+        );
+        assert_eq!(
+            page.evaluate("document.querySelector('#search-input').value").as_str(),
+            Some("")
+        );
+        assert!(common::click_send_or_enter(
+            &mut page,
+            &effective.send_refs(),
+            inputs[0],
+            500,
+        ).await.unwrap());
+        assert_eq!(page.evaluate("window.chatClicks || 0").as_f64(), Some(1.0));
+        assert_eq!(page.evaluate("window.searchClicks || 0").as_f64(), Some(0.0));
+    }
+
+    #[test]
+    fn configured_input_overrides_still_take_priority_over_built_in_order() {
+        let overrides = crate::config::ProviderSelectorOverrides {
+            input: Some(vec!["#owner-specified-input".to_owned()]),
+            ..Default::default()
+        };
+        let effective = SELECTORS.effective(&overrides);
+        assert_eq!(effective.input_refs(), vec!["#owner-specified-input"]);
     }
 }
