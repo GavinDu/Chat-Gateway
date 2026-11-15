@@ -226,13 +226,12 @@ mod tests {
         assert_eq!(state.apply(&request, opaque, Event::Accepted), T::Applied);
         assert_eq!(state.phase(), Phase::Accepted);
         for id in [" ", "\0", "task\nid", "manus task-α "] {
-            let expected = if id.chars().all(char::is_whitespace)
-                || id.chars().any(char::is_control)
-            {
-                T::Invalid
-            } else {
-                T::Stale
-            };
+            let expected =
+                if id.chars().all(char::is_whitespace) || id.chars().any(char::is_control) {
+                    T::Invalid
+                } else {
+                    T::Stale
+                };
             assert_eq!(state.apply(&request, id, Event::Running), expected);
             assert_eq!(state.phase(), Phase::Accepted);
         }
