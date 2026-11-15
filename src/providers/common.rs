@@ -1853,12 +1853,15 @@ pub fn is_login_url(url: &str) -> bool {
     {
         return true;
     }
-    uri.path().split('/').any(|segment| {
-        matches!(
-            segment.to_ascii_lowercase().as_str(),
-            "login" | "signin" | "sign-in" | "auth" | "oauth" | "oauth2" | "authorize" | "sso"
-        )
-    })
+    // Authenticate only explicit root-level routes. A chat conversation ID
+    // such as /c/login, /chat/auth, or /app/oauth is not a login redirect.
+    // Nested provider-specific auth routes need observed first-party evidence.
+    let root_path = uri.path().strip_prefix('/').unwrap_or_default();
+    let root_segment = root_path.split('/').next().unwrap_or_default();
+    matches!(
+        root_segment.to_ascii_lowercase().as_str(),
+        "login" | "signin" | "sign-in" | "auth" | "oauth" | "oauth2" | "authorize" | "sso"
+    )
 }
 
 pub fn is_login_page(page: &Page) -> bool {
@@ -1877,6 +1880,9 @@ mod login_url_classification_tests {
             "https://chatgpt.com/auth/login",
             "https://claude.ai/login?next=%2Fnew",
             "https://login.microsoftonline.com/tenant/oauth2/authorize",
+            "https://www.perplexity.ai/signin",
+            "https://manus.im/auth/login",
+            "https://grok.com/oauth2/authorize",
             "https://login.auth0.com/authorize",
         ] {
             assert!(is_login_url(url), "missed authentication redirect: {url}");
@@ -1889,6 +1895,13 @@ mod login_url_classification_tests {
             "https://chatgpt.com/c/authoring",
             "https://grok.com/author",
             "https://gemini.google.com/app?q=auth",
+            "https://chatgpt.com/c/login",
+            "https://grok.com/chat/auth",
+            "https://gemini.google.com/app/authorize",
+            "https://manus.im/app/oauth",
+            "https://claude.ai/new/signin",
+            "https://www.perplexity.ai/search/sso",
+            "https://chat.qwen.ai/c/oauth2",
             "https://claude.ai/new?redirect=https%3A%2F%2Fauth.openai.com%2Flogin",
             "https://accounts.x.com.attacker.invalid/",
             "data:text/html,<textarea></textarea>",
