@@ -75,8 +75,27 @@ try {
     args:["--disable-extensions-except="+join(temp,"extension"),
       "--load-extension="+join(temp,"extension")],
   });
-  const worker = context.serviceWorkers()[0] || await context.waitForEvent("serviceworker");
+  // The extension background worker may exist before MV3 APIs are exposed.
+  // Never seed a non-extension service worker or skip the real storage check.
+  const isExtensionWorker = worker => worker.url().startsWith("chrome-extension://");
+  const worker = context.serviceWorkers().find(isExtensionWorker) ||
+    await context.waitForEvent("serviceworker", {predicate:isExtensionWorker, timeout:20000});
   const id = new URL(worker.url()).host;
+  let storageReady = false;
+  for (let attempt = 0; attempt < 50; attempt++) {
+    try {
+      storageReady = await worker.evaluate(() => Boolean(
+        typeof chrome !== "undefined" &&
+        chrome.runtime?.id &&
+        typeof chrome.storage?.local?.set === "function"
+      ));
+    } catch {
+      // An MV3 worker can restart while the browser exposes its APIs.
+    }
+    if (storageReady) break;
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  assert.ok(storageReady, "extension worker storage API unavailable after bounded startup");
   // The CI gateway listens on a random isolated port, not the popup's normal
   // 8080 default. Seed only its URL; never provide a token or pairing secret.
   await worker.evaluate(gatewayUrl => chrome.storage.local.set({gateway:gatewayUrl}), base);
