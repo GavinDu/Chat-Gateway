@@ -111,8 +111,23 @@
       reader.read = (...args) => {
         const queued = this._queue.length > 0;
         const pending = nativeRead(...args);
-        if (queued) this._dequeued();
-        this._pullIfNeeded();
+        if (queued) {
+          // A delegated read can reject without consuming its queued chunk
+          // (e.g. an invalid BYOB view). Releasing backpressure before a
+          // fulfilled read would permit an extra pull while the queue is full.
+          Promise.resolve(pending).then(
+            result => {
+              if (result && result.done === false) {
+                this._dequeued();
+                this._pullIfNeeded();
+              }
+            },
+            () => {} // Retain queue credit and the original rejection.
+          );
+        } else {
+          // An empty queue's pending read still needs an immediate pull.
+          this._pullIfNeeded();
+        }
         return pending;
       };
       return reader;

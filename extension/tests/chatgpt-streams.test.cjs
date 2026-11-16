@@ -292,6 +292,47 @@ test('wrapped reader preserves byte-view arguments for the delegated read', asyn
   assert.equal((await settled(reader.read(new Uint8Array(4)))).done, true);
 });
 
+test('rejected queued read retains backpressure until a chunk is consumed', async () => {
+  // A specialized reader can reject its view before touching the queue.
+  // The compatibility shim must not treat that as a successful dequeue.
+  class RejectingReadStream extends PinnedReadableStream {
+    getReader(...args) {
+      const reader = super.getReader(...args);
+      const originalRead = reader.read.bind(reader);
+      reader.read = view => {
+        if (view === null) return Promise.reject(new TypeError('invalid read view'));
+        if (view === 'malformed') return Promise.resolve(undefined);
+        return originalRead();
+      };
+      return reader;
+    }
+  }
+  const {context} = load('chatgpt.com', 'https:', RejectingReadStream);
+  let controller;
+  let pulls = 0;
+  const stream = new context.ReadableStream({
+    start(value) { controller = value; },
+    pull(value) { value.enqueue(++pulls); },
+  }, {highWaterMark: 1});
+  await tick();
+  assert.equal(pulls, 1, 'the first chunk prefills the single-slot queue');
+  assert.equal(controller.desiredSize, 0);
+
+  const reader = stream.getReader();
+  await assert.rejects(reader.read(null), /invalid read view/);
+  assert.equal(await reader.read('malformed'), undefined,
+    'an invalid fulfilled result must not consume queue credit');
+  await tick();
+  assert.equal(pulls, 1, 'rejected read must not trigger a second pull');
+  assert.equal(controller.desiredSize, 0, 'rejected read must retain queued credit');
+  assert.equal((await settled(reader.read('valid'))).value, 1,
+    'valid read still receives the original queued chunk');
+  await tick();
+  assert.equal(pulls, 2, 'successful dequeue restores one credit');
+  assert.equal(controller.desiredSize, 0);
+  await reader.cancel('finished');
+});
+
 test('50 sequential streams terminate without a retained global registry', async () => {
   const {context} = load();
   for (let i = 0; i < 50; i++) {
