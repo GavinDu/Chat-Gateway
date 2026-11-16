@@ -783,8 +783,12 @@ fn click_text_selector(page: &Page, selector: &str) -> anyhow::Result<bool> {
     };
     let tag = serde_json::to_string(tag)?;
     let needle = serde_json::to_string(needle)?;
+    // Text selector clicks are used for model pickers. An old, transparent
+    // or pointer-inert clone is not an actionable picker, even if it has a
+    // layout box and matching label text.
+    let nontransparent = nontransparent_ancestors_expression("el");
     let clicked = page.evaluate(&format!(
-        "(() => {{ const el = Array.from(document.querySelectorAll({tag})).find(el => {{ try {{ return ((el.innerText || el.textContent || '').trim()).includes({needle}) && el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden' && !el.disabled && !el.matches(':disabled') && !el.closest('[hidden], [inert], [aria-hidden=\"true\"], [aria-disabled=\"true\"], fieldset[disabled]'); }} catch (_) {{ return false; }} }}); if (!el) return false; el.click(); return true; }})()"
+        "(() => {{ const el = Array.from(document.querySelectorAll({tag})).find(el => {{ try {{ return ((el.innerText || el.textContent || '').trim()).includes({needle}) && el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).pointerEvents !== 'none' && {nontransparent} && !el.disabled && !el.matches(':disabled') && !el.closest('[hidden], [inert], [aria-hidden=\"true\"], [aria-disabled=\"true\"], fieldset[disabled]'); }} catch (_) {{ return false; }} }}); if (!el) return false; el.click(); return true; }})()"
     ));
     Ok(clicked.as_bool() == Some(true))
 }
