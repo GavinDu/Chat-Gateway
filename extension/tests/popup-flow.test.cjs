@@ -234,6 +234,8 @@ function loadPopup({failCookieDomain = null, includeSecondProvider = false, manu
 test("popup pending connection status never renders untrusted worker or storage secrets", async () => {
   for (const [response, expected] of [
     [{ok:false,error:"token=private secret_url=https://secret.invalid"}, /worker did not respond/],
+    [{ok:false,error:"Gateway permission is missing."}, /Gateway permission is missing/],
+    [{ok:false,error:"Gateway permission is missing. token=private"}, /worker did not respond/],
     [{ok:false,errorCode:"connection_poll_unavailable",
       error:"poll_secret=private-request"}, /approval check unavailable/],
     [undefined, /worker did not respond/]
