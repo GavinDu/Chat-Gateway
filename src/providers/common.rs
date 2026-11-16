@@ -406,7 +406,7 @@ pub fn response_probe(
                         // unanchored substring across unrelated attributes.
                         const replyActions = /^(copy|copy response|copy answer|copy message|regenerate|regenerate response|retry|retry response|good response|bad response|thumbs up|thumbs down)$/;
                         const replyTestIds = /^(copy-(response|answer|message)(-button)?|(response|answer|message)-copy(-button)?|regenerate(-response)?-button|retry-response-button|thumbs-(up|down)(-button)?)$/;
-                        const normalize = value => String(value || "").trim().toLowerCase().replace(/\\s+/g, " ");
+                        const normalize = value => String(value || "").trim().toLowerCase().replace(/\s+/g, " ");
                         postAnswerAffordance = buttons.some(button => {{
                             if (!visible(button)) return false;
                             const aria = normalize(button.getAttribute("aria-label"));
