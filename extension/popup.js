@@ -43,6 +43,38 @@ async function openExtensionTab(url) {
   return false;
 }
 
+// Provider action callbacks can receive errors from stale workers, Chrome
+// permission/storage/tab APIs, or the gateway. Only exact source-authored
+// operator guidance may cross the popup display boundary.
+const SAFE_PROVIDER_ACTION_ERRORS = new Set([
+  "Unsupported provider.",
+  "This provider is not yet supported by Chat-Gateway.",
+  "Connect to gateway before linking a provider.",
+  "Provider permissions were not granted.",
+  "Gateway could not save provider consent. Reload the extension.",
+  "Provider cookies disappeared before sync. Sign in to the provider and retry linking.",
+  "Provider session was not uploaded; check the gateway connection and retry.",
+  "Provider session uploaded, but link confirmation changed. Refresh status.",
+  "Provider logout could not complete. Retry before reconnecting.",
+  "Gateway sync was cancelled. Retry when ready.",
+  "Gateway sync timed out. Check the connection and retry.",
+  "Provider permission or consent is missing. Re-link and retry.",
+  "Provider activation timed out. Retry from the extension.",
+  "Gateway connection was rejected. Reconnect and retry.",
+  "Provider sync failed. Check the gateway connection and retry.",
+  "Gateway connection changed before logout. Reconnect and retry.",
+  "Gateway logout was cancelled. Check status and retry.",
+  "Gateway logout timed out. Check status and retry.",
+  "Gateway or provider permission changed. Reconnect and retry.",
+  "Gateway did not finish logout in time. Check status and retry.",
+  "Gateway rejected logout. Reconnect and retry.",
+  "Gateway logout failed. Check the connection and retry."
+]);
+function safeProviderActionError(error, fallback) {
+  const text = typeof error?.message === "string" ? error.message : "";
+  return SAFE_PROVIDER_ACTION_ERRORS.has(text) ? text : fallback;
+}
+
 function showGatewayConnection(connected) {
   $("pairing").hidden = connected;
   $("linked").hidden = !connected;
@@ -177,14 +209,16 @@ async function refreshStatus(force = false) {
     linkButton.addEventListener("click", () => connectProvider(
       item.provider,
       !item.linked || item.authentication === "needs_login"
-    ).catch(error => message(error.message)));
+    ).catch(error => message(safeProviderActionError(error,
+      "Provider connection failed. Check browser permissions and gateway status, then retry.")));
     actions.append(linkButton);
 
     const openButton = document.createElement("button");
     openButton.type = "button";
     openButton.className = "secondary provider-action";
     openButton.textContent = "Open website";
-    openButton.addEventListener("click", () => openProviderLogin(item.provider).catch(error => message(error.message)));
+    openButton.addEventListener("click", () => openProviderLogin(item.provider).catch(error => message(safeProviderActionError(error,
+      "Unable to open provider website. Retry from the extension."))));
     actions.append(openButton);
 
     if (item.linked) {
@@ -193,7 +227,8 @@ async function refreshStatus(force = false) {
       logoutButton.className = "quiet-danger provider-action";
       logoutButton.textContent = "Log out";
       logoutButton.title = "Remove the gateway session and stop cookie resync. Does not sign out from the official website.";
-      logoutButton.addEventListener("click", () => logoutProvider(item.provider).catch(error => message(error.message)));
+      logoutButton.addEventListener("click", () => logoutProvider(item.provider).catch(error => message(safeProviderActionError(error,
+      "Provider logout unavailable. Check gateway status and retry."))));
       actions.append(logoutButton);
     }
     li.append(actions);
