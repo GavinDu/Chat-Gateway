@@ -4,6 +4,9 @@ const debounceTimers = new Map();
 // Internal API snapshots contain only fixed health categories and timestamps.
 // Never retain or return provider cookies, install credentials or raw errors.
 const providerDiagnostics = new Map();
+// Only worker-internal consent ownership; never expose epochs in diagnostics.
+const providerDiagnosticEpochs = new Map();
+let diagnosticIdentityGeneration = 0;
 // Keep cache shorter than the popup check interval so token revocation is
 // never masked by a still-valid dashboard snapshot on the next poll.
 const CONNECTION_DIAGNOSTICS_TTL_MS = 5_000;
@@ -22,13 +25,15 @@ let gatewayProbeSerial = 0;
 function ensureGatewayDiagnosticIdentity(current) {
   const identity = hasRelayConnection(current) ? current.gateway + "|" + relayIdentity(current) : null;
   if (identity !== lastGatewayIdentity) {
-    // Invalidate an in-flight A probe even across A -> B -> A without
-    // another health request. Equality of destination alone is not a lease.
+    // Invalidate any response from an older install generation, including
+    // A -> B -> A where the gateway URL returns to its previous value.
+    diagnosticIdentityGeneration += 1;
     gatewayProbeSerial += 1;
     lastGatewayCheck = null;
     lastGatewayIdentity = identity;
     automaticCookieSyncSuppressedUntil = 0;
     providerDiagnostics.clear();
+    providerDiagnosticEpochs.clear();
   }
   return identity;
 }
@@ -91,7 +96,7 @@ async function hasOriginPermissions(origins) {
   try { return Boolean(await chrome.permissions.contains({origins})); }
   catch { return false; }
 }
-function recordProviderDiagnostic(provider, state, errorCode = null) {
+function recordProviderDiagnostic(provider, state, errorCode = null, attempt = null) {
   // A provider sync attempt is NOT authenticated-login verification.
   // Store only stable local result codes, never raw upstream responses.
   const safeState = ["syncing", "uploaded", "unchanged", "no_cookies", "skipped", "failed"].includes(state)
@@ -100,17 +105,22 @@ function recordProviderDiagnostic(provider, state, errorCode = null) {
     state: safeState, issue: errorCode, updated_at: new Date().toISOString()
   };
   providerDiagnostics.set(provider, entry);
+  if (attempt) providerDiagnosticEpochs.set(provider, attempt.providerLinkEpochs?.[provider]);
   return entry;
 }
 // Every diagnostics response has independent per-provider attempt freshness.
 // Failed gateway status makes old local sync snapshots stale, but never
 // deletes the last attempt time or falsely changes a backend login state.
-function finalizeRelayDiagnostics(result) {
+function finalizeRelayDiagnostics(result, requestedGeneration, requestedEpochs) {
   const extension = result.extension;
   if (!extension) return result;
   extension.provider_sync = Object.fromEntries(
     extension.linked_providers.map(provider => {
-      const previous = providerDiagnostics.get(provider);
+      // A delayed popup query must not borrow another gateway's or newly
+      // relinked provider's live progress. The status record's epoch is private.
+      const previous = requestedGeneration === diagnosticIdentityGeneration &&
+        providerDiagnosticEpochs.get(provider) === requestedEpochs?.[provider]
+        ? providerDiagnostics.get(provider) : null;
       return [provider, {
         state: previous?.state || "not_attempted",
         issue: previous?.issue || null,
@@ -122,8 +132,17 @@ function finalizeRelayDiagnostics(result) {
   return result;
 }
 async function relayDiagnostics(force = false) {
-  const current = await chrome.storage.local.get(["gateway", "token", "connectionMode", "linkedProviders"]);
+  const current = await chrome.storage.local.get(["gateway", "token", "connectionMode", "linkedProviders", "providerLinkEpochs"]);
   const identity = ensureGatewayDiagnosticIdentity(current);
+  const requestedGeneration = diagnosticIdentityGeneration;
+  // A same-gateway provider unlink/relink changes consent even when the
+  // connection identity itself has not changed.
+  for (const provider of providerDiagnostics.keys()) {
+    if (providerDiagnosticEpochs.get(provider) !== current.providerLinkEpochs?.[provider]) {
+      providerDiagnostics.delete(provider);
+      providerDiagnosticEpochs.delete(provider);
+    }
+  }
   const extension = {
     connected: hasRelayConnection(current),
     connection_mode: !hasRelayConnection(current) ? "disconnected" : current.connectionMode === "local" ? "local" : "paired",
@@ -139,7 +158,7 @@ async function relayDiagnostics(force = false) {
       return [provider, await hasOriginPermissions(origins)];
     })
   ));
-  if (!extension.connected) return finalizeRelayDiagnostics({ok:false, extension, gateway_issue:"not_connected"});
+  if (!extension.connected) return finalizeRelayDiagnostics({ok:false, extension, gateway_issue:"not_connected"}, requestedGeneration, current.providerLinkEpochs);
   extension.permissions.gateway = await hasOriginPermissions([current.gateway + "/*"]);
   // The health probe is read-only. Its network result may be shared for the
   // same identity, but each caller must retain its own linked-provider and
@@ -152,11 +171,11 @@ async function relayDiagnostics(force = false) {
     return finalizeRelayDiagnostics({
       ok: shared.ok, extension, gateway: shared.gateway,
       gateway_issue: shared.gateway_issue
-    });
+    }, requestedGeneration, current.providerLinkEpochs);
   }
   if (!force && lastGatewayCheck && Date.now() - lastGatewayCheckAt < CONNECTION_DIAGNOSTICS_TTL_MS) {
     extension.gateway_checked_at = new Date(lastGatewayCheckAt).toISOString();
-    return finalizeRelayDiagnostics({ok:true, extension, gateway:lastGatewayCheck});
+    return finalizeRelayDiagnostics({ok:true, extension, gateway:lastGatewayCheck}, requestedGeneration, current.providerLinkEpochs);
   }
   const probe = (async () => {
   const probeSerial = ++gatewayProbeSerial;
@@ -172,7 +191,7 @@ async function relayDiagnostics(force = false) {
   };
   const changed = () => finalizeRelayDiagnostics({
     ok:false, extension, gateway_issue:"gateway_connection_changed"
-  });
+  }, requestedGeneration, current.providerLinkEpochs);
   try {
     // Check the identity before dispatching the status request, as well as
     // after it resolves. A reconnect must not reuse an old target/token.
@@ -185,7 +204,7 @@ async function relayDiagnostics(force = false) {
       lastGatewayCheckAt = 0;
       automaticCookieSyncSuppressedUntil = Date.now() + COOKIE_OUTAGE_BACKOFF_MS;
       return finalizeRelayDiagnostics({ok:false, extension, gateway_issue:
-        response.status === 401 || response.status === 403 ? "gateway_unauthorized" : "gateway_request_failed"});
+        response.status === 401 || response.status === 403 ? "gateway_unauthorized" : "gateway_request_failed"}, requestedGeneration, current.providerLinkEpochs);
     }
     const gateway = await response.json();
     if (!await isCurrentProbe()) return changed();
@@ -193,7 +212,7 @@ async function relayDiagnostics(force = false) {
     lastGatewayCheckAt = Date.now();
     automaticCookieSyncSuppressedUntil = 0;
     extension.gateway_checked_at = new Date(lastGatewayCheckAt).toISOString();
-    return finalizeRelayDiagnostics({ok:true, extension, gateway});
+    return finalizeRelayDiagnostics({ok:true, extension, gateway}, requestedGeneration, current.providerLinkEpochs);
   } catch (error) {
     // In-flight failure from a prior connection must not mark the new one
     // offline or revoke its healthy cache/automatic cookie sync.
@@ -201,7 +220,7 @@ async function relayDiagnostics(force = false) {
     lastGatewayCheck = null;
     lastGatewayCheckAt = 0;
     automaticCookieSyncSuppressedUntil = Date.now() + COOKIE_OUTAGE_BACKOFF_MS;
-    return finalizeRelayDiagnostics({ok:false, extension, gateway_issue:classifyRelayFailure(error)});
+    return finalizeRelayDiagnostics({ok:false, extension, gateway_issue:classifyRelayFailure(error)}, requestedGeneration, current.providerLinkEpochs);
   }
   })();
   inFlightGatewayStatus = {identity, promise:probe};
@@ -591,7 +610,7 @@ function queueProviderSync(provider, force = false) {
     let inProgress = null;
     if (await providerDiagnosticScopeCurrent(provider, attempt)) {
       ensureGatewayDiagnosticIdentity(attempt);
-      inProgress = recordProviderDiagnostic(provider, "syncing");
+      inProgress = recordProviderDiagnostic(provider, "syncing", null, attempt);
     }
     // A delayed result can follow unlink/relink or an owner change. Remove
     // only this attempt's in-progress record; never erase a newer attempt.
@@ -603,7 +622,7 @@ function queueProviderSync(provider, force = false) {
     try {
       const result = await syncProvider(provider, {force:shouldForce});
       if (await providerDiagnosticScopeCurrent(provider, attempt)) {
-        recordProviderDiagnostic(provider, result || "skipped");
+        recordProviderDiagnostic(provider, result || "skipped", null, attempt);
         if (result === "uploaded") lastGatewayCheck = null;
       } else {
         clearStaleProgress();
@@ -611,7 +630,7 @@ function queueProviderSync(provider, force = false) {
       return result;
     } catch (error) {
       if (await providerDiagnosticScopeCurrent(provider, attempt)) {
-        recordProviderDiagnostic(provider, "failed", classifyRelayFailure(error));
+        recordProviderDiagnostic(provider, "failed", classifyRelayFailure(error), attempt);
       } else {
         clearStaleProgress();
       }
