@@ -45,7 +45,14 @@
         Promise.resolve().then(() => { if (!terminal) return source.pull.call(source, controller); }).then(() => {
           pulling = false;
           if (again) { again = false; kick(); }
-        }, error => { pulling = false; controller.error(error); });
+        }, error => {
+          pulling = false;
+          // A late rejected pull must never poison a stream that already
+          // delivered its final queued chunk and closed, or was cancelled.
+          // The pinned fallback error() would otherwise erase that chunk.
+          if (terminal) { again = false; return; }
+          controller.error(error);
+        });
       };
       super({
         start(nativeController) {
