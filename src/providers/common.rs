@@ -4576,7 +4576,10 @@ mod prompt_bound_submission_tests {
         let ghosts_only = submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
         assert_eq!(ghosts_only.user_turn_count, before.user_turn_count);
         assert_eq!(ghosts_only.response_count, before.response_count);
-        assert!(!ghosts_only.streaming, "invisible Stop is not new generation");
+        assert!(
+            !ghosts_only.streaming,
+            "invisible Stop is not new generation"
+        );
         assert!(!super::submission_accepted(&before, &ghosts_only));
         assert!(!submission_observed_for_prompt(&page, &before, &ghosts_only, "request").unwrap());
 
@@ -4607,7 +4610,10 @@ mod prompt_bound_submission_tests {
             })()"#,
         );
         let after_trailing_ghost = submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
-        assert_eq!(after_trailing_ghost.user_turn_count, accepted.user_turn_count);
+        assert_eq!(
+            after_trailing_ghost.user_turn_count,
+            accepted.user_turn_count
+        );
         assert!(
             submission_observed_for_prompt(&page, &before, &after_trailing_ghost, "request")
                 .unwrap(),
@@ -4618,7 +4624,10 @@ mod prompt_bound_submission_tests {
         // an older match once a newer distinct turn actually appears.
         page.evaluate("document.body.lastElementChild.style.opacity = '0.5'");
         let newer_real_turn = submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
-        assert_eq!(newer_real_turn.user_turn_count, accepted.user_turn_count + 1);
+        assert_eq!(
+            newer_real_turn.user_turn_count,
+            accepted.user_turn_count + 1
+        );
         assert!(
             !submission_observed_for_prompt(&page, &before, &newer_real_turn, "request").unwrap()
         );
