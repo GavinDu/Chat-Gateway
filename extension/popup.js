@@ -287,8 +287,10 @@ async function initialize() {
   if (!stored.localDisconnected && isLocalGateway($("gateway").value)) {
     try {
       if (await connectLocalGateway(normalizeGateway($("gateway").value))) return;
-    } catch (error) {
-      message("Local gateway unavailable: " + error.message);
+    } catch (_) {
+      // The mode probe and status fetch can reject with a credential-bearing
+      // URL or browser-internal text. Never reflect that exception to popup.
+      message("Local gateway connection unavailable. Check the gateway and retry.");
     }
   }
   showGatewayConnection(hasRelayConnection(stored));
