@@ -4035,6 +4035,7 @@ fn submission_snapshot(
     let input_expr = visible_input_query(&input);
     let draft = composer_draft_expression("el");
     let responses = serde_json::to_string(response_selectors)?;
+    let nontransparent = nontransparent_ancestors_expression("node");
     let js = format!(
         r#"(() => {{
             const el = {input_expr};
@@ -4044,6 +4045,7 @@ fn submission_snapshot(
                 try {{
                     return node.getClientRects().length > 0 &&
                         window.getComputedStyle(node).visibility !== "hidden" &&
+                        {nontransparent} &&
                         !node.closest('[hidden], [inert], [aria-hidden="true"]') &&
                         !node.disabled && !node.matches(':disabled') &&
                         !node.closest('fieldset[disabled], [aria-disabled="true"]');
@@ -4159,6 +4161,7 @@ fn submission_observed_for_prompt(
         return Ok(false);
     }
     let prompt_js = serde_json::to_string(prompt)?;
+    let nontransparent = nontransparent_ancestors_expression("node");
     let matched = page.evaluate(&format!(
         r#"(() => {{
             const expected = {prompt_js};
@@ -4174,6 +4177,7 @@ fn submission_observed_for_prompt(
                 try {{
                     return node.getClientRects().length > 0 &&
                         window.getComputedStyle(node).visibility !== 'hidden' &&
+                        {nontransparent} &&
                         !node.closest('[hidden], [inert], [aria-hidden="true"], [aria-disabled="true"]');
                 }} catch (_) {{ return false; }}
             }});
