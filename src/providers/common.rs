@@ -5209,6 +5209,43 @@ mod text_selector_tests {
         assert!(!super::click_text_selector(&page, "text:button=Send").unwrap());
     }
 
+    #[tokio::test]
+    async fn text_picker_skips_opacity_zero_self_ancestor_and_pointer_inert_clones() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <button style="opacity:0" onclick="window.picked='ghost-self'">Choose model</button>
+            <section style="opacity:0">
+                <button onclick="window.picked='ghost-parent'">Choose model</button>
+            </section>
+            <button style="pointer-events:none" onclick="window.picked='pointer-inert'">Choose model</button>
+            <div style="pointer-events:none">
+                <button onclick="window.picked='pointer-parent'">Choose model</button>
+            </div>
+            <button id="valid" style="opacity:0.5" onclick="window.picked='visible'">Choose model</button>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        assert!(
+            super::click_text_selector(&page, "text:button=Choose model").unwrap(),
+            "the translucent actionable picker must remain click-supported"
+        );
+        assert_eq!(page.evaluate("window.picked").as_str(), Some("visible"));
+        page.evaluate(
+            "(() => { window.picked = 'unchanged'; document.querySelector('#valid').style.pointerEvents='none'; })()",
+        );
+        assert!(
+            !super::click_text_selector(&page, "text:button=Choose model").unwrap(),
+            "only invisible and pointer-inert controls must not be clicked"
+        );
+        assert_eq!(page.evaluate("window.picked").as_str(), Some("unchanged"));
+    }
+
     #[test]
     fn selector_override_is_role_specific_and_preserves_defaults() {
         let base = &crate::providers::chatgpt::SELECTORS;
