@@ -216,13 +216,17 @@ manus_runtime_status() {
     echo "Manus runtime status: unavailable" >&2
     return 1
   fi
-  local response
-  if ! response="$(curl --noproxy '*' --max-time 8 --connect-timeout 3 --max-filesize 131072 \
-    --fail --silent --request POST "http://127.0.0.1:$PORT/relay/v1/status" 2>/dev/null)"; then
+  # Stream untrusted HTTP bytes directly to the size-bounded parser. Only
+  # its allowlisted lines may enter a shell variable; pipefail prevents a
+  # late curl failure from printing a falsely successful runtime status.
+  local safe_output
+  if ! safe_output="$(curl --noproxy '*' --max-time 8 --connect-timeout 3 --max-filesize 131072 \
+    --fail --silent --request POST "http://127.0.0.1:$PORT/relay/v1/status" 2>/dev/null |
+    python3 -B "$ROOT/scripts/manus_runtime_status.py" 2>/dev/null)"; then
     echo "Manus runtime status: unavailable" >&2
     return 1
   fi
-  printf '%s' "$response" | python3 -B "$ROOT/scripts/manus_runtime_status.py"
+  printf '%s\n' "$safe_output"
 }
 
 ensure_volumes_and_key() {
