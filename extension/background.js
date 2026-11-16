@@ -648,7 +648,10 @@ function queueProviderSync(provider, force = false) {
         inProgress.phase = IMPORT_PHASES.includes(sample?.phase) ? sample.phase : null;
         inProgress.durations_ms = redactedImportTimings(sample?.durations_ms);
       };
-      const result = await syncProvider(provider, {force:shouldForce,onProgress});
+      const result = await syncProvider(provider, {
+        force:shouldForce, onProgress,
+        snapshotVersionMutation:queueConsentMutation
+      });
       if (await providerDiagnosticScopeCurrent(provider, attempt)) {
         recordProviderDiagnostic(provider, result || "skipped", null, attempt, inProgress);
         if (result === "uploaded") lastGatewayCheck = null;
@@ -683,15 +686,17 @@ function logoutProviderFromRelay(provider) {
     // Take the provider off the consent list BEFORE the network DELETE.
     // Other provider links may proceed while network revocation awaits.
     // Their array/epoch writes must not race the logout mutation.
+    let revokedEpoch;
     await queueConsentMutation(async () => {
       const current = await chrome.storage.local.get(
         ["gateway", "token", "connectionMode", "linkedProviders", "providerLinkEpochs", "providerLinkPendingAttempts"]);
       if (!sameRelayIdentity(expected, current)) {
         throw new Error("Gateway connection changed before provider logout. Retry on the new connection.");
       }
+      revokedEpoch = randomHex(16);
       await chrome.storage.local.set({
         linkedProviders:(current.linkedProviders || []).filter(value => value !== provider),
-        providerLinkEpochs:{...(current.providerLinkEpochs || {}), [provider]:randomHex(16)},
+        providerLinkEpochs:{...(current.providerLinkEpochs || {}), [provider]:revokedEpoch},
         providerLinkPendingAttempts: Object.fromEntries(
           Object.entries(current.providerLinkPendingAttempts || {}).filter(([name]) => name !== provider)
         )
@@ -703,14 +708,23 @@ function logoutProviderFromRelay(provider) {
       method:"DELETE",body:"{}"
     }, {gateway:expected.gateway,token:expected.token,connectionMode:expected.connectionMode});
     if (!response.ok) throw new Error("Gateway logout failed (" + response.status + "). Auto sync is paused; retry logout.");
-    providerDiagnostics.delete(provider);
-    lastGatewayCheck = null;
-    const latest = await chrome.storage.local.get(["gateway", "token", "connectionMode", "relaySnapshotVersions"]);
-    if (latest.gateway === expected.gateway && latest.token === expected.token && latest.connectionMode === expected.connectionMode) {
+    // A concurrent provider upload also writes this shared map. Serialize
+    // the cleanup with every link/logout/snapshot writer, and do not delete a
+    // newly relinked provider's digest or its fresh diagnostic record.
+    await queueConsentMutation(async () => {
+      const latest = await chrome.storage.local.get([
+        "gateway", "token", "connectionMode", "linkedProviders",
+        "providerLinkEpochs", "relaySnapshotVersions"
+      ]);
+      if (!sameRelayIdentity(expected, latest) ||
+          latest.linkedProviders?.includes(provider) ||
+          latest.providerLinkEpochs?.[provider] !== revokedEpoch) return;
       const versions = {...(latest.relaySnapshotVersions || {})};
       delete versions[provider];
       await chrome.storage.local.set({relaySnapshotVersions:versions});
-    }
+      providerDiagnostics.delete(provider);
+      lastGatewayCheck = null;
+    });
   });
 }
 
