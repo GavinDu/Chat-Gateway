@@ -4,6 +4,10 @@ const debounceTimers = new Map();
 // Internal API snapshots contain only fixed health categories and timestamps.
 // Never retain or return provider cookies, install credentials or raw errors.
 const providerDiagnostics = new Map();
+// Consent epochs and install identity are internal-only ownership fences.
+// Never include these in the public relay-diagnostics payload.
+const providerDiagnosticEpochs = new Map();
+let providerDiagnosticsIdentity = null;
 // Keep cache shorter than the popup check interval so token revocation is
 // never masked by a still-valid dashboard snapshot on the next poll.
 const CONNECTION_DIAGNOSTICS_TTL_MS = 5_000;
@@ -40,10 +44,20 @@ async function hasOriginPermissions(origins) {
   try { return Boolean(await chrome.permissions.contains({origins})); }
   catch { return false; }
 }
-function recordProviderDiagnostic(provider, state, errorCode = null) {
+function recordProviderDiagnostic(provider, state, errorCode = null, attempt = null) {
   // A provider sync attempt is NOT authenticated-login verification.
-  // Store only stable local result codes, never raw upstream responses.
-  const safeState = ["uploaded", "unchanged", "no_cookies", "skipped", "failed"].includes(state)
+  // Scope the visible state to the install + explicit linked-provider epoch.
+  if (attempt) {
+    const identity = hasRelayConnection(attempt) ? attempt.gateway + "|" + relayIdentity(attempt) : null;
+    if (providerDiagnosticsIdentity !== identity) {
+      providerDiagnostics.clear();
+      providerDiagnosticEpochs.clear();
+      providerDiagnosticsIdentity = identity;
+    }
+    providerDiagnosticEpochs.set(provider, attempt.providerLinkEpochs?.[provider]);
+  }
+  // Store only fixed local result codes, never raw upstream responses.
+  const safeState = ["syncing", "uploaded", "unchanged", "no_cookies", "skipped", "failed"].includes(state)
     ? state : "unknown";
   providerDiagnostics.set(provider, {
     state: safeState, issue: errorCode, updated_at: new Date().toISOString()
@@ -69,13 +83,27 @@ function finalizeRelayDiagnostics(result) {
   return result;
 }
 async function relayDiagnostics(force = false) {
-  const current = await chrome.storage.local.get(["gateway", "token", "connectionMode", "linkedProviders"]);
+  const current = await chrome.storage.local.get(["gateway", "token", "connectionMode", "linkedProviders", "providerLinkEpochs"]);
   const identity = hasRelayConnection(current) ? current.gateway + "|" + relayIdentity(current) : null;
   if (identity !== lastGatewayIdentity) {
     lastGatewayCheck = null;
     lastGatewayIdentity = identity;
     automaticCookieSyncSuppressedUntil = 0;
-    providerDiagnostics.clear();
+    // Preserve a currently running import recorded before the first popup
+    // status read, but discard status from an older install identity.
+    if (providerDiagnosticsIdentity !== identity) {
+      providerDiagnostics.clear();
+      providerDiagnosticEpochs.clear();
+    }
+    providerDiagnosticsIdentity = identity;
+  }
+  // The same provider can be unlinked/relinked on the same gateway (ABA).
+  // Its older in-flight progress must not survive the new consent epoch.
+  for (const provider of providerDiagnostics.keys()) {
+    if (providerDiagnosticEpochs.get(provider) !== current.providerLinkEpochs?.[provider]) {
+      providerDiagnostics.delete(provider);
+      providerDiagnosticEpochs.delete(provider);
+    }
   }
   const extension = {
     connected: hasRelayConnection(current),
@@ -539,15 +567,20 @@ function queueProviderSync(provider, force = false) {
     queuedProviderForces.delete(provider);
     const attempt = await chrome.storage.local.get(["gateway", "token", "connectionMode", "linkedProviders", "providerLinkEpochs"]);
     try {
+      // Actual serialized import begins here, not when a cookie burst queued
+      // work behind another attempt. Never claim login/authentication.
+      if (await providerDiagnosticScopeCurrent(provider, attempt)) {
+        recordProviderDiagnostic(provider, "syncing", null, attempt);
+      }
       const result = await syncProvider(provider, {force:shouldForce});
       if (await providerDiagnosticScopeCurrent(provider, attempt)) {
-        recordProviderDiagnostic(provider, result || "skipped");
+        recordProviderDiagnostic(provider, result || "skipped", null, attempt);
         if (result === "uploaded") lastGatewayCheck = null;
       }
       return result;
     } catch (error) {
       if (await providerDiagnosticScopeCurrent(provider, attempt)) {
-        recordProviderDiagnostic(provider, "failed", classifyRelayFailure(error));
+        recordProviderDiagnostic(provider, "failed", classifyRelayFailure(error), attempt);
       }
       throw error;
     }
