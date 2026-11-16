@@ -22,6 +22,9 @@ let gatewayProbeSerial = 0;
 function ensureGatewayDiagnosticIdentity(current) {
   const identity = hasRelayConnection(current) ? current.gateway + "|" + relayIdentity(current) : null;
   if (identity !== lastGatewayIdentity) {
+    // Invalidate an in-flight A probe even across A -> B -> A without
+    // another health request. Equality of destination alone is not a lease.
+    gatewayProbeSerial += 1;
     lastGatewayCheck = null;
     lastGatewayIdentity = identity;
     automaticCookieSyncSuppressedUntil = 0;
