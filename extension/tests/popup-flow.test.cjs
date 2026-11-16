@@ -489,6 +489,51 @@ test("popup displays last extension sync and stale status independently of auth"
   assert.doesNotMatch(status,/private|token|cookie=secret/);
 });
 
+test("provider dashboard renders only exact known issue codes from gateway and worker", async () => {
+  const view = async (gatewayIssue, extensionIssue) => {
+    const popup = loadPopup({includeSecondProvider:true,diagnosticsSync:{
+      state:"failed",issue:extensionIssue,updated_at:"2026-11-15T18:00:00.000Z"
+    }});
+    await new Promise(resolve=>setImmediate(resolve));
+    popup.context.relayFetch = async () => ({ok:true,status:200,json:async()=>({
+      providers:[
+        {provider:"metaai",enabled:true,linked:true,authentication:"unknown",
+          availability:"degraded",issue:gatewayIssue},
+        {provider:"claude",enabled:true,linked:false,authentication:"needs_login",
+          availability:"unknown",issue:"session_not_linked"}
+      ],vault_mode:true
+    })});
+    await popup.controls.refreshStatus();
+    const rows=popup.byId("status").children;
+    const detail=rows[0].children.find(x=>x.className==="provider-detail").textContent;
+    const healthy=rows[1].children.find(x=>x.className==="provider-detail").textContent;
+    assert.match(healthy,/Gateway issue: session not linked/,
+      "a bad issue for one provider must not corrupt another row");
+    return detail;
+  };
+
+  const known=await view("provider_document_denied","gateway_timeout");
+  assert.match(known,/Gateway issue: provider document denied/);
+  assert.match(known,/Extension sync: gateway timeout/);
+  assert.match(known,/Login unverified/,
+    "issue codes do not establish authenticated login");
+
+  const leaked="token=private https://private.invalid/relay?poll_secret=secret";
+  const untrusted=await view("provider_document_denied "+leaked,leaked);
+  assert.match(untrusted,/Gateway issue: unverified status/);
+  assert.match(untrusted,/Extension sync: unverified status/);
+  assert.ok(!untrusted.includes("private"));
+  assert.ok(!untrusted.includes("poll_secret"));
+  assert.ok(!untrusted.includes("token="));
+
+  for(const malformed of [42,{token:"secret"},"provider_degraded token=secret"]) {
+    const detail=await view(malformed,malformed);
+    assert.match(detail,/Gateway issue: unverified status/);
+    assert.match(detail,/Extension sync: unverified status/);
+    assert.ok(!detail.includes("secret"));
+  }
+});
+
 test("provider challenge is shown as manual verification, not an expired session or automatic retry",async()=>{
   const popup=loadPopup({manualVerification:true});
   popup.server.linked=true;

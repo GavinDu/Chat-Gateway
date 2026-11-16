@@ -133,6 +133,25 @@ function safeStatusErrorMessage(error) {
     : "Gateway status unavailable. Check the connection and retry.";
 }
 
+// A stale worker or malformed gateway status JSON may provide arbitrary issue
+// text. Only the server's source-authored provider codes and the worker's
+// redacted sync failure codes are safe to show on the provider dashboard.
+const GATEWAY_PROVIDER_ISSUES = new Set([
+  "provider_disabled", "session_not_linked", "manual_verification_required",
+  "provider_assets_blocked", "provider_document_denied",
+  "needs_login", "provider_degraded", "authentication_unverified"
+]);
+const EXTENSION_SYNC_ISSUES = new Set([
+  "gateway_cancelled", "gateway_timeout", "permission_or_consent",
+  "activation_timeout", "gateway_unauthorized", "relay_unavailable",
+  "gateway_request_failed", "gateway_connection_changed"
+]);
+function safeProviderIssueLabel(value, allowed) {
+  if (value === null || value === undefined || value === "") return null;
+  return typeof value === "string" && allowed.has(value)
+    ? value.replaceAll("_", " ") : "unverified status";
+}
+
 async function refreshStatus(force = false) {
   // Bind any authorization failure to the exact paired installation whose
   // health was requested, not a newer connection made during the await.
@@ -231,9 +250,9 @@ async function refreshStatus(force = false) {
     const blocker = item.manual_verification_required ? "Manual provider verification required; open website"
       : item.availability === "degraded" ? "Gateway check unavailable; retry" : null;
     const runtimeIssue = item.issue && item.issue !== "authentication_unverified"
-      ? "Gateway issue: " + item.issue.replaceAll("_", " ") : null;
+      ? "Gateway issue: " + safeProviderIssueLabel(item.issue, GATEWAY_PROVIDER_ISSUES) : null;
     const sync = diagnostics?.extension?.provider_sync?.[item.provider];
-    const extensionIssue = sync?.issue;
+    const extensionIssue = safeProviderIssueLabel(sync?.issue, EXTENSION_SYNC_ISSUES);
     const syncAttempt = typeof sync?.updated_at === "string" && !Number.isNaN(Date.parse(sync.updated_at))
       ? "Last extension sync attempt: " + sync.updated_at : null;
     // An upload/check is not a verified login. The health call may fail
@@ -243,7 +262,7 @@ async function refreshStatus(force = false) {
       ...(activation ? [activation] : []),
       ...(blocker ? [blocker] : []),
       ...(runtimeIssue ? [runtimeIssue] : []),
-      ...(extensionIssue ? ["Extension sync: " + extensionIssue.replaceAll("_", " ")] : []),
+      ...(extensionIssue ? ["Extension sync: " + extensionIssue] : []),
       ...(syncAttempt ? [syncAttempt] : []),
       ...(staleSync ? [staleSync] : [])
     ].join(" · ");
