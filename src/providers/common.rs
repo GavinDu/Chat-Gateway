@@ -401,12 +401,24 @@ pub fn response_probe(
                     if (!hasOtherReply) {{
                         let buttons = [];
                         try {{ buttons = Array.from(scope.querySelectorAll("button, [role='button']")); }} catch (_) {{}}
-                        postAnswerAffordance = buttons.some(button => visible(button) &&
-                        /copy|regenerate|retry|good response|bad response|thumbs up|thumbs down/.test(
-                            ((button.getAttribute("aria-label") || "") + " " +
-                            (button.getAttribute("data-testid") || "") + " " +
-                            (button.innerText || button.textContent || "")).toLowerCase()
-                        ));
+                        // The in-answer "Copy code" control is not proof that
+                        // the assistant turn finished. Never classify by an
+                        // unanchored substring across unrelated attributes.
+                        const replyActions = /^(copy|copy response|copy answer|copy message|regenerate|regenerate response|retry|retry response|good response|bad response|thumbs up|thumbs down)$/;
+                        const replyTestIds = /^(copy-(response|answer|message)(-button)?|(response|answer|message)-copy(-button)?|regenerate(-response)?-button|retry-response-button|thumbs-(up|down)(-button)?)$/;
+                        const normalize = value => String(value || "").trim().toLowerCase().replace(/\s+/g, " ");
+                        postAnswerAffordance = buttons.some(button => {{
+                            if (!visible(button)) return false;
+                            const aria = normalize(button.getAttribute("aria-label"));
+                            const label = normalize(button.innerText || button.textContent);
+                            const testId = normalize(button.getAttribute("data-testid"));
+                            // An explicit aria-label contradicting a reply
+                            // control is authoritative even if inner text or
+                            // a broad test id happens to say "Copy".
+                            if (aria && !replyActions.test(aria)) return false;
+                            return replyActions.test(aria || label) ||
+                                replyTestIds.test(testId);
+                        }});
                     }}
                 }}
                 // An unrecognized turn root cannot safely borrow controls
@@ -728,6 +740,75 @@ mod streaming_visibility_regression_tests {
         assert!(
             finished.post_answer_affordance,
             "the current explicit assistant turn may own its Copy control"
+        );
+    }
+
+    #[tokio::test]
+    async fn in_answer_copy_code_and_unrelated_retry_do_not_finish_reply() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <article data-message-author-role="assistant">
+              <div class="answer">still generating a code example</div>
+              <button id="code-copy" aria-label="Copy code">Copy</button>
+              <button id="copyright">Copyright notice</button>
+              <button id="upload-retry">Retry upload</button>
+              <button id="reply-copy" aria-label="Copy" hidden>Copy</button>
+            </article>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        let partial = response_probe(&page, &[".answer"], false);
+        assert!(
+            !partial.post_answer_affordance,
+            "Copy code, copyright and upload retry are not reply completion"
+        );
+        page.evaluate("document.querySelector('#reply-copy').hidden = false");
+        let done = response_probe(&page, &[".answer"], false);
+        assert!(
+            done.post_answer_affordance,
+            "exact current-turn Copy remains supported"
+        );
+        page.evaluate("document.querySelector('#reply-copy').disabled = true");
+        let disabled = response_probe(&page, &[".answer"], false);
+        assert!(
+            !disabled.post_answer_affordance,
+            "disabled Copy cannot certify generation completion"
+        );
+    }
+
+    #[tokio::test]
+    async fn reply_level_testid_is_distinct_from_code_copy_metadata() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <article><div class="answer">partial response</div>
+              <button id="code" data-testid="copy-code-button">Copy code</button>
+              <button id="reply" data-testid="copy-response-button" hidden></button>
+            </article>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        assert!(!response_probe(&page, &[".answer"], false).post_answer_affordance);
+        page.evaluate("document.querySelector('#reply').hidden = false");
+        assert!(
+            response_probe(&page, &[".answer"], false).post_answer_affordance,
+            "a narrowly named response-level test id remains usable"
+        );
+        page.evaluate("document.querySelector('#reply').setAttribute('aria-label','Copy code')");
+        assert!(
+            !response_probe(&page, &[".answer"], false).post_answer_affordance,
+            "contradictory Copy code aria label must fail closed even with response testid"
         );
     }
 
