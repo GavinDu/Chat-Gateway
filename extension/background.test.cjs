@@ -1636,3 +1636,61 @@ test("inherited provider names are not linked diagnostics or actionable worker m
   }
   assert.equal(f.calls.length,0,"invalid names must never schedule a provider sync");
 });
+
+
+test("malformed linked-provider storage never schedules cookie or startup imports", async () => {
+  const f = loadBackground(["chatgpt"], [], true);
+  const state = {
+    gateway:"http://127.0.0.1:8080",connectionMode:"local",
+    linkedProviders:"prefix-chatgpt-suffix",providerLinkEpochs:{chatgpt:"epoch-a"}
+  };
+  f.sandbox.chrome.storage.local.get = async () => ({...state});
+  f.sandbox.chrome.permissions = {contains:async()=>true};
+  f.sandbox.relayFetch = async () => ({
+    ok:true,status:200,json:async()=>({providers:[]})
+  });
+  for (const malformed of [
+    "prefix-chatgpt-suffix", "chatgpt", "chatgpt,claude", {}, null,
+    {includes:()=>true}
+  ]) {
+    state.linkedProviders = malformed;
+    const diagnostics = await new Promise(resolve => f.listeners.message[0](
+      {type:"relay-diagnostics",force:true},{},resolve
+    ));
+    assert.equal(diagnostics.ok,true);
+    assert.deepEqual(Array.from(diagnostics.extension.linked_providers),[]);
+    f.listeners.startup[0]();
+    for(let i=0;i<6;i++) await flushAsyncWork();
+    assert.deepEqual(f.calls,[], "malformed stored consent cannot cause automatic imports");
+    f.listeners.cookieChanged[0]({cookie:{domain:".chatgpt.com"}});
+    const last = [...f.timers.values()].at(-1);
+    await last.callback();
+    for(let i=0;i<5;i++) await flushAsyncWork();
+    assert.deepEqual(f.calls,[], "cookie rotation cannot treat substring as link consent");
+  }
+  state.linkedProviders=["chatgpt"];
+  f.listeners.startup[0]();
+  for(let i=0;i<8;i++) await flushAsyncWork();
+  assert.deepEqual(f.calls,["chatgpt"], "valid linked array still restores provider");
+});
+
+test("explicit provider link recovers safely from malformed stored membership", async () => {
+  const f = loadBackground([],[],true);
+  const state = {
+    gateway:"http://127.0.0.1:8080",connectionMode:"local",
+    linkedProviders:"prefix-chatgpt-suffix",
+    providerLinkEpochs:{},providerLinkPendingAttempts:{}
+  };
+  f.sandbox.chrome.storage.local.get=async()=>({...state});
+  f.sandbox.chrome.storage.local.set=async patch=>Object.assign(state,patch);
+  const send=(type)=>new Promise(resolve=>f.listeners.message[0]({
+    type,provider:"chatgpt",
+    connection:{gateway:state.gateway,connectionMode:"local"},
+    attemptId:"explicit-owner-consent"
+  },{},resolve));
+  const linked=await send("link-provider");
+  assert.equal(linked.ok,true);
+  assert.equal(linked.alreadyLinked,false,"malformed string is not an existing link");
+  assert.deepEqual(Array.from(state.linkedProviders),["chatgpt"]);
+  assert.equal((await send("commit-provider-link")).committed,true);
+});
