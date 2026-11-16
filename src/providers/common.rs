@@ -570,28 +570,20 @@ mod transparent_response_probe_tests {
             "pointer-inert ancestor and self controls must not certify completion"
         );
 
-        page.evaluate(
-            "document.querySelector('#inert-ancestor').style.pointerEvents = 'auto'",
-        );
+        page.evaluate("document.querySelector('#inert-ancestor').style.pointerEvents = 'auto'");
         let done = response_probe(&page, &[".answer"], false);
         assert!(
             done.post_answer_affordance,
             "ordinary actionable same-turn Copy still certifies completion"
         );
 
-        page.evaluate(
-            "document.querySelector('#inert-ancestor').style.pointerEvents = 'none'",
-        );
-        page.evaluate(
-            "document.querySelector('#inert-self').style.pointerEvents = 'auto'",
-        );
+        page.evaluate("document.querySelector('#inert-ancestor').style.pointerEvents = 'none'");
+        page.evaluate("document.querySelector('#inert-self').style.pointerEvents = 'auto'");
         assert!(
             response_probe(&page, &[".answer"], false).post_answer_affordance,
             "actionable sibling Retry remains valid independently"
         );
-        page.evaluate(
-            "document.querySelector('#inert-self').style.pointerEvents = 'none'",
-        );
+        page.evaluate("document.querySelector('#inert-self').style.pointerEvents = 'none'");
         assert!(
             !response_probe(&page, &[".answer"], false).post_answer_affordance,
             "restoring both CSS blocks revokes terminal evidence"
