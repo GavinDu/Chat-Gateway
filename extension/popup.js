@@ -222,7 +222,16 @@ async function refreshStatus(force = false) {
     throw new Error("Status request failed (" + response.status + ").");
   }
   const data = await response.json();
-  const items = await Promise.all(data.providers.map(async item => {
+  if (!data || !Array.isArray(data.providers)) {
+    throw new Error("Gateway status is unavailable.");
+  }
+  // Older or malformed gateway responses must not break every healthy provider,
+  // render unrecognized names, or expose actions for unregistered providers.
+  const safeRows = data.providers.filter(item =>
+    item !== null && typeof item === "object" && !Array.isArray(item) &&
+    typeof item.provider === "string" && Object.hasOwn(PROVIDERS, item.provider)
+  );
+  const items = await Promise.all(safeRows.map(async item => {
     const li = document.createElement("li");
     const heading = document.createElement("strong");
     heading.textContent = item.provider;
@@ -230,8 +239,12 @@ async function refreshStatus(force = false) {
 
     const status = document.createElement("p");
     status.className = "provider-detail";
-    const enabled = item.enabled === false ? "Disabled in gateway config" : "Enabled in gateway";
-    const linked = item.linked ? "Session saved" : "Not linked";
+    const providerEnabled = item.enabled === true;
+    const hasSavedSession = item.linked === true;
+    const enabled = providerEnabled ? "Enabled in gateway"
+      : item.enabled === false ? "Disabled in gateway config"
+      : "Gateway enablement unverified";
+    const linked = hasSavedSession ? "Session saved" : "Not linked";
     let browser = "Browser permission not granted";
     const domains = typeof item.provider === "string" && Object.hasOwn(PROVIDERS, item.provider)
       ? PROVIDERS[item.provider] : [];
@@ -252,14 +265,14 @@ async function refreshStatus(force = false) {
       : "Login unverified";
     // Browser activation is not proof of login. Keep the independent
     // authenticated-provider observation visible beside this fixed category.
-    const activation = !item.linked ? null
+    const activation = !hasSavedSession ? null
       : item.activation === "pending" ? "Browser activation pending"
       : item.activation === "ready" ? "Browser activation completed"
       : item.activation === "failed" ? "Browser activation failed"
       : item.activation === "cancelled" ? "Browser activation cancelled"
       : item.activation === "not_attempted" ? "Browser activation not attempted"
       : null;
-    const blocker = item.manual_verification_required ? "Manual provider verification required; open website"
+    const blocker = item.manual_verification_required === true ? "Manual provider verification required; open website"
       : item.availability === "degraded" ? "Gateway check unavailable; retry" : null;
     const runtimeIssue = item.issue && item.issue !== "authentication_unverified"
       ? "Gateway issue: " + safeProviderIssueLabel(item.issue, GATEWAY_PROVIDER_ISSUES) : null;
@@ -287,12 +300,12 @@ async function refreshStatus(force = false) {
     const linkButton = document.createElement("button");
     linkButton.type = "button";
     linkButton.className = "provider-action";
-    linkButton.textContent = !item.linked ? "Log in / Connect"
+    linkButton.textContent = !hasSavedSession ? "Log in / Connect"
       : item.authentication === "needs_login" ? "Re-login / Sync" : "Sync session";
-    linkButton.disabled = item.enabled === false;
+    linkButton.disabled = !providerEnabled;
     linkButton.addEventListener("click", () => connectProvider(
       item.provider,
-      !item.linked || item.authentication === "needs_login"
+      !hasSavedSession || item.authentication === "needs_login"
     ).catch(error => message(safeProviderActionError(error,
       "Provider connection failed. Check browser permissions and gateway status, then retry."))));
     actions.append(linkButton);
@@ -305,7 +318,7 @@ async function refreshStatus(force = false) {
       "Unable to open provider website. Retry from the extension."))));
     actions.append(openButton);
 
-    if (item.linked) {
+    if (hasSavedSession) {
       const logoutButton = document.createElement("button");
       logoutButton.type = "button";
       logoutButton.className = "quiet-danger provider-action";
