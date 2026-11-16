@@ -778,7 +778,14 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
   if (message?.type === "poll-connection") {
-    pollConnection().then(() => sendResponse({ok:true})).catch(error => sendResponse({ok:false,error:error.message}));
+    pollConnection()
+      .then(() => sendResponse({ok:true}))
+      // A pending approval can involve browser storage and network exceptions.
+      // Do not reflect credential-bearing raw errors into the popup.
+      .catch(() => sendResponse({
+        ok:false, errorCode:"connection_poll_unavailable",
+        error:"Connection approval check unavailable. Retry or reconnect."
+      }));
     return true;
   }
   if (message?.type === "connect-local-relay") {
