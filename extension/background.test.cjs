@@ -375,6 +375,52 @@ test("logout of provider B racing link of A does not resurrect B consent",async(
   assert.notEqual(state.providerLinkEpochs.claude,"old-consent");
 });
 
+test("manual logout message never forwards sensitive upstream errors to popup", async () => {
+  const f = loadBackground(["chatgpt", "claude"], [], true);
+  const state = {
+    gateway:"http://127.0.0.1:8080",connectionMode:"local",
+    linkedProviders:["chatgpt","claude"],
+    providerLinkEpochs:{chatgpt:"old-epoch",claude:"other-epoch"},
+    providerLinkPendingAttempts:{},relaySnapshotVersions:{}
+  };
+  f.sandbox.chrome.storage.local.get = async () => ({...state});
+  f.sandbox.chrome.storage.local.set = async patch => Object.assign(state,patch);
+  const send = provider => new Promise(resolve => {
+    assert.equal(f.listeners.message[0]({type:"logout-provider",provider},{},resolve),true);
+  });
+  const cases = [
+    ["Gateway connection changed before provider logout. token=private", "connection_changed"],
+    ["Gateway request cancelled; token=private", "gateway_cancelled"],
+    ["Gateway timed out cookie=private", "gateway_timeout"],
+    ["Missing host permission for token=private", "permission_or_consent"],
+    ["Gateway failed (504) cookie=private", "activation_timeout"],
+    ["Gateway logout failed (401) cookie=private", "gateway_unauthorized"],
+    ["Unexpected service: https://example.invalid/secret?cookie=private", "relay_unavailable"]
+  ];
+  for(const [raw,expected] of cases) {
+    // Each independent explicit link restores consent before another logout.
+    state.linkedProviders = ["chatgpt","claude"];
+    f.sandbox.relayFetch = async () => {throw new Error(raw)};
+    const result = await send("chatgpt");
+    assert.equal(result.ok,false);
+    assert.equal(result.errorCode,expected);
+    assert.equal(typeof result.error,"string");
+    assert.ok(!JSON.stringify(result).includes(raw));
+    assert.ok(!JSON.stringify(result).includes("private"));
+    assert.ok(!JSON.stringify(result).includes("secret"));
+    assert.ok(!JSON.stringify(result).includes("cookie="));
+    assert.deepEqual(Array.from(state.linkedProviders),["claude"],
+      "a failed remote DELETE still revokes only that provider's local consent");
+    assert.equal(state.providerLinkEpochs.claude,"other-epoch");
+  }
+  state.linkedProviders = ["chatgpt","claude"];
+  f.sandbox.relayFetch = async () => ({ok:true,status:200});
+  const success = await send("chatgpt");
+  assert.equal(success.ok,true);
+  assert.equal(success.error,undefined);
+  assert.deepEqual(Array.from(state.linkedProviders),["claude"]);
+});
+
 test("same-gateway unlink and relink epoch cannot attribute the old upload to new consent", async () => {
   const f = loadBackground(["chatgpt"], [], true);
   const state = {
