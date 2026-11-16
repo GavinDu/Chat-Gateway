@@ -210,7 +210,7 @@ async function refreshStatus(force = false) {
       item.provider,
       !item.linked || item.authentication === "needs_login"
     ).catch(error => message(safeProviderActionError(error,
-      "Provider connection failed. Check browser permissions and gateway status, then retry.")));
+      "Provider connection failed. Check browser permissions and gateway status, then retry."))));
     actions.append(linkButton);
 
     const openButton = document.createElement("button");
