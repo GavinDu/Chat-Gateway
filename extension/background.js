@@ -66,12 +66,16 @@ function recordProviderDiagnostic(provider, state, errorCode = null, attempt = n
 // Every diagnostics response has independent per-provider attempt freshness.
 // Failed gateway status makes old local sync snapshots stale, but never
 // deletes the last attempt time or falsely changes a backend login state.
-function finalizeRelayDiagnostics(result) {
+function finalizeRelayDiagnostics(result, expectedIdentity, expectedEpochs) {
   const extension = result.extension;
   if (!extension) return result;
   extension.provider_sync = Object.fromEntries(
     extension.linked_providers.map(provider => {
-      const previous = providerDiagnostics.get(provider);
+      // An earlier status read cannot borrow another gateway's or consent
+      // generation's in-flight result while its own health POST was pending.
+      const previous = providerDiagnosticsIdentity === expectedIdentity &&
+        providerDiagnosticEpochs.get(provider) === expectedEpochs?.[provider]
+        ? providerDiagnostics.get(provider) : null;
       return [provider, {
         state: previous?.state || "not_attempted",
         issue: previous?.issue || null,
@@ -120,7 +124,7 @@ async function relayDiagnostics(force = false) {
       return [provider, await hasOriginPermissions(origins)];
     })
   ));
-  if (!extension.connected) return finalizeRelayDiagnostics({ok:false, extension, gateway_issue:"not_connected"});
+  if (!extension.connected) return finalizeRelayDiagnostics({ok:false, extension, gateway_issue:"not_connected"}, identity, current.providerLinkEpochs);
   extension.permissions.gateway = await hasOriginPermissions([current.gateway + "/*"]);
   // The health probe is read-only. Its network result may be shared for the
   // same identity, but each caller must retain its own linked-provider and
@@ -133,11 +137,11 @@ async function relayDiagnostics(force = false) {
     return finalizeRelayDiagnostics({
       ok: shared.ok, extension, gateway: shared.gateway,
       gateway_issue: shared.gateway_issue
-    });
+    }, identity, current.providerLinkEpochs);
   }
   if (!force && lastGatewayCheck && Date.now() - lastGatewayCheckAt < CONNECTION_DIAGNOSTICS_TTL_MS) {
     extension.gateway_checked_at = new Date(lastGatewayCheckAt).toISOString();
-    return finalizeRelayDiagnostics({ok:true, extension, gateway:lastGatewayCheck});
+    return finalizeRelayDiagnostics({ok:true, extension, gateway:lastGatewayCheck}, identity, current.providerLinkEpochs);
   }
   const probe = (async () => {
   const probeSerial = ++gatewayProbeSerial;
@@ -153,7 +157,7 @@ async function relayDiagnostics(force = false) {
   };
   const changed = () => finalizeRelayDiagnostics({
     ok:false, extension, gateway_issue:"gateway_connection_changed"
-  });
+  }, identity, current.providerLinkEpochs);
   try {
     // Check the identity before dispatching the status request, as well as
     // after it resolves. A reconnect must not reuse an old target/token.
@@ -166,7 +170,7 @@ async function relayDiagnostics(force = false) {
       lastGatewayCheckAt = 0;
       automaticCookieSyncSuppressedUntil = Date.now() + COOKIE_OUTAGE_BACKOFF_MS;
       return finalizeRelayDiagnostics({ok:false, extension, gateway_issue:
-        response.status === 401 || response.status === 403 ? "gateway_unauthorized" : "gateway_request_failed"});
+        response.status === 401 || response.status === 403 ? "gateway_unauthorized" : "gateway_request_failed"}, identity, current.providerLinkEpochs);
     }
     const gateway = await response.json();
     if (!await isCurrentProbe()) return changed();
@@ -174,7 +178,7 @@ async function relayDiagnostics(force = false) {
     lastGatewayCheckAt = Date.now();
     automaticCookieSyncSuppressedUntil = 0;
     extension.gateway_checked_at = new Date(lastGatewayCheckAt).toISOString();
-    return finalizeRelayDiagnostics({ok:true, extension, gateway});
+    return finalizeRelayDiagnostics({ok:true, extension, gateway}, identity, current.providerLinkEpochs);
   } catch (error) {
     // In-flight failure from a prior connection must not mark the new one
     // offline or revoke its healthy cache/automatic cookie sync.
@@ -182,7 +186,7 @@ async function relayDiagnostics(force = false) {
     lastGatewayCheck = null;
     lastGatewayCheckAt = 0;
     automaticCookieSyncSuppressedUntil = Date.now() + COOKIE_OUTAGE_BACKOFF_MS;
-    return finalizeRelayDiagnostics({ok:false, extension, gateway_issue:classifyRelayFailure(error)});
+    return finalizeRelayDiagnostics({ok:false, extension, gateway_issue:classifyRelayFailure(error)}, identity, current.providerLinkEpochs);
   }
   })();
   inFlightGatewayStatus = {identity, promise:probe};
