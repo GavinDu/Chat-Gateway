@@ -409,6 +409,19 @@ pub fn response_probe(
                         const normalize = value => String(value || "").trim().toLowerCase().replace(/\s+/g, " ");
                         postAnswerAffordance = buttons.some(button => {{
                             if (!visible(button)) return false;
+                            // A CSS-inert reply action is not evidence that
+                            // generation finished. Scope this to reply actions:
+                            // noninteractive response text may still be valid.
+                            let pointerEnabled = true;
+                            try {{
+                                for (let ancestor = button; ancestor && ancestor.nodeType === 1; ancestor = ancestor.parentElement) {{
+                                    if (window.getComputedStyle(ancestor).pointerEvents === 'none') {{
+                                        pointerEnabled = false;
+                                        break;
+                                    }}
+                                }}
+                            }} catch (_) {{ pointerEnabled = false; }}
+                            if (!pointerEnabled) return false;
                             const aria = normalize(button.getAttribute("aria-label"));
                             const label = normalize(button.innerText || button.textContent);
                             const testId = normalize(button.getAttribute("data-testid"));
@@ -525,6 +538,55 @@ mod transparent_response_probe_tests {
         assert!(
             visible.post_answer_affordance,
             "nonzero-opacity same-turn Copy remains completion evidence"
+        );
+    }
+
+    #[tokio::test]
+    async fn pointer_inert_reply_actions_cannot_certify_completion() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <article>
+                <div class="answer">still generating</div>
+                <section id="inert-ancestor" style="pointer-events:none">
+                    <button id="inherited" style="pointer-events:auto"
+                        aria-label="Copy">Copy</button>
+                </section>
+                <button id="inert-self" style="pointer-events:none"
+                    aria-label="Retry">Retry</button>
+            </article>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        let partial = response_probe(&page, &[".answer"], false);
+        assert_eq!(partial.text.as_deref(), Some("still generating"));
+        assert!(
+            !partial.post_answer_affordance,
+            "pointer-inert ancestor and self controls must not certify completion"
+        );
+
+        page.evaluate("document.querySelector('#inert-ancestor').style.pointerEvents = 'auto'");
+        let done = response_probe(&page, &[".answer"], false);
+        assert!(
+            done.post_answer_affordance,
+            "ordinary actionable same-turn Copy still certifies completion"
+        );
+
+        page.evaluate("document.querySelector('#inert-ancestor').style.pointerEvents = 'none'");
+        page.evaluate("document.querySelector('#inert-self').style.pointerEvents = 'auto'");
+        assert!(
+            response_probe(&page, &[".answer"], false).post_answer_affordance,
+            "actionable sibling Retry remains valid independently"
+        );
+        page.evaluate("document.querySelector('#inert-self').style.pointerEvents = 'none'");
+        assert!(
+            !response_probe(&page, &[".answer"], false).post_answer_affordance,
+            "restoring both CSS blocks revokes terminal evidence"
         );
     }
 }
