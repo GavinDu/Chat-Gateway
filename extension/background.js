@@ -16,6 +16,22 @@ let inFlightGatewayStatus = null;
 // Only the newest read-only gateway health request for the current identity
 // can update the cached status or cookie-event outage backoff.
 let gatewayProbeSerial = 0;
+// A provider sync may begin before the first popup diagnostics read. Give
+// both paths the same gateway identity boundary, so that a first status
+// read cannot erase an in-flight result. Never expose this identity.
+function ensureGatewayDiagnosticIdentity(current) {
+  const identity = hasRelayConnection(current) ? current.gateway + "|" + relayIdentity(current) : null;
+  if (identity !== lastGatewayIdentity) {
+    // Invalidate an in-flight A probe even across A -> B -> A without
+    // another health request. Equality of destination alone is not a lease.
+    gatewayProbeSerial += 1;
+    lastGatewayCheck = null;
+    lastGatewayIdentity = identity;
+    automaticCookieSyncSuppressedUntil = 0;
+    providerDiagnostics.clear();
+  }
+  return identity;
+}
 // Only throttle automatic cookie-event resync after a gateway health probe
 // has actually failed; a manual Sync or scheduled liveness probe is never
 // suppressed. A new gateway identity cannot inherit the old outage.
@@ -43,11 +59,13 @@ async function hasOriginPermissions(origins) {
 function recordProviderDiagnostic(provider, state, errorCode = null) {
   // A provider sync attempt is NOT authenticated-login verification.
   // Store only stable local result codes, never raw upstream responses.
-  const safeState = ["uploaded", "unchanged", "no_cookies", "skipped", "failed"].includes(state)
+  const safeState = ["syncing", "uploaded", "unchanged", "no_cookies", "skipped", "failed"].includes(state)
     ? state : "unknown";
-  providerDiagnostics.set(provider, {
+  const entry = {
     state: safeState, issue: errorCode, updated_at: new Date().toISOString()
-  });
+  };
+  providerDiagnostics.set(provider, entry);
+  return entry;
 }
 // Every diagnostics response has independent per-provider attempt freshness.
 // Failed gateway status makes old local sync snapshots stale, but never
@@ -70,13 +88,7 @@ function finalizeRelayDiagnostics(result) {
 }
 async function relayDiagnostics(force = false) {
   const current = await chrome.storage.local.get(["gateway", "token", "connectionMode", "linkedProviders"]);
-  const identity = hasRelayConnection(current) ? current.gateway + "|" + relayIdentity(current) : null;
-  if (identity !== lastGatewayIdentity) {
-    lastGatewayCheck = null;
-    lastGatewayIdentity = identity;
-    automaticCookieSyncSuppressedUntil = 0;
-    providerDiagnostics.clear();
-  }
+  const identity = ensureGatewayDiagnosticIdentity(current);
   const extension = {
     connected: hasRelayConnection(current),
     connection_mode: !hasRelayConnection(current) ? "disconnected" : current.connectionMode === "local" ? "local" : "paired",
@@ -538,16 +550,35 @@ function queueProviderSync(provider, force = false) {
     const shouldForce = force || queuedProviderForces.has(provider);
     queuedProviderForces.delete(provider);
     const attempt = await chrome.storage.local.get(["gateway", "token", "connectionMode", "linkedProviders", "providerLinkEpochs"]);
+    // A queued sync is not active until its serialized provider task starts.
+    // Expose only a fixed redacted category for the *current* owner; never
+    // mistake this for authenticated login or leak cookie/progress payloads.
+    let inProgress = null;
+    if (await providerDiagnosticScopeCurrent(provider, attempt)) {
+      ensureGatewayDiagnosticIdentity(attempt);
+      inProgress = recordProviderDiagnostic(provider, "syncing");
+    }
+    // A delayed result can follow unlink/relink or an owner change. Remove
+    // only this attempt's in-progress record; never erase a newer attempt.
+    const clearStaleProgress = () => {
+      if (inProgress && providerDiagnostics.get(provider) === inProgress) {
+        providerDiagnostics.delete(provider);
+      }
+    };
     try {
       const result = await syncProvider(provider, {force:shouldForce});
       if (await providerDiagnosticScopeCurrent(provider, attempt)) {
         recordProviderDiagnostic(provider, result || "skipped");
         if (result === "uploaded") lastGatewayCheck = null;
+      } else {
+        clearStaleProgress();
       }
       return result;
     } catch (error) {
       if (await providerDiagnosticScopeCurrent(provider, attempt)) {
         recordProviderDiagnostic(provider, "failed", classifyRelayFailure(error));
+      } else {
+        clearStaleProgress();
       }
       throw error;
     }
