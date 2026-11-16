@@ -853,3 +853,19 @@ test("popup timer storage read errors do not cause unhandled worker requests",as
   await Promise.all(popup.intervals.map(x=>x.fn()));
   assert.equal(popup.chromeCalls.length,0);
 });
+
+
+test("popup rejects inherited provider names without requesting permissions or opening URLs", async () => {
+  const popup = loadPopup();
+  await new Promise(resolve => setImmediate(resolve));
+  for (const invalid of ["constructor","toString","__proto__",["metaai"],null]) {
+    await assert.rejects(() => popup.controls.connectProvider(invalid), /Unsupported provider/);
+    await assert.rejects(() => popup.controls.logoutProvider(invalid), /Unsupported provider/);
+    await assert.rejects(
+      () => vm.runInContext("openProviderLogin(" + JSON.stringify(invalid) + ")", popup.context),
+      /not yet supported/
+    );
+  }
+  assert.ok(!popup.chromeCalls.some(call => call.startsWith("tab:")),
+    "unsupported names must not open a provider or inherited URL");
+});
