@@ -131,6 +131,7 @@ class ManusRuntimeStatusContractTests(unittest.TestCase):
             ("private-secret", False),
             ('{"ok":true,"providers":[],"token":"private-secret"}', False),
             ("private-secret", True),
+            (response(enabled=True, linked=True, auth="verified").decode(), True),
         ]:
             proc, args = self.run_command(fixture=fixture, fail=failed)
             self.assertNotEqual(proc.returncode, 0)
