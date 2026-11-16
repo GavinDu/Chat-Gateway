@@ -1355,8 +1355,33 @@ pub fn click_first(page: &Page, selectors: &[&str]) -> anyhow::Result<()> {
                 return Ok(());
             }
         } else if let Some(el) = page.query_selector(sel) {
-            el.click()?;
-            return Ok(());
+            // Preserve Obscura's native click/focus semantics, but never
+            // click an invisible or pointer-inert first CSS match. Picker
+            // selectors can resolve stale SPA transition clones; the next
+            // explicitly configured selector is safer than guessing a DOM
+            // descendant or silently treating an inert control as success.
+            let selector_js = serde_json::to_string(sel)?;
+            let nontransparent = nontransparent_ancestors_expression("el");
+            let actionable = page.evaluate(&format!(
+                r#"(() => {{
+                    try {{
+                        const el = document.querySelector({selector_js});
+                        return !!el && el.getClientRects().length > 0 &&
+                            window.getComputedStyle(el).visibility !== 'hidden' &&
+                            window.getComputedStyle(el).pointerEvents !== 'none' &&
+                            {nontransparent} &&
+                            !el.closest('[hidden], [inert], [aria-hidden="true"], [aria-disabled="true"], [aria-readonly="true"], fieldset[disabled]') &&
+                            !el.disabled && !el.matches(':disabled') &&
+                            !el.readOnly &&
+                            el.getAttribute('aria-disabled') !== 'true' &&
+                            el.getAttribute('aria-readonly') !== 'true';
+                    }} catch (_) {{ return false; }}
+                }})()"#
+            ));
+            if actionable.as_bool() == Some(true) {
+                el.click()?;
+                return Ok(());
+            }
         }
     }
     anyhow::bail!("none of selectors matched: {:?}", selectors)
