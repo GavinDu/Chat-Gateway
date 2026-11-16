@@ -107,6 +107,23 @@ test("periodic relay alarm refreshes status without recreating repeating alarm",
   assert.equal(f.createdAlarms.length, 1);
 });
 
+test("relay diagnostics classify user cancellation apart from gateway timeout", () => {
+  const f = loadBackground([]);
+  assert.equal(
+    f.sandbox.classifyRelayFailure(new Error("Gateway request cancelled; check provider status before retrying.")),
+    "gateway_cancelled"
+  );
+  assert.equal(
+    f.sandbox.classifyRelayFailure(new Error("Gateway request timed out; the session may have changed.")),
+    "gateway_timeout"
+  );
+  assert.equal(
+    f.sandbox.classifyRelayFailure(new Error("private cookie=secret and unrecognized transport failure")),
+    "relay_unavailable",
+    "never expose raw upstream text in diagnostic issue codes"
+  );
+});
+
 test("explicit provider sync reports a skipped upload instead of success", async () => {
   const f = loadBackground(["chatgpt"]);
   let status = "no_cookies";
