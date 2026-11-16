@@ -489,6 +489,39 @@ test("popup displays last extension sync and stale status independently of auth"
   assert.doesNotMatch(status,/private|token|cookie=secret/);
 });
 
+test("popup shows canonical UTC sync timestamps only, never raw worker strings", async () => {
+  const shown = async updated_at => {
+    const popup=loadPopup({diagnosticsSync:{state:"failed",issue:"gateway_timeout",updated_at}});
+    await new Promise(resolve=>setImmediate(resolve));
+    await popup.controls.refreshStatus();
+    return popup.byId("status").children[0]
+      .children.find(n=>n.className==="provider-detail").textContent;
+  };
+  const canonical="2026-11-15T18:00:00.000Z";
+  const valid=await shown(canonical);
+  assert.ok(valid.includes("Last extension sync attempt: "+canonical));
+  assert.ok(valid.includes("Extension sync: gateway timeout"));
+
+  for (const bad of [
+    canonical+" token=private",
+    "Nov 15 2026",
+    "2026-11-15T18:00:00Z",
+    "2026-11-15T18:00:00.000+00:00",
+    "2026-02-30T18:00:00.000Z",
+    1763239200000,
+    {text:"secret"},
+    null
+  ]) {
+    const detail=await shown(bad);
+    assert.ok(!detail.includes("Last extension sync attempt:"),
+      "invalid date must not display any raw timestamp");
+    assert.ok(!detail.includes("private"));
+    assert.ok(!detail.includes("secret"));
+    assert.ok(detail.includes("Extension sync: gateway timeout"),
+      "invalid timestamp does not suppress otherwise valid typed diagnostics");
+  }
+});
+
 test("provider dashboard renders only exact known issue codes from gateway and worker", async () => {
   const view = async (gatewayIssue, extensionIssue) => {
     const popup = loadPopup({includeSecondProvider:true,diagnosticsSync:{
