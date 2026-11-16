@@ -4006,7 +4006,10 @@ pub async fn send_prompt(
             5_000,
             Some(prompt),
             SendClickPolicy {
-                allow_untrusted_enter: provider == "perplexity",
+                // A lone Perplexity Ask/search editor is not evidence of
+                // thread submission. Require the composer-scoped Send
+                // control; synthetic Enter could submit a different form.
+                allow_untrusted_enter: false,
                 expected_provider: send_guard_provider,
                 unique_input_selectors: Some(&inputs),
             },
