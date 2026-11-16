@@ -117,7 +117,7 @@
           // fulfilled read would permit an extra pull while the queue is full.
           Promise.resolve(pending).then(
             result => {
-              if (!result.done) {
+              if (result && result.done === false) {
                 this._dequeued();
                 this._pullIfNeeded();
               }
