@@ -1598,3 +1598,41 @@ test("logout digest cleanup cannot clobber a concurrent other-provider commit", 
   assert.equal(state.relaySnapshotVersions.claude,undefined);
   assert.deepEqual(Array.from(state.linkedProviders),["chatgpt"]);
 });
+
+
+test("inherited provider names are not linked diagnostics or actionable worker messages", async () => {
+  const f = loadBackground(["chatgpt"], [], true);
+  const state = {
+    gateway:"http://127.0.0.1:8080", connectionMode:"local",
+    linkedProviders:["constructor","toString","__proto__",["chatgpt"],"chatgpt"]
+  };
+  f.sandbox.chrome.storage.local.get = async () => ({...state});
+  f.sandbox.chrome.permissions = {contains:async () => true};
+  f.sandbox.relayFetch = async () => ({
+    ok:true, status:200, json:async () => ({
+      providers:[{provider:"chatgpt",linked:true,authentication:"unknown"}]
+    })
+  });
+  const diag = await new Promise(resolve => f.listeners.message[0](
+    {type:"relay-diagnostics",force:true}, {}, resolve
+  ));
+  assert.equal(diag.ok,true, "poisoned legacy consent cannot break the dashboard");
+  assert.deepEqual(Array.from(diag.extension.linked_providers),["chatgpt"]);
+  assert.deepEqual(Object.keys(diag.extension.permissions.providers),["chatgpt"]);
+
+  for (const invalid of ["constructor","toString","__proto__",["chatgpt"],null]) {
+    for (const type of [
+      "sync-provider","logout-provider","link-provider",
+      "commit-provider-link","rollback-provider-link"
+    ]) {
+      let responded = false;
+      const handled = f.listeners.message[0](
+        {type,provider:invalid,connection:state,attemptId:"attempt-invalid"}, {},
+        () => {responded = true;}
+      );
+      assert.equal(handled,undefined);
+      assert.equal(responded,false);
+    }
+  }
+  assert.equal(f.calls.length,0,"invalid names must never schedule a provider sync");
+});
