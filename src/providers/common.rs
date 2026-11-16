@@ -815,8 +815,11 @@ fn editable_composer_condition(element: &str) -> String {
 /// ancestor is entirely transparent. Opacity does not inherit, so inspect
 /// the whole parent chain. Translucent (nonzero) editors stay actionable.
 fn nontransparent_ancestors_expression(element: &str) -> String {
+    // Use a local name distinct from common callers' `node` argument.
+    // `let node = node` is a JavaScript temporal-dead-zone self-reference,
+    // which makes every visibility probe fail closed even for visible roots.
     format!(
-        "(() => {{ for (let node = {element}; node; node = node.parentElement) {{ if (Number(window.getComputedStyle(node).opacity) === 0) return false; }} return true; }})()"
+        "(() => {{ for (let opacityAncestor = {element}; opacityAncestor; opacityAncestor = opacityAncestor.parentElement) {{ if (Number(window.getComputedStyle(opacityAncestor).opacity) === 0) return false; }} return true; }})()"
     )
 }
 
