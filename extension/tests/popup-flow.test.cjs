@@ -227,9 +227,52 @@ function loadPopup({failCookieDomain = null, includeSecondProvider = false, manu
   };
   vm.createContext(context);
   vm.runInContext(fs.readFileSync(path.join(__dirname,"..","popup.js"),"utf8")+
-    "\nglobalThis.testControls={refreshStatus,connectProvider,logoutProvider};",context);
+    "\nglobalThis.testControls={refreshStatus,connectProvider,logoutProvider,initialize,safeStatusErrorMessage};",context);
   return {values,server,elements,byId,chromeCalls,intervals,controls:context.testControls,context};
 }
+
+test("popup status refresh and local startup reject raw credential-bearing exceptions", async () => {
+  const popup = loadPopup();
+  await new Promise(resolve => setImmediate(resolve));
+  const leak = "fetch rejected url=https://private.invalid/status?token=private&poll_secret=private";
+  popup.context.relayFetch = async () => {throw new Error(leak);};
+  await popup.byId("refresh").handlers.click();
+  assert.equal(popup.byId("message").textContent,
+    "Gateway status unavailable. Check the connection and retry.");
+  assert.ok(!popup.byId("message").textContent.includes("private"));
+
+  // Preserve only exact source-authored diagnostic messages. Neither a
+  // malicious suffix/prefix nor an arbitrary raw HTTP body is ever safe.
+  const safe = popup.controls.safeStatusErrorMessage;
+  assert.equal(safe(new Error("Gateway status check timed out.")),
+    "Gateway status check timed out.");
+  for (const payload of [
+    leak, "Gateway status check timed out. token=private",
+    "Status request failed (401). token=private", "private URL credential"
+  ]) {
+    assert.equal(safe(new Error(payload)),
+      "Gateway status unavailable. Check the connection and retry.");
+  }
+
+  const initial = loadPopup();
+  await new Promise(resolve => setImmediate(resolve));
+  initial.values.localDisconnected = true;
+  initial.values.connectionMode = "paired";
+  initial.values.token = "synthetic-credential";
+  initial.context.relayFetch = async () => {throw new Error(leak);};
+  await initial.controls.initialize();
+  assert.equal(initial.byId("message").textContent,
+    "Gateway status unavailable. Check the connection and retry.");
+
+  // A local mode probe can throw before any explicit status fetch.
+  const local = loadPopup();
+  await new Promise(resolve => setImmediate(resolve));
+  local.context.fetch = async () => {throw new Error(leak);};
+  await local.controls.initialize();
+  assert.equal(local.byId("message").textContent,
+    "Local gateway connection unavailable. Check the gateway and retry.");
+  assert.ok(!local.byId("message").textContent.includes("private"));
+});
 
 test("popup pending connection status never renders untrusted worker or storage secrets", async () => {
   for (const [response, expected] of [
