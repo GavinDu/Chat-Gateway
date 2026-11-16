@@ -84,7 +84,8 @@ async function relayFetch(path, options = {}, expectedConnection = null) {
     const latest = await chrome.storage.local.get(["gateway", "token", "connectionMode", "linkedProviders", "providerLinkEpochs"]);
     if (latest.gateway !== gateway || latest.token !== token ||
         (expectedConnection.connectionMode !== undefined && latest.connectionMode !== expectedConnection.connectionMode) ||
-        (expectedConnection.provider && !latest.linkedProviders?.includes(expectedConnection.provider)) ||
+        (expectedConnection.provider && (!Array.isArray(latest.linkedProviders) ||
+          !latest.linkedProviders.includes(expectedConnection.provider))) ||
         (expectedConnection.provider &&
           latest.providerLinkEpochs?.[expectedConnection.provider] !== expectedConnection.linkEpoch)) {
       throw new Error("Provider consent or gateway connection changed during sync.");
@@ -260,7 +261,10 @@ async function syncProvider(provider, {
   }
   const {gateway, token, connectionMode, linkedProviders = [], providerLinkEpochs = {}} =
     await chrome.storage.local.get(["gateway", "token", "connectionMode", "linkedProviders", "providerLinkEpochs"]);
-  if (!hasRelayConnection({gateway, token, connectionMode}) || !linkedProviders.includes(provider)) return "skipped";
+  // Chrome storage is not a typed trust boundary. A string containing a
+  // provider name is NOT an owner-approved list of linked providers.
+  if (!hasRelayConnection({gateway, token, connectionMode}) ||
+      !Array.isArray(linkedProviders) || !linkedProviders.includes(provider)) return "skipped";
   const linkEpoch = providerLinkEpochs[provider];
   // Legacy pre-upgrade linked consent has no epoch. Invalid nonempty state
   // is not permission to silently bypass the epoch check.
@@ -277,7 +281,7 @@ async function syncProvider(provider, {
   const current = await chrome.storage.local.get(["gateway", "token", "connectionMode", "linkedProviders", "providerLinkEpochs"]);
   if (current.gateway !== gateway || current.token !== token ||
       current.connectionMode !== connectionMode ||
-      !current.linkedProviders?.includes(provider) ||
+      (!Array.isArray(current.linkedProviders) || !current.linkedProviders.includes(provider)) ||
       current.providerLinkEpochs?.[provider] !== linkEpoch) return "skipped";
   // Missing permissions or an expired browser session must not overwrite a
   // previously valid gateway session with an empty snapshot.
@@ -325,7 +329,7 @@ async function syncProvider(provider, {
       ]);
       if (latest.gateway !== gateway || latest.token !== token ||
           latest.connectionMode !== connectionMode ||
-          !latest.linkedProviders?.includes(provider) ||
+          (!Array.isArray(latest.linkedProviders) || !latest.linkedProviders.includes(provider)) ||
           latest.providerLinkEpochs?.[provider] !== linkEpoch) return;
       await chrome.storage.local.set({
         relaySnapshotVersions:{...(latest.relaySnapshotVersions || {}), [provider]:version}
