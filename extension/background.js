@@ -48,6 +48,21 @@ function classifyRelayFailure(error) {
   if (message.includes("(403)") || message.includes("(401)")) return "gateway_unauthorized";
   return "relay_unavailable";
 }
+// A manual sync result crosses the MV3 worker-to-popup trust boundary.
+// Never forward raw upstream exceptions (which may include credential URLs,
+// cookie names/values or gateway response bodies) into the UI message.
+const MANUAL_SYNC_ERRORS = Object.freeze({
+  gateway_cancelled: "Gateway sync was cancelled. Retry when ready.",
+  gateway_timeout: "Gateway sync timed out. Check the connection and retry.",
+  permission_or_consent: "Provider permission or consent is missing. Re-link and retry.",
+  activation_timeout: "Provider activation timed out. Retry from the extension.",
+  gateway_unauthorized: "Gateway connection was rejected. Reconnect and retry.",
+  relay_unavailable: "Provider sync failed. Check the gateway connection and retry."
+});
+function redactedManualSyncFailure(error) {
+  const errorCode = classifyRelayFailure(error);
+  return {ok:false, errorCode, error:MANUAL_SYNC_ERRORS[errorCode]};
+}
 // Permission state is independent of relay connectivity or saved sessions.
 // Return fixed booleans (or null when this browser cannot inspect permission),
 // never cookie values, credential-bearing URLs or raw browser errors.
@@ -748,7 +763,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
   if (message?.type === "sync-provider" && PROVIDERS[message.provider]) {
-    queueProviderSync(message.provider, true).then(syncStatus => sendResponse({ok:true,syncStatus:syncStatus || "skipped"})).catch(error => sendResponse({ok:false,error:error.message}));
+    queueProviderSync(message.provider, true)
+      .then(syncStatus => sendResponse({ok:true,syncStatus:syncStatus || "skipped"}))
+      .catch(error => sendResponse(redactedManualSyncFailure(error)));
     return true;
   }
   if (message?.type === "logout-provider" && PROVIDERS[message.provider]) {

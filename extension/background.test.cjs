@@ -1003,6 +1003,56 @@ test("slow provider sync coalesces a cookie burst into one latest trailing snaps
   assert.equal(chat[1].version, 20, "the trailing job reads latest cookie state");
 });
 
+test("manual provider sync returns only fixed redacted popup errors, not upstream exceptions", async () => {
+  const f = loadBackground(["chatgpt", "claude"], [], true);
+  f.sandbox.chrome.storage.local.get = async () => ({
+    gateway:"http://127.0.0.1:8080",connectionMode:"local",
+    linkedProviders:["chatgpt", "claude"],providerLinkEpochs:{chatgpt:"epoch-c",claude:"epoch-d"}
+  });
+  const request = provider => new Promise(resolve => {
+    assert.equal(f.listeners.message[0]({type:"sync-provider",provider},{},resolve), true);
+  });
+  const diagnostics = () => new Promise(resolve => {
+    f.listeners.message[0]({type:"relay-diagnostics"},{},resolve);
+  });
+  const cases = [
+    ["Gateway request cancelled; credential=private-session-cookie", "gateway_cancelled"],
+    ["gateway timed out on https://example.invalid/secret", "gateway_timeout"],
+    ["Missing provider host permissions token=secret", "permission_or_consent"],
+    ["Gateway activation failed (504), cookie=secret", "activation_timeout"],
+    ["Gateway rejected credential (401) token=secret", "gateway_unauthorized"],
+    ["upstream returned cookie=secret&access_token=private", "relay_unavailable"],
+  ];
+  const messages = new Map();
+  for (const [raw, code] of cases) {
+    f.sandbox.syncProvider = async () => {throw new Error(raw)};
+    const failed = await request("chatgpt");
+    assert.equal(failed.ok,false);
+    assert.equal(failed.errorCode,code);
+    assert.equal(typeof failed.error,"string");
+    assert.ok(failed.error.length > 0);
+    assert.ok(!JSON.stringify(failed).includes(raw));
+    assert.ok(!JSON.stringify(failed).includes("secret"));
+    assert.ok(!JSON.stringify(failed).includes("private"));
+    if (messages.has(code)) assert.equal(failed.error,messages.get(code));
+    messages.set(code,failed.error);
+
+    // Read-only health still has redacted issue categories and never infers
+    // that an uploaded session means an authenticated provider login.
+    const state = await diagnostics();
+    assert.equal(state.extension.provider_sync.chatgpt.state,"failed");
+    assert.equal(state.extension.provider_sync.chatgpt.issue,code);
+    assert.ok(!JSON.stringify(state).includes(raw));
+    assert.equal(state.extension.provider_sync.claude.state,"not_attempted");
+  }
+  f.sandbox.syncProvider = async () => "uploaded";
+  const success = await request("claude");
+  assert.equal(success.ok,true);
+  assert.equal(success.syncStatus,"uploaded");
+  assert.equal(success.error,undefined);
+  assert.equal(success.errorCode,undefined);
+});
+
 test("relay diagnostics message reports redacted local sync failures without raw errors", async () => {
   const f = loadBackground(["chatgpt"], ["chatgpt"]);
   // Manual explicit sync remains independent of automatic disconnect skip.
