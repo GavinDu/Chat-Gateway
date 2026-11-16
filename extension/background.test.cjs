@@ -1076,6 +1076,51 @@ test("diagnostics separates connection, browser host permissions and saved gatew
     "never include the configured gateway origin in the diagnostics payload");
 });
 
+test("live provider diagnostics show a held sync and preserve it on first status read", async () => {
+  const f = loadBackground(["chatgpt", "claude"], [], true);
+  let release;
+  let started = false;
+  const held = new Promise(resolve => { release = resolve; });
+  f.sandbox.syncProvider = async provider => {
+    assert.equal(provider, "chatgpt");
+    started = true;
+    await held;
+    return "uploaded";
+  };
+  f.sandbox.relayFetch = async () => ({
+    ok:true, status:200, json:async()=>({providers:[
+      {provider:"chatgpt",linked:false,authentication:"unknown"},
+      {provider:"claude",linked:false,authentication:"unknown"}
+    ]})
+  });
+  const diagnosis = () => new Promise(resolve =>
+    f.listeners.message[0]({type:"relay-diagnostics",force:true},{},resolve));
+  // This import begins before *any* dashboard check has initialized its
+  // connection identity; that first dashboard query must not erase it.
+  const pending = new Promise(resolve =>
+    f.listeners.message[0]({type:"sync-provider",provider:"chatgpt"},{},resolve));
+  for (let i = 0; i < 16 && !started; i++) await flushAsyncWork();
+  assert.equal(started, true);
+  const during = await diagnosis();
+  assert.equal(during.ok, true);
+  assert.equal(during.extension.provider_sync.chatgpt.state, "syncing");
+  assert.equal(during.extension.provider_sync.chatgpt.issue, null);
+  assert.match(during.extension.provider_sync.chatgpt.updated_at, /^\d{4}-\d{2}-\d{2}T/);
+  assert.equal(during.extension.provider_sync.claude.state, "not_attempted");
+  assert.equal(during.gateway.providers[0].authentication, "unknown");
+  assert.ok(!JSON.stringify(during).includes("private-cookie"));
+
+  release();
+  const completed = await pending;
+  assert.equal(completed.ok, true);
+  assert.equal(completed.syncStatus, "uploaded");
+  const after = await diagnosis();
+  assert.equal(after.extension.provider_sync.chatgpt.state, "uploaded");
+  assert.equal(after.extension.provider_sync.claude.state, "not_attempted");
+  assert.equal(after.gateway.providers[0].authentication, "unknown",
+    "successful import is not proof of signed-in chat");
+});
+
 test("provider sync timestamp is independent of login and turns stale when gateway status fails", async () => {
   const f = loadBackground(["chatgpt", "claude"]);
   let healthy = true;
