@@ -412,6 +412,12 @@ pub fn response_probe(
                             const aria = normalize(button.getAttribute("aria-label"));
                             const label = normalize(button.innerText || button.textContent);
                             const testId = normalize(button.getAttribute("data-testid"));
+                            // Code-block copy actions can have the same short
+                            // "Copy" label as a completed response. Semantic
+                            // code descendants and explicit code-copy test IDs
+                            // are never a reply-level done signal.
+                            if (button.closest("pre, code") ||
+                                /^(copy-code|copy-code-button|code-copy|code-copy-button)$/.test(testId)) return false;
                             // An explicit aria-label contradicting a reply
                             // control is authoritative even if inner text or
                             // a broad test id happens to say "Copy".
@@ -809,6 +815,43 @@ mod streaming_visibility_regression_tests {
         assert!(
             !response_probe(&page, &[".answer"], false).post_answer_affordance,
             "contradictory Copy code aria label must fail closed even with response testid"
+        );
+    }
+
+    #[tokio::test]
+    async fn copy_buttons_in_semantic_code_blocks_do_not_finish_reply() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <article data-message-author-role="assistant">
+              <div class="answer">generating code output</div>
+              <pre><button id="code-copy" aria-label="Copy">Copy</button>
+                <code><span role="button" aria-label="Copy">Copy</span></code>
+              </pre>
+              <button id="code-action" data-testid="copy-code-button" aria-label="Copy">Copy</button>
+              <button id="reply-action" aria-label="Copy" hidden>Copy</button>
+            </article>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        assert!(
+            !response_probe(&page, &[".answer"], false).post_answer_affordance,
+            "code-descendant and code-copy testid controls cannot complete reply"
+        );
+        page.evaluate("document.querySelector('#reply-action').hidden = false");
+        assert!(
+            response_probe(&page, &[".answer"], false).post_answer_affordance,
+            "exact reply-level Copy outside semantic code block still works"
+        );
+        page.evaluate("document.querySelector('#reply-action').disabled = true");
+        assert!(
+            !response_probe(&page, &[".answer"], false).post_answer_affordance,
+            "disabled reply Copy must not borrow an adjacent code Copy"
         );
     }
 
