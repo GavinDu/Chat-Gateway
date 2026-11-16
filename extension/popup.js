@@ -510,6 +510,16 @@ $("unpair").addEventListener("click", async () => {
   } catch (error) { message(error.message); }
 });
 
+// Old paired-mode workers used a small, fixed set of source-authored
+// approval errors. Keep that useful operator guidance without reflecting
+// arbitrary strings from a replaced worker or browser/network exception.
+const SAFE_LEGACY_APPROVAL_ERRORS = new Set([
+  "Gateway permission is missing.",
+  "Local approval connection changed. Connect again.",
+  "Connection approval expired. Choose Connect to gateway again.",
+  "Connection approval unavailable. Connect again from the extension.",
+  "Invalid connection token."
+]);
 let checkingConnection;
 async function updateConnection() {
   if (checkingConnection) return checkingConnection;
@@ -534,7 +544,9 @@ async function checkConnection() {
       // may still echo a network URL, poll secret or request identifier.
       message(result?.errorCode === "connection_poll_unavailable"
         ? "Connection approval check unavailable. Retry or reconnect."
-        : "The connection worker did not respond. Reload Chat Gateway Browser Relay at chrome://extensions, then reconnect.");
+        : SAFE_LEGACY_APPROVAL_ERRORS.has(result?.error)
+          ? result.error
+          : "The connection worker did not respond. Reload Chat Gateway Browser Relay at chrome://extensions, then reconnect.");
       return false;
     } else if (pendingConnection) showPendingApproval(pendingConnection);
     return true;
