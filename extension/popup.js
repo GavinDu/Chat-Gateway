@@ -510,6 +510,16 @@ $("unpair").addEventListener("click", async () => {
   } catch (error) { message(error.message); }
 });
 
+// Old paired-mode workers used a small, fixed set of source-authored
+// approval errors. Keep that useful operator guidance without reflecting
+// arbitrary strings from a replaced worker or browser/network exception.
+const SAFE_LEGACY_APPROVAL_ERRORS = new Set([
+  "Gateway permission is missing.",
+  "Local approval connection changed. Connect again.",
+  "Connection approval expired. Choose Connect to gateway again.",
+  "Connection approval unavailable. Connect again from the extension.",
+  "Invalid connection token."
+]);
 let checkingConnection;
 async function updateConnection() {
   if (checkingConnection) return checkingConnection;
@@ -530,13 +540,21 @@ async function checkConnection() {
     showGatewayConnection(Boolean(token));
     if (token) await refreshStatus();
     else if (result?.ok !== true) {
-      // Do not hide a failed exchange behind an endless waiting message.
-      // A stale/missing service worker can also return no acknowledgement.
-      message(result?.error || "The connection worker did not respond. Reload Chat Gateway Browser Relay at chrome://extensions, then reconnect.");
+      // Never display an untrusted worker's raw error string. Older workers
+      // may still echo a network URL, poll secret or request identifier.
+      message(result?.errorCode === "connection_poll_unavailable"
+        ? "Connection approval check unavailable. Retry or reconnect."
+        : SAFE_LEGACY_APPROVAL_ERRORS.has(result?.error)
+          ? result.error
+          : "The connection worker did not respond. Reload Chat Gateway Browser Relay at chrome://extensions, then reconnect.");
       return false;
     } else if (pendingConnection) showPendingApproval(pendingConnection);
     return true;
-  } catch (error) { message(error.message); return false; }
+  } catch (_) {
+    // Storage/runtime exceptions can contain internal connection details.
+    message("Gateway connection check unavailable. Retry or reopen the extension.");
+    return false;
+  }
 }
 initialize().then(updateConnection);
 // Only a connected dashboard needs a periodic gateway heartbeat. The popup

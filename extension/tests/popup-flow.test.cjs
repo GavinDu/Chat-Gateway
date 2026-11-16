@@ -231,6 +231,49 @@ function loadPopup({failCookieDomain = null, includeSecondProvider = false, manu
   return {values,server,elements,byId,chromeCalls,intervals,controls:context.testControls,context};
 }
 
+test("popup pending connection status never renders untrusted worker or storage secrets", async () => {
+  for (const [response, expected] of [
+    [{ok:false,error:"token=private secret_url=https://secret.invalid"}, /worker did not respond/],
+    [{ok:false,error:"Gateway permission is missing."}, /Gateway permission is missing/],
+    [{ok:false,error:"Gateway permission is missing. token=private"}, /worker did not respond/],
+    [{ok:false,errorCode:"connection_poll_unavailable",
+      error:"poll_secret=private-request"}, /approval check unavailable/],
+    [undefined, /worker did not respond/]
+  ]) {
+    const popup = loadPopup();
+    await new Promise(resolve => setImmediate(resolve));
+    popup.values.pendingConnection = {gateway:"http://127.0.0.1:8080",
+      request_id:"a".repeat(64),poll_secret:"b".repeat(64),expires:Date.now()+30_000};
+    const original = popup.context.chrome.runtime.sendMessage;
+    popup.context.chrome.runtime.sendMessage = async request =>
+      request.type==="poll-connection" ? response : original(request);
+    assert.equal(await popup.context.checkConnection(),false);
+    const rendered = popup.byId("message").textContent;
+    assert.match(rendered,expected);
+    assert.ok(!rendered.includes("private"));
+    assert.ok(!rendered.includes("poll_secret"));
+    assert.ok(!rendered.includes("secret.invalid"));
+  }
+
+  const thrown = loadPopup();
+  await new Promise(resolve=>setImmediate(resolve));
+  thrown.context.chrome.runtime.sendMessage = async () => {
+    throw new Error("fetch rejected token=private gateway=https://secret.invalid");
+  };
+  assert.equal(await thrown.context.checkConnection(),false);
+  assert.equal(thrown.byId("message").textContent,
+    "Gateway connection check unavailable. Retry or reopen the extension.");
+
+  const storage = loadPopup();
+  await new Promise(resolve=>setImmediate(resolve));
+  storage.context.chrome.storage.local.get = async () => {
+    throw new Error("storage failed with poll_secret=private");
+  };
+  assert.equal(await storage.context.checkConnection(),false);
+  assert.equal(storage.byId("message").textContent,
+    "Gateway connection check unavailable. Retry or reopen the extension.");
+});
+
 test("worker diagnostic failure avoids a second redundant popup status HTTP request", async () => {
   for (const [gateway_issue, message] of [
     ["gateway_timeout", /timed out/],
