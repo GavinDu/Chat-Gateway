@@ -49,6 +49,29 @@ function showGatewayConnection(connected) {
   $("gateway").disabled = connected;
 }
 
+// Only source-authored fixed gateway-status errors may be displayed.
+// A Chrome storage/runtime exception or a fallback fetch rejection can
+// contain URLs, tokens or internal request identifiers, even in local mode.
+const SAFE_STATUS_ERRORS = new Set([
+  "Local relay access rejected. Check the gateway mode and optional extension ID restriction.",
+  "Gateway authorization check could not be applied safely. Refresh status.",
+  "Gateway connection changed during status check. Refresh status.",
+  "Gateway connection expired or was revoked. Choose Connect to gateway to approve it again.",
+  "Gateway is not connected.",
+  "Gateway status check timed out.",
+  "Gateway status request failed.",
+  "Gateway status is unavailable.",
+  "Gateway permission or consent is missing.",
+  "Gateway activation timed out.",
+  "Gateway diagnostics are unavailable."
+]);
+function safeStatusErrorMessage(error) {
+  const text = typeof error?.message === "string" ? error.message : "";
+  return SAFE_STATUS_ERRORS.has(text)
+    ? text
+    : "Gateway status unavailable. Check the connection and retry.";
+}
+
 async function refreshStatus(force = false) {
   // Bind any authorization failure to the exact paired installation whose
   // health was requested, not a newer connection made during the await.
@@ -270,7 +293,7 @@ async function initialize() {
   }
   showGatewayConnection(hasRelayConnection(stored));
   if (hasRelayConnection(stored)) {
-    try { await refreshStatus(); } catch (error) { message(error.message); }
+    try { await refreshStatus(); } catch (error) { message(safeStatusErrorMessage(error)); }
   }
 }
 
@@ -462,7 +485,7 @@ async function logoutProvider(provider) {
 }
 
 $("refresh").addEventListener("click", async () => {
-  try { await refreshStatus(true); message("Status refreshed."); } catch (error) { message(error.message); }
+  try { await refreshStatus(true); message("Status refreshed."); } catch (error) { message(safeStatusErrorMessage(error)); }
 });
 
 
