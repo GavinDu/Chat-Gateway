@@ -152,6 +152,17 @@ function safeProviderIssueLabel(value, allowed) {
     ? value.replaceAll("_", " ") : "unverified status";
 }
 
+// Worker diagnostics timestamps originate from new Date().toISOString().
+// Date.parse alone also accepts browser-dependent, noncanonical human strings;
+// never echo those raw values (which can be poisoned by a stale worker).
+function safeSyncAttemptTimestamp(value) {
+  if (typeof value !== "string" ||
+      !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value)) return null;
+  const millis = Date.parse(value);
+  if (!Number.isFinite(millis)) return null;
+  return new Date(millis).toISOString() === value ? value : null;
+}
+
 async function refreshStatus(force = false) {
   // Bind any authorization failure to the exact paired installation whose
   // health was requested, not a newer connection made during the await.
@@ -253,8 +264,9 @@ async function refreshStatus(force = false) {
       ? "Gateway issue: " + safeProviderIssueLabel(item.issue, GATEWAY_PROVIDER_ISSUES) : null;
     const sync = diagnostics?.extension?.provider_sync?.[item.provider];
     const extensionIssue = safeProviderIssueLabel(sync?.issue, EXTENSION_SYNC_ISSUES);
-    const syncAttempt = typeof sync?.updated_at === "string" && !Number.isNaN(Date.parse(sync.updated_at))
-      ? "Last extension sync attempt: " + sync.updated_at : null;
+    const safeSyncAttempt = safeSyncAttemptTimestamp(sync?.updated_at);
+    const syncAttempt = safeSyncAttempt
+      ? "Last extension sync attempt: " + safeSyncAttempt : null;
     // An upload/check is not a verified login. The health call may fail
     // while this extension still remembers an earlier successful import.
     const staleSync = sync?.stale === true ? "Extension sync status stale (gateway check failed)" : null;
