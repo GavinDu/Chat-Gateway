@@ -122,6 +122,11 @@ test("relay diagnostics classify user cancellation apart from gateway timeout", 
     "relay_unavailable",
     "never expose raw upstream text in diagnostic issue codes"
   );
+  assert.equal(
+    f.sandbox.classifyRelayFailure(new Error("provider callback cancelled by upstream proxy")),
+    "relay_unavailable",
+    "unverified upstream text must not impersonate explicit owner cancellation"
+  );
 });
 
 test("explicit provider sync reports a skipped upload instead of success", async () => {
