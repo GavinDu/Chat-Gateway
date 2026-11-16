@@ -1211,6 +1211,70 @@ test("live sync diagnostic cannot outlive same-gateway relink or cross-gateway s
   assert.equal((await send({type:"relay-diagnostics"})).extension.provider_sync.chatgpt.state,"not_attempted");
 });
 
+test("delayed old consent status response cannot borrow a newer live sync", async () => {
+  const f = loadBackground(["chatgpt"], [], true);
+  const state = {
+    gateway:"http://127.0.0.1:8080", connectionMode:"local",
+    linkedProviders:["chatgpt"], providerLinkEpochs:{chatgpt:"epoch-old"}
+  };
+  f.sandbox.chrome.storage.local.get = async () => ({...state});
+  let releaseStatus;
+  f.sandbox.relayFetch = async () => new Promise(resolve => {releaseStatus = resolve;});
+  const send = request => new Promise(resolve => f.listeners.message[0](request,{},resolve));
+  const oldStatus = send({type:"relay-diagnostics",force:true});
+  for (let i = 0; i < 4; i++) await flushAsyncWork();
+  assert.equal(typeof releaseStatus,"function");
+
+  // Gateway identity stays the same, but the old dashboard's consent
+  // snapshot must not borrow a later link generation's live state.
+  state.providerLinkEpochs = {chatgpt:"epoch-new"};
+  let releaseSync;
+  f.sandbox.syncProvider = async () => new Promise(resolve => {releaseSync=resolve;});
+  const sync = send({type:"sync-provider",provider:"chatgpt"});
+  for (let i = 0; i < 4; i++) await flushAsyncWork();
+  assert.equal(typeof releaseSync,"function");
+  releaseStatus({ok:true,status:200,json:async()=>({providers:[]})});
+  const old = await oldStatus;
+  assert.equal(old.ok,true);
+  assert.equal(old.extension.provider_sync.chatgpt.state,"not_attempted",
+    "old consent status cannot borrow a new epoch's syncing state");
+
+  const fresh = await send({type:"relay-diagnostics"});
+  assert.equal(fresh.extension.provider_sync.chatgpt.state,"syncing");
+  releaseSync("uploaded");
+  await sync;
+});
+
+test("delayed old gateway diagnostic cannot borrow new gateway provider status", async () => {
+  const f = loadBackground(["chatgpt"], [], true);
+  const state = {
+    gateway:"http://127.0.0.1:8080", connectionMode:"local",
+    linkedProviders:["chatgpt"], providerLinkEpochs:{chatgpt:"epoch"}
+  };
+  f.sandbox.chrome.storage.local.get = async () => ({...state});
+  let releaseOldStatus;
+  f.sandbox.relayFetch = async () => new Promise(resolve => {releaseOldStatus=resolve;});
+  const send = request => new Promise(resolve => f.listeners.message[0](request,{},resolve));
+  const oldStatus = send({type:"relay-diagnostics",force:true});
+  for (let i = 0; i < 4; i++) await flushAsyncWork();
+  assert.equal(typeof releaseOldStatus,"function");
+
+  state.gateway = "http://127.0.0.1:9090";
+  let releaseSync;
+  f.sandbox.syncProvider = async () => new Promise(resolve => {releaseSync=resolve;});
+  const sync = send({type:"sync-provider",provider:"chatgpt"});
+  for (let i = 0; i < 4; i++) await flushAsyncWork();
+  assert.equal(typeof releaseSync,"function");
+  releaseOldStatus({ok:true,status:200,json:async()=>({providers:[]})});
+  const old = await oldStatus;
+  assert.equal(old.gateway_issue,"gateway_connection_changed");
+  assert.equal(old.extension.provider_sync.chatgpt.state,"not_attempted");
+  f.sandbox.relayFetch = async () => ({ok:true,status:200,json:async()=>({providers:[]})});
+  assert.equal((await send({type:"relay-diagnostics",force:true})).extension.provider_sync.chatgpt.state,"syncing");
+  releaseSync("uploaded");
+  await sync;
+});
+
 test("forced diagnostic refresh never reports stale success after a gateway failure", async () => {
   const f = loadBackground(["chatgpt"]);
   f.sandbox.chrome.storage.local.get = async () => ({
