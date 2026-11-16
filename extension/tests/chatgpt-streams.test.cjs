@@ -240,6 +240,43 @@ test('reader locking, bounded invalid strategy, and default byte-stream read', a
   assert.deepEqual(Array.from(result.value), [4, 2]);
 });
 
+test('wrapped reader preserves byte-view arguments for the delegated read', async () => {
+  // The pinned fallback currently does not implement BYOB. This stand-in
+  // verifies the compat wrapper does not destroy a future reader's contract;
+  // it is NOT proof of full byte-stream/BYOB conformance.
+  class ByteViewStream extends PinnedReadableStream {
+    getReader(options) {
+      const reader = super.getReader();
+      if (options?.mode === 'byob') {
+        const originalRead = reader.read.bind(reader);
+        reader.read = async view => {
+          if (!(view instanceof Uint8Array)) throw new TypeError('BYOB view missing');
+          const chunk = await originalRead();
+          if (chunk.done) return chunk;
+          view.set(chunk.value);
+          return {value: view.subarray(0, chunk.value.length), done: false};
+        };
+      }
+      return reader;
+    }
+  }
+  const {context} = load('chatgpt.com', 'https:', ByteViewStream);
+  const stream = new context.ReadableStream({
+    type: 'bytes',
+    pull(controller) {
+      controller.enqueue(Uint8Array.from([8, 5]));
+      controller.close();
+    },
+  });
+  const reader = stream.getReader({mode: 'byob'});
+  const buffer = new Uint8Array(4);
+  const first = await settled(reader.read(buffer));
+  assert.deepEqual(Array.from(first.value), [8, 5]);
+  assert.strictEqual(first.value.buffer, buffer.buffer,
+    'the same caller-provided byte-view backing buffer must be delegated');
+  assert.equal((await settled(reader.read(new Uint8Array(4)))).done, true);
+});
+
 test('50 sequential streams terminate without a retained global registry', async () => {
   const {context} = load();
   for (let i = 0; i < 50; i++) {
