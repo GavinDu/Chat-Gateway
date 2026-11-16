@@ -137,6 +137,7 @@ class ManusRuntimeStatusContractTests(unittest.TestCase):
             self.assertNotEqual(proc.returncode, 0)
             self.assertIsNotNone(args)
             self.assertEqual(proc.stderr.strip(), "Manus runtime status: unavailable")
+            self.assertEqual(proc.stdout, "", "failed or partial HTTP status must not print success")
             self.assertNotIn("private-secret", proc.stdout + proc.stderr)
 
 
