@@ -1352,7 +1352,10 @@ test("delayed consent-A status never borrows new consent-B live sync", async () 
   // Same gateway and consent target; a new explicit link changes only epoch.
   state.providerLinkEpochs = {chatgpt:"epoch-B"};
   let releaseSync;
-  f.sandbox.syncProvider = async () => new Promise(resolve => {releaseSync = resolve;});
+  f.sandbox.syncProvider = async (_provider,{onProgress}) => {
+    onProgress({phase:"upload",durations_ms:{permission:5,cookie_read:9,digest:3}});
+    return new Promise(resolve => {releaseSync = resolve;});
+  };
   const syncing = send({type:"sync-provider",provider:"chatgpt"});
   for (let i=0;i<5;i++) await flushAsyncWork();
   assert.equal(typeof releaseSync,"function");
@@ -1362,8 +1365,13 @@ test("delayed consent-A status never borrows new consent-B live sync", async () 
   assert.equal(previous.ok,true);
   assert.equal(previous.extension.provider_sync.chatgpt.state,"not_attempted",
     "old A status cannot borrow B in-flight sync");
+  assert.equal(previous.extension.provider_sync.chatgpt.phase,null,
+    "old A status cannot borrow B phase telemetry");
+  assert.deepEqual(JSON.parse(JSON.stringify(previous.extension.provider_sync.chatgpt.durations_ms)),{});
   const fresh = await send({type:"relay-diagnostics"});
   assert.equal(fresh.extension.provider_sync.chatgpt.state,"syncing");
+  assert.equal(fresh.extension.provider_sync.chatgpt.phase,"upload");
+  assert.equal(fresh.extension.provider_sync.chatgpt.durations_ms.cookie_read,9);
   releaseSync("uploaded");
   assert.equal((await syncing).ok,true);
   // An uploaded session invalidates the health cache; the next status GET
@@ -1390,6 +1398,74 @@ test("diagnostics immediately hides old same-gateway in-flight status after cons
     "a revoked consent generation cannot remain in-progress");
   release("uploaded");
   await old;
+  assert.equal((await send({type:"relay-diagnostics"})).extension.provider_sync.chatgpt.state,"not_attempted");
+});
+
+test("redacted phase progress follows the same provider ownership and terminal status", async () => {
+  const f = loadBackground(["chatgpt","claude"], [], true);
+  const state = {gateway:"http://127.0.0.1:8080",connectionMode:"local",
+    linkedProviders:["chatgpt","claude"], providerLinkEpochs:{chatgpt:"epoch-a",claude:"epoch-b"}};
+  f.sandbox.chrome.storage.local.get = async () => ({...state});
+  f.sandbox.relayFetch = async () => ({
+    ok:true,status:200,json:async()=>({providers:[{provider:"chatgpt",authentication:"unknown"}]})
+  });
+  let release;
+  f.sandbox.syncProvider = async (provider,{onProgress}) => {
+    if (provider !== "chatgpt") return "unchanged";
+    onProgress({phase:"cookie_read",durations_ms:{permission:4}});
+    onProgress({phase:"upload",durations_ms:{permission:4,cookie_read:18,digest:10}});
+    return new Promise(resolve=>{release = () => {
+      onProgress({phase:null,durations_ms:{permission:4,cookie_read:18,digest:10,upload:24}});
+      resolve("uploaded");
+    };});
+  };
+  const send = message=>new Promise(resolve=>f.listeners.message[0](message,{},resolve));
+  const work = send({type:"sync-provider",provider:"chatgpt"});
+  for (let i=0;i<5;i++) await flushAsyncWork();
+  const live = await send({type:"relay-diagnostics",force:true});
+  assert.equal(live.extension.provider_sync.chatgpt.state,"syncing");
+  assert.equal(live.extension.provider_sync.chatgpt.phase,"upload");
+  assert.equal(live.extension.provider_sync.chatgpt.durations_ms.cookie_read,18);
+  assert.equal(live.extension.provider_sync.claude.phase,null);
+  assert.equal(live.gateway.providers[0].authentication,"unknown");
+  assert.ok(!JSON.stringify(live).includes("epoch-a"));
+  release();
+  assert.equal((await work).syncStatus,"uploaded");
+  const after = await send({type:"relay-diagnostics"});
+  assert.equal(after.extension.provider_sync.chatgpt.state,"uploaded");
+  assert.equal(after.extension.provider_sync.chatgpt.phase,null);
+  assert.equal(after.extension.provider_sync.chatgpt.durations_ms.upload,24);
+});
+
+test("phase timing callback cannot leak raw values and obsolete progress is fenced on same gateway", async () => {
+  const f = loadBackground(["chatgpt"], [], true);
+  const state = {gateway:"http://127.0.0.1:8080",connectionMode:"local",
+    linkedProviders:["chatgpt"],providerLinkEpochs:{chatgpt:"old"}};
+  f.sandbox.chrome.storage.local.get = async () => ({...state});
+  f.sandbox.relayFetch = async () => ({ok:true,status:200,json:async()=>({providers:[]})});
+  let release;
+  f.sandbox.syncProvider = async (_provider,{onProgress}) => {
+    onProgress({phase:"secret-cookie=XYZ",durations_ms:{
+      permission:Infinity,cookie_read:-3,digest:200_000,upload:7.9,secret_token:12345
+    }});
+    return new Promise(resolve=>{release=() => {onProgress({phase:"upload",durations_ms:{upload:40}});resolve("uploaded");};});
+  };
+  const send = message=>new Promise(resolve=>f.listeners.message[0](message,{},resolve));
+  const work = send({type:"sync-provider",provider:"chatgpt"});
+  for(let i=0;i<5;i++) await flushAsyncWork();
+  const live = await send({type:"relay-diagnostics",force:true});
+  const detail = live.extension.provider_sync.chatgpt;
+  assert.equal(detail.phase,null);
+  assert.deepEqual(JSON.parse(JSON.stringify(detail.durations_ms)),{
+    cookie_read:0,digest:120_000,upload:7
+  });
+  assert.ok(!JSON.stringify(live).includes("secret-cookie"));
+  assert.ok(!JSON.stringify(live).includes("secret_token"));
+  state.providerLinkEpochs={chatgpt:"new"};
+  const invalid = await send({type:"relay-diagnostics"});
+  assert.equal(invalid.extension.provider_sync.chatgpt.state,"not_attempted");
+  release();
+  await work;
   assert.equal((await send({type:"relay-diagnostics"})).extension.provider_sync.chatgpt.state,"not_attempted");
 });
 
