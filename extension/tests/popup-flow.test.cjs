@@ -909,7 +909,7 @@ test("popup quarantines malformed provider rows and refuses truthy fake saved-se
   assert.match(claudeStatus,/Session saved/);
   assert.equal(rows[1].children[2].children.length,3);
   assert.equal(rows[1].children[2].children[2].textContent,"Log out");
-  assert.equal(cookieChecks,1,"unknown rows must not check arbitrary provider cookies");
+  assert.equal(cookieChecks,2,"only the two registered provider rows may check cookies");
 });
 
 test("popup treats non-array gateway provider status as fixed unavailable error", async () => {
