@@ -191,8 +191,8 @@ function loadPopup({failCookieDomain = null, includeSecondProvider = false, manu
     isLocalGateway: value => value.startsWith("http://127.0.0.1:") || value.startsWith("http://localhost:"),
     hasRelayConnection: state => Boolean(state.gateway && (state.token || state.connectionMode === "local")),
     normalizeGateway: v=>v,
-    PROVIDER_LOGIN_URLS:{metaai:"https://www.meta.ai/"},
-    PROVIDERS:{metaai:["meta.ai"],claude:["claude.ai"]},
+    PROVIDER_LOGIN_URLS:{metaai:"https://www.meta.ai/",manus:"https://manus.im/app"},
+    PROVIDERS:{metaai:["meta.ai"],claude:["claude.ai"],manus:["manus.im"]},
     providerCookieSnapshot:async()=>({cookies:[{name:"token",value:"test-only"}]}),
     relayFetch:async()=>{chromeCalls.push("http:relay-status");return {ok:true,status:200,json:async()=>({
       providers:[
@@ -925,4 +925,49 @@ test("popup treats non-array gateway provider status as fixed unavailable error"
     assert.equal(popup.byId("status").children,initialRows,
       "malformed refresh must not replace existing healthy rows");
   }
+});
+
+
+test("duplicate Manus status rows cannot display conflicting saved-session controls", async () => {
+  const popup=loadPopup();
+  await new Promise(resolve=>setImmediate(resolve));
+  let cookieReads=0;
+  popup.context.chrome.cookies.getAll=async()=>{cookieReads++;return [];};
+  const typed = (provider,linked) => ({
+    provider,enabled:true,linked,
+    authentication:linked?"verified":"needs_login",manual_verification_required:false
+  });
+  popup.context.relayFetch=async()=>({ok:true,status:200,json:async()=>({
+    vault_mode:true,
+    providers:[typed("manus",true), typed("manus",false), typed("metaai",false),
+      null, {provider:"constructor",linked:true,enabled:true}]
+  })});
+  await popup.controls.refreshStatus(true);
+  const rows=popup.byId("status").children;
+  assert.equal(rows.length,1,"both conflicting Manus copies must be quarantined");
+  assert.equal(rows[0].children[0].textContent,"metaai");
+  assert.equal(rows[0].children[2].children[0].textContent,"Log in / Connect");
+  assert.equal(cookieReads,1,"do not inspect browser cookies for ambiguous Manus rows");
+
+  popup.context.relayFetch=async()=>({ok:true,status:200,json:async()=>({
+    vault_mode:true,
+    providers:[typed("manus",true), typed("manus",true), typed("claude",false)]
+  })});
+  await popup.controls.refreshStatus(true);
+  const second=popup.byId("status").children;
+  assert.equal(second.length,1,"even identical duplicate status rows are not unique");
+  assert.equal(second[0].children[0].textContent,"claude");
+  assert.equal(cookieReads,2);
+
+  popup.context.relayFetch=async()=>({ok:true,status:200,json:async()=>({
+    vault_mode:true,
+    providers:[typed("manus",true),typed("metaai",false)]
+  })});
+  await popup.controls.refreshStatus(true);
+  const unique=popup.byId("status").children;
+  assert.equal(unique.length,2,"unique Manus remains available");
+  assert.equal(unique[0].children[0].textContent,"manus");
+  assert.match(unique[0].children[1].textContent,/Session saved/);
+  assert.equal(unique[0].children[2].children.length,3,"unambiguous linked Manus permits Log out");
+  assert.equal(unique[0].children[2].children[2].textContent,"Log out");
 });
