@@ -1270,6 +1270,9 @@ test("delayed consent-A status never borrows new consent-B live sync", async () 
   assert.equal(fresh.extension.provider_sync.chatgpt.state,"syncing");
   releaseSync("uploaded");
   assert.equal((await syncing).ok,true);
+  // An uploaded session invalidates the health cache; the next status GET
+  // must use a fresh completed mock rather than waiting on old held status.
+  f.sandbox.relayFetch = async () => ({ok:true,status:200,json:async()=>({providers:[]})});
   assert.equal((await send({type:"relay-diagnostics"})).extension.provider_sync.chatgpt.state,"uploaded");
 });
 
