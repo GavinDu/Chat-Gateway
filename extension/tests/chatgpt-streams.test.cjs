@@ -89,8 +89,8 @@ class PinnedReadableStream {
   }
 }
 
-function load(hostname = 'chatgpt.com', protocol = 'https:', Stream = PinnedReadableStream) {
-  const context = {ReadableStream: Stream, location: {hostname, protocol}};
+function load(hostname = 'chatgpt.com', protocol = 'https:', Stream = PinnedReadableStream, port = '') {
+  const context = {ReadableStream: Stream, location: {hostname, protocol, port}};
   vm.createContext(context);
   const before = context.ReadableStream;
   vm.runInContext(script, context, {filename: 'chatgpt_streams.js'});
@@ -121,6 +121,21 @@ test('exact HTTPS ChatGPT origin is required, other providers and non-HTTPS unto
     const installed = context.ReadableStream;
     vm.runInContext(script, context);
     assert.strictEqual(context.ReadableStream, installed, 'preloads must be idempotent');
+  }
+});
+
+test('ChatGPT compatibility never patches non-default HTTPS ports', () => {
+  for (const host of ['chatgpt.com', 'www.chatgpt.com']) {
+    for (const port of ['444', '8443']) {
+      const {context, before} = load(host, 'https:', PinnedReadableStream, port);
+      assert.strictEqual(context.ReadableStream, before,
+        'a non-default HTTPS port is not the standard ChatGPT origin');
+    }
+    for (const port of ['', '443']) {
+      const {context, before} = load(host, 'https:', PinnedReadableStream, port);
+      assert.notStrictEqual(context.ReadableStream, before,
+        'the default HTTPS port remains an allowed ChatGPT origin');
+    }
   }
 });
 
