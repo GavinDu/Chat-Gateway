@@ -75,6 +75,35 @@ function safeProviderActionError(error, fallback) {
   return SAFE_PROVIDER_ACTION_ERRORS.has(text) ? text : fallback;
 }
 
+// Pair/Unpair can await Chrome permissions/storage, gateway HTTP, and old
+// extension workers. Preserve only exact source-authored operator guidance;
+// never render a thrown browser/network exception containing a code or token.
+const SAFE_GATEWAY_ACTION_ERRORS = new Set([
+  "Enter the fresh 8-digit code from your private remote gateway.",
+  "Gateway permission was not granted.",
+  "Local approval worker did not respond.",
+  "An approval is already pending. Finish it in the local approval tab or retry in five minutes.",
+  "Could not request approval. Check the gateway URL and configured extension ID.",
+  "Remote pairing failed. Check the gateway and request a fresh pairing code.",
+  "Invalid connection response.",
+  "Remote Pair worker did not respond.",
+  "Local approval worker did not save the request.",
+  "Local approval reservation unavailable.",
+  "Local approval changed or expired before it was saved.",
+  "Paired connection changed while pairing.",
+  "Local gateway connection changed or was disconnected.",
+  "Local disconnect worker did not respond.",
+  "Paired gateway connection changed; refresh before disconnecting.",
+  "Could not revoke the install token.",
+  "Paired disconnect worker did not respond.",
+  "Paired gateway connection changed before disconnect.",
+  "Local gateway connection changed before disconnect."
+]);
+function safeGatewayActionError(error, fallback) {
+  const text = typeof error?.message === "string" ? error.message : "";
+  return SAFE_GATEWAY_ACTION_ERRORS.has(text) ? text : fallback;
+}
+
 function showGatewayConnection(connected) {
   $("pairing").hidden = connected;
   $("linked").hidden = !connected;
@@ -426,7 +455,8 @@ $("pair").addEventListener("click", async () => {
         type:"release-pending-approval",generation:pendingApprovalGeneration
       }).catch(() => null);
     }
-    message(error.message);
+    message(safeGatewayActionError(error,
+      "Gateway connection request failed. Check browser permissions and retry."));
   }
 });
 
@@ -567,7 +597,10 @@ $("unpair").addEventListener("click", async () => {
     await chrome.alarms?.clear?.("relay-connection");
     showGatewayConnection(false);
     message("Gateway disconnected. Saved provider sessions remain in the gateway vault. Reconnect to manage them.");
-  } catch (error) { message(error.message); }
+  } catch (error) {
+    message(safeGatewayActionError(error,
+      "Gateway disconnect failed. Check the connection and retry."));
+  }
 });
 
 // Old paired-mode workers used a small, fixed set of source-authored
