@@ -233,7 +233,8 @@ async function refreshStatus(force = false) {
     const enabled = item.enabled === false ? "Disabled in gateway config" : "Enabled in gateway";
     const linked = item.linked ? "Session saved" : "Not linked";
     let browser = "Browser permission not granted";
-    const domains = PROVIDERS[item.provider] || [];
+    const domains = typeof item.provider === "string" && Object.hasOwn(PROVIDERS, item.provider)
+      ? PROVIDERS[item.provider] : [];
     const origins = domains.flatMap(domain => ["https://" + domain + "/*", "https://*." + domain + "/*"]);
     // Chrome can revoke a provider's permission or fail a cookie read while
     // another provider is healthy. Keep the dashboard usable and fail closed
@@ -322,8 +323,10 @@ async function refreshStatus(force = false) {
 }
 
 async function openProviderLogin(provider) {
+  if (typeof provider !== "string" || !Object.hasOwn(PROVIDER_LOGIN_URLS, provider)) {
+    throw new Error("This provider is not yet supported by Chat-Gateway.");
+  }
   const url = PROVIDER_LOGIN_URLS[provider];
-  if (!url) throw new Error("This provider is not yet supported by Chat-Gateway.");
   if (await openExtensionTab(url)) {
     message("Use your existing provider session or sign in on the provider website. Connected accounts sync automatically; credentials and MFA stay there.");
   } else {
@@ -494,8 +497,10 @@ $("pair").addEventListener("click", async () => {
 // Linking consents to automatic updates from this provider. The browser only
 // sends cookies for domains the user has explicitly granted permission to.
 async function connectProvider(provider, openLogin = false) {
+  if (typeof provider !== "string" || !Object.hasOwn(PROVIDERS, provider)) {
+    throw new Error("Unsupported provider.");
+  }
   const domains = PROVIDERS[provider];
-  if (!domains) throw new Error("Unsupported provider.");
   // Pairing may be revoked or replaced while Chrome's permission prompt or
   // browser cookie read is pending. Consent must belong to the exact install.
   const connection = await chrome.storage.local.get(["gateway", "token", "connectionMode"]);
@@ -572,7 +577,9 @@ async function connectProvider(provider, openLogin = false) {
 }
 
 async function logoutProvider(provider) {
-  if (!PROVIDERS[provider]) throw new Error("Unsupported provider.");
+  if (typeof provider !== "string" || !Object.hasOwn(PROVIDERS, provider)) {
+    throw new Error("Unsupported provider.");
+  }
   if (!confirm("Log out " + provider + " from Chat Gateway and stop automatic sync? This does not sign you out on the provider website. You can reconnect later.")) return;
   // The service worker queues logout behind in-flight cookie syncs, then
   // revokes the persisted gateway snapshot. No website cookies are deleted.
