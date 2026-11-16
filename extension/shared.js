@@ -101,17 +101,30 @@ async function relayFetch(path, options = {}, expectedConnection = null) {
   // on the gateway, so never automatically replay it as a "failed" import.
   const controller = new AbortController();
   const upstreamSignal = options.signal;
-  const abortFromCaller = () => controller.abort();
-  if (upstreamSignal?.aborted) controller.abort();
+  let cancelledByCaller = false;
+  const abortFromCaller = () => {
+    cancelledByCaller = true;
+    controller.abort();
+  };
+  if (upstreamSignal?.aborted) abortFromCaller();
   else upstreamSignal?.addEventListener?.("abort", abortFromCaller, {once:true});
   const deadline = setTimeout(() => controller.abort(), RELAY_FETCH_TIMEOUT_MS);
   try {
+    // Never even dispatch a provider cookie snapshot with an already-aborted
+    // owner request. Relying on native fetch rejection is not a sufficient
+    // security boundary for browser shims or test doubles.
+    if (cancelledByCaller) {
+      throw new Error("Gateway request cancelled; check provider status before retrying.");
+    }
     return await fetch(localGateway + path, {
       ...options, headers, cache:"no-store", redirect:"error", signal:controller.signal
     });
   } catch (error) {
     if (controller.signal.aborted) {
-      throw new Error("Gateway request timed out or was cancelled; the session may have changed. Check provider status before retrying.");
+      if (cancelledByCaller) {
+        throw new Error("Gateway request cancelled; check provider status before retrying.");
+      }
+      throw new Error("Gateway request timed out; the session may have changed. Check provider status before retrying.");
     }
     throw error;
   } finally {
