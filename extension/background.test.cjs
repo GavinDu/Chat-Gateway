@@ -634,8 +634,11 @@ test("old provider import result cannot overwrite new gateway dashboard or cache
 test("unlink during in-flight import does not leave a synthetic linked sync result", async () => {
   const f = loadBackground(["chatgpt"], [], true);
   let linkedProviders = ["chatgpt"];
+  let providerLinkEpochs = {chatgpt:"consent-before"};
+  // The actual worker's explicit unlink/relink rotates a durable epoch;
+  // the old test mutated only membership, an impossible legacy ABA fixture.
   f.sandbox.chrome.storage.local.get = async () => ({
-    gateway:"http://127.0.0.1:8080",connectionMode:"local",linkedProviders
+    gateway:"http://127.0.0.1:8080",connectionMode:"local",linkedProviders,providerLinkEpochs
   });
   let release;
   const held = new Promise(resolve => {release=resolve});
@@ -649,9 +652,11 @@ test("unlink during in-flight import does not leave a synthetic linked sync resu
   const old = send({type:"sync-provider",provider:"chatgpt"});
   for (let i = 0; i < 3; i++) await flushAsyncWork();
   linkedProviders = [];
+  providerLinkEpochs = {chatgpt:"consent-revoked"};
   release();
   await old;
   linkedProviders = ["chatgpt"];
+  providerLinkEpochs = {chatgpt:"consent-relinked"};
   const after = await send({type:"relay-diagnostics"});
   assert.equal(after.extension.provider_sync.chatgpt.state,"not_attempted",
     "relinked provider must not inherit the old unlinked import result");
