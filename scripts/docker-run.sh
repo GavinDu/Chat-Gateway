@@ -30,6 +30,7 @@ Usage:
   scripts/docker-run.sh pairing-code (legacy paired-mode only)
   scripts/docker-run.sh login <provider>
   scripts/docker-run.sh enable-manus (edit existing config only; restart separately)
+  scripts/docker-run.sh manus-status (read-only, redacted local enabled flag)
 
 Environment:
   PORT                         Published loopback port (default: 8080)
@@ -161,6 +162,48 @@ enable_manus_config() {
   echo "Restart Chat Gateway explicitly to apply. Sign in and link Manus separately; enabling does not prove account login or permission to automate."
 }
 
+manus_config_status() {
+  # Owner-local read-only state; config contains private settings, so neither
+  # the path nor ANY surrounding bytes are printed (even on parse failure).
+  # A saved config flag never proves the website session is authenticated.
+  if [[ ! -f "$CONFIG" || -L "$CONFIG" ]]; then
+    echo "Manus configuration: unavailable" >&2
+    return 1
+  fi
+  local flag
+  if ! flag="$(awk '
+    /^[^[:space:]#]/ {
+      in_providers = $0 ~ /^providers:[[:space:]]*(#.*)?$/
+      if (in_providers) sections++
+      provider = ""
+    }
+    in_providers && /^  - / {
+      provider = $2 == "name:" && $3 == "manus" ? "manus" : ""
+      if (provider == "manus") found++
+    }
+    in_providers && provider == "manus" && /^    enabled:[[:space:]]*/ {
+      if ($2 == "true" || $2 == "false") {
+        flags++
+        value = $2
+      } else {
+        invalid++
+      }
+    }
+    END {
+      if (sections == 1 && found == 1 && flags == 1 && invalid == 0) print value
+      else exit 1
+    }
+  ' "$CONFIG" 2>/dev/null)"; then
+    echo "Manus configuration: unverifiable" >&2
+    return 1
+  fi
+  case "$flag" in
+    true) echo "Manus configuration: enabled (login unverified)" ;;
+    false) echo "Manus configuration: disabled" ;;
+    *) echo "Manus configuration: unverifiable" >&2; return 1 ;;
+  esac
+}
+
 ensure_volumes_and_key() {
   docker volume create "$DATA_VOLUME" >/dev/null
   docker volume create "$SESSION_VOLUME" >/dev/null
@@ -286,6 +329,9 @@ case "${1:-}" in
     ;;
   enable-manus)
     enable_manus_config
+    ;;
+  manus-status)
+    manus_config_status
     ;;
   build)
     build_image
