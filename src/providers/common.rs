@@ -1355,8 +1355,33 @@ pub fn click_first(page: &Page, selectors: &[&str]) -> anyhow::Result<()> {
                 return Ok(());
             }
         } else if let Some(el) = page.query_selector(sel) {
-            el.click()?;
-            return Ok(());
+            // Preserve Obscura's native click/focus semantics, but never
+            // click an invisible or pointer-inert first CSS match. Picker
+            // selectors can resolve stale SPA transition clones; the next
+            // explicitly configured selector is safer than guessing a DOM
+            // descendant or silently treating an inert control as success.
+            let selector_js = serde_json::to_string(sel)?;
+            let nontransparent = nontransparent_ancestors_expression("el");
+            let actionable = page.evaluate(&format!(
+                r#"(() => {{
+                    try {{
+                        const el = document.querySelector({selector_js});
+                        return !!el && el.getClientRects().length > 0 &&
+                            window.getComputedStyle(el).visibility !== 'hidden' &&
+                            window.getComputedStyle(el).pointerEvents !== 'none' &&
+                            {nontransparent} &&
+                            !el.closest('[hidden], [inert], [aria-hidden="true"], [aria-disabled="true"], [aria-readonly="true"], fieldset[disabled]') &&
+                            !el.disabled && !el.matches(':disabled') &&
+                            !el.readOnly &&
+                            el.getAttribute('aria-disabled') !== 'true' &&
+                            el.getAttribute('aria-readonly') !== 'true';
+                    }} catch (_) {{ return false; }}
+                }})()"#
+            ));
+            if actionable.as_bool() == Some(true) {
+                el.click()?;
+                return Ok(());
+            }
         }
     }
     anyhow::bail!("none of selectors matched: {:?}", selectors)
@@ -5244,6 +5269,67 @@ mod text_selector_tests {
             "only invisible and pointer-inert controls must not be clicked"
         );
         assert_eq!(page.evaluate("window.picked").as_str(), Some("unchanged"));
+    }
+
+    #[tokio::test]
+    async fn css_picker_native_click_rejects_hidden_inert_and_transparent_first_matches() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <button id="hidden" hidden onclick="window.clicked='hidden'">Model</button>
+            <button id="disabled" disabled onclick="window.clicked='disabled'">Model</button>
+            <section style="opacity:0">
+                <button id="ghost-parent" onclick="window.clicked='ghost-parent'">Model</button>
+            </section>
+            <button id="ghost-self" style="opacity:0" onclick="window.clicked='ghost-self'">Model</button>
+            <div style="pointer-events:none">
+                <button id="pointer-parent" onclick="window.clicked='pointer-parent'">Model</button>
+            </div>
+            <button id="pointer-self" style="pointer-events:none" onclick="window.clicked='pointer-self'">Model</button>
+            <div inert><button id="inert" onclick="window.clicked='inert'">Model</button></div>
+            <button id="valid" style="opacity:0.5" onclick="window.clicked='valid'">Model</button>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+
+        for selector in [
+            "#hidden",
+            "#disabled",
+            "#ghost-parent",
+            "#ghost-self",
+            "#pointer-parent",
+            "#pointer-self",
+            "#inert",
+        ] {
+            assert!(
+                super::click_first(&page, &[selector]).is_err(),
+                "nonactionable first CSS selector unexpectedly clicked: {selector}"
+            );
+            assert_eq!(page.evaluate("window.clicked || ''").as_str(), Some(""));
+        }
+        assert!(super::click_first(
+            &page,
+            &["#hidden", "#pointer-parent", "#ghost-self", "#valid"]
+        )
+        .is_ok());
+        assert_eq!(page.evaluate("window.clicked").as_str(), Some("valid"));
+
+        // The first matching CSS node must be actionable. Never silently
+        // click a hidden first clone or pick an arbitrary later clone when
+        // only one selector was configured.
+        page.evaluate("window.clicked = ''");
+        assert!(
+            super::click_first(&page, &["button"]).is_err(),
+            "an invisible first match must fail closed"
+        );
+        assert_eq!(page.evaluate("window.clicked").as_str(), Some(""));
+        assert!(super::click_first(&page, &["#valid"]).is_ok());
+        assert_eq!(page.evaluate("window.clicked").as_str(), Some("valid"));
     }
 
     #[test]
