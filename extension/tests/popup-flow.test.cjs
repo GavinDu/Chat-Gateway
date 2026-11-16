@@ -869,3 +869,60 @@ test("popup rejects inherited provider names without requesting permissions or o
   assert.ok(!popup.chromeCalls.some(call => call.startsWith("tab:")),
     "unsupported names must not open a provider or inherited URL");
 });
+
+
+test("popup quarantines malformed provider rows and refuses truthy fake saved-session flags", async () => {
+  const popup = loadPopup();
+  await new Promise(resolve => setImmediate(resolve));
+  let cookieChecks = 0;
+  popup.context.chrome.cookies.getAll = async () => {
+    cookieChecks++;
+    return [];
+  };
+  popup.context.relayFetch = async () => ({ok:true,status:200,json:async()=>({
+    vault_mode:true,
+    providers:[
+      null, "invalid row",
+      {provider:"constructor",linked:true,enabled:true},
+      {provider:["metaai"],linked:true,enabled:true},
+      {provider:"metaai",linked:"false",enabled:"true",
+        manual_verification_required:"false",authentication:"unknown"},
+      {provider:"claude",linked:true,enabled:true,
+        manual_verification_required:false,authentication:"verified"}
+    ]
+  })});
+  await popup.controls.refreshStatus(true);
+  const rows = popup.byId("status").children;
+  assert.equal(rows.length,2,"invalid rows must not suppress valid providers");
+  assert.equal(rows[0].children[0].textContent,"metaai");
+  assert.equal(rows[1].children[0].textContent,"claude");
+  const metaStatus = rows[0].children[1].textContent;
+  assert.match(metaStatus,/Gateway enablement unverified/);
+  assert.match(metaStatus,/Not linked/);
+  assert.doesNotMatch(metaStatus,/Session saved|Manual provider verification required/);
+  const metaActions = rows[0].children[2].children;
+  assert.equal(metaActions.length,2,"fake saved-session flag must not show Log out");
+  assert.equal(metaActions[0].disabled,true,"unknown enabled flag cannot authorize linking");
+  assert.equal(metaActions[0].textContent,"Log in / Connect");
+  const claudeStatus = rows[1].children[1].textContent;
+  assert.match(claudeStatus,/Enabled in gateway/);
+  assert.match(claudeStatus,/Session saved/);
+  assert.equal(rows[1].children[2].children.length,3);
+  assert.equal(rows[1].children[2].children[2].textContent,"Log out");
+  assert.equal(cookieChecks,1,"unknown rows must not check arbitrary provider cookies");
+});
+
+test("popup treats non-array gateway provider status as fixed unavailable error", async () => {
+  const popup = loadPopup();
+  await new Promise(resolve => setImmediate(resolve));
+  const initialRows = popup.byId("status").children;
+  for (const malformed of [null, {}, {providers:{}}, {providers:"private credential"}, {providers:false}]) {
+    popup.context.relayFetch = async () => ({ok:true,status:200,json:async()=>malformed});
+    await assert.rejects(
+      () => popup.controls.refreshStatus(true),
+      error => error.message === "Gateway status is unavailable."
+    );
+    assert.equal(popup.byId("status").children,initialRows,
+      "malformed refresh must not replace existing healthy rows");
+  }
+});
