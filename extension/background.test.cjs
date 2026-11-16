@@ -1352,7 +1352,10 @@ test("delayed consent-A status never borrows new consent-B live sync", async () 
   // Same gateway and consent target; a new explicit link changes only epoch.
   state.providerLinkEpochs = {chatgpt:"epoch-B"};
   let releaseSync;
-  f.sandbox.syncProvider = async () => new Promise(resolve => {releaseSync = resolve;});
+  f.sandbox.syncProvider = async (_provider,{onProgress}) => {
+    onProgress({phase:"upload",durations_ms:{permission:5,cookie_read:9,digest:3}});
+    return new Promise(resolve => {releaseSync = resolve;});
+  };
   const syncing = send({type:"sync-provider",provider:"chatgpt"});
   for (let i=0;i<5;i++) await flushAsyncWork();
   assert.equal(typeof releaseSync,"function");
@@ -1362,8 +1365,13 @@ test("delayed consent-A status never borrows new consent-B live sync", async () 
   assert.equal(previous.ok,true);
   assert.equal(previous.extension.provider_sync.chatgpt.state,"not_attempted",
     "old A status cannot borrow B in-flight sync");
+  assert.equal(previous.extension.provider_sync.chatgpt.phase,null,
+    "old A status cannot borrow B phase telemetry");
+  assert.deepEqual(JSON.parse(JSON.stringify(previous.extension.provider_sync.chatgpt.durations_ms)),{});
   const fresh = await send({type:"relay-diagnostics"});
   assert.equal(fresh.extension.provider_sync.chatgpt.state,"syncing");
+  assert.equal(fresh.extension.provider_sync.chatgpt.phase,"upload");
+  assert.equal(fresh.extension.provider_sync.chatgpt.durations_ms.cookie_read,9);
   releaseSync("uploaded");
   assert.equal((await syncing).ok,true);
   // An uploaded session invalidates the health cache; the next status GET
