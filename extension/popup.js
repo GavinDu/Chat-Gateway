@@ -530,13 +530,19 @@ async function checkConnection() {
     showGatewayConnection(Boolean(token));
     if (token) await refreshStatus();
     else if (result?.ok !== true) {
-      // Do not hide a failed exchange behind an endless waiting message.
-      // A stale/missing service worker can also return no acknowledgement.
-      message(result?.error || "The connection worker did not respond. Reload Chat Gateway Browser Relay at chrome://extensions, then reconnect.");
+      // Never display an untrusted worker's raw error string. Older workers
+      // may still echo a network URL, poll secret or request identifier.
+      message(result?.errorCode === "connection_poll_unavailable"
+        ? "Connection approval check unavailable. Retry or reconnect."
+        : "The connection worker did not respond. Reload Chat Gateway Browser Relay at chrome://extensions, then reconnect.");
       return false;
     } else if (pendingConnection) showPendingApproval(pendingConnection);
     return true;
-  } catch (error) { message(error.message); return false; }
+  } catch (_) {
+    // Storage/runtime exceptions can contain internal connection details.
+    message("Gateway connection check unavailable. Retry or reopen the extension.");
+    return false;
+  }
 }
 initialize().then(updateConnection);
 // Only a connected dashboard needs a periodic gateway heartbeat. The popup
