@@ -4,6 +4,20 @@ const debounceTimers = new Map();
 // Internal API snapshots contain only fixed health categories and timestamps.
 // Never retain or return provider cookies, install credentials or raw errors.
 const providerDiagnostics = new Map();
+// Private consent epochs, never serialized into the public diagnostics payload.
+const providerDiagnosticEpochs = new Map();
+const IMPORT_PHASES = ["permission", "cookie_read", "digest", "upload"];
+const IMPORT_MAX_DURATION_MS = 120_000;
+function redactedImportTimings(value) {
+  const timings = {};
+  for (const phase of IMPORT_PHASES) {
+    const n = value?.[phase];
+    if (typeof n === "number" && Number.isFinite(n)) {
+      timings[phase] = Math.max(0, Math.min(IMPORT_MAX_DURATION_MS, Math.floor(n)));
+    }
+  }
+  return timings;
+}
 // Keep cache shorter than the popup check interval so token revocation is
 // never masked by a still-valid dashboard snapshot on the next poll.
 const CONNECTION_DIAGNOSTICS_TTL_MS = 5_000;
@@ -29,6 +43,7 @@ function ensureGatewayDiagnosticIdentity(current) {
     lastGatewayIdentity = identity;
     automaticCookieSyncSuppressedUntil = 0;
     providerDiagnostics.clear();
+    providerDiagnosticEpochs.clear();
   }
   return identity;
 }
@@ -56,13 +71,16 @@ async function hasOriginPermissions(origins) {
   try { return Boolean(await chrome.permissions.contains({origins})); }
   catch { return false; }
 }
-function recordProviderDiagnostic(provider, state, errorCode = null) {
+function recordProviderDiagnostic(provider, state, errorCode = null, telemetry = null) {
   // A provider sync attempt is NOT authenticated-login verification.
-  // Store only stable local result codes, never raw upstream responses.
+  // All telemetry is revalidated to fixed categories and bounded integers.
   const safeState = ["syncing", "uploaded", "unchanged", "no_cookies", "skipped", "failed"].includes(state)
     ? state : "unknown";
   const entry = {
-    state: safeState, issue: errorCode, updated_at: new Date().toISOString()
+    state: safeState, issue: errorCode, updated_at: new Date().toISOString(),
+    phase: IMPORT_PHASES.includes(telemetry?.phase) && safeState === "syncing"
+      ? telemetry.phase : null,
+    durations_ms: redactedImportTimings(telemetry?.durations_ms),
   };
   providerDiagnostics.set(provider, entry);
   return entry;
@@ -80,6 +98,8 @@ function finalizeRelayDiagnostics(result) {
         state: previous?.state || "not_attempted",
         issue: previous?.issue || null,
         updated_at: previous?.updated_at || null,
+        phase: previous?.phase || null,
+        durations_ms: redactedImportTimings(previous?.durations_ms),
         stale: !result.ok,
       }];
     })
@@ -87,8 +107,17 @@ function finalizeRelayDiagnostics(result) {
   return result;
 }
 async function relayDiagnostics(force = false) {
-  const current = await chrome.storage.local.get(["gateway", "token", "connectionMode", "linkedProviders"]);
+  const current = await chrome.storage.local.get(["gateway", "token", "connectionMode", "linkedProviders", "providerLinkEpochs"]);
   const identity = ensureGatewayDiagnosticIdentity(current);
+  // Unlink/relink on the same install rotates per-provider consent. An old
+  // in-flight progress sample must disappear as soon as status is requested,
+  // not only after its former network promise eventually settles.
+  for (const [provider, epoch] of providerDiagnosticEpochs) {
+    if (epoch !== current.providerLinkEpochs?.[provider]) {
+      providerDiagnosticEpochs.delete(provider);
+      providerDiagnostics.delete(provider);
+    }
+  }
   const extension = {
     connected: hasRelayConnection(current),
     connection_mode: !hasRelayConnection(current) ? "disconnected" : current.connectionMode === "local" ? "local" : "paired",
@@ -557,18 +586,27 @@ function queueProviderSync(provider, force = false) {
     if (await providerDiagnosticScopeCurrent(provider, attempt)) {
       ensureGatewayDiagnosticIdentity(attempt);
       inProgress = recordProviderDiagnostic(provider, "syncing");
+      providerDiagnosticEpochs.set(provider, attempt.providerLinkEpochs?.[provider]);
     }
     // A delayed result can follow unlink/relink or an owner change. Remove
     // only this attempt's in-progress record; never erase a newer attempt.
     const clearStaleProgress = () => {
       if (inProgress && providerDiagnostics.get(provider) === inProgress) {
         providerDiagnostics.delete(provider);
+        providerDiagnosticEpochs.delete(provider);
       }
     };
     try {
-      const result = await syncProvider(provider, {force:shouldForce});
+      const onProgress = sample => {
+        if (!inProgress || providerDiagnostics.get(provider) !== inProgress) return;
+        // Async progress callbacks never hold raw session material and cannot
+        // manufacture statuses, URLs or arbitrary timing property names.
+        inProgress.phase = IMPORT_PHASES.includes(sample?.phase) ? sample.phase : null;
+        inProgress.durations_ms = redactedImportTimings(sample?.durations_ms);
+      };
+      const result = await syncProvider(provider, {force:shouldForce,onProgress});
       if (await providerDiagnosticScopeCurrent(provider, attempt)) {
-        recordProviderDiagnostic(provider, result || "skipped");
+        recordProviderDiagnostic(provider, result || "skipped", null, inProgress);
         if (result === "uploaded") lastGatewayCheck = null;
       } else {
         clearStaleProgress();
@@ -576,7 +614,7 @@ function queueProviderSync(provider, force = false) {
       return result;
     } catch (error) {
       if (await providerDiagnosticScopeCurrent(provider, attempt)) {
-        recordProviderDiagnostic(provider, "failed", classifyRelayFailure(error));
+        recordProviderDiagnostic(provider, "failed", classifyRelayFailure(error), inProgress);
       } else {
         clearStaleProgress();
       }
