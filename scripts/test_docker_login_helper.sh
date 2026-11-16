@@ -68,6 +68,12 @@ providers:
 server:
   port: 8080
 CONFIG
+# An owner can inspect only the Manus boolean without exposing any config
+# values or starting Docker. The command must be strictly read-only.
+cp "$CHAT_GATEWAY_CONFIG" "$TMP/manus-status-before"
+[[ "$(bash "$ROOT/scripts/docker-run.sh" manus-status)" == "Manus configuration: disabled" ]]
+cmp -s "$CHAT_GATEWAY_CONFIG" "$TMP/manus-status-before"
+
 bash "$ROOT/scripts/docker-run.sh" enable-manus > "$TMP/manus-message"
 grep -Fq "Manus enabled" "$TMP/manus-message"
 grep -Fq "Restart Chat Gateway explicitly" "$TMP/manus-message"
@@ -76,6 +82,7 @@ grep -Fq "permission to automate" "$TMP/manus-message"
 grep -Fq 'enabled: true # explicitly opted out in the old install' "$CHAT_GATEWAY_CONFIG"
 grep -Fq '  - name: chatgpt' "$CHAT_GATEWAY_CONFIG"
 grep -Fq 'server:' "$CHAT_GATEWAY_CONFIG"
+[[ "$(bash "$ROOT/scripts/docker-run.sh" manus-status)" == "Manus configuration: enabled (login unverified)" ]]
 # Idempotent and tightly scoped: repeated enable does not touch other fields.
 cp "$CHAT_GATEWAY_CONFIG" "$TMP/manus-enabled-expected"
 bash "$ROOT/scripts/docker-run.sh" enable-manus >/dev/null
@@ -169,6 +176,61 @@ if bash "$ROOT/scripts/docker-run.sh" enable-manus >/dev/null 2>&1; then
   echo "Symlink config was not rejected" >&2; exit 1
 fi
 rm "$CHAT_GATEWAY_CONFIG"
+
+# Read-only enabled-state status must never print private config bytes,
+# discover a decoy Manus workflow, or give an answer for ambiguous YAML.
+cat > "$CHAT_GATEWAY_CONFIG" <<'CONFIG'
+private:
+  gateway_token: SUPER_SECRET_NEVER_OUTPUT
+workflows:
+  - name: manus
+    enabled: false
+providers:
+  - name: chatgpt
+    enabled: false
+  - name: manus
+    enabled: true # enabled but not proof of authenticated login
+CONFIG
+cp "$CHAT_GATEWAY_CONFIG" "$TMP/status-secret-config"
+[[ "$(bash "$ROOT/scripts/docker-run.sh" manus-status)" == "Manus configuration: enabled (login unverified)" ]]
+cmp -s "$CHAT_GATEWAY_CONFIG" "$TMP/status-secret-config"
+
+assert_redacted_status_failure() {
+  if bash "$ROOT/scripts/docker-run.sh" manus-status > "$TMP/status-output" 2>&1; then
+    echo "Unverifiable Manus state was reported as enabled or disabled" >&2
+    exit 1
+  fi
+  if grep -Eq 'SUPER_SECRET_NEVER_OUTPUT|gateway_token:|config\.yaml|/tmp/' "$TMP/status-output"; then
+    echo "Read-only Manus state command exposed config details" >&2
+    exit 1
+  fi
+  grep -Fq "Manus configuration: " "$TMP/status-output"
+}
+
+printf 'workflows:\n  - name: manus\n    enabled: true\nprivate: SUPER_SECRET_NEVER_OUTPUT\n' > "$CHAT_GATEWAY_CONFIG"
+cp "$CHAT_GATEWAY_CONFIG" "$TMP/status-decoy-only"
+assert_redacted_status_failure
+cmp -s "$CHAT_GATEWAY_CONFIG" "$TMP/status-decoy-only"
+
+printf 'providers:\n  - name: manus\n    enabled: true\nproviders:\n  - name: manus\n    enabled: false\nprivate: SUPER_SECRET_NEVER_OUTPUT\n' > "$CHAT_GATEWAY_CONFIG"
+cp "$CHAT_GATEWAY_CONFIG" "$TMP/status-double-section"
+assert_redacted_status_failure
+cmp -s "$CHAT_GATEWAY_CONFIG" "$TMP/status-double-section"
+
+printf 'providers:\n  - name: manus\n    enabled: false\n  - name: manus\n    enabled: true\nprivate: SUPER_SECRET_NEVER_OUTPUT\n' > "$CHAT_GATEWAY_CONFIG"
+assert_redacted_status_failure
+
+printf 'providers:\n  - name: manus\n    enabled: perhaps\nprivate: SUPER_SECRET_NEVER_OUTPUT\n' > "$CHAT_GATEWAY_CONFIG"
+assert_redacted_status_failure
+printf 'providers:\n  - name: manus\n    enabled: false\n    enabled: true\nprivate: SUPER_SECRET_NEVER_OUTPUT\n' > "$CHAT_GATEWAY_CONFIG"
+assert_redacted_status_failure
+
+printf 'providers:\n  - name: manus\n    enabled: true\nprivate: SUPER_SECRET_NEVER_OUTPUT\n' > "$TMP/status-symlink-target"
+ln -s "$TMP/status-symlink-target" "$CHAT_GATEWAY_CONFIG"
+assert_redacted_status_failure
+rm "$CHAT_GATEWAY_CONFIG"
+[[ -f "$TMP/status-symlink-target" ]]
+grep -Fq SUPER_SECRET_NEVER_OUTPUT "$TMP/status-symlink-target"
 
 # Keep the checked-in provider risk register truthful about the owner
 # example. This does not certify that any provider terms permit automation.
