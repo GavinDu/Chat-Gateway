@@ -896,3 +896,48 @@ test("prototype property names cannot authorize cookie collection or sync", asyn
   assert.equal(api.fetchCalls.length, 0, "prototype names must never upload cookie material");
   assert.equal(api.PROVIDERS.chatgpt[0], "chatgpt.com");
 });
+
+
+test("malformed linked-provider storage cannot authorize Manus cookie sync", async () => {
+  const storage = {
+    gateway:"http://127.0.0.1:8080", connectionMode:"local",
+    linkedProviders:"prefix-manus-suffix", providerLinkEpochs:{manus:"consent-a"}
+  };
+  const api = loadShared([
+    {name:"session",value:"private-fixture",domain:".manus.im",path:"/",secure:true,httpOnly:true}
+  ], true, storage);
+  for (const malformed of [
+    "prefix-manus-suffix", "manus", "chatgpt,manus", {}, null, 42, {includes:()=>true}
+  ]) {
+    storage.linkedProviders = malformed;
+    assert.equal(await api.syncProvider("manus"), "skipped");
+    assert.equal(api.getCookieReads(), 0, "malformed consent must fail before cookie collection");
+    assert.equal(api.fetchCalls.length, 0, "malformed consent must never POST cookies");
+  }
+  storage.linkedProviders = ["manus"];
+  assert.equal(await api.syncProvider("manus"), "uploaded");
+  assert.ok(api.getCookieReads() > 0, "genuine linked Manus can use existing permitted browser login");
+  assert.equal(api.fetchCalls.length, 1);
+  assert.equal(api.fetchCalls[0].url, "http://127.0.0.1:8080/relay/v1/session/manus");
+});
+
+test("relay upload rechecks exact array consent after an awaited owner transition", async () => {
+  const storage = {
+    gateway:"http://127.0.0.1:8080", connectionMode:"local",
+    linkedProviders:["manus"],providerLinkEpochs:{manus:"consent-a"}
+  };
+  const api = loadShared([
+    {name:"session",value:"private-fixture",domain:".manus.im",path:"/",secure:true,httpOnly:true}
+  ], true, storage, {
+    onCookieRead: async current => {current.linkedProviders = "prefix-manus-suffix";}
+  });
+  assert.equal(await api.syncProvider("manus"), "skipped");
+  assert.equal(api.fetchCalls.length, 0);
+  await assert.rejects(() => api.relayFetch("/relay/v1/session/manus", {
+    method:"POST", body:"{}"
+  }, {
+    gateway:storage.gateway, token:undefined, connectionMode:"local",
+    provider:"manus", linkEpoch:"consent-a"
+  }), /Provider consent or gateway connection changed/);
+  assert.equal(api.fetchCalls.length, 0, "pre-POST consent fence must reject string membership");
+});
