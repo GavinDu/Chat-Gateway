@@ -277,7 +277,7 @@ mod chatgpt_stream_preload_tests {
         // The *only* host bypass lives in this in-memory data: fixture.
         // Production always evaluates the exact HTTPS ChatGPT origin guard.
         let original = include_str!("chatgpt_streams.js");
-        let origin_guard = "  if (typeof location === 'undefined' || location.protocol !== 'https:' ||\n      !['chatgpt.com', 'www.chatgpt.com'].includes(location.hostname)) return;";
+        let origin_guard = "  if (typeof location === 'undefined' || location.protocol !== 'https:' ||\n      !['chatgpt.com', 'www.chatgpt.com'].includes(location.hostname) ||\n      !['', '443'].includes(String(location.port || ''))) return;";
         assert!(original.contains(origin_guard));
         let fixture_script = original.replacen(origin_guard, "", 1);
         let browser = obscura_core::Browser::builder()
