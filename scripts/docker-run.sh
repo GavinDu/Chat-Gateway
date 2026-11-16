@@ -31,6 +31,7 @@ Usage:
   scripts/docker-run.sh login <provider>
   scripts/docker-run.sh enable-manus (edit existing config only; restart separately)
   scripts/docker-run.sh manus-status (read-only, redacted local enabled flag)
+  scripts/docker-run.sh manus-runtime-status (read-only, loopback gateway state)
 
 Environment:
   PORT                         Published loopback port (default: 8080)
@@ -204,6 +205,26 @@ manus_config_status() {
   esac
 }
 
+manus_runtime_status() {
+  # Read only the local gateway's existing redacted nine-provider status
+  # contract. Never inspect or transmit cookies, vault keys or full config.
+  if [[ ! "$PORT" =~ ^[0-9]{1,5}$ ]] || (( 10#$PORT < 1 || 10#$PORT > 65535 )); then
+    echo "Manus runtime status: unavailable" >&2
+    return 1
+  fi
+  if ! command -v curl >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1; then
+    echo "Manus runtime status: unavailable" >&2
+    return 1
+  fi
+  local response
+  if ! response="$(curl --noproxy '*' --max-time 8 --connect-timeout 3 \
+    --fail --silent --request POST "http://127.0.0.1:$PORT/relay/v1/status" 2>/dev/null)"; then
+    echo "Manus runtime status: unavailable" >&2
+    return 1
+  fi
+  printf '%s' "$response" | python3 -B "$ROOT/scripts/manus_runtime_status.py"
+}
+
 ensure_volumes_and_key() {
   docker volume create "$DATA_VOLUME" >/dev/null
   docker volume create "$SESSION_VOLUME" >/dev/null
@@ -332,6 +353,9 @@ case "${1:-}" in
     ;;
   manus-status)
     manus_config_status
+    ;;
+  manus-runtime-status)
+    manus_runtime_status
     ;;
   build)
     build_image
