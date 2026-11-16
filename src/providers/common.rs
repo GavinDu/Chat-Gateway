@@ -815,8 +815,11 @@ fn editable_composer_condition(element: &str) -> String {
 /// ancestor is entirely transparent. Opacity does not inherit, so inspect
 /// the whole parent chain. Translucent (nonzero) editors stay actionable.
 fn nontransparent_ancestors_expression(element: &str) -> String {
+    // Use a local name distinct from common callers' `node` argument.
+    // `let node = node` is a JavaScript temporal-dead-zone self-reference,
+    // which makes every visibility probe fail closed even for visible roots.
     format!(
-        "(() => {{ for (let node = {element}; node; node = node.parentElement) {{ if (Number(window.getComputedStyle(node).opacity) === 0) return false; }} return true; }})()"
+        "(() => {{ for (let opacityAncestor = {element}; opacityAncestor; opacityAncestor = opacityAncestor.parentElement) {{ if (Number(window.getComputedStyle(opacityAncestor).opacity) === 0) return false; }} return true; }})()"
     )
 }
 
@@ -4035,6 +4038,7 @@ fn submission_snapshot(
     let input_expr = visible_input_query(&input);
     let draft = composer_draft_expression("el");
     let responses = serde_json::to_string(response_selectors)?;
+    let nontransparent = nontransparent_ancestors_expression("node");
     let js = format!(
         r#"(() => {{
             const el = {input_expr};
@@ -4044,6 +4048,7 @@ fn submission_snapshot(
                 try {{
                     return node.getClientRects().length > 0 &&
                         window.getComputedStyle(node).visibility !== "hidden" &&
+                        {nontransparent} &&
                         !node.closest('[hidden], [inert], [aria-hidden="true"]') &&
                         !node.disabled && !node.matches(':disabled') &&
                         !node.closest('fieldset[disabled], [aria-disabled="true"]');
@@ -4159,6 +4164,7 @@ fn submission_observed_for_prompt(
         return Ok(false);
     }
     let prompt_js = serde_json::to_string(prompt)?;
+    let nontransparent = nontransparent_ancestors_expression("node");
     let matched = page.evaluate(&format!(
         r#"(() => {{
             const expected = {prompt_js};
@@ -4174,6 +4180,7 @@ fn submission_observed_for_prompt(
                 try {{
                     return node.getClientRects().length > 0 &&
                         window.getComputedStyle(node).visibility !== 'hidden' &&
+                        {nontransparent} &&
                         !node.closest('[hidden], [inert], [aria-hidden="true"], [aria-disabled="true"]');
                 }} catch (_) {{ return false; }}
             }});
@@ -4525,6 +4532,107 @@ mod prompt_bound_submission_tests {
         );
         assert!(
             !submission_observed_for_prompt(&page, &before, &after, "fixture request").unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn opacity_zero_turns_and_stop_clones_cannot_acknowledge_a_dropped_draft() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <textarea id="prompt">original draft</textarea>
+            <div data-message-author-role="user">earlier user turn</div>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+
+        let before = submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
+        assert_eq!(before.user_turn_count, 1);
+        assert_eq!(before.response_count, 0);
+        assert!(!before.streaming);
+
+        page.evaluate(
+            r#"(() => {
+                document.querySelector('#prompt').value = '';
+                // A SPA may retain opacity-zero transition shells after
+                // a draft is dropped. Their user/assistant/Stop nodes cannot
+                // certify application acceptance of the prompt.
+                const wrapper = document.createElement('section');
+                wrapper.id = 'ghost-wrapper';
+                wrapper.style.opacity = '0';
+                wrapper.innerHTML = '<div data-testid="user-message">request</div>' +
+                    '<div class="answer">ghost answer</div>' +
+                    '<button aria-label="Stop generating">Stop</button>';
+                document.body.appendChild(wrapper);
+                const selfGhost = document.createElement('div');
+                selfGhost.setAttribute('data-testid', 'user-message');
+                selfGhost.style.opacity = '0';
+                selfGhost.textContent = 'request';
+                document.body.appendChild(selfGhost);
+            })()"#,
+        );
+        let ghosts_only = submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
+        assert_eq!(ghosts_only.user_turn_count, before.user_turn_count);
+        assert_eq!(ghosts_only.response_count, before.response_count);
+        assert!(
+            !ghosts_only.streaming,
+            "invisible Stop is not new generation"
+        );
+        assert!(!super::submission_accepted(&before, &ghosts_only));
+        assert!(!submission_observed_for_prompt(&page, &before, &ghosts_only, "request").unwrap());
+
+        page.evaluate(
+            r#"(() => {
+                const visibleTurn = document.createElement('div');
+                visibleTurn.setAttribute('data-testid', 'user-message');
+                visibleTurn.style.opacity = '0.5';
+                visibleTurn.style.whiteSpace = 'pre-wrap';
+                visibleTurn.textContent = 'request';
+                document.body.appendChild(visibleTurn);
+            })()"#,
+        );
+        let accepted = submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
+        assert_eq!(accepted.user_turn_count, before.user_turn_count + 1);
+        assert!(!accepted.streaming);
+        assert!(submission_observed_for_prompt(&page, &before, &accepted, "request").unwrap());
+
+        // A newer invisible unrelated turn cannot hide the last *visible*
+        // prompt-bound turn or make it look like a different request.
+        page.evaluate(
+            r#"(() => {
+                const ghost = document.createElement('div');
+                ghost.setAttribute('data-message-author-role', 'user');
+                ghost.style.opacity = '0';
+                ghost.textContent = 'different private request';
+                document.body.appendChild(ghost);
+            })()"#,
+        );
+        let after_trailing_ghost = submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
+        assert_eq!(
+            after_trailing_ghost.user_turn_count,
+            accepted.user_turn_count
+        );
+        assert!(
+            submission_observed_for_prompt(&page, &before, &after_trailing_ghost, "request")
+                .unwrap(),
+            "the last nontransparent user turn is still the submitted request"
+        );
+
+        // Non-zero-opacity user turns remain visible and prevent accepting
+        // an older match once a newer distinct turn actually appears.
+        page.evaluate("document.body.lastElementChild.style.opacity = '0.5'");
+        let newer_real_turn = submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
+        assert_eq!(
+            newer_real_turn.user_turn_count,
+            accepted.user_turn_count + 1
+        );
+        assert!(
+            !submission_observed_for_prompt(&page, &before, &newer_real_turn, "request").unwrap()
         );
     }
 
