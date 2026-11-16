@@ -4278,7 +4278,9 @@ mod grok_fresh_submission_ack_tests {
             <article><div class="answer">old assistant answer</div></article>
         </body></html>"#;
         let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
-        page.goto(&format!("data:text/html,{encoded}")).await.unwrap();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
         let prompt = "first line\n  second line";
         let before = submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
         assert_eq!(before.response_count, 1);
@@ -4287,37 +4289,46 @@ mod grok_fresh_submission_ack_tests {
 
         // The app may hydrate an old assistant turn and separately clear an
         // unaccepted controlled draft. Neither is proof Grok received Send.
-        page.evaluate(r#"(() => {
+        page.evaluate(
+            r#"(() => {
             document.querySelector('#prompt').value = '';
             document.body.insertAdjacentHTML('beforeend',
                 '<article><div class="answer">hydrated history</div></article>');
-        })()"#);
+        })()"#,
+        );
         let hydrated = submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
         assert_eq!(hydrated.response_count, 2);
         assert!(hydrated.input_empty);
-        assert!(!submission_observed_for_adapter(
-            "grok", &page, &before, &hydrated, prompt
-        ).unwrap(), "Grok cannot acknowledge history hydration as new Send");
+        assert!(
+            !submission_observed_for_adapter("grok", &page, &before, &hydrated, prompt).unwrap(),
+            "Grok cannot acknowledge history hydration as new Send"
+        );
 
         // Only a fresh visible prompt-bound user turn proves actual uptake.
-        page.evaluate(r#"(() => {
+        page.evaluate(
+            r#"(() => {
             const turn = document.createElement('div');
             turn.id = 'new-user-turn';
             turn.setAttribute('data-testid', 'user-message');
             turn.textContent = 'first line\n  second line';
             document.body.appendChild(turn);
-        })()"#);
+        })()"#,
+        );
         let with_user = submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
         assert_eq!(with_user.user_turn_count, 1);
-        assert!(submission_observed_for_adapter(
-            "grok", &page, &before, &with_user, prompt
-        ).unwrap(), "matching exact multiline user turn acknowledges the prompt");
+        assert!(
+            submission_observed_for_adapter("grok", &page, &before, &with_user, prompt).unwrap(),
+            "matching exact multiline user turn acknowledges the prompt"
+        );
 
-        page.evaluate("document.querySelector('#new-user-turn').textContent = 'wrong previous turn'");
+        page.evaluate(
+            "document.querySelector('#new-user-turn').textContent = 'wrong previous turn'",
+        );
         let wrong_user = submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
-        assert!(!submission_observed_for_adapter(
-            "grok", &page, &before, &wrong_user, prompt
-        ).unwrap(), "a different user's message cannot acknowledge this prompt");
+        assert!(
+            !submission_observed_for_adapter("grok", &page, &before, &wrong_user, prompt).unwrap(),
+            "a different user's message cannot acknowledge this prompt"
+        );
     }
 
     #[tokio::test]
@@ -4333,19 +4344,31 @@ mod grok_fresh_submission_ack_tests {
             <div class="answer">older answer</div>
         </body></html>"#;
         let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
-        page.goto(&format!("data:text/html,{encoded}")).await.unwrap();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
         let before_active = submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
         assert!(before_active.streaming);
-        page.evaluate(r#"(() => {
+        page.evaluate(
+            r#"(() => {
             document.querySelector('#prompt').value = '';
             document.body.insertAdjacentHTML('beforeend',
                 '<div class="answer">hydrated historic answer</div>');
-        })()"#);
+        })()"#,
+        );
         let inherited = submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
         assert!(inherited.streaming);
-        assert!(!submission_observed_for_adapter(
-            "grok", &page, &before_active, &inherited, "some draft"
-        ).unwrap(), "preexisting Stop is not a fresh generation event");
+        assert!(
+            !submission_observed_for_adapter(
+                "grok",
+                &page,
+                &before_active,
+                &inherited,
+                "some draft"
+            )
+            .unwrap(),
+            "preexisting Stop is not a fresh generation event"
+        );
 
         page.evaluate("document.querySelector('#stop').hidden = true");
         page.evaluate("document.querySelector('#prompt').value = 'some draft'");
@@ -4354,9 +4377,17 @@ mod grok_fresh_submission_ack_tests {
         page.evaluate("document.querySelector('#stop').hidden = false");
         let freshly_active = submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
         assert!(freshly_active.streaming);
-        assert!(submission_observed_for_adapter(
-            "grok", &page, &before_inactive, &freshly_active, "some draft"
-        ).unwrap(), "newly active visible generation may acknowledge before a user turn appears");
+        assert!(
+            submission_observed_for_adapter(
+                "grok",
+                &page,
+                &before_inactive,
+                &freshly_active,
+                "some draft"
+            )
+            .unwrap(),
+            "newly active visible generation may acknowledge before a user turn appears"
+        );
     }
 }
 
