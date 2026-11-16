@@ -103,9 +103,11 @@
     getReader(...args) {
       const reader = nativeGetReader.apply(this, args);
       const nativeRead = reader.read.bind(reader);
-      reader.read = () => {
+      // Preserve a delegated reader's arguments (e.g. a byte/BYOB view).
+      // The pinned fallback may ignore them; silently dropping is incorrect.
+      reader.read = (...args) => {
         const queued = this._queue.length > 0;
-        const pending = nativeRead();
+        const pending = nativeRead(...args);
         if (queued) this._dequeued();
         this._pullIfNeeded();
         return pending;
