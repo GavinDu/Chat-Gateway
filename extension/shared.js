@@ -133,7 +133,7 @@ async function relayFetch(path, options = {}, expectedConnection = null) {
   }
 }
 
-async function providerCookieSnapshot(provider) {
+async function providerCookieSnapshot(provider, afterPermissionCheck = null) {
   const domains = PROVIDERS[provider];
   if (!domains) throw new Error("Unsupported provider.");
   // A partial permission grant must never overwrite a valid gateway session
@@ -147,6 +147,9 @@ async function providerCookieSnapshot(provider) {
   if (!hasAllPermissions) {
     throw new Error("Missing provider host permissions. Refusing to send a partial cookie snapshot; re-link the provider and grant all requested domains.");
   }
+  // The caller's progress function is timing-only; never pass cookies,
+  // required host patterns or the permission response into diagnostics.
+  if (afterPermissionCheck) afterPermissionCheck();
   // Independent domain reads run concurrently instead of serializing each
   // browser API round-trip. Promise.all preserves configured domain order for
   // deterministic deduplication; any failed read rejects the whole snapshot.
@@ -206,7 +209,36 @@ async function cookieSnapshotVersion(snapshot, scope) {
   return Array.from(bytes, byte => byte.toString(16).padStart(2, "0")).join("");
 }
 
-async function syncProvider(provider, {force = false} = {}) {
+// Fixed, bounded timing categories. Stopwatch uses a monotonic clock when
+// available; the callback receives only stage names and aggregate durations.
+const SYNC_STAGE_MAX_MS = 120_000;
+const SYNC_STAGE_NAMES = ["permission", "cookie_read", "digest", "upload"];
+function createSyncPhaseClock(onProgress) {
+  const now = () => globalThis.performance?.now?.() ?? Date.now();
+  let stage = null;
+  let startedAt = now();
+  const durations = {};
+  const publish = () => {
+    if (typeof onProgress !== "function") return;
+    // Progress reporting must never block a cookie transfer or make a
+    // successful upload fail. Do not pass arbitrary values or objects.
+    try { onProgress({phase:stage, durations_ms:{...durations}}); } catch (_) {}
+  };
+  const transition = next => {
+    const current = now();
+    if (stage !== null) {
+      const elapsed = current - startedAt;
+      durations[stage] = Math.max(0, Math.min(SYNC_STAGE_MAX_MS,
+        Number.isFinite(elapsed) ? Math.floor(elapsed) : SYNC_STAGE_MAX_MS));
+    }
+    stage = SYNC_STAGE_NAMES.includes(next) ? next : null;
+    startedAt = current;
+    publish();
+  };
+  return {transition, finish:() => transition(null)};
+}
+
+async function syncProvider(provider, {force = false, onProgress = null} = {}) {
   const {gateway, token, connectionMode, linkedProviders = [], providerLinkEpochs = {}} =
     await chrome.storage.local.get(["gateway", "token", "connectionMode", "linkedProviders", "providerLinkEpochs"]);
   if (!hasRelayConnection({gateway, token, connectionMode}) || !linkedProviders.includes(provider)) return "skipped";
@@ -215,7 +247,11 @@ async function syncProvider(provider, {force = false} = {}) {
   // is not permission to silently bypass the epoch check.
   if (Object.hasOwn(providerLinkEpochs, provider) &&
       (typeof linkEpoch !== "string" || linkEpoch.length === 0)) return "skipped";
-  const snapshot = await providerCookieSnapshot(provider);
+  const timing = createSyncPhaseClock(onProgress);
+  timing.transition("permission");
+  try {
+  const snapshot = await providerCookieSnapshot(provider, () => timing.transition("cookie_read"));
+  timing.transition("digest");
   // A permission/cookie read can await long enough for unpair, re-pair or
   // explicit provider unlink. Re-check ownership and consent immediately
   // before preparing the upload, and bind the relay fetch to that snapshot.
@@ -245,6 +281,7 @@ async function syncProvider(provider, {force = false} = {}) {
     await chrome.storage.local.get(["relaySnapshotVersions", "providerLinkEpochs"]);
   if (latestEpochs[provider] !== linkEpoch) return "skipped";
   if (!force && version && relaySnapshotVersions[provider] === version) return "unchanged";
+  timing.transition("upload");
   const response = await relayFetch("/relay/v1/session/" + encodeURIComponent(provider), {
     method:"POST", body:JSON.stringify(snapshot)
   }, {gateway, token, connectionMode, provider, linkEpoch});
@@ -266,5 +303,8 @@ async function syncProvider(provider, {force = false} = {}) {
     });
   }
   return "uploaded";
+  } finally {
+    timing.finish();
+  }
 }
 
