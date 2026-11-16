@@ -23,7 +23,8 @@ const COOKIE_OUTAGE_BACKOFF_MS = 60_000;
 let automaticCookieSyncSuppressedUntil = 0;
 function classifyRelayFailure(error) {
   const message = String(error?.message || "");
-  if (message.includes("timed out") || message.includes("cancelled")) return "gateway_timeout";
+  if (message.includes("cancelled")) return "gateway_cancelled";
+  if (message.includes("timed out")) return "gateway_timeout";
   if (message.includes("permission") || message.includes("consent")) return "permission_or_consent";
   if (message.includes("(504)")) return "activation_timeout";
   if (message.includes("(403)") || message.includes("(401)")) return "gateway_unauthorized";
