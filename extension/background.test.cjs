@@ -1152,7 +1152,7 @@ test("live provider sync appears before the first popup status and becomes termi
   const live = await send({type:"relay-diagnostics",force:true});
   assert.equal(live.extension.provider_sync.chatgpt.state,"syncing");
   assert.equal(live.extension.provider_sync.chatgpt.issue,null);
-  assert.match(live.extension.provider_sync.chatgpt.updated_at,/^\\d{4}-\\d{2}-\\d{2}T/);
+  assert.match(live.extension.provider_sync.chatgpt.updated_at,/^\d{4}-\d{2}-\d{2}T/);
   assert.equal(live.extension.provider_sync.claude.state,"not_attempted");
   assert.equal(live.gateway.providers[0].authentication,"unknown",
     "local in-flight sync must never assert provider login");
