@@ -6,8 +6,11 @@
 // ChatGPT's lazy response readers need it. Keep this compatibility hook
 // confined to the known shim and ChatGPT; native browser streams are untouched.
 (() => {
+  // A non-default HTTPS port is a different origin, even on the same host.
+  // Browsers normalize :443 to an empty port; tolerate explicit 443 in shims.
   if (typeof location === 'undefined' || location.protocol !== 'https:' ||
-      !['chatgpt.com', 'www.chatgpt.com'].includes(location.hostname)) return;
+      !['chatgpt.com', 'www.chatgpt.com'].includes(location.hostname) ||
+      !['', '443'].includes(String(location.port || ''))) return;
   const NativeStream = globalThis.ReadableStream;
   if (typeof NativeStream !== 'function' || NativeStream.__chatGatewayPullCompat) return;
   let probe;
