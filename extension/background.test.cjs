@@ -1241,6 +1241,59 @@ test("provider sync timestamp is independent of login and turns stale when gatew
   assert.equal(restartDiagnostic.extension.provider_sync.chatgpt.updated_at,null);
 });
 
+test("delayed consent-A status never borrows new consent-B live sync", async () => {
+  const f = loadBackground(["chatgpt"], [], true);
+  const state = {gateway:"http://127.0.0.1:8080",connectionMode:"local",
+    linkedProviders:["chatgpt"],providerLinkEpochs:{chatgpt:"epoch-A"}};
+  f.sandbox.chrome.storage.local.get = async () => ({...state});
+  let releaseStatus;
+  f.sandbox.relayFetch = async () => new Promise(resolve => {releaseStatus = resolve;});
+  const send = request => new Promise(resolve => f.listeners.message[0](request,{},resolve));
+  const oldStatus = send({type:"relay-diagnostics",force:true});
+  for (let i=0;i<5;i++) await flushAsyncWork();
+  assert.equal(typeof releaseStatus,"function");
+
+  // Same gateway and consent target; a new explicit link changes only epoch.
+  state.providerLinkEpochs = {chatgpt:"epoch-B"};
+  let releaseSync;
+  f.sandbox.syncProvider = async () => new Promise(resolve => {releaseSync = resolve;});
+  const syncing = send({type:"sync-provider",provider:"chatgpt"});
+  for (let i=0;i<5;i++) await flushAsyncWork();
+  assert.equal(typeof releaseSync,"function");
+
+  releaseStatus({ok:true,status:200,json:async()=>({providers:[]})});
+  const previous = await oldStatus;
+  assert.equal(previous.ok,true);
+  assert.equal(previous.extension.provider_sync.chatgpt.state,"not_attempted",
+    "old A status cannot borrow B in-flight sync");
+  const fresh = await send({type:"relay-diagnostics"});
+  assert.equal(fresh.extension.provider_sync.chatgpt.state,"syncing");
+  releaseSync("uploaded");
+  assert.equal((await syncing).ok,true);
+  assert.equal((await send({type:"relay-diagnostics"})).extension.provider_sync.chatgpt.state,"uploaded");
+});
+
+test("diagnostics immediately hides old same-gateway in-flight status after consent rotation", async () => {
+  const f = loadBackground(["chatgpt"], [], true);
+  const state = {gateway:"http://127.0.0.1:8080",connectionMode:"local",
+    linkedProviders:["chatgpt"],providerLinkEpochs:{chatgpt:"epoch-before"}};
+  f.sandbox.chrome.storage.local.get = async () => ({...state});
+  f.sandbox.relayFetch = async () => ({ok:true,status:200,json:async()=>({providers:[]})});
+  let release;
+  f.sandbox.syncProvider = async () => new Promise(resolve => {release=resolve;});
+  const send = request => new Promise(resolve => f.listeners.message[0](request,{},resolve));
+  const old = send({type:"sync-provider",provider:"chatgpt"});
+  for(let i=0;i<5;i++) await flushAsyncWork();
+  assert.equal(typeof release,"function");
+  assert.equal((await send({type:"relay-diagnostics"})).extension.provider_sync.chatgpt.state,"syncing");
+  state.providerLinkEpochs = {chatgpt:"epoch-after"};
+  assert.equal((await send({type:"relay-diagnostics"})).extension.provider_sync.chatgpt.state,"not_attempted",
+    "a revoked consent generation cannot remain in-progress");
+  release("uploaded");
+  await old;
+  assert.equal((await send({type:"relay-diagnostics"})).extension.provider_sync.chatgpt.state,"not_attempted");
+});
+
 test("forced diagnostic refresh never reports stale success after a gateway failure", async () => {
   const f = loadBackground(["chatgpt"]);
   f.sandbox.chrome.storage.local.get = async () => ({
