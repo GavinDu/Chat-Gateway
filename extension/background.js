@@ -165,7 +165,9 @@ async function relayDiagnostics(force = false) {
   const extension = {
     connected: hasRelayConnection(current),
     connection_mode: !hasRelayConnection(current) ? "disconnected" : current.connectionMode === "local" ? "local" : "paired",
-    linked_providers: [...new Set(current.linkedProviders || [])].filter(provider => Boolean(PROVIDERS[provider])),
+    linked_providers: [...new Set(current.linkedProviders || [])].filter(
+      provider => typeof provider === "string" && Object.hasOwn(PROVIDERS, provider)
+    ),
     provider_sync: Object.fromEntries(providerDiagnostics),
     permissions: {gateway:null, providers:{}},
   };
@@ -832,31 +834,31 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       .catch(() => sendResponse({ok:false, error:"Paired gateway connection changed before disconnect."}));
     return true;
   }
-  if (message?.type === "link-provider" && Object.hasOwn(PROVIDERS, message.provider)) {
+  if (message?.type === "link-provider" && typeof message.provider === "string" && Object.hasOwn(PROVIDERS, message.provider)) {
     linkProviderConsent(message.provider, message.connection, message.attemptId)
       .then(({alreadyLinked, tentative}) => sendResponse({ok:true, alreadyLinked, tentative}))
       .catch(() => sendResponse({ok:false, error:"Gateway connection or link attempt invalid."}));
     return true;
   }
-  if (message?.type === "commit-provider-link" && Object.hasOwn(PROVIDERS, message.provider)) {
+  if (message?.type === "commit-provider-link" && typeof message.provider === "string" && Object.hasOwn(PROVIDERS, message.provider)) {
     finishProviderLink(message.provider, message.connection, message.attemptId, false)
       .then(committed => sendResponse({ok:true, committed}))
       .catch(() => sendResponse({ok:false, error:"Provider link commit unavailable."}));
     return true;
   }
-  if (message?.type === "rollback-provider-link" && Object.hasOwn(PROVIDERS, message.provider)) {
+  if (message?.type === "rollback-provider-link" && typeof message.provider === "string" && Object.hasOwn(PROVIDERS, message.provider)) {
     finishProviderLink(message.provider, message.connection, message.attemptId, true)
       .then(rolledBack => sendResponse({ok:true, rolledBack}))
       .catch(() => sendResponse({ok:false, error:"Provider link rollback unavailable."}));
     return true;
   }
-  if (message?.type === "sync-provider" && PROVIDERS[message.provider]) {
+  if (message?.type === "sync-provider" && typeof message.provider === "string" && Object.hasOwn(PROVIDERS, message.provider)) {
     queueProviderSync(message.provider, true)
       .then(syncStatus => sendResponse({ok:true,syncStatus:syncStatus || "skipped"}))
       .catch(error => sendResponse(redactedManualSyncFailure(error)));
     return true;
   }
-  if (message?.type === "logout-provider" && PROVIDERS[message.provider]) {
+  if (message?.type === "logout-provider" && typeof message.provider === "string" && Object.hasOwn(PROVIDERS, message.provider)) {
     logoutProviderFromRelay(message.provider)
       .then(() => sendResponse({ok:true}))
       .catch(error => sendResponse(redactedManualLogoutFailure(error)));
@@ -897,7 +899,7 @@ async function resyncLinkedProviders() {
     .filter(item => !item.linked).map(item => item.provider));
   await Promise.allSettled(
     [...new Set(latest.linkedProviders || [])]
-      .filter(provider => Object.hasOwn(PROVIDERS, provider))
+      .filter(provider => typeof provider === "string" && Object.hasOwn(PROVIDERS, provider))
       .map(provider => queueProviderSync(provider, missing.has(provider)))
   );
 }

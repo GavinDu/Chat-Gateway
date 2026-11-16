@@ -878,3 +878,21 @@ test("failed snapshot-version write releases cross-provider mutation queue", asy
   assert.match(storage.relaySnapshotVersions.claude, /^[a-f0-9]{64}$/);
   assert.equal(storage.relaySnapshotVersions.chatgpt, undefined);
 });
+
+
+test("prototype property names cannot authorize cookie collection or sync", async () => {
+  const storage = {
+    gateway:"http://127.0.0.1:8080", connectionMode:"local",
+    linkedProviders:["constructor","toString","__proto__",["chatgpt"]]
+  };
+  const api = loadShared([
+    {name:"session", value:"private-fixture", domain:".chatgpt.com", path:"/", secure:true}
+  ], true, storage);
+  for (const invalid of ["constructor","toString","__proto__",["chatgpt"],null]) {
+    await assert.rejects(() => api.providerCookieSnapshot(invalid), /Unsupported provider/);
+    await assert.rejects(() => api.syncProvider(invalid), /Unsupported provider/);
+  }
+  assert.equal(api.getCookieReads(), 0, "prototype names must never read browser cookies");
+  assert.equal(api.fetchCalls.length, 0, "prototype names must never upload cookie material");
+  assert.equal(api.PROVIDERS.chatgpt[0], "chatgpt.com");
+});
