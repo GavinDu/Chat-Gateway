@@ -455,6 +455,15 @@ chromium.launchPersistentContext = async (...args) => {
   console.error('FAIL stage=' + stage + ' type=' + safeErrorName + safeErrorCode + ' ' +
     (String(error.message).startsWith('timeout:')
       ? error.message : 'smoke assertion/runtime failure'));
+  // Fixed test-fixture-only error classes, never raw SSH output, key paths,
+  // provider URLs or owner transport contents.
+  const safeSshStartup = new Set([
+    'server_bind_failed', 'helper_spawn_failed', 'helper_exited_before_ready',
+    'helper_ready_timeout', 'cleanup_failed', 'startup_unclassified'
+  ]);
+  if (safeSshStartup.has(error?.fixtureCategory)) {
+    console.error('SSH fixture startup category: ' + error.fixtureCategory);
+  }
   const publicCodes = controlDiagnostics.filter(m => m.type === 'error')
     .map(m => m.code).filter(c => ['browser_runtime_unavailable','navigation_blocked',
       'no_provider_session','invalid_input','page_limit','input_queue_full','session_revoked'].includes(c));
