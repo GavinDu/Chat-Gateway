@@ -4139,10 +4139,11 @@ fn submission_snapshot(
     })
 }
 
-/// For Qwen and Manus, a response-node increase plus an emptied composer can
-/// happen when history hydrates over a dropped draft. Require a fresh
-/// prompt-bound user turn or a newly activated generation indicator instead.
-/// This intentionally fails closed until signed-in DOM is evidenced.
+/// For Grok and the previously strict adapters, an assistant node count
+/// increase plus an emptied composer can reflect SPA history hydration over
+/// an unaccepted draft. Require a fresh prompt-bound user turn or a newly
+/// activated generation indicator. Do not infer a completed new turn from
+/// previously rendered assistant content alone.
 fn submission_observed_for_adapter(
     provider: &str,
     page: &Page,
@@ -4150,7 +4151,7 @@ fn submission_observed_for_adapter(
     after: &SubmissionSnapshot,
     prompt: &str,
 ) -> anyhow::Result<bool> {
-    if matches!(provider, "qwen" | "manus")
+    if matches!(provider, "qwen" | "grok" | "manus")
         && after.user_turn_count <= before.user_turn_count
         && !(after.streaming && !before.streaming)
     {
@@ -4258,6 +4259,136 @@ fn submission_accepted(before: &SubmissionSnapshot, after: &SubmissionSnapshot) 
     user_turn_ack
         || after.response_count > before.response_count
         || (after.streaming && !before.streaming)
+}
+
+#[cfg(test)]
+mod grok_fresh_submission_ack_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn old_answer_hydration_with_cleared_draft_is_not_grok_submission() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <form><textarea id="prompt">first line
+  second line</textarea></form>
+            <article><div class="answer">old assistant answer</div></article>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        let prompt = "first line\n  second line";
+        let before = submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
+        assert_eq!(before.response_count, 1);
+        assert_eq!(before.user_turn_count, 0);
+        assert!(!before.input_empty);
+
+        // The app may hydrate an old assistant turn and separately clear an
+        // unaccepted controlled draft. Neither is proof Grok received Send.
+        page.evaluate(
+            r#"(() => {
+            document.querySelector('#prompt').value = '';
+            document.body.insertAdjacentHTML('beforeend',
+                '<article><div class="answer">hydrated history</div></article>');
+        })()"#,
+        );
+        let hydrated = submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
+        assert_eq!(hydrated.response_count, 2);
+        assert!(hydrated.input_empty);
+        assert!(
+            !submission_observed_for_adapter("grok", &page, &before, &hydrated, prompt).unwrap(),
+            "Grok cannot acknowledge history hydration as new Send"
+        );
+
+        // Only a fresh visible prompt-bound user turn proves actual uptake.
+        page.evaluate(
+            r#"(() => {
+            const turn = document.createElement('div');
+            turn.id = 'new-user-turn';
+            turn.setAttribute('data-testid', 'user-message');
+            turn.textContent = 'first line\n  second line';
+            document.body.appendChild(turn);
+        })()"#,
+        );
+        let with_user = submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
+        assert_eq!(with_user.user_turn_count, 1);
+        assert!(
+            submission_observed_for_adapter("grok", &page, &before, &with_user, prompt).unwrap(),
+            "matching exact multiline user turn acknowledges the prompt"
+        );
+
+        page.evaluate(
+            "document.querySelector('#new-user-turn').textContent = 'wrong previous turn'",
+        );
+        let wrong_user = submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
+        assert!(
+            !submission_observed_for_adapter("grok", &page, &before, &wrong_user, prompt).unwrap(),
+            "a different user's message cannot acknowledge this prompt"
+        );
+    }
+
+    #[tokio::test]
+    async fn only_fresh_not_inherited_grok_stop_can_acknowledge_without_user_turn() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <textarea id="prompt">some draft</textarea>
+            <button id="stop" aria-label="Stop generating">Stop</button>
+            <div class="answer">older answer</div>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        let before_active = submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
+        assert!(before_active.streaming);
+        page.evaluate(
+            r#"(() => {
+            document.querySelector('#prompt').value = '';
+            document.body.insertAdjacentHTML('beforeend',
+                '<div class="answer">hydrated historic answer</div>');
+        })()"#,
+        );
+        let inherited = submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
+        assert!(inherited.streaming);
+        assert!(
+            !submission_observed_for_adapter(
+                "grok",
+                &page,
+                &before_active,
+                &inherited,
+                "some draft"
+            )
+            .unwrap(),
+            "preexisting Stop is not a fresh generation event"
+        );
+
+        page.evaluate("document.querySelector('#stop').hidden = true");
+        page.evaluate("document.querySelector('#prompt').value = 'some draft'");
+        let before_inactive = submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
+        assert!(!before_inactive.streaming);
+        page.evaluate("document.querySelector('#stop').hidden = false");
+        let freshly_active = submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
+        assert!(freshly_active.streaming);
+        assert!(
+            submission_observed_for_adapter(
+                "grok",
+                &page,
+                &before_inactive,
+                &freshly_active,
+                "some draft"
+            )
+            .unwrap(),
+            "newly active visible generation may acknowledge before a user turn appears"
+        );
+    }
 }
 
 #[cfg(test)]
