@@ -300,3 +300,62 @@ test('late rejected pull after cancellation cannot change closed state', async (
   assert.equal((await settled(reader.read())).done,true);
   assert.equal(calls,1,'cancelled stream never restarts pulling');
 });
+
+
+test('late async start rejection after close preserves queued terminal response', async () => {
+  const {context} = load();
+  const stream = new context.ReadableStream({
+    start(controller) {
+      controller.enqueue('final-async');
+      controller.close();
+      return Promise.reject(new Error('late-start-async-rejection'));
+    },
+  });
+  await tick();
+  const reader = stream.getReader();
+  assert.deepEqual(await settled(reader.read()), {value:'final-async',done:false});
+  assert.deepEqual(await settled(reader.read()), {value:undefined,done:true});
+});
+
+test('synchronous start throw after close cannot erase final queued chunk', async () => {
+  const {context} = load();
+  const stream = new context.ReadableStream({
+    start(controller) {
+      controller.enqueue('final-sync');
+      controller.close();
+      throw new Error('late-start-sync-throw');
+    },
+  });
+  await tick();
+  const reader = stream.getReader();
+  assert.deepEqual(await settled(reader.read()), {value:'final-sync',done:false});
+  assert.deepEqual(await settled(reader.read()), {value:undefined,done:true});
+});
+
+test('start rejection before close still errors reader, cancellation blocks late rejection', async () => {
+  const {context} = load();
+  const failed = new context.ReadableStream({
+    start() { return Promise.reject(new Error('real-start-failure')); },
+  });
+  await assert.rejects(() => settled(failed.getReader().read()), /real-start-failure/);
+
+  let rejectStart;
+  let cancellations = 0;
+  const cancelled = new context.ReadableStream({
+    start() {
+      return new Promise((_, reject) => { rejectStart = reject; });
+    },
+    cancel(reason) {
+      assert.equal(reason, 'owner-cancel');
+      cancellations++;
+    },
+  }, {highWaterMark:0});
+  const reader = cancelled.getReader();
+  const pending = reader.read();
+  await reader.cancel('owner-cancel');
+  assert.deepEqual(await settled(pending), {value:undefined,done:true});
+  rejectStart(new Error('late-after-owner-cancel'));
+  await tick();
+  assert.deepEqual(await settled(reader.read()), {value:undefined,done:true});
+  assert.equal(cancellations, 1);
+});
