@@ -79,7 +79,20 @@
               return highWaterMark - queuedSize;
             }
           };
-          return Promise.resolve(source.start?.call(source, controller)).then(() => { started = true; kick(); });
+          // The pinned fallback forwards rejected start promises into its
+          // native error(), which can destroy a final queued chunk even after
+          // close() requested termination. Ignore only *late* start failures
+          // when the source already closed or the reader cancelled.
+          let startResult;
+          try {
+            startResult = source.start?.call(source, controller);
+          } catch (error) {
+            if (!terminal) throw error;
+          }
+          return Promise.resolve(startResult).then(
+            () => { started = true; kick(); },
+            error => { if (!terminal) throw error; }
+          );
         },
         cancel(reason) { terminal = true; queuedSizes.length = 0; queuedSize = 0; return source.cancel?.call(source, reason); }
       }, strategy);
