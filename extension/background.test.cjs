@@ -1128,6 +1128,89 @@ test("provider sync timestamp is independent of login and turns stale when gatew
   assert.equal(restartDiagnostic.extension.provider_sync.chatgpt.updated_at,null);
 });
 
+test("live provider sync appears before the first popup status and becomes terminal without auth claims", async () => {
+  const f = loadBackground(["chatgpt", "claude"], [], true);
+  const state = {
+    gateway:"http://127.0.0.1:8080", connectionMode:"local",
+    linkedProviders:["chatgpt", "claude"], providerLinkEpochs:{chatgpt:"epoch-a",claude:"epoch-b"}
+  };
+  f.sandbox.chrome.storage.local.get = async () => ({...state});
+  f.sandbox.relayFetch = async () => ({
+    ok:true,status:200,json:async()=>({providers:[{provider:"chatgpt",authentication:"unknown"}]})
+  });
+  let release;
+  f.sandbox.syncProvider = async provider => {
+    if (provider === "chatgpt") return new Promise(resolve => {release = resolve;});
+    return "unchanged";
+  };
+  const send = request => new Promise(resolve => f.listeners.message[0](request,{},resolve));
+  const pending = send({type:"sync-provider",provider:"chatgpt"});
+  for (let i = 0; i < 5; i++) await flushAsyncWork();
+  assert.equal(typeof release,"function","actual serialized import must begin");
+
+  // Deliberately make the first diagnostics read *after* import starts.
+  const live = await send({type:"relay-diagnostics",force:true});
+  assert.equal(live.extension.provider_sync.chatgpt.state,"syncing");
+  assert.equal(live.extension.provider_sync.chatgpt.issue,null);
+  assert.match(live.extension.provider_sync.chatgpt.updated_at,/^\\d{4}-\\d{2}-\\d{2}T/);
+  assert.equal(live.extension.provider_sync.claude.state,"not_attempted");
+  assert.equal(live.gateway.providers[0].authentication,"unknown",
+    "local in-flight sync must never assert provider login");
+  assert.ok(!JSON.stringify(live).includes("epoch-a"),
+    "private consent epoch never leaves the worker diagnostic map");
+
+  release("uploaded");
+  assert.equal((await pending).syncStatus,"uploaded");
+  const finished = await send({type:"relay-diagnostics"});
+  assert.equal(finished.extension.provider_sync.chatgpt.state,"uploaded");
+  assert.equal(finished.extension.provider_sync.chatgpt.issue,null);
+
+  f.sandbox.syncProvider = async () => {throw new Error("upstream cookie and secret material");};
+  assert.equal((await send({type:"sync-provider",provider:"claude"})).ok,false);
+  const failed = await send({type:"relay-diagnostics"});
+  assert.equal(failed.extension.provider_sync.claude.state,"failed");
+  assert.equal(failed.extension.provider_sync.claude.issue,"relay_unavailable");
+  assert.ok(!JSON.stringify(failed).includes("cookie and secret"));
+});
+
+test("live sync diagnostic cannot outlive same-gateway relink or cross-gateway switch", async () => {
+  const f = loadBackground(["chatgpt"], [], true);
+  const state = {
+    gateway:"http://127.0.0.1:8080", connectionMode:"local",
+    linkedProviders:["chatgpt"], providerLinkEpochs:{chatgpt:"epoch-old"}
+  };
+  f.sandbox.chrome.storage.local.get = async () => ({...state});
+  f.sandbox.relayFetch = async () => ({
+    ok:true,status:200,json:async()=>({providers:[]})
+  });
+  const releases = [];
+  f.sandbox.syncProvider = async () => new Promise(resolve => releases.push(resolve));
+  const send = request => new Promise(resolve => f.listeners.message[0](request,{},resolve));
+
+  const old = send({type:"sync-provider",provider:"chatgpt"});
+  for (let i = 0; i < 5; i++) await flushAsyncWork();
+  assert.equal(releases.length,1);
+  assert.equal((await send({type:"relay-diagnostics"})).extension.provider_sync.chatgpt.state,"syncing");
+
+  // The status read itself must not show the former consent's attempt.
+  state.providerLinkEpochs = {chatgpt:"epoch-relinked"};
+  assert.equal((await send({type:"relay-diagnostics"})).extension.provider_sync.chatgpt.state,"not_attempted");
+  releases.shift()("uploaded");
+  await old;
+  assert.equal((await send({type:"relay-diagnostics"})).extension.provider_sync.chatgpt.state,"not_attempted");
+
+  const next = send({type:"sync-provider",provider:"chatgpt"});
+  for (let i = 0; i < 5; i++) await flushAsyncWork();
+  assert.equal(releases.length,1);
+  assert.equal((await send({type:"relay-diagnostics"})).extension.provider_sync.chatgpt.state,"syncing");
+
+  state.gateway = "http://127.0.0.1:9090";
+  assert.equal((await send({type:"relay-diagnostics",force:true})).extension.provider_sync.chatgpt.state,"not_attempted");
+  releases.shift()("uploaded");
+  await next;
+  assert.equal((await send({type:"relay-diagnostics"})).extension.provider_sync.chatgpt.state,"not_attempted");
+});
+
 test("forced diagnostic refresh never reports stale success after a gateway failure", async () => {
   const f = loadBackground(["chatgpt"]);
   f.sandbox.chrome.storage.local.get = async () => ({
