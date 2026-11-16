@@ -43,7 +43,7 @@ async function hasOriginPermissions(origins) {
 function recordProviderDiagnostic(provider, state, errorCode = null) {
   // A provider sync attempt is NOT authenticated-login verification.
   // Store only stable local result codes, never raw upstream responses.
-  const safeState = ["uploaded", "unchanged", "no_cookies", "skipped", "failed"].includes(state)
+  const safeState = ["syncing", "uploaded", "unchanged", "no_cookies", "skipped", "failed"].includes(state)
     ? state : "unknown";
   providerDiagnostics.set(provider, {
     state: safeState, issue: errorCode, updated_at: new Date().toISOString()
@@ -538,6 +538,12 @@ function queueProviderSync(provider, force = false) {
     const shouldForce = force || queuedProviderForces.has(provider);
     queuedProviderForces.delete(provider);
     const attempt = await chrome.storage.local.get(["gateway", "token", "connectionMode", "linkedProviders", "providerLinkEpochs"]);
+    // A queued sync is not active until its serialized provider task starts.
+    // Expose only a fixed redacted category for the *current* owner; never
+    // mistake this for authenticated login or leak cookie/progress payloads.
+    if (await providerDiagnosticScopeCurrent(provider, attempt)) {
+      recordProviderDiagnostic(provider, "syncing");
+    }
     try {
       const result = await syncProvider(provider, {force:shouldForce});
       if (await providerDiagnosticScopeCurrent(provider, attempt)) {
