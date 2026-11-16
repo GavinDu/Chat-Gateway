@@ -1121,6 +1121,43 @@ test("live provider diagnostics show a held sync and preserve it on first status
     "successful import is not proof of signed-in chat");
 });
 
+test("in-flight syncing status cannot survive a gateway replacement", async () => {
+  const f = loadBackground(["chatgpt"], [], true);
+  const state = {
+    gateway:"http://127.0.0.1:8080", connectionMode:"local",
+    linkedProviders:["chatgpt"], providerLinkEpochs:{chatgpt:"first-owner"}
+  };
+  f.sandbox.chrome.storage.local.get = async () => ({...state});
+  f.sandbox.relayFetch = async () => ({
+    ok:true,status:200,json:async()=>({providers:[{provider:"chatgpt",linked:false}]})
+  });
+  let release;
+  let started = false;
+  const held = new Promise(resolve => { release = resolve; });
+  f.sandbox.syncProvider = async () => {
+    started = true;
+    await held;
+    return "uploaded";
+  };
+  const diagnose = () => new Promise(resolve =>
+    f.listeners.message[0]({type:"relay-diagnostics",force:true},{},resolve));
+  const pending = new Promise(resolve =>
+    f.listeners.message[0]({type:"sync-provider",provider:"chatgpt"},{},resolve));
+  for (let i = 0; i < 16 && !started; i++) await flushAsyncWork();
+  assert.equal((await diagnose()).extension.provider_sync.chatgpt.state,"syncing");
+
+  state.gateway = "http://localhost:9090";
+  state.providerLinkEpochs = {chatgpt:"replacement-owner"};
+  assert.equal((await diagnose()).extension.provider_sync.chatgpt.state,"not_attempted",
+    "new gateway must not inherit old in-progress diagnostics");
+
+  release();
+  const completed = await pending;
+  assert.equal(completed.ok,true);
+  assert.equal((await diagnose()).extension.provider_sync.chatgpt.state,"not_attempted",
+    "stale import completion must not overwrite replacement gateway status");
+});
+
 test("provider sync timestamp is independent of login and turns stale when gateway status fails", async () => {
   const f = loadBackground(["chatgpt", "claude"]);
   let healthy = true;
