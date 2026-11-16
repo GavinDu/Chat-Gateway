@@ -76,6 +76,34 @@ function flushAsyncWork() {
   return new Promise(resolve => setImmediate(resolve));
 }
 
+test("pending connection poll returns only a fixed redacted popup error", async () => {
+  const f = loadBackground(["chatgpt"], [], true);
+  const send = () => new Promise(resolve => {
+    assert.equal(f.listeners.message[0]({type:"poll-connection"},{},resolve), true);
+  });
+  for (const sensitiveMessage of [
+    "fetch failed https://127.0.0.1:8080/relay/v1/connect/poll?poll_secret=private-session",
+    "Chrome storage error with token=private-key and account=private-user",
+    "Gateway approval failed (401), request_id=private-request"
+  ]) {
+    f.sandbox.pollConnection = async () => {throw new Error(sensitiveMessage)};
+    const failed = await send();
+    assert.equal(failed.ok, false);
+    assert.equal(failed.errorCode, "connection_poll_unavailable");
+    assert.equal(failed.error, "Connection approval check unavailable. Retry or reconnect.");
+    assert.ok(!JSON.stringify(failed).includes(sensitiveMessage));
+    assert.ok(!JSON.stringify(failed).includes("private"));
+    assert.ok(!JSON.stringify(failed).includes("poll_secret"));
+    assert.ok(!JSON.stringify(failed).includes("token="));
+  }
+
+  f.sandbox.pollConnection = async () => {};
+  const success = await send();
+  assert.equal(success.ok, true);
+  assert.equal(success.error, undefined);
+  assert.equal(success.errorCode, undefined);
+});
+
 test("periodic relay alarm refreshes status without recreating repeating alarm", async () => {
   const f = loadBackground(["chatgpt"], [], true);
   let probes = 0;
