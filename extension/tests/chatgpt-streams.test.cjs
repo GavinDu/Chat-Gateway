@@ -253,3 +253,50 @@ test('50 sequential streams terminate without a retained global registry', async
   }
   assert.equal(context.__chatGatewayStreamRegistry, undefined);
 });
+
+
+test('late rejected pull cannot erase final enqueued chunk after close', async () => {
+  const {context} = load();
+  let calls = 0;
+  const stream = new context.ReadableStream({
+    pull(controller) {
+      calls++;
+      controller.enqueue('final');
+      controller.close();
+      return Promise.reject(new Error('late-rejection-after-close'));
+    },
+  });
+  // Let pull and its rejection settle before attaching a reader. The pinned
+  // Obscura fallback remains _closeRequested while one queued chunk exists.
+  await tick();
+  const reader = stream.getReader();
+  assert.deepEqual(await settled(reader.read()), {value:'final',done:false});
+  assert.deepEqual(await settled(reader.read()), {value:undefined,done:true});
+  assert.equal(calls,1);
+});
+
+test('late rejected pull after cancellation cannot change closed state', async () => {
+  const {context} = load();
+  let rejectPull;
+  let sourceController;
+  let calls = 0;
+  const stream = new context.ReadableStream({
+    pull(controller) {
+      calls++;
+      sourceController = controller;
+      return new Promise((_, reject) => {rejectPull = reject;});
+    },
+  }, {highWaterMark:0});
+  const reader = stream.getReader();
+  const pendingRead = reader.read();
+  await tick();
+  assert.equal(calls,1);
+  await reader.cancel('owner-cancel');
+  assert.equal((await settled(pendingRead)).done,true);
+  rejectPull(new Error('late-rejection-after-cancel'));
+  await tick();
+  assert.equal(sourceController.desiredSize,0,
+    'late error must not mark an already-cancelled stream errored');
+  assert.equal((await settled(reader.read())).done,true);
+  assert.equal(calls,1,'cancelled stream never restarts pulling');
+});
