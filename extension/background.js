@@ -165,7 +165,7 @@ async function relayDiagnostics(force = false) {
   const extension = {
     connected: hasRelayConnection(current),
     connection_mode: !hasRelayConnection(current) ? "disconnected" : current.connectionMode === "local" ? "local" : "paired",
-    linked_providers: [...new Set(current.linkedProviders || [])].filter(
+    linked_providers: [...new Set(Array.isArray(current.linkedProviders) ? current.linkedProviders : [])].filter(
       provider => typeof provider === "string" && Object.hasOwn(PROVIDERS, provider)
     ),
     provider_sync: Object.fromEntries(providerDiagnostics),
@@ -295,7 +295,9 @@ function linkProviderConsent(provider, expected, attemptId) {
     if (!hasRelayConnection(current) || !sameRelayIdentity(expected, current)) {
       throw new Error("Gateway connection changed before provider consent was saved.");
     }
-    const linked = current.linkedProviders || [];
+    // Malformed persisted storage must not count as linked consent.
+    // An explicit new link is still a fresh owner action, never implicit.
+    const linked = Array.isArray(current.linkedProviders) ? current.linkedProviders : [];
     const epochs = current.providerLinkEpochs || {};
     const pending = current.providerLinkPendingAttempts || {};
     const alreadyLinked = linked.includes(provider);
@@ -319,7 +321,7 @@ function finishProviderLink(provider, expected, attemptId, rollback) {
       ["gateway", "token", "connectionMode", "linkedProviders", "providerLinkEpochs", "providerLinkPendingAttempts"]);
     if (!sameRelayIdentity(expected, current) ||
         current.providerLinkPendingAttempts?.[provider] !== attemptId ||
-        !current.linkedProviders?.includes(provider)) return false;
+        (!Array.isArray(current.linkedProviders) || !current.linkedProviders.includes(provider))) return false;
     const remaining = {...current.providerLinkPendingAttempts};
     delete remaining[provider];
     if (rollback) {
@@ -426,7 +428,8 @@ function connectLocalRelay(gateway, manual) {
     if (current.gateway === gateway && current.connectionMode === "local" && !current.token) {
       return {unchanged:true};
     }
-    const linkedProviders = current.gateway === gateway ? (current.linkedProviders || []) : [];
+    const linkedProviders = current.gateway === gateway && Array.isArray(current.linkedProviders)
+      ? current.linkedProviders : [];
     // Write the complete disconnected/connected view at once, then remove
     // compatibility keys. No intervening provider consent mutation can run.
     await chrome.storage.local.set({
@@ -481,7 +484,7 @@ function connectPairedRelay(gateway, token, expected) {
     }
     const epochs = {...(current.providerLinkEpochs || {})};
     for (const provider of new Set([
-      ...(current.linkedProviders || []), ...Object.keys(epochs)
+      ...(Array.isArray(current.linkedProviders) ? current.linkedProviders : []), ...Object.keys(epochs)
     ])) {
       if (Object.hasOwn(PROVIDERS, provider)) epochs[provider] = randomHex(16);
     }
@@ -517,7 +520,7 @@ function disconnectPairedRelay(expected) {
     }
     const epochs = {...(current.providerLinkEpochs || {})};
     for (const provider of new Set([
-      ...(current.linkedProviders || []), ...Object.keys(epochs)
+      ...(Array.isArray(current.linkedProviders) ? current.linkedProviders : []), ...Object.keys(epochs)
     ])) {
       if (Object.hasOwn(PROVIDERS, provider)) epochs[provider] = randomHex(16);
     }
@@ -572,7 +575,7 @@ function invalidatePairedRelay(expected) {
     }
     const epochs = {...(current.providerLinkEpochs || {})};
     for (const provider of new Set([
-      ...(current.linkedProviders || []), ...Object.keys(epochs)
+      ...(Array.isArray(current.linkedProviders) ? current.linkedProviders : []), ...Object.keys(epochs)
     ])) {
       if (Object.hasOwn(PROVIDERS, provider)) epochs[provider] = randomHex(16);
     }
@@ -603,7 +606,7 @@ async function providerDiagnosticScopeCurrent(provider, attempt) {
     return attempt.gateway === latest.gateway &&
       attempt.token === latest.token &&
       attempt.connectionMode === latest.connectionMode &&
-      latest.linkedProviders?.includes(provider) &&
+      Array.isArray(latest.linkedProviders) && latest.linkedProviders.includes(provider) &&
       // Legacy linked entries without epochs are allowed only until their
       // first explicit link/logout transition; that transition always writes
       // a fresh epoch, so an old in-flight result cannot pass this check.
@@ -697,7 +700,8 @@ function logoutProviderFromRelay(provider) {
       }
       revokedEpoch = randomHex(16);
       await chrome.storage.local.set({
-        linkedProviders:(current.linkedProviders || []).filter(value => value !== provider),
+        linkedProviders:(Array.isArray(current.linkedProviders) ? current.linkedProviders : [])
+          .filter(value => value !== provider),
         providerLinkEpochs:{...(current.providerLinkEpochs || {}), [provider]:revokedEpoch},
         providerLinkPendingAttempts: Object.fromEntries(
           Object.entries(current.providerLinkPendingAttempts || {}).filter(([name]) => name !== provider)
@@ -719,7 +723,7 @@ function logoutProviderFromRelay(provider) {
         "providerLinkEpochs", "relaySnapshotVersions"
       ]);
       if (!sameRelayIdentity(expected, latest) ||
-          latest.linkedProviders?.includes(provider) ||
+          !Array.isArray(latest.linkedProviders) || latest.linkedProviders.includes(provider) ||
           latest.providerLinkEpochs?.[provider] !== revokedEpoch) return;
       const versions = {...(latest.relaySnapshotVersions || {})};
       delete versions[provider];
@@ -760,7 +764,7 @@ chrome.cookies.onChanged.addListener(({cookie}) => {
       // generation while the storage request was pending.
       if (debounceTimers.get(provider) !== timer) return;
       debounceTimers.delete(provider);
-      if (!hasRelayConnection(state) || !state.linkedProviders?.includes(provider) ||
+      if (!hasRelayConnection(state) || !Array.isArray(state.linkedProviders) || !state.linkedProviders.includes(provider) ||
           Date.now() < automaticCookieSyncSuppressedUntil) return;
       queueProviderSync(provider).catch(() => {
         // Never log cookie material or relay credentials. The popup can surface status on demand.
@@ -898,7 +902,7 @@ async function resyncLinkedProviders() {
   const missing = new Set((status.gateway.providers || [])
     .filter(item => !item.linked).map(item => item.provider));
   await Promise.allSettled(
-    [...new Set(latest.linkedProviders || [])]
+    [...new Set(Array.isArray(latest.linkedProviders) ? latest.linkedProviders : [])]
       .filter(provider => typeof provider === "string" && Object.hasOwn(PROVIDERS, provider))
       .map(provider => queueProviderSync(provider, missing.has(provider)))
   );
@@ -1024,7 +1028,8 @@ async function completePendingConnection() {
       await clearPendingApprovalIfCurrentLocked(active);
       throw new Error("Connection approval expired. Choose Connect to gateway again.");
     }
-    const linkedProviders = now.gateway === gateway ? (now.linkedProviders || []) : [];
+    const linkedProviders = now.gateway === gateway && Array.isArray(now.linkedProviders)
+      ? now.linkedProviders : [];
     await chrome.storage.local.set({
       gateway, token:data.token, connectionMode:"paired", linkedProviders,
       relayConnectionEpoch:randomHex(16), pendingApprovalRequest:null
