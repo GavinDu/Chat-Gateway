@@ -63,6 +63,26 @@ function redactedManualSyncFailure(error) {
   const errorCode = classifyRelayFailure(error);
   return {ok:false, errorCode, error:MANUAL_SYNC_ERRORS[errorCode]};
 }
+// Provider logout is not a website sign-out and may fail after local
+// consent was already revoked. Never reflect raw worker/upstream exceptions
+// (including response URLs, session identifiers or cookies) into popup text.
+const MANUAL_LOGOUT_ERRORS = Object.freeze({
+  connection_changed: "Gateway connection changed before logout. Reconnect and retry.",
+  gateway_cancelled: "Gateway logout was cancelled. Check status and retry.",
+  gateway_timeout: "Gateway logout timed out. Check status and retry.",
+  permission_or_consent: "Gateway or provider permission changed. Reconnect and retry.",
+  activation_timeout: "Gateway did not finish logout in time. Check status and retry.",
+  gateway_unauthorized: "Gateway rejected logout. Reconnect and retry.",
+  relay_unavailable: "Gateway logout failed. Check the connection and retry."
+});
+function redactedManualLogoutFailure(error) {
+  // The specific source-authored connection-change failure is distinguishable
+  // from generic networking failures without forwarding any exception text.
+  const sourceMessage = String(error?.message || "");
+  const errorCode = sourceMessage.startsWith("Gateway connection changed before provider logout.")
+    ? "connection_changed" : classifyRelayFailure(error);
+  return {ok:false, errorCode, error:MANUAL_LOGOUT_ERRORS[errorCode]};
+}
 // Permission state is independent of relay connectivity or saved sessions.
 // Return fixed booleans (or null when this browser cannot inspect permission),
 // never cookie values, credential-bearing URLs or raw browser errors.
@@ -769,7 +789,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
   if (message?.type === "logout-provider" && PROVIDERS[message.provider]) {
-    logoutProviderFromRelay(message.provider).then(() => sendResponse({ok:true})).catch(error => sendResponse({ok:false,error:error.message}));
+    logoutProviderFromRelay(message.provider)
+      .then(() => sendResponse({ok:true}))
+      .catch(error => sendResponse(redactedManualLogoutFailure(error)));
     return true;
   }
 });
