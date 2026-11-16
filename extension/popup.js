@@ -227,10 +227,18 @@ async function refreshStatus(force = false) {
   }
   // Older or malformed gateway responses must not break every healthy provider,
   // render unrecognized names, or expose actions for unregistered providers.
-  const safeRows = data.providers.filter(item =>
+  const candidates = data.providers.filter(item =>
     item !== null && typeof item === "object" && !Array.isArray(item) &&
     typeof item.provider === "string" && Object.hasOwn(PROVIDERS, item.provider)
   );
+  // A duplicate provider may claim contradictory saved-session/auth state.
+  // Quarantine *every* copy rather than choose an arbitrary first/last row
+  // that could expose the wrong Connect/Logout action.
+  const counts = new Map();
+  for (const item of candidates) {
+    counts.set(item.provider, (counts.get(item.provider) || 0) + 1);
+  }
+  const safeRows = candidates.filter(item => counts.get(item.provider) === 1);
   const items = await Promise.all(safeRows.map(async item => {
     const li = document.createElement("li");
     const heading = document.createElement("strong");
