@@ -14,6 +14,7 @@ function loadShared(cookieFixtures = [], hasAllPermissions = true, storageValues
     crypto: webcrypto,
     TextEncoder,
     AbortController,
+    performance: hooks.performance || {now: () => Date.now()},
     setTimeout: hooks.setTimeout || setTimeout,
     clearTimeout: hooks.clearTimeout || clearTimeout,
     fetch: async (url, options) => {
@@ -741,5 +742,78 @@ test("local relay mode cannot be used for a remote HTTP or HTTPS gateway", async
       true, {gateway,connectionMode:"local",linkedProviders:["chatgpt"]});
     assert.equal(await api.syncProvider("chatgpt"), "skipped");
     assert.equal(api.fetchCalls.length, 0);
+  }
+});
+
+test("sync stopwatch reports only fixed monotonic bounded stages and durations", async () => {
+  let clock = 0;
+  const progress = [];
+  const api = loadShared([
+    { name:"session",value:"cookie-private-value",domain:".chatgpt.com",path:"/",secure:true,httpOnly:true }
+  ], true, {
+    gateway:"http://127.0.0.1:8080",connectionMode:"local",
+    linkedProviders:["chatgpt"],providerLinkEpochs:{chatgpt:"private-epoch"}
+  }, {
+    performance:{now:()=>{clock+=5;return clock;}}
+  });
+  const result = await api.syncProvider("chatgpt", {
+    force:true,onProgress:sample=>progress.push(sample)
+  });
+  assert.equal(result,"uploaded");
+  assert.deepEqual(progress.map(e=>e.phase),
+    ["permission","cookie_read","digest","upload",null]);
+  assert.deepEqual(JSON.parse(JSON.stringify(progress.at(-1).durations_ms)), {
+    permission:5,cookie_read:5,digest:5,upload:5
+  });
+  assert.ok(!JSON.stringify(progress).includes("cookie-private-value"));
+  assert.ok(!JSON.stringify(progress).includes("private-epoch"));
+  assert.ok(!JSON.stringify(progress).includes("127.0.0.1"));
+  assert.equal(api.fetchCalls.length,1);
+});
+
+test("missing permission and absent cookies do not invent later sync phases", async () => {
+  const state = {
+    gateway:"http://127.0.0.1:8080",connectionMode:"local",
+    linkedProviders:["manus"],providerLinkEpochs:{manus:"private-consent"}
+  };
+  const deniedEvents = [];
+  const denied = loadShared([], false, {...state}, {
+    performance:{now:()=>6}
+  });
+  await assert.rejects(() => denied.syncProvider("manus",{
+    onProgress:step=>deniedEvents.push(step)
+  }),/Missing provider host permissions/);
+  assert.deepEqual(deniedEvents.map(x=>x.phase),["permission",null]);
+  assert.deepEqual(JSON.parse(JSON.stringify(deniedEvents.at(-1).durations_ms)),{permission:0});
+  assert.equal(denied.getCookieReads(),0);
+  assert.equal(denied.fetchCalls.length,0);
+
+  const emptyEvents = [];
+  const empty = loadShared([], true, {...state}, {performance:{now:()=>9}});
+  assert.equal(await empty.syncProvider("manus",{
+    onProgress:step=>emptyEvents.push(step)
+  }),"no_cookies");
+  assert.deepEqual(emptyEvents.map(x=>x.phase),
+    ["permission","cookie_read","digest",null]);
+  assert.equal(empty.fetchCalls.length,0);
+});
+
+test("sync stopwatch clamps unexpected timer jumps and ignores failing reporters", async () => {
+  const state = {gateway:"http://127.0.0.1:8080",connectionMode:"local",
+    linkedProviders:["chatgpt"],providerLinkEpochs:{chatgpt:"private-consent"}};
+  let clock = -500;
+  const seen = [];
+  const api = loadShared([], true, state, {
+    performance:{now:()=>{clock+=200_000;return clock;}}
+  });
+  assert.equal(await api.syncProvider("chatgpt",{
+    onProgress:step=>{
+      seen.push(step);
+      if (step.phase === "cookie_read") throw new Error("private reporter exception");
+    }
+  }),"no_cookies");
+  assert.ok(seen.length>=3);
+  for (const sample of seen) for (const value of Object.values(sample.durations_ms)) {
+    assert.equal(value,120_000);
   }
 });
