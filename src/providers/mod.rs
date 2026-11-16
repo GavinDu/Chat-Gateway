@@ -59,16 +59,19 @@ fn provider_challenge_error(provider: &str) -> anyhow::Error {
 /// Typed auth failure for a redirect observed during prompt dispatch or
 /// response polling. Only the structured URL classifier may make this
 /// determination; query text and chat content are not authentication proof.
-fn login_redirect_error(url: &str) -> Option<anyhow::Error> {
-    common::is_login_url(url)
+fn login_redirect_error(provider: &str, url: &str) -> Option<anyhow::Error> {
+    common::login_url_matches_provider(provider, url)
         .then(|| anyhow::Error::new(crate::browser::pool::ProviderSessionExpiredError))
 }
 
 /// Both the periodic and final completion samples must classify a new
 /// first-party authentication redirect. A stable old SPA reply may otherwise
 /// survive in the same origin while the route changes to /auth/login.
-fn probe_login_redirect_error(probe: &common::ResponseProbe) -> Option<anyhow::Error> {
-    login_redirect_error(&probe.url)
+fn probe_login_redirect_error(
+    provider: &str,
+    probe: &common::ResponseProbe,
+) -> Option<anyhow::Error> {
+    login_redirect_error(provider, &probe.url)
 }
 
 /// Primary selectors for an adapter (diagnostics + readiness reporting).
@@ -605,7 +608,7 @@ mod send_auth_redirect_tests {
             "https://accounts.x.com/",
             "https://login.microsoftonline.com/tenant/oauth2/authorize",
         ] {
-            let error = login_redirect_error(url).expect("explicit auth redirect");
+            let error = login_redirect_error("chatgpt", url).expect("explicit auth redirect");
             assert!(error
                 .downcast_ref::<ProviderSessionExpiredError>()
                 .is_some());
@@ -634,23 +637,45 @@ mod send_auth_redirect_tests {
             false,
             false,
         ));
-        let error = super::probe_login_redirect_error(&final_probe)
+        let error = super::probe_login_redirect_error("chatgpt", &final_probe)
             .expect("a final first-party auth route must override stable stale text");
         assert!(error
             .downcast_ref::<ProviderSessionExpiredError>()
             .is_some());
         assert!(
-            super::probe_login_redirect_error(&initial).is_none(),
+            super::probe_login_redirect_error("chatgpt", &initial).is_none(),
             "normal final conversation sample must not be an auth redirect"
         );
         final_probe.url =
             "https://chatgpt.com/c/turn?next=https%3A%2F%2Faccounts.google.com%2F".into();
-        assert!(super::probe_login_redirect_error(&final_probe).is_none());
+        assert!(super::probe_login_redirect_error("chatgpt", &final_probe).is_none());
         final_probe.url = "https://attacker.invalid/login".into();
         assert!(
-            super::probe_login_redirect_error(&final_probe).is_none(),
+            super::probe_login_redirect_error("chatgpt", &final_probe).is_none(),
             "unknown origin remains a redacted off-provider error, not expired auth"
         );
+    }
+
+    #[test]
+    fn another_known_provider_login_never_reports_requested_session_expired() {
+        for (expected, actual_url) in [
+            ("chatgpt", "https://manus.im/auth/login"),
+            ("manus", "https://chatgpt.com/auth/login"),
+            ("claude", "https://www.meta.ai/login"),
+            ("grok", "https://gemini.google.com/login"),
+        ] {
+            assert!(
+                login_redirect_error(expected, actual_url).is_none(),
+                "different provider login is unexpected navigation, not auth expiry"
+            );
+            let probe = crate::providers::common::ResponseProbe {
+                url: actual_url.to_owned(),
+                ..Default::default()
+            };
+            assert!(super::probe_login_redirect_error(expected, &probe).is_none());
+        }
+        assert!(login_redirect_error("manus", "https://manus.im/auth/login").is_some());
+        assert!(login_redirect_error("chatgpt", "https://chatgpt.com/auth/login").is_some());
     }
 
     #[test]
@@ -662,7 +687,7 @@ mod send_auth_redirect_tests {
             "https://gemini.google.com/app?q=auth",
             "data:text/html,<p>Login</p>",
         ] {
-            assert!(login_redirect_error(url).is_none(), "false expiry: {url}");
+            assert!(login_redirect_error("chatgpt", url).is_none(), "false expiry: {url}");
         }
     }
 }
@@ -1241,7 +1266,7 @@ pub async fn run_send(
             .await;
         return;
     }
-    if let Some(error) = login_redirect_error(&page.url()) {
+    if let Some(error) = login_redirect_error(adapter.name(), &page.url()) {
         let _ = chunks.send(Err(error)).await;
         return;
     }
@@ -1273,7 +1298,7 @@ pub async fn run_send(
             .await;
         return;
     }
-    if let Some(auth_error) = probe_login_redirect_error(&baseline_probe) {
+    if let Some(auth_error) = probe_login_redirect_error(adapter.name(), &baseline_probe) {
         let _ = chunks.send(Err(auth_error)).await;
         return;
     }
@@ -1312,7 +1337,7 @@ pub async fn run_send(
                 let _ = chunks
                     .send(Err(provider_challenge_error(adapter.name())))
                     .await;
-            } else if let Some(auth_error) = login_redirect_error(&page.url()) {
+            } else if let Some(auth_error) = login_redirect_error(adapter.name(), &page.url()) {
                 let _ = chunks.send(Err(auth_error)).await;
             } else {
                 let _ = chunks.send(Err(error)).await;
@@ -1408,7 +1433,7 @@ pub async fn run_send(
         }
         // A login redirect after Send must not look like a slow model or
         // allow the previous warm-page response to complete successfully.
-        if let Some(auth_error) = probe_login_redirect_error(&probe) {
+        if let Some(auth_error) = probe_login_redirect_error(adapter.name(), &probe) {
             let _ = chunks.send(Err(auth_error)).await;
             return;
         }
@@ -1542,7 +1567,7 @@ pub async fn run_send(
                                 .await;
                             return;
                         }
-                        if let Some(auth_error) = probe_login_redirect_error(&final_probe) {
+                        if let Some(auth_error) = probe_login_redirect_error(adapter.name(), &final_probe) {
                             let _ = chunks.send(Err(auth_error)).await;
                             return;
                         }
@@ -1675,7 +1700,7 @@ pub async fn run_send(
                         .await;
                     return;
                 }
-                if let Some(auth_error) = probe_login_redirect_error(&final_probe) {
+                if let Some(auth_error) = probe_login_redirect_error(adapter.name(), &final_probe) {
                     let _ = chunks.send(Err(auth_error)).await;
                     return;
                 }
