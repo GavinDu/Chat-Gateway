@@ -61,9 +61,11 @@ function recordProviderDiagnostic(provider, state, errorCode = null) {
   // Store only stable local result codes, never raw upstream responses.
   const safeState = ["syncing", "uploaded", "unchanged", "no_cookies", "skipped", "failed"].includes(state)
     ? state : "unknown";
-  providerDiagnostics.set(provider, {
+  const entry = {
     state: safeState, issue: errorCode, updated_at: new Date().toISOString()
-  });
+  };
+  providerDiagnostics.set(provider, entry);
+  return entry;
 }
 // Every diagnostics response has independent per-provider attempt freshness.
 // Failed gateway status makes old local sync snapshots stale, but never
@@ -551,20 +553,32 @@ function queueProviderSync(provider, force = false) {
     // A queued sync is not active until its serialized provider task starts.
     // Expose only a fixed redacted category for the *current* owner; never
     // mistake this for authenticated login or leak cookie/progress payloads.
+    let inProgress = null;
     if (await providerDiagnosticScopeCurrent(provider, attempt)) {
       ensureGatewayDiagnosticIdentity(attempt);
-      recordProviderDiagnostic(provider, "syncing");
+      inProgress = recordProviderDiagnostic(provider, "syncing");
     }
+    // A delayed result can follow unlink/relink or an owner change. Remove
+    // only this attempt's in-progress record; never erase a newer attempt.
+    const clearStaleProgress = () => {
+      if (inProgress && providerDiagnostics.get(provider) === inProgress) {
+        providerDiagnostics.delete(provider);
+      }
+    };
     try {
       const result = await syncProvider(provider, {force:shouldForce});
       if (await providerDiagnosticScopeCurrent(provider, attempt)) {
         recordProviderDiagnostic(provider, result || "skipped");
         if (result === "uploaded") lastGatewayCheck = null;
+      } else {
+        clearStaleProgress();
       }
       return result;
     } catch (error) {
       if (await providerDiagnosticScopeCurrent(provider, attempt)) {
         recordProviderDiagnostic(provider, "failed", classifyRelayFailure(error));
+      } else {
+        clearStaleProgress();
       }
       throw error;
     }
