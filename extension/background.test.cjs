@@ -1547,3 +1547,54 @@ test("multiple manual syncs coalesce into one forced refresh behind an automatic
   for (let i = 0; i < 4; i++) await flushAsyncWork();
   assert.deepEqual(attempts, [false, true], "manual recovery runs once after the automatic import");
 });
+
+
+test("logout digest cleanup cannot clobber a concurrent other-provider commit", async () => {
+  const f = loadBackground(["chatgpt","claude"], [], true);
+  const state = {
+    gateway:"http://127.0.0.1:8080", connectionMode:"local",
+    linkedProviders:["chatgpt","claude"],
+    providerLinkEpochs:{chatgpt:"epoch-a",claude:"epoch-b"},
+    providerLinkPendingAttempts:{},
+    relaySnapshotVersions:{chatgpt:"digest-a-old",claude:"digest-b"}
+  };
+  let releaseRead, readEntered;
+  const reading = new Promise(resolve => {readEntered = resolve;});
+  const readGate = new Promise(resolve => {releaseRead = resolve;});
+  let heldRead = false;
+  f.sandbox.chrome.storage.local.get = async keys => {
+    const snap = {
+      ...state,
+      linkedProviders:[...state.linkedProviders],
+      providerLinkEpochs:{...state.providerLinkEpochs},
+      relaySnapshotVersions:{...state.relaySnapshotVersions}
+    };
+    if (!heldRead && Array.isArray(keys) && keys.includes("relaySnapshotVersions")) {
+      heldRead = true;
+      readEntered();
+      await readGate;
+    }
+    return snap;
+  };
+  f.sandbox.chrome.storage.local.set = async patch => Object.assign(state, patch);
+  f.sandbox.relayFetch = async () => ({ok:true,status:200});
+  const logout = new Promise(resolve => f.listeners.message[0]({
+    type:"logout-provider",provider:"claude"
+  }, {}, resolve));
+  await reading;
+  const otherUpload = f.sandbox.queueConsentMutation(async () => {
+    const now = await f.sandbox.chrome.storage.local.get(["relaySnapshotVersions"]);
+    await f.sandbox.chrome.storage.local.set({
+      relaySnapshotVersions:{...now.relaySnapshotVersions, chatgpt:"digest-a-new"}
+    });
+  });
+  await flushAsyncWork();
+  assert.equal(state.relaySnapshotVersions.chatgpt, "digest-a-old",
+    "logout must hold the consent writer throughout its snapshot cleanup");
+  releaseRead();
+  assert.equal((await logout).ok,true);
+  await otherUpload;
+  assert.equal(state.relaySnapshotVersions.chatgpt,"digest-a-new");
+  assert.equal(state.relaySnapshotVersions.claude,undefined);
+  assert.deepEqual(Array.from(state.linkedProviders),["chatgpt"]);
+});

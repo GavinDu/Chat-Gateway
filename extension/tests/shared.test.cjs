@@ -40,7 +40,10 @@ function loadShared(cookieFixtures = [], hasAllPermissions = true, storageValues
       },
       storage: { local: {
         get: async () => storageValues,
-        set: async update => Object.assign(storageValues, update)
+        set: async update => {
+          if (hooks.onStorageSet) return hooks.onStorageSet(update, storageValues);
+          Object.assign(storageValues, update);
+        }
       } }
     }
   };
@@ -816,4 +819,62 @@ test("sync stopwatch clamps unexpected timer jumps and ignores failing reporters
   for (const sample of seen) for (const value of Object.values(sample.durations_ms)) {
     assert.equal(value,120_000);
   }
+});
+
+
+test("concurrent cross-provider uploads preserve both snapshot digests", async () => {
+  const storage = {
+    gateway:"http://127.0.0.1:8080", connectionMode:"local",
+    linkedProviders:["chatgpt","claude"],
+    providerLinkEpochs:{chatgpt:"epoch-a",claude:"epoch-b"}
+  };
+  let entered;
+  let release;
+  const started = new Promise(resolve => {entered = resolve;});
+  const held = new Promise(resolve => {release = resolve;});
+  let writes = 0;
+  const api = loadShared([
+    {name:"session-a",value:"redacted-a",domain:".chatgpt.com",path:"/",secure:true,httpOnly:true},
+    {name:"session-b",value:"redacted-b",domain:".claude.ai",path:"/",secure:true,httpOnly:true}
+  ], true, storage, {
+    onStorageSet: async (patch, current) => {
+      writes++;
+      if (writes === 1) {entered(); await held;}
+      Object.assign(current, patch);
+    }
+  });
+  const first = api.syncProvider("chatgpt");
+  await started;
+  const second = api.syncProvider("claude");
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(writes, 1, "a second provider cannot read/write stale digest state");
+  release();
+  assert.deepEqual(await Promise.all([first,second]), ["uploaded","uploaded"]);
+  assert.match(storage.relaySnapshotVersions.chatgpt, /^[a-f0-9]{64}$/);
+  assert.match(storage.relaySnapshotVersions.claude, /^[a-f0-9]{64}$/);
+  assert.notEqual(storage.relaySnapshotVersions.chatgpt, storage.relaySnapshotVersions.claude);
+  assert.equal(await api.syncProvider("chatgpt"), "unchanged");
+  assert.equal(await api.syncProvider("claude"), "unchanged");
+});
+
+test("failed snapshot-version write releases cross-provider mutation queue", async () => {
+  const storage = {
+    gateway:"http://127.0.0.1:8080", connectionMode:"local",
+    linkedProviders:["chatgpt","claude"],
+    providerLinkEpochs:{chatgpt:"epoch-a",claude:"epoch-b"}
+  };
+  let failFirst = true;
+  const api = loadShared([
+    {name:"session-a",value:"redacted-a",domain:".chatgpt.com",path:"/",secure:true,httpOnly:true},
+    {name:"session-b",value:"redacted-b",domain:".claude.ai",path:"/",secure:true,httpOnly:true}
+  ], true, storage, {
+    onStorageSet: async (patch, current) => {
+      if (failFirst) {failFirst = false; throw new Error("simulated storage failure");}
+      Object.assign(current, patch);
+    }
+  });
+  await assert.rejects(() => api.syncProvider("chatgpt"), /simulated storage failure/);
+  assert.equal(await api.syncProvider("claude"), "uploaded");
+  assert.match(storage.relaySnapshotVersions.claude, /^[a-f0-9]{64}$/);
+  assert.equal(storage.relaySnapshotVersions.chatgpt, undefined);
 });
