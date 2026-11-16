@@ -5298,8 +5298,13 @@ mod text_selector_tests {
             .unwrap();
 
         for selector in [
-            "#hidden", "#disabled", "#ghost-parent", "#ghost-self",
-            "#pointer-parent", "#pointer-self", "#inert",
+            "#hidden",
+            "#disabled",
+            "#ghost-parent",
+            "#ghost-self",
+            "#pointer-parent",
+            "#pointer-self",
+            "#inert",
         ] {
             assert!(
                 super::click_first(&page, &[selector]).is_err(),
@@ -5310,7 +5315,8 @@ mod text_selector_tests {
         assert!(super::click_first(
             &page,
             &["#hidden", "#pointer-parent", "#ghost-self", "#valid"]
-        ).is_ok());
+        )
+        .is_ok());
         assert_eq!(page.evaluate("window.clicked").as_str(), Some("valid"));
 
         // The first matching CSS node must be actionable. Never silently
