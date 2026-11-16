@@ -687,7 +687,10 @@ mod send_auth_redirect_tests {
             "https://gemini.google.com/app?q=auth",
             "data:text/html,<p>Login</p>",
         ] {
-            assert!(login_redirect_error("chatgpt", url).is_none(), "false expiry: {url}");
+            assert!(
+                login_redirect_error("chatgpt", url).is_none(),
+                "false expiry: {url}"
+            );
         }
     }
 }
@@ -1567,7 +1570,9 @@ pub async fn run_send(
                                 .await;
                             return;
                         }
-                        if let Some(auth_error) = probe_login_redirect_error(adapter.name(), &final_probe) {
+                        if let Some(auth_error) =
+                            probe_login_redirect_error(adapter.name(), &final_probe)
+                        {
                             let _ = chunks.send(Err(auth_error)).await;
                             return;
                         }
