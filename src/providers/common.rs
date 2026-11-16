@@ -378,7 +378,10 @@ pub fn response_probe(
             const challenge = ["verify you are human", "confirm you are not a robot", "unusual traffic", "complete the captcha", "security challenge", "checking your browser"].some(marker => body.includes(marker));
             let postAnswerAffordance = false;
             if (lastResponseNode) {{
-                const scopeSelector = "article, [data-message-author-role='assistant'], [data-testid='assistant-message'], [data-testid*='conversation-turn'], [data-testid*='message']";
+                // Only explicit turn roots may attest completion. A generic
+                // message-list or conversation wrapper can contain an earlier
+                // Copy control alongside the current incomplete response.
+                const scopeSelector = "article, [data-message-author-role='assistant'], [data-testid='assistant-message'], [data-testid^='assistant-message-'], [data-testid='conversation-turn'], [data-testid^='conversation-turn-'], [data-testid='message']";
                 // A Copy/Retry control is terminal evidence ONLY when scoped to
                 // the same visible response turn. Climbing past an <article>
                 // can discover an old reply's Copy button in the conversation
@@ -386,14 +389,25 @@ pub fn response_probe(
                 let scope = null;
                 try {{ scope = lastResponseNode.closest(scopeSelector); }} catch (_) {{}}
                 if (scope) {{
-                    let buttons = [];
-                    try {{ buttons = Array.from(scope.querySelectorAll("button, [role='button']")); }} catch (_) {{}}
-                    postAnswerAffordance = buttons.some(button => visible(button) &&
+                    // An <article> may wrap a whole conversation instead of
+                    // one turn. If it contains another independent visible
+                    // answer root, none of its buttons are attributable to
+                    // this response. Nested selectors for this SAME reply
+                    // are not independent sibling turns.
+                    const hasOtherReply = Array.from(nodes).some(node =>
+                        node !== lastResponseNode && scope.contains(node) &&
+                        !lastResponseNode.contains(node) &&
+                        !node.contains(lastResponseNode));
+                    if (!hasOtherReply) {{
+                        let buttons = [];
+                        try {{ buttons = Array.from(scope.querySelectorAll("button, [role='button']")); }} catch (_) {{}}
+                        postAnswerAffordance = buttons.some(button => visible(button) &&
                         /copy|regenerate|retry|good response|bad response|thumbs up|thumbs down/.test(
                             ((button.getAttribute("aria-label") || "") + " " +
                             (button.getAttribute("data-testid") || "") + " " +
                             (button.innerText || button.textContent || "")).toLowerCase()
                         ));
+                    }}
                 }}
                 // An unrecognized turn root cannot safely borrow controls
                 // from an ancestor. Retain the conservative idle fallback.
@@ -630,6 +644,90 @@ mod streaming_visibility_regression_tests {
         assert!(
             !disabled.post_answer_affordance,
             "disabled current Copy must not borrow an enabled old Copy"
+        );
+    }
+
+    #[tokio::test]
+    async fn message_list_cannot_borrow_previous_reply_copy_control() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <div data-testid="message-list">
+                <div class="answer">previous complete reply</div>
+                <button aria-label="Copy">Copy old answer</button>
+                <div class="answer">current partial reply</div>
+            </div>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        let probe = response_probe(&page, &[".answer"], false);
+        assert_eq!(probe.text.as_deref(), Some("current partial reply"));
+        assert!(
+            !probe.post_answer_affordance,
+            "message-list is a conversation wrapper, not a reply turn"
+        );
+    }
+
+    #[tokio::test]
+    async fn conversation_article_with_two_reply_roots_cannot_claim_done() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body><article>
+            <div class="answer">previous complete reply</div>
+            <button aria-label="Copy">Copy old answer</button>
+            <div class="answer">current partial reply</div>
+        </article></body></html>"#;
+        let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        let probe = response_probe(&page, &[".answer"], false);
+        assert_eq!(probe.count, 2);
+        assert!(
+            !probe.post_answer_affordance,
+            "conversation-wide article must not borrow old Copy"
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_assistant_turn_owns_its_completion_control() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body><div data-testid="message-list">
+            <div data-testid="assistant-message-previous">
+                <div class="answer">previous complete reply</div>
+                <button aria-label="Copy">Copy old answer</button>
+            </div>
+            <div data-testid="assistant-message-current">
+                <div class="answer">current partial reply</div>
+                <button id="current-copy" aria-label="Copy" hidden>Copy</button>
+            </div>
+        </div></body></html>"#;
+        let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        let partial = response_probe(&page, &[".answer"], false);
+        assert!(
+            !partial.post_answer_affordance,
+            "the previous turn's Copy cannot finish the current turn"
+        );
+        page.evaluate("document.querySelector('#current-copy').hidden = false");
+        let finished = response_probe(&page, &[".answer"], false);
+        assert!(
+            finished.post_answer_affordance,
+            "the current explicit assistant turn may own its Copy control"
         );
     }
 
