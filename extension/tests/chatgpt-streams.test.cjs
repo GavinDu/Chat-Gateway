@@ -299,9 +299,11 @@ test('rejected queued read retains backpressure until a chunk is consumed', asyn
     getReader(...args) {
       const reader = super.getReader(...args);
       const originalRead = reader.read.bind(reader);
-      reader.read = view => view === null
-        ? Promise.reject(new TypeError('invalid read view'))
-        : originalRead();
+      reader.read = view => {
+        if (view === null) return Promise.reject(new TypeError('invalid read view'));
+        if (view === 'malformed') return Promise.resolve(undefined);
+        return originalRead();
+      };
       return reader;
     }
   }
@@ -318,6 +320,8 @@ test('rejected queued read retains backpressure until a chunk is consumed', asyn
 
   const reader = stream.getReader();
   await assert.rejects(reader.read(null), /invalid read view/);
+  assert.equal(await reader.read('malformed'), undefined,
+    'an invalid fulfilled result must not consume queue credit');
   await tick();
   assert.equal(pulls, 1, 'rejected read must not trigger a second pull');
   assert.equal(controller.desiredSize, 0, 'rejected read must retain queued credit');
