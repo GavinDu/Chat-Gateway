@@ -2676,13 +2676,21 @@ pub fn is_login_url(url: &str) -> bool {
     )
 }
 
+/// An explicit login route on a *different* recognized provider cannot
+/// prove that the requested provider's session expired. Let the strict
+/// provider-origin fence report unexpected navigation instead. The
+/// allowlisted cross-provider SSO hosts remain separately tracked by #1090.
+pub(crate) fn login_url_matches_provider(provider: &str, url: &str) -> bool {
+    is_login_url(url) && provider_origin_for_url(url).is_none_or(|actual| actual == provider)
+}
+
 pub fn is_login_page(page: &Page) -> bool {
     is_login_url(&page.url())
 }
 
 #[cfg(test)]
 mod login_url_classification_tests {
-    use super::is_login_url;
+    use super::{is_login_url, login_url_matches_provider};
 
     #[test]
     fn recognizes_explicit_provider_and_sso_redirects() {
@@ -2724,6 +2732,45 @@ mod login_url_classification_tests {
                 is_login_url(url),
                 "known provider login not recognized: {url}"
             );
+        }
+    }
+
+    #[test]
+    fn recognized_cross_provider_login_cannot_expire_another_provider() {
+        let logins = [
+            ("qwen", "https://chat.qwen.ai/login"),
+            ("metaai", "https://www.meta.ai/login"),
+            ("claude", "https://claude.ai/signin"),
+            ("chatgpt", "https://chatgpt.com/auth/login"),
+            ("gemini", "https://gemini.google.com/login"),
+            ("grok", "https://grok.com/oauth2/authorize"),
+            ("mistral", "https://chat.mistral.ai/login"),
+            ("perplexity", "https://www.perplexity.ai/signin"),
+            ("manus", "https://manus.im/auth/login"),
+        ];
+        for (requested, _) in logins {
+            for (actual, url) in logins {
+                assert_eq!(
+                    login_url_matches_provider(requested, url),
+                    requested == actual,
+                    "login for {actual} must not expire {requested}"
+                );
+            }
+        }
+        // Explicitly enumerated SSO hosts retain their previous behavior
+        // until source-verified per-provider IdP evidence exists (#1090).
+        for url in [
+            "https://accounts.google.com/v3/signin/challenge",
+            "https://login.microsoftonline.com/tenant/oauth2/authorize",
+        ] {
+            assert!(login_url_matches_provider("chatgpt", url));
+        }
+        for url in [
+            "https://login.attacker.invalid/home",
+            "https://manus.im.attacker.invalid/login",
+            "http://chatgpt.com/auth/login",
+        ] {
+            assert!(!login_url_matches_provider("chatgpt", url));
         }
     }
 
@@ -2784,8 +2831,7 @@ mod login_url_classification_tests {
 }
 
 pub fn check_session(provider: &str, page: &Page) -> anyhow::Result<()> {
-    if is_login_page(page) {
-        let _ = provider;
+    if login_url_matches_provider(provider, &page.url()) {
         return Err(anyhow::Error::new(
             crate::browser::pool::ProviderSessionExpiredError,
         ));
