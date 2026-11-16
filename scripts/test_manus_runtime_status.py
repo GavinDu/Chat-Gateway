@@ -113,6 +113,8 @@ class ManusRuntimeStatusContractTests(unittest.TestCase):
         self.assertIn("--noproxy", args)
         self.assertEqual(args[args.index("--noproxy") + 1], "*")
         self.assertIn("--max-time", args)
+        self.assertIn("--max-filesize", args)
+        self.assertEqual(args[args.index("--max-filesize") + 1], "131072")
         self.assertIn("--fail", args)
         self.assertNotIn("--location", args)
         self.assertNotIn("Authorization", json.dumps(args))
