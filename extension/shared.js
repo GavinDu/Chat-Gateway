@@ -134,8 +134,11 @@ async function relayFetch(path, options = {}, expectedConnection = null) {
 }
 
 async function providerCookieSnapshot(provider, afterPermissionCheck = null) {
+  // Never authorize an inherited Object.prototype name as a provider.
+  if (typeof provider !== "string" || !Object.hasOwn(PROVIDERS, provider)) {
+    throw new Error("Unsupported provider.");
+  }
   const domains = PROVIDERS[provider];
-  if (!domains) throw new Error("Unsupported provider.");
   // A partial permission grant must never overwrite a valid gateway session
   // with an incomplete cookie set. Check every declared root and subdomain
   // pattern before reading or transmitting any session material.
@@ -252,6 +255,9 @@ async function syncProvider(provider, {
   force = false, onProgress = null,
   snapshotVersionMutation = queueSnapshotVersionMutation
 } = {}) {
+  if (typeof provider !== "string" || !Object.hasOwn(PROVIDERS, provider)) {
+    throw new Error("Unsupported provider.");
+  }
   const {gateway, token, connectionMode, linkedProviders = [], providerLinkEpochs = {}} =
     await chrome.storage.local.get(["gateway", "token", "connectionMode", "linkedProviders", "providerLinkEpochs"]);
   if (!hasRelayConnection({gateway, token, connectionMode}) || !linkedProviders.includes(provider)) return "skipped";
