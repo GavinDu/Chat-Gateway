@@ -226,6 +226,7 @@ printf 'providers:\n  - name: manus\n    enabled: false\n    enabled: true\npriv
 assert_redacted_status_failure
 
 printf 'providers:\n  - name: manus\n    enabled: true\nprivate: SUPER_SECRET_NEVER_OUTPUT\n' > "$TMP/status-symlink-target"
+rm -f "$CHAT_GATEWAY_CONFIG"
 ln -s "$TMP/status-symlink-target" "$CHAT_GATEWAY_CONFIG"
 assert_redacted_status_failure
 rm "$CHAT_GATEWAY_CONFIG"
