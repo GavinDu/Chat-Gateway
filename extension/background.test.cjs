@@ -1158,6 +1158,37 @@ test("in-flight syncing status cannot survive a gateway replacement", async () =
     "stale import completion must not overwrite replacement gateway status");
 });
 
+test("gateway A-B-A identity transition invalidates a held old status probe", async () => {
+  const f = loadBackground(["chatgpt"], [], true);
+  const state = {
+    gateway:"http://127.0.0.1:8080", connectionMode:"local", linkedProviders:["chatgpt"]
+  };
+  f.sandbox.chrome.storage.local.get = async () => ({...state});
+  let release;
+  let dispatched = false;
+  const held = new Promise(resolve => { release = resolve; });
+  f.sandbox.relayFetch = async () => {
+    dispatched = true;
+    await held;
+    return {ok:true,status:200,json:async()=>({providers:[{provider:"chatgpt",linked:true}]})};
+  };
+  const first = new Promise(resolve =>
+    f.listeners.message[0]({type:"relay-diagnostics",force:true},{},resolve));
+  for (let i = 0; i < 16 && !dispatched; i++) await flushAsyncWork();
+  assert.equal(dispatched, true);
+
+  state.gateway = "http://localhost:9090";
+  f.sandbox.ensureGatewayDiagnosticIdentity(state);
+  state.gateway = "http://127.0.0.1:8080";
+  f.sandbox.ensureGatewayDiagnosticIdentity(state);
+  release();
+
+  const old = await first;
+  assert.equal(old.ok, false, "return to gateway A must not revive its stale probe");
+  assert.equal(old.gateway_issue, "gateway_connection_changed");
+  assert.equal(old.gateway, undefined);
+});
+
 test("provider sync timestamp is independent of login and turns stale when gateway status fails", async () => {
   const f = loadBackground(["chatgpt", "claude"]);
   let healthy = true;
