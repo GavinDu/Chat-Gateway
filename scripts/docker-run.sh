@@ -217,7 +217,7 @@ manus_runtime_status() {
     return 1
   fi
   local response
-  if ! response="$(curl --noproxy '*' --max-time 8 --connect-timeout 3 \
+  if ! response="$(curl --noproxy '*' --max-time 8 --connect-timeout 3 --max-filesize 131072 \
     --fail --silent --request POST "http://127.0.0.1:$PORT/relay/v1/status" 2>/dev/null)"; then
     echo "Manus runtime status: unavailable" >&2
     return 1
