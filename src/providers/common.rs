@@ -4139,10 +4139,11 @@ fn submission_snapshot(
     })
 }
 
-/// For Qwen and Manus, a response-node increase plus an emptied composer can
-/// happen when history hydrates over a dropped draft. Require a fresh
-/// prompt-bound user turn or a newly activated generation indicator instead.
-/// This intentionally fails closed until signed-in DOM is evidenced.
+/// For Grok and the previously strict adapters, an assistant node count
+/// increase plus an emptied composer can reflect SPA history hydration over
+/// an unaccepted draft. Require a fresh prompt-bound user turn or a newly
+/// activated generation indicator. Do not infer a completed new turn from
+/// previously rendered assistant content alone.
 fn submission_observed_for_adapter(
     provider: &str,
     page: &Page,
@@ -4150,7 +4151,7 @@ fn submission_observed_for_adapter(
     after: &SubmissionSnapshot,
     prompt: &str,
 ) -> anyhow::Result<bool> {
-    if matches!(provider, "qwen" | "manus")
+    if matches!(provider, "qwen" | "grok" | "manus")
         && after.user_turn_count <= before.user_turn_count
         && !(after.streaming && !before.streaming)
     {
