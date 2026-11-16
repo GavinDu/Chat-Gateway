@@ -238,7 +238,20 @@ function createSyncPhaseClock(onProgress) {
   return {transition, finish:() => transition(null)};
 }
 
-async function syncProvider(provider, {force = false, onProgress = null} = {}) {
+// Local isolated callers share a promise queue; the Chrome worker supplies
+// its broader consent-mutation queue so link/logout and digest updates have
+// one storage writer. A failed mutation must not poison later providers.
+let lastSnapshotVersionMutation = Promise.resolve();
+function queueSnapshotVersionMutation(work) {
+  const pending = lastSnapshotVersionMutation.catch(() => {}).then(work);
+  lastSnapshotVersionMutation = pending.catch(() => {});
+  return pending;
+}
+
+async function syncProvider(provider, {
+  force = false, onProgress = null,
+  snapshotVersionMutation = queueSnapshotVersionMutation
+} = {}) {
   const {gateway, token, connectionMode, linkedProviders = [], providerLinkEpochs = {}} =
     await chrome.storage.local.get(["gateway", "token", "connectionMode", "linkedProviders", "providerLinkEpochs"]);
   if (!hasRelayConnection({gateway, token, connectionMode}) || !linkedProviders.includes(provider)) return "skipped";
@@ -295,11 +308,22 @@ async function syncProvider(provider, {force = false, onProgress = null} = {}) {
     }
   }
   if (!response.ok) throw new Error("Gateway rejected session update (" + response.status + "). Check vault mode and provider permissions.");
-  const latest = await chrome.storage.local.get(["gateway", "token", "connectionMode", "linkedProviders", "providerLinkEpochs", "relaySnapshotVersions"]);
-  if (version && latest.gateway === gateway && latest.token === token && latest.connectionMode === connectionMode &&
-      latest.linkedProviders?.includes(provider) && latest.providerLinkEpochs?.[provider] === linkEpoch) {
-    await chrome.storage.local.set({
-      relaySnapshotVersions:{...(latest.relaySnapshotVersions || {}), [provider]:version}
+  if (version) {
+    // Re-read and validate inside the shared writer, not before awaiting it.
+    // Different providers can upload concurrently, while logout/relink can
+    // rotate this provider's consent epoch. Never overwrite another digest.
+    await snapshotVersionMutation(async () => {
+      const latest = await chrome.storage.local.get([
+        "gateway", "token", "connectionMode", "linkedProviders",
+        "providerLinkEpochs", "relaySnapshotVersions"
+      ]);
+      if (latest.gateway !== gateway || latest.token !== token ||
+          latest.connectionMode !== connectionMode ||
+          !latest.linkedProviders?.includes(provider) ||
+          latest.providerLinkEpochs?.[provider] !== linkEpoch) return;
+      await chrome.storage.local.set({
+        relaySnapshotVersions:{...(latest.relaySnapshotVersions || {}), [provider]:version}
+      });
     });
   }
   return "uploaded";
