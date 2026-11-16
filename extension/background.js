@@ -6,6 +6,19 @@ const debounceTimers = new Map();
 const providerDiagnostics = new Map();
 // Only worker-internal consent ownership; never expose epochs in diagnostics.
 const providerDiagnosticEpochs = new Map();
+// Only these fixed, bounded integer timing properties may reach the popup.
+const IMPORT_PHASES = ["permission", "cookie_read", "digest", "upload"];
+const IMPORT_MAX_DURATION_MS = 120_000;
+function redactedImportTimings(value) {
+  const timings = {};
+  for (const phase of IMPORT_PHASES) {
+    const n = value?.[phase];
+    if (typeof n === "number" && Number.isFinite(n)) {
+      timings[phase] = Math.max(0, Math.min(IMPORT_MAX_DURATION_MS, Math.floor(n)));
+    }
+  }
+  return timings;
+}
 let diagnosticIdentityGeneration = 0;
 // Keep cache shorter than the popup check interval so token revocation is
 // never masked by a still-valid dashboard snapshot on the next poll.
@@ -61,13 +74,16 @@ async function hasOriginPermissions(origins) {
   try { return Boolean(await chrome.permissions.contains({origins})); }
   catch { return false; }
 }
-function recordProviderDiagnostic(provider, state, errorCode = null, attempt = null) {
+function recordProviderDiagnostic(provider, state, errorCode = null, attempt = null, telemetry = null) {
   // A provider sync attempt is NOT authenticated-login verification.
-  // Store only stable local result codes, never raw upstream responses.
+  // All telemetry is revalidated to fixed categories and bounded integers.
   const safeState = ["syncing", "uploaded", "unchanged", "no_cookies", "skipped", "failed"].includes(state)
     ? state : "unknown";
   const entry = {
-    state: safeState, issue: errorCode, updated_at: new Date().toISOString()
+    state: safeState, issue: errorCode, updated_at: new Date().toISOString(),
+    phase: IMPORT_PHASES.includes(telemetry?.phase) && safeState === "syncing"
+      ? telemetry.phase : null,
+    durations_ms: redactedImportTimings(telemetry?.durations_ms),
   };
   providerDiagnostics.set(provider, entry);
   if (attempt) providerDiagnosticEpochs.set(provider, attempt.providerLinkEpochs?.[provider]);
@@ -90,6 +106,8 @@ function finalizeRelayDiagnostics(result, requestedGeneration, requestedEpochs) 
         state: previous?.state || "not_attempted",
         issue: previous?.issue || null,
         updated_at: previous?.updated_at || null,
+        phase: previous?.phase || null,
+        durations_ms: redactedImportTimings(previous?.durations_ms),
         stale: !result.ok,
       }];
     })
@@ -582,12 +600,19 @@ function queueProviderSync(provider, force = false) {
     const clearStaleProgress = () => {
       if (inProgress && providerDiagnostics.get(provider) === inProgress) {
         providerDiagnostics.delete(provider);
+        providerDiagnosticEpochs.delete(provider);
       }
     };
     try {
-      const result = await syncProvider(provider, {force:shouldForce});
+      const onProgress = sample => {
+        if (!inProgress || providerDiagnostics.get(provider) !== inProgress) return;
+        // No raw session, URL, cookie or account data enters this callback.
+        inProgress.phase = IMPORT_PHASES.includes(sample?.phase) ? sample.phase : null;
+        inProgress.durations_ms = redactedImportTimings(sample?.durations_ms);
+      };
+      const result = await syncProvider(provider, {force:shouldForce,onProgress});
       if (await providerDiagnosticScopeCurrent(provider, attempt)) {
-        recordProviderDiagnostic(provider, result || "skipped", null, attempt);
+        recordProviderDiagnostic(provider, result || "skipped", null, attempt, inProgress);
         if (result === "uploaded") lastGatewayCheck = null;
       } else {
         clearStaleProgress();
@@ -595,7 +620,7 @@ function queueProviderSync(provider, force = false) {
       return result;
     } catch (error) {
       if (await providerDiagnosticScopeCurrent(provider, attempt)) {
-        recordProviderDiagnostic(provider, "failed", classifyRelayFailure(error), attempt);
+        recordProviderDiagnostic(provider, "failed", classifyRelayFailure(error), attempt, inProgress);
       } else {
         clearStaleProgress();
       }
@@ -641,6 +666,7 @@ function logoutProviderFromRelay(provider) {
     }, {gateway:expected.gateway,token:expected.token,connectionMode:expected.connectionMode});
     if (!response.ok) throw new Error("Gateway logout failed (" + response.status + "). Auto sync is paused; retry logout.");
     providerDiagnostics.delete(provider);
+    providerDiagnosticEpochs.delete(provider);
     lastGatewayCheck = null;
     const latest = await chrome.storage.local.get(["gateway", "token", "connectionMode", "relaySnapshotVersions"]);
     if (latest.gateway === expected.gateway && latest.token === expected.token && latest.connectionMode === expected.connectionMode) {
