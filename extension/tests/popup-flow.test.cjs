@@ -227,7 +227,7 @@ function loadPopup({failCookieDomain = null, includeSecondProvider = false, manu
   };
   vm.createContext(context);
   vm.runInContext(fs.readFileSync(path.join(__dirname,"..","popup.js"),"utf8")+
-    "\nglobalThis.testControls={refreshStatus,connectProvider,logoutProvider,initialize,safeStatusErrorMessage,safeProviderActionError};",context);
+    "\nglobalThis.testControls={refreshStatus,connectProvider,logoutProvider,initialize,safeStatusErrorMessage,safeProviderActionError,safeGatewayActionError};",context);
   return {values,server,elements,byId,chromeCalls,intervals,controls:context.testControls,context};
 }
 
@@ -538,6 +538,62 @@ test("explicit gateway disconnect removes pending approval and stops polling",as
 });
 
 
+
+test("Pair and Unpair popup failures never render raw gateway secrets", async () => {
+  const leak="fetch failed https://private.example/relay/v1/unpair?token=private&poll_secret=private";
+  const paired=loadPopup();
+  await new Promise(resolve=>setImmediate(resolve));
+  paired.byId("gateway").value="https://private.example";
+  paired.byId("code").value="12345678";
+  paired.context.fetch=async()=>{throw new Error(leak);};
+  await paired.byId("pair").handlers.click();
+  assert.equal(paired.byId("message").textContent,
+    "Gateway connection request failed. Check browser permissions and retry.");
+  assert.equal(paired.values.token,undefined);
+  assert.equal(paired.values.gateway,"http://127.0.0.1:8080");
+  assert.ok(!paired.byId("message").textContent.includes("private.example"));
+
+  // Existing fixed user guidance remains intact for invalid pairing codes.
+  paired.byId("code").value="not-eight";
+  await paired.byId("pair").handlers.click();
+  assert.equal(paired.byId("message").textContent,
+    "Enter the fresh 8-digit code from your private remote gateway.");
+
+  const staleWorker=loadPopup();
+  await new Promise(resolve=>setImmediate(resolve));
+  staleWorker.byId("gateway").value="https://private.example";
+  staleWorker.byId("code").value="12345678";
+  const send=staleWorker.context.chrome.runtime.sendMessage;
+  staleWorker.context.chrome.runtime.sendMessage=async msg =>
+    msg.type==="connect-paired-relay" ? {ok:false,error:leak} : send(msg);
+  await staleWorker.byId("pair").handlers.click();
+  assert.equal(staleWorker.byId("message").textContent,
+    "Gateway connection request failed. Check browser permissions and retry.");
+  assert.equal(staleWorker.values.token,undefined);
+
+  const unpair=loadPopup();
+  await new Promise(resolve=>setImmediate(resolve));
+  unpair.values.gateway="https://private.example";
+  unpair.values.connectionMode="paired";
+  unpair.values.token="c".repeat(64);
+  unpair.values.linkedProviders=["metaai"];
+  unpair.context.relayFetch=async()=>{throw new Error(leak);};
+  await unpair.byId("unpair").handlers.click();
+  assert.equal(unpair.byId("message").textContent,
+    "Gateway disconnect failed. Check the connection and retry.");
+  assert.equal(unpair.values.token,"c".repeat(64));
+  assert.deepEqual(Array.from(unpair.values.linkedProviders),["metaai"]);
+  assert.ok(!unpair.chromeCalls.some(x=>x==="disconnect-paired-relay:"));
+  assert.ok(!unpair.byId("message").textContent.includes("poll_secret"));
+
+  const safe=unpair.controls.safeGatewayActionError;
+  assert.equal(safe(new Error("Could not revoke the install token."),"fallback"),
+    "Could not revoke the install token.");
+  for(const message of [leak, "Could not revoke the install token. token=private",
+      "Paired gateway connection changed before disconnect. account=private"]) {
+    assert.equal(safe(new Error(message),"fallback"),"fallback");
+  }
+});
 
 test("remote legacy Pair uses worker-owned generation-fenced commit",async()=>{
   const popup=loadPopup();
