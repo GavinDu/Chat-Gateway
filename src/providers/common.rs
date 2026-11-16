@@ -4264,6 +4264,94 @@ fn submission_accepted(before: &SubmissionSnapshot, after: &SubmissionSnapshot) 
 }
 
 #[cfg(test)]
+mod perplexity_enter_fallback_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_lone_ask_search_editor_never_submits_via_synthetic_enter() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body><form id="search">
+            <textarea id="ask" placeholder="Ask anything"></textarea>
+            </form><script>
+            window.enterCount = 0;
+            document.querySelector('#ask').addEventListener('keydown', event => {
+                if (event.key === 'Enter') window.enterCount++;
+            });
+            </script></body></html>"#;
+        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        page.evaluate(
+            "document.documentElement.setAttribute('data-chat-gateway-test-fixture', '')",
+        );
+        let set = EffectiveSelectorSet {
+            picker: vec![],
+            input: vec!["#ask".to_owned()],
+            send: vec!["button[aria-label='Submit']".to_owned()],
+            response: vec![],
+        };
+        let error = send_prompt("perplexity", &mut page, &set, "private fixture request")
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("synthetic Enter is not a supported submission path"),
+            "an Ask/search editor with no explicit thread Send must fail closed"
+        );
+        assert_eq!(page.evaluate("window.enterCount").as_f64(), Some(0.0));
+        assert_eq!(
+            page.evaluate("document.querySelector('#ask').value")
+                .as_str(),
+            Some("private fixture request"),
+            "no rejected draft is silently entered or lost"
+        );
+    }
+
+    #[tokio::test]
+    async fn one_actionable_perplexity_send_still_clicks_without_enter() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body><form id="thread">
+            <textarea id="ask" placeholder="Ask follow-up"></textarea>
+            <button type="button" aria-label="Submit" id="send"
+              onclick="window.clickCount++">Send</button>
+            </form><script>
+            window.enterCount = 0; window.clickCount = 0;
+            document.querySelector('#ask').addEventListener('keydown', event => {
+                if (event.key === 'Enter') window.enterCount++;
+            });
+            </script></body></html>"#;
+        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        page.evaluate(
+            "document.documentElement.setAttribute('data-chat-gateway-test-fixture', '')",
+        );
+        let set = EffectiveSelectorSet {
+            picker: vec![],
+            input: vec!["#ask".to_owned()],
+            send: vec!["button[aria-label='Submit']".to_owned()],
+            response: vec![],
+        };
+        send_prompt("perplexity", &mut page, &set, "private fixture request")
+            .await
+            .expect("a unique actionable thread Send remains supported");
+        assert_eq!(page.evaluate("window.clickCount").as_f64(), Some(1.0));
+        assert_eq!(page.evaluate("window.enterCount").as_f64(), Some(0.0));
+    }
+}
+
+#[cfg(test)]
 mod pre_send_retention_tests {
     #[tokio::test]
     async fn late_framework_clear_after_typing_does_not_click_send() {
