@@ -770,7 +770,10 @@ mod streaming_visibility_regression_tests {
         );
         page.evaluate("document.querySelector('#reply-copy').hidden = false");
         let done = response_probe(&page, &[".answer"], false);
-        assert!(done.post_answer_affordance, "exact current-turn Copy remains supported");
+        assert!(
+            done.post_answer_affordance,
+            "exact current-turn Copy remains supported"
+        );
         page.evaluate("document.querySelector('#reply-copy').disabled = true");
         let disabled = response_probe(&page, &[".answer"], false);
         assert!(
