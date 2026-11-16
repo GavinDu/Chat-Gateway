@@ -227,7 +227,7 @@ function loadPopup({failCookieDomain = null, includeSecondProvider = false, manu
   };
   vm.createContext(context);
   vm.runInContext(fs.readFileSync(path.join(__dirname,"..","popup.js"),"utf8")+
-    "\nglobalThis.testControls={refreshStatus,connectProvider,logoutProvider};",context);
+    "\nglobalThis.testControls={refreshStatus,connectProvider,logoutProvider,safeProviderActionError};",context);
   return {values,server,elements,byId,chromeCalls,intervals,controls:context.testControls,context};
 }
 
@@ -343,6 +343,54 @@ test("connected dashboard exposes login and small logout, then allows reconnecti
   assert.equal(popup.server.linked,true);
   assert.ok(popup.chromeCalls.includes("logout-provider:metaai"));
   assert.equal(popup.chromeCalls.filter(x=>x==="sync-provider:metaai").length,2);
+});
+
+test("provider link and logout buttons never display raw worker or Chrome errors", async () => {
+  const popup = loadPopup();
+  popup.values.token="c".repeat(64);
+  await popup.controls.refreshStatus();
+  const controls=()=>popup.byId("status").children[0]
+    .children.find(n=>n.className==="provider-actions").children;
+  const link=controls().find(b=>b.textContent==="Log in / Connect");
+  const secret="Chrome runtime failed https://private.invalid/relay?token=private&poll_secret=private";
+  const publicLinkError="Provider connection failed. Check browser permissions and gateway status, then retry.";
+
+  popup.context.chrome.permissions.request=async()=>{throw new Error(secret);};
+  await link.handlers.click();
+  assert.equal(popup.byId("message").textContent,publicLinkError);
+  assert.deepEqual(Array.from(popup.values.linkedProviders),[],
+    "failed permission request must not link provider consent");
+
+  popup.context.chrome.permissions.request=async()=>false;
+  await link.handlers.click();
+  assert.equal(popup.byId("message").textContent,"Provider permissions were not granted.");
+
+  popup.context.chrome.permissions.request=async()=>{throw new Error("Provider permissions were not granted. token=private");};
+  await link.handlers.click();
+  assert.equal(popup.byId("message").textContent,publicLinkError);
+
+  // Existing popup can receive a response from an old extension worker.
+  // Treat its arbitrary returned error as untrusted even after the new worker
+  // API was changed to emit only fixed diagnostic codes.
+  popup.server.linked=true;
+  popup.values.linkedProviders=["metaai"];
+  await popup.controls.refreshStatus();
+  const logout=controls().find(b=>b.textContent==="Log out");
+  const original=popup.context.chrome.runtime.sendMessage;
+  popup.context.chrome.runtime.sendMessage=async request=>
+    request.type==="logout-provider" ? {ok:false,error:secret} : original(request);
+  await logout.handlers.click();
+  assert.equal(popup.byId("message").textContent,
+    "Provider logout unavailable. Check gateway status and retry.");
+  assert.ok(!popup.byId("message").textContent.includes("private"));
+  assert.deepEqual(Array.from(popup.values.linkedProviders),["metaai"]);
+
+  const safe=popup.controls.safeProviderActionError;
+  assert.equal(safe(new Error("Gateway sync timed out. Check the connection and retry."),"fallback"),
+    "Gateway sync timed out. Check the connection and retry.");
+  assert.equal(safe(new Error("Gateway sync timed out. Check the connection and retry. token=private"),"fallback"),
+    "fallback");
+  assert.equal(safe(new Error(secret),"fallback"),"fallback");
 });
 
 test("explicit provider link persists one epoch and only re-link after logout rotates it", async () => {
