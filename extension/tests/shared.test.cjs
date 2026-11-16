@@ -121,6 +121,54 @@ test("a caller cannot override the no-redirect policy on credentialed relay requ
   assert.equal(api.fetchCalls[0].options.redirect, "error");
 });
 
+test("an already-cancelled owner never dispatches a relay cookie snapshot", async () => {
+  const controller = new AbortController();
+  controller.abort();
+  const api = loadShared([], true, {
+    gateway: "http://127.0.0.1:8080", connectionMode: "local"
+  });
+  await assert.rejects(
+    () => api.relayFetch("/relay/v1/session/chatgpt", {
+      method:"POST", body:"private-cookie-snapshot", signal:controller.signal
+    }),
+    error => {
+      assert.match(error.message, /Gateway request cancelled/);
+      assert.doesNotMatch(error.message, /cookie|private-cookie-snapshot|timed out/i);
+      return true;
+    }
+  );
+  assert.equal(api.fetchCalls.length, 0, "an aborted owner may not dispatch even a single fetch");
+});
+
+test("owner cancellation aborts one pending relay POST without a false timeout or secret leak", async () => {
+  const controller = new AbortController();
+  const api = loadShared([], true, {
+    gateway: "http://127.0.0.1:8080", connectionMode: "local"
+  }, {
+    onFetch(_url, options) {
+      return new Promise((_resolve, reject) => {
+        options.signal.addEventListener("abort", () =>
+          reject(new Error("raw upstream failure cookie=private-secret")), {once:true});
+      });
+    }
+  });
+  const pending = api.relayFetch("/relay/v1/session/chatgpt", {
+    method:"POST", body:"private-cookie-snapshot", signal:controller.signal
+  });
+  for (let i = 0; i < 8 && !api.fetchCalls.length; i++) {
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  assert.equal(api.fetchCalls.length, 1);
+  controller.abort();
+  await assert.rejects(pending, error => {
+    assert.match(error.message, /Gateway request cancelled/);
+    assert.doesNotMatch(error.message, /timed out|private-secret|cookie=/i);
+    return true;
+  });
+  assert.equal(api.fetchCalls.length, 1, "ambiguous POST must never auto-replay");
+  assert.equal(api.fetchCalls[0].options.signal.aborted, true);
+});
+
 test("relay fetch aborts a stalled credential import without replaying it", async () => {
   let timeout;
   let cleared = false;
