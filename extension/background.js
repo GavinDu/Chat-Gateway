@@ -16,6 +16,19 @@ let inFlightGatewayStatus = null;
 // Only the newest read-only gateway health request for the current identity
 // can update the cached status or cookie-event outage backoff.
 let gatewayProbeSerial = 0;
+// A provider sync may begin before the first popup diagnostics read. Give
+// both paths the same gateway identity boundary, so that a first status
+// read cannot erase an in-flight result. Never expose this identity.
+function ensureGatewayDiagnosticIdentity(current) {
+  const identity = hasRelayConnection(current) ? current.gateway + "|" + relayIdentity(current) : null;
+  if (identity !== lastGatewayIdentity) {
+    lastGatewayCheck = null;
+    lastGatewayIdentity = identity;
+    automaticCookieSyncSuppressedUntil = 0;
+    providerDiagnostics.clear();
+  }
+  return identity;
+}
 // Only throttle automatic cookie-event resync after a gateway health probe
 // has actually failed; a manual Sync or scheduled liveness probe is never
 // suppressed. A new gateway identity cannot inherit the old outage.
@@ -70,13 +83,7 @@ function finalizeRelayDiagnostics(result) {
 }
 async function relayDiagnostics(force = false) {
   const current = await chrome.storage.local.get(["gateway", "token", "connectionMode", "linkedProviders"]);
-  const identity = hasRelayConnection(current) ? current.gateway + "|" + relayIdentity(current) : null;
-  if (identity !== lastGatewayIdentity) {
-    lastGatewayCheck = null;
-    lastGatewayIdentity = identity;
-    automaticCookieSyncSuppressedUntil = 0;
-    providerDiagnostics.clear();
-  }
+  const identity = ensureGatewayDiagnosticIdentity(current);
   const extension = {
     connected: hasRelayConnection(current),
     connection_mode: !hasRelayConnection(current) ? "disconnected" : current.connectionMode === "local" ? "local" : "paired",
@@ -542,6 +549,7 @@ function queueProviderSync(provider, force = false) {
     // Expose only a fixed redacted category for the *current* owner; never
     // mistake this for authenticated login or leak cookie/progress payloads.
     if (await providerDiagnosticScopeCurrent(provider, attempt)) {
+      ensureGatewayDiagnosticIdentity(attempt);
       recordProviderDiagnostic(provider, "syncing");
     }
     try {
