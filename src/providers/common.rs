@@ -378,7 +378,10 @@ pub fn response_probe(
                         return true;
                     }} catch (_) {{ return false; }}
                 }};
-                streaming = Array.from(document.querySelectorAll("button"))
+                // Cancellation also recognizes ARIA role buttons. A real
+                // active generation must not be mistaken for terminal just
+                // because the provider rendered a non-<button> Stop control.
+                streaming = Array.from(document.querySelectorAll("button, [role='button']"))
                     .some(button => visible(button) && pointerEnabled(button) &&
                         /^(stop|stop generating|stop generation|stop responding|stop response|stop answering)$/i.test(
                             (button.getAttribute("aria-label") || button.innerText || button.textContent || "").trim()
@@ -709,6 +712,66 @@ mod streaming_visibility_regression_tests {
             "a passive explicit streaming marker remains valid with pointer-events:none"
         );
         page.evaluate("document.querySelector('#stream-marker').hidden = true");
+        assert!(!response_probe(&page, &[".answer"], false).streaming);
+    }
+
+    #[tokio::test]
+    async fn actionable_aria_role_stop_matches_cancellation_streaming_policy() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <div class="answer">partial assistant answer</div>
+            <div id="role-stop" role="button" aria-label="Stop generating">Stop</div>
+            <section id="inert-parent" style="pointer-events:none">
+                <span id="inert-role-stop" role="button"
+                    style="pointer-events:auto" aria-label="Stop responding">Stop</span>
+            </section>
+            <button id="native-stop" aria-label="Stop" hidden>Stop</button>
+            <span id="marker" data-is-streaming="true"
+                style="pointer-events:none" hidden>generating</span>
+            <div role="button" aria-label="Stop sharing">Stop sharing</div>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+
+        assert!(
+            response_probe(&page, &[".answer"], false).streaming,
+            "a visible actionable ARIA Stop button indicates active generation"
+        );
+        page.evaluate("document.getElementById('role-stop').hidden = true");
+        assert!(
+            !response_probe(&page, &[".answer"], false).streaming,
+            "an inert-ancestor role button and unrelated Stop sharing cannot indicate streaming"
+        );
+
+        page.evaluate("document.getElementById('inert-parent').style.pointerEvents = 'auto'");
+        assert!(
+            response_probe(&page, &[".answer"], false).streaming,
+            "an actionable role Stop nested in an enabled ancestor is recognized"
+        );
+        page.evaluate(
+            "document.getElementById('inert-role-stop').setAttribute('aria-hidden','true')",
+        );
+        assert!(!response_probe(&page, &[".answer"], false).streaming);
+
+        page.evaluate("document.getElementById('native-stop').hidden = false");
+        assert!(
+            response_probe(&page, &[".answer"], false).streaming,
+            "native actionable Stop controls retain previous behavior"
+        );
+        page.evaluate("document.getElementById('native-stop').hidden = true");
+
+        page.evaluate("document.getElementById('marker').hidden = false");
+        assert!(
+            response_probe(&page, &[".answer"], false).streaming,
+            "passive nonclickable streaming markers remain valid"
+        );
+        page.evaluate("document.getElementById('marker').hidden = true");
         assert!(!response_probe(&page, &[".answer"], false).streaming);
     }
 
