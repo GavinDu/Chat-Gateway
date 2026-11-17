@@ -1383,9 +1383,7 @@ mod submission_timeout_cancellation_tests {
                 );
             }
             if self.return_submission_error {
-                return Err(anyhow::Error::new(
-                    common::ProviderSubmissionUnacknowledgedError,
-                ));
+                return Err(anyhow::Error::new(common::ProviderSubmissionUnacknowledgedError));
             }
             tokio::time::sleep(Duration::from_millis(250)).await;
             Ok(())
