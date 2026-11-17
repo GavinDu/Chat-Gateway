@@ -237,7 +237,7 @@ function loadPopup({failCookieDomain = null, includeSecondProvider = false, manu
   vm.createContext(context);
   vm.runInContext(fs.readFileSync(path.join(__dirname,"..","credential_probe.js"),"utf8"),context);
   vm.runInContext(fs.readFileSync(path.join(__dirname,"..","popup.js"),"utf8")+
-    "\nglobalThis.testControls={refreshStatus,connectProvider,logoutProvider,initialize,connectLocalGateway,popupConnectionJson,safeStatusErrorMessage,safeProviderActionError,safeGatewayActionError,verifyChatgptActiveTab};",context);
+    "\nglobalThis.testControls={refreshStatus,connectProvider,logoutProvider,initialize,connectLocalGateway,popupConnectionJson,safeStatusErrorMessage,safeProviderActionError,safeGatewayActionError,verifyChatgptActiveTab,safeLastFailedRequest};",context);
   return {values,server,elements,byId,chromeCalls,intervals,connectDeadlines,clearedConnectDeadlines,controls:context.testControls,context};
 }
 
@@ -1173,4 +1173,54 @@ test("forged Chrome result and unavailable scripting are never called verified",
   delete popup.context.chrome.scripting;
   await popup.controls.verifyChatgptActiveTab();
   assert.match(popup.byId("message").textContent,/unavailable/);
+});
+
+test("last-failure UI accepts only fresh fixed server evidence for two active providers", async () => {
+  const popup = loadPopup();
+  await new Promise(resolve => setImmediate(resolve));
+  const current = new Date(Math.floor(Date.now() / 1000) * 1000)
+    .toISOString().replace(".000Z", "Z");
+  const valid = {
+    request_id: "5f855e0d-5b22-4a93-b925-98db841a1ee1",
+    stage: "json_completion", reason: "backend_unavailable",
+    duration_ms: 120_000, observed_at_utc: current
+  };
+  const safe = popup.controls.safeLastFailedRequest;
+  assert.match(safe("chatgpt", valid), /json completion \/ backend unavailable/);
+  assert.match(safe("metaai", valid), /5f855e0d-5b22-4a93-b925-98db841a1ee1/);
+  assert.equal(safe("grok", valid), null, "deferred provider has no diagnostic display");
+  assert.equal(safe("chatgpt", null), null, "no evidence is not proof of success");
+  const invalid = [
+    {...valid,request_id:"token=private"},
+    {...valid,stage:"json_completion token=private"},
+    {...valid,reason:"https://private.example/token?cookie=secret"},
+    {...valid,duration_ms: Infinity}, {...valid,duration_ms: -1},
+    {...valid,duration_ms: 120_001}, {...valid,duration_ms: 1.5},
+    {...valid,observed_at_utc:current+" token=private"},
+    {...valid,observed_at_utc:"2000-01-01T00:00:00Z"},
+    {...valid,observed_at_utc:"2099-01-01T00:00:00Z"},
+    {...valid,observed_at_utc:"2026-02-30T00:00:00Z"},
+    {request_id: valid.request_id,stage:valid.stage,reason:valid.reason,observed_at_utc:current}
+  ];
+  for (const record of invalid) {
+    assert.equal(safe("chatgpt", record), null, "untrusted field must discard entire record");
+  }
+  popup.context.relayFetch = async () => ({
+    ok:true,status:200,json:async()=>({vault_mode:true,providers:[
+      {provider:"chatgpt",enabled:true,linked:true,authentication:"unknown",last_failed_request:valid},
+      {provider:"metaai",enabled:true,linked:true,authentication:"unknown",
+        last_failed_request:{...valid,reason:"private cookie=secret"}},
+      {provider:"grok",enabled:false,linked:false,last_failed_request:valid}
+    ]})
+  });
+  await popup.controls.refreshStatus(true);
+  const rows = popup.byId("status").children;
+  const texts = Object.fromEntries(rows.map(row => [
+    row.children[0].textContent,
+    row.children.find(child=>child.className==="provider-detail").textContent
+  ]));
+  assert.match(texts.chatgpt,/Last gateway failure: json completion/);
+  assert.match(texts.chatgpt,/Login unverified/);
+  assert.doesNotMatch(texts.metaai,/Last gateway failure|private|cookie=secret/);
+  assert.doesNotMatch(texts.grok,/Last gateway failure/);
 });
