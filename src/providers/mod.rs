@@ -1382,7 +1382,9 @@ mod submission_timeout_cancellation_tests {
 
         async fn send_prompt(&self, page: &mut Page, _prompt: &str) -> Result<()> {
             if matches!(self.outcome, MockSubmissionOutcome::PreSendInputRejected) {
-                return Err(anyhow::Error::new(common::ProviderComposerInputRejectedError));
+                return Err(anyhow::Error::new(
+                    common::ProviderComposerInputRejectedError,
+                ));
             }
             page.evaluate("window.sendAttempts = (window.sendAttempts || 0) + 1");
             if self.revoke_fixture_before_timeout {
@@ -1393,7 +1395,9 @@ mod submission_timeout_cancellation_tests {
                 );
             }
             if matches!(self.outcome, MockSubmissionOutcome::Unacknowledged) {
-                return Err(anyhow::Error::new(common::ProviderSubmissionUnacknowledgedError));
+                return Err(anyhow::Error::new(
+                    common::ProviderSubmissionUnacknowledgedError,
+                ));
             }
             tokio::time::sleep(Duration::from_millis(250)).await;
             Ok(())
@@ -1556,7 +1560,10 @@ mod submission_timeout_cancellation_tests {
             onclick="window.cancelClicks=(window.cancelClicks||0)+1">Stop</button>"#;
         let (attempts, cancels) =
             exercise_submission(stop, false, MockSubmissionOutcome::PreSendInputRejected).await;
-        assert_eq!(attempts, 0.0, "no Send was attempted before input rejection");
+        assert_eq!(
+            attempts, 0.0,
+            "no Send was attempted before input rejection"
+        );
         assert_eq!(
             cancels, 0.0,
             "pre-Send errors must not click an inherited Stop control"
