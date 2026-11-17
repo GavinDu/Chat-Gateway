@@ -299,6 +299,7 @@ pub(super) async fn run(
                         request_started,
                     );
                     record_safe_attempt_failure(
+                        &state.provider_sessions,
                         &request_id,
                         &provider_name,
                         "first_stream_event",
