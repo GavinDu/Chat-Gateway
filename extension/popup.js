@@ -221,6 +221,9 @@ function safeStatusErrorMessage(error) {
 // A stale worker or malformed gateway status JSON may provide arbitrary issue
 // text. Only the server's source-authored provider codes and the worker's
 // redacted sync failure codes are safe to show on the provider dashboard.
+// UI-only names: never substitute a server-provided label into actions or routing.
+const ACTIVE_PROVIDER_LABELS = Object.freeze({chatgpt: "ChatGPT", metaai: "Meta AI"});
+
 const GATEWAY_PROVIDER_ISSUES = new Set([
   "provider_disabled", "session_not_linked", "manual_verification_required",
   "provider_assets_blocked", "provider_document_denied",
@@ -360,7 +363,7 @@ async function refreshStatus(force = false) {
   const items = await Promise.all(safeRows.map(async item => {
     const li = document.createElement("li");
     const heading = document.createElement("strong");
-    heading.textContent = item.provider;
+    heading.textContent = ACTIVE_PROVIDER_LABELS[item.provider] || item.provider;
     li.append(heading);
 
     const status = document.createElement("p");
@@ -386,7 +389,8 @@ async function refreshStatus(force = false) {
     } catch {
       browser = "Browser cookie check unavailable";
     }
-    const auth = item.authentication === "verified" ? "Login verified"
+    const auth = item.enabled === false ? "Account check deferred (provider disabled)"
+      : item.authentication === "verified" ? "Login verified"
       : item.authentication === "needs_login" ? "Login needed"
       : "Login unverified";
     // Browser activation is not proof of login. Keep the independent
