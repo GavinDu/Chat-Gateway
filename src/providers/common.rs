@@ -4500,12 +4500,32 @@ mod pointer_inert_submission_stop_tests {
                 .streaming,
             "inert ancestor blocks Stop despite child override"
         );
-        page.evaluate("document.querySelector('#stop-root').style.pointerEvents='auto'");
+        // A fresh actionable Stop must be distinguishable from a stale
+        // framework clone whose CSS/layout state was changed in place.
+        page.evaluate(
+            r#"(() => {
+                const root = document.querySelector('#stop-root');
+                root.style.pointerEvents = 'auto';
+                root.innerHTML = '<button id="stop" aria-label="Stop generating">Stop</button>';
+            })()"#,
+        );
+        let enabled_diagnostic = page.evaluate(
+            r#"(() => {
+                const button = document.querySelector('#stop');
+                const root = document.querySelector('#stop-root');
+                return {
+                    rect: !!button?.getClientRects().length,
+                    hidden: !!button?.hidden,
+                    buttonPointer: getComputedStyle(button).pointerEvents,
+                    rootPointer: getComputedStyle(root).pointerEvents
+                };
+            })()"#,
+        );
         assert!(
             submission_snapshot(&page, "#prompt", &[".answer"])
                 .unwrap()
                 .streaming,
-            "actionable newly visible Stop remains supported"
+            "fresh actionable Stop remains supported; fixture CSS: {enabled_diagnostic:?}"
         );
 
         page.evaluate(
