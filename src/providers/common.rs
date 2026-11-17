@@ -1192,8 +1192,9 @@ fn click_text_selector(page: &Page, selector: &str) -> anyhow::Result<bool> {
     // or pointer-inert clone is not an actionable picker, even if it has a
     // layout box and matching label text.
     let nontransparent = nontransparent_ancestors_expression("el");
+    let pointer_enabled = pointer_enabled_ancestors_expression("el");
     let clicked = page.evaluate(&format!(
-        "(() => {{ const el = Array.from(document.querySelectorAll({tag})).find(el => {{ try {{ return ((el.innerText || el.textContent || '').trim()).includes({needle}) && el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).pointerEvents !== 'none' && {nontransparent} && !el.disabled && !el.matches(':disabled') && !el.closest('[hidden], [inert], [aria-hidden=\"true\"], [aria-disabled=\"true\"], fieldset[disabled]'); }} catch (_) {{ return false; }} }}); if (!el) return false; el.click(); return true; }})()"
+        "(() => {{ const el = Array.from(document.querySelectorAll({tag})).find(el => {{ try {{ return ((el.innerText || el.textContent || '').trim()).includes({needle}) && el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden' && {pointer_enabled} && {nontransparent} && !el.disabled && !el.matches(':disabled') && !el.closest('[hidden], [inert], [aria-hidden=\"true\"], [aria-disabled=\"true\"], fieldset[disabled]'); }} catch (_) {{ return false; }} }}); if (!el) return false; el.click(); return true; }})()"
     ));
     Ok(clicked.as_bool() == Some(true))
 }
@@ -1777,13 +1778,14 @@ pub fn click_first(page: &Page, selectors: &[&str]) -> anyhow::Result<()> {
             // descendant or silently treating an inert control as success.
             let selector_js = serde_json::to_string(sel)?;
             let nontransparent = nontransparent_ancestors_expression("el");
+            let pointer_enabled = pointer_enabled_ancestors_expression("el");
             let actionable = page.evaluate(&format!(
                 r#"(() => {{
                     try {{
                         const el = document.querySelector({selector_js});
                         return !!el && el.getClientRects().length > 0 &&
                             window.getComputedStyle(el).visibility !== 'hidden' &&
-                            window.getComputedStyle(el).pointerEvents !== 'none' &&
+                            {pointer_enabled} &&
                             {nontransparent} &&
                             !el.closest('[hidden], [inert], [aria-hidden="true"], [aria-disabled="true"], [aria-readonly="true"], fieldset[disabled]') &&
                             !el.disabled && !el.matches(':disabled') &&
@@ -1800,6 +1802,49 @@ pub fn click_first(page: &Page, selectors: &[&str]) -> anyhow::Result<()> {
         }
     }
     anyhow::bail!("none of selectors matched: {:?}", selectors)
+}
+
+#[cfg(test)]
+mod picker_pointer_inert_ancestor_tests {
+    use super::{click_first, click_text_selector};
+
+    #[tokio::test]
+    async fn css_pointer_inert_model_picker_clone_never_receives_a_click() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <section id="old-panel" style="pointer-events:none">
+                <button id="ghost" style="pointer-events:auto"
+                    onclick="window.ghostClicks=(window.ghostClicks||0)+1">Sonar</button>
+            </section>
+            <button id="real"
+                onclick="window.realClicks=(window.realClicks||0)+1">Sonar</button>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+
+        assert!(click_text_selector(&page, "text:button=Sonar").unwrap());
+        assert_eq!(page.evaluate("window.ghostClicks || 0").as_f64(), Some(0.0));
+        assert_eq!(page.evaluate("window.realClicks || 0").as_f64(), Some(1.0));
+
+        click_first(&page, &["#ghost", "#real"]).unwrap();
+        assert_eq!(page.evaluate("window.ghostClicks || 0").as_f64(), Some(0.0));
+        assert_eq!(page.evaluate("window.realClicks || 0").as_f64(), Some(2.0));
+
+        page.evaluate("document.querySelector('#real').hidden = true");
+        assert!(!click_text_selector(&page, "text:button=Sonar").unwrap());
+        assert!(click_first(&page, &["#ghost", "#real"]).is_err());
+        assert_eq!(page.evaluate("window.ghostClicks || 0").as_f64(), Some(0.0));
+
+        page.evaluate("document.querySelector('#old-panel').style.pointerEvents = 'auto'");
+        assert!(click_text_selector(&page, "text:button=Sonar").unwrap());
+        assert_eq!(page.evaluate("window.ghostClicks || 0").as_f64(), Some(1.0));
+    }
 }
 
 /// Focus the first matching input and type into it. Obscura has no
