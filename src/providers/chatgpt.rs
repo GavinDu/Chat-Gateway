@@ -128,6 +128,7 @@ mod current_chatgpt_dom_tests {
                 <div class="MarkdownRoot-first"><p>first block</p></div>
                 <div class="MarkdownRoot-second"><p>second block</p></div>
                 <div class="MarkdownRoot-hidden" hidden>hidden secret</div>
+                <div class="MarkdownRoot-opacity" style="opacity:0">transparent secret</div>
                 <button>Reload response</button>
               </div>
               <button aria-label="Copy response">Copy</button>
@@ -144,6 +145,7 @@ mod current_chatgpt_dom_tests {
         assert!(!text.contains("Copy"));
         assert!(!text.contains("Reload"));
         assert!(!text.contains("hidden secret"));
+        assert!(!text.contains("transparent secret"));
         assert!(!text.contains("stale"));
     }
 
