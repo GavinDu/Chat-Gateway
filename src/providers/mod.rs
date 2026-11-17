@@ -2768,7 +2768,12 @@ mod generation_cancel_visibility_tests {
             cfg: serde_yaml::from_str("name: qwen").unwrap(),
         };
         adapter.cancel_generation(&page);
-        for field in ["ghostCount", "ghostChildCount", "inertCount", "inertChildCount"] {
+        for field in [
+            "ghostCount",
+            "ghostChildCount",
+            "inertCount",
+            "inertChildCount",
+        ] {
             let count = page.evaluate(&format!("window.{field} || 0"));
             assert_eq!(
                 count.as_f64(),
