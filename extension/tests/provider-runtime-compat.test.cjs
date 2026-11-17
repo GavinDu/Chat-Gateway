@@ -66,3 +66,20 @@ test('Meta AI shim leaves native Response and unrelated or insecure origins unto
     assert.equal(Object.getOwnPropertyDescriptor(context.Response.prototype, 'body').get, before);
   }
 });
+
+test('Meta AI body access after text consumption exposes a closed stream, never replayed content', async () => {
+  const context = fixture();
+  vm.runInContext(source, context);
+  const response = new context.Response('must not replay');
+  await response.text();
+  const stream = response.body;
+  assert.equal(response.body, stream);
+  assert.equal((await stream.getReader().read()).done, true);
+  assert.equal(response._bodyUsed, true);
+  await assert.rejects(response.text(), /already consumed/);
+  const aborted = new context.Response('must not replay');
+  await aborted.text();
+  aborted._bodyAborted = true;
+  aborted._bodyAbortReason = new Error('synthetic abort');
+  await assert.rejects(aborted.body.getReader().read(), /synthetic abort/);
+});
