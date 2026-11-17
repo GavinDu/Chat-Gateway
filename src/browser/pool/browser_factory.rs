@@ -39,7 +39,7 @@ pub(super) async fn new_page(browser: &obscura_core::Browser) -> Result<obscura_
     Ok(page)
 }
 
-/// Attach the private socket bridge only before ChatGPT page navigation.
+/// Attach disjoint, page-scoped socket bridges for the active providers.
 /// Other provider pages retain the original embedded browser transport.
 pub(super) async fn new_provider_page(
     browser: &obscura_core::Browser,
@@ -48,6 +48,8 @@ pub(super) async fn new_provider_page(
     let mut page = new_page(browser).await?;
     if provider == crate::providers::Provider::ChatGPT {
         crate::browser::chatgpt_websocket::attach(browser, &mut page);
+    } else if provider == crate::providers::Provider::MetaAI {
+        crate::browser::chatgpt_websocket::attach_metaai(browser, &mut page);
     }
     Ok(page)
 }
