@@ -14,7 +14,7 @@ function fixture(initial = {}) {
   let fetchResponse = async () => ({status:202,ok:true,json:async()=>({pending:true})});
   const calls = [];
   const context = {
-    Map, Set, Promise, Date, setTimeout, clearTimeout,
+    Map, Set, Promise, Date, AbortController, setTimeout, clearTimeout,
     importScripts(){},
     PROVIDERS:{chatgpt:["chatgpt.com"],manus:["manus.im"]},
     randomHex:()=>(++counter).toString(16).padStart(32,"0"),
