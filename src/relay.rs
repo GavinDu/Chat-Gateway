@@ -1577,7 +1577,7 @@ pub async fn status(State(app): State<Arc<crate::AppState>>, headers: HeaderMap)
         let observed = source_grounded_account_observation(
             provider,
             legacy_observed,
-            app.provider_sessions.credentials_verified(provider),
+            enabled && session_present && app.provider_sessions.credentials_verified(provider),
         );
         let runtime = app.provider_sessions.status(provider);
         let lifecycle = runtime.state;
@@ -2285,6 +2285,33 @@ mod tests {
             let mut headers = HeaderMap::new();
             headers.insert(header::ORIGIN, HeaderValue::from_static(origin));
             assert_eq!(requested_extension_id(&headers).is_some(), allowed);
+        }
+    }
+
+    #[test]
+    fn active_provider_account_status_cannot_inherit_composer_heuristics() {
+        use crate::provider_state::ProviderSessionState::Ready;
+        for legacy in [None, Some(false), Some(true)] {
+            // ChatGPT needs its own currently valid first-party Obscura check.
+            let without_proof = source_grounded_account_observation("chatgpt", legacy, false);
+            assert_eq!(without_proof, None);
+            assert_eq!(provider_authentication_status(without_proof, Ready, false), "unknown");
+            let with_proof = source_grounded_account_observation("chatgpt", legacy, true);
+            assert_eq!(with_proof, Some(true));
+            assert_eq!(provider_authentication_status(with_proof, Ready, false), "verified");
+
+            // Meta AI has no authoritative positive account contract.
+            assert_eq!(source_grounded_account_observation("metaai", legacy, true), None);
+            assert_eq!(
+                provider_authentication_status(
+                    source_grounded_account_observation("metaai", legacy, true),
+                    Ready,
+                    false,
+                ),
+                "unknown"
+            );
+            // Deferred providers keep their earlier routing semantics.
+            assert_eq!(source_grounded_account_observation("grok", legacy, false), legacy);
         }
     }
 
