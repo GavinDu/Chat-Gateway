@@ -1024,13 +1024,18 @@ pub(super) fn browser_thread(
                                 // A queued request may have been cancelled
                                 // while another send owned the page lock.
                                 if chunks.is_closed() { return; }
-                                applied_imports.borrow_mut().remove(&provider);
                                 let Some(opened) = send_unless_disconnected(&chunks,
                                     ensure_provider_page(&browser_for_save, &pages, provider)).await else { return; };
                                 let just_opened = match opened {
                                     Ok(opened) => opened,
                                     Err(error) => { let _ = chunks.send(Err(error)).await; return; }
                                 };
+                                // Do not lose the last applied digest when a ChatGPT
+                                // or Meta AI request reuses its original page/jar.
+                                // A newly created page must never inherit that claim.
+                                if !page_session::retain_applied_after_send(provider, just_opened) {
+                                    applied_imports.borrow_mut().remove(&provider);
+                                }
                                 let mut page = match PageLease::take(&pages, provider) {
                                     Ok(page) => page,
                                     Err(error) => { let _ = chunks.send(Err(error)).await; return; }
