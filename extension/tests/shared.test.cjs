@@ -775,6 +775,47 @@ test("Gemini relay retains Chrome SameSite and expiry while leaving session cook
   assert.equal(Object.hasOwn(cookies.unspecified, "same_site"), false);
 });
 
+test("partitioned Chrome cookie scopes fail closed without modifying saved gateway session", async () => {
+  for (const partitionKey of [
+    {topLevelSite:"https://first.example"},
+    {topLevelSite:"https://private-value.example",hasCrossSiteAncestor:true},
+    {}
+  ]) {
+    const storage = {
+      gateway:"http://127.0.0.1:8080",connectionMode:"local",
+      linkedProviders:["chatgpt"],relaySnapshotVersions:{chatgpt:"old-safe-snapshot"}
+    };
+    const api = loadShared([
+      {name:"safe",value:"synthetic",domain:".chatgpt.com",path:"/",secure:true},
+      {name:"partitioned-secret",value:"never-upload",domain:"chatgpt.com",
+        path:"/",secure:true,partitionKey}
+    ],true,storage);
+    await assert.rejects(
+      () => api.syncProvider("chatgpt"),
+      error => error.message ===
+        "Unsupported browser cookie partition scope; existing gateway session was preserved."
+    );
+    assert.equal(api.fetchCalls.length,0,"never upload a partially flattened snapshot");
+    assert.equal(storage.relaySnapshotVersions.chatgpt,"old-safe-snapshot",
+      "failed capture must not replace previous snapshot evidence");
+    assert.deepEqual(storage.linkedProviders,["chatgpt"],"owner consent is unchanged");
+  }
+});
+
+test("absent or null partition metadata works and out-of-scope partitions are ignored", async () => {
+  const api = loadShared([
+    {name:"regular",value:"safe",domain:".chatgpt.com",path:"/",secure:true},
+    {name:"explicit-null",value:"safe",domain:"chatgpt.com",
+      path:"/",secure:true,partitionKey:null},
+    {name:"unrelated",value:"ignore",domain:".evil.example",
+      path:"/",secure:true,partitionKey:{topLevelSite:"https://private.example"}}
+  ]);
+  const snapshot = await api.providerCookieSnapshot("chatgpt");
+  assert.deepEqual(JSON.parse(JSON.stringify(snapshot.cookies.map(cookie=>cookie.name).sort())),
+    ["explicit-null","regular"]);
+  assert.equal(api.fetchCalls.length,0);
+});
+
 test("invalid browser cookie attributes fail the complete relay upload before persistence", async () => {
   for (const invalid of [
     {sameSite: "unsupported"},
