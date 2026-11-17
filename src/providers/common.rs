@@ -3019,7 +3019,6 @@ mod login_url_classification_tests {
             "https://www.perplexity.ai/signin",
             "https://manus.im/auth/login",
             "https://grok.com/oauth2/authorize",
-
         ] {
             assert!(is_login_url(url), "missed authentication redirect: {url}");
         }
@@ -3124,7 +3123,10 @@ mod login_url_classification_tests {
             "https://attacker-tenant.auth0.com/oauth",
             "https://auth0.com.attacker.invalid/login",
         ] {
-            assert!(!is_login_url(url), "unverified tenant is not known SSO: {url}");
+            assert!(
+                !is_login_url(url),
+                "unverified tenant is not known SSO: {url}"
+            );
             for provider in ["chatgpt", "grok", "manus", "claude", "gemini"] {
                 assert!(
                     !login_url_matches_provider(provider, url),
