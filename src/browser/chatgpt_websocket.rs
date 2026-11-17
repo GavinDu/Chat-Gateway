@@ -537,7 +537,7 @@ mod tests {
             };})()"#);
         let source = include_str!("chatgpt_websocket.js")
             .replace(
-                "if (!['chatgpt.com', 'www.chatgpt.com'].includes(location.hostname)) return;",
+                "if (location.protocol !== 'https:' || !['chatgpt.com', 'www.chatgpt.com'].includes(location.hostname) || (location.port && location.port !== '443')) return;",
                 "",
             )
             .replace(
