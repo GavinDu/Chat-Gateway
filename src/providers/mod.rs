@@ -1500,10 +1500,9 @@ mod closed_consumer_before_dispatch_tests {
             .await
             .expect("live receiver should obtain adapter result")
             .expect_err("mock adapter intentionally rejects unacknowledged Send");
-        assert!(
-            err.downcast_ref::<common::ProviderSubmissionUnacknowledgedError>()
-                .is_some()
-        );
+        assert!(err
+            .downcast_ref::<common::ProviderSubmissionUnacknowledgedError>()
+            .is_some());
     }
 }
 
