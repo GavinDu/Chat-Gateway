@@ -43,9 +43,33 @@ const MANUAL_VERIFICATION_NOTICE: &str =
 #[derive(Clone, Debug, Default)]
 pub struct ProviderSessionRegistry {
     states: Arc<Mutex<HashMap<String, ProviderSessionStatus>>>,
+    credential_checks: Arc<Mutex<HashMap<String, SystemTime>>>,
 }
 
 impl ProviderSessionRegistry {
+    /// Only a first-party authenticated session check may populate this cache.
+    /// Presence, cookies, a composer or a successful import are not proof.
+    pub fn credentials_verified(&self, provider: &str) -> bool {
+        self.credential_checks
+            .lock()
+            .ok()
+            .and_then(|checks| checks.get(provider).copied())
+            .and_then(|checked| checked.elapsed().ok())
+            .is_some_and(|age| age < Duration::from_secs(300))
+    }
+
+    pub fn invalidate_credentials(&self, provider: &str) {
+        if let Ok(mut checks) = self.credential_checks.lock() {
+            checks.remove(provider);
+        }
+    }
+
+    pub fn record_credentials_verified(&self, provider: &str) {
+        if let Ok(mut checks) = self.credential_checks.lock() {
+            checks.insert(provider.to_owned(), SystemTime::now());
+        }
+    }
+
     pub fn status(&self, provider: &str) -> ProviderSessionStatus {
         self.states
             .lock()
@@ -60,6 +84,7 @@ impl ProviderSessionRegistry {
 
     /// Mark a provider as requiring authentication after its session is unlinked.
     pub fn record_unlinked(&self, provider: &str) {
+        self.invalidate_credentials(provider);
         if let Ok(mut map) = self.states.lock() {
             map.insert(
                 provider.to_owned(),
@@ -73,6 +98,7 @@ impl ProviderSessionRegistry {
     }
 
     pub fn record_needs_login(&self, provider: &str) {
+        self.invalidate_credentials(provider);
         self.record_error_state(provider, true, None);
     }
 
@@ -96,6 +122,7 @@ impl ProviderSessionRegistry {
     /// An operator reset allows the next request to probe the provider again;
     /// it does not claim that a browser session has been authenticated.
     pub fn reset_for_retry(&self, provider: &str) -> anyhow::Result<()> {
+        self.invalidate_credentials(provider);
         self.states
             .lock()
             .map_err(|_| anyhow::anyhow!("provider state unavailable"))?
@@ -106,6 +133,7 @@ impl ProviderSessionRegistry {
     /// New credentials permit a login retry, but do not erase a failed chat
     /// merely because the extension rotated unrelated provider cookies.
     pub fn record_session_import(&self, provider: &str) {
+        self.invalidate_credentials(provider);
         if let Ok(mut map) = self.states.lock() {
             if map
                 .get(provider)
@@ -593,5 +621,34 @@ mod probe_outcome_tests {
             registry.status("chatgpt").state,
             ProviderSessionState::Ready
         );
+    }
+}
+
+#[cfg(test)]
+mod credential_proof_tests {
+    use super::*;
+    #[test]
+    fn only_explicit_proof_verifies_and_import_unlink_or_expiry_revokes_it() {
+        let registry = ProviderSessionRegistry::default();
+        registry.record_probe_success("chatgpt");
+        registry.record_success("chatgpt");
+        assert!(!registry.credentials_verified("chatgpt"));
+        registry.record_credentials_verified("chatgpt");
+        assert!(registry.credentials_verified("chatgpt"));
+        assert!(!registry.credentials_verified("metaai"));
+        assert!(!ProviderSessionRegistry::default().credentials_verified("chatgpt"));
+        registry.record_session_import("chatgpt");
+        assert!(!registry.credentials_verified("chatgpt"));
+        registry.record_credentials_verified("chatgpt");
+        registry.record_needs_login("chatgpt");
+        assert!(!registry.credentials_verified("chatgpt"));
+        registry.record_credentials_verified("chatgpt");
+        registry.record_unlinked("chatgpt");
+        assert!(!registry.credentials_verified("chatgpt"));
+        registry.credential_checks.lock().unwrap().insert(
+            "chatgpt".into(),
+            SystemTime::now() - Duration::from_secs(301),
+        );
+        assert!(!registry.credentials_verified("chatgpt"));
     }
 }
