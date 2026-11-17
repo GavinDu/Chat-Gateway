@@ -2966,13 +2966,13 @@ pub fn is_login_url(url: &str) -> bool {
         .unwrap_or_default()
         .trim_end_matches('.')
         .to_ascii_lowercase();
-    // Preserve the explicitly enumerated identity destinations while
-    // separately tracking any further first-party IdP hosts in issue #1090.
+    // Only enumerated identity destinations are trusted; arbitrary Auth0
+    // tenants cannot prove that this provider's session has expired.
+    // Source-verify any tenant-specific SSO hosts under issue #1090.
     if matches!(
         host.as_str(),
         "accounts.google.com" | "accounts.x.com" | "login.microsoftonline.com"
-    ) || host.ends_with(".auth0.com")
-    {
+    ) {
         return true;
     }
     // Root /login on a foreign origin is an unexpected navigation, not
@@ -3019,8 +3019,6 @@ mod login_url_classification_tests {
             "https://www.perplexity.ai/signin",
             "https://manus.im/auth/login",
             "https://grok.com/oauth2/authorize",
-            "https://tenant.auth0.com/profile",
-            "https://login.auth0.com/authorize",
         ] {
             assert!(is_login_url(url), "missed authentication redirect: {url}");
         }
@@ -3073,8 +3071,8 @@ mod login_url_classification_tests {
                 );
             }
         }
-        // Explicitly enumerated SSO hosts retain their previous behavior
-        // until source-verified per-provider IdP evidence exists (#1090).
+        // Explicitly enumerated SSO hosts retain their previous behavior;
+        // tenant-specific SSO awaits source-verified evidence (#1090).
         for url in [
             "https://accounts.google.com/v3/signin/challenge",
             "https://login.microsoftonline.com/tenant/oauth2/authorize",
@@ -3118,6 +3116,27 @@ mod login_url_classification_tests {
     }
 
     #[test]
+    fn arbitrary_auth0_tenants_cannot_expire_unrelated_provider_sessions() {
+        for url in [
+            "https://tenant.auth0.com/profile",
+            "https://login.auth0.com/authorize",
+            "https://attacker-tenant.auth0.com/oauth",
+            "https://auth0.com.attacker.invalid/login",
+        ] {
+            assert!(
+                !is_login_url(url),
+                "unverified tenant is not known SSO: {url}"
+            );
+            for provider in ["chatgpt", "grok", "manus", "claude", "gemini"] {
+                assert!(
+                    !login_url_matches_provider(provider, url),
+                    "unverified Auth0 tenant must not expire {provider}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn does_not_treat_unrelated_url_text_as_expired_authentication() {
         for url in [
             "https://chatgpt.com/c/authoring",
@@ -3136,6 +3155,9 @@ mod login_url_classification_tests {
             "https://LOGIN.UNKNOWN.invalid/",
             "https://login.microsoftonline.com.attacker.invalid/",
             "https://tenant.auth0.com.attacker.invalid/home",
+            "https://tenant.auth0.com/profile",
+            "https://login.auth0.com/authorize",
+            "https://attacker-tenant.auth0.com/oauth",
             "http://auth.unknown.invalid/",
             "https://auth.other.invalid/chat/login",
             "https://accounts.x.com.attacker.invalid/",
