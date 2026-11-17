@@ -4,7 +4,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
 
-function loadPopup({failCookieDomain = null, includeSecondProvider = false, manualVerification = false, localRelay = false, activation = null, diagnosticsSync = null, diagnosticsFailure = null, pairedDisconnectReject = false, pairedConnectReject = false, remotePairToken = "b".repeat(64)} = {}) {
+function loadPopup({failCookieDomain = null, includeSecondProvider = false, manualVerification = false, localRelay = false, activation = null, diagnosticsSync = null, diagnosticsFailure = null, pairedDisconnectReject = false, pairedConnectReject = false, remotePairToken = "b".repeat(64), syncStatus = undefined} = {}) {
   const elements = new Map();
   const chromeCalls = [];
   const intervals = [];
@@ -181,7 +181,7 @@ function loadPopup({failCookieDomain = null, includeSecondProvider = false, manu
       delete pending[request.provider];
       values.providerLinkPendingAttempts=pending;
     }
-    if(request.type==="sync-provider") server.linked=true;
+    if(request.type==="sync-provider") {server.linked=true;return {ok:true,syncStatus};}
     return {ok:true};
   }};
   const context = {
@@ -1079,4 +1079,26 @@ test("remote Pair stuck JSON body never commits a connection token", async () =>
   assert.ok(!popup.chromeCalls.some(x=>x.startsWith("connect-paired-relay:")));
   assert.equal(popup.values.token, undefined);
   assert.ok(!popup.byId("message").textContent.includes("private.example"));
+});
+
+
+test("persisted but activation-pending tentative link commits consent without claiming login", async () => {
+  const popup = loadPopup({localRelay:true,syncStatus:"saved_activation_pending"});
+  for (let i=0;i<8;i++) await new Promise(resolve=>setImmediate(resolve));
+  await popup.controls.connectProvider("metaai");
+  assert.ok(popup.values.linkedProviders.includes("metaai"));
+  assert.equal(popup.server.linked,true);
+  assert.ok(popup.chromeCalls.includes("commit-provider-link:metaai"));
+  assert.ok(!popup.chromeCalls.includes("rollback-provider-link:metaai"));
+  assert.match(popup.byId("message").textContent, /Session saved, but the provider browser could not activate/);
+  assert.match(popup.byId("message").textContent, /authentication is not verified/);
+});
+
+test("unverified sync status still rolls back tentative consent", async () => {
+  const popup = loadPopup({localRelay:true,syncStatus:"unverified_status"});
+  for (let i=0;i<8;i++) await new Promise(resolve=>setImmediate(resolve));
+  await assert.rejects(()=>popup.controls.connectProvider("metaai"),
+    /Provider session was not uploaded/);
+  assert.ok(!popup.values.linkedProviders.includes("metaai"));
+  assert.ok(popup.chromeCalls.includes("rollback-provider-link:metaai"));
 });
