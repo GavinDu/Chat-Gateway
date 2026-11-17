@@ -2021,7 +2021,6 @@ mod picker_pointer_inert_ancestor_tests {
             Some(0.0)
         );
     }
-
 }
 
 /// Focus the first matching input and type into it. Obscura has no
