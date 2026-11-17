@@ -789,12 +789,15 @@ mod metaai_target_policy_tests {
         for origin in ["https://meta.ai", "https://www.meta.ai"] {
             for target in [
                 "wss://gateway.meta.ai/ws/clippy",
-                "wss://gateway.meta.ai:443/ws?opaque=fixture",
+                "wss://gateway.meta.ai:443/ws/clippy?opaque=fixture",
             ] {
                 assert!(allowed_target_for_origin(origin, target).is_some());
                 assert!(allowed_target_for_origin("https://chatgpt.com", target).is_none());
             }
             for target in [
+                "wss://gateway.meta.ai/ws",
+                "wss://gateway.meta.ai/ws/clippy/",
+                "wss://gateway.meta.ai/ws/other",
                 "wss://ws.chatgpt.com/socket",
                 "ws://gateway.meta.ai/ws/clippy",
                 "wss://gateway.meta.ai:8086/ws",
@@ -812,10 +815,11 @@ mod metaai_target_policy_tests {
                 );
             }
         }
-        assert!(
-            allowed_target_for_origin("https://attacker.test", "wss://gateway.meta.ai/ws/clippy")
-                .is_none()
-        );
+        assert!(allowed_target_for_origin(
+            "https://attacker.test",
+            "wss://gateway.meta.ai/ws/clippy"
+        )
+        .is_none());
     }
     #[test]
     fn a_page_bridge_cannot_be_reused_by_the_other_provider() {
