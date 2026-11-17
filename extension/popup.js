@@ -25,6 +25,91 @@ function showPendingApproval(pending) {
   messageWithLink("Waiting for local approval.", pendingApprovalUrl(pending), "Open approval page");
 }
 
+// The result is not a gateway snapshot or an Obscura credential proof.
+// Never cache it across a tab change, connection switch, or popup closure.
+let chatgptCheckGeneration = 0;
+const CHATGPT_VERIFIER_REASONS = new Set([
+  "first_party_session_confirmed", "provider_rejected_session",
+  "provider_reports_no_session", "provider_or_network_blocked",
+  "unrecognized_session_response", "incomplete_or_expired_session_evidence",
+  "verification_timeout", "verification_unavailable", "tab_changed",
+  "unsupported_origin"
+]);
+
+function firstPartyChatgptTab(url) {
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === "https:" &&
+      (parsed.hostname === "chatgpt.com" || parsed.hostname === "www.chatgpt.com") &&
+      (parsed.port === "" || parsed.port === "443") &&
+      !parsed.username && !parsed.password;
+  } catch {
+    return false;
+  }
+}
+
+async function verifyChatgptActiveTab() {
+  const attempt = ++chatgptCheckGeneration;
+  const action = $("verify-chatgpt");
+  action.disabled = true;
+  message("Checking the active ChatGPT tab without syncing credentials.");
+  try {
+    if (typeof chrome.tabs?.query !== "function" ||
+        typeof chrome.scripting?.executeScript !== "function") {
+      message("Chrome active-tab account verification is unavailable in this extension.");
+      return;
+    }
+    const tabs = await chrome.tabs.query({active:true, currentWindow:true});
+    if (!Array.isArray(tabs) || tabs.length !== 1 ||
+        !Number.isSafeInteger(tabs[0]?.id) || !firstPartyChatgptTab(tabs[0].url)) {
+      message("Open an existing signed-in chatgpt.com tab, then retry verification.");
+      return;
+    }
+    const tabId = tabs[0].id;
+    // Explicit user gesture + activeTab grants exactly this tab, not arbitrary
+    // browser pages. No credential-bearing body leaves the page function.
+    const runs = await chrome.scripting.executeScript({
+      target: {tabId, allFrames:false},
+      world: "MAIN",
+      func: probeActiveChatgptAccount
+    });
+    const current = await chrome.tabs.query({active:true, currentWindow:true});
+    if (attempt !== chatgptCheckGeneration ||
+        current?.length !== 1 || current[0]?.id !== tabId ||
+        !firstPartyChatgptTab(current[0].url)) {
+      message("Tab changed during verification. Result discarded.");
+      return;
+    }
+    const result = Array.isArray(runs) && runs.length === 1 ? runs[0]?.result : null;
+    const reasons = CHATGPT_VERIFIER_REASONS;
+    if (!result || result.provider !== "chatgpt" ||
+        result.context !== "chrome_active_tab" ||
+        result.exported_snapshot_verified !== false ||
+        !reasons.has(result.reason) ||
+        !["verified","unauthenticated","unknown"].includes(result.authentication) ||
+        typeof result.checked_at !== "string" ||
+        !Number.isFinite(Date.parse(result.checked_at)) ||
+        Math.abs(Date.now() - Date.parse(result.checked_at)) > 30000) {
+      message("Chrome account verification returned unsupported evidence.");
+      return;
+    }
+    if (result.authentication === "verified" &&
+        result.reason === "first_party_session_confirmed") {
+      message("ChatGPT account verified in this Chrome tab. Gateway credential replay remains unverified.");
+    } else if (result.authentication === "unauthenticated" &&
+        ["provider_rejected_session", "provider_reports_no_session"].includes(result.reason)) {
+      message("ChatGPT explicitly reports no active account in this Chrome tab. Saved gateway credentials were not changed.");
+    } else {
+      message("ChatGPT account verification inconclusive. No session was changed or resynced.");
+    }
+  } catch (_) {
+    // Browser permission failures can include internal tab URLs or other data.
+    message("Chrome account verification unavailable. No session was changed.");
+  } finally {
+    if (attempt === chatgptCheckGeneration) action.disabled = false;
+  }
+}
+
 async function openExtensionTab(url) {
   try {
     if (typeof chrome.tabs?.create === "function") {
@@ -643,6 +728,8 @@ async function logoutProvider(provider) {
   await refreshStatus();
   message("Logged out " + provider + " from Chat Gateway. Your website login is unchanged. Choose Log in / Connect to reconnect.");
 }
+
+$("verify-chatgpt").addEventListener("click", verifyChatgptActiveTab);
 
 $("refresh").addEventListener("click", async () => {
   try { await refreshStatus(true); message("Status refreshed."); } catch (error) { message(safeStatusErrorMessage(error)); }
