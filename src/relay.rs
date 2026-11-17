@@ -1608,6 +1608,8 @@ pub async fn status(State(app): State<Arc<crate::AppState>>, headers: HeaderMap)
             "authentication": authentication,
             "availability": lifecycle.as_str(),
             "manual_verification_required": manual_verification_required,
+            // Owner-scoped, bounded last failed request, never upstream text.
+            "last_failed_request": app.provider_sessions.last_failed_request(provider),
             "issue": issue,
         }));
     }
