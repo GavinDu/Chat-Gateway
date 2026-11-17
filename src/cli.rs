@@ -35,6 +35,14 @@ pub struct Cli {
 
     #[arg(
         long,
+        value_name = "REDACTED_JSON_FILE",
+        conflicts_with_all = ["all", "test_adapter", "create_api_key", "vault_list", "vault_delete_provider", "vault_rotate_key", "vault_restore_backup", "show_memory_egress_policy", "json"],
+        help = "Classify bounded, typed operator evidence offline; no provider/relay/credential access"
+    )]
+    pub diagnose_credential_evidence: Option<std::path::PathBuf>,
+
+    #[arg(
+        long,
         value_name = "NAME",
         help = "Create a random chat API key, print it once and exit"
     )]
@@ -93,6 +101,23 @@ mod tests {
         assert!(
             Cli::try_parse_from(["chat-gateway-rs", "--vault-list", "--vault-rotate-key"]).is_err()
         );
+    }
+
+    #[test]
+    fn offline_credential_diagnosis_never_coexists_with_live_or_vault_actions() {
+        let cli = Cli::try_parse_from([
+            "chat-gateway-rs", "--diagnose-credential-evidence", "report.json"
+        ]).expect("offline diagnosis option parses");
+        assert_eq!(
+            cli.diagnose_credential_evidence.as_deref(),
+            Some(std::path::Path::new("report.json"))
+        );
+        assert!(Cli::try_parse_from([
+            "chat-gateway-rs", "--diagnose-credential-evidence", "report.json", "--all"
+        ]).is_err());
+        assert!(Cli::try_parse_from([
+            "chat-gateway-rs", "--diagnose-credential-evidence", "report.json", "--vault-list"
+        ]).is_err());
     }
 
     #[test]
