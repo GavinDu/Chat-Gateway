@@ -1322,6 +1322,22 @@ fn authenticated_request_with_origin_mode(
     Ok(())
 }
 
+/// Browser DOM/login-view observations are not source-backed account proof for
+/// the two active recovery targets. Only ChatGPT's actual Obscura first-party
+/// verifier may assert an authenticated account; Meta AI has no reviewed
+/// positive account-readiness contract yet and must stay unknown.
+fn source_grounded_account_observation(
+    provider: &str,
+    legacy_observed: Option<bool>,
+    first_party_verified: bool,
+) -> Option<bool> {
+    match provider {
+        "chatgpt" => first_party_verified.then_some(true),
+        "metaai" => None,
+        _ => legacy_observed,
+    }
+}
+
 fn provider_authentication_status(
     observed: Option<bool>,
     state: crate::provider_state::ProviderSessionState,
@@ -1554,10 +1570,15 @@ pub async fn status(State(app): State<Arc<crate::AppState>>, headers: HeaderMap)
             .is_some_and(|config| config.enabled);
         // Report the embedded browser's observed state only when available.
         // Saved cookies alone are never proof of a valid provider login.
-        let observed = active
+        let legacy_observed = active
             .iter()
             .find(|item| item.provider == provider)
             .and_then(|item| item.logged_in);
+        let observed = source_grounded_account_observation(
+            provider,
+            legacy_observed,
+            enabled && session_present && app.provider_sessions.credentials_verified(provider),
+        );
         let runtime = app.provider_sessions.status(provider);
         let lifecycle = runtime.state;
         let manual_verification_required =
@@ -1844,6 +1865,12 @@ pub async fn import_session(
         "queue",
         import_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
     );
+    // A new candidate is queued under the provider import gate. Do not
+    // advertise an older first-party proof while this candidate is persisted
+    // and activated; the browser worker assigns its own opaque check epoch.
+    if provider == "chatgpt" {
+        app.provider_sessions.invalidate_credentials(&provider);
+    }
     let tail_metrics_app = Arc::clone(&app);
     let task = run_provider_mutation_detached_with_tail(provider_import_guard, async move {
         let store_started = Instant::now();
@@ -2258,6 +2285,45 @@ mod tests {
             let mut headers = HeaderMap::new();
             headers.insert(header::ORIGIN, HeaderValue::from_static(origin));
             assert_eq!(requested_extension_id(&headers).is_some(), allowed);
+        }
+    }
+
+    #[test]
+    fn active_provider_account_status_cannot_inherit_composer_heuristics() {
+        use crate::provider_state::ProviderSessionState::Ready;
+        for legacy in [None, Some(false), Some(true)] {
+            // ChatGPT needs its own currently valid first-party Obscura check.
+            let without_proof = source_grounded_account_observation("chatgpt", legacy, false);
+            assert_eq!(without_proof, None);
+            assert_eq!(
+                provider_authentication_status(without_proof, Ready, false),
+                "unknown"
+            );
+            let with_proof = source_grounded_account_observation("chatgpt", legacy, true);
+            assert_eq!(with_proof, Some(true));
+            assert_eq!(
+                provider_authentication_status(with_proof, Ready, false),
+                "verified"
+            );
+
+            // Meta AI has no authoritative positive account contract.
+            assert_eq!(
+                source_grounded_account_observation("metaai", legacy, true),
+                None
+            );
+            assert_eq!(
+                provider_authentication_status(
+                    source_grounded_account_observation("metaai", legacy, true),
+                    Ready,
+                    false,
+                ),
+                "unknown"
+            );
+            // Deferred providers keep their earlier routing semantics.
+            assert_eq!(
+                source_grounded_account_observation("grok", legacy, false),
+                legacy
+            );
         }
     }
 

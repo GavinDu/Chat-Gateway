@@ -3,7 +3,7 @@ use crate::chat_backend::{GatewayError, GatewayErrorKind};
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
-    time::{Duration, SystemTime},
+    time::{Duration, Instant, SystemTime},
 };
 
 /// Typed provider lifecycle state. Keep its string representation at API boundaries.
@@ -35,6 +35,20 @@ pub struct ProviderSessionStatus {
 }
 
 const DEGRADED_RETRY_COOLDOWN: Duration = Duration::from_secs(15);
+const CREDENTIAL_PROOF_TTL: Duration = Duration::from_secs(300);
+
+/// An opaque, non-credential-derived epoch for one provider/worker account
+/// observation. No cookie hashes, raw account data or tokens are retained.
+#[derive(Debug)]
+struct CredentialProof {
+    epoch: uuid::Uuid,
+    first_party_verified_at: Option<Instant>,
+}
+
+#[derive(Debug, Default)]
+struct CredentialProofStore {
+    by_provider: HashMap<String, CredentialProof>,
+}
 const MANUAL_VERIFICATION_NOTICE: &str =
     "provider manual verification required; resolve challenge and reset before retrying";
 
@@ -43,9 +57,71 @@ const MANUAL_VERIFICATION_NOTICE: &str =
 #[derive(Clone, Debug, Default)]
 pub struct ProviderSessionRegistry {
     states: Arc<Mutex<HashMap<String, ProviderSessionStatus>>>,
+    credential_proofs: Arc<Mutex<CredentialProofStore>>,
 }
 
 impl ProviderSessionRegistry {
+    /// Invalidate a prior positive result before a new imported-session check.
+    /// Only matching epochs may publish a later source-verified verdict.
+    pub fn begin_credential_verification(&self, provider: &str) -> Option<uuid::Uuid> {
+        let mut proofs = self.credential_proofs.lock().ok()?;
+        let epoch = uuid::Uuid::new_v4();
+        proofs.by_provider.insert(
+            provider.to_owned(),
+            CredentialProof {
+                epoch,
+                first_party_verified_at: None,
+            },
+        );
+        Some(epoch)
+    }
+
+    pub fn record_credentials_verified(&self, provider: &str, epoch: uuid::Uuid) -> bool {
+        let Ok(mut proofs) = self.credential_proofs.lock() else {
+            return false;
+        };
+        let Some(current) = proofs.by_provider.get_mut(provider) else {
+            return false;
+        };
+        if current.epoch != epoch {
+            return false;
+        }
+        current.first_party_verified_at = Some(Instant::now());
+        true
+    }
+
+    fn credentials_verified_at(&self, provider: &str, now: Instant) -> bool {
+        self.credential_proofs
+            .lock()
+            .ok()
+            .and_then(|proofs| {
+                proofs
+                    .by_provider
+                    .get(provider)
+                    .and_then(|entry| entry.first_party_verified_at)
+            })
+            .and_then(|observed| now.checked_duration_since(observed))
+            .is_some_and(|age| age <= CREDENTIAL_PROOF_TTL)
+    }
+
+    pub fn credentials_verified(&self, provider: &str) -> bool {
+        self.credentials_verified_at(provider, Instant::now())
+    }
+
+    pub fn invalidate_credentials(&self, provider: &str) {
+        if let Ok(mut proofs) = self.credential_proofs.lock() {
+            proofs.by_provider.remove(provider);
+        }
+    }
+
+    /// Worker reinitialization must reject a late result from the old worker.
+    /// Reuse of an old UUID across new epochs is not permitted.
+    pub fn invalidate_all_credentials(&self) {
+        if let Ok(mut proofs) = self.credential_proofs.lock() {
+            proofs.by_provider.clear();
+        }
+    }
+
     pub fn status(&self, provider: &str) -> ProviderSessionStatus {
         self.states
             .lock()
@@ -60,6 +136,7 @@ impl ProviderSessionRegistry {
 
     /// Mark a provider as requiring authentication after its session is unlinked.
     pub fn record_unlinked(&self, provider: &str) {
+        self.invalidate_credentials(provider);
         if let Ok(mut map) = self.states.lock() {
             map.insert(
                 provider.to_owned(),
@@ -73,6 +150,7 @@ impl ProviderSessionRegistry {
     }
 
     pub fn record_needs_login(&self, provider: &str) {
+        self.invalidate_credentials(provider);
         self.record_error_state(provider, true, None);
     }
 
@@ -100,6 +178,7 @@ impl ProviderSessionRegistry {
             .lock()
             .map_err(|_| anyhow::anyhow!("provider state unavailable"))?
             .remove(provider);
+        self.invalidate_credentials(provider);
         Ok(())
     }
 
@@ -178,6 +257,7 @@ impl ProviderSessionRegistry {
     /// credentials expired. Fail closed without a scheduled half-open retry.
     /// New relay cookie imports cannot silently clear this manual blocker.
     fn record_manual_challenge(&self, provider: &str) {
+        self.invalidate_credentials(provider);
         if let Ok(mut map) = self.states.lock() {
             map.insert(
                 provider.to_owned(),
@@ -593,5 +673,74 @@ mod probe_outcome_tests {
             registry.status("chatgpt").state,
             ProviderSessionState::Ready
         );
+    }
+}
+
+#[cfg(test)]
+mod credential_evidence_lifecycle_tests {
+    use super::*;
+
+    #[test]
+    fn evidence_requires_matching_epoch_and_expires_after_five_minutes() {
+        let reg = ProviderSessionRegistry::default();
+        assert!(!reg.credentials_verified("chatgpt"));
+        let first = reg.begin_credential_verification("chatgpt").unwrap();
+        assert!(!reg.credentials_verified("chatgpt"));
+        assert!(reg.record_credentials_verified("chatgpt", first));
+        assert!(reg.credentials_verified("chatgpt"));
+        let expired_now = Instant::now() + CREDENTIAL_PROOF_TTL + Duration::from_secs(1);
+        assert!(!reg.credentials_verified_at("chatgpt", expired_now));
+        let second = reg.begin_credential_verification("chatgpt").unwrap();
+        assert_ne!(first, second);
+        assert!(!reg.record_credentials_verified("chatgpt", first));
+        assert!(!reg.credentials_verified("chatgpt"));
+        assert!(reg.record_credentials_verified("chatgpt", second));
+        assert!(reg.credentials_verified("chatgpt"));
+    }
+
+    #[test]
+    fn logout_restart_and_typed_expiry_revoke_previous_evidence() {
+        let reg = ProviderSessionRegistry::default();
+        let a = reg.begin_credential_verification("chatgpt").unwrap();
+        assert!(reg.record_credentials_verified("chatgpt", a));
+        reg.record_unlinked("chatgpt");
+        assert!(!reg.credentials_verified("chatgpt"));
+        assert!(!reg.record_credentials_verified("chatgpt", a));
+
+        let b = reg.begin_credential_verification("chatgpt").unwrap();
+        assert!(reg.record_credentials_verified("chatgpt", b));
+        reg.record_needs_login("chatgpt");
+        assert!(!reg.credentials_verified("chatgpt"));
+        let c = reg.begin_credential_verification("chatgpt").unwrap();
+        reg.invalidate_all_credentials();
+        assert!(!reg.record_credentials_verified("chatgpt", c));
+        assert!(!reg.credentials_verified("chatgpt"));
+    }
+
+    #[test]
+    fn cloned_registry_and_provider_epochs_are_isolated() {
+        let reg = ProviderSessionRegistry::default();
+        let clone = reg.clone();
+        let chat = reg.begin_credential_verification("chatgpt").unwrap();
+        let meta = reg.begin_credential_verification("metaai").unwrap();
+        assert!(clone.record_credentials_verified("chatgpt", chat));
+        assert!(!clone.credentials_verified("metaai"));
+        assert!(reg.record_credentials_verified("metaai", meta));
+        reg.invalidate_credentials("chatgpt");
+        assert!(!clone.credentials_verified("chatgpt"));
+        assert!(clone.credentials_verified("metaai"));
+        assert!(!ProviderSessionRegistry::default().credentials_verified("metaai"));
+        assert!(!clone.record_credentials_verified("chatgpt", chat));
+    }
+
+    #[test]
+    fn transient_non_authentication_failure_does_not_mislabel_credentials_expired() {
+        let reg = ProviderSessionRegistry::default();
+        let epoch = reg.begin_credential_verification("chatgpt").unwrap();
+        assert!(reg.record_credentials_verified("chatgpt", epoch));
+        reg.record_probe_failure("chatgpt");
+        assert!(reg.credentials_verified("chatgpt"));
+        reg.record_needs_login("chatgpt");
+        assert!(!reg.credentials_verified("chatgpt"));
     }
 }
