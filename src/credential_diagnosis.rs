@@ -480,7 +480,10 @@ mod tests {
             "2026-11-17T03:00:00Z\nCOOKIE=secret",
         ] {
             v["gateway_failure"]["observed_at_utc"] = json!(invalid);
-            assert_eq!(checked(v.clone()).reason, "invalid_gateway_failure_evidence");
+            assert_eq!(
+            checked(v.clone()).reason,
+            "invalid_gateway_failure_evidence"
+        );
         }
     }
 
@@ -493,7 +496,10 @@ mod tests {
         // Both timestamp representations are not a trusted pair; do not
         // guess which one describes the actual owner-status request.
         v["gateway_failure"]["observed_at_utc"] = json!(timestamp);
-        assert_eq!(checked(v.clone()).reason, "invalid_gateway_failure_evidence");
+        assert_eq!(
+            checked(v.clone()).reason,
+            "invalid_gateway_failure_evidence"
+        );
         v["gateway_failure"]
             .as_object_mut()
             .unwrap()
@@ -502,7 +508,10 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .remove("observed_at_utc");
-        assert_eq!(checked(v.clone()).reason, "invalid_gateway_failure_evidence");
+        assert_eq!(
+            checked(v.clone()).reason,
+            "invalid_gateway_failure_evidence"
+        );
         let stale = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(
             (NOW - MAX_AGE_MS - 1000) as i64,
         )
