@@ -29,6 +29,7 @@ mod chat_service;
 mod cli;
 mod config;
 mod context;
+mod credential_diagnosis;
 mod diagnostics;
 mod embedded_login;
 mod login;
@@ -76,8 +77,13 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    let remote_proxy_trust = validate_remote_gateway_config()?;
     let cli = Cli::parse();
+    if let Some(path) = cli.diagnose_credential_evidence.as_deref() {
+        // Offline evidence only: no gateway, browser, vault or network startup.
+        println!("{}", credential_diagnosis::diagnose_file(path)?);
+        return Ok(());
+    }
+    let remote_proxy_trust = validate_remote_gateway_config()?;
     if cli.show_memory_egress_policy {
         let policy = memory_egress::MemoryEgressPolicy::from_env()
             .map_err(|_| anyhow::anyhow!("provider memory egress policy is invalid"))?;
