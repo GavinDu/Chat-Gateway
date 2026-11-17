@@ -1554,10 +1554,17 @@ pub async fn status(State(app): State<Arc<crate::AppState>>, headers: HeaderMap)
             .is_some_and(|config| config.enabled);
         // Report the embedded browser's observed state only when available.
         // Saved cookies alone are never proof of a valid provider login.
-        let observed = active
-            .iter()
-            .find(|item| item.provider == provider)
-            .and_then(|item| item.logged_in);
+        let observed = if matches!(provider, "chatgpt" | "metaai") {
+            // These recovery targets require actual credential proof. A login
+            // window's visible editor is not authenticated account evidence.
+            (app.pool.worker_alive() && app.provider_sessions.credentials_verified(provider))
+                .then_some(true)
+        } else {
+            active
+                .iter()
+                .find(|item| item.provider == provider)
+                .and_then(|item| item.logged_in)
+        };
         let runtime = app.provider_sessions.status(provider);
         let lifecycle = runtime.state;
         let manual_verification_required =
@@ -1868,6 +1875,7 @@ pub async fn import_session(
                 let activation_started = Instant::now();
                 // Record actual activation, not just the saved credential
                 // snapshot. This says nothing about authenticated login.
+                app.provider_sessions.invalidate_credentials(&provider);
                 let generation = app.relay.activation_states.begin(&provider);
                 // Keep the queued/active browser refresh alive after the
                 // bounded HTTP wait, including while the browser is executing

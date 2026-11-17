@@ -123,6 +123,7 @@ pub(super) fn attach_provider_network_tap(
     let provider_name = provider.name();
     let script_errors_seen = Arc::new(AtomicUsize::new(0));
     let metaai_documents_seen = Arc::new(AtomicUsize::new(0));
+    let metaai_graphql_seen = Arc::new(AtomicUsize::new(0));
     let bootstrap_403_seen = Arc::new(AtomicBool::new(false));
     let observed_403 = Arc::clone(&bootstrap_403_seen);
     let metaai_seen = Arc::clone(&metaai_documents_seen);
@@ -164,6 +165,17 @@ pub(super) fn attach_provider_network_tap(
                     );
                 }
             }
+        }
+        // Meta's application reports GraphQL 403 from its JavaScript stack;
+        // this is not evidence that a script or document download was denied.
+        // Observe the exact first-party endpoint without reading/logging body,
+        // request variables, tokens, paths, viewer identity or cookie values.
+        if provider == Provider::MetaAI
+            && metaai_graphql_response(info.url.as_str(), response.url.as_str())
+            && metaai_graphql_seen.fetch_add(1, Ordering::Relaxed) < 8
+        {
+            tracing::info!(provider = "metaai", stage = "application_graphql",
+                status = response.status, "Meta AI application response observed (status only)");
         }
         let javascript_asset_path = is_javascript_asset_path(info.url.path())
             || is_javascript_asset_path(response.url.path())
@@ -421,5 +433,46 @@ mod tests {
         assert!(provider_network_tap_provider_supported(Provider::ChatGPT));
         assert!(provider_network_tap_provider_supported(Provider::Claude));
         assert!(!provider_network_tap_provider_supported(Provider::Gemini));
+    }
+}
+
+/// Both the dispatched request and its final response must be the exact
+/// first-party HTTPS endpoint. Redirected unrelated responses are not proof.
+fn metaai_graphql_response(request: &str, response: &str) -> bool {
+    [request, response].into_iter().all(|value| {
+        let Ok(uri) = value.parse::<axum::http::Uri>() else {
+            return false;
+        };
+        uri.scheme_str() == Some("https")
+            && uri
+                .authority()
+                .is_some_and(|a| !a.as_str().contains('@') && a.port_u16().is_none_or(|p| p == 443))
+            && matches!(uri.host(), Some("meta.ai" | "www.meta.ai"))
+            && uri.path() == "/api/graphql"
+    })
+}
+
+#[cfg(test)]
+mod meta_graphql_tests {
+    use super::metaai_graphql_response;
+    #[test]
+    fn exact_https_endpoint_only_and_redirects_do_not_inherit_classification() {
+        let endpoint = "https://www.meta.ai/api/graphql";
+        assert!(metaai_graphql_response(endpoint, endpoint));
+        assert!(metaai_graphql_response(
+            endpoint,
+            "https://meta.ai/api/graphql?private=not-logged"
+        ));
+        for bad in [
+            "http://www.meta.ai/api/graphql",
+            "https://www.meta.ai:8443/api/graphql",
+            "https://www.meta.ai.attacker.test/api/graphql",
+            "https://www.meta.ai/_next/script.js",
+            "https://www.meta.ai/api/graphql-other",
+            "https://user@www.meta.ai/api/graphql",
+        ] {
+            assert!(!metaai_graphql_response(endpoint, bad));
+            assert!(!metaai_graphql_response(bad, endpoint));
+        }
     }
 }

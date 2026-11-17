@@ -39,6 +39,52 @@ mod session_worker_error_redaction_tests {
     }
 }
 
+#[cfg(test)]
+mod initial_frame_compatibility_tests {
+    #[tokio::test]
+    async fn srcdoc_frame_initialization_can_reenter_dom_without_aborting_worker() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        page.goto("data:text/html,%3Chtml%3E%3Cbody%3E%3C/body%3E%3C/html%3E")
+            .await
+            .unwrap();
+        // Child initialization synchronously calls native DOM ops. The pinned
+        // engine must declare that reentrancy instead of aborting this process.
+        page.evaluate(r#"document.body.innerHTML = '<iframe srcdoc="<p>frame</p>"></iframe>';"#);
+        // The facade adopts the queued child document while settling.
+        page.settle(50).await;
+        assert_eq!(
+            page.evaluate("document.querySelector('iframe').contentDocument.body.textContent")
+                .as_str(),
+            Some("frame")
+        );
+        page.evaluate(
+            r#"(() => {
+                document.body.innerHTML = '';
+                const frame = document.createElement('iframe');
+                frame.srcdoc = '<body><span>inner</span></body>';
+                document.body.appendChild(frame);
+            })()"#,
+        );
+        page.settle(50).await;
+        assert_eq!(
+            page.evaluate(
+                r#"(() => {
+                    const frame = document.querySelector('iframe');
+                    const span = frame.contentDocument.querySelector('span');
+                    span.textContent = 'touched';
+                    return frame.contentDocument.body.textContent;
+                })()"#,
+            )
+            .as_str(),
+            Some("touched")
+        );
+    }
+}
+
 /// Fixed, non-sensitive DOM readiness signals for all nine registered
 /// providers. This does not select a new composer or type into arbitrary inputs;
 /// a generic editor may be a search/login field rather than the chat editor.
@@ -776,6 +822,8 @@ pub(super) fn browser_thread(
         rt.block_on(async move {
             let local = tokio::task::LocalSet::new();
             local.run_until(async move {
+                // Proof belongs to this worker generation, never a restarted page.
+                provider_sessions.invalidate_all_credentials();
                 let gateway_poll_tick = Duration::from_millis(cfg.server.gateway_poll_tick_ms);
                 let browser = match build_browser(&cfg) {
                     Ok(b) => b,
@@ -1292,6 +1340,18 @@ pub(super) fn browser_thread(
                                     finish(report);
                                     return;
                                 }
+                                if provider == Provider::ChatGPT {
+                                    if let Err(error) = providers::chatgpt::verify_credentials(&mut page).await {
+                                        report.authentication = Some(if error.downcast_ref::<ProviderSessionExpiredError>().is_some() { "needs_login" } else { "unavailable" });
+                                        report.errors.push("first-party credential verification failed before composer probe".into());
+                                        finish(report);
+                                        return;
+                                    }
+                                    report.authentication = Some("verified");
+                                } else {
+                                    // A usable composer does not verify Meta AI credentials.
+                                    report.authentication = Some("unverified");
+                                }
                                 report.session_ok = true;
                                 // Selector probe over the full Rust v1
                                 // arrays (snapshot, not Go's 5s waits —
@@ -1408,6 +1468,8 @@ pub(super) fn browser_thread(
                                     // the old browser-wide jar. Invalid snapshots must not
                                     // disrupt a previously usable provider page/session.
                                     session::preflight_cookie_restore(&file, provider.name())?;
+                                    provider_sessions.invalidate_credentials(provider.name());
+                                    let verified_credentials = std::cell::Cell::new(false);
                                     let activated = page_session::activate_if_changed(&applied_imports, provider, &file, || async {
                                     page_session::replace_after_success(
                                     || async {
@@ -1422,7 +1484,18 @@ pub(super) fn browser_thread(
                                         anyhow::bail!("provider localStorage could not be cleared");
                                     }
                                     session::clear_provider_cookies(&browser, provider.name())?;
+                                    // The cleanup navigation used the previous credentials.
+                                    // Its document 403 must not poison the new Meta AI replay.
+                                    if provider == Provider::MetaAI {
+                                        if let Some(observed) = &network_bootstrap_403 {
+                                            observed.store(false, Ordering::Relaxed);
+                                        }
+                                    }
                                     PageSession::open(&browser, &mut page, provider, Some(&file)).await?;
+                                    if provider == Provider::ChatGPT {
+                                        providers::chatgpt::verify_credentials(&mut page).await?;
+                                        verified_credentials.set(true);
+                                    }
                                     Ok((Rc::new(page), network_bootstrap_403))
                                     },
                                     |(replacement, network_bootstrap_403)| {
@@ -1435,9 +1508,24 @@ pub(super) fn browser_thread(
                                     ).await
                                     }).await?;
                                     if activated { provider_sessions.record_session_import(provider.name()); }
+                                    if !activated && provider == Provider::ChatGPT {
+                                        // An unchanged cookie digest must still allow an explicit
+                                        // resync to refresh expired authentication evidence.
+                                        let mut page = PageLease::take(&pages, provider)?;
+                                        providers::chatgpt::verify_credentials(&mut page).await?;
+                                        verified_credentials.set(true);
+                                    }
+                                    if verified_credentials.get() {
+                                        provider_sessions.record_credentials_verified(provider.name());
+                                        tracing::info!(provider = provider.name(), stage = "imported_credential_verification", outcome = "verified", "first-party session verified on activated provider page");
+                                    }
                                     Ok(())
                                 }.await;
-                                if res.is_err() { provider_sessions.record_probe_failure(provider.name()); }
+                                if let Err(error) = &res {
+                                    if error.downcast_ref::<ProviderSessionExpiredError>().is_some() {
+                                        provider_sessions.record_needs_login(provider.name());
+                                    } else { provider_sessions.record_probe_failure(provider.name()); }
+                                }
                                 let _ = reply.send(res);
                             });
                         }

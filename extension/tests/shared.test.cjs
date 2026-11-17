@@ -1042,3 +1042,38 @@ test("relay upload rechecks exact array consent after an awaited owner transitio
   }), /Provider consent or gateway connection changed/);
   assert.equal(api.fetchCalls.length, 0, "pre-POST consent fence must reject string membership");
 });
+
+
+test("exact typed persistence-success activation failures remain pending without caching a digest", async () => {
+  for (const [status, code] of [[504, "session_activation_timeout"], [500, "session_refresh_failed"]]) {
+    const storage = {gateway:"http://127.0.0.1:8080",connectionMode:"local",
+      linkedProviders:["chatgpt"],providerLinkEpochs:{chatgpt:"consent-epoch"}};
+    const api = loadShared([{name:"session",value:"private-test-cookie",
+      domain:".chatgpt.com",path:"/",secure:true}],true,storage,{
+      fetchResponse:{ok:false,status,json:async()=>({error:{code,message:"private token=secret"}})}
+    });
+    assert.equal(await api.syncProvider("chatgpt"), "saved_activation_pending");
+    assert.deepEqual(storage.linkedProviders, ["chatgpt"]);
+    assert.equal(storage.relaySnapshotVersions, undefined,
+      "activation-pending must not falsely mark a cookie version as activated");
+    assert.equal(api.fetchCalls.length,1,"do not automatically replay uncertain uploads");
+  }
+});
+
+test("untyped or status-mismatched activation responses cannot claim persisted consent", async () => {
+  for (const [status, code] of [
+    [504,"unrelated_timeout"],[500,"session_activation_timeout"],
+    [504,"session_refresh_failed"],[403,"session_refresh_failed"],
+  ]) {
+    const storage = {gateway:"http://127.0.0.1:8080",connectionMode:"local",
+      linkedProviders:["chatgpt"],providerLinkEpochs:{chatgpt:"consent-epoch"}};
+    const api = loadShared([{name:"session",value:"private-test-cookie",
+      domain:".chatgpt.com",path:"/",secure:true}],true,storage,{
+      fetchResponse:{ok:false,status,json:async()=>({error:{code,message:"private token=secret"}})}
+    });
+    await assert.rejects(() => api.syncProvider("chatgpt"),
+      /Gateway rejected session update/);
+    assert.equal(storage.relaySnapshotVersions,undefined);
+    assert.equal(api.fetchCalls.length,1);
+  }
+});

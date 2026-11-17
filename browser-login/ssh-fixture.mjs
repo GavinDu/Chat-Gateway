@@ -23,13 +23,20 @@ function startupError(category) {
   return error;
 }
 
+// ssh2 1.17's Ed25519 serializer strips real leading zero key bytes along
+// with DER's unused-bits byte, intermittently producing malformed SSH keys.
+// Use P-256 for disposable fixtures; its encoded public point begins with 0x04.
+export function generateFixtureKeyPair() {
+  return utils.generateKeyPairSync('ecdsa', {bits:256});
+}
+
 // The optional hooks inject only fixture process/socket failures in offline
 // tests. The real browser/SSH acceptance always calls this with no hooks.
 export async function startOwnerTunnel(gatewayPort, testHooks = {}) {
   const temp = await mkdtemp('/dev/shm/cg-ssh-fixture-');
   testHooks.onTemporaryDirectory?.(temp);
-  const host = utils.generateKeyPairSync('ed25519');
-  const owner = utils.generateKeyPairSync('ed25519');
+  const host = generateFixtureKeyPair();
+  const owner = generateFixtureKeyPair();
   const allowed = utils.parseKey(owner.public);
   const clients = new Set(), children = new Set();
   let authenticated = 0, rejected = 0, helper;

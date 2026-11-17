@@ -272,6 +272,10 @@ fn record_test_adapter_restore_result(
 /// selector arrays, and the live send uses the restored send path).
 #[derive(Default, Debug, serde::Serialize)]
 pub struct TestAdapterReport {
+    /// Explicit first-party authentication evidence, separate from DOM readiness.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub authentication: Option<&'static str>,
+
     pub session_ok: bool,
     pub probe: Vec<(String, Option<String>)>,
     pub input_found: bool,

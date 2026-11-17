@@ -133,6 +133,9 @@ impl MemoryEgressPolicy {
             prompt.push_str(&escape_memory_field(&item.content));
             prompt.push_str("</personal_memory_item>\n");
         }
+        // This removes only the final wrapper's generated separator. Empty
+        // filtered memory returns above without modifying the prompt.
+        prompt.pop();
         Ok(())
     }
 
@@ -281,6 +284,34 @@ mod tests {
 
         assert!(outbound_prompt.contains("allowed-item-1"));
         assert!(outbound_prompt.contains("allowed fact"));
+    }
+
+    #[test]
+    fn allowed_memory_preserves_content_whitespace_without_final_transport_separator() {
+        let allowed = policy(&["chatgpt"]);
+        let items = vec![
+            PersonalMemoryItem {
+                id: "id-1".into(),
+                content: "value  \n\n".into(),
+            },
+            PersonalMemoryItem {
+                id: "id-2".into(),
+                content: "Unicode 世界".into(),
+            },
+        ];
+        let mut prompt = "original request\n".to_owned();
+        allowed
+            .append_personal_memory_to_prompt("chatgpt", &mut prompt, &items)
+            .unwrap();
+        assert!(prompt.contains("value  \n\n</personal_memory_item>\n"));
+        assert!(prompt.ends_with("Unicode 世界</personal_memory_item>"));
+        assert!(!prompt.ends_with("</personal_memory_item>\n"));
+        assert_eq!(prompt.matches("</personal_memory_item>").count(), 2);
+        let mut denied = "unchanged \n".to_owned();
+        policy(&[])
+            .append_personal_memory_to_prompt("chatgpt", &mut denied, &items)
+            .unwrap();
+        assert_eq!(denied, "unchanged \n");
     }
 
     #[test]

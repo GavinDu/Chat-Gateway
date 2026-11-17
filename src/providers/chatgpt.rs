@@ -7,6 +7,11 @@ use obscura_core::Page;
 
 mod session_readiness;
 
+/// Verify restored credentials on the provider origin before inspecting the editor.
+pub(crate) async fn verify_credentials(page: &mut Page) -> Result<()> {
+    session_readiness::wait(page).await
+}
+
 /// ChatGPT - chatgpt.com. Contenteditable #prompt-textarea; markdown response divs.
 pub struct ChatGPTAdapter {
     pub cfg: ProviderConfig,

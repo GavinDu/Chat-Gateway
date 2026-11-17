@@ -110,7 +110,38 @@ fn public_ip(ip: IpAddr) -> bool {
     }
 }
 
-fn bridge_origin(url: &str) -> Option<&'static str> {
+fn allowed_target_for_origin(origin: &str, target: &str) -> Option<(String, String)> {
+    if matches!(origin, "https://chatgpt.com" | "https://www.chatgpt.com") {
+        return allowed_target(target);
+    }
+    if !matches!(origin, "https://meta.ai" | "https://www.meta.ai")
+        || target.len() > 4096
+        || target.contains('#')
+    {
+        return None;
+    }
+    let uri = target.parse::<axum::http::Uri>().ok()?;
+    let authority = uri.authority()?.as_str();
+    if uri.scheme_str() != Some("wss")
+        || !matches!(authority, "gateway.meta.ai" | "gateway.meta.ai:443")
+        || uri.path() != "/ws/clippy"
+    {
+        return None;
+    }
+    Some((
+        "gateway.meta.ai".into(),
+        "https://gateway.meta.ai/ws/clippy".into(),
+    ))
+}
+
+fn bridge_origin(url: &str, metaai: bool) -> Option<&'static str> {
+    if metaai {
+        return match url {
+            "https://meta.ai/.well-known/chat-gateway-websocket" => Some("https://meta.ai"),
+            "https://www.meta.ai/.well-known/chat-gateway-websocket" => Some("https://www.meta.ai"),
+            _ => None,
+        };
+    }
     if url == format!("https://chatgpt.com{BRIDGE_PATH}") {
         Some("https://chatgpt.com")
     } else if url == format!("https://www.chatgpt.com{BRIDGE_PATH}") {
@@ -206,6 +237,11 @@ async fn command(
     input: Value,
 ) -> Value {
     let fail = || json!({"ok":false});
+    let provider = match origin {
+        "https://chatgpt.com" | "https://www.chatgpt.com" => "chatgpt",
+        "https://meta.ai" | "https://www.meta.ai" => "metaai",
+        _ => return fail(),
+    };
     match input["op"].as_str().unwrap_or("") {
         "reset" => {
             let mut sockets = state.sockets.lock().await;
@@ -219,7 +255,7 @@ async fn command(
             let Some(target) = input["url"].as_str() else {
                 return fail();
             };
-            let Some((host, cookie_url)) = allowed_target(target) else {
+            let Some((host, cookie_url)) = allowed_target_for_origin(origin, target) else {
                 return fail();
             };
             let Some(ua) = input["ua"].as_str().filter(|s| s.len() <= 1024) else {
@@ -306,18 +342,18 @@ async fn command(
                     Ok(result) => result,
                     Err(tokio_tungstenite::tungstenite::Error::Http(response)) => {
                         tracing::warn!(
-                            provider = "chatgpt",
+                            provider,
                             status = response.status().as_u16(),
-                            "ChatGPT WebSocket handshake rejected"
+                            "Provider WebSocket handshake rejected"
                         );
                         return None;
                     }
                     Err(_) => return None,
                 };
                 tracing::info!(
-                    provider = "chatgpt",
+                    provider,
                     host = host.as_str(),
-                    "ChatGPT WebSocket connected"
+                    "Provider WebSocket connected"
                 );
                 let protocol = response
                     .headers()
@@ -332,9 +368,9 @@ async fn command(
                 Ok(Some(value)) => value,
                 _ => {
                     tracing::warn!(
-                        provider = "chatgpt",
+                        provider,
                         category = "websocket_connect_failed",
-                        "ChatGPT transport connection failed"
+                        "Provider transport connection failed"
                     );
                     fail()
                 }
@@ -426,18 +462,34 @@ async fn command(
 }
 
 pub(super) fn attach(browser: &Browser, page: &mut Page) {
+    attach_for_site(browser, page, false);
+}
+
+/// Meta AI's observed DGW endpoint needs a real socket as well. Reuse the
+/// bounded page-scoped bridge with an exact, disjoint target policy.
+pub(super) fn attach_metaai(browser: &Browser, page: &mut Page) {
+    attach_for_site(browser, page, true);
+}
+
+fn attach_for_site(browser: &Browser, page: &mut Page, metaai: bool) {
     let token = uuid::Uuid::new_v4().simple().to_string();
     let config = json!({"token":token,"path":BRIDGE_PATH});
-    page.add_preload_script(
-        &include_str!("chatgpt_websocket.js").replace("__BRIDGE_CONFIG__", &config.to_string()),
-    );
+    let mut source =
+        include_str!("chatgpt_websocket.js").replace("__BRIDGE_CONFIG__", &config.to_string());
+    if metaai {
+        source = source.replace(
+            "['chatgpt.com', 'www.chatgpt.com']",
+            "['meta.ai', 'www.meta.ai']",
+        );
+    }
+    page.add_preload_script(&source);
     let mut requests = page.enable_interception();
     let cookies = Arc::new(browser.cookies());
     let state = Arc::new(State::default());
     let command_capacity = Arc::new(tokio::sync::Semaphore::new(MAX_INFLIGHT_COMMANDS));
     tokio::spawn(async move {
         while let Some(request) = requests.recv().await {
-            let Some(origin) = bridge_origin(&request.url) else {
+            let Some(origin) = bridge_origin(&request.url, metaai) else {
                 let _ = request.resolver.send(InterceptResolution::Continue {
                     url: None,
                     method: None,
@@ -726,5 +778,70 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod metaai_target_policy_tests {
+    use super::*;
+    #[test]
+    fn metaai_socket_targets_are_exact_and_disjoint_from_chatgpt() {
+        for origin in ["https://meta.ai", "https://www.meta.ai"] {
+            for target in [
+                "wss://gateway.meta.ai/ws/clippy",
+                "wss://gateway.meta.ai:443/ws/clippy?opaque=fixture",
+            ] {
+                assert!(allowed_target_for_origin(origin, target).is_some());
+                assert!(allowed_target_for_origin("https://chatgpt.com", target).is_none());
+            }
+            for target in [
+                "wss://gateway.meta.ai/ws",
+                "wss://gateway.meta.ai/ws/clippy/",
+                "wss://gateway.meta.ai/ws/other",
+                "wss://ws.chatgpt.com/socket",
+                "ws://gateway.meta.ai/ws/clippy",
+                "wss://gateway.meta.ai:8086/ws",
+                "wss://gateway.meta.ai:65536/ws",
+                "wss://user@gateway.meta.ai/ws/clippy",
+                "wss://gateway.meta.ai.attacker.test/ws",
+                "wss://other.meta.ai/ws",
+                "wss://gateway.meta.ai/admin",
+                "wss://gateway.meta.ai/ws/clippy#secret",
+                "wss://127.0.0.1/ws",
+            ] {
+                assert!(
+                    allowed_target_for_origin(origin, target).is_none(),
+                    "{target}"
+                );
+            }
+        }
+        assert!(allowed_target_for_origin(
+            "https://attacker.test",
+            "wss://gateway.meta.ai/ws/clippy"
+        )
+        .is_none());
+    }
+    #[test]
+    fn a_page_bridge_cannot_be_reused_by_the_other_provider() {
+        assert!(bridge_origin(
+            "https://www.meta.ai/.well-known/chat-gateway-websocket",
+            true
+        )
+        .is_some());
+        assert!(bridge_origin(
+            "https://www.meta.ai/.well-known/chat-gateway-websocket",
+            false
+        )
+        .is_none());
+        assert!(bridge_origin(
+            "https://chatgpt.com/.well-known/chat-gateway-websocket",
+            true
+        )
+        .is_none());
+        assert!(bridge_origin(
+            "https://www.meta.ai:8443/.well-known/chat-gateway-websocket",
+            true
+        )
+        .is_none());
     }
 }

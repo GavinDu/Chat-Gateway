@@ -353,6 +353,16 @@ async function syncProvider(provider, {
       throw new Error("No provider cookies reached the gateway. Sign in to the provider and retry linking.");
     }
   }
+  if (!response.ok && (response.status === 504 || response.status === 500)) {
+    let failure = null;
+    try { failure = await response.json(); } catch {}
+    if ((response.status === 504 && failure?.error?.code === "session_activation_timeout") ||
+        (response.status === 500 && failure?.error?.code === "session_refresh_failed")) {
+      // Encrypted persistence completed before the typed activation failure.
+      // Do not cache this digest as activated or replay an uncertain upload.
+      return "saved_activation_pending";
+    }
+  }
   if (!response.ok) throw new Error("Gateway rejected session update (" + response.status + "). Check vault mode and provider permissions.");
   if (version) {
     // Re-read and validate inside the shared writer, not before awaiting it.
