@@ -594,7 +594,7 @@ test("provider dashboard keeps healthy providers actionable when one cookie prob
   const popup=loadPopup({failCookieDomain:"meta.ai",includeSecondProvider:true});
   await popup.controls.refreshStatus();
   const [failed,healthy]=popup.elements.get("status").children;
-  assert.equal(failed.children[0].textContent,"metaai");
+  assert.equal(failed.children[0].textContent,"Meta AI");
   assert.match(failed.children[1].textContent,/Browser cookie check unavailable/);
   assert.equal(healthy.children[0].textContent,"claude");
   assert.match(healthy.children[1].textContent,/Browser cookies present/);
@@ -904,7 +904,7 @@ test("popup quarantines malformed provider rows and refuses truthy fake saved-se
   await popup.controls.refreshStatus(true);
   const rows = popup.byId("status").children;
   assert.equal(rows.length,2,"invalid rows must not suppress valid providers");
-  assert.equal(rows[0].children[0].textContent,"metaai");
+  assert.equal(rows[0].children[0].textContent,"Meta AI");
   assert.equal(rows[1].children[0].textContent,"claude");
   const metaStatus = rows[0].children[1].textContent;
   assert.match(metaStatus,/Gateway enablement unverified/);
@@ -955,7 +955,7 @@ test("duplicate Manus status rows cannot display conflicting saved-session contr
   await popup.controls.refreshStatus(true);
   const rows=popup.byId("status").children;
   assert.equal(rows.length,1,"both conflicting Manus copies must be quarantined");
-  assert.equal(rows[0].children[0].textContent,"metaai");
+  assert.equal(rows[0].children[0].textContent,"Meta AI");
   assert.equal(rows[0].children[2].children[0].textContent,"Log in / Connect");
   assert.equal(cookieReads,1,"do not inspect browser cookies for ambiguous Manus rows");
 
@@ -1223,8 +1223,39 @@ test("last-failure UI accepts only fresh fixed server evidence for two active pr
     row.children[0].textContent,
     row.children.find(child=>child.className==="provider-detail").textContent
   ]));
-  assert.match(texts.chatgpt,/Last gateway failure: json completion/);
-  assert.match(texts.chatgpt,/Login unverified/);
-  assert.doesNotMatch(texts.metaai,/Last gateway failure|private|cookie=secret/);
+  assert.match(texts.ChatGPT,/Last gateway failure: json completion/);
+  assert.match(texts.ChatGPT,/Login unverified/);
+  assert.doesNotMatch(texts["Meta AI"],/Last gateway failure|private|cookie=secret/);
   assert.doesNotMatch(texts.grok,/Last gateway failure/);
+});
+
+test("provider status names and disabled account checks are distinct from verified login", async () => {
+  const popup = loadPopup();
+  await new Promise(resolve => setImmediate(resolve));
+  popup.context.PROVIDERS.chatgpt = ["chatgpt.com"];
+  popup.context.relayFetch = async () => ({
+    ok:true,status:200,json:async()=>({vault_mode:true,providers:[
+      {provider:"chatgpt",enabled:true,linked:true,authentication:"verified"},
+      {provider:"metaai",enabled:true,linked:true,authentication:"unknown"},
+      {provider:"claude",enabled:false,linked:true,authentication:"verified"},
+      {provider:"manus",enabled:null,linked:true,authentication:"unknown"}
+    ]})
+  });
+  await popup.controls.refreshStatus(true);
+  const rows = popup.byId("status").children;
+  const cards = Object.fromEntries(rows.map(row => [
+    row.children[0].textContent,
+    row.children.find(child => child.className === "provider-detail").textContent
+  ]));
+  assert.match(cards.ChatGPT,/Login verified/);
+  assert.match(cards["Meta AI"],/Login unverified/);
+  assert.match(cards.claude,/Disabled in gateway config/);
+  assert.match(cards.claude,/Account check deferred \(provider disabled\)/);
+  assert.doesNotMatch(cards.claude,/Login verified|Login needed|Login unverified/);
+  assert.match(cards.manus,/Gateway enablement unverified/);
+  assert.match(cards.manus,/Login unverified/);
+  // Display-name mapping is UI only; action routing still uses provider IDs.
+  const chatgptRow = rows.find(row => row.children[0].textContent === "ChatGPT");
+  assert.ok(chatgptRow);
+  assert.match(chatgptRow.children[1].textContent,/Session saved/);
 });
