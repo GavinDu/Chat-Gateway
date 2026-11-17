@@ -82,6 +82,20 @@ missing/duplicate entries and never logs into Manus or starts the gateway on
 its own. Sign in on the official website and link the browser session through
 the extension separately, after checking your permitted usage.
 
+### Two-provider investigation focus (ChatGPT + Meta AI)
+
+For the owner-requested temporary focus, use the **existing private** `config.yaml`, not `config.example.yaml`. The following commands leave ChatGPT and Meta AI's existing `enabled` values unchanged, disable the other configured providers (including Manus), preserve the encrypted sessions and linked consent, and never restart automatically. Use only when you have reviewed the applicable provider terms and account authorization; this helper **never enables ChatGPT or Meta AI** for you.
+
+```bash
+bash scripts/docker-run.sh focus-chatgpt-metaai-preview
+bash scripts/docker-run.sh focus-chatgpt-metaai
+# Inspect config.yaml: only ChatGPT/Meta AI should be enabled if authorized.
+bash scripts/docker-run.sh restart
+bash scripts/docker-run.sh status
+```
+
+The helper requires exactly one recognized top-level `providers` list containing explicit `enabled: true/false` for every listed provider and both target providers. It rejects unexpected layouts, duplicates and symlinks instead of risking a wrong edit. It saves **only the previous enabled booleans** (not the config file, passwords or cookies) to an owner-private ignored `config.yaml.focus-flags.json`. To restore those flags later, run `bash scripts/docker-run.sh restore-provider-focus`, then explicitly `restart`. Do not remove the private focus snapshot if you want to restore the exact previous enabled settings. Disabling routing does not delete sessions, and linking cookies alone is never proof of authenticated completion.
+
 Load the repository's `extension/` directory from `chrome://extensions`. In its popup,
 enter `http://127.0.0.1:8080` and choose **Connect to gateway**. In the
 current local-only Docker mode the extension connects **without a pairing code,
