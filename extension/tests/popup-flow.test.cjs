@@ -1223,9 +1223,9 @@ test("last-failure UI accepts only fresh fixed server evidence for two active pr
     row.children[0].textContent,
     row.children.find(child=>child.className==="provider-detail").textContent
   ]));
-  assert.match(texts.chatgpt,/Last gateway failure: json completion/);
-  assert.match(texts.chatgpt,/Login unverified/);
-  assert.doesNotMatch(texts.metaai,/Last gateway failure|private|cookie=secret/);
+  assert.match(texts.ChatGPT,/Last gateway failure: json completion/);
+  assert.match(texts.ChatGPT,/Login unverified/);
+  assert.doesNotMatch(texts["Meta AI"],/Last gateway failure|private|cookie=secret/);
   assert.doesNotMatch(texts.grok,/Last gateway failure/);
 });
 
