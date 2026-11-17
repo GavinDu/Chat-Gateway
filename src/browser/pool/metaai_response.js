@@ -21,6 +21,17 @@
         Object.hasOwn(this, '_bodyUsed') && Object.hasOwn(this, '_bodyBytes')) {
       return this._bodyStream;
     }
+    if (Object.hasOwn(this, '_bodyUsed') && this._bodyUsed &&
+        Object.hasOwn(this, '_bodyStream') && !this._bodyStream && !this._bodyNull &&
+        Object.hasOwn(this, '_bodyBytes')) {
+      // text/json may consume the bytes before the lazy stream was created.
+      // Expose a terminal stream, never replay the consumed response bytes.
+      this._bodyStream = new ReadableStream({start: controller => {
+        if (this._bodyAborted) controller.error(this._bodyAbortReason);
+        else controller.close();
+      }});
+      return this._bodyStream;
+    }
     return descriptor.get.call(this);
   };
   Object.defineProperty(get, '__cgMetaBody', {value:true});
