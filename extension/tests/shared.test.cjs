@@ -585,6 +585,56 @@ test("revoked provider permission at upload boundary blocks previously captured 
   assert.equal(api.fetchCalls.length, 0, "revoked consent must block credential uploads");
 });
 
+test("provider host permission revoked during gateway check prevents cookie POST", async () => {
+  const storage = {
+    gateway:"http://127.0.0.1:8080", connectionMode:"local",
+    linkedProviders:["chatgpt"], providerLinkEpochs:{chatgpt:"owner-consent"}
+  };
+  let providerPermission = true;
+  const api = loadShared([
+    {name:"session", value:"synthetic-only", domain:".chatgpt.com", path:"/", secure:true}
+  ], true, storage, {
+    onPermissionCheck: origins => {
+      // Capture, cookie reads, digest and the earlier pre-upload provider
+      // check all succeeded. Revocation happens in the awaited GATEWAY
+      // origin check inside relayFetch, before its final POST dispatch.
+      if (origins.some(origin => origin.startsWith("http://127.0.0.1"))) {
+        providerPermission = false;
+      }
+    },
+    hasPermissions: origins => origins.every(origin => origin.startsWith("https://"))
+      ? providerPermission : true
+  });
+  await assert.rejects(() => api.syncProvider("chatgpt"),
+    /Provider host permissions were revoked before relay upload/);
+  assert.equal(api.getCookieReads() > 0, true,
+    "consent revocation here must occur after a real snapshot was collected");
+  assert.equal(api.fetchCalls.length, 0,
+    "revoked browser host permission cannot authorize later cookie POST");
+  assert.equal(storage.relaySnapshotVersions, undefined,
+    "a rejected POST must not cache a session snapshot digest");
+});
+
+test("final provider host permission fence does not block session DELETE or status", async () => {
+  const storage = {
+    gateway:"http://127.0.0.1:8080", connectionMode:"local",
+    linkedProviders:["chatgpt"], providerLinkEpochs:{chatgpt:"owner-consent"}
+  };
+  const api = loadShared([], true, storage, {
+    hasPermissions: origins => !origins.some(origin => origin.startsWith("https://"))
+  });
+  const expected = {
+    gateway:storage.gateway, connectionMode:storage.connectionMode,
+    provider:"chatgpt", linkEpoch:"owner-consent"
+  };
+  await api.relayFetch("/relay/v1/session/chatgpt", {
+    method:"DELETE", body:"{}"
+  }, expected);
+  await api.relayFetch("/relay/v1/diagnostics", {method:"POST", body:"{}"});
+  assert.equal(api.fetchCalls.length, 2,
+    "permission revocation must not break cleanup or safe diagnostics");
+});
+
 test("token-bound logout can run after provider consent is removed", async () => {
   const state = {
     gateway:"http://127.0.0.1:8080",
