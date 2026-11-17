@@ -213,7 +213,11 @@ pub(super) async fn run(
                     &request_id,
                     &provider_name,
                     "candidate_admission",
-                    if busy { "provider_busy" } else { "candidate_skipped" },
+                    if busy {
+                        "provider_busy"
+                    } else {
+                        "candidate_skipped"
+                    },
                     request_started,
                 );
                 last_err = Some(message);
