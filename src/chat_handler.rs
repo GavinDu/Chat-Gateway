@@ -188,7 +188,9 @@ pub(super) async fn run(
     for provider_name in candidates {
         // Newer request IDs fence late failures from older same-provider work.
         // No upstream text or credential values are used for diagnostics.
-        state.provider_sessions.begin_request_attempt(&provider_name, &request_id);
+        state
+            .provider_sessions
+            .begin_request_attempt(&provider_name, &request_id);
         let chat_service::CandidateAttempt {
             permit,
             queue_ms,
