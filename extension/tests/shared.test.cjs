@@ -7,6 +7,7 @@ const { TextEncoder } = require("node:util");
 
 function loadShared(cookieFixtures = [], hasAllPermissions = true, storageValues = {}, hooks = {}) {
   let cookieReads = 0;
+  const cookieQueries = [];
   const fetchCalls = [];
   const context = {
     URL,
@@ -26,8 +27,9 @@ function loadShared(cookieFixtures = [], hasAllPermissions = true, storageValues
       cookies: {
         // Return the full fixture set to simulate a permissive/misbehaving
         // browser API; providerCookieSnapshot must still enforce its own scope.
-        getAll: async ({domain}) => {
+        getAll: async ({domain,partitionKey}) => {
           cookieReads += 1;
+          cookieQueries.push({domain,partitionKey});
           if (hooks.onCookieRead) await hooks.onCookieRead(storageValues, domain);
           return cookieFixtures;
         }
@@ -50,7 +52,8 @@ function loadShared(cookieFixtures = [], hasAllPermissions = true, storageValues
   vm.createContext(context);
   const source = fs.readFileSync(require.resolve("../shared.js"), "utf8");
   vm.runInContext(source + "\nglobalThis.__testApi = { normalizeGateway, providerCookieSnapshot, relayFetch, syncProvider, PROVIDERS };", context);
-  return { ...context.__testApi, getCookieReads: () => cookieReads, fetchCalls };
+  return { ...context.__testApi, getCookieReads: () => cookieReads,
+    getCookieQueries: () => cookieQueries, fetchCalls };
 }
 
 test("gateway normalization accepts local HTTP and explicit HTTPS origins", () => {
@@ -874,6 +877,11 @@ test("irrelevant partitioned cookies are excluded while ordinary active cookies 
   const snapshot = await api.providerCookieSnapshot("chatgpt");
   const names = JSON.parse(JSON.stringify(snapshot.cookies.map(cookie => cookie.name).sort()));
   assert.deepEqual(names, ["non-partitioned","null-partition"]);
+  const queries = api.getCookieQueries();
+  assert.ok(queries.length > 0);
+  assert.ok(queries.every(query => query.partitionKey &&
+    Object.keys(query.partitionKey).length === 0),
+    "explicit empty partitionKey is necessary to enumerate all cookie scopes");
   assert.ok(snapshot.cookies.every(cookie => !Object.hasOwn(cookie, "partitionKey")));
 });
 
