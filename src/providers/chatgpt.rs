@@ -22,7 +22,6 @@ pub const SELECTORS: SelectorSet = SelectorSet {
     model_pairs: &[("button[data-testid='model-switcher-dropdown-button'], button[aria-label*='model' i], [data-testid='model-switcher-dropdown-button']", "[role='menuitem'], [role='option'], [data-testid*='model' i]")],
 };
 
-
 /// A redesign fallback belongs to one actionable first-party chat form, not
 /// an unrelated search box, modal dialog, or duplicate editor.
 fn require_unambiguous_form_composer(page: &Page) -> Result<()> {
