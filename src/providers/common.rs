@@ -4389,8 +4389,21 @@ fn submission_snapshot(
             }}
             // Visible response nodes and actionable generation controls
             // are additional evidence of a submission transition.
+            // A visually present but CSS pointer-inert Stop clone is not
+            // positive evidence that THIS submitted prompt began generating.
+            // Keep explicit first-party data-is-streaming state independent:
+            // those markers may be noninteractive response containers.
+            const actionableStop = button => {{
+                if (!visible(button)) return false;
+                try {{
+                    for (let ancestor = button; ancestor; ancestor = ancestor.parentElement) {{
+                        if (window.getComputedStyle(ancestor).pointerEvents === 'none') return false;
+                    }}
+                }} catch (_) {{ return false; }}
+                return true;
+            }};
             const streaming = Array.from(document.querySelectorAll('[data-is-streaming="true"]')).some(visible) ||
-                Array.from(document.querySelectorAll("button")).some(button => visible(button) &&
+                Array.from(document.querySelectorAll("button")).some(button => actionableStop(button) &&
                     /^(stop|stop generating|stop generation|stop responding|stop response|stop answering)$/i.test(
                         (button.getAttribute("aria-label") || button.innerText || button.textContent || "").trim()
                     ));
@@ -4424,6 +4437,107 @@ fn submission_snapshot(
             .and_then(|x| x.as_bool())
             .unwrap_or(false),
     })
+}
+
+#[cfg(test)]
+mod pointer_inert_submission_stop_tests {
+    use super::{submission_observed_for_adapter, submission_snapshot};
+
+    #[tokio::test]
+    async fn css_inert_stop_clones_never_prove_a_fresh_submission() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <textarea id="prompt">private test draft</textarea>
+            <section id="stop-root">
+                <button id="stop" aria-label="Stop generating" hidden>Stop</button>
+            </section>
+            <article><div class="answer">old reply</div></article>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+
+        let before = submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
+        assert!(!before.streaming);
+
+        page.evaluate(
+            "document.querySelector('#stop').hidden=false; document.querySelector('#stop').style.pointerEvents='none'; document.querySelector('#prompt').value=''",
+        );
+        let disabled = submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
+        assert!(
+            !disabled.streaming,
+            "pointer-inert Stop cannot signal fresh generation"
+        );
+
+        page.evaluate(
+            "document.body.insertAdjacentHTML('beforeend', '<article><div class=answer>hydrated reply</div></article>')",
+        );
+        let hydrated = submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
+        assert_eq!(hydrated.response_count, before.response_count + 1);
+        assert!(
+            !submission_observed_for_adapter(
+                "grok",
+                &page,
+                &before,
+                &hydrated,
+                "private test draft"
+            )
+            .unwrap(),
+            "old response hydration and pointer-inert Stop must not acknowledge Send"
+        );
+
+        page.evaluate(
+            "document.querySelector('#stop').style.pointerEvents='auto'; document.querySelector('#stop-root').style.pointerEvents='none'",
+        );
+        assert!(
+            !submission_snapshot(&page, "#prompt", &[".answer"])
+                .unwrap()
+                .streaming,
+            "inert ancestor blocks Stop despite child override"
+        );
+        // A fresh actionable Stop must be distinguishable from a stale
+        // framework clone whose CSS/layout state was changed in place.
+        page.evaluate(
+            r#"(() => {
+                const root = document.querySelector('#stop-root');
+                root.style.pointerEvents = 'auto';
+                root.innerHTML = '<button id="stop" aria-label="Stop generating">Stop</button>';
+            })()"#,
+        );
+        let enabled_diagnostic = page.evaluate(
+            r#"(() => {
+                const button = document.querySelector('#stop');
+                const root = document.querySelector('#stop-root');
+                return {
+                    rect: !!button?.getClientRects().length,
+                    hidden: !!button?.hidden,
+                    buttonPointer: getComputedStyle(button).pointerEvents,
+                    rootPointer: getComputedStyle(root).pointerEvents
+                };
+            })()"#,
+        );
+        assert!(
+            submission_snapshot(&page, "#prompt", &[".answer"])
+                .unwrap()
+                .streaming,
+            "fresh actionable Stop remains supported; fixture CSS: {enabled_diagnostic:?}"
+        );
+
+        page.evaluate(
+            "document.querySelector('#stop').hidden=true; document.querySelector('#stop-root').setAttribute('data-is-streaming','true')",
+        );
+        assert!(
+            submission_snapshot(&page, "#prompt", &[".answer"])
+                .unwrap()
+                .streaming,
+            "explicit streaming-state marker remains independent of Stop actionability"
+        );
+    }
 }
 
 /// For ChatGPT, Grok and the previously strict adapters, an assistant node count
