@@ -275,7 +275,10 @@ mod cookie_partition_rejection_tests {
                 let mut cookie = fixture();
                 cookie[field] = metadata;
                 let error = serde_json::from_value::<Cookie>(cookie).err().unwrap();
-                assert_eq!(error.to_string(), "unsupported provider cookie partition scope");
+                assert_eq!(
+                    error.to_string(),
+                    "unsupported provider cookie partition scope"
+                );
                 for secret in ["private-fixture-bearer", "private.example", ".chatgpt.com"] {
                     assert!(!error.to_string().contains(secret));
                 }
@@ -286,15 +289,17 @@ mod cookie_partition_rejection_tests {
     #[test]
     fn whole_relay_snapshot_rejects_partitioned_cookie_before_import() {
         let mut cookie = fixture();
-        cookie["partitionKey"] =
-            serde_json::json!({"topLevelSite":"https://private.example"});
+        cookie["partitionKey"] = serde_json::json!({"topLevelSite":"https://private.example"});
         let value = serde_json::json!({
             "cookies": [cookie],
             "local_storage": {},
             "ts": "synthetic"
         });
         let error = serde_json::from_value::<SessionFile>(value).err().unwrap();
-        assert_eq!(error.to_string(), "unsupported provider cookie partition scope");
+        assert_eq!(
+            error.to_string(),
+            "unsupported provider cookie partition scope"
+        );
     }
 
     #[test]
@@ -309,7 +314,10 @@ mod cookie_partition_rejection_tests {
         assert!(serialized.get("partitionKey").is_none());
         assert!(serialized.get("partition_key").is_none());
         assert!(serialized.get("legacy_unrelated_flag").is_none());
-        assert_eq!(serialized.get("value").and_then(|v| v.as_str()), Some("private-fixture-bearer"));
+        assert_eq!(
+            serialized.get("value").and_then(|v| v.as_str()),
+            Some("private-fixture-bearer")
+        );
         let legacy: Cookie = serde_json::from_value(fixture()).unwrap();
         assert_eq!(serialized, serde_json::to_value(legacy).unwrap());
     }
