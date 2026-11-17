@@ -1552,7 +1552,9 @@ mod closed_consumer_before_dispatch_tests {
         .await
         .expect("consumer closure must interrupt the hung submission promptly");
         assert_eq!(attempts.load(Ordering::SeqCst), 1);
-        page.evaluate("window.stopHits || 0").as_f64().unwrap_or(0.0)
+        page.evaluate("window.stopHits || 0")
+            .as_f64()
+            .unwrap_or(0.0)
     }
 
     #[tokio::test]
