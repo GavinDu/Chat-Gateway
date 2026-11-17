@@ -287,6 +287,28 @@ mod tests {
     }
 
     #[test]
+    fn allowed_memory_preserves_content_whitespace_without_final_transport_separator() {
+        let allowed = policy(&["chatgpt"]);
+        let items = vec![
+            PersonalMemoryItem { id: "id-1".into(), content: "value  \n\n".into() },
+            PersonalMemoryItem { id: "id-2".into(), content: "Unicode 世界".into() },
+        ];
+        let mut prompt = "original request\n".to_owned();
+        allowed
+            .append_personal_memory_to_prompt("chatgpt", &mut prompt, &items)
+            .unwrap();
+        assert!(prompt.contains("value  \n\n</personal_memory_item>\n"));
+        assert!(prompt.ends_with("Unicode 世界</personal_memory_item>"));
+        assert!(!prompt.ends_with("</personal_memory_item>\n"));
+        assert_eq!(prompt.matches("</personal_memory_item>").count(), 2);
+        let mut denied = "unchanged \n".to_owned();
+        policy(&[])
+            .append_personal_memory_to_prompt("chatgpt", &mut denied, &items)
+            .unwrap();
+        assert_eq!(denied, "unchanged \n");
+    }
+
+    #[test]
     fn allowed_memory_cannot_forge_a_new_memory_or_system_boundary() {
         let policy = policy(&["chatgpt"]);
         let items = vec![PersonalMemoryItem {
