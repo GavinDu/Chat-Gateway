@@ -2295,13 +2295,22 @@ mod tests {
             // ChatGPT needs its own currently valid first-party Obscura check.
             let without_proof = source_grounded_account_observation("chatgpt", legacy, false);
             assert_eq!(without_proof, None);
-            assert_eq!(provider_authentication_status(without_proof, Ready, false), "unknown");
+            assert_eq!(
+                provider_authentication_status(without_proof, Ready, false),
+                "unknown"
+            );
             let with_proof = source_grounded_account_observation("chatgpt", legacy, true);
             assert_eq!(with_proof, Some(true));
-            assert_eq!(provider_authentication_status(with_proof, Ready, false), "verified");
+            assert_eq!(
+                provider_authentication_status(with_proof, Ready, false),
+                "verified"
+            );
 
             // Meta AI has no authoritative positive account contract.
-            assert_eq!(source_grounded_account_observation("metaai", legacy, true), None);
+            assert_eq!(
+                source_grounded_account_observation("metaai", legacy, true),
+                None
+            );
             assert_eq!(
                 provider_authentication_status(
                     source_grounded_account_observation("metaai", legacy, true),
@@ -2311,7 +2320,10 @@ mod tests {
                 "unknown"
             );
             // Deferred providers keep their earlier routing semantics.
-            assert_eq!(source_grounded_account_observation("grok", legacy, false), legacy);
+            assert_eq!(
+                source_grounded_account_observation("grok", legacy, false),
+                legacy
+            );
         }
     }
 
