@@ -1345,6 +1345,168 @@ mod baseline_provenance_before_send_tests {
 }
 
 #[cfg(test)]
+mod closed_consumer_before_dispatch_tests {
+    use super::{AdapterSelectors, ProviderChunk, ProviderSendPolicy, SiteAdapter};
+    use crate::providers::common::{self, EffectiveSelectorSet, ResponseProbe, SelectorSet};
+    use anyhow::Result;
+    use obscura_core::Page;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
+    };
+    use std::time::Duration;
+    use tokio::sync::mpsc;
+
+    type HeldReceiver = Arc<Mutex<Option<mpsc::Receiver<Result<ProviderChunk>>>>>;
+
+    struct DisconnectSpy {
+        cfg: crate::config::ProviderConfig,
+        sends: Arc<AtomicUsize>,
+        drop_receiver_on_baseline: Option<HeldReceiver>,
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl SiteAdapter for DisconnectSpy {
+        fn name(&self) -> &str {
+            "qwen"
+        }
+
+        fn aliases(&self) -> &[String] {
+            &self.cfg.models
+        }
+
+        async fn discover_models(&self, _page: &mut Page) -> Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+
+        async fn send_prompt(&self, _page: &mut Page, _prompt: &str) -> Result<()> {
+            self.sends.fetch_add(1, Ordering::SeqCst);
+            Err(anyhow::Error::new(
+                common::ProviderSubmissionUnacknowledgedError,
+            ))
+        }
+
+        fn response_text(&self, _page: &Page) -> Option<String> {
+            None
+        }
+
+        fn response_probe(&self, page: &Page, challenge: bool) -> ResponseProbe {
+            if let Some(receiver) = &self.drop_receiver_on_baseline {
+                let _ = receiver.lock().unwrap().take();
+            }
+            common::response_probe(page, &[".answer"], challenge)
+        }
+
+        fn selectors(&self) -> AdapterSelectors {
+            self.effective_selectors().adapter_selectors()
+        }
+
+        fn selector_set(&self) -> &SelectorSet {
+            &crate::providers::qwen::SELECTORS
+        }
+
+        fn effective_selectors(&self) -> EffectiveSelectorSet {
+            crate::providers::qwen::SELECTORS.effective(&self.cfg.selectors)
+        }
+    }
+
+    async fn test_page(browser: &obscura_core::Browser) -> Page {
+        let mut page = browser.new_page().await.unwrap();
+        let html = "<html data-chat-gateway-test-fixture><body><div class='answer'>old response</div></body></html>";
+        let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        page
+    }
+
+    fn spy(
+        sends: &Arc<AtomicUsize>,
+        drop_receiver_on_baseline: Option<HeldReceiver>,
+    ) -> Arc<dyn SiteAdapter> {
+        Arc::new(DisconnectSpy {
+            cfg: serde_yaml::from_str("name: qwen").unwrap(),
+            sends: Arc::clone(sends),
+            drop_receiver_on_baseline,
+        })
+    }
+
+    async fn send(
+        adapter: Arc<dyn SiteAdapter>,
+        page: &mut Page,
+        sender: mpsc::Sender<Result<ProviderChunk>>,
+    ) {
+        super::run_send(
+            adapter,
+            page,
+            "private test prompt".to_owned(),
+            Duration::from_millis(80),
+            Duration::from_millis(20),
+            ProviderSendPolicy {
+                completion_idle: Duration::from_millis(80),
+                provider_guard: crate::provider_guard::ProviderGuard::default(),
+                metrics: crate::metrics::MetricsRegistry::default(),
+            },
+            sender,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn receiver_closed_at_entry_never_dispatches_a_prompt() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = test_page(&browser).await;
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let (sender, receiver) = mpsc::channel(8);
+        drop(receiver);
+
+        send(spy(&attempts, None), &mut page, sender).await;
+        assert_eq!(attempts.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn receiver_closed_during_baseline_never_reaches_send_prompt() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = test_page(&browser).await;
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let (sender, receiver) = mpsc::channel(8);
+        let holder = Arc::new(Mutex::new(Some(receiver)));
+
+        send(spy(&attempts, Some(Arc::clone(&holder))), &mut page, sender).await;
+        assert!(holder.lock().unwrap().is_none());
+        assert_eq!(attempts.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn live_consumer_still_reaches_adapter_and_receives_typed_error() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = test_page(&browser).await;
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let (sender, mut receiver) = mpsc::channel(8);
+
+        send(spy(&attempts, None), &mut page, sender).await;
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        let err = receiver
+            .recv()
+            .await
+            .expect("live receiver should obtain adapter result")
+            .expect_err("mock adapter intentionally rejects unacknowledged Send");
+        assert!(err
+            .downcast_ref::<common::ProviderSubmissionUnacknowledgedError>()
+            .is_some());
+    }
+}
+
+#[cfg(test)]
 mod submission_timeout_cancellation_tests {
     use super::{AdapterSelectors, ProviderSendPolicy, SiteAdapter};
     use crate::providers::common::{self, EffectiveSelectorSet, SelectorSet};
@@ -1595,6 +1757,11 @@ pub async fn run_send(
         provider_guard,
         metrics,
     } = policy;
+    // A disconnected HTTP consumer must never cause a new provider Send.
+    // The later polling-loop check cannot undo a prompt already dispatched.
+    if chunks.is_closed() {
+        return;
+    }
     if crate::provider_guard::is_challenge_page(page) {
         if let Some(error) = untrusted_challenge_origin_error(adapter.name(), page) {
             let _ = chunks.send(Err(error)).await;
@@ -1660,6 +1827,11 @@ pub async fn run_send(
     // Apply the same timeout budget to prompt submission and response
     // polling; otherwise a stuck selector/input action can hang indefinitely
     // before the existing polling timeout even starts.
+    // The receiver can disappear during the synchronous baseline probe.
+    // Recheck at the final handoff before any provider-side input mutation.
+    if chunks.is_closed() {
+        return;
+    }
     let start = Instant::now();
     match tokio::time::timeout(timeout, adapter.send_prompt(page, &prompt)).await {
         Ok(Ok(())) => {}
