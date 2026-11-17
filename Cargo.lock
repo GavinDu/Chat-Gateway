@@ -604,9 +604,11 @@ dependencies = [
  "async-stream",
  "async-trait",
  "axum",
+ "base64 0.22.1",
  "chrono",
  "clap",
  "dashmap",
+ "futures-util",
  "obscura",
  "regex",
  "ring",
@@ -617,6 +619,7 @@ dependencies = [
  "sha2",
  "subtle",
  "tokio",
+ "tokio-tungstenite",
  "tower",
  "tracing",
  "tracing-subscriber",
@@ -3825,6 +3828,10 @@ dependencies = [
  "log",
  "tokio",
  "tungstenite",
+ "rustls",
+ "rustls-pki-types",
+ "tokio-rustls",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]
@@ -3991,6 +3998,8 @@ dependencies = [
  "sha1",
  "thiserror 1.0.69",
  "utf-8",
+ "rustls",
+ "rustls-pki-types",
 ]
 
 [[package]]
