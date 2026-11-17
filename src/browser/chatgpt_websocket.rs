@@ -762,8 +762,13 @@ mod tests {
             .unwrap();
         assert!(second_id > first_id);
 
-        let reset = command(&state, &cookies, "https://chatgpt.com", json!({"op":"reset"}))
-            .await;
+        let reset = command(
+            &state,
+            &cookies,
+            "https://chatgpt.com",
+            json!({"op":"reset"}),
+        )
+        .await;
         assert_eq!(reset["ok"], true);
         assert!(state.sockets.lock().await.is_empty());
 
@@ -772,7 +777,9 @@ mod tests {
         let (stale, _) = tokio_tungstenite::connect_async(format!("ws://{address}"))
             .await
             .unwrap();
-        assert!(register_socket(&state, stale, old_generation).await.is_none());
+        assert!(register_socket(&state, stale, old_generation)
+            .await
+            .is_none());
 
         let current_generation = state.generation.load(std::sync::atomic::Ordering::SeqCst);
         assert!(current_generation > old_generation);
@@ -820,5 +827,4 @@ mod tests {
             .unwrap()
             .unwrap();
     }
-
 }
