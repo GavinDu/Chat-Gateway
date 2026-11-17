@@ -1408,6 +1408,9 @@ pub(super) fn browser_thread(
                                     // the old browser-wide jar. Invalid snapshots must not
                                     // disrupt a previously usable provider page/session.
                                     session::preflight_cookie_restore(&file, provider.name())?;
+                                    // This is per-attempt local evidence only. A saved cookie
+                                    // or successful page navigation is not account proof.
+                                    let verified_credentials = std::cell::Cell::new(false);
                                     let activated = page_session::activate_if_changed(&applied_imports, provider, &file, || async {
                                     page_session::replace_after_success(
                                     || async {
@@ -1423,6 +1426,12 @@ pub(super) fn browser_thread(
                                     }
                                     session::clear_provider_cookies(&browser, provider.name())?;
                                     PageSession::open(&browser, &mut page, provider, Some(&file)).await?;
+                                    if provider == Provider::ChatGPT {
+                                        // Validate the same imported snapshot on the new
+                                        // first-party page before replacing the warm page.
+                                        providers::chatgpt::verify_credentials(&mut page).await?;
+                                        verified_credentials.set(true);
+                                    }
                                     Ok((Rc::new(page), network_bootstrap_403))
                                     },
                                     |(replacement, network_bootstrap_403)| {
@@ -1434,10 +1443,34 @@ pub(super) fn browser_thread(
                                     },
                                     ).await
                                     }).await?;
-                                    if activated { provider_sessions.record_session_import(provider.name()); }
+                                    if !activated && provider == Provider::ChatGPT {
+                                        // An unchanged digest MUST NOT force Chrome to sync
+                                        // again, but can still read the existing first-party
+                                        // page to establish current account readiness.
+                                        let mut page = PageLease::take(&pages, provider)?;
+                                        providers::chatgpt::verify_credentials(&mut page).await?;
+                                        verified_credentials.set(true);
+                                    }
+                                    if activated {
+                                        provider_sessions.record_session_import(provider.name());
+                                    }
+                                    if verified_credentials.get() {
+                                        tracing::info!(
+                                            provider = "chatgpt",
+                                            stage = "imported_session_first_party_account_check",
+                                            outcome = "verified",
+                                            "imported provider page passed read-only session verification"
+                                        );
+                                    }
                                     Ok(())
                                 }.await;
-                                if res.is_err() { provider_sessions.record_probe_failure(provider.name()); }
+                                if let Err(error) = &res {
+                                    if error.downcast_ref::<ProviderSessionExpiredError>().is_some() {
+                                        provider_sessions.record_needs_login(provider.name());
+                                    } else {
+                                        provider_sessions.record_probe_failure(provider.name());
+                                    }
+                                }
                                 let _ = reply.send(res);
                             });
                         }

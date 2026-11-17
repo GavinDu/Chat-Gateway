@@ -7,6 +7,13 @@ use obscura_core::Page;
 
 mod session_readiness;
 
+/// Read-only first-party account verification on an *actual* Obscura page.
+/// This cannot prove Chrome capture parity, but rejects unsupported/expired
+/// imported sessions before they are marked successfully activated.
+pub(crate) async fn verify_credentials(page: &mut Page) -> Result<()> {
+    session_readiness::wait(page).await
+}
+
 /// ChatGPT - chatgpt.com. Contenteditable #prompt-textarea; markdown response divs.
 pub struct ChatGPTAdapter {
     pub cfg: ProviderConfig,
@@ -102,6 +109,63 @@ impl SiteAdapter for ChatGPTAdapter {
     }
     fn effective_selectors(&self) -> common::EffectiveSelectorSet {
         SELECTORS.effective(&self.cfg.selectors)
+    }
+}
+
+#[cfg(test)]
+mod imported_chatgpt_session_tests {
+    use super::*;
+
+    async fn page_with_first_party_fixture(script: &str) -> Page {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        page.goto(
+            "data:text/html,<html data-chat-gateway-test-fixture><body>session</body></html>",
+        )
+        .await
+        .unwrap();
+        page.evaluate(script);
+        page
+    }
+
+    #[tokio::test]
+    async fn imported_page_checks_first_party_session_without_sending_chat() {
+        let mut page = page_with_first_party_fixture(
+            r#"(() => { globalThis.accountFetches = 0; globalThis.fetch = async (url, options) => {
+                accountFetches++;
+                if (url !== '/api/auth/session' || options.credentials !== 'include') {
+                    throw new Error('unexpected');
+                }
+                return new Response(JSON.stringify({
+                    user: {fixture: true}, accessToken: 'synthetic-private-not-real',
+                    expires: new Date(Date.now() + 60000).toISOString()
+                }));
+            }; })()"#,
+        )
+        .await;
+        verify_credentials(&mut page).await.unwrap();
+        assert_eq!(page.evaluate("accountFetches").as_f64(), Some(1.0));
+    }
+
+    #[tokio::test]
+    async fn explicit_session_rejection_and_403_remain_distinct() {
+        for (status, expected_login) in [(401, true), (403, false)] {
+            let mut page = page_with_first_party_fixture(&format!(
+                "globalThis.fetch = async () => new Response('{{}}', {{status:{status}}});"
+            ))
+            .await;
+            let error = verify_credentials(&mut page).await.unwrap_err();
+            assert_eq!(
+                error
+                    .downcast_ref::<crate::browser::pool::ProviderSessionExpiredError>()
+                    .is_some(),
+                expected_login
+            );
+            assert!(!error.to_string().contains("private"));
+        }
     }
 }
 
