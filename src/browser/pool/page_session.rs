@@ -184,9 +184,7 @@ mod live_replay_guard_tests {
     #[test]
     fn rejected_candidate_keeps_existing_verified_epoch_until_worker_admits_replay() {
         let registry = crate::provider_state::ProviderSessionRegistry::default();
-        let previous_epoch = registry
-            .begin_credential_verification("chatgpt")
-            .unwrap();
+        let previous_epoch = registry.begin_credential_verification("chatgpt").unwrap();
         assert!(registry.record_credentials_verified("chatgpt", previous_epoch));
         assert!(registry.credentials_verified("chatgpt"));
 
@@ -210,9 +208,7 @@ mod live_replay_guard_tests {
             true,
         )
         .is_ok());
-        let next_epoch = registry
-            .begin_credential_verification("chatgpt")
-            .unwrap();
+        let next_epoch = registry.begin_credential_verification("chatgpt").unwrap();
         assert!(!registry.credentials_verified("chatgpt"));
         assert!(!registry.record_credentials_verified("chatgpt", previous_epoch));
         assert!(registry.record_credentials_verified("chatgpt", next_epoch));
