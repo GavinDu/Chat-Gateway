@@ -66,6 +66,9 @@ jobs:
       # across jobs while still loading and smoke-testing the exact image.
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
+      - name: Capture UTC build timestamp
+        id: provenance
+        run: echo "utc=$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
       - name: Build container image with reusable layer cache
         uses: docker/build-push-action@v7
         with:
@@ -76,6 +79,11 @@ jobs:
           # base-image security fixes are not hidden by layer caching.
           pull: true
           tags: chat-gateway-rs:ci
+          # Checkout matches the workflow SHA; image label and Rust compile
+          # receive exactly the same provenance values.
+          build-args: |
+            CHAT_GATEWAY_SOURCE_SHA=${{ github.sha }}
+            CHAT_GATEWAY_BUILD_TIMESTAMP=${{ steps.provenance.outputs.utc }}
           cache-from: type=gha,scope=chat-gateway-rs
           # Cache export is an optimization only: quota/rate-limit failures
           # must not prevent the security and runtime smoke checks.
