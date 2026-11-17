@@ -1867,12 +1867,11 @@ pub async fn import_session(
         "queue",
         import_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
     );
-    // A new candidate is queued under the provider import gate. Do not
-    // advertise an older first-party proof while this candidate is persisted
-    // and activated; the browser worker assigns its own opaque check epoch.
-    if provider == "chatgpt" {
-        app.provider_sessions.invalidate_credentials(&provider);
-    }
+    // Enqueueing or persisting a candidate does not change the active
+    // browser context. Preserve its existing account proof on persistence
+    // rejection or a fail-closed replay guard. The worker starts a fresh
+    // verification epoch only AFTER non-destructive replay checks pass.
+    // Explicit unlink/reset and worker restart still invalidate old proofs.
     let tail_metrics_app = Arc::clone(&app);
     let task = run_provider_mutation_detached_with_tail(provider_import_guard, async move {
         let store_started = Instant::now();
