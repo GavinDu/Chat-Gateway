@@ -1358,8 +1358,7 @@ mod pointer_inert_composer_ancestors_tests {
             "an explicitly pointer-enabled ghost still has a blocked ancestor"
         );
         assert!(visible_composer_exists(&page, &["#ghost", "#live"]));
-        let count = actionable_composer_count_expression(&["#ghost", "textarea", "#live"])
-            .unwrap();
+        let count = actionable_composer_count_expression(&["#ghost", "textarea", "#live"]).unwrap();
         assert_eq!(
             page.evaluate(&count).as_f64(),
             Some(1.0),
@@ -1369,11 +1368,13 @@ mod pointer_inert_composer_ancestors_tests {
             .await
             .unwrap();
         assert_eq!(
-            page.evaluate("document.querySelector('#ghost').value").as_str(),
+            page.evaluate("document.querySelector('#ghost').value")
+                .as_str(),
             Some("")
         );
         assert_eq!(
-            page.evaluate("document.querySelector('#live').value").as_str(),
+            page.evaluate("document.querySelector('#live').value")
+                .as_str(),
             Some("private fixture input")
         );
 
@@ -1386,7 +1387,8 @@ mod pointer_inert_composer_ancestors_tests {
             "stale ancestor cannot become eligible just because valid editor disappears"
         );
         assert_eq!(
-            page.evaluate("document.querySelector('#ghost').value").as_str(),
+            page.evaluate("document.querySelector('#ghost').value")
+                .as_str(),
             Some("")
         );
         page.evaluate("document.querySelector('#stale-panel').style.pointerEvents = 'auto'");
