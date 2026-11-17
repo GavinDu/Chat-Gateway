@@ -365,8 +365,21 @@ pub fn response_probe(
                 streaming = Array.from(document.querySelectorAll({streaming_selector})).some(visible);
             }} catch (_) {{}}
             if (!streaming) {{
+                // A stale SPA Stop clone can have a box and label while CSS
+                // makes the control inert. Do not treat that as active
+                // generation. Passive data-is-streaming markers above are
+                // intentionally not subject to pointer-actionability.
+                const pointerEnabled = button => {{
+                    try {{
+                        for (let ancestor = button; ancestor; ancestor = ancestor.parentElement) {{
+                            if (window.getComputedStyle(ancestor).pointerEvents === "none")
+                                return false;
+                        }}
+                        return true;
+                    }} catch (_) {{ return false; }}
+                }};
                 streaming = Array.from(document.querySelectorAll("button"))
-                    .some(button => visible(button) &&
+                    .some(button => visible(button) && pointerEnabled(button) &&
                         /^(stop|stop generating|stop generation|stop responding|stop response|stop answering)$/i.test(
                             (button.getAttribute("aria-label") || button.innerText || button.textContent || "").trim()
                         ));
@@ -654,6 +667,51 @@ mod streaming_visibility_regression_tests {
             "a visible Stop generating button is active"
         );
     }
+    #[tokio::test]
+    async fn css_pointer_inert_stop_clones_do_not_extend_streaming() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <div class="answer">completed reply</div>
+            <button style="pointer-events:none" aria-label="Stop generating">stale Stop</button>
+            <section style="pointer-events:none">
+                <button style="pointer-events:auto" aria-label="Stop responding">stale child</button>
+            </section>
+            <button id="new-stop" aria-label="Stop" hidden>Stop</button>
+            <div id="stream-marker" data-is-streaming="true"
+                style="pointer-events:none" hidden>generating</div>
+            <button aria-label="Stop sharing">Stop sharing</button>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+
+        assert!(
+            !response_probe(&page, &[".answer"], false).streaming,
+            "pointer-inert Stop clones and unrelated actions cannot imply generation"
+        );
+
+        page.evaluate("document.querySelector('#new-stop').hidden = false");
+        assert!(
+            response_probe(&page, &[".answer"], false).streaming,
+            "a newly actionable exact Stop still indicates generation"
+        );
+        page.evaluate("document.querySelector('#new-stop').hidden = true");
+        assert!(!response_probe(&page, &[".answer"], false).streaming);
+
+        page.evaluate("document.querySelector('#stream-marker').hidden = false");
+        assert!(
+            response_probe(&page, &[".answer"], false).streaming,
+            "a passive explicit streaming marker remains valid with pointer-events:none"
+        );
+        page.evaluate("document.querySelector('#stream-marker').hidden = true");
+        assert!(!response_probe(&page, &[".answer"], false).streaming);
+    }
+
     #[tokio::test]
     async fn disabled_stop_and_hidden_copy_never_signal_progress_or_completion() {
         let browser = obscura_core::Browser::builder()
