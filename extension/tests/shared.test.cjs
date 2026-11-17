@@ -115,6 +115,57 @@ test("relayFetch supports an HTTPS gateway without weakening the HTTP loopback r
   assert.equal(api.fetchCalls[0].options.redirect, "error");
 });
 
+test("relayFetch refuses authority-confused and non-API paths before credential dispatch", async () => {
+  const api = loadShared([], true, {
+    gateway:"https://gateway.example.com", token:"synthetic-install-token",
+    connectionMode:"remote"
+  });
+  const invalid = [
+    "@attacker.example/relay/v1/status",
+    "//attacker.example/relay/v1/status",
+    "https://attacker.example/relay/v1/status",
+    "/outside/relay",
+    "/relay/v1/../admin",
+    "/relay/v1/%2e%2e/admin",
+    "/relay/v1/status?token=secret",
+    "/relay/v1/status#fragment",
+    "/relay/v1/status\\unexpected",
+    "/relay/v1/status" + String.fromCharCode(0),
+    null
+  ];
+  for (const path of invalid) {
+    await assert.rejects(
+      () => api.relayFetch(path, {method:"POST", body:"synthetic-cookie-snapshot"}),
+      /Invalid relay API path/,
+      String(path)
+    );
+  }
+  assert.equal(api.fetchCalls.length, 0,
+    "invalid path must not dispatch a bearer token or cookie snapshot");
+});
+
+test("strict relay API path keeps valid status and session calls on configured origin", async () => {
+  const api = loadShared([], true, {
+    gateway:"https://gateway.example.com", token:"synthetic-install-token",
+    connectionMode:"remote"
+  });
+  await api.relayFetch("/relay/v1/diagnostics", {method:"POST",body:"{}"});
+  await api.relayFetch("/relay/v1/session/chatgpt", {
+    method:"DELETE",body:"{}"
+  });
+  assert.equal(api.fetchCalls.length, 2);
+  assert.deepEqual(api.fetchCalls.map(call => call.url), [
+    "https://gateway.example.com/relay/v1/diagnostics",
+    "https://gateway.example.com/relay/v1/session/chatgpt"
+  ]);
+  for (const call of api.fetchCalls) {
+    assert.equal(new URL(call.url).origin, "https://gateway.example.com");
+    assert.equal(call.options.headers.get("Authorization"),
+      "Bearer synthetic-install-token");
+    assert.equal(call.options.redirect, "error");
+  }
+});
+
 test("a caller cannot override the no-redirect policy on credentialed relay requests", async () => {
   const api = loadShared([], true, {
     gateway: "https://gateway.example.com",

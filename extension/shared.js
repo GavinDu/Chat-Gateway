@@ -72,6 +72,25 @@ function randomHex(bytes = 16) {
 // serialized sync/logout queue behind an unbounded credential transfer.
 const RELAY_FETCH_TIMEOUT_MS = 60_000;
 
+// Avoid constructing a credentialed URL by concatenating an origin with an
+// unchecked suffix. Current callers use fixed /relay/v1 API paths; enforce
+// that contract here so a future relative "@host" or protocol-relative
+// suffix cannot redirect an install token or browser cookie POST.
+function relayApiUrl(origin, path) {
+  if (typeof path !== "string" || !path.startsWith("/relay/v1/") ||
+      path.startsWith("//") || /[\\?#\u0000-\u001f\u007f]/.test(path)) {
+    throw new Error("Invalid relay API path.");
+  }
+  let url;
+  try { url = new URL(path, origin); }
+  catch { throw new Error("Invalid relay API path."); }
+  if (url.origin !== origin || !url.pathname.startsWith("/relay/v1/") ||
+      url.search || url.hash) {
+    throw new Error("Invalid relay API path.");
+  }
+  return url.href;
+}
+
 async function relayFetch(path, options = {}, expectedConnection = null) {
   const {gateway, token, connectionMode} = await chrome.storage.local.get(["gateway", "token", "connectionMode"]);
   // Cookie snapshots must never switch destinations after they were collected.
@@ -87,6 +106,7 @@ async function relayFetch(path, options = {}, expectedConnection = null) {
   // Treat browser storage as untrusted: a stale or tampered gateway value must
   // never redirect provider cookies or the relay token to a remote origin.
   const localGateway = normalizeGateway(gateway);
+  const targetUrl = relayApiUrl(localGateway, path);
   const hasGatewayPermission = await chrome.permissions.contains({origins:[localGateway + "/*"]});
   if (!hasGatewayPermission) {
     throw new Error("Gateway host permission is missing. Re-pair and grant access only to the configured gateway origin.");
@@ -139,7 +159,7 @@ async function relayFetch(path, options = {}, expectedConnection = null) {
     if (cancelledByCaller) {
       throw new Error("Gateway request cancelled; check provider status before retrying.");
     }
-    return await fetch(localGateway + path, {
+    return await fetch(targetUrl, {
       ...options, headers, cache:"no-store", redirect:"error", signal:controller.signal
     });
   } catch (error) {
