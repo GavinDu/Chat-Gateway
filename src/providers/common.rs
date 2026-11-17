@@ -2102,8 +2102,26 @@ async fn human_type_with_provider(
     } else {
         String::new()
     };
+    // The previously successful first-party ChatGPT form uses a controlled
+    // ProseMirror paste handler. Its native paste acknowledgment is useful
+    // only if the exact rendered draft survives the existing verification.
+    // Never set a synthetic value or textContent for failed rich-text edits.
+    let chatgpt_paste = format!(
+        r#"if (el.matches('form[data-chatgpt-composer] div.ProseMirror[contenteditable="true"][role="textbox"]')) {{
+            try {{
+                const clipboard = {{
+                    types: ['text/plain'], files: [], items: [],
+                    getData(kind) {{ return kind === 'text/plain' || kind === 'Text' ? {text} : ''; }}
+                }};
+                const paste = new ClipboardEvent('paste', {{ bubbles: true, cancelable: true, composed: true }});
+                Object.defineProperty(paste, 'clipboardData', {{ value: clipboard }});
+                if (!el.dispatchEvent(paste)) return true;
+            }} catch (_) {{}}
+        }}"#,
+        text = text_js,
+    );
     let js = format!(
-        "(function() {{ {route_guard} {composer_guard} var el = {el_js}; if (!el) return false; el.focus(); if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {{ try {{ var prototype = el.tagName === 'INPUT' ? window.HTMLInputElement.prototype : window.HTMLTextAreaElement.prototype; var setter = Object.getOwnPropertyDescriptor(prototype, 'value').set; setter.call(el, {text}); }} catch (e) {{ el.value = {text}; }} el.dispatchEvent(new InputEvent('input', {{ bubbles: true, inputType: 'insertText', data: {text} }})); el.dispatchEvent(new Event('change', {{ bubbles: true }})); return true; }} var selection = window.getSelection(); if (!selection) return false; try {{ var range = document.createRange(); range.selectNodeContents(el); selection.removeAllRanges(); selection.addRange(range); }} catch (e) {{ return false; }} var ok = false; try {{ ok = document.execCommand('insertText', false, {text}); }} catch (e) {{}} if (!ok) return 'editor-unsupported'; el.dispatchEvent(new InputEvent('input', {{ bubbles: true, inputType: 'insertText', data: {text} }})); el.dispatchEvent(new Event('change', {{ bubbles: true }})); return true; }})()",
+        "(function() {{ {route_guard} {composer_guard} var el = {el_js}; if (!el) return false; el.focus(); if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {{ try {{ var prototype = el.tagName === 'INPUT' ? window.HTMLInputElement.prototype : window.HTMLTextAreaElement.prototype; var setter = Object.getOwnPropertyDescriptor(prototype, 'value').set; setter.call(el, {text}); }} catch (e) {{ el.value = {text}; }} el.dispatchEvent(new InputEvent('input', {{ bubbles: true, inputType: 'insertText', data: {text} }})); el.dispatchEvent(new Event('change', {{ bubbles: true }})); return true; }} var selection = window.getSelection(); if (!selection) return false; try {{ var range = document.createRange(); range.selectNodeContents(el); selection.removeAllRanges(); selection.addRange(range); }} catch (e) {{ return false; }} {chatgpt_paste} var ok = false; try {{ ok = document.execCommand('insertText', false, {text}); }} catch (e) {{}} if (!ok) return 'editor-unsupported'; el.dispatchEvent(new InputEvent('input', {{ bubbles: true, inputType: 'insertText', data: {text} }})); el.dispatchEvent(new Event('change', {{ bubbles: true }})); return true; }})()",
         text = text_js,
         el_js = el_js,
     );
