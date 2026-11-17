@@ -280,6 +280,30 @@ fn decode_response_probe(value: serde_json::Value) -> ResponseProbe {
     }
 }
 
+// The current ChatGPT response root contains multiple independently rendered
+// Markdown blocks plus action buttons. Read only outermost visible answer
+// blocks; never treat controls, hidden clones or user echoes as model text.
+// The same expression is used by synchronous extraction and response polling.
+const RESPONSE_RENDERED_TEXT_JS: &str = r#"
+    const renderedText = node => {
+        const ordinary = () => node.querySelector('*')
+            ? (node.innerText || '')
+            : (node.textContent || '');
+        if (!node.matches('[class*="DilResponseRoot-"]')) return ordinary();
+        const blocks = Array.from(node.querySelectorAll('[class*="MarkdownRoot-"]'))
+            .filter(block => {
+                const parentBlock = block.parentElement?.closest('[class*="MarkdownRoot-"]');
+                return (!parentBlock || !node.contains(parentBlock)) &&
+                    block.getClientRects().length > 0 &&
+                    getComputedStyle(block).visibility !== 'hidden' &&
+                    !block.closest('button, [role="button"], [hidden], [inert], [aria-hidden="true"]');
+            });
+        return blocks.map(block => block.querySelector('*')
+            ? (block.innerText || '')
+            : (block.textContent || '')).join('\\n\\n');
+    };
+"#;
+
 /// Read response text, response-node count, and streaming state in one
 /// JavaScript evaluation per polling tick.
 pub fn response_probe(
@@ -294,6 +318,7 @@ pub fn response_probe(
         return ResponseProbe::default();
     };
     let nontransparent = nontransparent_ancestors_expression("el");
+    let response_text_js = RESPONSE_RENDERED_TEXT_JS;
     let script = format!(
         r#"(() => {{
             const selectors = {selectors};
@@ -311,9 +336,7 @@ pub fn response_probe(
             // textContent must not become a fabricated provider response when
             // innerText is empty. Text-only roots are safe and preserve exact
             // newlines in the pinned embedded Obscura runtime.
-            const renderedText = node => node.querySelector('*')
-                ? (node.innerText || '')
-                : (node.textContent || '');
+            {response_text_js}
             const nodes = new Set();
             let text = null;
             let lastResponseNode = null;
@@ -3762,12 +3785,11 @@ pub fn probe_selector_groups(
 pub fn last_element_text(page: &Page, selector: &str) -> Option<String> {
     let sel_js = serde_json::to_string(selector).ok()?;
     let nontransparent = nontransparent_ancestors_expression("node");
+    let response_text_js = RESPONSE_RENDERED_TEXT_JS;
     let js = format!(
         r#"(() => {{
             const nodes = Array.from(document.querySelectorAll({sel_js}));
-            const renderedText = node => node.querySelector('*')
-                ? (node.innerText || '')
-                : (node.textContent || '');
+            {response_text_js}
             for (let i = nodes.length - 1; i >= 0; i--) {{
                 const node = nodes[i];
                 if (!node.getClientRects().length ||
