@@ -581,6 +581,7 @@ async function connectProvider(provider, openLogin = false) {
     return;
   }
   let sessionUploaded = false;
+  let activationPending = false;
   try {
     // The service worker serializes imports and logout per provider. Never
     // send a manual import in parallel with a logout request.
@@ -592,9 +593,11 @@ async function connectProvider(provider, openLogin = false) {
     if (result.syncStatus === "no_cookies") {
       throw new Error("Provider cookies disappeared before sync. Sign in to the provider and retry linking.");
     }
-    if (result.syncStatus && result.syncStatus !== "uploaded") {
+    if (result.syncStatus && result.syncStatus !== "uploaded" &&
+        result.syncStatus !== "saved_activation_pending") {
       throw new Error("Provider session was not uploaded; check the gateway connection and retry.");
     }
+    activationPending = result.syncStatus === "saved_activation_pending";
     sessionUploaded = true;
     if (tentative) {
       const committed = await chrome.runtime.sendMessage({
@@ -621,6 +624,8 @@ async function connectProvider(provider, openLogin = false) {
   // An explicit Sync session on an already-linked account remains tab-free.
   if (openLogin) {
     await openProviderLogin(provider);
+  } else if (activationPending) {
+    message("Session saved, but the provider browser could not activate it. Check gateway diagnostics and retry; authentication is not verified.");
   } else {
     message("Saved " + provider + " to the gateway. Verify the login status; saved cookies alone do not confirm authentication.");
   }
