@@ -526,10 +526,7 @@ mod tests {
             "account_or_challenge_state_changed"
         );
         v["gateway_failure"]["reason"] = json!("challenge");
-        assert_eq!(
-            checked(v).reason,
-            "account_or_challenge_state_changed"
-        );
+        assert_eq!(checked(v).reason, "account_or_challenge_state_changed");
     }
 
     #[test]
