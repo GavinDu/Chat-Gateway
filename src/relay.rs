@@ -1557,8 +1557,7 @@ pub async fn status(State(app): State<Arc<crate::AppState>>, headers: HeaderMap)
         let observed = if matches!(provider, "chatgpt" | "metaai") {
             // These recovery targets require actual credential proof. A login
             // window's visible editor is not authenticated account evidence.
-            app.provider_sessions
-                .credentials_verified(provider)
+            (app.pool.worker_alive() && app.provider_sessions.credentials_verified(provider))
                 .then_some(true)
         } else {
             active
