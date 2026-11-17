@@ -56,7 +56,9 @@ fn allowed_target(target: &str) -> Option<(String, String)> {
                 || label.len() > 63
                 || label.starts_with('-')
                 || label.ends_with('-')
-                || !label.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                || !label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
         })
     {
         return None;
