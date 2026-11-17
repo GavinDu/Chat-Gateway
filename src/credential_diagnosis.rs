@@ -458,6 +458,68 @@ mod tests {
     }
 
     #[test]
+    fn direct_owner_status_utc_timestamp_joins_only_when_canonical_and_fresh() {
+        let mut v = with_gateway_failure();
+        v["gateway_failure"]
+            .as_object_mut()
+            .unwrap()
+            .remove("observed_at_ms");
+        let timestamp = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(NOW as i64)
+            .unwrap()
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        v["gateway_failure"]["observed_at_utc"] = json!(timestamp);
+        let result = checked(v.clone());
+        assert_eq!(result.category, "transport_or_extraction");
+        assert!(!result.live_proof);
+        for invalid in [
+            "2026-02-30T03:00:00Z",
+            "2026-11-17T24:00:00Z",
+            "2026-11-17T03:00:00+00:00",
+            "2026-11-17T03:00:00.000Z",
+            "https://private.example/?token=secret",
+            "2026-11-17T03:00:00Z\nCOOKIE=secret",
+        ] {
+            v["gateway_failure"]["observed_at_utc"] = json!(invalid);
+            assert_eq!(checked(v.clone()).reason, "invalid_gateway_failure_evidence");
+        }
+    }
+
+    #[test]
+    fn contradictory_or_missing_gateway_clock_and_stale_utc_fail_closed() {
+        let mut v = with_gateway_failure();
+        let timestamp = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(NOW as i64)
+            .unwrap()
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        // Both timestamp representations are not a trusted pair; do not
+        // guess which one describes the actual owner-status request.
+        v["gateway_failure"]["observed_at_utc"] = json!(timestamp);
+        assert_eq!(checked(v.clone()).reason, "invalid_gateway_failure_evidence");
+        v["gateway_failure"]
+            .as_object_mut()
+            .unwrap()
+            .remove("observed_at_ms");
+        v["gateway_failure"]
+            .as_object_mut()
+            .unwrap()
+            .remove("observed_at_utc");
+        assert_eq!(checked(v.clone()).reason, "invalid_gateway_failure_evidence");
+        let stale = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(
+            (NOW - MAX_AGE_MS - 1000) as i64,
+        )
+        .unwrap()
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        v["gateway_failure"]["observed_at_utc"] = json!(stale);
+        assert_eq!(checked(v.clone()).reason, "stale_or_future_evidence");
+        let future = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(
+            (NOW + CLOCK_SKEW_MS + 1000) as i64,
+        )
+        .unwrap()
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        v["gateway_failure"]["observed_at_utc"] = json!(future);
+        assert_eq!(checked(v).reason, "stale_or_future_evidence");
+    }
+
+    #[test]
     fn matching_gateway_last_failure_is_only_owner_supplied_evidence_not_live_proof() {
         let v = with_gateway_failure();
         let result = checked(v);
