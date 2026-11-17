@@ -61,7 +61,7 @@ function loadPopup({pollResult = {ok:true}} = {}) {
     // Intentionally no tabs or alarms API: reproduces reading 'create' of undefined.
   };
   const context = {
-    chrome, Promise, Set, Array, Date, document: {
+    chrome, Promise, Set, Array, Date, AbortController, setTimeout, clearTimeout, document: {
       getElementById: element,
       createElement: () => ({textContent: "", href: "", target: "", rel: ""}),
     },

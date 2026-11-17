@@ -357,6 +357,36 @@ async function openProviderLogin(provider) {
 
 // Detect local-only relay mode before asking for a pairing code. A plain
 // read-only mode probe contains no token and never collects provider cookies.
+// Connection establishment is deliberately outside relayFetch (no install
+// token exists yet), but cannot wait forever for a gateway fetch or JSON body.
+// A popup closing or retrying does not authorize an older Pair response.
+const POPUP_CONNECT_DEADLINE_MS = 12_000;
+async function popupConnectionJson(gateway, path, options) {
+  if (!["/relay/v1/mode", "/relay/v1/pair", "/relay/v1/connect/request"].includes(path)) {
+    throw new Error("Invalid gateway connection route.");
+  }
+  const controller = new AbortController();
+  let deadline;
+  try {
+    return await Promise.race([
+      (async () => {
+        const response = await fetch(gateway + path, {
+          ...options, cache:"no-store", redirect:"error", signal:controller.signal
+        });
+        return {ok:response.ok, status:response.status,
+          data:response.ok ? await response.json() : null};
+      })(),
+      new Promise((_, reject) => {
+        deadline = setTimeout(() => {
+          reject(new Error("Gateway connection request timed out. Retry the connection."));
+          controller.abort();
+        }, POPUP_CONNECT_DEADLINE_MS);
+      })
+    ]);
+  } finally {
+    clearTimeout(deadline);
+  }
+}
 async function connectLocalGateway(gateway, requestPermission = false) {
   if (!isLocalGateway(gateway)) return false;
   const origins = [gateway + "/*"];
@@ -364,10 +394,8 @@ async function connectLocalGateway(gateway, requestPermission = false) {
     ? await chrome.permissions.request({origins})
     : await chrome.permissions.contains({origins});
   if (!allowed) return false;
-  const response = await fetch(gateway + "/relay/v1/mode", {
-    method:"GET", cache:"no-store", redirect:"error"
-  });
-  if (!response.ok || (await response.json()).no_pairing !== true) return false;
+  const mode = await popupConnectionJson(gateway, "/relay/v1/mode", {method:"GET"});
+  if (!mode.ok || mode.data?.no_pairing !== true) return false;
   const previous = await chrome.storage.local.get(["gateway", "token", "connectionMode", "linkedProviders"]);
   // Opening the popup must not invalidate the fingerprint of successfully
   // imported sessions, or the next background repair would restart browsers.
@@ -462,16 +490,17 @@ $("pair").addEventListener("click", async () => {
       }
       pendingApprovalGeneration = reservation.generation;
     }
-    const response = await fetch(gateway + (remote ? "/relay/v1/pair" : "/relay/v1/connect/request"), {
-      method:"POST", headers:{"Content-Type":"application/json"},
-      body:JSON.stringify(remote ? {code} : {}), cache:"no-store", redirect:"error"
-    });
+    const response = await popupConnectionJson(gateway,
+      remote ? "/relay/v1/pair" : "/relay/v1/connect/request", {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body:JSON.stringify(remote ? {code} : {})
+      });
     if (!response.ok) throw new Error(remote ? "Remote pairing failed. Check the gateway and request a fresh pairing code." : response.status === 409
       ? "An approval is already pending. Finish it in the local approval tab or retry in five minutes."
       : "Could not request approval. Check the gateway URL and configured extension ID.");
-    const data = await response.json();
+    const data = response.data;
     if (remote) {
-      if (!/^[a-f0-9]{64}$/.test(data.token)) throw new Error("Invalid connection response.");
+      if (!/^[a-f0-9]{64}$/.test(data?.token)) throw new Error("Invalid connection response.");
       const committed = await chrome.runtime.sendMessage({
         type:"connect-paired-relay", gateway, token:data.token, expected:beforePair
       });
@@ -482,7 +511,7 @@ $("pair").addEventListener("click", async () => {
       await updateConnection();
       return;
     }
-    if (!/^[a-f0-9]{64}$/.test(data.request_id) || !/^[a-f0-9]{64}$/.test(data.poll_secret)) throw new Error("Invalid connection response.");
+    if (!/^[a-f0-9]{64}$/.test(data?.request_id) || !/^[a-f0-9]{64}$/.test(data?.poll_secret)) throw new Error("Invalid connection response.");
     const saved = await chrome.runtime.sendMessage({
       type:"install-pending-approval", gateway,
       generation:pendingApprovalGeneration,
