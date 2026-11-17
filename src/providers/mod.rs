@@ -1344,6 +1344,149 @@ mod baseline_provenance_before_send_tests {
     }
 }
 
+#[cfg(test)]
+mod submission_timeout_cancellation_tests {
+    use super::{AdapterSelectors, ProviderSendPolicy, SiteAdapter};
+    use crate::providers::common::{self, EffectiveSelectorSet, SelectorSet};
+    use anyhow::Result;
+    use obscura_core::Page;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    struct HangingSubmissionAdapter {
+        cfg: crate::config::ProviderConfig,
+        revoke_fixture_before_timeout: bool,
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl SiteAdapter for HangingSubmissionAdapter {
+        fn name(&self) -> &str {
+            "qwen"
+        }
+
+        fn aliases(&self) -> &[String] {
+            &self.cfg.models
+        }
+
+        async fn discover_models(&self, _page: &mut Page) -> Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+
+        async fn send_prompt(&self, page: &mut Page, _prompt: &str) -> Result<()> {
+            page.evaluate("window.sendAttempts = (window.sendAttempts || 0) + 1");
+            if self.revoke_fixture_before_timeout {
+                // Simulate navigation to an untrusted origin without relying
+                // on external network or a live authenticated provider.
+                page.evaluate(
+                    "document.documentElement.removeAttribute('data-chat-gateway-test-fixture')",
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            Ok(())
+        }
+
+        fn response_text(&self, _page: &Page) -> Option<String> {
+            None
+        }
+
+        fn selectors(&self) -> AdapterSelectors {
+            self.effective_selectors().adapter_selectors()
+        }
+
+        fn selector_set(&self) -> &SelectorSet {
+            &crate::providers::qwen::SELECTORS
+        }
+
+        fn effective_selectors(&self) -> EffectiveSelectorSet {
+            crate::providers::qwen::SELECTORS.effective(&self.cfg.selectors)
+        }
+    }
+
+    async fn exercise_timeout(stop_markup: &str, revoke_fixture: bool) -> (f64, f64) {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = format!(
+            "<html data-chat-gateway-test-fixture><body>{stop_markup}</body></html>"
+        );
+        let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        let adapter: Arc<dyn SiteAdapter> = Arc::new(HangingSubmissionAdapter {
+            cfg: serde_yaml::from_str("name: qwen").unwrap(),
+            revoke_fixture_before_timeout: revoke_fixture,
+        });
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(8);
+        super::run_send(
+            adapter,
+            &mut page,
+            "private prompt used only for this offline test".to_owned(),
+            Duration::from_millis(40),
+            Duration::from_millis(10),
+            ProviderSendPolicy {
+                completion_idle: Duration::from_millis(40),
+                provider_guard: crate::provider_guard::ProviderGuard::default(),
+                metrics: crate::metrics::MetricsRegistry::default(),
+            },
+            sender,
+        )
+        .await;
+        let error = receiver
+            .recv()
+            .await
+            .expect("submission must emit a terminal typed timeout")
+            .expect_err("a stalled submission must not succeed");
+        assert!(
+            error.downcast_ref::<common::ProviderTimeoutError>().is_some(),
+            "submission timeout remains downcastable"
+        );
+        assert!(error.to_string().contains("timed out while submitting"));
+        assert!(!error.to_string().contains("private prompt"));
+        assert!(
+            receiver.try_recv().is_err(),
+            "timed-out submission must not emit assistant success"
+        );
+        (
+            page.evaluate("window.sendAttempts || 0")
+                .as_f64()
+                .unwrap_or(0.0),
+            page.evaluate("window.cancelClicks || 0")
+                .as_f64()
+                .unwrap_or(0.0),
+        )
+    }
+
+    #[tokio::test]
+    async fn stalled_submission_requests_stop_before_warm_page_reuse() {
+        let stop = r#"<button aria-label="Stop generating" type="button"
+            onclick="window.cancelClicks=(window.cancelClicks||0)+1">Stop</button>"#;
+        let (attempts, cancels) = exercise_timeout(stop, false).await;
+        assert_eq!(attempts, 1.0);
+        assert_eq!(cancels, 1.0, "cancel one genuine in-flight generation");
+    }
+
+    #[tokio::test]
+    async fn timeout_never_clicks_unrelated_stop_or_foreign_page_control() {
+        let unrelated = r#"<button type="button" aria-label="Stop sharing"
+            onclick="window.cancelClicks=(window.cancelClicks||0)+1">Stop sharing</button>"#;
+        let (attempts, cancels) = exercise_timeout(unrelated, false).await;
+        assert_eq!(attempts, 1.0);
+        assert_eq!(cancels, 0.0);
+
+        let foreign = r#"<button aria-label="Stop generating" type="button"
+            onclick="window.cancelClicks=(window.cancelClicks||0)+1">Stop</button>"#;
+        let (attempts, cancels) = exercise_timeout(foreign, true).await;
+        assert_eq!(attempts, 1.0);
+        assert_eq!(
+            cancels, 0.0,
+            "lost provider origin must block cancellation side effects"
+        );
+    }
+}
+
 pub async fn run_send(
     adapter: Arc<dyn SiteAdapter>,
     page: &mut Page,
@@ -1452,6 +1595,15 @@ pub async fn run_send(
         }
         Err(_) => {
             metrics.record_provider_timeout(adapter.name(), "submission");
+            // Send may already have been clicked before a framework ack hung.
+            // Best-effort cancel so a warm page cannot retain that generation.
+            // Never click a Stop control after navigation to an off-provider
+            // page or authentication redirect, and keep the original timeout.
+            if login_redirect_error(adapter.name(), &page.url()).is_none()
+                && require_expected_response_origin(adapter.name(), page).is_ok()
+            {
+                adapter.cancel_generation(page);
+            }
             let _ = chunks
                 .send(Err(anyhow::Error::new(common::ProviderTimeoutError::new(
                     adapter.name(),
