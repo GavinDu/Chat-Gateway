@@ -1365,6 +1365,7 @@ mod closed_consumer_before_dispatch_tests {
         drop_receiver_on_baseline: Option<HeldReceiver>,
         hang_after_send: bool,
         revoke_origin_before_hang: bool,
+        show_fresh_stop_after_send: bool,
     }
 
     #[async_trait::async_trait(?Send)]
@@ -1383,6 +1384,9 @@ mod closed_consumer_before_dispatch_tests {
 
         async fn send_prompt(&self, page: &mut Page, _prompt: &str) -> Result<()> {
             self.sends.fetch_add(1, Ordering::SeqCst);
+            if self.show_fresh_stop_after_send {
+                page.evaluate("document.querySelector('#send-stop').hidden = false");
+            }
             if self.revoke_origin_before_hang {
                 page.evaluate(
                     "document.documentElement.removeAttribute('data-chat-gateway-test-fixture')",
@@ -1440,6 +1444,7 @@ mod closed_consumer_before_dispatch_tests {
             drop_receiver_on_baseline,
             hang_after_send: false,
             revoke_origin_before_hang: false,
+            show_fresh_stop_after_send: false,
         })
     }
 
@@ -1504,7 +1509,10 @@ mod closed_consumer_before_dispatch_tests {
         assert_eq!(attempts.load(Ordering::SeqCst), 0);
     }
 
-    async fn exercise_disconnect_while_submission_pending(revoke_origin: bool) -> f64 {
+    async fn exercise_disconnect_while_submission_pending(
+        revoke_origin: bool,
+        reveal_fresh_stop: bool,
+    ) -> f64 {
         let browser = obscura_core::Browser::builder()
             .stealth(false)
             .build()
@@ -1512,7 +1520,7 @@ mod closed_consumer_before_dispatch_tests {
         let mut page = test_page(&browser).await;
         page.evaluate(
             r#"document.body.insertAdjacentHTML('beforeend',
-               '<button aria-label="Stop generating" onclick="window.stopHits=(window.stopHits||0)+1">Stop</button>')"#,
+               '<button id="send-stop" aria-label="Stop generating" hidden onclick="window.stopHits=(window.stopHits||0)+1">Stop</button>')"#,
         );
         let attempts = Arc::new(AtomicUsize::new(0));
         let adapter: Arc<dyn SiteAdapter> = Arc::new(DisconnectSpy {
@@ -1521,6 +1529,7 @@ mod closed_consumer_before_dispatch_tests {
             drop_receiver_on_baseline: None,
             hang_after_send: true,
             revoke_origin_before_hang: revoke_origin,
+            show_fresh_stop_after_send: reveal_fresh_stop,
         });
         let (sender, receiver) = mpsc::channel(8);
         let observer = Arc::clone(&attempts);
@@ -1545,7 +1554,7 @@ mod closed_consumer_before_dispatch_tests {
     #[tokio::test]
     async fn mid_submission_disconnect_drops_send_future_and_requests_stop() {
         assert_eq!(
-            exercise_disconnect_while_submission_pending(false).await,
+            exercise_disconnect_while_submission_pending(false, true).await,
             1.0,
             "a hung acknowledged Send must not outlive its disconnected consumer"
         );
@@ -1554,9 +1563,18 @@ mod closed_consumer_before_dispatch_tests {
     #[tokio::test]
     async fn mid_submission_disconnect_never_clicks_an_untrusted_page() {
         assert_eq!(
-            exercise_disconnect_while_submission_pending(true).await,
+            exercise_disconnect_while_submission_pending(true, true).await,
             0.0,
             "redirected/foreign page cannot receive the abandoned Stop action"
+        );
+    }
+
+    #[tokio::test]
+    async fn mid_submission_disconnect_does_not_cancel_without_fresh_stream_signal() {
+        assert_eq!(
+            exercise_disconnect_while_submission_pending(false, false).await,
+            0.0,
+            "an inherited or absent Stop cannot certify a dispatched new generation"
         );
     }
 
@@ -2004,10 +2022,20 @@ pub async fn run_send(
         _ = chunks.closed() => None,
     };
     let Some(submission) = submission else {
-        cancel_generation_if_trusted(adapter.as_ref(), page);
+        // The framework may have been typing an editor when the consumer
+        // disconnected, before any Send click. Do not cancel an inherited
+        // previous-turn Stop: only a fresh inactive-to-active stream signal
+        // on the expected provider page permits best-effort cleanup.
+        let new_stream = !baseline_probe.streaming
+            && require_expected_response_origin(adapter.name(), page).is_ok()
+            && adapter.response_probe(page, false).streaming;
+        if new_stream {
+            cancel_generation_if_trusted(adapter.as_ref(), page);
+        }
         tracing::debug!(
             provider = adapter.name(),
-            "client disconnected during submission; requested generation stop"
+            fresh_stream = new_stream,
+            "client disconnected during submission"
         );
         return;
     };
