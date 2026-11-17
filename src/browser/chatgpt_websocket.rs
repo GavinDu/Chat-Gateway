@@ -386,7 +386,14 @@ async fn command(
             let Some(id) = input["id"].as_u64() else {
                 return fail();
             };
-            let code = input["code"].as_u64().unwrap_or(1000) as u16;
+            // Reject out-of-range JSON integers before conversion. A narrowing
+            // cast would turn 65536 + 1000 into a seemingly valid close code.
+            let Some(code) = input["code"]
+                .as_u64()
+                .map_or(Some(1000), |raw| u16::try_from(raw).ok())
+            else {
+                return fail();
+            };
             if code != 1000 && !(3000..=4999).contains(&code) {
                 return fail();
             }
@@ -562,6 +569,21 @@ mod tests {
         }
         assert!(public_ip("1.1.1.1".parse().unwrap()));
         assert!(public_ip("2001:4860:4860::8888".parse().unwrap()));
+    }
+
+    #[tokio::test]
+    async fn invalid_large_close_code_does_not_wrap_into_valid_status() {
+        let browser = Browser::builder().stealth(false).build().unwrap();
+        let state = Arc::new(State::default());
+        let cookies = browser.cookies();
+        let result = command(
+            &state,
+            &cookies,
+            "https://chatgpt.com",
+            json!({"op":"close","id":7,"code":66536}),
+        )
+        .await;
+        assert_eq!(result["ok"], false);
     }
 
     #[tokio::test]
