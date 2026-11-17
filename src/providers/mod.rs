@@ -1648,6 +1648,7 @@ mod submission_timeout_cancellation_tests {
     struct HangingSubmissionAdapter {
         cfg: crate::config::ProviderConfig,
         revoke_fixture_before_timeout: bool,
+        show_challenge_before_timeout: bool,
         outcome: MockSubmissionOutcome,
     }
 
@@ -1677,6 +1678,11 @@ mod submission_timeout_cancellation_tests {
                 // on external network or a live authenticated provider.
                 page.evaluate(
                     "document.documentElement.removeAttribute('data-chat-gateway-test-fixture')",
+                );
+            }
+            if self.show_challenge_before_timeout {
+                page.evaluate(
+                    "document.body.insertAdjacentHTML('beforeend', '<div role=dialog>Verify you are human</div>')",
                 );
             }
             if matches!(self.outcome, MockSubmissionOutcome::Unacknowledged) {
@@ -1710,6 +1716,15 @@ mod submission_timeout_cancellation_tests {
         revoke_fixture: bool,
         outcome: MockSubmissionOutcome,
     ) -> (f64, f64) {
+        exercise_submission_with_challenge(stop_markup, revoke_fixture, false, outcome).await
+    }
+
+    async fn exercise_submission_with_challenge(
+        stop_markup: &str,
+        revoke_fixture: bool,
+        show_challenge: bool,
+        outcome: MockSubmissionOutcome,
+    ) -> (f64, f64) {
         let browser = obscura_core::Browser::builder()
             .stealth(false)
             .build()
@@ -1724,6 +1739,7 @@ mod submission_timeout_cancellation_tests {
         let adapter: Arc<dyn SiteAdapter> = Arc::new(HangingSubmissionAdapter {
             cfg: serde_yaml::from_str("name: qwen").unwrap(),
             revoke_fixture_before_timeout: revoke_fixture,
+            show_challenge_before_timeout: show_challenge,
             outcome,
         });
         let (sender, mut receiver) = tokio::sync::mpsc::channel(8);
@@ -1815,6 +1831,20 @@ mod submission_timeout_cancellation_tests {
         assert_eq!(
             cancels, 0.0,
             "lost provider origin must block cancellation side effects"
+        );
+    }
+
+    #[tokio::test]
+    async fn submission_timeout_never_cancels_a_visible_challenge_dialog() {
+        let stop = r#"<button aria-label="Stop generating" type="button"
+            onclick="window.cancelClicks=(window.cancelClicks||0)+1">Stop</button>"#;
+        let (attempts, cancels) =
+            exercise_submission_with_challenge(stop, false, true, MockSubmissionOutcome::Timeout)
+                .await;
+        assert_eq!(attempts, 1.0);
+        assert_eq!(
+            cancels, 0.0,
+            "an on-provider verification overlay must block all Stop cleanup"
         );
     }
 
@@ -2094,10 +2124,8 @@ pub async fn run_send(
                 // the original typed error, but first request best-effort
                 // cancellation only while the page still belongs to this
                 // provider. Do not interact with unrelated redirected pages.
-                if error.is::<common::ProviderSubmissionUnacknowledgedError>()
-                    && require_expected_response_origin(adapter.name(), page).is_ok()
-                {
-                    adapter.cancel_generation(page);
+                if error.is::<common::ProviderSubmissionUnacknowledgedError>() {
+                    cancel_generation_if_trusted(adapter.as_ref(), page);
                 }
                 let _ = chunks.send(Err(error)).await;
             }
@@ -2109,11 +2137,7 @@ pub async fn run_send(
             // Best-effort cancel so a warm page cannot retain that generation.
             // Never click a Stop control after navigation to an off-provider
             // page or authentication redirect, and keep the original timeout.
-            if login_redirect_error(adapter.name(), &page.url()).is_none()
-                && require_expected_response_origin(adapter.name(), page).is_ok()
-            {
-                adapter.cancel_generation(page);
-            }
+            cancel_generation_if_trusted(adapter.as_ref(), page);
             let _ = chunks
                 .send(Err(anyhow::Error::new(common::ProviderTimeoutError::new(
                     adapter.name(),
