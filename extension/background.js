@@ -973,6 +973,38 @@ async function clearPendingApprovalIfCurrentLocked(pending) {
 function clearPendingApprovalIfCurrent(pending) {
   return queueConsentMutation(() => clearPendingApprovalIfCurrentLocked(pending));
 }
+// A stalled fetch OR successful response with a stuck body parser must not
+// pin the popup/alarm approval singleton forever. Keep the five-minute
+// approval expiry authoritative: a timeout does not discard pending consent.
+const APPROVAL_POLL_DEADLINE_MS = 12_000;
+async function boundedApprovalPoll(gateway, pending) {
+  const controller = new AbortController();
+  let deadline;
+  try {
+    return await Promise.race([
+      (async () => {
+        const response = await fetch(gateway + "/relay/v1/connect/poll", {
+          method:"POST", headers:{"Content-Type":"application/json"},
+          body:JSON.stringify({request_id:pending.request_id,poll_secret:pending.poll_secret}),
+          cache:"no-store", redirect:"error", signal:controller.signal
+        });
+        // HTTP 202 is a normal pending result; do not parse its empty body.
+        if (response.status === 202 || !response.ok) {
+          return {status:response.status, data:null};
+        }
+        return {status:response.status, data:await response.json()};
+      })(),
+      new Promise((_, reject) => {
+        deadline = setTimeout(() => {
+          reject(new Error("Connection approval poll timed out. Retry or reconnect."));
+          controller.abort();
+        }, APPROVAL_POLL_DEADLINE_MS);
+      })
+    ]);
+  } finally {
+    clearTimeout(deadline);
+  }
+}
 async function completePendingConnection() {
   const initial = await chrome.storage.local.get(["pendingConnection", "relayConnectionEpoch"]);
   const pending = initial.pendingConnection;
@@ -987,18 +1019,13 @@ async function completePendingConnection() {
   }
   const gateway = normalizeGateway(pending.gateway);
   if (!await chrome.permissions.contains({origins:[gateway + "/*"]})) throw new Error("Gateway permission is missing.");
-  const response = await fetch(gateway + "/relay/v1/connect/poll", {
-    method:"POST", headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({request_id:pending.request_id,poll_secret:pending.poll_secret}),
-    cache:"no-store", redirect:"error"
-  });
-  if (response.status === 202) return;
-  if (!response.ok) {
-    if (response.status === 410) await clearPendingApprovalIfCurrent(pending);
+  const {status, data} = await boundedApprovalPoll(gateway, pending);
+  if (status === 202) return;
+  if (data === null) {
+    if (status === 410) await clearPendingApprovalIfCurrent(pending);
     throw new Error("Connection approval unavailable. Connect again from the extension.");
   }
-  const data = await response.json();
-  if (!/^[a-f0-9]{64}$/.test(data.token)) throw new Error("Invalid connection token.");
+  if (!/^[a-f0-9]{64}$/.test(data?.token)) throw new Error("Invalid connection token.");
   const latest = await chrome.storage.local.get(["pendingConnection","gateway","linkedProviders","relayConnectionEpoch"]);
   const current = latest.pendingConnection;
   // A prior approval response is not valid for a renewed request, even if a
