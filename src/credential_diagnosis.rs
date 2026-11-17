@@ -83,6 +83,20 @@ struct AttemptEvidence {
     outcome: Outcome,
     observed_at_ms: u64,
     generation: String,
+    /// Optional gateway-generated request UUID; not a session fingerprint.
+    request_id: Option<String>,
+}
+
+/// Optional owner-status last-failure observation, not a proof of account
+/// validity or an Obscura internal DOM/transport subphase.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GatewayFailureEvidence {
+    request_id: String,
+    stage: String,
+    reason: String,
+    duration_ms: u64,
+    observed_at_ms: u64,
 }
 
 #[derive(Deserialize)]
@@ -93,6 +107,7 @@ struct Evidence {
     snapshot: Option<SnapshotEvidence>,
     obscura: Option<ReplayEvidence>,
     attempt: Option<AttemptEvidence>,
+    gateway_failure: Option<GatewayFailureEvidence>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -139,6 +154,38 @@ fn generation(raw: &str) -> Option<uuid::Uuid> {
     uuid::Uuid::parse_str(raw).ok().filter(|id| !id.is_nil())
 }
 
+fn canonical_request_id(raw: &str) -> Option<uuid::Uuid> {
+    let id = generation(raw)?;
+    (id.to_string() == raw).then_some(id)
+}
+
+fn fixed_gateway_stage(stage: &str) -> bool {
+    matches!(
+        stage,
+        "candidate_admission" | "backend_admission" | "first_stream_event" | "json_completion"
+    )
+}
+
+fn fixed_gateway_reason(reason: &str) -> bool {
+    matches!(
+        reason,
+        "invalid_request"
+            | "model_not_found"
+            | "provider_busy"
+            | "session_expired"
+            | "challenge"
+            | "timeout"
+            | "memory"
+            | "provider_failure"
+            | "asset_blocked"
+            | "document_denied"
+            | "input_rejected"
+            | "backend_unavailable"
+            | "candidate_skipped"
+            | "unclassified"
+    )
+}
+
 fn classify(e: &Evidence, now: u64) -> Diagnosis {
     let provider = match e.provider.as_str() {
         "chatgpt" => "chatgpt",
@@ -157,6 +204,7 @@ fn classify(e: &Evidence, now: u64) -> Diagnosis {
         e.snapshot.as_ref().map(|x| x.observed_at_ms),
         e.obscura.as_ref().map(|x| x.observed_at_ms),
         e.attempt.as_ref().map(|x| x.observed_at_ms),
+        e.gateway_failure.as_ref().map(|x| x.observed_at_ms),
     ];
     if timestamps
         .into_iter()
@@ -179,6 +227,32 @@ fn classify(e: &Evidence, now: u64) -> Diagnosis {
         .collect::<Vec<_>>();
     if parsed.iter().any(Option::is_none) || parsed.windows(2).any(|pair| pair[0] != pair[1]) {
         return inconclusive(provider, "snapshot_generation_mismatch");
+    }
+    if let Some(failure) = e.gateway_failure.as_ref() {
+        if failure.duration_ms > 120_000
+            || !fixed_gateway_stage(&failure.stage)
+            || !fixed_gateway_reason(&failure.reason)
+        {
+            return inconclusive(provider, "invalid_gateway_failure_evidence");
+        }
+        let Some(attempt) = e.attempt.as_ref() else {
+            return inconclusive(provider, "missing_gateway_request_correlation");
+        };
+        let (Some(gateway_id), Some(attempt_id)) = (
+            canonical_request_id(&failure.request_id),
+            attempt
+                .request_id
+                .as_deref()
+                .and_then(canonical_request_id),
+        ) else {
+            return inconclusive(provider, "missing_gateway_request_correlation");
+        };
+        if gateway_id != attempt_id {
+            return inconclusive(provider, "gateway_request_id_mismatch");
+        }
+        if attempt.outcome != Outcome::Failed {
+            return inconclusive(provider, "contradictory_gateway_failure_evidence");
+        }
     }
     if (e.snapshot.is_none() && (e.obscura.is_some() || e.attempt.is_some()))
         || (e.snapshot.as_ref().is_some_and(|snapshot| {
