@@ -203,6 +203,18 @@ pub trait SiteAdapter: Send + Sync {
                             button.closest('[hidden], [inert], [aria-hidden="true"]') ||
                             button.disabled || button.matches(':disabled') ||
                             button.closest('fieldset[disabled], [aria-disabled="true"]')) continue;
+                        // A hidden CSS or pointer-inert previous-turn Stop
+                        // clone may still receive programmatic click(), then
+                        // shadow the real action later in document order.
+                        let actionable = true;
+                        for (let ancestor = button; ancestor; ancestor = ancestor.parentElement) {
+                            const style = window.getComputedStyle(ancestor);
+                            if (style.pointerEvents === "none" || Number(style.opacity) === 0) {
+                                actionable = false;
+                                break;
+                            }
+                        }
+                        if (!actionable) continue;
                         button.click();
                         return true;
                     } catch (_) {}
@@ -2847,6 +2859,60 @@ mod generation_cancel_visibility_tests {
         assert_eq!(
             page.evaluate("window.fieldsetClicks || 0").as_f64(),
             Some(0.0)
+        );
+    }
+
+    #[tokio::test]
+    async fn cancellation_ignores_opacity_zero_and_pointer_inert_stop_clones() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><head><style>
+            .transparent { opacity: 0; }
+        </style></head><body>
+            <button id="ghost" aria-label="Stop generating" class="transparent"
+                onclick="window.ghostCount=(window.ghostCount||0)+1">Stop</button>
+            <section class="transparent"><button id="ghost-child" aria-label="Stop generation"
+                onclick="window.ghostChildCount=(window.ghostChildCount||0)+1">Stop</button></section>
+            <button id="inert" aria-label="Stop responding" style="pointer-events:none"
+                onclick="window.inertCount=(window.inertCount||0)+1">Stop</button>
+            <section style="pointer-events:none"><button id="inert-child"
+                aria-label="Stop generating" style="pointer-events:auto"
+                onclick="window.inertChildCount=(window.inertChildCount||0)+1">Stop</button></section>
+            <button id="real" aria-label="Stop generating"
+                onclick="window.realCount=(window.realCount||0)+1">Stop</button>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        let adapter = qwen::QwenAdapter {
+            cfg: serde_yaml::from_str("name: qwen").unwrap(),
+        };
+        adapter.cancel_generation(&page);
+        for field in [
+            "ghostCount",
+            "ghostChildCount",
+            "inertCount",
+            "inertChildCount",
+        ] {
+            let count = page.evaluate(&format!("window.{field} || 0"));
+            assert_eq!(
+                count.as_f64(),
+                Some(0.0),
+                "nonactionable {field} Stop must not be clicked"
+            );
+        }
+        assert_eq!(page.evaluate("window.realCount || 0").as_f64(), Some(1.0));
+
+        page.evaluate("document.querySelector('#real').hidden = true");
+        adapter.cancel_generation(&page);
+        assert_eq!(
+            page.evaluate("window.realCount || 0").as_f64(),
+            Some(1.0),
+            "no candidate is actionable after hiding the only real Stop"
         );
     }
 }
