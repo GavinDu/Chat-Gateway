@@ -177,7 +177,8 @@ mod current_chatgpt_dom_tests {
                 });
             })()"#,
         );
-        let editor = "form[data-chatgpt-composer] div.ProseMirror[contenteditable='true'][role='textbox']";
+        let editor =
+            "form[data-chatgpt-composer] div.ProseMirror[contenteditable='true'][role='textbox']";
         common::human_type(&page, &[editor], "Reply exactly OK")
             .await
             .unwrap();
