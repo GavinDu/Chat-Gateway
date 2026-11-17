@@ -16,10 +16,10 @@ function fixture(hostname = 'chatgpt.com', options = {}) {
     navigator:{userAgent:'fixture'}, WebSocket:original,
     EventTarget, Event, MessageEvent, DOMException, URL, TextEncoder,
     Uint8Array, ArrayBuffer, Blob, btoa, atob, setTimeout, clearTimeout,
-    fetch:async (url, options) => {
+    fetch:async (url, requestOptions) => {
       assert.equal(url, 'https://' + hostname + '/.well-known/chat-gateway-websocket');
-      assert.equal(options.headers['X-Chat-Gateway-WS-Token'], 'fixture-token');
-      const command = JSON.parse(Buffer.from(options.headers['X-Chat-Gateway-WS-Command'],'base64').toString());
+      assert.equal(requestOptions.headers['X-Chat-Gateway-WS-Token'], 'fixture-token');
+      const command = JSON.parse(Buffer.from(requestOptions.headers['X-Chat-Gateway-WS-Command'],'base64').toString());
       commands.push(command);
       let result = {ok:true};
       if (command.op === 'open') {
