@@ -1581,6 +1581,96 @@ mod submission_timeout_cancellation_tests {
     }
 }
 
+/// A stale or redirected page may expose an unrelated visible "Stop".
+/// Never click that page while cleaning up the previous provider request.
+/// This is a best-effort current-origin fence; actual first-party browser
+/// cancellation and cross-navigation atomicity still need live evidence.
+fn cancel_generation_if_trusted(adapter: &dyn SiteAdapter, page: &Page) {
+    if login_redirect_error(adapter.name(), &page.url()).is_none()
+        && require_expected_response_origin(adapter.name(), page).is_ok()
+        && !crate::provider_guard::is_challenge_page(page)
+    {
+        adapter.cancel_generation(page);
+    }
+}
+
+#[cfg(test)]
+mod post_send_cancel_origin_tests {
+    use super::{cancel_generation_if_trusted, qwen};
+    use obscura_core::Page;
+
+    async fn fixture() -> (obscura_core::Browser, Page) {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html data-chat-gateway-test-fixture><body>
+            <button aria-label="Stop generating" id="active-stop"
+                onclick="window.stopCount=(window.stopCount||0)+1">Stop</button>
+            <button aria-label="Stop sharing"
+                onclick="window.unrelatedCount=(window.unrelatedCount||0)+1">Stop sharing</button>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        (browser, page)
+    }
+
+    #[tokio::test]
+    async fn trusted_post_send_cancellation_clicks_only_real_stop() {
+        let (_browser, page) = fixture().await;
+        let adapter = qwen::QwenAdapter {
+            cfg: serde_yaml::from_str("name: qwen").unwrap(),
+        };
+        cancel_generation_if_trusted(&adapter, &page);
+        assert_eq!(page.evaluate("window.stopCount || 0").as_f64(), Some(1.0));
+        assert_eq!(
+            page.evaluate("window.unrelatedCount || 0").as_f64(),
+            Some(0.0)
+        );
+
+        page.evaluate("document.querySelector('#active-stop').disabled = true");
+        cancel_generation_if_trusted(&adapter, &page);
+        assert_eq!(
+            page.evaluate("window.stopCount || 0").as_f64(),
+            Some(1.0),
+            "disabled Stop clones cannot be clicked"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancellation_skips_lost_origin_and_challenge_page() {
+        let (_browser, page) = fixture().await;
+        let adapter = qwen::QwenAdapter {
+            cfg: serde_yaml::from_str("name: qwen").unwrap(),
+        };
+        page.evaluate(
+            "document.documentElement.removeAttribute('data-chat-gateway-test-fixture')",
+        );
+        cancel_generation_if_trusted(&adapter, &page);
+        assert_eq!(
+            page.evaluate("window.stopCount || 0").as_f64(),
+            Some(0.0),
+            "off-provider DOM must not receive a Stop click"
+        );
+
+        page.evaluate(
+            "document.documentElement.setAttribute('data-chat-gateway-test-fixture','')",
+        );
+        page.evaluate(
+            "document.body.insertAdjacentHTML('beforeend','<h1>Security challenge</h1>')",
+        );
+        cancel_generation_if_trusted(&adapter, &page);
+        assert_eq!(
+            page.evaluate("window.stopCount || 0").as_f64(),
+            Some(0.0),
+            "verification UI must not receive unrelated cleanup clicks"
+        );
+    }
+}
+
 pub async fn run_send(
     adapter: Arc<dyn SiteAdapter>,
     page: &mut Page,
@@ -1735,7 +1825,7 @@ pub async fn run_send(
 
     loop {
         if chunks.is_closed() {
-            adapter.cancel_generation(page);
+            cancel_generation_if_trusted(adapter.as_ref(), page);
             tracing::debug!(
                 provider = adapter.name(),
                 "client disconnected; requested generation stop"
@@ -1753,7 +1843,7 @@ pub async fn run_send(
             // The request is terminal, but the remote composer may still be
             // generating. Stop it before another send reuses this warm page.
             // Cancellation is best effort; the timeout remains an error.
-            adapter.cancel_generation(page);
+            cancel_generation_if_trusted(adapter.as_ref(), page);
             let _ = chunks
                 .send(Err(anyhow::Error::new(common::ProviderTimeoutError::new(
                     adapter.name(),
@@ -1972,7 +2062,7 @@ pub async fn run_send(
                                 .await
                                 .is_err()
                             {
-                                adapter.cancel_generation(page);
+                                cancel_generation_if_trusted(adapter.as_ref(), page);
                                 return;
                             }
                         }
@@ -1993,7 +2083,7 @@ pub async fn run_send(
                                     .await
                                     .is_err()
                             {
-                                adapter.cancel_generation(page);
+                                cancel_generation_if_trusted(adapter.as_ref(), page);
                                 return;
                             }
                         }
@@ -2026,7 +2116,7 @@ pub async fn run_send(
                             .await
                             .is_err()
                     {
-                        adapter.cancel_generation(page);
+                        cancel_generation_if_trusted(adapter.as_ref(), page);
                         return; // receiver gone
                     }
                     continue;
@@ -2123,7 +2213,7 @@ pub async fn run_send(
                             .await
                             .is_err()
                     {
-                        adapter.cancel_generation(page);
+                        cancel_generation_if_trusted(adapter.as_ref(), page);
                         return;
                     }
                 }
