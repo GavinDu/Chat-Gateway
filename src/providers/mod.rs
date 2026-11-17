@@ -1646,9 +1646,7 @@ mod post_send_cancel_origin_tests {
         let adapter = qwen::QwenAdapter {
             cfg: serde_yaml::from_str("name: qwen").unwrap(),
         };
-        page.evaluate(
-            "document.documentElement.removeAttribute('data-chat-gateway-test-fixture')",
-        );
+        page.evaluate("document.documentElement.removeAttribute('data-chat-gateway-test-fixture')");
         cancel_generation_if_trusted(&adapter, &page);
         assert_eq!(
             page.evaluate("window.stopCount || 0").as_f64(),
@@ -1656,9 +1654,7 @@ mod post_send_cancel_origin_tests {
             "off-provider DOM must not receive a Stop click"
         );
 
-        page.evaluate(
-            "document.documentElement.setAttribute('data-chat-gateway-test-fixture','')",
-        );
+        page.evaluate("document.documentElement.setAttribute('data-chat-gateway-test-fixture','')");
         page.evaluate(
             "document.body.insertAdjacentHTML('beforeend','<h1>Security challenge</h1>')",
         );
