@@ -2096,7 +2096,10 @@ async fn human_type_with_provider(
     tokio::time::sleep(Duration::from_millis(80)).await;
     let text_js = serde_json::to_string(text)?;
     let route_guard = provider_origin_guard_js(expected_provider)?;
-    let composer_guard = if matches!(expected_provider, Some("perplexity" | "manus")) {
+    let composer_guard = if matches!(
+        expected_provider,
+        Some("perplexity" | "manus" | "chatgpt" | "metaai")
+    ) {
         let count = actionable_composer_count_expression(selectors)?;
         format!("if ({count} !== 1) return 'ambiguous-composer';")
     } else {
@@ -4762,7 +4765,7 @@ pub async fn send_prompt(
     require_page_provider_origin(provider, page)?;
     // A search/dialog editor can coexist with a thread editor. Never pick
     // whichever is first without a source-grounded thread-scoped selector.
-    if matches!(provider, "perplexity" | "manus") {
+    if matches!(provider, "perplexity" | "manus" | "chatgpt" | "metaai") {
         require_unique_actionable_composer(page, &inputs)?;
     }
     // Waiting for the composer can navigate to a foreign site containing an
@@ -4782,7 +4785,7 @@ pub async fn send_prompt(
     drive_page(page, Duration::from_millis(200)).await;
     check_session(provider, page)?;
     require_page_provider_origin(provider, page)?;
-    if matches!(provider, "perplexity" | "manus") {
+    if matches!(provider, "perplexity" | "manus" | "chatgpt" | "metaai") {
         require_unique_actionable_composer(page, &inputs)?;
     }
     let input_sel = inputs
@@ -4806,7 +4809,7 @@ pub async fn send_prompt(
     if let Some(provider) = expected_submission_provider {
         require_submission_provider_route(provider, page)?;
     }
-    if matches!(provider, "perplexity" | "manus") {
+    if matches!(provider, "perplexity" | "manus" | "chatgpt" | "metaai") {
         require_unique_actionable_composer(page, &inputs)?;
     }
     let sends = set.send_refs();
@@ -4818,7 +4821,7 @@ pub async fn send_prompt(
         None
     };
     if verify_submission {
-        let result = if provider == "manus" {
+        let result = if matches!(provider, "manus" | "chatgpt" | "metaai") {
             // The same unique-editor gate must run atomically with the click.
             // A task dialog may become visible while the Send button settles.
             click_send_or_enter_checked_with_unique_composer(
@@ -4854,7 +4857,7 @@ pub async fn send_prompt(
                 "provider composer diagnostic"
             );
         })?;
-    } else if matches!(provider, "perplexity" | "manus") {
+    } else if matches!(provider, "perplexity" | "manus" | "chatgpt" | "metaai") {
         click_send_or_enter_checked_with_unique_composer(
             page,
             &sends,
@@ -6893,5 +6896,65 @@ mod provider_fixture_selector_tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod active_provider_composer_identity_tests {
+    use super::*;
+    #[tokio::test]
+    async fn two_active_provider_composers_never_receive_a_prompt_or_send() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        for provider in ["chatgpt", "metaai"] {
+            let mut page = browser.new_page().await.unwrap();
+            let editors = if provider == "chatgpt" {
+                "<textarea id='prompt-textarea'>first</textarea><textarea data-id='root'>second</textarea>"
+            } else {
+                "<textarea placeholder='Ask Meta AI'>first</textarea><div contenteditable='true' role='textbox'>second</div>"
+            };
+            let html = format!("<html data-chat-gateway-test-fixture><body><form>{editors}<button type='button' aria-label='Send' data-testid='send-button' onclick='window.sent=true'>Send</button></form></body></html>");
+            let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+            page.goto(&format!("data:text/html,{encoded}"))
+                .await
+                .unwrap();
+            let selectors = if provider == "chatgpt" {
+                &crate::providers::chatgpt::SELECTORS
+            } else {
+                &crate::providers::metaai::SELECTORS
+            };
+            let effective = selectors.effective(&Default::default());
+            let error = send_prompt(provider, &mut page, &effective, "must not be typed")
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("ambiguous"));
+            assert_eq!(
+                page.evaluate("document.querySelector('textarea').value")
+                    .as_str(),
+                Some("first")
+            );
+            assert_ne!(page.evaluate("window.sent").as_bool(), Some(true));
+        }
+    }
+
+    #[tokio::test]
+    async fn active_provider_overlap_counts_one_editor_and_ignores_hidden_clone() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = "<html><body><div contenteditable='true' role='textbox'>draft</div><textarea placeholder='Ask Meta AI' hidden>stale</textarea></body></html>";
+        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        require_unique_actionable_composer(&page, crate::providers::metaai::SELECTORS.input)
+            .unwrap();
+        let count = actionable_composer_count_expression(crate::providers::metaai::SELECTORS.input)
+            .unwrap();
+        assert_eq!(page.evaluate(&count).as_f64(), Some(1.0));
     }
 }
