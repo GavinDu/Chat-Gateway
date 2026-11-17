@@ -24,6 +24,9 @@ use tokio_tungstenite::{
 const BRIDGE_PATH: &str = "/.well-known/chat-gateway-websocket";
 const MAX_COMMAND: usize = 1_048_576;
 const MAX_SOCKETS: usize = 16;
+// Bridge commands, including slow DNS/TLS opens and 5-second read polls,
+// cannot spawn an unbounded number of per-page tasks.
+const MAX_INFLIGHT_COMMANDS: usize = 64;
 
 struct SocketHandle {
     outgoing: mpsc::Sender<Message>,
@@ -424,6 +427,7 @@ pub(super) fn attach(browser: &Browser, page: &mut Page) {
     let mut requests = page.enable_interception();
     let cookies = Arc::new(browser.cookies());
     let state = Arc::new(State::default());
+    let command_capacity = Arc::new(tokio::sync::Semaphore::new(MAX_INFLIGHT_COMMANDS));
     tokio::spawn(async move {
         while let Some(request) = requests.recv().await {
             let Some(origin) = bridge_origin(&request.url) else {
@@ -452,9 +456,24 @@ pub(super) fn attach(browser: &Browser, page: &mut Page) {
                 .and_then(|s| STANDARD.decode(s).ok())
                 .filter(|v| v.len() <= MAX_COMMAND)
                 .and_then(|v| serde_json::from_slice::<Value>(&v).ok());
+            // Non-blocking admission protects the gateway from unbounded
+            // concurrent intercepted commands while the page renders.
+            let Ok(_permit) = command_capacity.clone().try_acquire_owned() else {
+                let _ = request.resolver.send(InterceptResolution::Fulfill {
+                    status: 503,
+                    headers: HashMap::from([
+                        ("content-type".into(), "application/json".into()),
+                        ("cache-control".into(), "no-store".into()),
+                    ]),
+                    body: r#"{"ok":false}"#.to_string(),
+                    body_base64: String::new(),
+                });
+                continue;
+            };
             let state = state.clone();
             let cookies = cookies.clone();
             tokio::spawn(async move {
+                let _permit = _permit;
                 let output = if let Some(input) = parsed {
                     command(&state, &cookies, origin, input).await
                 } else {
@@ -493,6 +512,17 @@ pub(super) fn attach(browser: &Browser, page: &mut Page) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn bridge_command_capacity_is_bounded_and_recovers_after_drop() {
+        let limiter = Arc::new(tokio::sync::Semaphore::new(MAX_INFLIGHT_COMMANDS));
+        let permits = (0..MAX_INFLIGHT_COMMANDS)
+            .map(|_| limiter.clone().try_acquire_owned().unwrap())
+            .collect::<Vec<_>>();
+        assert!(limiter.clone().try_acquire_owned().is_err());
+        drop(permits);
+        assert!(limiter.try_acquire_owned().is_ok());
+    }
+
     #[test]
     fn targets_reject_other_origins_credentials_ports_and_plaintext() {
         for url in [
