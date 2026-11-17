@@ -1292,6 +1292,18 @@ pub(super) fn browser_thread(
                                     finish(report);
                                     return;
                                 }
+                                if provider == Provider::ChatGPT {
+                                    if let Err(error) = providers::chatgpt::verify_credentials(&mut page).await {
+                                        report.authentication = Some(if error.downcast_ref::<ProviderSessionExpiredError>().is_some() { "needs_login" } else { "unavailable" });
+                                        report.errors.push("first-party credential verification failed before composer probe".into());
+                                        finish(report);
+                                        return;
+                                    }
+                                    report.authentication = Some("verified");
+                                } else {
+                                    // A usable composer does not verify Meta AI credentials.
+                                    report.authentication = Some("unverified");
+                                }
                                 report.session_ok = true;
                                 // Selector probe over the full Rust v1
                                 // arrays (snapshot, not Go's 5s waits —
@@ -1408,6 +1420,8 @@ pub(super) fn browser_thread(
                                     // the old browser-wide jar. Invalid snapshots must not
                                     // disrupt a previously usable provider page/session.
                                     session::preflight_cookie_restore(&file, provider.name())?;
+                                    provider_sessions.invalidate_credentials(provider.name());
+                                    let verified_credentials = std::cell::Cell::new(false);
                                     let activated = page_session::activate_if_changed(&applied_imports, provider, &file, || async {
                                     page_session::replace_after_success(
                                     || async {
@@ -1423,6 +1437,10 @@ pub(super) fn browser_thread(
                                     }
                                     session::clear_provider_cookies(&browser, provider.name())?;
                                     PageSession::open(&browser, &mut page, provider, Some(&file)).await?;
+                                    if provider == Provider::ChatGPT {
+                                        providers::chatgpt::verify_credentials(&mut page).await?;
+                                        verified_credentials.set(true);
+                                    }
                                     Ok((Rc::new(page), network_bootstrap_403))
                                     },
                                     |(replacement, network_bootstrap_403)| {
@@ -1435,9 +1453,24 @@ pub(super) fn browser_thread(
                                     ).await
                                     }).await?;
                                     if activated { provider_sessions.record_session_import(provider.name()); }
+                                    if !activated && provider == Provider::ChatGPT {
+                                        // An unchanged cookie digest must still allow an explicit
+                                        // resync to refresh expired authentication evidence.
+                                        let mut page = PageLease::take(&pages, provider)?;
+                                        providers::chatgpt::verify_credentials(&mut page).await?;
+                                        verified_credentials.set(true);
+                                    }
+                                    if verified_credentials.get() {
+                                        provider_sessions.record_credentials_verified(provider.name());
+                                        tracing::info!(provider = provider.name(), stage = "imported_credential_verification", outcome = "verified", "first-party session verified on activated provider page");
+                                    }
                                     Ok(())
                                 }.await;
-                                if res.is_err() { provider_sessions.record_probe_failure(provider.name()); }
+                                if let Err(error) = &res {
+                                    if error.downcast_ref::<ProviderSessionExpiredError>().is_some() {
+                                        provider_sessions.record_needs_login(provider.name());
+                                    } else { provider_sessions.record_probe_failure(provider.name()); }
+                                }
                                 let _ = reply.send(res);
                             });
                         }
