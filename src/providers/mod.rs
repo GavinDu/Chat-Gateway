@@ -462,6 +462,97 @@ impl ResponseDeltaTracker {
     }
 }
 
+/// Incrementally remove provider-supplied numeric citations without making
+/// output depend on DOM polling boundaries. Retain only an incomplete trailing
+/// bracket-and-digits candidate, never the entire provider response.
+struct CitationDeltaFilter {
+    pending: String,
+    suffix: regex::Regex,
+}
+
+impl CitationDeltaFilter {
+    // Large malformed/unfinished bracket sequences must not buffer arbitrary
+    // response text while waiting for a closing bracket.
+    const MAX_PENDING_BYTES: usize = 128;
+
+    fn new() -> Self {
+        Self {
+            pending: String::new(),
+            suffix: regex::Regex::new(r"\[\p{Nd}*$").expect("static citation suffix regex"),
+        }
+    }
+
+    fn push(&mut self, delta: &str, complete: &regex::Regex) -> String {
+        let mut combined = std::mem::take(&mut self.pending);
+        combined.push_str(delta);
+        if let Some(candidate) = self.suffix.find(&combined) {
+            if combined.len() - candidate.start() <= Self::MAX_PENDING_BYTES {
+                self.pending = combined.split_off(candidate.start());
+            }
+        }
+        complete.replace_all(&combined, "").into_owned()
+    }
+
+    /// An unfinished citation marker is literal content, not a matched
+    /// citation. Flush it before sending the successful terminal chunk.
+    fn finish(&mut self) -> String {
+        std::mem::take(&mut self.pending)
+    }
+}
+
+#[cfg(test)]
+mod citation_delta_filter_tests {
+    use super::CitationDeltaFilter;
+
+    fn collect(parts: &[&str]) -> String {
+        let complete = regex::Regex::new(r"\[\d+\]").unwrap();
+        let mut filter = CitationDeltaFilter::new();
+        let mut output = String::new();
+        for part in parts {
+            output.push_str(&filter.push(part, &complete));
+        }
+        output.push_str(&filter.finish());
+        output
+    }
+
+    #[test]
+    fn numeric_citations_are_removed_across_chunk_boundaries() {
+        for chunks in [
+            vec!["See [", "12]", " text [", "3]", " done"],
+            vec!["See [12] text [3] done"],
+            vec!["See ", "[1", "2] text ", "[3", "] done"],
+        ] {
+            assert_eq!(collect(&chunks), "See  text  done");
+        }
+    }
+
+    #[test]
+    fn non_citation_text_and_incomplete_brackets_remain_exact() {
+        assert_eq!(collect(&["arr[", "abc] and [", "42"]), "arr[abc] and [42");
+        assert_eq!(collect(&["plain ", "[", "x]"]), "plain [x]");
+        assert_eq!(collect(&["text ", "["]), "text [");
+    }
+
+    #[test]
+    fn unicode_decimal_citations_use_the_same_regex_semantics() {
+        assert_eq!(collect(&["before [", "١", "٢] after"]), "before  after");
+        assert_eq!(collect(&["A[1] B[", "٣]"]), "A B");
+    }
+
+    #[test]
+    fn lookbehind_is_bounded_and_overlong_unclosed_candidate_is_literal() {
+        let digits = "7".repeat(CitationDeltaFilter::MAX_PENDING_BYTES + 12);
+        let original = format!("hello [{digits}");
+        let parts = ["hello [", digits.as_str()];
+        assert_eq!(collect(&parts), original);
+        let complete = regex::Regex::new(r"\[\d+\]").unwrap();
+        let mut filter = CitationDeltaFilter::new();
+        let output = filter.push(&original, &complete);
+        assert_eq!(output, original);
+        assert!(filter.pending.is_empty());
+    }
+}
+
 fn is_new_response_node(baseline_count: usize, current_count: usize) -> bool {
     current_count > baseline_count
 }
@@ -1363,6 +1454,7 @@ pub async fn run_send(
     let citation_re = adapter
         .strip_citations()
         .then(|| regex::Regex::new(r"\[\d+\]").expect("static regex"));
+    let mut citation_filter = citation_re.as_ref().map(|_| CitationDeltaFilter::new());
     let mut tracker = ResponseDeltaTracker::new(baseline.take());
     let mut stable_ticks = 0u32;
     let mut last_delta_at: Option<Instant> = None;
@@ -1622,6 +1714,21 @@ pub async fn run_send(
                                 last_delta_at.elapsed().as_millis().min(u64::MAX as u128) as u64,
                             );
                         }
+                        if let Some(filter) = citation_filter.as_mut() {
+                            let suffix = filter.finish();
+                            if !suffix.is_empty()
+                                && chunks
+                                    .send(Ok(ProviderChunk {
+                                        content: suffix,
+                                        done: false,
+                                    }))
+                                    .await
+                                    .is_err()
+                            {
+                                adapter.cancel_generation(page);
+                                return;
+                            }
+                        }
                         let _ = chunks
                             .send(Ok(ProviderChunk {
                                 content: String::new(),
@@ -1633,8 +1740,10 @@ pub async fn run_send(
                     continue;
                 }
                 DeltaObservation::Delta(mut delta) => {
-                    if let Some(re) = &citation_re {
-                        delta = re.replace_all(&delta, "").to_string();
+                    if let (Some(re), Some(filter)) =
+                        (citation_re.as_ref(), citation_filter.as_mut())
+                    {
+                        delta = filter.push(&delta, re);
                     }
                     stable_ticks = 0;
                     if !delta.is_empty() {
@@ -1734,6 +1843,21 @@ pub async fn run_send(
                         adapter.name(),
                         last_delta_at.elapsed().as_millis().min(u64::MAX as u128) as u64,
                     );
+                }
+                if let Some(filter) = citation_filter.as_mut() {
+                    let suffix = filter.finish();
+                    if !suffix.is_empty()
+                        && chunks
+                            .send(Ok(ProviderChunk {
+                                content: suffix,
+                                done: false,
+                            }))
+                            .await
+                            .is_err()
+                    {
+                        adapter.cancel_generation(page);
+                        return;
+                    }
                 }
                 let _ = chunks
                     .send(Ok(ProviderChunk {
