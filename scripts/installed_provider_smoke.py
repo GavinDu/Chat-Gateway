@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Opt-in, JSON-first eight-provider installed gateway smoke matrix.
+"""Opt-in JSON-first installed gateway smoke matrix.
+
+By default only ChatGPT and Meta AI are tested; six other providers are
+explicitly deferred until the owner changes the selection. The report always
+contains all eight provider rows.
 
 No owner session is accessed unless --execute is supplied. The output is
 redacted metadata only: never print response bodies, prompts, model IDs,
@@ -28,6 +32,7 @@ PROVIDERS = (
     "chatgpt", "metaai", "gemini", "claude", "grok", "qwen",
     "perplexity", "mistral",
 )
+FOCUS_PROVIDERS = ("chatgpt", "metaai")
 PROMPT = "Reply exactly OK"
 MAX_JSON_BYTES = 262_144
 SHA_PATTERN = re.compile(r"^[0-9a-f]{40}$")
@@ -36,7 +41,7 @@ FIXED_CATEGORIES = frozenset({
     "missing_request_id", "unexpected_answer", "incomplete_finish",
     "sse_incomplete", "invalid_models", "gateway_not_ready",
     "gateway_unreachable", "response_too_large", "invalid_response",
-    "invalid_header", "invalid_gateway_url",
+    "invalid_header", "invalid_gateway_url", "invalid_selection",
 })
 
 
@@ -187,7 +192,21 @@ def _skipped(reason: str) -> dict:
     return {"status": "skipped", "reason": reason}
 
 
-def run_matrix(models: dict[str, str], sender) -> list[dict]:
+def parse_selected_providers(raw: str) -> tuple[str, ...]:
+    # A fixed allowlist prevents accidental provider access. The owner must
+    # explicitly name each deferred provider when resuming its investigation.
+    selected = tuple(part.strip() for part in raw.split(","))
+    if (not selected or any(part not in PROVIDERS for part in selected)
+            or len(set(selected)) != len(selected)):
+        raise SmokeFailure("invalid_selection")
+    return selected
+
+
+def run_matrix(
+    models: dict[str, str], sender,
+    selected_providers: tuple[str, ...] = FOCUS_PROVIDERS,
+) -> list[dict]:
+    selected = set(parse_selected_providers(",".join(selected_providers)))
     results = []
     for provider in PROVIDERS:
         item = {
@@ -196,6 +215,11 @@ def run_matrix(models: dict[str, str], sender) -> list[dict]:
             "repeat": _skipped("separate_acceptance"),
             "restart": _skipped("separate_acceptance"),
         }
+        if provider not in selected:
+            item["json"] = _skipped("owner_deferred")
+            item["sse"] = _skipped("owner_deferred")
+            results.append(item)
+            continue
         model = models.get(provider)
         if model:
             try:
@@ -242,7 +266,12 @@ def _report(phase: str, identity: dict | None = None,
     return report
 
 
-def execute(base_url: str, api_key: str, timeout: int, opener=None) -> dict:
+def execute(
+    base_url: str, api_key: str, timeout: int, opener=None,
+    selected_providers: tuple[str, ...] = FOCUS_PROVIDERS,
+) -> dict:
+    # Validate before any network call, even the local read-only preflight.
+    parse_selected_providers(",".join(selected_providers))
     validate_canary_target(base_url, api_key, local_no_key=True)
     if timeout < 1 or timeout > 600:
         raise SmokeFailure("invalid_response")
@@ -255,7 +284,7 @@ def execute(base_url: str, api_key: str, timeout: int, opener=None) -> dict:
     results = run_matrix(
         models, lambda provider, model, stream: _call(
             base_url, api_key, model, provider, stream, timeout, opener
-        )
+        ), selected_providers
     )
     return _report("completed", identity, results)
 
@@ -267,13 +296,20 @@ def main() -> int:
     parser.add_argument("--timeout", type=int, default=150)
     parser.add_argument("--execute", action="store_true",
                         help="Explicitly authorize synthetic live requests")
+    parser.add_argument("--providers", default="chatgpt,metaai",
+                        help="Comma-separated explicit provider allowlist (default: chatgpt,metaai)")
     args = parser.parse_args()
+    try:
+        selected = parse_selected_providers(args.providers)
+    except SmokeFailure:
+        print(json.dumps(_report("preflight_failed", reason="invalid_selection"), sort_keys=True))
+        return 1
     if not args.execute:
         print(json.dumps(_report("not_executed"), sort_keys=True))
         return 0
     try:
         report = execute(args.base_url, os.environ.get("CHAT_GATEWAY_API_KEY", ""),
-                         args.timeout)
+                         args.timeout, selected_providers=selected)
     except Exception as error:
         # Never reflect upstream error text, URLs, credentials or prompt content.
         report = _report("preflight_failed", reason=_safe_error(error))
@@ -281,7 +317,7 @@ def main() -> int:
     return 0 if report["phase"] == "completed" and all(
         item["json"]["status"] == "passed"
         and item["sse"]["status"] == "passed"
-        for item in report["providers"]
+        for item in report["providers"] if item["provider"] in selected
     ) else 1
 
 
