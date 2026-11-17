@@ -754,7 +754,9 @@ mod streaming_visibility_regression_tests {
             response_probe(&page, &[".answer"], false).streaming,
             "an actionable role Stop nested in an enabled ancestor is recognized"
         );
-        page.evaluate("document.getElementById('inert-role-stop').setAttribute('aria-hidden','true')");
+        page.evaluate(
+            "document.getElementById('inert-role-stop').setAttribute('aria-hidden','true')",
+        );
         assert!(!response_probe(&page, &[".answer"], false).streaming);
 
         page.evaluate("document.getElementById('native-stop').hidden = false");
