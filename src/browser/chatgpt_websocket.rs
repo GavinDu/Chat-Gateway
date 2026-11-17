@@ -458,7 +458,7 @@ pub(super) fn attach(browser: &Browser, page: &mut Page) {
                 .and_then(|v| serde_json::from_slice::<Value>(&v).ok());
             // Non-blocking admission protects the gateway from unbounded
             // concurrent intercepted commands while the page renders.
-            let Ok(_permit) = command_capacity.clone().try_acquire_owned() else {
+            let Ok(permit) = command_capacity.clone().try_acquire_owned() else {
                 let _ = request.resolver.send(InterceptResolution::Fulfill {
                     status: 503,
                     headers: HashMap::from([
@@ -473,7 +473,7 @@ pub(super) fn attach(browser: &Browser, page: &mut Page) {
             let state = state.clone();
             let cookies = cookies.clone();
             tokio::spawn(async move {
-                let _permit = _permit;
+                let _permit = permit;
                 let output = if let Some(input) = parsed {
                     command(&state, &cookies, origin, input).await
                 } else {
