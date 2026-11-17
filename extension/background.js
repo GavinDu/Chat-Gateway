@@ -113,7 +113,7 @@ async function hasOriginPermissions(origins) {
 function recordProviderDiagnostic(provider, state, errorCode = null, attempt = null, telemetry = null) {
   // A provider sync attempt is NOT authenticated-login verification.
   // Store only stable local result codes, never raw upstream responses.
-  const safeState = ["syncing", "uploaded", "unchanged", "no_cookies", "skipped", "failed"].includes(state)
+  const safeState = ["syncing", "uploaded", "saved_activation_pending", "unchanged", "no_cookies", "skipped", "failed"].includes(state)
     ? state : "unknown";
   const entry = {
     state: safeState, issue: errorCode, updated_at: new Date().toISOString(),
@@ -658,8 +658,10 @@ function queueProviderSync(provider, force = false) {
         snapshotVersionMutation:queueConsentMutation
       });
       if (await providerDiagnosticScopeCurrent(provider, attempt)) {
-        recordProviderDiagnostic(provider, result || "skipped", null, attempt, inProgress);
-        if (result === "uploaded") lastGatewayCheck = null;
+        recordProviderDiagnostic(provider, result || "skipped",
+          result === "saved_activation_pending" ? "activation_pending" : null,
+          attempt, inProgress);
+        if (result === "uploaded" || result === "saved_activation_pending") lastGatewayCheck = null;
       } else {
         clearStaleProgress();
       }
