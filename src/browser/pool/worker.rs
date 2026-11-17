@@ -776,6 +776,8 @@ pub(super) fn browser_thread(
         rt.block_on(async move {
             let local = tokio::task::LocalSet::new();
             local.run_until(async move {
+                // A restarted worker must never reuse a previous page/account proof.
+                provider_sessions.invalidate_all_credentials();
                 let gateway_poll_tick = Duration::from_millis(cfg.server.gateway_poll_tick_ms);
                 let browser = match build_browser(&cfg) {
                     Ok(b) => b,
@@ -1402,6 +1404,13 @@ pub(super) fn browser_thread(
                                         return Ok(());
                                     };
                                     if reply.is_closed() { return Ok(()); }
+                                    // Begin only for providers with a source-grounded verifier.
+                                    // Other adapters, including Meta AI, stay authentication unknown.
+                                    let verification_epoch = if provider == Provider::ChatGPT {
+                                        provider_sessions.begin_credential_verification(provider.name())
+                                    } else {
+                                        None
+                                    };
                                     let file = session::load_session_file(provider.name())?
                                         .ok_or_else(|| anyhow::anyhow!("imported provider session is missing"))?;
                                     // Validate every eligible cookie before the refresh clears
@@ -1451,10 +1460,19 @@ pub(super) fn browser_thread(
                                         providers::chatgpt::verify_credentials(&mut page).await?;
                                         verified_credentials.set(true);
                                     }
-                                    if activated {
+                                    // An unchanged saved snapshot can recover a prior explicit
+                                    // login block after a fresh first-party account check.
+                                    if activated || verified_credentials.get() {
                                         provider_sessions.record_session_import(provider.name());
                                     }
-                                    if verified_credentials.get() {
+                                    if verified_credentials.get()
+                                        && verification_epoch.is_some_and(|epoch| {
+                                            provider_sessions.record_credentials_verified(
+                                                provider.name(),
+                                                epoch,
+                                            )
+                                        })
+                                    {
                                         tracing::info!(
                                             provider = "chatgpt",
                                             stage = "imported_session_first_party_account_check",
