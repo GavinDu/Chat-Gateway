@@ -53,9 +53,7 @@ mod initial_frame_compatibility_tests {
             .unwrap();
         // Child initialization synchronously calls native DOM ops. The pinned
         // engine must declare that reentrancy instead of aborting this process.
-        page.evaluate(
-            r#"document.body.innerHTML = '<iframe srcdoc="<p>frame</p>"></iframe>';"#,
-        );
+        page.evaluate(r#"document.body.innerHTML = '<iframe srcdoc="<p>frame</p>"></iframe>';"#);
         // The facade adopts the queued child document while settling.
         page.settle(50).await;
         assert_eq!(
