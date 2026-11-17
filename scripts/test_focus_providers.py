@@ -79,8 +79,8 @@ class ProviderFocusTests(unittest.TestCase):
         self.assertTrue(self.manifest.exists())
         self.assertNotIn("not-a-real-secret", self.manifest.read_text())
         self.assertEqual(set(json.loads(self.manifest.read_text())["flags"]), {
-            "qwen", "metaai", "claude", "chatgpt", "gemini",
-            "grok", "mistral", "perplexity", "manus"
+            "qwen", "claude", "gemini", "grok",
+            "mistral", "perplexity", "manus"
         })
         self.assertEqual(stat.S_IMODE(self.config.stat().st_mode), 0o600)
         self.assertEqual(stat.S_IMODE(self.manifest.stat().st_mode), 0o600)
@@ -102,6 +102,20 @@ class ProviderFocusTests(unittest.TestCase):
         text = self.config.read_text()
         self.assertIn("- name: chatgpt\n    enabled: false", text)
         self.assertIn("- name: metaai\n    enabled: false", text)
+
+    def test_restore_preserves_owner_changes_to_focus_provider_flags(self):
+        operate(self.config, "apply")
+        focused = self.config.read_text().replace(
+            "- name: chatgpt\n    enabled: true",
+            "- name: chatgpt\n    enabled: false"
+        )
+        self.config.write_text(focused)
+        operate(self.config, "restore")
+        restored = self.config.read_text()
+        self.assertIn("- name: chatgpt\n    enabled: false", restored)
+        self.assertIn("- name: metaai\n    enabled: true", restored)
+        self.assertEqual(restored.count("enabled: false"), 1)
+        self.assertFalse(self.manifest.exists())
 
     def test_idempotence_does_not_overwrite_original_flags(self):
         operate(self.config, "apply")
