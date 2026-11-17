@@ -37,6 +37,64 @@ pub struct ProviderSessionStatus {
 const DEGRADED_RETRY_COOLDOWN: Duration = Duration::from_secs(15);
 const CREDENTIAL_PROOF_TTL: Duration = Duration::from_secs(300);
 
+const LAST_FAILED_REQUEST_TTL: Duration = Duration::from_secs(300);
+
+/// Diagnostics for a gateway-generated request, not an upstream session.
+/// Every serialized field is bounded or selected from a fixed source list.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct LastFailedRequest {
+    pub request_id: uuid::Uuid,
+    pub stage: &'static str,
+    pub reason: &'static str,
+    pub duration_ms: u64,
+    pub observed_at_utc: String,
+}
+
+#[derive(Debug)]
+struct RequestAttemptSlot {
+    request_id: uuid::Uuid,
+    last_failure: Option<(LastFailedRequest, Instant)>,
+}
+
+fn active_failure_provider(provider: &str) -> Option<&'static str> {
+    match provider {
+        "chatgpt" => Some("chatgpt"),
+        "metaai" => Some("metaai"),
+        _ => None,
+    }
+}
+
+fn safe_failure_stage(stage: &str) -> &'static str {
+    match stage {
+        "candidate_admission" => "candidate_admission",
+        "backend_admission" => "backend_admission",
+        "first_stream_event" => "first_stream_event",
+        "json_completion" => "json_completion",
+        _ => "unknown",
+    }
+}
+
+fn safe_failure_reason(reason: &str) -> &'static str {
+    match reason {
+        "invalid_request" => "invalid_request",
+        "model_not_found" => "model_not_found",
+        "provider_busy" => "provider_busy",
+        "session_expired" => "session_expired",
+        "challenge" => "challenge",
+        "timeout" => "timeout",
+        "memory" => "memory",
+        "provider_failure" => "provider_failure",
+        "asset_blocked" => "asset_blocked",
+        "document_denied" => "document_denied",
+        "input_rejected" => "input_rejected",
+        "backend_unavailable" => "backend_unavailable",
+        "candidate_skipped" => "candidate_skipped",
+        "unclassified" => "unclassified",
+        _ => "unclassified",
+    }
+}
+
+
 /// An opaque, non-credential-derived epoch for one provider/worker account
 /// observation. No cookie hashes, raw account data or tokens are retained.
 #[derive(Debug)]
@@ -58,9 +116,98 @@ const MANUAL_VERIFICATION_NOTICE: &str =
 pub struct ProviderSessionRegistry {
     states: Arc<Mutex<HashMap<String, ProviderSessionStatus>>>,
     credential_proofs: Arc<Mutex<CredentialProofStore>>,
+    /// Two known active providers only; new requests fence older completions.
+    last_request_attempts: Arc<Mutex<HashMap<&'static str, RequestAttemptSlot>>>,
 }
 
 impl ProviderSessionRegistry {
+    /// Begin one owner-attributable request attempt before any candidate awaits.
+    /// Generated request IDs are UUIDs; malformed or external strings cannot
+    /// become diagnostic labels. Newer attempts hide stale prior failures.
+    pub fn begin_request_attempt(&self, provider: &str, request_id: &str) {
+        let Some(provider) = active_failure_provider(provider) else {
+            return;
+        };
+        let Ok(request_id) = uuid::Uuid::parse_str(request_id) else {
+            return;
+        };
+        if request_id.is_nil() {
+            return;
+        }
+        if let Ok(mut slots) = self.last_request_attempts.lock() {
+            slots.insert(
+                provider,
+                RequestAttemptSlot {
+                    request_id,
+                    last_failure: None,
+                },
+            );
+        }
+    }
+
+    /// Record a failure only if the current provider slot still belongs to
+    /// the same gateway request. Never retain upstream messages or response
+    /// text: both stage and reason are mapped to static allowlisted strings.
+    pub fn record_request_failure(
+        &self,
+        provider: &str,
+        request_id: &str,
+        stage: &str,
+        reason: &str,
+        duration_ms: u64,
+    ) {
+        let Some(provider) = active_failure_provider(provider) else {
+            return;
+        };
+        let Ok(request_id) = uuid::Uuid::parse_str(request_id) else {
+            return;
+        };
+        let Ok(mut slots) = self.last_request_attempts.lock() else {
+            return;
+        };
+        let Some(slot) = slots.get_mut(provider) else {
+            return;
+        };
+        if slot.request_id != request_id {
+            return;
+        }
+        let record = LastFailedRequest {
+            request_id,
+            stage: safe_failure_stage(stage),
+            reason: safe_failure_reason(reason),
+            duration_ms: duration_ms.min(120_000),
+            observed_at_utc: chrono::Utc::now().to_rfc3339_opts(
+                chrono::SecondsFormat::Secs,
+                true,
+            ),
+        };
+        slot.last_failure = Some((record, Instant::now()));
+    }
+
+    fn last_failed_request_at(&self, provider: &str, now: Instant) -> Option<LastFailedRequest> {
+        let provider = active_failure_provider(provider)?;
+        self.last_request_attempts.lock().ok().and_then(|slots| {
+            slots.get(provider).and_then(|slot| {
+                let (record, at) = slot.last_failure.as_ref()?;
+                (now.checked_duration_since(*at)? <= LAST_FAILED_REQUEST_TTL)
+                    .then(|| record.clone())
+            })
+        })
+    }
+
+    pub fn last_failed_request(&self, provider: &str) -> Option<LastFailedRequest> {
+        self.last_failed_request_at(provider, Instant::now())
+    }
+
+    pub fn clear_last_request(&self, provider: &str) {
+        let Some(provider) = active_failure_provider(provider) else {
+            return;
+        };
+        if let Ok(mut slots) = self.last_request_attempts.lock() {
+            slots.remove(provider);
+        }
+    }
+
     /// Invalidate a prior positive result before a new imported-session check.
     /// Only matching epochs may publish a later source-verified verdict.
     pub fn begin_credential_verification(&self, provider: &str) -> Option<uuid::Uuid> {
@@ -137,6 +284,7 @@ impl ProviderSessionRegistry {
     /// Mark a provider as requiring authentication after its session is unlinked.
     pub fn record_unlinked(&self, provider: &str) {
         self.invalidate_credentials(provider);
+        self.clear_last_request(provider);
         if let Ok(mut map) = self.states.lock() {
             map.insert(
                 provider.to_owned(),
@@ -179,6 +327,7 @@ impl ProviderSessionRegistry {
             .map_err(|_| anyhow::anyhow!("provider state unavailable"))?
             .remove(provider);
         self.invalidate_credentials(provider);
+        self.clear_last_request(provider);
         Ok(())
     }
 
@@ -742,5 +891,91 @@ mod credential_evidence_lifecycle_tests {
         assert!(reg.credentials_verified("chatgpt"));
         reg.record_needs_login("chatgpt");
         assert!(!reg.credentials_verified("chatgpt"));
+    }
+}
+
+#[cfg(test)]
+mod bounded_request_diagnostic_tests {
+    use super::*;
+
+    const FIRST: &str = "5f855e0d-5b22-4a93-b925-98db841a1ee1";
+    const SECOND: &str = "e7d97a2b-195b-43db-9c8e-9f8a0da3408d";
+
+    #[test]
+    fn older_completion_cannot_replace_latest_attempt() {
+        let reg = ProviderSessionRegistry::default();
+        reg.begin_request_attempt("chatgpt", FIRST);
+        reg.begin_request_attempt("chatgpt", SECOND);
+        reg.record_request_failure("chatgpt", FIRST, "json_completion", "timeout", 500);
+        assert!(reg.last_failed_request("chatgpt").is_none());
+        reg.record_request_failure(
+            "chatgpt",
+            SECOND,
+            "first_stream_event",
+            "backend_unavailable",
+            123,
+        );
+        let latest = reg.last_failed_request("chatgpt").unwrap();
+        assert_eq!(latest.request_id.to_string(), SECOND);
+        assert_eq!(latest.stage, "first_stream_event");
+        assert_eq!(latest.reason, "backend_unavailable");
+        assert_eq!(latest.duration_ms, 123);
+    }
+
+    #[test]
+    fn bounded_provider_cardinality_and_cross_provider_isolation() {
+        let reg = ProviderSessionRegistry::default();
+        reg.begin_request_attempt("metaai", FIRST);
+        reg.record_request_failure("metaai", FIRST, "backend_admission", "timeout", 240_000);
+        reg.begin_request_attempt("chatgpt", SECOND);
+        reg.record_request_failure("chatgpt", SECOND, "candidate_admission", "provider_busy", 2);
+        reg.begin_request_attempt("grok", FIRST);
+        reg.record_request_failure("grok", FIRST, "candidate_admission", "provider_busy", 2);
+        assert_eq!(reg.last_request_attempts.lock().unwrap().len(), 2);
+        assert!(reg.last_failed_request("grok").is_none());
+        assert_eq!(reg.last_failed_request("metaai").unwrap().duration_ms, 120_000);
+        reg.clear_last_request("chatgpt");
+        assert!(reg.last_failed_request("chatgpt").is_none());
+        assert!(reg.last_failed_request("metaai").is_some());
+    }
+
+    #[test]
+    fn unsafe_stage_reason_and_id_cannot_leak_tokens_or_urls() {
+        let reg = ProviderSessionRegistry::default();
+        reg.begin_request_attempt("chatgpt", "cookie=verysecret");
+        assert!(reg.last_failed_request("chatgpt").is_none());
+        reg.begin_request_attempt("chatgpt", FIRST);
+        reg.record_request_failure(
+            "chatgpt",
+            FIRST,
+            "https://private.example/credential",
+            "bearer_secret_from_upstream",
+            u64::MAX,
+        );
+        let record = reg.last_failed_request("chatgpt").unwrap();
+        let serialized = serde_json::to_string(&record).unwrap();
+        assert_eq!(record.stage, "unknown");
+        assert_eq!(record.reason, "unclassified");
+        assert_eq!(record.duration_ms, 120_000);
+        for private in ["private.example", "bearer_secret", "credential", "verysecret"] {
+            assert!(!serialized.contains(private));
+        }
+        assert_eq!(serde_json::to_value(&record).unwrap().as_object().unwrap().len(), 5);
+    }
+
+    #[test]
+    fn no_failure_expiry_unlink_and_reset_do_not_fake_success() {
+        let reg = ProviderSessionRegistry::default();
+        reg.begin_request_attempt("chatgpt", FIRST);
+        assert!(reg.last_failed_request("chatgpt").is_none());
+        reg.record_request_failure("chatgpt", FIRST, "json_completion", "unclassified", 1);
+        let expired = Instant::now() + LAST_FAILED_REQUEST_TTL + Duration::from_secs(1);
+        assert!(reg.last_failed_request_at("chatgpt", expired).is_none());
+        reg.record_unlinked("chatgpt");
+        assert!(reg.last_failed_request("chatgpt").is_none());
+        reg.begin_request_attempt("chatgpt", SECOND);
+        reg.record_request_failure("chatgpt", SECOND, "backend_admission", "timeout", 1);
+        reg.reset_for_retry("chatgpt").unwrap();
+        assert!(reg.last_failed_request("chatgpt").is_none());
     }
 }
