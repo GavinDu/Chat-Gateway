@@ -128,6 +128,7 @@ mod session_zeroization_tests {
 }
 
 #[derive(Serialize, Deserialize, Clone)]
+#[serde(try_from = "CookieWire")]
 pub struct Cookie {
     pub name: String,
     pub value: String,
@@ -139,6 +140,54 @@ pub struct Cookie {
     pub expires: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub same_site: Option<String>,
+}
+
+// Preserve the existing serialized Cookie representation, including legacy
+// records with unrelated extra fields. Only the Chrome partition scope is
+// unrepresentable in the pinned Obscura jar: reject it before vault persistence
+// rather than silently accepting it as an unpartitioned bearer credential.
+// IgnoredAny discards the top-level site without allocating or logging it.
+#[derive(Deserialize)]
+struct CookieWire {
+    name: String,
+    value: String,
+    domain: String,
+    path: String,
+    secure: bool,
+    http_only: bool,
+    #[serde(default)]
+    expires: Option<f64>,
+    #[serde(default)]
+    same_site: Option<String>,
+    #[serde(default, alias = "partitionKey")]
+    partition_key: Option<serde::de::IgnoredAny>,
+}
+
+impl TryFrom<CookieWire> for Cookie {
+    type Error = &'static str;
+
+    fn try_from(mut wire: CookieWire) -> std::result::Result<Self, Self::Error> {
+        if wire.partition_key.is_some() {
+            wire.name.zeroize();
+            wire.value.zeroize();
+            wire.domain.zeroize();
+            wire.path.zeroize();
+            if let Some(same_site) = wire.same_site.as_mut() {
+                same_site.zeroize();
+            }
+            return Err("unsupported provider cookie partition scope");
+        }
+        Ok(Self {
+            name: wire.name,
+            value: wire.value,
+            domain: wire.domain,
+            path: wire.path,
+            secure: wire.secure,
+            http_only: wire.http_only,
+            expires: wire.expires,
+            same_site: wire.same_site,
+        })
+    }
 }
 
 impl Drop for Cookie {
