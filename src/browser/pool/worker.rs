@@ -776,6 +776,8 @@ pub(super) fn browser_thread(
         rt.block_on(async move {
             let local = tokio::task::LocalSet::new();
             local.run_until(async move {
+                // Proof belongs to this worker generation, never a restarted page.
+                provider_sessions.invalidate_all_credentials();
                 let gateway_poll_tick = Duration::from_millis(cfg.server.gateway_poll_tick_ms);
                 let browser = match build_browser(&cfg) {
                     Ok(b) => b,
