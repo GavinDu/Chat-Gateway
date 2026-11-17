@@ -26,6 +26,12 @@ RUN cargo build --locked --release --features render,stealth
 # Build the actual application using the already compiled dependency artifacts.
 COPY src ./src
 COPY benches ./benches
+# Only the final application compilation sees immutable build provenance; the
+# cached dependency layer above is independent of checkout and timestamp.
+ARG CHAT_GATEWAY_SOURCE_SHA=unknown
+ARG CHAT_GATEWAY_BUILD_TIMESTAMP=unknown
+ENV CHAT_GATEWAY_SOURCE_SHA=${CHAT_GATEWAY_SOURCE_SHA} \
+    CHAT_GATEWAY_BUILD_TIMESTAMP=${CHAT_GATEWAY_BUILD_TIMESTAMP}
 # Force an application rebuild even if the cached layer contains a dummy main.
 # CI reuses this exact command for the tighter final-link memory regression.
 COPY scripts/docker-release-link.sh /usr/local/bin/chat-gateway-release-link
@@ -33,6 +39,10 @@ RUN bash /usr/local/bin/chat-gateway-release-link
 RUN mkdir -p /app/data /app/sessions && chown -R 65532:65532 /app/data /app/sessions
 
 FROM gcr.io/distroless/cc:nonroot
+ARG CHAT_GATEWAY_SOURCE_SHA=unknown
+ARG CHAT_GATEWAY_BUILD_TIMESTAMP=unknown
+LABEL org.opencontainers.image.revision=${CHAT_GATEWAY_SOURCE_SHA} \
+      org.opencontainers.image.created=${CHAT_GATEWAY_BUILD_TIMESTAMP}
 WORKDIR /app
 # This native-only image supports the extension relay, not embedded Chromium.
 # See browser-login/README.md for the separately supported Replit-native runtime.
