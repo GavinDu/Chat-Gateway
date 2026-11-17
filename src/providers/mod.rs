@@ -1408,7 +1408,8 @@ mod submission_timeout_cancellation_tests {
             .build()
             .unwrap();
         let mut page = browser.new_page().await.unwrap();
-        let html = format!("<html data-chat-gateway-test-fixture><body>{stop_markup}</body></html>");
+        let html =
+            format!("<html data-chat-gateway-test-fixture><body>{stop_markup}</body></html>");
         let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
         page.goto(&format!("data:text/html,{encoded}"))
             .await
@@ -1438,7 +1439,9 @@ mod submission_timeout_cancellation_tests {
             .expect("submission must emit a terminal typed timeout")
             .expect_err("a stalled submission must not succeed");
         assert!(
-            error.downcast_ref::<common::ProviderTimeoutError>().is_some(),
+            error
+                .downcast_ref::<common::ProviderTimeoutError>()
+                .is_some(),
             "submission timeout remains downcastable"
         );
         assert!(error.to_string().contains("timed out while submitting"));
