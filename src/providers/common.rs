@@ -1252,6 +1252,7 @@ pub fn visible_composer_exists(page: &Page, selectors: &[&str]) -> bool {
     };
     let editable = editable_composer_condition("input");
     let nontransparent = nontransparent_ancestors_expression("input");
+    let pointer_enabled = pointer_enabled_ancestors_expression("input");
     let script = format!(
         r#"(() => {{
             for (const selector of {selectors}) {{
@@ -1260,7 +1261,7 @@ pub fn visible_composer_exists(page: &Page, selectors: &[&str]) -> bool {
                         if ({editable} &&
                             input.getClientRects().length > 0 &&
                             window.getComputedStyle(input).visibility !== "hidden" &&
-                            window.getComputedStyle(input).pointerEvents !== "none" &&
+                            {pointer_enabled} &&
                             {nontransparent} &&
                             !input.closest('[hidden], [inert], [aria-hidden="true"], [aria-disabled="true"], [aria-readonly="true"]') &&
                             !input.disabled && !input.matches(':disabled') &&
@@ -1282,8 +1283,9 @@ pub fn visible_composer_exists(page: &Page, selectors: &[&str]) -> bool {
 fn visible_input_query(selector_js: &str) -> String {
     let editable = editable_composer_condition("el");
     let nontransparent = nontransparent_ancestors_expression("el");
+    let pointer_enabled = pointer_enabled_ancestors_expression("el");
     format!(
-        "Array.from(document.querySelectorAll({selector_js})).find(el => {editable} && el.getClientRects().length > 0 && window.getComputedStyle(el).visibility !== 'hidden' && window.getComputedStyle(el).pointerEvents !== 'none' && {nontransparent} && !el.closest('[hidden], [inert], [aria-hidden=\"true\"], [aria-disabled=\"true\"], [aria-readonly=\"true\"]') && !el.disabled && !el.matches(':disabled') && !el.closest('fieldset[disabled]') && !el.readOnly && el.getAttribute('aria-disabled') !== 'true' && el.getAttribute('aria-readonly') !== 'true' && el.getAttribute('contenteditable') !== 'false')"
+        "Array.from(document.querySelectorAll({selector_js})).find(el => {editable} && el.getClientRects().length > 0 && window.getComputedStyle(el).visibility !== 'hidden' && {pointer_enabled} && {nontransparent} && !el.closest('[hidden], [inert], [aria-hidden=\"true\"], [aria-disabled=\"true\"], [aria-readonly=\"true\"]') && !el.disabled && !el.matches(':disabled') && !el.closest('fieldset[disabled]') && !el.readOnly && el.getAttribute('aria-disabled') !== 'true' && el.getAttribute('aria-readonly') !== 'true' && el.getAttribute('contenteditable') !== 'false')"
     )
 }
 
@@ -1293,6 +1295,7 @@ fn actionable_composer_count_expression(selectors: &[&str]) -> anyhow::Result<St
     let selectors = serde_json::to_string(selectors)?;
     let editable = editable_composer_condition("el");
     let nontransparent = nontransparent_ancestors_expression("el");
+    let pointer_enabled = pointer_enabled_ancestors_expression("el");
     Ok(format!(
         r#"(() => {{
             const matches = new Set();
@@ -1302,7 +1305,7 @@ fn actionable_composer_count_expression(selectors: &[&str]) -> anyhow::Result<St
                         if ({editable} &&
                             el.getClientRects().length > 0 &&
                             window.getComputedStyle(el).visibility !== 'hidden' &&
-                            window.getComputedStyle(el).pointerEvents !== 'none' &&
+                            {pointer_enabled} &&
                             {nontransparent} &&
                             !el.closest('[hidden], [inert], [aria-hidden="true"], [aria-disabled="true"], [aria-readonly="true"]') &&
                             !el.disabled && !el.matches(':disabled') &&
@@ -1326,6 +1329,76 @@ fn require_unique_actionable_composer(page: &Page, selectors: &[&str]) -> anyhow
         Ok(())
     } else {
         anyhow::bail!("provider actionable composer ambiguous or unavailable")
+    }
+}
+
+#[cfg(test)]
+mod pointer_inert_composer_ancestors_tests {
+    use super::{actionable_composer_count_expression, human_type, visible_composer_exists};
+
+    #[tokio::test]
+    async fn css_pointer_inert_ancestor_never_becomes_actionable_input() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <section id="stale-panel" style="pointer-events:none">
+                <textarea id="ghost" style="pointer-events:auto"></textarea>
+            </section>
+            <form><textarea id="live"></textarea></form>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+
+        assert!(
+            !visible_composer_exists(&page, &["#ghost"]),
+            "an explicitly pointer-enabled ghost still has a blocked ancestor"
+        );
+        assert!(visible_composer_exists(&page, &["#ghost", "#live"]));
+        let count = actionable_composer_count_expression(&["#ghost", "textarea", "#live"]).unwrap();
+        assert_eq!(
+            page.evaluate(&count).as_f64(),
+            Some(1.0),
+            "a valid editor matched twice must count once; ghost excluded"
+        );
+        human_type(&page, &["#ghost", "#live"], "private fixture input")
+            .await
+            .unwrap();
+        assert_eq!(
+            page.evaluate("document.querySelector('#ghost').value")
+                .as_str(),
+            Some("")
+        );
+        assert_eq!(
+            page.evaluate("document.querySelector('#live').value")
+                .as_str(),
+            Some("private fixture input")
+        );
+
+        page.evaluate("document.querySelector('#live').hidden = true");
+        assert!(!visible_composer_exists(&page, &["#ghost", "#live"]));
+        assert!(
+            human_type(&page, &["#ghost"], "other private input")
+                .await
+                .is_err(),
+            "stale ancestor cannot become eligible just because valid editor disappears"
+        );
+        assert_eq!(
+            page.evaluate("document.querySelector('#ghost').value")
+                .as_str(),
+            Some("")
+        );
+        page.evaluate("document.querySelector('#stale-panel').style.pointerEvents = 'auto'");
+        assert!(visible_composer_exists(&page, &["#ghost"]));
+        assert_eq!(
+            page.evaluate(&actionable_composer_count_expression(&["#ghost"]).unwrap())
+                .as_f64(),
+            Some(1.0)
+        );
     }
 }
 
