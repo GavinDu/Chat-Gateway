@@ -2004,7 +2004,12 @@ mod picker_pointer_inert_ancestor_tests {
         );
         assert_eq!(page.evaluate("window.validClicks || 0").as_f64(), Some(2.0));
         assert_eq!(
-            page.evaluate("document.querySelector('#replaced') !== null")
+            page.evaluate("document.querySelector('#retired') !== null")
+                .as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            page.evaluate("document.querySelector('#replaced').textContent === 'New'")
                 .as_bool(),
             Some(true)
         );
