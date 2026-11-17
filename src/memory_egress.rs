@@ -290,8 +290,14 @@ mod tests {
     fn allowed_memory_preserves_content_whitespace_without_final_transport_separator() {
         let allowed = policy(&["chatgpt"]);
         let items = vec![
-            PersonalMemoryItem { id: "id-1".into(), content: "value  \n\n".into() },
-            PersonalMemoryItem { id: "id-2".into(), content: "Unicode 世界".into() },
+            PersonalMemoryItem {
+                id: "id-1".into(),
+                content: "value  \n\n".into(),
+            },
+            PersonalMemoryItem {
+                id: "id-2".into(),
+                content: "Unicode 世界".into(),
+            },
         ];
         let mut prompt = "original request\n".to_owned();
         allowed
