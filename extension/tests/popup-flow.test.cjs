@@ -499,6 +499,19 @@ test("popup displays last extension sync and stale status independently of auth"
   assert.doesNotMatch(status,/private|token|cookie=secret/);
 });
 
+test("popup renders only the fixed partition-scope sync diagnosis", async () => {
+  const popup = loadPopup({diagnosticsSync:{
+    state:"failed",issue:"partition_scope_unsupported",
+    updated_at:"2026-11-17T23:00:00.000Z",stale:true
+  }});
+  await new Promise(resolve=>setImmediate(resolve));
+  await popup.controls.refreshStatus();
+  const row = popup.byId("status").children[0];
+  const detail = row.children.find(n=>n.className==="provider-detail").textContent;
+  assert.match(detail,/Extension sync: partition scope unsupported/);
+  assert.doesNotMatch(detail,/topLevelSite|cookie=secret|private.example/);
+});
+
 test("popup shows canonical UTC sync timestamps only, never raw worker strings", async () => {
   const shown = async updated_at => {
     const popup=loadPopup({diagnosticsSync:{state:"failed",issue:"gateway_timeout",updated_at}});
