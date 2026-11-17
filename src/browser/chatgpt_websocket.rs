@@ -237,6 +237,11 @@ async fn command(
     input: Value,
 ) -> Value {
     let fail = || json!({"ok":false});
+    let provider = match origin {
+        "https://chatgpt.com" | "https://www.chatgpt.com" => "chatgpt",
+        "https://meta.ai" | "https://www.meta.ai" => "metaai",
+        _ => return fail(),
+    };
     match input["op"].as_str().unwrap_or("") {
         "reset" => {
             let mut sockets = state.sockets.lock().await;
@@ -337,18 +342,18 @@ async fn command(
                     Ok(result) => result,
                     Err(tokio_tungstenite::tungstenite::Error::Http(response)) => {
                         tracing::warn!(
-                            provider = "chatgpt",
+                            provider,
                             status = response.status().as_u16(),
-                            "ChatGPT WebSocket handshake rejected"
+                            "Provider WebSocket handshake rejected"
                         );
                         return None;
                     }
                     Err(_) => return None,
                 };
                 tracing::info!(
-                    provider = "chatgpt",
+                    provider,
                     host = host.as_str(),
-                    "ChatGPT WebSocket connected"
+                    "Provider WebSocket connected"
                 );
                 let protocol = response
                     .headers()
@@ -363,9 +368,9 @@ async fn command(
                 Ok(Some(value)) => value,
                 _ => {
                     tracing::warn!(
-                        provider = "chatgpt",
+                        provider,
                         category = "websocket_connect_failed",
-                        "ChatGPT transport connection failed"
+                        "Provider transport connection failed"
                     );
                     fail()
                 }
