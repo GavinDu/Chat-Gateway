@@ -1436,6 +1436,13 @@ pub(super) fn browser_thread(
                                         anyhow::bail!("provider localStorage could not be cleared");
                                     }
                                     session::clear_provider_cookies(&browser, provider.name())?;
+                                    // The cleanup navigation used the previous credentials.
+                                    // Its document 403 must not poison the new Meta AI replay.
+                                    if provider == Provider::MetaAI {
+                                        if let Some(observed) = &network_bootstrap_403 {
+                                            observed.store(false, Ordering::Relaxed);
+                                        }
+                                    }
                                     PageSession::open(&browser, &mut page, provider, Some(&file)).await?;
                                     if provider == Provider::ChatGPT {
                                         providers::chatgpt::verify_credentials(&mut page).await?;
