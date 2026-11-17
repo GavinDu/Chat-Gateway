@@ -4,6 +4,7 @@
   if (location.protocol !== 'https:' || !['chatgpt.com', 'www.chatgpt.com'].includes(location.hostname) || (location.port && location.port !== '443')) return;
   if (globalThis.top && globalThis.top !== globalThis) return;
   const config = __BRIDGE_CONFIG__;
+  const CLOSE_TIMEOUT_MS = 10000;
   const eventProbe = new EventTarget();
   let dispatchesSlots = false;
   eventProbe.onchatgatewayprobe = () => { dispatchesSlots = true; };
@@ -49,6 +50,7 @@
       this._protocol = '';
       this._binaryType = 'blob';
       this._id = null;
+      this._closeTimer = null;
       this._sendTail = Promise.resolve();
       this.onopen = null; this.onmessage = null; this.onerror = null; this.onclose = null;
       this._opening = this._open(protocols);
@@ -72,7 +74,13 @@
       const result = await invoke({op:'open',url:this._url,protocols,ua:navigator.userAgent});
       this._id = result.id;
       this._protocol = result.protocol;
-      if (this._state === 2) { await invoke({op:'release',id:this._id}); this._finish(1006,'',false); return; }
+      // A previously closed CONNECTING socket must never resurrect when
+      // its delayed TLS open returns after the local close deadline.
+      if (this._state !== 0) {
+        await invoke({op:'release',id:this._id});
+        if (this._state !== 3) this._finish(1006,'',false);
+        return;
+      }
       this._state = 1;
       this._emit('open', new Event('open'));
       this._read().catch(() => this._failed());
@@ -80,6 +88,9 @@
     async _read() {
       while (this._state < 3) {
         const {packet} = await invoke({op:'read',id:this._id});
+        // An in-flight read may finish after a close deadline or generation
+        // reset. Its late packet is never a valid message event.
+        if (this._state === 3) break;
         if (packet.type === 'idle') continue;
         if (packet.type === 'close') { this._finish(packet.code,packet.reason,packet.clean); break; }
         const data = packet.type === 'binary'
@@ -114,6 +125,9 @@
       if (new TextEncoder().encode(reason).length > 123) throw new DOMException('WebSocket reason too long','SyntaxError');
       if (this._state >= 2) return;
       this._state = 2;
+      // A peer may ignore the WebSocket close handshake. Force eventual
+      // CLOSED and release the page-scoped socket even if read() stays idle.
+      this._closeTimer = setTimeout(() => this._failed(), CLOSE_TIMEOUT_MS);
       if (this._id !== null) {
         this._sendTail.then(() => invoke({op:'close',id:this._id,code,reason})).catch(() => this._failed());
       }
@@ -126,6 +140,10 @@
     _finish(code,reason,wasClean) {
       if (this._state === 3) return;
       this._state = 3;
+      if (this._closeTimer !== null) {
+        clearTimeout(this._closeTimer);
+        this._closeTimer = null;
+      }
       this._buffered = 0;
       const event = new Event('close');
       Object.defineProperties(event,{code:{value:code},reason:{value:reason},wasClean:{value:wasClean}});
