@@ -203,6 +203,13 @@ async function providerCookieSnapshot(provider, afterPermissionCheck = null) {
     for (const cookie of cookies) {
       const normalized = cookie.domain.replace(/^\./, "").toLowerCase();
       if (domains.some(root => normalized === root || normalized.endsWith("." + root))) {
+        // Partitioned cookies have an additional top-level-site scope.
+        // Neither the relay snapshot schema nor the pinned Obscura jar can
+        // restore that scope. Never flatten it into an ordinary cookie or
+        // publish a partial provider snapshot. Do not reflect partitionKey.
+        if (cookie.partitionKey != null) {
+          throw new Error("Unsupported browser cookie partition scope; existing gateway session was preserved.");
+        }
         // A host-only cookie is only sent to its exact host. A host-only copy on
         // a provider root (for example `google.com`) therefore cannot
         // authenticate the provider origin (`gemini.google.com`), and uploading
