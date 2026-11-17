@@ -280,6 +280,36 @@ fn decode_response_probe(value: serde_json::Value) -> ResponseProbe {
     }
 }
 
+// The current ChatGPT response root contains multiple independently rendered
+// Markdown blocks plus action buttons. Read only outermost visible answer
+// blocks; never treat controls, hidden clones or user echoes as model text.
+// The same expression is used by synchronous extraction and response polling.
+const RESPONSE_RENDERED_TEXT_JS: &str = r#"
+    const renderedText = node => {
+        const ordinary = () => node.querySelector('*')
+            ? (node.innerText || '')
+            : (node.textContent || '');
+        if (!node.matches('[class*="DilResponseRoot-"]')) return ordinary();
+        const blocks = Array.from(node.querySelectorAll('[class*="MarkdownRoot-"]'))
+            .filter(block => {
+                const parentBlock = block.parentElement?.closest('[class*="MarkdownRoot-"]');
+                if (parentBlock && node.contains(parentBlock)) return false;
+                if (!block.getClientRects().length ||
+                    block.closest('button, [role="button"], [hidden], [inert], [aria-hidden="true"]')) return false;
+                // Transparent answer clones remain laid out and have a rect;
+                // unlike controls, they must never become response evidence.
+                for (let current = block; current && node.contains(current); current = current.parentElement) {
+                    const style = getComputedStyle(current);
+                    if (style.visibility === 'hidden' || Number(style.opacity) === 0) return false;
+                }
+                return true;
+            });
+        return blocks.map(block => block.querySelector('*')
+            ? (block.innerText || '')
+            : (block.textContent || '')).join('\n\n');
+    };
+"#;
+
 /// Read response text, response-node count, and streaming state in one
 /// JavaScript evaluation per polling tick.
 pub fn response_probe(
@@ -294,6 +324,7 @@ pub fn response_probe(
         return ResponseProbe::default();
     };
     let nontransparent = nontransparent_ancestors_expression("el");
+    let response_text_js = RESPONSE_RENDERED_TEXT_JS;
     let script = format!(
         r#"(() => {{
             const selectors = {selectors};
@@ -311,9 +342,7 @@ pub fn response_probe(
             // textContent must not become a fabricated provider response when
             // innerText is empty. Text-only roots are safe and preserve exact
             // newlines in the pinned embedded Obscura runtime.
-            const renderedText = node => node.querySelector('*')
-                ? (node.innerText || '')
-                : (node.textContent || '');
+            {response_text_js}
             const nodes = new Set();
             let text = null;
             let lastResponseNode = null;
@@ -2073,8 +2102,34 @@ async fn human_type_with_provider(
     } else {
         String::new()
     };
+    // The previously successful first-party ChatGPT form uses a controlled
+    // ProseMirror paste handler. Its native paste acknowledgment is useful
+    // only if the exact rendered draft survives the existing verification.
+    // Never set a synthetic value or textContent for failed rich-text edits.
+    let chatgpt_paste_js = format!(
+        r#"if (el.matches('form[data-chatgpt-composer] div.ProseMirror[contenteditable="true"][role="textbox"]')) {{
+            try {{
+                const clipboard = {{
+                    types: ['text/plain'], files: [], items: [],
+                    getData(kind) {{ return kind === 'text/plain' || kind === 'Text' ? {text} : ''; }}
+                }};
+                const paste = new ClipboardEvent('paste', {{ bubbles: true, cancelable: true, composed: true }});
+                Object.defineProperty(paste, 'clipboardData', {{ value: clipboard }});
+                if (!el.dispatchEvent(paste)) return true;
+            }} catch (_) {{}}
+        }}"#,
+        text = text_js,
+    );
+    // Do not route framework-specific paste events through other adapters.
+    // Data-URL fixtures can exercise the helper without a provider origin.
+    let chatgpt_paste =
+        if expected_provider == Some("chatgpt") || (cfg!(test) && expected_provider.is_none()) {
+            chatgpt_paste_js
+        } else {
+            String::new()
+        };
     let js = format!(
-        "(function() {{ {route_guard} {composer_guard} var el = {el_js}; if (!el) return false; el.focus(); if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {{ try {{ var prototype = el.tagName === 'INPUT' ? window.HTMLInputElement.prototype : window.HTMLTextAreaElement.prototype; var setter = Object.getOwnPropertyDescriptor(prototype, 'value').set; setter.call(el, {text}); }} catch (e) {{ el.value = {text}; }} el.dispatchEvent(new InputEvent('input', {{ bubbles: true, inputType: 'insertText', data: {text} }})); el.dispatchEvent(new Event('change', {{ bubbles: true }})); return true; }} var selection = window.getSelection(); if (!selection) return false; try {{ var range = document.createRange(); range.selectNodeContents(el); selection.removeAllRanges(); selection.addRange(range); }} catch (e) {{ return false; }} var ok = false; try {{ ok = document.execCommand('insertText', false, {text}); }} catch (e) {{}} if (!ok) return 'editor-unsupported'; el.dispatchEvent(new InputEvent('input', {{ bubbles: true, inputType: 'insertText', data: {text} }})); el.dispatchEvent(new Event('change', {{ bubbles: true }})); return true; }})()",
+        "(function() {{ {route_guard} {composer_guard} var el = {el_js}; if (!el) return false; el.focus(); if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {{ try {{ var prototype = el.tagName === 'INPUT' ? window.HTMLInputElement.prototype : window.HTMLTextAreaElement.prototype; var setter = Object.getOwnPropertyDescriptor(prototype, 'value').set; setter.call(el, {text}); }} catch (e) {{ el.value = {text}; }} el.dispatchEvent(new InputEvent('input', {{ bubbles: true, inputType: 'insertText', data: {text} }})); el.dispatchEvent(new Event('change', {{ bubbles: true }})); return true; }} var selection = window.getSelection(); if (!selection) return false; try {{ var range = document.createRange(); range.selectNodeContents(el); selection.removeAllRanges(); selection.addRange(range); }} catch (e) {{ return false; }} {chatgpt_paste} var ok = false; try {{ ok = document.execCommand('insertText', false, {text}); }} catch (e) {{}} if (!ok) return 'editor-unsupported'; el.dispatchEvent(new InputEvent('input', {{ bubbles: true, inputType: 'insertText', data: {text} }})); el.dispatchEvent(new Event('change', {{ bubbles: true }})); return true; }})()",
         text = text_js,
         el_js = el_js,
     );
@@ -3762,12 +3817,11 @@ pub fn probe_selector_groups(
 pub fn last_element_text(page: &Page, selector: &str) -> Option<String> {
     let sel_js = serde_json::to_string(selector).ok()?;
     let nontransparent = nontransparent_ancestors_expression("node");
+    let response_text_js = RESPONSE_RENDERED_TEXT_JS;
     let js = format!(
         r#"(() => {{
             const nodes = Array.from(document.querySelectorAll({sel_js}));
-            const renderedText = node => node.querySelector('*')
-                ? (node.innerText || '')
-                : (node.textContent || '');
+            {response_text_js}
             for (let i = nodes.length - 1; i >= 0; i--) {{
                 const node = nodes[i];
                 if (!node.getClientRects().length ||
