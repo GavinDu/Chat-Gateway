@@ -21,6 +21,38 @@ where
         .context("provider session navigation timed out")?
 }
 
+#[cfg(test)]
+mod metaai_response_contract_tests {
+    #[tokio::test]
+    async fn pinned_response_body_property_remains_readable_after_reader_acquisition() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        page.goto("data:text/html,<body>response contract fixture</body>")
+            .await
+            .unwrap();
+        let script = include_str!("metaai_response.js")
+            .replace(
+                "location.protocol !== 'https:'",
+                "location.protocol !== 'data:'",
+            )
+            .replace("['meta.ai', 'www.meta.ai']", "['']");
+        page.evaluate(&script);
+        let result = page.evaluate(
+            r#"(() => {
+            const response = new Response('synthetic body');
+            const stream = response.body;
+            stream.getReader();
+            return {same: response.body === stream, used: response.bodyUsed};
+        })()"#,
+        );
+        assert_eq!(result["same"].as_bool(), Some(true));
+        assert_eq!(result["used"].as_bool(), Some(true));
+    }
+}
+
 pub(super) struct PageSession;
 
 impl PageSession {
@@ -39,6 +71,9 @@ impl PageSession {
         // The JS itself also verifies the exact HTTPS first-party origin.
         if provider == Provider::ChatGPT {
             page.add_preload_script(include_str!("chatgpt_streams.js"));
+        }
+        if provider == Provider::MetaAI {
+            page.add_preload_script(include_str!("metaai_response.js"));
         }
         bounded_warmup(SESSION_WARMUP_TIMEOUT, async {
             let cookie_restore = session_file
