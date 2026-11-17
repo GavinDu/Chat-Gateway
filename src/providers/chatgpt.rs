@@ -122,9 +122,11 @@ mod imported_chatgpt_session_tests {
             .build()
             .unwrap();
         let mut page = browser.new_page().await.unwrap();
-        page.goto("data:text/html,<html data-chat-gateway-test-fixture><body>session</body></html>")
-            .await
-            .unwrap();
+        page.goto(
+            "data:text/html,<html data-chat-gateway-test-fixture><body>session</body></html>",
+        )
+        .await
+        .unwrap();
         page.evaluate(script);
         page
     }
