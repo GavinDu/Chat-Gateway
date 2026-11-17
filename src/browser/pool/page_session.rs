@@ -12,6 +12,38 @@ use std::time::Duration;
 /// preempt synchronous JavaScript that blocks the worker thread.
 const SESSION_WARMUP_TIMEOUT: Duration = Duration::from_secs(30);
 
+#[derive(Debug)]
+pub(super) struct ReplayRequiresIsolatedContext;
+
+impl std::fmt::Display for ReplayRequiresIsolatedContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("replay_deferred_requires_isolated_context")
+    }
+}
+
+impl std::error::Error for ReplayRequiresIsolatedContext {}
+
+/// The pinned Obscura public Browser API shares one cookie jar across all
+/// pages. Until an isolated staging context exists, protect a *known applied*
+/// ChatGPT/Meta AI page against replacement with a different imported jar.
+/// This guard must run under the worker operation/provider locks and BEFORE
+/// invalidating an existing first-party proof or mutating browser cookies.
+/// A cold page or an identical snapshot can still be verified without resync.
+pub(super) fn guard_live_replay(
+    provider: Provider,
+    applied_fingerprint: Option<&str>,
+    candidate_fingerprint: &str,
+    live_page_present: bool,
+) -> Result<()> {
+    if matches!(provider, Provider::ChatGPT | Provider::MetaAI)
+        && live_page_present
+        && applied_fingerprint.is_some_and(|applied| applied != candidate_fingerprint)
+    {
+        return Err(ReplayRequiresIsolatedContext.into());
+    }
+    Ok(())
+}
+
 async fn bounded_warmup<F>(timeout: Duration, warmup: F) -> Result<()>
 where
     F: std::future::Future<Output = Result<()>>,
@@ -93,6 +125,54 @@ where
     let replacement = build().await?;
     insert(replacement);
     Ok(())
+}
+
+#[cfg(test)]
+mod live_replay_guard_tests {
+    use super::*;
+
+    #[test]
+    fn changed_active_chatgpt_and_metaai_snapshots_are_deferred_before_mutation() {
+        for provider in [Provider::ChatGPT, Provider::MetaAI] {
+            let error = guard_live_replay(provider, Some("previous-private-hash"), "rotated-hash", true)
+                .unwrap_err();
+            assert!(error.downcast_ref::<ReplayRequiresIsolatedContext>().is_some());
+            assert_eq!(error.to_string(), "replay_deferred_requires_isolated_context");
+            for secret in ["previous-private-hash", "rotated-hash", "cookie", "token"] {
+                assert!(!error.to_string().contains(secret));
+            }
+        }
+    }
+
+    #[test]
+    fn no_live_page_no_prior_applied_snapshot_and_identical_replay_remain_allowed() {
+        for provider in [Provider::ChatGPT, Provider::MetaAI] {
+            assert!(guard_live_replay(provider, None, "first", true).is_ok());
+            assert!(guard_live_replay(provider, Some("old"), "changed", false).is_ok());
+            assert!(guard_live_replay(provider, Some("same"), "same", true).is_ok());
+        }
+        // The other provider recoveries are explicitly deferred by owner.
+        assert!(guard_live_replay(Provider::Grok, Some("old"), "changed", true).is_ok());
+    }
+
+    #[tokio::test]
+    async fn replay_guard_blocks_destructive_activation_before_callback() {
+        let applied = std::cell::RefCell::new(std::collections::HashMap::new());
+        applied.borrow_mut().insert(Provider::ChatGPT, "known".to_owned());
+        let mut attempted_mutations = 0_usize;
+        let guard = guard_live_replay(
+            Provider::ChatGPT,
+            applied.borrow().get(&Provider::ChatGPT).map(String::as_str),
+            "candidate",
+            true,
+        );
+        if guard.is_ok() {
+            attempted_mutations += 1;
+        }
+        assert!(guard.is_err());
+        assert_eq!(attempted_mutations, 0);
+        assert_eq!(applied.borrow().get(&Provider::ChatGPT).map(String::as_str), Some("known"));
+    }
 }
 
 #[cfg(test)]
