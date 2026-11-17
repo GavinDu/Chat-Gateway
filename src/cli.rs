@@ -106,18 +106,29 @@ mod tests {
     #[test]
     fn offline_credential_diagnosis_never_coexists_with_live_or_vault_actions() {
         let cli = Cli::try_parse_from([
-            "chat-gateway-rs", "--diagnose-credential-evidence", "report.json"
-        ]).expect("offline diagnosis option parses");
+            "chat-gateway-rs",
+            "--diagnose-credential-evidence",
+            "report.json",
+        ])
+        .expect("offline diagnosis option parses");
         assert_eq!(
             cli.diagnose_credential_evidence.as_deref(),
             Some(std::path::Path::new("report.json"))
         );
         assert!(Cli::try_parse_from([
-            "chat-gateway-rs", "--diagnose-credential-evidence", "report.json", "--all"
-        ]).is_err());
+            "chat-gateway-rs",
+            "--diagnose-credential-evidence",
+            "report.json",
+            "--all"
+        ])
+        .is_err());
         assert!(Cli::try_parse_from([
-            "chat-gateway-rs", "--diagnose-credential-evidence", "report.json", "--vault-list"
-        ]).is_err());
+            "chat-gateway-rs",
+            "--diagnose-credential-evidence",
+            "report.json",
+            "--vault-list"
+        ])
+        .is_err());
     }
 
     #[test]
