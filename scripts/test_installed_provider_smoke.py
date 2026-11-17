@@ -9,8 +9,8 @@ from contextlib import redirect_stdout
 from unittest.mock import patch
 
 from installed_provider_smoke import (
-    PROVIDERS, SmokeFailure, _identity, _safe_error, execute, main,
-    model_inventory, run_matrix, validate_json, validate_sse,
+    PROVIDERS, FOCUS_PROVIDERS, SmokeFailure, _identity, _safe_error, execute, main,
+    model_inventory, parse_selected_providers, run_matrix, validate_json, validate_sse,
 )
 from live_provider_canary import consume_sse
 
@@ -163,7 +163,8 @@ class FakeGateway:
 class ExecutionContractTests(unittest.TestCase):
     def test_full_eight_provider_json_then_sse_with_redacted_report(self):
         gateway = FakeGateway()
-        report = execute("http://127.0.0.1:8080", "", 8, gateway)
+        report = execute("http://127.0.0.1:8080", "", 8, gateway,
+                         selected_providers=PROVIDERS)
         self.assertEqual(report["phase"], "completed")
         self.assertEqual([x["provider"] for x in report["providers"]], list(PROVIDERS))
         self.assertEqual(gateway.posts, [
@@ -189,7 +190,8 @@ class ExecutionContractTests(unittest.TestCase):
                 raise urllib.error.HTTPError("secret", 502, "private error", None, None)
             return {"status": "passed", "request_id": str(uuid.uuid4())}
 
-        rows = run_matrix({p: "model" for p in PROVIDERS}, sender)
+        rows = run_matrix({p: "model" for p in PROVIDERS}, sender,
+                          selected_providers=PROVIDERS)
         grok = next(row for row in rows if row["provider"] == "grok")
         self.assertEqual(grok["json"], {"status": "failed", "category": "http_502"})
         self.assertEqual(grok["sse"], {"status": "skipped", "reason": "json_not_passed"})
@@ -197,9 +199,44 @@ class ExecutionContractTests(unittest.TestCase):
         self.assertEqual(len(calls), 15)
 
     def test_unadvertised_models_produce_eight_explicit_outcomes(self):
-        rows = run_matrix({"chatgpt": "model"}, lambda *_: {"status": "passed"})
+        rows = run_matrix({"chatgpt": "model"}, lambda *_: {"status": "passed"},
+                          selected_providers=PROVIDERS)
         self.assertEqual(len(rows), 8)
         self.assertEqual(sum(row["json"]["status"] == "skipped" for row in rows), 7)
+
+    def test_default_only_tests_focus_two_even_when_eight_are_advertised(self):
+        gateway = FakeGateway()
+        report = execute("http://127.0.0.1:8080", "", 8, gateway)
+        self.assertEqual(gateway.posts, [
+            ("chatgpt", False), ("chatgpt", True),
+            ("metaai", False), ("metaai", True),
+        ])
+        self.assertEqual(FOCUS_PROVIDERS, ("chatgpt", "metaai"))
+        self.assertEqual(len(report["providers"]), 8)
+        for row in report["providers"]:
+            if row["provider"] in FOCUS_PROVIDERS:
+                self.assertEqual(row["json"]["status"], "passed")
+                self.assertEqual(row["sse"]["status"], "passed")
+            else:
+                self.assertEqual(row["json"], {"status":"skipped","reason":"owner_deferred"})
+                self.assertEqual(row["sse"], {"status":"skipped","reason":"owner_deferred"})
+        self.assertNotIn("model-", json.dumps(report))
+
+    def test_explicit_selection_rejects_unknown_duplicates_and_empty(self):
+        self.assertEqual(parse_selected_providers("chatgpt,metaai"), FOCUS_PROVIDERS)
+        self.assertEqual(parse_selected_providers("metaai"), ("metaai",))
+        for bad in ("", " ", "all", "chatgpt,chatgpt", "chatgpt,", "metaai,unknown"):
+            with self.subTest(bad=bad), self.assertRaises(SmokeFailure) as error:
+                parse_selected_providers(bad)
+            self.assertEqual(error.exception.category, "invalid_selection")
+
+    def test_invalid_selection_fails_before_first_network_request(self):
+        gateway = FakeGateway()
+        with self.assertRaises(SmokeFailure) as error:
+            execute("http://127.0.0.1:8080", "", 8, gateway,
+                    selected_providers=("chatgpt","invalid"))
+        self.assertEqual(error.exception.category, "invalid_selection")
+        self.assertEqual(gateway.posts, [])
 
     def test_without_execute_no_network_access_or_hidden_success(self):
         output = io.StringIO()
