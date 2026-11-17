@@ -727,4 +727,98 @@ mod tests {
             .unwrap()
             .unwrap();
     }
+    #[tokio::test]
+    async fn page_generation_reset_fences_late_socket_and_never_recycles_ids() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (finish_tx, finish_rx) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            // Keep all synthetic peer sockets alive until client-side
+            // generation checks finish, independent of their close behavior.
+            let mut peers = Vec::new();
+            for _ in 0..4 {
+                let (tcp, _) = listener.accept().await.unwrap();
+                peers.push(tokio_tungstenite::accept_async(tcp).await.unwrap());
+            }
+            let _ = finish_rx.await;
+            drop(peers);
+        });
+        let state = Arc::new(State::default());
+        let browser = Browser::builder().stealth(false).build().unwrap();
+        let cookies = browser.cookies();
+
+        let (first, _) = tokio_tungstenite::connect_async(format!("ws://{address}"))
+            .await
+            .unwrap();
+        let old_generation = state.generation.load(std::sync::atomic::Ordering::SeqCst);
+        let first_id = register_socket(&state, first, old_generation)
+            .await
+            .unwrap();
+        let (second, _) = tokio_tungstenite::connect_async(format!("ws://{address}"))
+            .await
+            .unwrap();
+        let second_id = register_socket(&state, second, old_generation)
+            .await
+            .unwrap();
+        assert!(second_id > first_id);
+
+        let reset = command(&state, &cookies, "https://chatgpt.com", json!({"op":"reset"}))
+            .await;
+        assert_eq!(reset["ok"], true);
+        assert!(state.sockets.lock().await.is_empty());
+
+        // A delayed TLS handshake that started before reset must not take
+        // ownership of the new page generation, even with a valid socket.
+        let (stale, _) = tokio_tungstenite::connect_async(format!("ws://{address}"))
+            .await
+            .unwrap();
+        assert!(register_socket(&state, stale, old_generation).await.is_none());
+
+        let current_generation = state.generation.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(current_generation > old_generation);
+        let (current, _) = tokio_tungstenite::connect_async(format!("ws://{address}"))
+            .await
+            .unwrap();
+        let current_id = register_socket(&state, current, current_generation)
+            .await
+            .unwrap();
+        assert!(current_id > second_id, "socket ids must never ABA-reuse");
+        assert_eq!(state.sockets.lock().await.len(), 1);
+        for old_id in [first_id, second_id] {
+            assert_eq!(
+                command(
+                    &state,
+                    &cookies,
+                    "https://chatgpt.com",
+                    json!({"op":"send","id":old_id,"data":"old","binary":false}),
+                )
+                .await["ok"],
+                false
+            );
+        }
+        // Releasing an old identifier cannot affect the newly registered
+        // socket or retroactively deliver old-generation frames.
+        command(
+            &state,
+            &cookies,
+            "https://chatgpt.com",
+            json!({"op":"release","id":first_id}),
+        )
+        .await;
+        assert_eq!(state.sockets.lock().await.len(), 1);
+        command(
+            &state,
+            &cookies,
+            "https://chatgpt.com",
+            json!({"op":"reset"}),
+        )
+        .await;
+        assert!(state.sockets.lock().await.is_empty());
+        let _ = finish_tx.send(());
+        tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
 }
