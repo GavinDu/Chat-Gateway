@@ -151,11 +151,14 @@ def operate(config: Path, mode: str) -> dict[str, object]:
         raise FocusError("unsafe_manifest_path")
     if mode == "restore":
         old = _read_manifest(manifest)
-        if set(old) != set(flags):
+        if set(old) != set(non_target):
             raise FocusError("provider_inventory_changed")
         if any(flags[name] for name in non_target):
             raise FocusError("focus_state_changed")
-        restored = _render(raw, old)
+        # Restore *only* flags this focus mode changed. The owner's manual
+        # ChatGPT/Meta AI changes during the focus period must survive.
+        restored_flags = {name: (flags[name] if name in FOCUS else old[name]) for name in flags}
+        restored = _render(raw, restored_flags)
         _write_atomic(config, restored)
         manifest.unlink()
         return {"state": "restored", "previously_enabled": sorted(
@@ -165,10 +168,14 @@ def operate(config: Path, mode: str) -> dict[str, object]:
     if mode == "apply":
         if manifest.exists():
             old = _read_manifest(manifest)
-            if set(old) != set(flags):
+            if set(old) != set(non_target):
                 raise FocusError("provider_inventory_changed")
         else:
-            _write_atomic(manifest, json.dumps({"version": 1, "flags": flags}, sort_keys=True) + "\n")
+            # Only the seven flags subject to modification need a snapshot.
+            # No credentials, target flags or unrelated configuration included.
+            _write_atomic(manifest, json.dumps({"version": 1, "flags": {
+                name: flags[name] for name in non_target
+            }}, sort_keys=True) + "\n")
         target_flags = {name: (flags[name] if name in FOCUS else False) for name in flags}
         modified = _render(raw, target_flags)
         if modified != raw:
