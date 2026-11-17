@@ -1353,10 +1353,17 @@ mod submission_timeout_cancellation_tests {
     use std::sync::Arc;
     use std::time::Duration;
 
+    #[derive(Clone, Copy)]
+    enum MockSubmissionOutcome {
+        Timeout,
+        Unacknowledged,
+        PreSendInputRejected,
+    }
+
     struct HangingSubmissionAdapter {
         cfg: crate::config::ProviderConfig,
         revoke_fixture_before_timeout: bool,
-        return_submission_error: bool,
+        outcome: MockSubmissionOutcome,
     }
 
     #[async_trait::async_trait(?Send)]
@@ -1374,6 +1381,9 @@ mod submission_timeout_cancellation_tests {
         }
 
         async fn send_prompt(&self, page: &mut Page, _prompt: &str) -> Result<()> {
+            if matches!(self.outcome, MockSubmissionOutcome::PreSendInputRejected) {
+                return Err(anyhow::Error::new(common::ProviderComposerInputRejectedError));
+            }
             page.evaluate("window.sendAttempts = (window.sendAttempts || 0) + 1");
             if self.revoke_fixture_before_timeout {
                 // Simulate navigation to an untrusted origin without relying
@@ -1382,7 +1392,7 @@ mod submission_timeout_cancellation_tests {
                     "document.documentElement.removeAttribute('data-chat-gateway-test-fixture')",
                 );
             }
-            if self.return_submission_error {
+            if matches!(self.outcome, MockSubmissionOutcome::Unacknowledged) {
                 return Err(anyhow::Error::new(common::ProviderSubmissionUnacknowledgedError));
             }
             tokio::time::sleep(Duration::from_millis(250)).await;
@@ -1409,7 +1419,7 @@ mod submission_timeout_cancellation_tests {
     async fn exercise_submission(
         stop_markup: &str,
         revoke_fixture: bool,
-        return_submission_error: bool,
+        outcome: MockSubmissionOutcome,
     ) -> (f64, f64) {
         let browser = obscura_core::Browser::builder()
             .stealth(false)
@@ -1425,7 +1435,7 @@ mod submission_timeout_cancellation_tests {
         let adapter: Arc<dyn SiteAdapter> = Arc::new(HangingSubmissionAdapter {
             cfg: serde_yaml::from_str("name: qwen").unwrap(),
             revoke_fixture_before_timeout: revoke_fixture,
-            return_submission_error,
+            outcome,
         });
         let (sender, mut receiver) = tokio::sync::mpsc::channel(8);
         super::run_send(
@@ -1447,21 +1457,32 @@ mod submission_timeout_cancellation_tests {
             .await
             .expect("submission must emit a terminal typed error")
             .expect_err("a rejected or timed-out submission must not succeed");
-        if return_submission_error {
-            assert!(
-                error
-                    .downcast_ref::<common::ProviderSubmissionUnacknowledgedError>()
-                    .is_some(),
-                "a rejected submission must preserve its downcastable error"
-            );
-        } else {
-            assert!(
-                error
-                    .downcast_ref::<common::ProviderTimeoutError>()
-                    .is_some(),
-                "submission timeout remains downcastable"
-            );
-            assert!(error.to_string().contains("timed out while submitting"));
+        match outcome {
+            MockSubmissionOutcome::Unacknowledged => {
+                assert!(
+                    error
+                        .downcast_ref::<common::ProviderSubmissionUnacknowledgedError>()
+                        .is_some(),
+                    "a rejected submission must preserve its downcastable error"
+                );
+            }
+            MockSubmissionOutcome::PreSendInputRejected => {
+                assert!(
+                    error
+                        .downcast_ref::<common::ProviderComposerInputRejectedError>()
+                        .is_some(),
+                    "an input failure must preserve its typed error"
+                );
+            }
+            MockSubmissionOutcome::Timeout => {
+                assert!(
+                    error
+                        .downcast_ref::<common::ProviderTimeoutError>()
+                        .is_some(),
+                    "submission timeout remains downcastable"
+                );
+                assert!(error.to_string().contains("timed out while submitting"));
+            }
         }
         assert!(!error.to_string().contains("private prompt"));
         assert!(
@@ -1482,7 +1503,7 @@ mod submission_timeout_cancellation_tests {
     async fn stalled_submission_requests_stop_before_warm_page_reuse() {
         let stop = r#"<button aria-label="Stop generating" type="button"
             onclick="window.cancelClicks=(window.cancelClicks||0)+1">Stop</button>"#;
-        let (attempts, cancels) = exercise_submission(stop, false, false).await;
+        let (attempts, cancels) = exercise_submission(stop, false, MockSubmissionOutcome::Timeout).await;
         assert_eq!(attempts, 1.0);
         assert_eq!(cancels, 1.0, "cancel one genuine in-flight generation");
     }
@@ -1491,13 +1512,13 @@ mod submission_timeout_cancellation_tests {
     async fn timeout_never_clicks_unrelated_stop_or_foreign_page_control() {
         let unrelated = r#"<button type="button" aria-label="Stop sharing"
             onclick="window.cancelClicks=(window.cancelClicks||0)+1">Stop sharing</button>"#;
-        let (attempts, cancels) = exercise_submission(unrelated, false, false).await;
+        let (attempts, cancels) = exercise_submission(unrelated, false, MockSubmissionOutcome::Timeout).await;
         assert_eq!(attempts, 1.0);
         assert_eq!(cancels, 0.0);
 
         let foreign = r#"<button aria-label="Stop generating" type="button"
             onclick="window.cancelClicks=(window.cancelClicks||0)+1">Stop</button>"#;
-        let (attempts, cancels) = exercise_submission(foreign, true, false).await;
+        let (attempts, cancels) = exercise_submission(foreign, true, MockSubmissionOutcome::Timeout).await;
         assert_eq!(attempts, 1.0);
         assert_eq!(
             cancels, 0.0,
@@ -1509,14 +1530,14 @@ mod submission_timeout_cancellation_tests {
     async fn rejected_submission_cancels_possible_generation_without_losing_typed_error() {
         let stop = r#"<button aria-label="Stop generating" type="button"
             onclick="window.cancelClicks=(window.cancelClicks||0)+1">Stop</button>"#;
-        let (attempts, cancels) = exercise_submission(stop, false, true).await;
+        let (attempts, cancels) = exercise_submission(stop, false, MockSubmissionOutcome::Unacknowledged).await;
         assert_eq!(attempts, 1.0);
         assert_eq!(
             cancels, 1.0,
             "a rejected acknowledgement may follow a real Send click"
         );
 
-        let (attempts, cancels) = exercise_submission(stop, true, true).await;
+        let (attempts, cancels) = exercise_submission(stop, true, MockSubmissionOutcome::Unacknowledged).await;
         assert_eq!(attempts, 1.0);
         assert_eq!(
             cancels, 0.0,
@@ -1525,10 +1546,23 @@ mod submission_timeout_cancellation_tests {
     }
 
     #[tokio::test]
+    async fn input_rejected_before_send_does_not_cancel_inherited_generation() {
+        let stop = r#"<button aria-label="Stop generating" type="button"
+            onclick="window.cancelClicks=(window.cancelClicks||0)+1">Stop</button>"#;
+        let (attempts, cancels) =
+            exercise_submission(stop, false, MockSubmissionOutcome::PreSendInputRejected).await;
+        assert_eq!(attempts, 0.0, "no Send was attempted before input rejection");
+        assert_eq!(
+            cancels, 0.0,
+            "pre-Send errors must not click an inherited Stop control"
+        );
+    }
+
+    #[tokio::test]
     async fn rejected_submission_does_not_click_unrelated_stop_sharing() {
         let unrelated = r#"<button type="button" aria-label="Stop sharing"
             onclick="window.cancelClicks=(window.cancelClicks||0)+1">Stop sharing</button>"#;
-        let (attempts, cancels) = exercise_submission(unrelated, false, true).await;
+        let (attempts, cancels) = exercise_submission(unrelated, false, MockSubmissionOutcome::Unacknowledged).await;
         assert_eq!(attempts, 1.0);
         assert_eq!(cancels, 0.0);
     }
@@ -1641,7 +1675,9 @@ pub async fn run_send(
                 // the original typed error, but first request best-effort
                 // cancellation only while the page still belongs to this
                 // provider. Do not interact with unrelated redirected pages.
-                if require_expected_response_origin(adapter.name(), page).is_ok() {
+                if error.is::<common::ProviderSubmissionUnacknowledgedError>()
+                    && require_expected_response_origin(adapter.name(), page).is_ok()
+                {
                     adapter.cancel_generation(page);
                 }
                 let _ = chunks.send(Err(error)).await;
