@@ -39,6 +39,19 @@ pub(super) async fn new_page(browser: &obscura_core::Browser) -> Result<obscura_
     Ok(page)
 }
 
+/// Attach the private socket bridge only before ChatGPT page navigation.
+/// Other provider pages retain the original embedded browser transport.
+pub(super) async fn new_provider_page(
+    browser: &obscura_core::Browser,
+    provider: crate::providers::Provider,
+) -> Result<obscura_core::Page> {
+    let mut page = new_page(browser).await?;
+    if provider == crate::providers::Provider::ChatGPT {
+        crate::browser::chatgpt_websocket::attach(browser, &mut page);
+    }
+    Ok(page)
+}
+
 #[cfg(test)]
 mod compatibility_tests {
 
