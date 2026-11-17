@@ -1951,7 +1951,6 @@ mod picker_pointer_inert_ancestor_tests {
         assert!(!click_text_selector(&page, "text:button=Model Next").unwrap());
         assert_eq!(page.evaluate("window.liveClicks || 0").as_f64(), Some(1.0));
     }
-
 }
 
 /// Focus the first matching input and type into it. Obscura has no
