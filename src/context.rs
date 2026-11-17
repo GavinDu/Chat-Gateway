@@ -217,6 +217,11 @@ pub(crate) fn render_prompt(messages: &[ChatMessage]) -> String {
         rendered.push_str(&escape_context_field(&message.content));
         rendered.push_str("\n</conversation_message>\n");
     }
+    // Controlled browser editors may omit the final generated empty line.
+    // Never trim actual user content, including its spaces and newlines.
+    if !messages.is_empty() {
+        rendered.pop(); // Only the final wrapper's generated newline.
+    }
     rendered
 }
 
@@ -285,7 +290,7 @@ mod tests {
         ];
         let (prompt, messages) = ContextBuilder::build(&history, &incoming, 1000);
         assert_eq!(messages.len(), 3);
-        assert!(prompt.ends_with("second\n</conversation_message>\n"));
+        assert!(prompt.ends_with("second\n</conversation_message>"));
     }
 
     #[test]
