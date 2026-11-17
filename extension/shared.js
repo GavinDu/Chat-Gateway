@@ -210,6 +210,13 @@ async function providerCookieSnapshot(provider, afterPermissionCheck = null) {
         // Drop the unusable host-only root copy and keep the domain scope.
         const hostOnly = !cookie.domain.startsWith(".");
         if (hostOnly && normalized !== loginHost && domains.includes(normalized)) continue;
+        // Chrome's partitionKey is a separate top-level-site security scope.
+        // The gateway/Obscura snapshot cannot represent it. Never upload a
+        // flattened cookie or overwrite a previously saved usable session.
+        // Do not log topLevelSite, cookie identity, or any partition metadata.
+        if (cookie.partitionKey !== undefined && cookie.partitionKey !== null) {
+          throw new Error("Unsupported browser cookie partition scope; existing gateway session was preserved.");
+        }
         // Preserve browser cookie policy rather than silently replacing
         // SameSite=None/Strict with a default and persistent cookies with
         // session-only cookies on gateway restoration.
