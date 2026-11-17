@@ -240,10 +240,7 @@ fn classify(e: &Evidence, now: u64) -> Diagnosis {
         };
         let (Some(gateway_id), Some(attempt_id)) = (
             canonical_request_id(&failure.request_id),
-            attempt
-                .request_id
-                .as_deref()
-                .and_then(canonical_request_id),
+            attempt.request_id.as_deref().and_then(canonical_request_id),
         ) else {
             return inconclusive(provider, "missing_gateway_request_correlation");
         };
@@ -259,8 +256,10 @@ fn classify(e: &Evidence, now: u64) -> Diagnosis {
         if matches!(
             failure.stage.as_str(),
             "candidate_admission" | "backend_admission"
-        ) && matches!(attempt.stage, Stage::Response | Stage::Stream | Stage::Completed)
-        {
+        ) && matches!(
+            attempt.stage,
+            Stage::Response | Stage::Stream | Stage::Completed
+        ) {
             return inconclusive(provider, "conflicting_gateway_failure_stage");
         }
     }
@@ -323,9 +322,10 @@ fn classify(e: &Evidence, now: u64) -> Diagnosis {
     if obscura != Some(Auth::Verified) {
         return inconclusive(provider, "authoritative_obscura_account_verifier_missing");
     }
-    if e.gateway_failure.as_ref().is_some_and(|failure| {
-        matches!(failure.reason.as_str(), "session_expired" | "challenge")
-    }) {
+    if e.gateway_failure
+        .as_ref()
+        .is_some_and(|failure| matches!(failure.reason.as_str(), "session_expired" | "challenge"))
+    {
         // A former first-party positive observation can be superseded by an
         // explicit new login/challenge signal. Recheck current session state
         // rather than mislabel the later failure as a transport defect.
@@ -448,18 +448,33 @@ mod tests {
         assert_eq!(checked(v.clone()).reason, "gateway_request_id_mismatch");
         v["gateway_failure"]["request_id"] = json!(ID);
         v["attempt"]["request_id"] = json!("COOKIE=secret");
-        assert_eq!(checked(v.clone()).reason, "missing_gateway_request_correlation");
+        assert_eq!(
+            checked(v.clone()).reason,
+            "missing_gateway_request_correlation"
+        );
         v["attempt"]["request_id"] = json!(ID.to_uppercase());
-        assert_eq!(checked(v.clone()).reason, "missing_gateway_request_correlation");
+        assert_eq!(
+            checked(v.clone()).reason,
+            "missing_gateway_request_correlation"
+        );
         v["attempt"]["request_id"] = json!(ID);
         v["gateway_failure"]["request_id"] = json!("00000000-0000-0000-0000-000000000000");
-        assert_eq!(checked(v.clone()).reason, "missing_gateway_request_correlation");
+        assert_eq!(
+            checked(v.clone()).reason,
+            "missing_gateway_request_correlation"
+        );
         v["gateway_failure"]["request_id"] = json!(ID);
         v["attempt"].as_object_mut().unwrap().remove("request_id");
-        assert_eq!(checked(v.clone()).reason, "missing_gateway_request_correlation");
+        assert_eq!(
+            checked(v.clone()).reason,
+            "missing_gateway_request_correlation"
+        );
         v["attempt"]["request_id"] = json!(ID);
         v.as_object_mut().unwrap().remove("attempt");
-        assert_eq!(checked(v.clone()).reason, "missing_gateway_request_correlation");
+        assert_eq!(
+            checked(v.clone()).reason,
+            "missing_gateway_request_correlation"
+        );
         v["attempt"] = base()["attempt"].clone();
         v["attempt"]["request_id"] = json!(ID);
         v["attempt"]["outcome"] = json!("passed");
@@ -470,13 +485,22 @@ mod tests {
     fn gateway_failure_stage_reason_duration_and_freshness_are_strict() {
         let mut v = with_gateway_failure();
         v["gateway_failure"]["stage"] = json!("https://private.example/?token=secret");
-        assert_eq!(checked(v.clone()).reason, "invalid_gateway_failure_evidence");
+        assert_eq!(
+            checked(v.clone()).reason,
+            "invalid_gateway_failure_evidence"
+        );
         v["gateway_failure"]["stage"] = json!("first_stream_event");
         v["gateway_failure"]["reason"] = json!("private cookie value");
-        assert_eq!(checked(v.clone()).reason, "invalid_gateway_failure_evidence");
+        assert_eq!(
+            checked(v.clone()).reason,
+            "invalid_gateway_failure_evidence"
+        );
         v["gateway_failure"]["reason"] = json!("timeout");
         v["gateway_failure"]["duration_ms"] = json!(120_001);
-        assert_eq!(checked(v.clone()).reason, "invalid_gateway_failure_evidence");
+        assert_eq!(
+            checked(v.clone()).reason,
+            "invalid_gateway_failure_evidence"
+        );
         v["gateway_failure"]["duration_ms"] = json!(90);
         v["gateway_failure"]["observed_at_ms"] = json!(NOW - MAX_AGE_MS - 1);
         assert_eq!(checked(v.clone()).reason, "stale_or_future_evidence");
@@ -491,12 +515,21 @@ mod tests {
     fn coarse_admission_and_changed_account_states_cannot_be_transport_proof() {
         let mut v = with_gateway_failure();
         v["gateway_failure"]["stage"] = json!("backend_admission");
-        assert_eq!(checked(v.clone()).reason, "conflicting_gateway_failure_stage");
+        assert_eq!(
+            checked(v.clone()).reason,
+            "conflicting_gateway_failure_stage"
+        );
         v["gateway_failure"]["stage"] = json!("json_completion");
         v["gateway_failure"]["reason"] = json!("session_expired");
-        assert_eq!(checked(v.clone()).reason, "account_or_challenge_state_changed");
+        assert_eq!(
+            checked(v.clone()).reason,
+            "account_or_challenge_state_changed"
+        );
         v["gateway_failure"]["reason"] = json!("challenge");
-        assert_eq!(checked(v).reason, "account_or_challenge_state_changed");
+        assert_eq!(
+            checked(v).reason,
+            "account_or_challenge_state_changed"
+        );
     }
 
     #[test]
