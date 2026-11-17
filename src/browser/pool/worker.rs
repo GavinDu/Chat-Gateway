@@ -53,23 +53,29 @@ mod initial_frame_compatibility_tests {
             .unwrap();
         // Child initialization synchronously calls native DOM ops. The pinned
         // engine must declare that reentrancy instead of aborting this process.
+        page.evaluate(
+            r#"document.body.innerHTML = '<iframe srcdoc="<p>frame</p>"></iframe>';"#,
+        );
+        // The facade adopts the queued child document while settling.
+        page.settle(50).await;
         assert_eq!(
-            page.evaluate(
-                r#"(() => {
-                    document.body.innerHTML = '<iframe srcdoc="<p>frame</p>"></iframe>';
-                    return document.querySelector('iframe').contentDocument.body.textContent;
-                })()"#,
-            )
-            .as_str(),
+            page.evaluate("document.querySelector('iframe').contentDocument.body.textContent")
+                .as_str(),
             Some("frame")
         );
+        page.evaluate(
+            r#"(() => {
+                document.body.innerHTML = '';
+                const frame = document.createElement('iframe');
+                frame.srcdoc = '<body><span>inner</span></body>';
+                document.body.appendChild(frame);
+            })()"#,
+        );
+        page.settle(50).await;
         assert_eq!(
             page.evaluate(
                 r#"(() => {
-                    document.body.innerHTML = '';
-                    const frame = document.createElement('iframe');
-                    frame.srcdoc = '<body><span>inner</span></body>';
-                    document.body.appendChild(frame);
+                    const frame = document.querySelector('iframe');
                     const span = frame.contentDocument.querySelector('span');
                     span.textContent = 'touched';
                     return frame.contentDocument.body.textContent;
