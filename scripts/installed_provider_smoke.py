@@ -36,6 +36,7 @@ FOCUS_PROVIDERS = ("chatgpt", "metaai")
 PROMPT = "Reply exactly OK"
 MAX_JSON_BYTES = 262_144
 SHA_PATTERN = re.compile(r"^[0-9a-f]{40}$")
+BUILD_TIME_PATTERN = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
 FIXED_CATEGORIES = frozenset({
     "invalid_json", "wrong_provider", "wrong_conversation",
     "missing_request_id", "unexpected_answer", "incomplete_finish",
@@ -92,15 +93,25 @@ def _safe_error(error: Exception) -> str:
 
 
 def _identity(health: dict) -> dict:
-    # Never reflect arbitrary server fields, freeform strings, or URLs.
-    out = {"health": "ok" if health.get("status") == "ok" else "unverified"}
-    for path in (("build", "source_sha"), ("source_sha",), ("commit_sha",)):
-        value = health
-        for key in path:
-            value = value.get(key) if isinstance(value, dict) else None
-        if isinstance(value, str) and SHA_PATTERN.fullmatch(value):
-            out["source_sha"] = value
-            break
+    # Only compile-time /health.build fields can identify the running binary.
+    # Never infer the installed SHA from the source checkout or reflect arbitrary
+    # server strings, URLs, environment data, tokens, or account identifiers.
+    out = {"health": "ok" if health.get("status") == "ok" else "unverified",
+           "source_sha": "unknown", "build_timestamp_utc": "unknown"}
+    build = health.get("build")
+    if not isinstance(build, dict):
+        return out
+    sha = build.get("source_sha")
+    if isinstance(sha, str) and SHA_PATTERN.fullmatch(sha):
+        out["source_sha"] = sha
+    timestamp = build.get("build_timestamp_utc")
+    if isinstance(timestamp, str) and BUILD_TIME_PATTERN.fullmatch(timestamp):
+        try:
+            observed = datetime.datetime.strptime(timestamp, "%Y-%m-%dT%H:%M:%SZ")
+            if observed.strftime("%Y-%m-%dT%H:%M:%SZ") == timestamp:
+                out["build_timestamp_utc"] = timestamp
+        except ValueError:
+            pass
     return out
 
 
