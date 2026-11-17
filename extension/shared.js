@@ -196,7 +196,13 @@ async function providerCookieSnapshot(provider, afterPermissionCheck = null) {
   // Independent domain reads run concurrently instead of serializing each
   // browser API round-trip. Promise.all preserves configured domain order for
   // deterministic deduplication; any failed read rejects the whole snapshot.
-  const domainCookies = await Promise.all(domains.map(domain => chrome.cookies.getAll({domain})));
+  // Chrome's default getAll() sees only UNPARTITIONED cookies. Since the
+  // relay has no partition-key representation, enumerate all cookie scopes
+  // (Chrome 119+) and fail closed if any eligible partition is present.
+  // Otherwise an apparently complete snapshot could omit live credentials.
+  const domainCookies = await Promise.all(domains.map(domain =>
+    chrome.cookies.getAll({domain, partitionKey:{}})
+  ));
   const loginHost = new URL(PROVIDER_LOGIN_URLS[provider]).hostname.toLowerCase();
   const all = [];
   for (const cookies of domainCookies) {
