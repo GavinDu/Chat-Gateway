@@ -2227,7 +2227,7 @@ dependencies = [
 [[package]]
 name = "obscura"
 version = "0.1.0"
-source = "git+https://github.com/h4ckf0r0day/obscura?rev=09790944a405ba81a7df27bc2577c6b0db283900#09790944a405ba81a7df27bc2577c6b0db283900"
+source = "git+https://github.com/h4ckf0r0day/obscura?rev=0e2ee76383b95a14e51203799c4abc6790d6c7df#0e2ee76383b95a14e51203799c4abc6790d6c7df"
 dependencies = [
  "anyhow",
  "obscura-browser",
@@ -2242,7 +2242,7 @@ dependencies = [
 [[package]]
 name = "obscura-browser"
 version = "0.1.0"
-source = "git+https://github.com/h4ckf0r0day/obscura?rev=09790944a405ba81a7df27bc2577c6b0db283900#09790944a405ba81a7df27bc2577c6b0db283900"
+source = "git+https://github.com/h4ckf0r0day/obscura?rev=0e2ee76383b95a14e51203799c4abc6790d6c7df#0e2ee76383b95a14e51203799c4abc6790d6c7df"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -2262,7 +2262,7 @@ dependencies = [
 [[package]]
 name = "obscura-dom"
 version = "0.1.0"
-source = "git+https://github.com/h4ckf0r0day/obscura?rev=09790944a405ba81a7df27bc2577c6b0db283900#09790944a405ba81a7df27bc2577c6b0db283900"
+source = "git+https://github.com/h4ckf0r0day/obscura?rev=0e2ee76383b95a14e51203799c4abc6790d6c7df#0e2ee76383b95a14e51203799c4abc6790d6c7df"
 dependencies = [
  "cssparser",
  "html5ever",
@@ -2277,7 +2277,7 @@ dependencies = [
 [[package]]
 name = "obscura-js"
 version = "0.1.0"
-source = "git+https://github.com/h4ckf0r0day/obscura?rev=09790944a405ba81a7df27bc2577c6b0db283900#09790944a405ba81a7df27bc2577c6b0db283900"
+source = "git+https://github.com/h4ckf0r0day/obscura?rev=0e2ee76383b95a14e51203799c4abc6790d6c7df#0e2ee76383b95a14e51203799c4abc6790d6c7df"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -2311,7 +2311,7 @@ dependencies = [
 [[package]]
 name = "obscura-net"
 version = "0.1.0"
-source = "git+https://github.com/h4ckf0r0day/obscura?rev=09790944a405ba81a7df27bc2577c6b0db283900#09790944a405ba81a7df27bc2577c6b0db283900"
+source = "git+https://github.com/h4ckf0r0day/obscura?rev=0e2ee76383b95a14e51203799c4abc6790d6c7df#0e2ee76383b95a14e51203799c4abc6790d6c7df"
 dependencies = [
  "async-trait",
  "encoding_rs",
@@ -2333,7 +2333,7 @@ dependencies = [
 [[package]]
 name = "obscura-render"
 version = "0.1.0"
-source = "git+https://github.com/h4ckf0r0day/obscura?rev=09790944a405ba81a7df27bc2577c6b0db283900#09790944a405ba81a7df27bc2577c6b0db283900"
+source = "git+https://github.com/h4ckf0r0day/obscura?rev=0e2ee76383b95a14e51203799c4abc6790d6c7df#0e2ee76383b95a14e51203799c4abc6790d6c7df"
 dependencies = [
  "ab_glyph",
  "base64 0.22.1",
@@ -2355,7 +2355,7 @@ dependencies = [
 [[package]]
 name = "obscura-ssrf"
 version = "0.1.0"
-source = "git+https://github.com/h4ckf0r0day/obscura?rev=09790944a405ba81a7df27bc2577c6b0db283900#09790944a405ba81a7df27bc2577c6b0db283900"
+source = "git+https://github.com/h4ckf0r0day/obscura?rev=0e2ee76383b95a14e51203799c4abc6790d6c7df#0e2ee76383b95a14e51203799c4abc6790d6c7df"
 
 [[package]]
 name = "once_cell"
