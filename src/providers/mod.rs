@@ -3374,18 +3374,14 @@ mod generation_cancel_visibility_tests {
             Some(0.0),
             "foreign page cannot borrow the Stop label to receive a click"
         );
-        page.evaluate(
-            "document.documentElement.setAttribute('data-chat-gateway-test-fixture','')",
-        );
+        page.evaluate("document.documentElement.setAttribute('data-chat-gateway-test-fixture','')");
         adapter.cancel_generation(&page);
         assert_eq!(
             page.evaluate("window.stopHits || 0").as_f64(),
             Some(1.0),
             "only the explicitly marked offline test fixture may bypass HTTPS"
         );
-        page.evaluate(
-            "document.documentElement.removeAttribute('data-chat-gateway-test-fixture')",
-        );
+        page.evaluate("document.documentElement.removeAttribute('data-chat-gateway-test-fixture')");
         adapter.cancel_generation(&page);
         assert_eq!(
             page.evaluate("window.stopHits || 0").as_f64(),
