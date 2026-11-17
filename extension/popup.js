@@ -230,6 +230,7 @@ const GATEWAY_PROVIDER_ISSUES = new Set([
   "needs_login", "provider_degraded", "authentication_unverified"
 ]);
 const EXTENSION_SYNC_ISSUES = new Set([
+  "partition_scope_unsupported",
   "gateway_cancelled", "gateway_timeout", "permission_or_consent",
   "activation_timeout", "gateway_unauthorized", "relay_unavailable",
   "gateway_request_failed", "gateway_connection_changed"

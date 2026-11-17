@@ -60,6 +60,9 @@ function classifyRelayFailure(error) {
   const message = String(error?.message || "");
   // Only the relay's own redacted cancellation category can claim an
   // owner-initiated abort. An unrelated upstream string is not evidence.
+  if (message === "Unsupported browser cookie partition scope; existing gateway session was preserved.") {
+    return "partition_scope_unsupported";
+  }
   if (message.startsWith("Gateway request cancelled;")) return "gateway_cancelled";
   if (message.includes("timed out")) return "gateway_timeout";
   if (message.includes("permission") || message.includes("consent")) return "permission_or_consent";
@@ -71,6 +74,7 @@ function classifyRelayFailure(error) {
 // Never forward raw upstream exceptions (which may include credential URLs,
 // cookie names/values or gateway response bodies) into the UI message.
 const MANUAL_SYNC_ERRORS = Object.freeze({
+  partition_scope_unsupported: "Partitioned provider cookies cannot be replayed by this gateway. Existing saved session was preserved; no resync was attempted.",
   gateway_cancelled: "Gateway sync was cancelled. Retry when ready.",
   gateway_timeout: "Gateway sync timed out. Check the connection and retry.",
   permission_or_consent: "Provider permission or consent is missing. Re-link and retry.",
@@ -100,7 +104,9 @@ function redactedManualLogoutFailure(error) {
   const sourceMessage = String(error?.message || "");
   const errorCode = sourceMessage.startsWith("Gateway connection changed before provider logout.")
     ? "connection_changed" : classifyRelayFailure(error);
-  return {ok:false, errorCode, error:MANUAL_LOGOUT_ERRORS[errorCode]};
+  // A future sync-only error code must not make logout return undefined.
+  const safeCode = Object.hasOwn(MANUAL_LOGOUT_ERRORS, errorCode) ? errorCode : "relay_unavailable";
+  return {ok:false, errorCode:safeCode, error:MANUAL_LOGOUT_ERRORS[safeCode]};
 }
 // Permission state is independent of relay connectivity or saved sessions.
 // Return fixed booleans (or null when this browser cannot inspect permission),

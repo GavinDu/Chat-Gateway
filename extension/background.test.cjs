@@ -157,6 +157,22 @@ test("relay diagnostics classify user cancellation apart from gateway timeout", 
   );
 });
 
+test("partitioned cookie refusal has fixed sync category with no provider secrets", () => {
+  const f = loadBackground([]);
+  const error = new Error("Unsupported browser cookie partition scope; existing gateway session was preserved.");
+  assert.equal(f.sandbox.classifyRelayFailure(error),"partition_scope_unsupported");
+  const result = f.sandbox.redactedManualSyncFailure(error);
+  assert.equal(result.ok,false);
+  assert.equal(result.errorCode,"partition_scope_unsupported");
+  assert.match(result.error,/Existing saved session was preserved/);
+  assert.doesNotMatch(JSON.stringify(result),/partitioned-secret|topLevelSite|private.example/);
+  const unrelated = f.sandbox.redactedManualSyncFailure(new Error(
+    "Unsupported browser cookie partition scope; existing gateway session was preserved. token=secret"
+  ));
+  assert.equal(unrelated.errorCode,"relay_unavailable",
+    "only the exact source-owned error may claim a known partition refusal");
+});
+
 test("explicit provider sync reports a skipped upload instead of success", async () => {
   const f = loadBackground(["chatgpt"]);
   let status = "no_cookies";

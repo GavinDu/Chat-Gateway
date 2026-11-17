@@ -7,6 +7,7 @@ const { TextEncoder } = require("node:util");
 
 function loadShared(cookieFixtures = [], hasAllPermissions = true, storageValues = {}, hooks = {}) {
   let cookieReads = 0;
+  const cookieQueries = [];
   const fetchCalls = [];
   const context = {
     URL,
@@ -26,8 +27,9 @@ function loadShared(cookieFixtures = [], hasAllPermissions = true, storageValues
       cookies: {
         // Return the full fixture set to simulate a permissive/misbehaving
         // browser API; providerCookieSnapshot must still enforce its own scope.
-        getAll: async ({domain}) => {
+        getAll: async ({domain,partitionKey}) => {
           cookieReads += 1;
+          cookieQueries.push({domain,partitionKey});
           if (hooks.onCookieRead) await hooks.onCookieRead(storageValues, domain);
           return cookieFixtures;
         }
@@ -50,7 +52,8 @@ function loadShared(cookieFixtures = [], hasAllPermissions = true, storageValues
   vm.createContext(context);
   const source = fs.readFileSync(require.resolve("../shared.js"), "utf8");
   vm.runInContext(source + "\nglobalThis.__testApi = { normalizeGateway, providerCookieSnapshot, relayFetch, syncProvider, PROVIDERS };", context);
-  return { ...context.__testApi, getCookieReads: () => cookieReads, fetchCalls };
+  return { ...context.__testApi, getCookieReads: () => cookieReads,
+    getCookieQueries: () => cookieQueries, fetchCalls };
 }
 
 test("gateway normalization accepts local HTTP and explicit HTTPS origins", () => {
@@ -791,6 +794,54 @@ test("invalid browser cookie attributes fail the complete relay upload before pe
     await assert.rejects(() => api.syncProvider("gemini"), /cookie (SameSite|expiry)/);
     assert.equal(api.fetchCalls.length, 0, "never upload a partial credential snapshot");
   }
+});
+
+test("partitioned provider cookies fail closed before upload without erasing saved relay state", async () => {
+  for (const partitionKey of [
+    {topLevelSite:"https://private.example"},
+    {topLevelSite:"https://chatgpt.com",hasCrossSiteAncestor:true},
+    {},
+    "forged-partition-shape",
+    0
+  ]) {
+    const storage = {
+      gateway:"http://127.0.0.1:8080",
+      token:"synthetic-install-token",
+      linkedProviders:["chatgpt"],
+      relaySnapshotVersions:{chatgpt:"prior-version"}
+    };
+    const api = loadShared([
+      {name:"plain",value:"fixture",domain:".chatgpt.com",path:"/",secure:true},
+      {name:"partitioned-private-name",value:"private-credential",domain:".chatgpt.com",
+        path:"/",secure:true,partitionKey}
+    ], true, storage);
+    await assert.rejects(
+      () => api.syncProvider("chatgpt"),
+      error => error.message ===
+        "Unsupported browser cookie partition scope; existing gateway session was preserved."
+    );
+    assert.equal(api.fetchCalls.length, 0, "partial provider snapshot must never be transmitted");
+    assert.deepEqual(storage.linkedProviders, ["chatgpt"], "owner consent is unchanged");
+    assert.equal(storage.relaySnapshotVersions.chatgpt, "prior-version");
+  }
+});
+
+test("irrelevant partitioned cookies are excluded while ordinary active cookies remain usable", async () => {
+  const api = loadShared([
+    {name:"non-partitioned",value:"fixture",domain:".chatgpt.com",path:"/",secure:true},
+    {name:"null-partition",value:"fixture",domain:".chatgpt.com",path:"/",secure:true,partitionKey:null},
+    {name:"out-of-scope",value:"private",domain:".gmail.com",path:"/",secure:true,
+      partitionKey:{topLevelSite:"https://private.example"}}
+  ]);
+  const snapshot = await api.providerCookieSnapshot("chatgpt");
+  const names = JSON.parse(JSON.stringify(snapshot.cookies.map(cookie => cookie.name).sort()));
+  assert.deepEqual(names, ["non-partitioned","null-partition"]);
+  const queries = api.getCookieQueries();
+  assert.ok(queries.length > 0);
+  assert.ok(queries.every(query => query.partitionKey &&
+    Object.keys(query.partitionKey).length === 0),
+    "explicit empty partitionKey is necessary to enumerate all cookie scopes");
+  assert.ok(snapshot.cookies.every(cookie => !Object.hasOwn(cookie, "partitionKey")));
 });
 
 test("automatic sync skips unchanged snapshots but manual sync always refreshes", async () => {

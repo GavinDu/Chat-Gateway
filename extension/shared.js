@@ -196,13 +196,26 @@ async function providerCookieSnapshot(provider, afterPermissionCheck = null) {
   // Independent domain reads run concurrently instead of serializing each
   // browser API round-trip. Promise.all preserves configured domain order for
   // deterministic deduplication; any failed read rejects the whole snapshot.
-  const domainCookies = await Promise.all(domains.map(domain => chrome.cookies.getAll({domain})));
+  // Chrome's default getAll() sees only UNPARTITIONED cookies. Since the
+  // relay has no partition-key representation, enumerate all cookie scopes
+  // (Chrome 119+) and fail closed if any eligible partition is present.
+  // Otherwise an apparently complete snapshot could omit live credentials.
+  const domainCookies = await Promise.all(domains.map(domain =>
+    chrome.cookies.getAll({domain, partitionKey:{}})
+  ));
   const loginHost = new URL(PROVIDER_LOGIN_URLS[provider]).hostname.toLowerCase();
   const all = [];
   for (const cookies of domainCookies) {
     for (const cookie of cookies) {
       const normalized = cookie.domain.replace(/^\./, "").toLowerCase();
       if (domains.some(root => normalized === root || normalized.endsWith("." + root))) {
+        // Partitioned cookies have an additional top-level-site scope.
+        // Neither the relay snapshot schema nor the pinned Obscura jar can
+        // restore that scope. Never flatten it into an ordinary cookie or
+        // publish a partial provider snapshot. Do not reflect partitionKey.
+        if (cookie.partitionKey != null) {
+          throw new Error("Unsupported browser cookie partition scope; existing gateway session was preserved.");
+        }
         // A host-only cookie is only sent to its exact host. A host-only copy on
         // a provider root (for example `google.com`) therefore cannot
         // authenticate the provider origin (`gemini.google.com`), and uploading
