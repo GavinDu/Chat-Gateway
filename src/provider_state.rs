@@ -77,8 +77,12 @@ impl ProviderSessionRegistry {
     }
 
     pub fn record_credentials_verified(&self, provider: &str, epoch: uuid::Uuid) -> bool {
-        let Ok(mut proofs) = self.credential_proofs.lock() else { return false; };
-        let Some(current) = proofs.by_provider.get_mut(provider) else { return false; };
+        let Ok(mut proofs) = self.credential_proofs.lock() else {
+            return false;
+        };
+        let Some(current) = proofs.by_provider.get_mut(provider) else {
+            return false;
+        };
         if current.epoch != epoch {
             return false;
         }
@@ -90,7 +94,12 @@ impl ProviderSessionRegistry {
         self.credential_proofs
             .lock()
             .ok()
-            .and_then(|proofs| proofs.by_provider.get(provider).and_then(|entry| entry.first_party_verified_at))
+            .and_then(|proofs| {
+                proofs
+                    .by_provider
+                    .get(provider)
+                    .and_then(|entry| entry.first_party_verified_at)
+            })
             .and_then(|observed| now.checked_duration_since(observed))
             .is_some_and(|age| age <= CREDENTIAL_PROOF_TTL)
     }
