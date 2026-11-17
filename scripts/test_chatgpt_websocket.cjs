@@ -2,7 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
-function fixture(hostname = 'chatgpt.com') {
+function fixture(hostname = 'chatgpt.com', provider = 'chatgpt') {
   const commands = [];
   const packets = [];
   let reader;
@@ -31,7 +31,8 @@ function fixture(hostname = 'chatgpt.com') {
   };
   vm.createContext(context);
   vm.runInContext(fs.readFileSync('src/browser/chatgpt_websocket.js','utf8')
-    .replace('__BRIDGE_CONFIG__', JSON.stringify({token:'fixture-token',path:'/.well-known/chat-gateway-websocket'})),context);
+    .replace('__BRIDGE_CONFIG__', JSON.stringify({token:'fixture-token',path:'/.well-known/chat-gateway-websocket'}))
+    .replace("['chatgpt.com', 'www.chatgpt.com']", provider === 'metaai' ? "['meta.ai', 'www.meta.ai']" : "['chatgpt.com', 'www.chatgpt.com']"),context);
   return {context,commands,original};
 }
 test('ChatGPT socket forwards text once, preserves protocol, and closes cleanly', async () => {
@@ -107,4 +108,24 @@ test('non-HTTPS and alternate port never install the ChatGPT socket override', (
     vm.runInContext(code, context);
     assert.equal(context.WebSocket, f.original);
   }
+});
+
+test('Meta AI page bridge forwards a real binary conversation frame and preserves origin isolation', async () => {
+  const f = fixture('www.meta.ai', 'metaai');
+  const socket = new f.context.WebSocket('wss://gateway.meta.ai/ws');
+  socket.binaryType = 'arraybuffer';
+  await new Promise((resolve, reject) => {
+    socket.onerror = () => reject(new Error('unexpected Meta AI transport failure'));
+    socket.onopen = () => socket.send(new Uint8Array([8, 1, 255]));
+    socket.onmessage = event => {
+      assert.deepEqual([...new Uint8Array(event.data)], [8, 1, 255]);
+      socket.close(1000, 'fixture');
+    };
+    socket.onclose = resolve;
+  });
+  assert.equal(f.commands.filter(command => command.op === 'send').length, 1);
+  assert.equal(f.commands.find(command => command.op === 'open').url, 'wss://gateway.meta.ai/ws');
+  const foreign = fixture('chatgpt.com', 'metaai');
+  assert.equal(foreign.context.WebSocket, foreign.original);
+  assert.equal(foreign.commands.length, 0);
 });
