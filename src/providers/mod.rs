@@ -1363,6 +1363,8 @@ mod closed_consumer_before_dispatch_tests {
         cfg: crate::config::ProviderConfig,
         sends: Arc<AtomicUsize>,
         drop_receiver_on_baseline: Option<HeldReceiver>,
+        hang_after_send: bool,
+        revoke_origin_before_hang: bool,
     }
 
     #[async_trait::async_trait(?Send)]
@@ -1379,8 +1381,16 @@ mod closed_consumer_before_dispatch_tests {
             Ok(Vec::new())
         }
 
-        async fn send_prompt(&self, _page: &mut Page, _prompt: &str) -> Result<()> {
+        async fn send_prompt(&self, page: &mut Page, _prompt: &str) -> Result<()> {
             self.sends.fetch_add(1, Ordering::SeqCst);
+            if self.revoke_origin_before_hang {
+                page.evaluate(
+                    "document.documentElement.removeAttribute('data-chat-gateway-test-fixture')",
+                );
+            }
+            if self.hang_after_send {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
             Err(anyhow::Error::new(
                 common::ProviderSubmissionUnacknowledgedError,
             ))
@@ -1428,6 +1438,8 @@ mod closed_consumer_before_dispatch_tests {
             cfg: serde_yaml::from_str("name: qwen").unwrap(),
             sends: Arc::clone(sends),
             drop_receiver_on_baseline,
+            hang_after_send: false,
+            revoke_origin_before_hang: false,
         })
     }
 
@@ -1436,11 +1448,20 @@ mod closed_consumer_before_dispatch_tests {
         page: &mut Page,
         sender: mpsc::Sender<Result<ProviderChunk>>,
     ) {
+        send_with_timeout(adapter, page, sender, Duration::from_millis(80)).await;
+    }
+
+    async fn send_with_timeout(
+        adapter: Arc<dyn SiteAdapter>,
+        page: &mut Page,
+        sender: mpsc::Sender<Result<ProviderChunk>>,
+        timeout: Duration,
+    ) {
         super::run_send(
             adapter,
             page,
             "private test prompt".to_owned(),
-            Duration::from_millis(80),
+            timeout,
             Duration::from_millis(20),
             ProviderSendPolicy {
                 completion_idle: Duration::from_millis(80),
@@ -1481,6 +1502,62 @@ mod closed_consumer_before_dispatch_tests {
         send(spy(&attempts, Some(Arc::clone(&holder))), &mut page, sender).await;
         assert!(holder.lock().unwrap().is_none());
         assert_eq!(attempts.load(Ordering::SeqCst), 0);
+    }
+
+    async fn exercise_disconnect_while_submission_pending(revoke_origin: bool) -> f64 {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = test_page(&browser).await;
+        page.evaluate(
+            r#"document.body.insertAdjacentHTML('beforeend',
+               '<button aria-label="Stop generating" onclick="window.stopHits=(window.stopHits||0)+1">Stop</button>')"#,
+        );
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let adapter: Arc<dyn SiteAdapter> = Arc::new(DisconnectSpy {
+            cfg: serde_yaml::from_str("name: qwen").unwrap(),
+            sends: Arc::clone(&attempts),
+            drop_receiver_on_baseline: None,
+            hang_after_send: true,
+            revoke_origin_before_hang: revoke_origin,
+        });
+        let (sender, receiver) = mpsc::channel(8);
+        let observer = Arc::clone(&attempts);
+        let disconnect = async move {
+            while observer.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+            drop(receiver);
+        };
+        tokio::time::timeout(Duration::from_secs(1), async {
+            tokio::join!(
+                send_with_timeout(adapter, &mut page, sender, Duration::from_secs(5)),
+                disconnect,
+            );
+        })
+        .await
+        .expect("consumer closure must interrupt the hung submission promptly");
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        page.evaluate("window.stopHits || 0").as_f64().unwrap_or(0.0)
+    }
+
+    #[tokio::test]
+    async fn mid_submission_disconnect_drops_send_future_and_requests_stop() {
+        assert_eq!(
+            exercise_disconnect_while_submission_pending(false).await,
+            1.0,
+            "a hung acknowledged Send must not outlive its disconnected consumer"
+        );
+    }
+
+    #[tokio::test]
+    async fn mid_submission_disconnect_never_clicks_an_untrusted_page() {
+        assert_eq!(
+            exercise_disconnect_while_submission_pending(true).await,
+            0.0,
+            "redirected/foreign page cannot receive the abandoned Stop action"
+        );
     }
 
     #[tokio::test]
@@ -1919,7 +1996,22 @@ pub async fn run_send(
         return;
     }
     let start = Instant::now();
-    match tokio::time::timeout(timeout, adapter.send_prompt(page, &prompt)).await {
+    // The consumer may disconnect after Send was clicked but before the
+    // framework reports an acknowledged submission. Drop the incomplete
+    // mutable-page future before using the page for guarded Stop cleanup.
+    let submission = tokio::select! {
+        result = tokio::time::timeout(timeout, adapter.send_prompt(page, &prompt)) => Some(result),
+        _ = chunks.closed() => None,
+    };
+    let Some(submission) = submission else {
+        cancel_generation_if_trusted(adapter.as_ref(), page);
+        tracing::debug!(
+            provider = adapter.name(),
+            "client disconnected during submission; requested generation stop"
+        );
+        return;
+    };
+    match submission {
         Ok(Ok(())) => {}
         Ok(Err(error)) => {
             // A provider can redirect to manual verification while the
