@@ -1205,6 +1205,10 @@ test("last-failure UI accepts only fresh fixed server evidence for two active pr
   for (const record of invalid) {
     assert.equal(safe("chatgpt", record), null, "untrusted field must discard entire record");
   }
+  // The general popup fixture initially registers Meta AI/Claude/Manus only.
+  // Register the two additional provider definitions before asserting their rows.
+  popup.context.PROVIDERS.chatgpt = ["chatgpt.com"];
+  popup.context.PROVIDERS.grok = ["grok.com"];
   popup.context.relayFetch = async () => ({
     ok:true,status:200,json:async()=>({vault_mode:true,providers:[
       {provider:"chatgpt",enabled:true,linked:true,authentication:"unknown",last_failed_request:valid},
