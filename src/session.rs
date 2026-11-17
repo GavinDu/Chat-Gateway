@@ -2063,7 +2063,10 @@ mod replay_fidelity_limits_tests {
 
     #[test]
     fn same_names_with_distinct_paths_remain_distinct() {
-        let source = vec![scoped(".chatgpt.com", "/"), scoped(".chatgpt.com", "/settings")];
+        let source = vec![
+            scoped(".chatgpt.com", "/"),
+            scoped(".chatgpt.com", "/settings"),
+        ];
         let (resolved, dropped) = resolve_cookie_scope_duplicates(&source);
         assert_eq!(resolved.len(), 2);
         assert_eq!(dropped, 0);
@@ -2089,7 +2092,10 @@ mod replay_fidelity_limits_tests {
         cookie.value = "private-cookie-bearer-token".into();
         cookie.name = "private-cookie-name".into();
         let evidence = replay_fidelity_limits(&[cookie], 0);
-        let redacted = format!("{}:{}:{}", evidence.scope, evidence.expiry, evidence.same_site);
+        let redacted = format!(
+            "{}:{}:{}",
+            evidence.scope, evidence.expiry, evidence.same_site
+        );
         assert!(!redacted.contains("private"));
         assert!(!redacted.contains("bearer"));
         assert!(!redacted.contains(".chatgpt.com"));
