@@ -4469,7 +4469,10 @@ mod pointer_inert_submission_stop_tests {
             "document.querySelector('#stop').hidden=false; document.querySelector('#stop').style.pointerEvents='none'; document.querySelector('#prompt').value=''",
         );
         let disabled = submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
-        assert!(!disabled.streaming, "pointer-inert Stop cannot signal fresh generation");
+        assert!(
+            !disabled.streaming,
+            "pointer-inert Stop cannot signal fresh generation"
+        );
 
         page.evaluate(
             "document.body.insertAdjacentHTML('beforeend', '<article><div class=answer>hydrated reply</div></article>')",
@@ -4478,7 +4481,11 @@ mod pointer_inert_submission_stop_tests {
         assert_eq!(hydrated.response_count, before.response_count + 1);
         assert!(
             !submission_observed_for_adapter(
-                "grok", &page, &before, &hydrated, "private test draft"
+                "grok",
+                &page,
+                &before,
+                &hydrated,
+                "private test draft"
             )
             .unwrap(),
             "old response hydration and pointer-inert Stop must not acknowledge Send"
@@ -4488,12 +4495,16 @@ mod pointer_inert_submission_stop_tests {
             "document.querySelector('#stop').style.pointerEvents='auto'; document.querySelector('#stop-root').style.pointerEvents='none'",
         );
         assert!(
-            !submission_snapshot(&page, "#prompt", &[".answer"]).unwrap().streaming,
+            !submission_snapshot(&page, "#prompt", &[".answer"])
+                .unwrap()
+                .streaming,
             "inert ancestor blocks Stop despite child override"
         );
         page.evaluate("document.querySelector('#stop-root').style.pointerEvents='auto'");
         assert!(
-            submission_snapshot(&page, "#prompt", &[".answer"]).unwrap().streaming,
+            submission_snapshot(&page, "#prompt", &[".answer"])
+                .unwrap()
+                .streaming,
             "actionable newly visible Stop remains supported"
         );
 
@@ -4501,7 +4512,9 @@ mod pointer_inert_submission_stop_tests {
             "document.querySelector('#stop').hidden=true; document.querySelector('#stop-root').setAttribute('data-is-streaming','true')",
         );
         assert!(
-            submission_snapshot(&page, "#prompt", &[".answer"]).unwrap().streaming,
+            submission_snapshot(&page, "#prompt", &[".answer"])
+                .unwrap()
+                .streaming,
             "explicit streaming-state marker remains independent of Stop actionability"
         );
     }
