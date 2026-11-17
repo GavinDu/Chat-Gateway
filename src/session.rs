@@ -2033,6 +2033,70 @@ fn cookie_restore_header(cookie: &Cookie, now_epoch: f64) -> Result<Zeroizing<St
 }
 
 #[cfg(test)]
+mod replay_fidelity_limits_tests {
+    use super::*;
+
+    fn scoped(domain: &str, path: &str) -> Cookie {
+        Cookie {
+            name: "fixture".into(),
+            value: "secret=do-not-log".into(),
+            domain: domain.into(),
+            path: path.into(),
+            secure: true,
+            http_only: true,
+            expires: None,
+            same_site: None,
+        }
+    }
+
+    #[test]
+    fn host_only_and_domain_twins_are_reported_as_normalized() {
+        let source = vec![scoped("chatgpt.com", "/"), scoped(".chatgpt.com", "/")];
+        let (resolved, dropped) = resolve_cookie_scope_duplicates(&source);
+        assert_eq!(dropped, 1);
+        assert_eq!(resolved.len(), 1);
+        let evidence = replay_fidelity_limits(&source, dropped);
+        assert_eq!(evidence.scope, "scope_normalized");
+        assert_eq!(evidence.expiry, "expiry_not_provided");
+        assert_eq!(evidence.same_site, "same_site_not_provided");
+    }
+
+    #[test]
+    fn same_names_with_distinct_paths_remain_distinct() {
+        let source = vec![scoped(".chatgpt.com", "/"), scoped(".chatgpt.com", "/settings")];
+        let (resolved, dropped) = resolve_cookie_scope_duplicates(&source);
+        assert_eq!(resolved.len(), 2);
+        assert_eq!(dropped, 0);
+        assert_eq!(
+            replay_fidelity_limits(&source, dropped).scope,
+            "no_scope_normalization_observed"
+        );
+    }
+
+    #[test]
+    fn explicit_expiry_and_same_site_cannot_be_confirmed_by_current_jar() {
+        let mut cookie = scoped(".chatgpt.com", "/");
+        cookie.expires = Some(2_000_000_000.0);
+        cookie.same_site = Some("Strict".into());
+        let evidence = replay_fidelity_limits(&[cookie], 0);
+        assert_eq!(evidence.expiry, "expiry_unobservable_in_jar_readback");
+        assert_eq!(evidence.same_site, "same_site_unobservable_in_jar_readback");
+    }
+
+    #[test]
+    fn evidence_never_contains_credential_fields() {
+        let mut cookie = scoped(".chatgpt.com", "/private");
+        cookie.value = "private-cookie-bearer-token".into();
+        cookie.name = "private-cookie-name".into();
+        let evidence = replay_fidelity_limits(&[cookie], 0);
+        let redacted = format!("{}:{}:{}", evidence.scope, evidence.expiry, evidence.same_site);
+        assert!(!redacted.contains("private"));
+        assert!(!redacted.contains("bearer"));
+        assert!(!redacted.contains(".chatgpt.com"));
+    }
+}
+
+#[cfg(test)]
 mod restored_cookie_attribute_tests {
     use super::*;
 
@@ -2077,6 +2141,35 @@ mod restored_cookie_attribute_tests {
     }
 }
 
+/// Readback from this pinned Obscura CookieStore has no expiry/SameSite
+/// fields. A successful six-field jar match is not full replay parity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ReplayFidelityLimits {
+    scope: &'static str,
+    expiry: &'static str,
+    same_site: &'static str,
+}
+
+fn replay_fidelity_limits(source: &[Cookie], normalized_count: usize) -> ReplayFidelityLimits {
+    ReplayFidelityLimits {
+        scope: if normalized_count > 0 {
+            "scope_normalized"
+        } else {
+            "no_scope_normalization_observed"
+        },
+        expiry: if source.iter().any(|cookie| cookie.expires.is_some()) {
+            "expiry_unobservable_in_jar_readback"
+        } else {
+            "expiry_not_provided"
+        },
+        same_site: if source.iter().any(|cookie| cookie.same_site.is_some()) {
+            "same_site_unobservable_in_jar_readback"
+        } else {
+            "same_site_not_provided"
+        },
+    }
+}
+
 /// Restore step 1 (BEFORE goto): put the saved cookies into the browser's
 /// cookie store so the first navigation is already authenticated.
 pub fn restore_cookies(browser: &Browser, file: &SessionFile, provider: &str) -> Result<()> {
@@ -2089,12 +2182,27 @@ pub fn restore_cookies(browser: &Browser, file: &SessionFile, provider: &str) ->
     let mut failed_writes = 0usize;
     let mut expected_restores = Vec::new();
     let (cookies, dropped) = resolve_cookie_scope_duplicates(&file.cookies);
+    let fidelity = replay_fidelity_limits(&file.cookies, dropped);
     if dropped > 0 {
         // Counts only: cookie names, domains and values are credentials.
         tracing::info!(
             provider,
             cookies_dropped = dropped,
             "resolved duplicate provider cookie scopes before restore"
+        );
+    }
+    if dropped > 0
+        || fidelity.expiry == "expiry_unobservable_in_jar_readback"
+        || fidelity.same_site == "same_site_unobservable_in_jar_readback"
+    {
+        // Fixed labels only. Never log cookie names, domains, expiry times,
+        // values or stable hashes. This cannot establish valid account login.
+        tracing::debug!(
+            provider,
+            scope = fidelity.scope,
+            expiry = fidelity.expiry,
+            same_site = fidelity.same_site,
+            "provider cookie replay fidelity is partially unobservable"
         );
     }
     for c in &cookies {
