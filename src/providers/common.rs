@@ -2106,7 +2106,7 @@ async fn human_type_with_provider(
     // ProseMirror paste handler. Its native paste acknowledgment is useful
     // only if the exact rendered draft survives the existing verification.
     // Never set a synthetic value or textContent for failed rich-text edits.
-    let chatgpt_paste = format!(
+    let chatgpt_paste_js = format!(
         r#"if (el.matches('form[data-chatgpt-composer] div.ProseMirror[contenteditable="true"][role="textbox"]')) {{
             try {{
                 const clipboard = {{
@@ -2120,6 +2120,15 @@ async fn human_type_with_provider(
         }}"#,
         text = text_js,
     );
+    // Do not route framework-specific paste events through other adapters.
+    // Data-URL fixtures can exercise the helper without a provider origin.
+    let chatgpt_paste = if expected_provider == Some("chatgpt")
+        || (cfg!(test) && expected_provider.is_none())
+    {
+        chatgpt_paste_js
+    } else {
+        String::new()
+    };
     let js = format!(
         "(function() {{ {route_guard} {composer_guard} var el = {el_js}; if (!el) return false; el.focus(); if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {{ try {{ var prototype = el.tagName === 'INPUT' ? window.HTMLInputElement.prototype : window.HTMLTextAreaElement.prototype; var setter = Object.getOwnPropertyDescriptor(prototype, 'value').set; setter.call(el, {text}); }} catch (e) {{ el.value = {text}; }} el.dispatchEvent(new InputEvent('input', {{ bubbles: true, inputType: 'insertText', data: {text} }})); el.dispatchEvent(new Event('change', {{ bubbles: true }})); return true; }} var selection = window.getSelection(); if (!selection) return false; try {{ var range = document.createRange(); range.selectNodeContents(el); selection.removeAllRanges(); selection.addRange(range); }} catch (e) {{ return false; }} {chatgpt_paste} var ok = false; try {{ ok = document.execCommand('insertText', false, {text}); }} catch (e) {{}} if (!ok) return 'editor-unsupported'; el.dispatchEvent(new InputEvent('input', {{ bubbles: true, inputType: 'insertText', data: {text} }})); el.dispatchEvent(new Event('change', {{ bubbles: true }})); return true; }})()",
         text = text_js,
