@@ -39,6 +39,48 @@ mod session_worker_error_redaction_tests {
     }
 }
 
+#[cfg(test)]
+mod initial_frame_compatibility_tests {
+    #[tokio::test]
+    async fn srcdoc_frame_initialization_can_reenter_dom_without_aborting_worker() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        page.goto("data:text/html,%3Chtml%3E%3Cbody%3E%3C/body%3E%3C/html%3E")
+            .await
+            .unwrap();
+        // Child initialization synchronously calls native DOM ops. The pinned
+        // engine must declare that reentrancy instead of aborting this process.
+        assert_eq!(
+            page.evaluate(
+                r#"(() => {
+                    document.body.innerHTML = '<iframe srcdoc="<p>frame</p>"></iframe>';
+                    return document.querySelector('iframe').contentDocument.body.textContent;
+                })()"#,
+            )
+            .as_str(),
+            Some("frame")
+        );
+        assert_eq!(
+            page.evaluate(
+                r#"(() => {
+                    document.body.innerHTML = '';
+                    const frame = document.createElement('iframe');
+                    frame.srcdoc = '<body><span>inner</span></body>';
+                    document.body.appendChild(frame);
+                    const span = frame.contentDocument.querySelector('span');
+                    span.textContent = 'touched';
+                    return frame.contentDocument.body.textContent;
+                })()"#,
+            )
+            .as_str(),
+            Some("touched")
+        );
+    }
+}
+
 /// Fixed, non-sensitive DOM readiness signals for all nine registered
 /// providers. This does not select a new composer or type into arbitrary inputs;
 /// a generic editor may be a search/login field rather than the chat editor.
