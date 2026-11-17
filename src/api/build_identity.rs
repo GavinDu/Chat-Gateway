@@ -18,10 +18,9 @@ fn safe_build_timestamp(value: Option<&str>) -> &str {
         .filter(|timestamp| {
             timestamp.len() == 20
                 && timestamp.ends_with('Z')
-                && chrono::DateTime::parse_from_rfc3339(timestamp)
-                    .is_ok_and(|parsed| {
-                        parsed.to_rfc3339_opts(SecondsFormat::Secs, true) == *timestamp
-                    })
+                && chrono::DateTime::parse_from_rfc3339(timestamp).is_ok_and(|parsed| {
+                    parsed.to_rfc3339_opts(SecondsFormat::Secs, true) == *timestamp
+                })
         })
         .unwrap_or("unknown")
 }
