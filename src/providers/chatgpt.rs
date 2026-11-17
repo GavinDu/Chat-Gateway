@@ -150,6 +150,55 @@ mod current_chatgpt_dom_tests {
     }
 
     #[tokio::test]
+    async fn scoped_chatgpt_paste_handler_retains_rendered_prompt_before_send() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        page.goto(&page_url(
+            r#"<html><body>
+                <div id="unrelated" contenteditable="true">untouched</div>
+                <form data-chatgpt-composer>
+                  <div class="ProseMirror" contenteditable="true" role="textbox"></div>
+                  <button id="send" aria-label="Send" disabled>Send</button>
+                </form>
+              </body></html>"#,
+        ))
+        .await
+        .unwrap();
+        page.evaluate(
+            r#"(() => {
+                const editor = document.querySelector('form .ProseMirror');
+                editor.addEventListener('paste', event => {
+                    event.preventDefault();
+                    editor.textContent = event.clipboardData.getData('text/plain');
+                    document.querySelector('#send').disabled = false;
+                });
+            })()"#,
+        );
+        let editor = "form[data-chatgpt-composer] div.ProseMirror[contenteditable='true'][role='textbox']";
+        common::human_type(&page, &[editor], "Reply exactly OK")
+            .await
+            .unwrap();
+        assert_eq!(
+            page.evaluate("document.querySelector('form .ProseMirror').textContent")
+                .as_str(),
+            Some("Reply exactly OK")
+        );
+        assert_eq!(
+            page.evaluate("document.querySelector('#unrelated').textContent")
+                .as_str(),
+            Some("untouched")
+        );
+        assert_eq!(
+            page.evaluate("document.querySelector('#send').disabled")
+                .as_bool(),
+            Some(false)
+        );
+    }
+
+    #[tokio::test]
     async fn form_composer_rejects_multiple_visible_candidates_and_dialogs() {
         let browser = obscura_core::Browser::builder()
             .stealth(false)
