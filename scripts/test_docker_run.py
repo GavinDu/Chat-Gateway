@@ -76,7 +76,15 @@ raise SystemExit(1 if os.environ.get("CURL_FAIL") == "1" else 0)
         result, calls = self.build()
         self.assertEqual(result.returncode, 0, result.stderr)
         command = next(args for args in calls if args[:2] == ["buildx", "build"])
-        self.assertEqual(command, ["buildx", "build", "--load", "--pull", "--tag", "gateway:test", str(ROOT)])
+        self.assertEqual(command[:6], ["buildx", "build", "--load", "--pull", "--tag", "gateway:test"])
+        self.assertEqual(command[-1], str(ROOT))
+        # Two bounded build arguments are intentional provenance inputs, not
+        # an unexpected second builder or mutable runtime checkout claim.
+        self.assertEqual(command[6], "--build-arg")
+        self.assertRegex(command[7], r"^CHAT_GATEWAY_SOURCE_SHA=(unknown|[a-f0-9]{40})$")
+        self.assertEqual(command[8], "--build-arg")
+        self.assertRegex(command[9], r"^CHAT_GATEWAY_BUILD_TIMESTAMP=\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+        self.assertEqual(len(command), 11)
         self.assertFalse(any(args and args[0] == "build" for args in calls))
 
     def test_missing_buildx_fails_before_attempting_a_legacy_build(self):
