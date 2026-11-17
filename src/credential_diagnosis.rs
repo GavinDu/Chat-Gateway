@@ -253,6 +253,16 @@ fn classify(e: &Evidence, now: u64) -> Diagnosis {
         if attempt.outcome != Outcome::Failed {
             return inconclusive(provider, "contradictory_gateway_failure_evidence");
         }
+        // A failure at candidate/backend admission cannot certify a later
+        // response/stream phase of the *same provider attempt*. This can
+        // happen when owner evidence incorrectly joins fallback attempts.
+        if matches!(
+            failure.stage.as_str(),
+            "candidate_admission" | "backend_admission"
+        ) && matches!(attempt.stage, Stage::Response | Stage::Stream | Stage::Completed)
+        {
+            return inconclusive(provider, "conflicting_gateway_failure_stage");
+        }
     }
     if (e.snapshot.is_none() && (e.obscura.is_some() || e.attempt.is_some()))
         || (e.snapshot.as_ref().is_some_and(|snapshot| {
@@ -312,6 +322,14 @@ fn classify(e: &Evidence, now: u64) -> Diagnosis {
     }
     if obscura != Some(Auth::Verified) {
         return inconclusive(provider, "authoritative_obscura_account_verifier_missing");
+    }
+    if e.gateway_failure.as_ref().is_some_and(|failure| {
+        matches!(failure.reason.as_str(), "session_expired" | "challenge")
+    }) {
+        // A former first-party positive observation can be superseded by an
+        // explicit new login/challenge signal. Recheck current session state
+        // rather than mislabel the later failure as a transport defect.
+        return inconclusive(provider, "account_or_challenge_state_changed");
     }
     match e.attempt.as_ref().map(|a| (a.stage, a.outcome)) {
         Some((Stage::Composer | Stage::Send, Outcome::Failed)) => verdict(
@@ -467,6 +485,18 @@ mod tests {
         v["gateway_failure"]["observed_at_ms"] = json!(NOW);
         v["gateway_failure"]["token"] = json!("private-account-cookie");
         assert!(serde_json::from_value::<Evidence>(v).is_err());
+    }
+
+    #[test]
+    fn coarse_admission_and_changed_account_states_cannot_be_transport_proof() {
+        let mut v = with_gateway_failure();
+        v["gateway_failure"]["stage"] = json!("backend_admission");
+        assert_eq!(checked(v.clone()).reason, "conflicting_gateway_failure_stage");
+        v["gateway_failure"]["stage"] = json!("json_completion");
+        v["gateway_failure"]["reason"] = json!("session_expired");
+        assert_eq!(checked(v.clone()).reason, "account_or_challenge_state_changed");
+        v["gateway_failure"]["reason"] = json!("challenge");
+        assert_eq!(checked(v).reason, "account_or_challenge_state_changed");
     }
 
     #[test]
