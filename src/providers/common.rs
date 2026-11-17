@@ -300,7 +300,7 @@ const RESPONSE_RENDERED_TEXT_JS: &str = r#"
             });
         return blocks.map(block => block.querySelector('*')
             ? (block.innerText || '')
-            : (block.textContent || '')).join('\\n\\n');
+            : (block.textContent || '')).join('\n\n');
     };
 "#;
 
