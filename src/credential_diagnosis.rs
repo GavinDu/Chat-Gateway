@@ -105,7 +105,12 @@ struct Diagnosis {
     live_proof: bool,
 }
 
-fn verdict(provider: &'static str, category: &'static str, reason: &'static str, next_action: &'static str) -> Diagnosis {
+fn verdict(
+    provider: &'static str,
+    category: &'static str,
+    reason: &'static str,
+    next_action: &'static str,
+) -> Diagnosis {
     Diagnosis {
         schema_version: 1,
         provider,
@@ -117,12 +122,16 @@ fn verdict(provider: &'static str, category: &'static str, reason: &'static str,
 }
 
 fn inconclusive(provider: &'static str, reason: &'static str) -> Diagnosis {
-    verdict(provider, "inconclusive", reason, "collect_current_correlated_evidence")
+    verdict(
+        provider,
+        "inconclusive",
+        reason,
+        "collect_current_correlated_evidence",
+    )
 }
 
 fn fresh(at: u64, now: u64) -> bool {
-    at <= now.saturating_add(CLOCK_SKEW_MS)
-        && now.saturating_sub(at) <= MAX_AGE_MS
+    at <= now.saturating_add(CLOCK_SKEW_MS) && now.saturating_sub(at) <= MAX_AGE_MS
 }
 
 fn generation(raw: &str) -> Option<uuid::Uuid> {
@@ -133,7 +142,14 @@ fn classify(e: &Evidence, now: u64) -> Diagnosis {
     let provider = match e.provider.as_str() {
         "chatgpt" => "chatgpt",
         "metaai" => "metaai",
-        _ => return verdict("unsupported", "inconclusive", "unsupported_provider", "use_chatgpt_or_metaai"),
+        _ => {
+            return verdict(
+                "unsupported",
+                "inconclusive",
+                "unsupported_provider",
+                "use_chatgpt_or_metaai",
+            )
+        }
     };
     let timestamps = [
         e.chrome.as_ref().map(|x| x.observed_at_ms),
@@ -141,7 +157,11 @@ fn classify(e: &Evidence, now: u64) -> Diagnosis {
         e.obscura.as_ref().map(|x| x.observed_at_ms),
         e.attempt.as_ref().map(|x| x.observed_at_ms),
     ];
-    if timestamps.into_iter().flatten().any(|time| !fresh(time, now)) {
+    if timestamps
+        .into_iter()
+        .flatten()
+        .any(|time| !fresh(time, now))
+    {
         return inconclusive(provider, "stale_or_future_evidence");
     }
 
@@ -151,10 +171,12 @@ fn classify(e: &Evidence, now: u64) -> Diagnosis {
         e.obscura.as_ref().map(|x| x.generation.as_str()),
         e.attempt.as_ref().map(|x| x.generation.as_str()),
     ];
-    let parsed = ids.into_iter().flatten().map(generation).collect::<Vec<_>>();
-    if parsed.iter().any(Option::is_none)
-        || parsed.windows(2).any(|pair| pair[0] != pair[1])
-    {
+    let parsed = ids
+        .into_iter()
+        .flatten()
+        .map(generation)
+        .collect::<Vec<_>>();
+    if parsed.iter().any(Option::is_none) || parsed.windows(2).any(|pair| pair[0] != pair[1]) {
         return inconclusive(provider, "snapshot_generation_mismatch");
     }
     if (e.snapshot.is_none() && (e.obscura.is_some() || e.attempt.is_some()))
@@ -176,30 +198,59 @@ fn classify(e: &Evidence, now: u64) -> Diagnosis {
         return inconclusive(provider, "contradictory_account_observations");
     }
     if chrome == Some(Auth::Unauthenticated) {
-        return verdict(provider, "browser_login_attention", "chrome_explicitly_unauthenticated", "verify_login_on_official_website");
+        return verdict(
+            provider,
+            "browser_login_attention",
+            "chrome_explicitly_unauthenticated",
+            "verify_login_on_official_website",
+        );
     }
-    if matches!(snapshot, Some(SnapshotState::Missing | SnapshotState::Rejected)) {
-        return verdict(provider, "capture_or_import", "snapshot_missing_or_rejected", "inspect_capture_and_relay_without_forced_resync");
+    if matches!(
+        snapshot,
+        Some(SnapshotState::Missing | SnapshotState::Rejected)
+    ) {
+        return verdict(
+            provider,
+            "capture_or_import",
+            "snapshot_missing_or_rejected",
+            "inspect_capture_and_relay_without_forced_resync",
+        );
     }
     if snapshot == Some(SnapshotState::SavedActivationPending) {
-        return verdict(provider, "activation_pending", "snapshot_saved_but_browser_not_activated", "inspect_activation_generation");
+        return verdict(
+            provider,
+            "activation_pending",
+            "snapshot_saved_but_browser_not_activated",
+            "inspect_activation_generation",
+        );
     }
     if snapshot != Some(SnapshotState::Applied) {
         return inconclusive(provider, "applied_snapshot_unproven");
     }
     if chrome == Some(Auth::Verified) && obscura == Some(Auth::Unauthenticated) {
-        return verdict(provider, "replay_or_binding", "different_account_verdict_on_applied_snapshot", "compare_same_snapshot_scope_and_context");
+        return verdict(
+            provider,
+            "replay_or_binding",
+            "different_account_verdict_on_applied_snapshot",
+            "compare_same_snapshot_scope_and_context",
+        );
     }
     if obscura != Some(Auth::Verified) {
         return inconclusive(provider, "authoritative_obscura_account_verifier_missing");
     }
     match e.attempt.as_ref().map(|a| (a.stage, a.outcome)) {
-        Some((Stage::Composer | Stage::Send, Outcome::Failed)) => {
-            verdict(provider, "adapter_input", "authenticated_composer_or_send_failed", "inspect_editor_and_prompt_acknowledgement")
-        }
-        Some((Stage::Response | Stage::Stream, Outcome::Failed)) => {
-            verdict(provider, "transport_or_extraction", "authenticated_send_response_failed", "inspect_transport_and_current_turn_response")
-        }
+        Some((Stage::Composer | Stage::Send, Outcome::Failed)) => verdict(
+            provider,
+            "adapter_input",
+            "authenticated_composer_or_send_failed",
+            "inspect_editor_and_prompt_acknowledgement",
+        ),
+        Some((Stage::Response | Stage::Stream, Outcome::Failed)) => verdict(
+            provider,
+            "transport_or_extraction",
+            "authenticated_send_response_failed",
+            "inspect_transport_and_current_turn_response",
+        ),
         Some((Stage::Completed, Outcome::Passed)) => {
             inconclusive(provider, "no_failure_in_supplied_evidence")
         }
@@ -215,8 +266,7 @@ pub(crate) fn diagnose_file(path: &Path) -> anyhow::Result<String> {
     if !info.is_file() || info.file_type().is_symlink() || info.len() > MAX_FILE {
         anyhow::bail!("credential evidence unavailable");
     }
-    let bytes = fs::read(path)
-        .map_err(|_| anyhow::anyhow!("credential evidence unavailable"))?;
+    let bytes = fs::read(path).map_err(|_| anyhow::anyhow!("credential evidence unavailable"))?;
     if bytes.len() as u64 > MAX_FILE {
         anyhow::bail!("credential evidence unavailable");
     }
@@ -288,7 +338,10 @@ mod tests {
         v["obscura"]["verdict"] = json!("unauthenticated");
         let result = checked(v);
         assert_eq!(result.category, "replay_or_binding");
-        assert_eq!(result.next_action, "compare_same_snapshot_scope_and_context");
+        assert_eq!(
+            result.next_action,
+            "compare_same_snapshot_scope_and_context"
+        );
     }
 
     #[test]
