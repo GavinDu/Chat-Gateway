@@ -93,14 +93,72 @@ class ParserContractTests(unittest.TestCase):
 
     def test_reports_only_supported_sha_and_categories(self):
         self.assertEqual(_identity({"status": "ok", "build": {
-            "source_sha": "a" * 40, "credential": "secret"}}),
-            {"health": "ok", "source_sha": "a" * 40})
-        self.assertEqual(_identity({"status": "error", "source_sha": "url?token=secret"}),
-                         {"health": "unverified"})
+            "source_sha": "a" * 40, "build_timestamp_utc": "2026-11-17T23:42:05Z",
+            "credential": "secret"}}),
+            {"health": "ok", "source_sha": "a" * 40,
+             "build_timestamp_utc": "2026-11-17T23:42:05Z"})
+        self.assertEqual(_identity({"status": "error", "source_sha": "b" * 40,
+                                    "commit_sha": "c" * 40}),
+                         {"health": "unverified", "source_sha": "unknown",
+                          "build_timestamp_utc": "unknown"})
         self.assertEqual(_safe_error(urllib.error.HTTPError(
             "https://secret.invalid/path?token=private", 502,
             "private detail", None, None)), "http_502")
         self.assertEqual(_safe_error(RuntimeError("secret upstream body")), "invalid_response")
+
+
+class InstalledProvenanceTests(unittest.TestCase):
+    def test_provenance_is_always_explicit_and_never_inferred_from_checkout(self):
+        for health in [
+            {"status": "ok"},
+            {"status": "ok", "build": None},
+            {"status": "ok", "build": "a" * 40},
+            {"status": "ok", "source_sha": "b" * 40, "commit_sha": "c" * 40},
+            {"status": "ok", "build": {"source_sha": "unknown"}},
+        ]:
+            self.assertEqual(_identity(health), {
+                "health": "ok",
+                "source_sha": "unknown",
+                "build_timestamp_utc": "unknown",
+            })
+
+    def test_build_metadata_rejects_untrusted_freeform_strings_and_bad_dates(self):
+        bad_shas = [
+            "A" * 40, "a" * 39, "a" * 41, "a" * 40 + "\\nsecret",
+            "https://private.example?token=secret", "unknown", 123, None,
+        ]
+        bad_times = [
+            "2026-02-30T20:15:30Z", "2026-11-17T24:15:30Z",
+            "2026-11-17T20:15:30+00:00", "2026-11-17T20:15:30.000Z",
+            "2026-11-17T20:15:30Z\\r\\nsecret", "private.example",
+            None, 17,
+        ]
+        for value in bad_shas:
+            self.assertEqual(_identity({"status": "ok",
+                                        "build": {"source_sha": value}})["source_sha"],
+                             "unknown")
+        for value in bad_times:
+            self.assertEqual(_identity({"status": "ok", "build": {
+                "build_timestamp_utc": value}})["build_timestamp_utc"], "unknown")
+
+    def test_build_metadata_is_independently_validated_per_field(self):
+        self.assertEqual(_identity({"status": "ok", "build": {
+            "source_sha": "a" * 40,
+            "build_timestamp_utc": "2026-02-30T00:00:00Z",
+        }}), {
+            "health": "ok",
+            "source_sha": "a" * 40,
+            "build_timestamp_utc": "unknown",
+        })
+        self.assertEqual(_identity({"status": "ok", "build": {
+            "source_sha": "not-a-sha",
+            "build_timestamp_utc": "2026-11-17T23:42:05Z",
+            "secret": "cookie=very-secret",
+        }}), {
+            "health": "ok",
+            "source_sha": "unknown",
+            "build_timestamp_utc": "2026-11-17T23:42:05Z",
+        })
 
 
 class FakeResponse:
