@@ -32,6 +32,7 @@ pub(crate) async fn health(State(state): State<Arc<AppState>>) -> impl IntoRespo
         .collect::<Vec<_>>();
     Json(serde_json::json!({
         "status": "ok",
+        "build": super::build_identity::build_identity(),
         "engine": "obscura-native (embedded)",
         "sessions_loaded": "sessions/<provider> (restored on demand)",
         "providers": providers,
