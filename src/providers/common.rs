@@ -1194,7 +1194,7 @@ fn click_text_selector(page: &Page, selector: &str) -> anyhow::Result<bool> {
     let nontransparent = nontransparent_ancestors_expression("el");
     let pointer_enabled = pointer_enabled_ancestors_expression("el");
     let clicked = page.evaluate(&format!(
-        "(() => {{ const el = Array.from(document.querySelectorAll({tag})).find(el => {{ try {{ return ((el.innerText || el.textContent || '').trim()).includes({needle}) && el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden' && {pointer_enabled} && {nontransparent} && !el.disabled && !el.matches(':disabled') && !el.closest('[hidden], [inert], [aria-hidden=\"true\"], [aria-disabled=\"true\"], fieldset[disabled]'); }} catch (_) {{ return false; }} }}); if (!el) return false; el.click(); return true; }})()"
+        "(() => {{ const el = Array.from(document.querySelectorAll({tag})).find(el => {{ try {{ return ((el.innerText || el.textContent || '').trim()).includes({needle}) && el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden' && {pointer_enabled} && {nontransparent} && !el.disabled && !el.matches(':disabled') && !el.readOnly && !el.closest('[hidden], [inert], [aria-hidden=\"true\"], [aria-disabled=\"true\"], [aria-readonly=\"true\"], fieldset[disabled]'); }} catch (_) {{ return false; }} }}); if (!el) return false; el.click(); return true; }})()"
     ));
     Ok(clicked.as_bool() == Some(true))
 }
@@ -1918,6 +1918,40 @@ mod picker_pointer_inert_ancestor_tests {
         assert!(click_text_selector(&page, "text:button=Sonar").unwrap());
         assert_eq!(page.evaluate("window.ghostClicks || 0").as_f64(), Some(1.0));
     }
+    #[tokio::test]
+    async fn text_picker_skips_readonly_clones_and_never_clicks_blocked_only() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <button id="self-readonly" aria-readonly="true"
+                onclick="window.selfClicks=(window.selfClicks||0)+1">Model Next</button>
+            <section aria-readonly="true">
+                <button id="ancestor-readonly"
+                    onclick="window.ancestorClicks=(window.ancestorClicks||0)+1">Model Next</button>
+            </section>
+            <button id="live" onclick="window.liveClicks=(window.liveClicks||0)+1">Model Next</button>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+
+        assert!(click_text_selector(&page, "text:button=Model Next").unwrap());
+        assert_eq!(page.evaluate("window.selfClicks || 0").as_f64(), Some(0.0));
+        assert_eq!(
+            page.evaluate("window.ancestorClicks || 0").as_f64(),
+            Some(0.0)
+        );
+        assert_eq!(page.evaluate("window.liveClicks || 0").as_f64(), Some(1.0));
+
+        page.evaluate("document.querySelector('#live').setAttribute('aria-readonly', 'true')");
+        assert!(!click_text_selector(&page, "text:button=Model Next").unwrap());
+        assert_eq!(page.evaluate("window.liveClicks || 0").as_f64(), Some(1.0));
+    }
+
 }
 
 /// Focus the first matching input and type into it. Obscura has no
