@@ -1512,6 +1512,7 @@ mod closed_consumer_before_dispatch_tests {
     async fn exercise_disconnect_while_submission_pending(
         revoke_origin: bool,
         reveal_fresh_stop: bool,
+        baseline_stop_active: bool,
     ) -> f64 {
         let browser = obscura_core::Browser::builder()
             .stealth(false)
@@ -1522,6 +1523,9 @@ mod closed_consumer_before_dispatch_tests {
             r#"document.body.insertAdjacentHTML('beforeend',
                '<button id="send-stop" aria-label="Stop generating" hidden onclick="window.stopHits=(window.stopHits||0)+1">Stop</button>')"#,
         );
+        if baseline_stop_active {
+            page.evaluate("document.querySelector('#send-stop').hidden = false");
+        }
         let attempts = Arc::new(AtomicUsize::new(0));
         let adapter: Arc<dyn SiteAdapter> = Arc::new(DisconnectSpy {
             cfg: serde_yaml::from_str("name: qwen").unwrap(),
@@ -1554,7 +1558,7 @@ mod closed_consumer_before_dispatch_tests {
     #[tokio::test]
     async fn mid_submission_disconnect_drops_send_future_and_requests_stop() {
         assert_eq!(
-            exercise_disconnect_while_submission_pending(false, true).await,
+            exercise_disconnect_while_submission_pending(false, true, false).await,
             1.0,
             "a hung acknowledged Send must not outlive its disconnected consumer"
         );
@@ -1563,7 +1567,7 @@ mod closed_consumer_before_dispatch_tests {
     #[tokio::test]
     async fn mid_submission_disconnect_never_clicks_an_untrusted_page() {
         assert_eq!(
-            exercise_disconnect_while_submission_pending(true, true).await,
+            exercise_disconnect_while_submission_pending(true, true, false).await,
             0.0,
             "redirected/foreign page cannot receive the abandoned Stop action"
         );
@@ -1572,9 +1576,18 @@ mod closed_consumer_before_dispatch_tests {
     #[tokio::test]
     async fn mid_submission_disconnect_does_not_cancel_without_fresh_stream_signal() {
         assert_eq!(
-            exercise_disconnect_while_submission_pending(false, false).await,
+            exercise_disconnect_while_submission_pending(false, false, false).await,
             0.0,
             "an inherited or absent Stop cannot certify a dispatched new generation"
+        );
+    }
+
+    #[tokio::test]
+    async fn mid_submission_disconnect_does_not_cancel_inherited_active_stop() {
+        assert_eq!(
+            exercise_disconnect_while_submission_pending(false, true, true).await,
+            0.0,
+            "a pre-existing active Stop must not be attributed to a new request"
         );
     }
 
