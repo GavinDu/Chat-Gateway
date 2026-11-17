@@ -1503,7 +1503,8 @@ mod submission_timeout_cancellation_tests {
     async fn stalled_submission_requests_stop_before_warm_page_reuse() {
         let stop = r#"<button aria-label="Stop generating" type="button"
             onclick="window.cancelClicks=(window.cancelClicks||0)+1">Stop</button>"#;
-        let (attempts, cancels) = exercise_submission(stop, false, MockSubmissionOutcome::Timeout).await;
+        let (attempts, cancels) =
+            exercise_submission(stop, false, MockSubmissionOutcome::Timeout).await;
         assert_eq!(attempts, 1.0);
         assert_eq!(cancels, 1.0, "cancel one genuine in-flight generation");
     }
@@ -1512,13 +1513,15 @@ mod submission_timeout_cancellation_tests {
     async fn timeout_never_clicks_unrelated_stop_or_foreign_page_control() {
         let unrelated = r#"<button type="button" aria-label="Stop sharing"
             onclick="window.cancelClicks=(window.cancelClicks||0)+1">Stop sharing</button>"#;
-        let (attempts, cancels) = exercise_submission(unrelated, false, MockSubmissionOutcome::Timeout).await;
+        let (attempts, cancels) =
+            exercise_submission(unrelated, false, MockSubmissionOutcome::Timeout).await;
         assert_eq!(attempts, 1.0);
         assert_eq!(cancels, 0.0);
 
         let foreign = r#"<button aria-label="Stop generating" type="button"
             onclick="window.cancelClicks=(window.cancelClicks||0)+1">Stop</button>"#;
-        let (attempts, cancels) = exercise_submission(foreign, true, MockSubmissionOutcome::Timeout).await;
+        let (attempts, cancels) =
+            exercise_submission(foreign, true, MockSubmissionOutcome::Timeout).await;
         assert_eq!(attempts, 1.0);
         assert_eq!(
             cancels, 0.0,
@@ -1530,14 +1533,16 @@ mod submission_timeout_cancellation_tests {
     async fn rejected_submission_cancels_possible_generation_without_losing_typed_error() {
         let stop = r#"<button aria-label="Stop generating" type="button"
             onclick="window.cancelClicks=(window.cancelClicks||0)+1">Stop</button>"#;
-        let (attempts, cancels) = exercise_submission(stop, false, MockSubmissionOutcome::Unacknowledged).await;
+        let (attempts, cancels) =
+            exercise_submission(stop, false, MockSubmissionOutcome::Unacknowledged).await;
         assert_eq!(attempts, 1.0);
         assert_eq!(
             cancels, 1.0,
             "a rejected acknowledgement may follow a real Send click"
         );
 
-        let (attempts, cancels) = exercise_submission(stop, true, MockSubmissionOutcome::Unacknowledged).await;
+        let (attempts, cancels) =
+            exercise_submission(stop, true, MockSubmissionOutcome::Unacknowledged).await;
         assert_eq!(attempts, 1.0);
         assert_eq!(
             cancels, 0.0,
@@ -1562,7 +1567,8 @@ mod submission_timeout_cancellation_tests {
     async fn rejected_submission_does_not_click_unrelated_stop_sharing() {
         let unrelated = r#"<button type="button" aria-label="Stop sharing"
             onclick="window.cancelClicks=(window.cancelClicks||0)+1">Stop sharing</button>"#;
-        let (attempts, cancels) = exercise_submission(unrelated, false, MockSubmissionOutcome::Unacknowledged).await;
+        let (attempts, cancels) =
+            exercise_submission(unrelated, false, MockSubmissionOutcome::Unacknowledged).await;
         assert_eq!(attempts, 1.0);
         assert_eq!(cancels, 0.0);
     }
