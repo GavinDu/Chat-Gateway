@@ -128,6 +128,7 @@ mod session_zeroization_tests {
 }
 
 #[derive(Serialize, Deserialize, Clone)]
+#[serde(try_from = "CookieWire")]
 pub struct Cookie {
     pub name: String,
     pub value: String,
@@ -139,6 +140,54 @@ pub struct Cookie {
     pub expires: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub same_site: Option<String>,
+}
+
+// Preserve the existing serialized Cookie representation, including legacy
+// records with unrelated extra fields. Only the Chrome partition scope is
+// unrepresentable in the pinned Obscura jar: reject it before vault persistence
+// rather than silently accepting it as an unpartitioned bearer credential.
+// IgnoredAny discards the top-level site without allocating or logging it.
+#[derive(Deserialize)]
+struct CookieWire {
+    name: String,
+    value: String,
+    domain: String,
+    path: String,
+    secure: bool,
+    http_only: bool,
+    #[serde(default)]
+    expires: Option<f64>,
+    #[serde(default)]
+    same_site: Option<String>,
+    #[serde(default, alias = "partitionKey")]
+    partition_key: Option<serde::de::IgnoredAny>,
+}
+
+impl TryFrom<CookieWire> for Cookie {
+    type Error = &'static str;
+
+    fn try_from(mut wire: CookieWire) -> std::result::Result<Self, Self::Error> {
+        if wire.partition_key.is_some() {
+            wire.name.zeroize();
+            wire.value.zeroize();
+            wire.domain.zeroize();
+            wire.path.zeroize();
+            if let Some(same_site) = wire.same_site.as_mut() {
+                same_site.zeroize();
+            }
+            return Err("unsupported provider cookie partition scope");
+        }
+        Ok(Self {
+            name: wire.name,
+            value: wire.value,
+            domain: wire.domain,
+            path: wire.path,
+            secure: wire.secure,
+            http_only: wire.http_only,
+            expires: wire.expires,
+            same_site: wire.same_site,
+        })
+    }
 }
 
 impl Drop for Cookie {
@@ -193,6 +242,84 @@ mod browser_cookie_metadata_tests {
         cookie.same_site = Some("None".into());
         cookie.secure = false;
         assert!(cookie.validate_browser_metadata().is_err());
+    }
+}
+
+#[cfg(test)]
+mod cookie_partition_rejection_tests {
+    use super::*;
+
+    fn fixture() -> serde_json::Value {
+        serde_json::json!({
+            "name": "synthetic",
+            "value": "private-fixture-bearer",
+            "domain": ".chatgpt.com",
+            "path": "/",
+            "secure": true,
+            "http_only": true,
+            "expires": 2000000000.0,
+            "same_site": "Strict"
+        })
+    }
+
+    #[test]
+    fn both_partition_key_spellings_reject_without_reflecting_sensitive_scope() {
+        for field in ["partitionKey", "partition_key"] {
+            for metadata in [
+                serde_json::json!({"topLevelSite":"https://private.example"}),
+                serde_json::json!({"topLevelSite":"https://chatgpt.com","hasCrossSiteAncestor":true}),
+                serde_json::json!({}),
+                serde_json::json!("forged"),
+                serde_json::json!(0),
+            ] {
+                let mut cookie = fixture();
+                cookie[field] = metadata;
+                let error = serde_json::from_value::<Cookie>(cookie).err().unwrap();
+                assert_eq!(
+                    error.to_string(),
+                    "unsupported provider cookie partition scope"
+                );
+                for secret in ["private-fixture-bearer", "private.example", ".chatgpt.com"] {
+                    assert!(!error.to_string().contains(secret));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn whole_relay_snapshot_rejects_partitioned_cookie_before_import() {
+        let mut cookie = fixture();
+        cookie["partitionKey"] = serde_json::json!({"topLevelSite":"https://private.example"});
+        let value = serde_json::json!({
+            "cookies": [cookie],
+            "local_storage": {},
+            "ts": "synthetic"
+        });
+        let error = serde_json::from_value::<SessionFile>(value).err().unwrap();
+        assert_eq!(
+            error.to_string(),
+            "unsupported provider cookie partition scope"
+        );
+    }
+
+    #[test]
+    fn legacy_unpartitioned_cookies_keep_fidelity_and_canonical_wire_shape() {
+        let mut cookie = fixture();
+        cookie["partitionKey"] = serde_json::Value::Null;
+        cookie["legacy_unrelated_flag"] = serde_json::json!("allowed");
+        let parsed: Cookie = serde_json::from_value(cookie).unwrap();
+        assert_eq!(parsed.expires, Some(2000000000.0));
+        assert_eq!(parsed.same_site.as_deref(), Some("Strict"));
+        let serialized = serde_json::to_value(&parsed).unwrap();
+        assert!(serialized.get("partitionKey").is_none());
+        assert!(serialized.get("partition_key").is_none());
+        assert!(serialized.get("legacy_unrelated_flag").is_none());
+        assert_eq!(
+            serialized.get("value").and_then(|v| v.as_str()),
+            Some("private-fixture-bearer")
+        );
+        let legacy: Cookie = serde_json::from_value(fixture()).unwrap();
+        assert_eq!(serialized, serde_json::to_value(legacy).unwrap());
     }
 }
 
