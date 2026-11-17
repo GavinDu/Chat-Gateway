@@ -248,6 +248,39 @@ function safeSyncAttemptTimestamp(value) {
   return new Date(millis).toISOString() === value ? value : null;
 }
 
+// Last-failure diagnostics are server-generated evidence, not account validity.
+// Reject the *whole* record if any field is missing, stale or untrusted; never
+// interpolate a raw upstream error, URL, token or malformed status into the UI.
+const SAFE_LAST_FAILURE_STAGES = new Set([
+  "candidate_admission", "backend_admission",
+  "first_stream_event", "json_completion"
+]);
+const SAFE_LAST_FAILURE_REASONS = new Set([
+  "invalid_request", "model_not_found", "provider_busy", "session_expired",
+  "challenge", "timeout", "memory", "provider_failure",
+  "asset_blocked", "document_denied", "input_rejected",
+  "backend_unavailable", "candidate_skipped", "unclassified"
+]);
+function safeLastFailedRequest(provider, record) {
+  if (provider !== "chatgpt" && provider !== "metaai") return null;
+  if (!record || typeof record !== "object" || Array.isArray(record)) return null;
+  if (typeof record.request_id !== "string" ||
+      !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(record.request_id) ||
+      !SAFE_LAST_FAILURE_STAGES.has(record.stage) ||
+      !SAFE_LAST_FAILURE_REASONS.has(record.reason) ||
+      !Number.isSafeInteger(record.duration_ms) ||
+      record.duration_ms < 0 || record.duration_ms > 120_000 ||
+      typeof record.observed_at_utc !== "string" ||
+      !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(record.observed_at_utc)) return null;
+  const observed = Date.parse(record.observed_at_utc);
+  if (!Number.isFinite(observed) ||
+      new Date(observed).toISOString().replace(".000Z", "Z") !== record.observed_at_utc ||
+      Date.now() - observed > 300_000 || observed - Date.now() > 60_000) return null;
+  return "Last gateway failure: " + record.stage.replaceAll("_", " ") +
+    " / " + record.reason.replaceAll("_", " ") +
+    " · request " + record.request_id + " · " + record.duration_ms + " ms";
+}
+
 async function refreshStatus(force = false) {
   // Bind any authorization failure to the exact paired installation whose
   // health was requested, not a newer connection made during the await.
@@ -377,13 +410,15 @@ async function refreshStatus(force = false) {
     // An upload/check is not a verified login. The health call may fail
     // while this extension still remembers an earlier successful import.
     const staleSync = sync?.stale === true ? "Extension sync status stale (gateway check failed)" : null;
+    const lastFailedRequest = safeLastFailedRequest(item.provider, item.last_failed_request);
     status.textContent = [enabled, linked, browser, auth,
       ...(activation ? [activation] : []),
       ...(blocker ? [blocker] : []),
       ...(runtimeIssue ? [runtimeIssue] : []),
       ...(extensionIssue ? ["Extension sync: " + extensionIssue] : []),
       ...(syncAttempt ? [syncAttempt] : []),
-      ...(staleSync ? [staleSync] : [])
+      ...(staleSync ? [staleSync] : []),
+      ...(lastFailedRequest ? [lastFailedRequest] : [])
     ].join(" · ");
     li.append(status);
 
