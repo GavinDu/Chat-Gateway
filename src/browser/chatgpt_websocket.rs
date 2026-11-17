@@ -82,18 +82,27 @@ fn public_ip(ip: IpAddr) -> bool {
                 && o[0] != 0
                 && !(o[0] == 100 && (64..=127).contains(&o[1]))
                 && !(o[0] == 198 && (o[1] == 18 || o[1] == 19))
+                // Special-use and obsolete transition ranges must never
+                // become a local-network credential delivery path.
+                && !(o[0] == 192 && o[1] == 0 && o[2] == 0)
+                && !(o[0] == 192 && o[1] == 88 && o[2] == 99)
                 && o[0] < 240
         }
         IpAddr::V6(v) => {
             if let Some(v4) = v.to_ipv4_mapped() {
                 return public_ip(IpAddr::V4(v4));
             }
-            !v.is_loopback()
-                && !v.is_unspecified()
+            // Admit only unicast 2000::/3, excluding non-routed or special
+            // transition/documentation ranges. IPv4-mapped values above use
+            // IPv4's stricter public-only policy.
+            (v.segments()[0] & 0xe000) == 0x2000
                 && !v.is_multicast()
                 && !v.is_unique_local()
                 && !v.is_unicast_link_local()
+                && !(v.segments()[0] == 0x2001 && v.segments()[1] == 0)
                 && !(v.segments()[0] == 0x2001 && v.segments()[1] == 0x0db8)
+                && !(v.segments()[0] == 0x2001 && (v.segments()[1] & 0xfff0) == 0x0010)
+                && v.segments()[0] != 0x2002
         }
     }
 }
@@ -513,10 +522,16 @@ mod tests {
             "::1",
             "fc00::1",
             "::ffff:127.0.0.1",
+            "192.0.0.1",
+            "192.88.99.1",
+            "2001:db8::1",
+            "2002::1",
+            "2001::1",
         ] {
             assert!(!public_ip(ip.parse().unwrap()));
         }
         assert!(public_ip("1.1.1.1".parse().unwrap()));
+        assert!(public_ip("2001:4860:4860::8888".parse().unwrap()));
     }
 
     #[tokio::test]
