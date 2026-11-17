@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { stat } from 'node:fs/promises';
-import { startOwnerTunnel } from './ssh-fixture.mjs';
+import ssh2 from 'ssh2';
+import { startOwnerTunnel, generateFixtureKeyPair } from './ssh-fixture.mjs';
 
 // No real owner credentials, existing SSH config, or provider browser state:
 // every test creates its own ephemeral fixture server and injects only the
@@ -68,4 +69,39 @@ test('SSH fixture classifies synchronous helper spawn failure without raw stderr
   await expectStartupCategory({
     spawnHelper() { throw new Error('private external path and token'); }
   }, 'helper_spawn_failed');
+});
+
+test('P-256 fixture keys parse and prove signed challenge, not reused host keys', () => {
+  const { utils } = ssh2;
+  for (let n = 0; n < 32; n++) {
+    const keys = generateFixtureKeyPair();
+    const privateKey = utils.parseKey(keys.private);
+    const publicKey = utils.parseKey(keys.public);
+    assert.ok(!(privateKey instanceof Error), 'private key must parse');
+    assert.ok(!(publicKey instanceof Error), 'public key must parse');
+    assert.equal(privateKey.type, 'ecdsa-sha2-nistp256');
+    assert.equal(publicKey.type, 'ecdsa-sha2-nistp256');
+    assert.deepEqual(privateKey.getPublicSSH(), publicKey.getPublicSSH());
+    const challenge = Buffer.from('isolated fixture authentication');
+    const signature = privateKey.sign(challenge);
+    assert.ok(Buffer.isBuffer(signature));
+    assert.equal(publicKey.verify(challenge, signature), true);
+    assert.equal(publicKey.verify(Buffer.from('different challenge'), signature), false);
+  }
+});
+
+test('malformed generated fixture key fails with fixed redacted category and removes owned temp', async () => {
+  await expectStartupCategory({
+    generateFixtureKeyPair() {
+      return {private:'not-a-private-key secret',public:'not-a-public-key secret'};
+    }
+  }, 'startup_unclassified');
+});
+
+test('fixture key-generator exception is redacted and cleans up its isolated state', async () => {
+  await expectStartupCategory({
+    generateFixtureKeyPair() {
+      throw new Error('private random key data that must never leak');
+    }
+  }, 'startup_unclassified');
 });
