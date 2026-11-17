@@ -3885,7 +3885,7 @@ pub(crate) fn require_response_probe_origins(
 /// Inline page guard reused for typing *and* the atomic Send click. A
 /// Rust-side check before an await is insufficient if navigation occurs
 /// while a framework-controlled composer is settling.
-fn provider_origin_guard_js(expected_provider: Option<&str>) -> anyhow::Result<String> {
+pub(crate) fn provider_origin_guard_js(expected_provider: Option<&str>) -> anyhow::Result<String> {
     let provider = serde_json::to_string(&expected_provider)?;
     Ok(format!(
         r#"const expectedProvider = {provider};

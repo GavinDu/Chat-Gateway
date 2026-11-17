@@ -192,8 +192,20 @@ pub trait SiteAdapter: Send + Sync {
         // A reused SPA can retain hidden/disabled Stop buttons, and may also
         // show unrelated controls such as "Stop sharing". Clicking the first
         // DOM match is not a reliable generation cancellation.
-        let _ = page.evaluate(
-            r#"(() => {
+        // The provider-origin check and the Stop click must run within
+        // one DOM evaluation, not a Rust URL read followed by a later click.
+        let route_guard = match common::provider_origin_guard_js(Some(self.name())) {
+            Ok(guard) => guard,
+            Err(_) => return,
+        };
+        // Test-only escape hatch for explicitly tagged offline data fixtures;
+        // the production build always requires the strict HTTPS origin.
+        #[cfg(test)]
+        let route_guard = format!(
+            "if (!(location.protocol === 'data:' && document.documentElement.hasAttribute('data-chat-gateway-test-fixture'))) {{ {route_guard} }}"
+        );
+        let js = r#"(() => {
+                __CG_EXPECTED_PROVIDER_ORIGIN_GUARD__
                 for (const button of document.querySelectorAll('button, [role="button"]')) {
                     const label = (button.getAttribute("aria-label") || button.innerText || button.textContent || "").trim();
                     if (!/^(stop|stop generating|stop generation|stop responding|stop response|stop answering)$/i.test(label)) continue;
@@ -220,8 +232,9 @@ pub trait SiteAdapter: Send + Sync {
                     } catch (_) {}
                 }
                 return false;
-            })()"#,
-        );
+            })()"#
+            .replace("__CG_EXPECTED_PROVIDER_ORIGIN_GUARD__", &route_guard);
+        let _ = page.evaluate(&js);
     }
 
     fn selectors(&self) -> AdapterSelectors;
@@ -3338,13 +3351,53 @@ mod generation_cancel_visibility_tests {
     use super::*;
 
     #[tokio::test]
+    async fn inline_cancellation_refuses_unmarked_foreign_dom_even_with_real_stop() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <button aria-label="Stop generating"
+                onclick="window.stopHits=(window.stopHits||0)+1">Stop</button>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        let adapter = qwen::QwenAdapter {
+            cfg: serde_yaml::from_str("name: qwen").unwrap(),
+        };
+        adapter.cancel_generation(&page);
+        assert_eq!(
+            page.evaluate("window.stopHits || 0").as_f64(),
+            Some(0.0),
+            "foreign page cannot borrow the Stop label to receive a click"
+        );
+        page.evaluate("document.documentElement.setAttribute('data-chat-gateway-test-fixture','')");
+        adapter.cancel_generation(&page);
+        assert_eq!(
+            page.evaluate("window.stopHits || 0").as_f64(),
+            Some(1.0),
+            "only the explicitly marked offline test fixture may bypass HTTPS"
+        );
+        page.evaluate("document.documentElement.removeAttribute('data-chat-gateway-test-fixture')");
+        adapter.cancel_generation(&page);
+        assert_eq!(
+            page.evaluate("window.stopHits || 0").as_f64(),
+            Some(1.0),
+            "removing the test-only marker must immediately restore rejection"
+        );
+    }
+
+    #[tokio::test]
     async fn cancellation_skips_hidden_disabled_and_unrelated_stop_buttons() {
         let browser = obscura_core::Browser::builder()
             .stealth(false)
             .build()
             .unwrap();
         let mut page = browser.new_page().await.unwrap();
-        let html = r#"<html><body><button aria-label="Stop generating" style="display:none" onclick="window.hiddenClicks=(window.hiddenClicks||0)+1">Hidden</button><button aria-label="Stop sharing" onclick="window.unrelatedClicks=(window.unrelatedClicks||0)+1">Stop sharing</button><button aria-label="Stop generating" disabled onclick="window.disabledClicks=(window.disabledClicks||0)+1">Disabled</button><fieldset disabled><button aria-label="Stop generating" onclick="window.fieldsetClicks=(window.fieldsetClicks||0)+1">Disabled fieldset</button></fieldset><button aria-label="Stop generating" onclick="window.activeClicks=(window.activeClicks||0)+1">Stop</button></body></html>"#;
+        let html = r#"<html data-chat-gateway-test-fixture><body><button aria-label="Stop generating" style="display:none" onclick="window.hiddenClicks=(window.hiddenClicks||0)+1">Hidden</button><button aria-label="Stop sharing" onclick="window.unrelatedClicks=(window.unrelatedClicks||0)+1">Stop sharing</button><button aria-label="Stop generating" disabled onclick="window.disabledClicks=(window.disabledClicks||0)+1">Disabled</button><fieldset disabled><button aria-label="Stop generating" onclick="window.fieldsetClicks=(window.fieldsetClicks||0)+1">Disabled fieldset</button></fieldset><button aria-label="Stop generating" onclick="window.activeClicks=(window.activeClicks||0)+1">Stop</button></body></html>"#;
         let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
         page.goto(&format!("data:text/html,{encoded}"))
             .await
@@ -3383,7 +3436,7 @@ mod generation_cancel_visibility_tests {
             .build()
             .unwrap();
         let mut page = browser.new_page().await.unwrap();
-        let html = r#"<html><head><style>
+        let html = r#"<html data-chat-gateway-test-fixture><head><style>
             .transparent { opacity: 0; }
         </style></head><body>
             <button id="ghost" aria-label="Stop generating" class="transparent"
