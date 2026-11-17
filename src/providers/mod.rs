@@ -2749,16 +2749,16 @@ mod generation_cancel_visibility_tests {
             .transparent { opacity: 0; }
         </style></head><body>
             <button id="ghost" aria-label="Stop generating" class="transparent"
-                onclick="window.ghost=(window.ghost||0)+1">Stop</button>
+                onclick="window.ghostCount=(window.ghostCount||0)+1">Stop</button>
             <section class="transparent"><button id="ghost-child" aria-label="Stop generation"
-                onclick="window.ghostChild=(window.ghostChild||0)+1">Stop</button></section>
+                onclick="window.ghostChildCount=(window.ghostChildCount||0)+1">Stop</button></section>
             <button id="inert" aria-label="Stop responding" style="pointer-events:none"
-                onclick="window.inert=(window.inert||0)+1">Stop</button>
+                onclick="window.inertCount=(window.inertCount||0)+1">Stop</button>
             <section style="pointer-events:none"><button id="inert-child"
                 aria-label="Stop generating" style="pointer-events:auto"
-                onclick="window.inertChild=(window.inertChild||0)+1">Stop</button></section>
+                onclick="window.inertChildCount=(window.inertChildCount||0)+1">Stop</button></section>
             <button id="real" aria-label="Stop generating"
-                onclick="window.real=(window.real||0)+1">Stop</button>
+                onclick="window.realCount=(window.realCount||0)+1">Stop</button>
         </body></html>"#;
         let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
         page.goto(&format!("data:text/html,{encoded}"))
@@ -2768,7 +2768,7 @@ mod generation_cancel_visibility_tests {
             cfg: serde_yaml::from_str("name: qwen").unwrap(),
         };
         adapter.cancel_generation(&page);
-        for field in ["ghost", "ghostChild", "inert", "inertChild"] {
+        for field in ["ghostCount", "ghostChildCount", "inertCount", "inertChildCount"] {
             let count = page.evaluate(&format!("window.{field} || 0"));
             assert_eq!(
                 count.as_f64(),
@@ -2776,12 +2776,12 @@ mod generation_cancel_visibility_tests {
                 "nonactionable {field} Stop must not be clicked"
             );
         }
-        assert_eq!(page.evaluate("window.real || 0").as_f64(), Some(1.0));
+        assert_eq!(page.evaluate("window.realCount || 0").as_f64(), Some(1.0));
 
         page.evaluate("document.querySelector('#real').hidden = true");
         adapter.cancel_generation(&page);
         assert_eq!(
-            page.evaluate("window.real || 0").as_f64(),
+            page.evaluate("window.realCount || 0").as_f64(),
             Some(1.0),
             "no candidate is actionable after hiding the only real Stop"
         );
