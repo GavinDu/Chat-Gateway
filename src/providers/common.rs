@@ -3312,6 +3312,7 @@ pub fn probe_selector_groups(
 /// must not override the latest visible assistant response or satisfy probes.
 pub fn last_element_text(page: &Page, selector: &str) -> Option<String> {
     let sel_js = serde_json::to_string(selector).ok()?;
+    let nontransparent = nontransparent_ancestors_expression("node");
     let js = format!(
         r#"(() => {{
             const nodes = Array.from(document.querySelectorAll({sel_js}));
@@ -3322,6 +3323,7 @@ pub fn last_element_text(page: &Page, selector: &str) -> Option<String> {
                 const node = nodes[i];
                 if (!node.getClientRects().length ||
                     window.getComputedStyle(node).visibility === 'hidden' ||
+                    !{nontransparent} ||
                     node.closest('[hidden], [inert], [aria-hidden="true"], [aria-disabled="true"], fieldset[disabled]') ||
                     node.disabled || node.matches(':disabled')) continue;
                 const value = renderedText(node);
@@ -3461,6 +3463,51 @@ mod last_visible_response_text_tests {
             super::last_element_text(&page, ".answer").as_deref(),
             Some("answer")
         );
+    }
+    #[tokio::test]
+    async fn transparent_assistant_clones_match_response_probe_visibility() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <div class="answer" id="live">visible reply</div>
+            <div class="answer" id="ghost-self" style="opacity:0">stale self</div>
+            <section style="opacity:0">
+                <div class="answer" id="ghost-child">stale ancestor</div>
+            </section>
+            <div class="answer" id="translucent" style="opacity:0.4">translucent reply</div>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+
+        for expected in ["translucent reply", "visible reply"] {
+            assert_eq!(
+                super::last_element_text(&page, ".answer").as_deref(),
+                Some(expected)
+            );
+            assert_eq!(
+                super::response_text(&page, &[".answer"]).as_deref(),
+                Some(expected)
+            );
+            assert_eq!(
+                super::response_probe(&page, &[".answer"], false)
+                    .text
+                    .as_deref(),
+                Some(expected)
+            );
+            page.evaluate("document.querySelector('#translucent').style.opacity = '0'");
+        }
+
+        page.evaluate("document.querySelector('#live').style.opacity = '0'");
+        assert!(super::last_element_text(&page, ".answer").is_none());
+        assert!(super::response_text(&page, &[".answer"]).is_none());
+        assert!(super::response_probe(&page, &[".answer"], false)
+            .text
+            .is_none());
     }
 }
 
