@@ -245,6 +245,76 @@ mod browser_cookie_metadata_tests {
     }
 }
 
+#[cfg(test)]
+mod cookie_partition_rejection_tests {
+    use super::*;
+
+    fn fixture() -> serde_json::Value {
+        serde_json::json!({
+            "name": "synthetic",
+            "value": "private-fixture-bearer",
+            "domain": ".chatgpt.com",
+            "path": "/",
+            "secure": true,
+            "http_only": true,
+            "expires": 2000000000.0,
+            "same_site": "Strict"
+        })
+    }
+
+    #[test]
+    fn both_partition_key_spellings_reject_without_reflecting_sensitive_scope() {
+        for field in ["partitionKey", "partition_key"] {
+            for metadata in [
+                serde_json::json!({"topLevelSite":"https://private.example"}),
+                serde_json::json!({"topLevelSite":"https://chatgpt.com","hasCrossSiteAncestor":true}),
+                serde_json::json!({}),
+                serde_json::json!("forged"),
+                serde_json::json!(0),
+            ] {
+                let mut cookie = fixture();
+                cookie[field] = metadata;
+                let error = serde_json::from_value::<Cookie>(cookie).err().unwrap();
+                assert_eq!(error.to_string(), "unsupported provider cookie partition scope");
+                for secret in ["private-fixture-bearer", "private.example", ".chatgpt.com"] {
+                    assert!(!error.to_string().contains(secret));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn whole_relay_snapshot_rejects_partitioned_cookie_before_import() {
+        let mut cookie = fixture();
+        cookie["partitionKey"] =
+            serde_json::json!({"topLevelSite":"https://private.example"});
+        let value = serde_json::json!({
+            "cookies": [cookie],
+            "local_storage": {},
+            "ts": "synthetic"
+        });
+        let error = serde_json::from_value::<SessionFile>(value).err().unwrap();
+        assert_eq!(error.to_string(), "unsupported provider cookie partition scope");
+    }
+
+    #[test]
+    fn legacy_unpartitioned_cookies_keep_fidelity_and_canonical_wire_shape() {
+        let mut cookie = fixture();
+        cookie["partitionKey"] = serde_json::Value::Null;
+        cookie["legacy_unrelated_flag"] = serde_json::json!("allowed");
+        let parsed: Cookie = serde_json::from_value(cookie).unwrap();
+        assert_eq!(parsed.expires, Some(2000000000.0));
+        assert_eq!(parsed.same_site.as_deref(), Some("Strict"));
+        let serialized = serde_json::to_value(&parsed).unwrap();
+        assert!(serialized.get("partitionKey").is_none());
+        assert!(serialized.get("partition_key").is_none());
+        assert!(serialized.get("legacy_unrelated_flag").is_none());
+        assert_eq!(serialized.get("value").and_then(|v| v.as_str()), Some("private-fixture-bearer"));
+        let legacy: Cookie = serde_json::from_value(fixture()).unwrap();
+        assert_eq!(serialized, serde_json::to_value(legacy).unwrap());
+    }
+}
+
 impl From<obscura_core::Cookie> for Cookie {
     fn from(c: obscura_core::Cookie) -> Self {
         Self {
