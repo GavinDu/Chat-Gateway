@@ -96,7 +96,10 @@ struct GatewayFailureEvidence {
     stage: String,
     reason: String,
     duration_ms: u64,
-    observed_at_ms: u64,
+    /// Fixture-compatible Unix milliseconds; do not accept together with UTC.
+    observed_at_ms: Option<u64>,
+    /// Exact owner status API format, not a freeform provider timestamp.
+    observed_at_utc: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -159,6 +162,27 @@ fn canonical_request_id(raw: &str) -> Option<uuid::Uuid> {
     (id.to_string() == raw).then_some(id)
 }
 
+/// Only a single source-owned timestamp shape may establish recency. Direct
+/// owner-status records use canonical RFC3339 UTC seconds; older offline
+/// fixtures may still provide Unix milliseconds. A contradictory pair, missing
+/// field, invalid date/zone, or overflowing value supplies no usable evidence.
+fn gateway_failure_timestamp(e: &GatewayFailureEvidence) -> Option<u64> {
+    match (e.observed_at_ms, e.observed_at_utc.as_deref()) {
+        (Some(ms), None) => Some(ms),
+        (None, Some(utc)) => {
+            if utc.len() != 20 || !utc.ends_with('Z') {
+                return None;
+            }
+            let time = chrono::DateTime::parse_from_rfc3339(utc).ok()?;
+            if time.to_rfc3339_opts(chrono::SecondsFormat::Secs, true) != utc {
+                return None;
+            }
+            u64::try_from(time.timestamp_millis()).ok()
+        }
+        _ => None,
+    }
+}
+
 fn fixed_gateway_stage(stage: &str) -> bool {
     matches!(
         stage,
@@ -204,7 +228,9 @@ fn classify(e: &Evidence, now: u64) -> Diagnosis {
         e.snapshot.as_ref().map(|x| x.observed_at_ms),
         e.obscura.as_ref().map(|x| x.observed_at_ms),
         e.attempt.as_ref().map(|x| x.observed_at_ms),
-        e.gateway_failure.as_ref().map(|x| x.observed_at_ms),
+        e.gateway_failure
+            .as_ref()
+            .and_then(gateway_failure_timestamp),
     ];
     if timestamps
         .into_iter()
@@ -229,7 +255,8 @@ fn classify(e: &Evidence, now: u64) -> Diagnosis {
         return inconclusive(provider, "snapshot_generation_mismatch");
     }
     if let Some(failure) = e.gateway_failure.as_ref() {
-        if failure.duration_ms > 120_000
+        if gateway_failure_timestamp(failure).is_none()
+            || failure.duration_ms > 120_000
             || !fixed_gateway_stage(&failure.stage)
             || !fixed_gateway_reason(&failure.reason)
         {
