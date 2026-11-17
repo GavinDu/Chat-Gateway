@@ -399,6 +399,89 @@ mod tests {
         assert_eq!(checked(v).category, "inconclusive");
     }
 
+    fn with_gateway_failure() -> Value {
+        let mut v = base();
+        v["attempt"]["request_id"] = json!(ID);
+        v["gateway_failure"] = json!({
+            "request_id": ID,
+            "stage": "json_completion",
+            "reason": "backend_unavailable",
+            "duration_ms": 120_000,
+            "observed_at_ms": NOW
+        });
+        v
+    }
+
+    #[test]
+    fn matching_gateway_last_failure_is_only_owner_supplied_evidence_not_live_proof() {
+        let v = with_gateway_failure();
+        let result = checked(v);
+        assert_eq!(result.category, "transport_or_extraction");
+        assert!(!result.live_proof);
+        let body = serde_json::to_string(&result).unwrap();
+        assert!(!body.contains(ID));
+        assert!(!body.contains("backend_unavailable"));
+    }
+
+    #[test]
+    fn gateway_failure_requires_matching_canonical_id_and_failed_attempt() {
+        let mut v = with_gateway_failure();
+        v["gateway_failure"]["request_id"] = json!(OTHER_ID);
+        assert_eq!(checked(v.clone()).reason, "gateway_request_id_mismatch");
+        v["gateway_failure"]["request_id"] = json!(ID);
+        v["attempt"]["request_id"] = json!("COOKIE=secret");
+        assert_eq!(checked(v.clone()).reason, "missing_gateway_request_correlation");
+        v["attempt"]["request_id"] = json!(ID.to_uppercase());
+        assert_eq!(checked(v.clone()).reason, "missing_gateway_request_correlation");
+        v["attempt"]["request_id"] = json!(ID);
+        v["gateway_failure"]["request_id"] = json!("00000000-0000-0000-0000-000000000000");
+        assert_eq!(checked(v.clone()).reason, "missing_gateway_request_correlation");
+        v["gateway_failure"]["request_id"] = json!(ID);
+        v["attempt"].as_object_mut().unwrap().remove("request_id");
+        assert_eq!(checked(v.clone()).reason, "missing_gateway_request_correlation");
+        v["attempt"]["request_id"] = json!(ID);
+        v.as_object_mut().unwrap().remove("attempt");
+        assert_eq!(checked(v.clone()).reason, "missing_gateway_request_correlation");
+        v["attempt"] = base()["attempt"].clone();
+        v["attempt"]["request_id"] = json!(ID);
+        v["attempt"]["outcome"] = json!("passed");
+        assert_eq!(checked(v).reason, "contradictory_gateway_failure_evidence");
+    }
+
+    #[test]
+    fn gateway_failure_stage_reason_duration_and_freshness_are_strict() {
+        let mut v = with_gateway_failure();
+        v["gateway_failure"]["stage"] = json!("https://private.example/?token=secret");
+        assert_eq!(checked(v.clone()).reason, "invalid_gateway_failure_evidence");
+        v["gateway_failure"]["stage"] = json!("first_stream_event");
+        v["gateway_failure"]["reason"] = json!("private cookie value");
+        assert_eq!(checked(v.clone()).reason, "invalid_gateway_failure_evidence");
+        v["gateway_failure"]["reason"] = json!("timeout");
+        v["gateway_failure"]["duration_ms"] = json!(120_001);
+        assert_eq!(checked(v.clone()).reason, "invalid_gateway_failure_evidence");
+        v["gateway_failure"]["duration_ms"] = json!(90);
+        v["gateway_failure"]["observed_at_ms"] = json!(NOW - MAX_AGE_MS - 1);
+        assert_eq!(checked(v.clone()).reason, "stale_or_future_evidence");
+        v["gateway_failure"]["observed_at_ms"] = json!(NOW + CLOCK_SKEW_MS + 1);
+        assert_eq!(checked(v.clone()).reason, "stale_or_future_evidence");
+        v["gateway_failure"]["observed_at_ms"] = json!(NOW);
+        v["gateway_failure"]["token"] = json!("private-account-cookie");
+        assert!(serde_json::from_value::<Evidence>(v).is_err());
+    }
+
+    #[test]
+    fn gateway_failure_cannot_bypass_snapshot_generation_or_account_verification() {
+        let mut v = with_gateway_failure();
+        v["snapshot"]["generation"] = json!(OTHER_ID);
+        assert_eq!(checked(v.clone()).reason, "snapshot_generation_mismatch");
+        v["snapshot"]["generation"] = json!(ID);
+        v["obscura"]["verdict"] = json!("unknown");
+        assert_eq!(
+            checked(v).reason,
+            "authoritative_obscura_account_verifier_missing"
+        );
+    }
+
     #[test]
     fn explicit_browser_rejection_and_capture_paths_are_separate() {
         let mut v = base();
