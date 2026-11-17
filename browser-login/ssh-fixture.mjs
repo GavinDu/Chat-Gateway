@@ -23,14 +23,38 @@ function startupError(category) {
   return error;
 }
 
+// ssh2 1.17's Ed25519 public-key serializer can strip genuine leading zero
+// bytes. For test-only disposable SSH keys use P-256 and validate both public
+// and private parsers before starting the real authenticated SSH smoke.
+export function generateFixtureKeyPair() {
+  return utils.generateKeyPairSync('ecdsa', {bits:256});
+}
+
 // The optional hooks inject only fixture process/socket failures in offline
 // tests. The real browser/SSH acceptance always calls this with no hooks.
 export async function startOwnerTunnel(gatewayPort, testHooks = {}) {
   const temp = await mkdtemp('/dev/shm/cg-ssh-fixture-');
   testHooks.onTemporaryDirectory?.(temp);
-  const host = utils.generateKeyPairSync('ed25519');
-  const owner = utils.generateKeyPairSync('ed25519');
-  const allowed = utils.parseKey(owner.public);
+  let host, owner, allowed;
+  try {
+    const generate = testHooks.generateFixtureKeyPair || generateFixtureKeyPair;
+    host = generate();
+    owner = generate();
+    const privateHost = utils.parseKey(host.private);
+    const privateOwner = utils.parseKey(owner.private);
+    allowed = utils.parseKey(owner.public);
+    if (privateHost instanceof Error || privateOwner instanceof Error ||
+        allowed instanceof Error ||
+        privateHost.type !== 'ecdsa-sha2-nistp256' ||
+        privateOwner.type !== 'ecdsa-sha2-nistp256' ||
+        allowed.type !== 'ecdsa-sha2-nistp256' ||
+        !privateOwner.getPublicSSH().equals(allowed.getPublicSSH())) {
+      throw startupError('startup_unclassified');
+    }
+  } catch {
+    await rm(temp,{recursive:true,force:true});
+    throw startupError('startup_unclassified');
+  }
   const clients = new Set(), children = new Set();
   let authenticated = 0, rejected = 0, helper;
   const source = await readFile(join(root, 'owner_tunnel.py'), 'utf8');
