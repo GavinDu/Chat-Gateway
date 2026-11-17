@@ -10,6 +10,17 @@ const PROVIDERS = {
   manus: ["manus.im"]
 };
 
+// The same full host-permission contract must guard cookie capture and the
+// final POST dispatch. One canonical list prevents provider scopes drifting.
+function requiredProviderOrigins(provider) {
+  if (typeof provider !== "string" || !Object.hasOwn(PROVIDERS, provider)) {
+    throw new Error("Unsupported provider.");
+  }
+  return PROVIDERS[provider].flatMap(domain => [
+    "https://" + domain + "/*", "https://*." + domain + "/*"
+  ]);
+}
+
 const PROVIDER_LOGIN_URLS = Object.freeze({
   chatgpt: "https://chatgpt.com/",
   claude: "https://claude.ai/",
@@ -91,6 +102,17 @@ async function relayFetch(path, options = {}, expectedConnection = null) {
       throw new Error("Provider consent or gateway connection changed during sync.");
     }
   }
+  // The provider's Chrome host permission can be revoked while the snapshot
+  // is hashed or the gateway permission/storage checks above are awaited.
+  // Reconfirm at the last pre-fetch boundary for cookie POST only. Logout
+  // after permission revocation and ordinary status requests remain usable.
+  if (expectedConnection && Object.hasOwn(expectedConnection, "provider") &&
+      String(options.method || "GET").toUpperCase() === "POST") {
+    const origins = requiredProviderOrigins(expectedConnection.provider);
+    if (!await chrome.permissions.contains({origins})) {
+      throw new Error("Provider host permissions were revoked before relay upload.");
+    }
+  }
   const headers = new Headers(options.headers || {});
   headers.set("X-Relay-Timestamp", String(Math.floor(Date.now() / 1000)));
   headers.set("X-Relay-Nonce", randomHex());
@@ -143,10 +165,7 @@ async function providerCookieSnapshot(provider, afterPermissionCheck = null) {
   // A partial permission grant must never overwrite a valid gateway session
   // with an incomplete cookie set. Check every declared root and subdomain
   // pattern before reading or transmitting any session material.
-  const requiredOrigins = domains.flatMap(domain => [
-    "https://" + domain + "/*",
-    "https://*." + domain + "/*"
-  ]);
+  const requiredOrigins = requiredProviderOrigins(provider);
   const hasAllPermissions = await chrome.permissions.contains({origins:requiredOrigins});
   if (!hasAllPermissions) {
     throw new Error("Missing provider host permissions. Refusing to send a partial cookie snapshot; re-link the provider and grant all requested domains.");
@@ -288,10 +307,7 @@ async function syncProvider(provider, {
   if (snapshot.cookies.length === 0) return "no_cookies";
   // Storage reads also await; recheck host consent at the final upload
   // boundary rather than relying only on the snapshot-time checks.
-  const domains = PROVIDERS[provider];
-  const requiredOrigins = domains.flatMap(domain => [
-    "https://" + domain + "/*", "https://*." + domain + "/*"
-  ]);
+  const requiredOrigins = requiredProviderOrigins(provider);
   if (!await chrome.permissions.contains({origins:requiredOrigins})) {
     throw new Error("Provider host permissions were revoked before session sync.");
   }
