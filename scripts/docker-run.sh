@@ -30,6 +30,9 @@ Usage:
   scripts/docker-run.sh pairing-code (legacy paired-mode only)
   scripts/docker-run.sh login <provider>
   scripts/docker-run.sh enable-manus (edit existing config only; restart separately)
+  scripts/docker-run.sh focus-chatgpt-metaai-preview (read-only plan)
+  scripts/docker-run.sh focus-chatgpt-metaai (disable other providers; restart separately)
+  scripts/docker-run.sh restore-provider-focus (restore previous enabled flags; restart separately)
   scripts/docker-run.sh manus-status (read-only, redacted local enabled flag)
   scripts/docker-run.sh manus-runtime-status (read-only, loopback gateway state)
 
@@ -354,6 +357,17 @@ case "${1:-}" in
     ;;
   enable-manus)
     enable_manus_config
+    ;;
+  focus-chatgpt-metaai-preview)
+    python3 -B "$ROOT/scripts/focus_providers.py" --config "$CONFIG"
+    ;;
+  focus-chatgpt-metaai)
+    python3 -B "$ROOT/scripts/focus_providers.py" --config "$CONFIG" --apply
+    echo "Only ChatGPT/Meta AI kept their previous enabled flags. Restart explicitly to apply."
+    ;;
+  restore-provider-focus)
+    python3 -B "$ROOT/scripts/focus_providers.py" --config "$CONFIG" --restore
+    echo "Previous provider flags restored locally. Restart explicitly to apply."
     ;;
   manus-status)
     manus_config_status
