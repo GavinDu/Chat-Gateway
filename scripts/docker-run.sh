@@ -78,6 +78,20 @@ build_image() {
   if [[ -n "${CHAT_GATEWAY_BUILD_CACHE_TO:-}" ]]; then
     args+=(--cache-to "$CHAT_GATEWAY_BUILD_CACHE_TO")
   fi
+  # A clean source tree alone authorizes commit attribution. Dirty, missing,
+  # or non-Git checkouts use unknown, never the latest remote/main SHA.
+  local source_sha="unknown" working_tree_status="" candidate_sha="" build_timestamp
+  if command -v git >/dev/null 2>&1 && \
+      working_tree_status="$(git -C "$ROOT" status --porcelain --untracked-files=normal 2>/dev/null)" && \
+      [[ -z "$working_tree_status" ]]; then
+    candidate_sha="$(git -C "$ROOT" rev-parse --verify HEAD 2>/dev/null || true)"
+    if [[ "$candidate_sha" =~ ^[a-f0-9]{40}$ ]]; then
+      source_sha="$candidate_sha"
+    fi
+  fi
+  build_timestamp="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  args+=(--build-arg "CHAT_GATEWAY_SOURCE_SHA=$source_sha")
+  args+=(--build-arg "CHAT_GATEWAY_BUILD_TIMESTAMP=$build_timestamp")
   args+=("$ROOT")
   # Preserve build failure status; never fall back to a stale image or builder.
   docker "${args[@]}"
@@ -381,11 +395,45 @@ case "${1:-}" in
     require_docker
     if container_exists; then
       docker ps --filter "name=^/$CONTAINER$" --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'
-      if curl --fail --silent "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
+      if curl --fail --silent --max-time 5 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
         echo "Health: healthy"
       else
         echo "Health: unhealthy (inspect with '$0 logs')" >&2
         exit 1
+      fi
+      # The running container's immutable image ID is distinct from a mutable
+      # local tag. Never use git HEAD here to claim the installed version.
+      image_id="$(docker inspect --format '{{.Image}}' "$CONTAINER" 2>/dev/null || true)"
+      image_revision="$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$CONTAINER" 2>/dev/null || true)"
+      [[ "$image_id" =~ ^sha256:[a-f0-9]{64}$ ]] || image_id="unknown"
+      [[ "$image_revision" =~ ^[a-f0-9]{40}$ ]] || image_revision="unknown"
+      binary_revision="unknown"
+      if command -v python3 >/dev/null 2>&1; then
+        # Parse only allowlisted build identity from bounded JSON, never echo
+        # arbitrary gateway output, upstream errors, prompts or credentials.
+        binary_revision="$(curl --fail --silent --max-time 5 "http://127.0.0.1:$PORT/health" | python3 -c '
+import json, re, sys
+try:
+    raw = sys.stdin.buffer.read(262145)
+    if len(raw) > 262144:
+        raise ValueError("oversize")
+    doc = json.loads(raw)
+    rev = doc.get("build", {}).get("source_sha", "unknown")
+    print(rev if isinstance(rev, str) and re.fullmatch(r"[a-f0-9]{40}", rev) else "unknown")
+except (ValueError, TypeError, AttributeError, UnicodeDecodeError):
+    print("unknown")
+' 2>/dev/null)" || binary_revision="unknown"
+      fi
+      [[ "$binary_revision" =~ ^[a-f0-9]{40}$ ]] || binary_revision="unknown"
+      echo "Running image ID: $image_id"
+      echo "Image revision: $image_revision"
+      echo "Binary revision: $binary_revision"
+      if [[ "$image_revision" == "unknown" || "$binary_revision" == "unknown" ]]; then
+        echo "Build provenance: unverifiable"
+      elif [[ "$image_revision" == "$binary_revision" ]]; then
+        echo "Build provenance: match"
+      else
+        echo "Build provenance: mismatch"
       fi
     else
       echo "Container $CONTAINER is not created."
