@@ -293,10 +293,16 @@ const RESPONSE_RENDERED_TEXT_JS: &str = r#"
         const blocks = Array.from(node.querySelectorAll('[class*="MarkdownRoot-"]'))
             .filter(block => {
                 const parentBlock = block.parentElement?.closest('[class*="MarkdownRoot-"]');
-                return (!parentBlock || !node.contains(parentBlock)) &&
-                    block.getClientRects().length > 0 &&
-                    getComputedStyle(block).visibility !== 'hidden' &&
-                    !block.closest('button, [role="button"], [hidden], [inert], [aria-hidden="true"]');
+                if (parentBlock && node.contains(parentBlock)) return false;
+                if (!block.getClientRects().length ||
+                    block.closest('button, [role="button"], [hidden], [inert], [aria-hidden="true"]')) return false;
+                // Transparent answer clones remain laid out and have a rect;
+                // unlike controls, they must never become response evidence.
+                for (let current = block; current && node.contains(current); current = current.parentElement) {
+                    const style = getComputedStyle(current);
+                    if (style.visibility === 'hidden' || Number(style.opacity) === 0) return false;
+                }
+                return true;
             });
         return blocks.map(block => block.querySelector('*')
             ? (block.innerText || '')
