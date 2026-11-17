@@ -1955,18 +1955,27 @@ mod picker_pointer_inert_ancestor_tests {
         // A focus handler can disable the entire ancestor after the first
         // check but before click. No stale programmatic click is permitted.
         click_first(&page, &["#poison", "#valid"]).unwrap();
-        assert_eq!(page.evaluate("window.poisonClicks || 0").as_f64(), Some(0.0));
+        assert_eq!(
+            page.evaluate("window.poisonClicks || 0").as_f64(),
+            Some(0.0)
+        );
         assert_eq!(page.evaluate("window.validClicks || 0").as_f64(), Some(1.0));
 
         // Replacement during focus must not click either the detached node
         // or its newly inserted (not previously validated) same-ID successor.
         click_first(&page, &["#replaced", "#valid"]).unwrap();
-        assert_eq!(page.evaluate("window.replacedClicks || 0").as_f64(), Some(0.0));
+        assert_eq!(
+            page.evaluate("window.replacedClicks || 0").as_f64(),
+            Some(0.0)
+        );
         assert_eq!(page.evaluate("window.validClicks || 0").as_f64(), Some(2.0));
 
         page.evaluate("document.querySelector('#valid').hidden = true");
         assert!(click_first(&page, &["#poison", "#valid"]).is_err());
-        assert_eq!(page.evaluate("window.poisonClicks || 0").as_f64(), Some(0.0));
+        assert_eq!(
+            page.evaluate("window.poisonClicks || 0").as_f64(),
+            Some(0.0)
+        );
     }
 
 }
