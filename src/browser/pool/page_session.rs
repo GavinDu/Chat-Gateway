@@ -29,6 +29,14 @@ impl std::error::Error for ReplayRequiresIsolatedContext {}
 /// This guard must run under the worker operation/provider locks and BEFORE
 /// invalidating an existing first-party proof or mutating browser cookies.
 /// A cold page or an identical snapshot can still be verified without resync.
+/// A normal send can reuse the same authenticated page and cookie jar.
+/// Keep the known applied marker for active recovery providers in that case,
+/// so the next relay import remains protected. A newly created page cannot
+/// inherit the previous page's applied-state assertion.
+pub(super) fn retain_applied_after_send(provider: Provider, newly_opened: bool) -> bool {
+    !newly_opened && matches!(provider, Provider::ChatGPT | Provider::MetaAI)
+}
+
 pub(super) fn guard_live_replay(
     provider: Provider,
     applied_fingerprint: Option<&str>,
@@ -153,6 +161,16 @@ mod live_replay_guard_tests {
         }
         // The other provider recoveries are explicitly deferred by owner.
         assert!(guard_live_replay(Provider::Grok, Some("old"), "changed", true).is_ok());
+    }
+
+    #[test]
+    fn only_reused_active_provider_page_retains_applied_fingerprint_after_send() {
+        assert!(retain_applied_after_send(Provider::ChatGPT, false));
+        assert!(retain_applied_after_send(Provider::MetaAI, false));
+        assert!(!retain_applied_after_send(Provider::ChatGPT, true));
+        assert!(!retain_applied_after_send(Provider::MetaAI, true));
+        assert!(!retain_applied_after_send(Provider::Grok, false));
+        assert!(!retain_applied_after_send(Provider::Grok, true));
     }
 
     #[tokio::test]
