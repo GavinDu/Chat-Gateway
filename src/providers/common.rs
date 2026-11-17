@@ -1964,6 +1964,7 @@ mod picker_pointer_inert_ancestor_tests {
         assert!(!click_text_selector(&page, "text:button=Model Next").unwrap());
         assert_eq!(page.evaluate("window.liveClicks || 0").as_f64(), Some(1.0));
     }
+
     #[tokio::test]
     async fn css_picker_rechecks_synchronous_focus_invalidation_and_rerender() {
         let browser = obscura_core::Browser::builder()
