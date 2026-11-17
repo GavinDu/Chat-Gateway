@@ -5,6 +5,7 @@
 use serde::Deserialize;
 use std::{
     fs,
+    io::Read,
     path::Path,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -266,7 +267,15 @@ pub(crate) fn diagnose_file(path: &Path) -> anyhow::Result<String> {
     if !info.is_file() || info.file_type().is_symlink() || info.len() > MAX_FILE {
         anyhow::bail!("credential evidence unavailable");
     }
-    let bytes = fs::read(path).map_err(|_| anyhow::anyhow!("credential evidence unavailable"))?;
+    // Bound reads even when an operator-managed file changes after lstat.
+    // Never allocate or parse an unbounded credential-bearing JSON document.
+    let mut reader = fs::File::open(path)
+        .map_err(|_| anyhow::anyhow!("credential evidence unavailable"))?
+        .take(MAX_FILE + 1);
+    let mut bytes = Vec::new();
+    reader
+        .read_to_end(&mut bytes)
+        .map_err(|_| anyhow::anyhow!("credential evidence unavailable"))?;
     if bytes.len() as u64 > MAX_FILE {
         anyhow::bail!("credential evidence unavailable");
     }
