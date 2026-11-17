@@ -116,7 +116,10 @@ mod current_chatgpt_dom_tests {
 
     #[tokio::test]
     async fn current_assistant_root_extracts_visible_blocks_without_actions_or_echoes() {
-        let browser = obscura_core::Browser::builder().stealth(false).build().unwrap();
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
         let mut page = browser.new_page().await.unwrap();
         let html = r#"<html><body>
             <article data-message-author-role="user">user echo</article>
@@ -146,7 +149,10 @@ mod current_chatgpt_dom_tests {
 
     #[tokio::test]
     async fn form_composer_rejects_multiple_visible_candidates_and_dialogs() {
-        let browser = obscura_core::Browser::builder().stealth(false).build().unwrap();
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
         let mut page = browser.new_page().await.unwrap();
         let html = r#"<html><body>
             <input type="search" value="unrelated">
