@@ -1404,19 +1404,29 @@ pub(super) fn browser_thread(
                                         return Ok(());
                                     };
                                     if reply.is_closed() { return Ok(()); }
-                                    // Begin only for providers with a source-grounded verifier.
-                                    // Other adapters, including Meta AI, stay authentication unknown.
+                                    let file = session::load_session_file(provider.name())?
+                                        .ok_or_else(|| anyhow::anyhow!("imported provider session is missing"))?;
+                                    // Reject malformed metadata before touching live state.
+                                    session::preflight_cookie_restore(&file, provider.name())?;
+                                    // Obscura pages share a cookie jar. Once a provider has a
+                                    // successfully applied live page, changing the snapshot
+                                    // would mutate that jar before replacement verification.
+                                    // Protect its prior session/proof until isolated staging
+                                    // exists. Borrowed hashes never cross an await or log.
+                                    let fingerprint = session::session_state_hash(&file)?;
+                                    page_session::guard_live_replay(
+                                        provider,
+                                        applied_imports.borrow().get(&provider).map(String::as_str),
+                                        &fingerprint,
+                                        pages.borrow().contains_key(&provider),
+                                    )?;
+                                    // Begin only after the non-mutating replay guard passes.
+                                    // Other adapters, including Meta AI, have no verifier.
                                     let verification_epoch = if provider == Provider::ChatGPT {
                                         provider_sessions.begin_credential_verification(provider.name())
                                     } else {
                                         None
                                     };
-                                    let file = session::load_session_file(provider.name())?
-                                        .ok_or_else(|| anyhow::anyhow!("imported provider session is missing"))?;
-                                    // Validate every eligible cookie before the refresh clears
-                                    // the old browser-wide jar. Invalid snapshots must not
-                                    // disrupt a previously usable provider page/session.
-                                    session::preflight_cookie_restore(&file, provider.name())?;
                                     // This is per-attempt local evidence only. A saved cookie
                                     // or successful page navigation is not account proof.
                                     let verified_credentials = std::cell::Cell::new(false);
@@ -1483,7 +1493,16 @@ pub(super) fn browser_thread(
                                     Ok(())
                                 }.await;
                                 if let Err(error) = &res {
-                                    if error.downcast_ref::<ProviderSessionExpiredError>().is_some() {
+                                    if error.downcast_ref::<page_session::ReplayRequiresIsolatedContext>().is_some() {
+                                        // The prior browser page, cookie jar, applied digest,
+                                        // and source-verified account proof were not mutated.
+                                        // Do not mark a previously working session degraded.
+                                        tracing::warn!(
+                                            provider = provider.name(),
+                                            reason = "replay_deferred_requires_isolated_context",
+                                            "changed provider replay deferred to preserve live session"
+                                        );
+                                    } else if error.downcast_ref::<ProviderSessionExpiredError>().is_some() {
                                         provider_sessions.record_needs_login(provider.name());
                                     } else {
                                         provider_sessions.record_probe_failure(provider.name());
