@@ -1357,11 +1357,12 @@ mod closed_consumer_before_dispatch_tests {
     use std::time::Duration;
     use tokio::sync::mpsc;
 
+    type HeldReceiver = Arc<Mutex<Option<mpsc::Receiver<Result<ProviderChunk>>>>>;
+
     struct DisconnectSpy {
         cfg: crate::config::ProviderConfig,
         sends: Arc<AtomicUsize>,
-        drop_receiver_on_baseline:
-            Option<Arc<Mutex<Option<mpsc::Receiver<Result<ProviderChunk>>>>>>,
+        drop_receiver_on_baseline: Option<HeldReceiver>,
     }
 
     #[async_trait::async_trait(?Send)]
@@ -1391,7 +1392,7 @@ mod closed_consumer_before_dispatch_tests {
 
         fn response_probe(&self, page: &Page, challenge: bool) -> ResponseProbe {
             if let Some(receiver) = &self.drop_receiver_on_baseline {
-                receiver.lock().unwrap().take();
+                let _ = receiver.lock().unwrap().take();
             }
             common::response_probe(page, &[".answer"], challenge)
         }
@@ -1421,7 +1422,7 @@ mod closed_consumer_before_dispatch_tests {
 
     fn spy(
         sends: &Arc<AtomicUsize>,
-        drop_receiver_on_baseline: Option<Arc<Mutex<Option<mpsc::Receiver<Result<ProviderChunk>>>>>>,
+        drop_receiver_on_baseline: Option<HeldReceiver>,
     ) -> Arc<dyn SiteAdapter> {
         Arc::new(DisconnectSpy {
             cfg: serde_yaml::from_str("name: qwen").unwrap(),
@@ -1430,7 +1431,11 @@ mod closed_consumer_before_dispatch_tests {
         })
     }
 
-    async fn send(adapter: Arc<dyn SiteAdapter>, page: &mut Page, sender: mpsc::Sender<Result<ProviderChunk>>) {
+    async fn send(
+        adapter: Arc<dyn SiteAdapter>,
+        page: &mut Page,
+        sender: mpsc::Sender<Result<ProviderChunk>>,
+    ) {
         super::run_send(
             adapter,
             page,
