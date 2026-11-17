@@ -124,13 +124,13 @@ fn allowed_target_for_origin(origin: &str, target: &str) -> Option<(String, Stri
     let authority = uri.authority()?.as_str();
     if uri.scheme_str() != Some("wss")
         || !matches!(authority, "gateway.meta.ai" | "gateway.meta.ai:443")
-        || uri.path() != "/ws"
+        || uri.path() != "/ws/clippy"
     {
         return None;
     }
     Some((
         "gateway.meta.ai".into(),
-        "https://gateway.meta.ai/ws".into(),
+        "https://gateway.meta.ai/ws/clippy".into(),
     ))
 }
 
@@ -788,7 +788,7 @@ mod metaai_target_policy_tests {
     fn metaai_socket_targets_are_exact_and_disjoint_from_chatgpt() {
         for origin in ["https://meta.ai", "https://www.meta.ai"] {
             for target in [
-                "wss://gateway.meta.ai/ws",
+                "wss://gateway.meta.ai/ws/clippy",
                 "wss://gateway.meta.ai:443/ws?opaque=fixture",
             ] {
                 assert!(allowed_target_for_origin(origin, target).is_some());
@@ -796,14 +796,14 @@ mod metaai_target_policy_tests {
             }
             for target in [
                 "wss://ws.chatgpt.com/socket",
-                "ws://gateway.meta.ai/ws",
+                "ws://gateway.meta.ai/ws/clippy",
                 "wss://gateway.meta.ai:8086/ws",
                 "wss://gateway.meta.ai:65536/ws",
-                "wss://user@gateway.meta.ai/ws",
+                "wss://user@gateway.meta.ai/ws/clippy",
                 "wss://gateway.meta.ai.attacker.test/ws",
                 "wss://other.meta.ai/ws",
                 "wss://gateway.meta.ai/admin",
-                "wss://gateway.meta.ai/ws#secret",
+                "wss://gateway.meta.ai/ws/clippy#secret",
                 "wss://127.0.0.1/ws",
             ] {
                 assert!(
@@ -813,7 +813,7 @@ mod metaai_target_policy_tests {
             }
         }
         assert!(
-            allowed_target_for_origin("https://attacker.test", "wss://gateway.meta.ai/ws")
+            allowed_target_for_origin("https://attacker.test", "wss://gateway.meta.ai/ws/clippy")
                 .is_none()
         );
     }
