@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { stat } from 'node:fs/promises';
-import { startOwnerTunnel } from './ssh-fixture.mjs';
+import ssh2 from 'ssh2';
+import { startOwnerTunnel, generateFixtureKeyPair } from './ssh-fixture.mjs';
 
 // No real owner credentials, existing SSH config, or provider browser state:
 // every test creates its own ephemeral fixture server and injects only the
@@ -68,4 +69,20 @@ test('SSH fixture classifies synchronous helper spawn failure without raw stderr
   await expectStartupCategory({
     spawnHelper() { throw new Error('private external path and token'); }
   }, 'helper_spawn_failed');
+});
+
+test('fixture keys retain the P-256 format and authenticate with matching signatures', () => {
+  const keys = generateFixtureKeyPair();
+  const privateKey = ssh2.utils.parseKey(keys.private);
+  const publicKey = ssh2.utils.parseKey(keys.public);
+  assert.ok(!(privateKey instanceof Error), 'fixture private key must parse');
+  assert.ok(!(publicKey instanceof Error), 'fixture public key must parse');
+  assert.equal(privateKey.type, 'ecdsa-sha2-nistp256');
+  assert.equal(publicKey.type, 'ecdsa-sha2-nistp256');
+  assert.deepEqual(privateKey.getPublicSSH(), publicKey.getPublicSSH());
+  const message = Buffer.from('isolated fixture authentication');
+  const signature = privateKey.sign(message);
+  assert.ok(Buffer.isBuffer(signature));
+  assert.equal(publicKey.verify(message, signature), true);
+  assert.equal(publicKey.verify(Buffer.from('altered challenge'), signature), false);
 });
