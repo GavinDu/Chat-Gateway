@@ -58,6 +58,12 @@ impl ProviderSessionRegistry {
             .is_some_and(|age| age < Duration::from_secs(300))
     }
 
+    pub fn invalidate_all_credentials(&self) {
+        if let Ok(mut checks) = self.credential_checks.lock() {
+            checks.clear();
+        }
+    }
+
     pub fn invalidate_credentials(&self, provider: &str) {
         if let Ok(mut checks) = self.credential_checks.lock() {
             checks.remove(provider);
@@ -627,6 +633,14 @@ mod probe_outcome_tests {
 #[cfg(test)]
 mod credential_proof_tests {
     use super::*;
+    #[test]
+    fn worker_restart_revokes_proof_across_registry_clones() {
+        let registry = ProviderSessionRegistry::default();
+        registry.record_credentials_verified("chatgpt");
+        let worker = registry.clone();
+        worker.invalidate_all_credentials();
+        assert!(!registry.credentials_verified("chatgpt"));
+    }
     #[test]
     fn only_explicit_proof_verifies_and_import_unlink_or_expiry_revokes_it() {
         let registry = ProviderSessionRegistry::default();
