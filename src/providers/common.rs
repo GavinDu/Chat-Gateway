@@ -1943,7 +1943,7 @@ mod picker_pointer_inert_ancestor_tests {
                 <button id="poison" onfocus="this.parentElement.style.pointerEvents='none'"
                     onclick="window.poisonClicks=(window.poisonClicks||0)+1">Old</button>
             </section>
-            <button id="replaced" onfocus="this.outerHTML='<button id=&quot;replaced&quot;>New</button>'"
+            <button id="replaced" onfocus="this.setAttribute('id','retired');var successor=document.createElement('button');successor.setAttribute('id','replaced');successor.textContent='New';this.parentElement.insertBefore(successor,this)"
                 onclick="window.replacedClicks=(window.replacedClicks||0)+1">Old</button>
             <button id="valid" onclick="window.validClicks=(window.validClicks||0)+1">Valid</button>
         </body></html>"#;
@@ -1969,6 +1969,10 @@ mod picker_pointer_inert_ancestor_tests {
             Some(0.0)
         );
         assert_eq!(page.evaluate("window.validClicks || 0").as_f64(), Some(2.0));
+        assert_eq!(
+            page.evaluate("document.querySelector('#replaced') !== null").as_bool(),
+            Some(true)
+        );
 
         page.evaluate("document.querySelector('#valid').hidden = true");
         assert!(click_first(&page, &["#poison", "#valid"]).is_err());
