@@ -181,6 +181,48 @@ mod live_replay_guard_tests {
         assert!(!retain_applied_after_send(Provider::Grok, true));
     }
 
+    #[test]
+    fn rejected_candidate_keeps_existing_verified_epoch_until_worker_admits_replay() {
+        let registry = crate::provider_state::ProviderSessionRegistry::default();
+        let previous_epoch = registry
+            .begin_credential_verification("chatgpt")
+            .unwrap();
+        assert!(registry.record_credentials_verified("chatgpt", previous_epoch));
+        assert!(registry.credentials_verified("chatgpt"));
+
+        // The HTTP import queue/persistence stage must not invalidate this
+        // proof: it refers to the still-active page, not the new candidate.
+        assert!(guard_live_replay(
+            Provider::ChatGPT,
+            Some("active-fingerprint"),
+            "changed-fingerprint",
+            true,
+        )
+        .is_err());
+        assert!(registry.credentials_verified("chatgpt"));
+
+        // After a permitted, actual worker verification begins, only its new
+        // opaque epoch can publish an updated first-party positive result.
+        assert!(guard_live_replay(
+            Provider::ChatGPT,
+            Some("active-fingerprint"),
+            "active-fingerprint",
+            true,
+        )
+        .is_ok());
+        let next_epoch = registry
+            .begin_credential_verification("chatgpt")
+            .unwrap();
+        assert!(!registry.credentials_verified("chatgpt"));
+        assert!(!registry.record_credentials_verified("chatgpt", previous_epoch));
+        assert!(registry.record_credentials_verified("chatgpt", next_epoch));
+        assert!(registry.credentials_verified("chatgpt"));
+
+        // User unlink/reset must still revoke even a previously verified page.
+        registry.invalidate_credentials("chatgpt");
+        assert!(!registry.credentials_verified("chatgpt"));
+    }
+
     #[tokio::test]
     async fn replay_guard_blocks_destructive_activation_before_callback() {
         let applied = std::cell::RefCell::new(std::collections::HashMap::new());
