@@ -1408,9 +1408,7 @@ mod submission_timeout_cancellation_tests {
             .build()
             .unwrap();
         let mut page = browser.new_page().await.unwrap();
-        let html = format!(
-            "<html data-chat-gateway-test-fixture><body>{stop_markup}</body></html>"
-        );
+        let html = format!("<html data-chat-gateway-test-fixture><body>{stop_markup}</body></html>");
         let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
         page.goto(&format!("data:text/html,{encoded}"))
             .await
