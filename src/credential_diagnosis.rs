@@ -157,7 +157,14 @@ fn classify(e: &Evidence, now: u64) -> Diagnosis {
     {
         return inconclusive(provider, "snapshot_generation_mismatch");
     }
-    if e.snapshot.is_none() && (e.obscura.is_some() || e.attempt.is_some()) {
+    if (e.snapshot.is_none() && (e.obscura.is_some() || e.attempt.is_some()))
+        || (e.snapshot.as_ref().is_some_and(|snapshot| {
+            matches!(
+                snapshot.state,
+                SnapshotState::Applied | SnapshotState::SavedActivationPending
+            ) && snapshot.generation.is_none()
+        }))
+    {
         return inconclusive(provider, "missing_snapshot_correlation");
     }
 
@@ -314,6 +321,15 @@ mod tests {
         v["snapshot"]["generation"] = json!(ID);
         v["secret_token"] = json!("bearer highly-secret");
         assert!(serde_json::from_value::<Evidence>(v).is_err());
+    }
+
+    #[test]
+    fn applied_snapshot_without_generation_never_diagnoses_runtime() {
+        let mut value = base();
+        value["snapshot"]["generation"] = serde_json::Value::Null;
+        let result = checked(value);
+        assert_eq!(result.category, "inconclusive");
+        assert_eq!(result.reason, "missing_snapshot_correlation");
     }
 
     #[test]
