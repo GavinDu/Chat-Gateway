@@ -8,6 +8,9 @@ function loadPopup({failCookieDomain = null, includeSecondProvider = false, manu
   const elements = new Map();
   const chromeCalls = [];
   const intervals = [];
+  const connectDeadlines = new Map();
+  const clearedConnectDeadlines = new Set();
+  let nextConnectDeadlineId = 0;
   const values = {gateway:"http://127.0.0.1:8080",linkedProviders:[]};
   const server = {linked:false};
   function node() {
@@ -182,7 +185,13 @@ function loadPopup({failCookieDomain = null, includeSecondProvider = false, manu
     return {ok:true};
   }};
   const context = {
-    Promise, Date, Set, Array,
+    Promise, Date, Set, Array, AbortController,
+    setTimeout(fn,ms) {
+      const id = ++nextConnectDeadlineId;
+      connectDeadlines.set(id,{fn,ms});
+      return id;
+    },
+    clearTimeout(id) {clearedConnectDeadlines.add(id);},
     randomHex: (() => { let counter = 0; return () => "test-epoch-" + (++counter); })(),
     confirm:()=>true,
     document:{getElementById:byId,createElement:node},
@@ -227,8 +236,8 @@ function loadPopup({failCookieDomain = null, includeSecondProvider = false, manu
   };
   vm.createContext(context);
   vm.runInContext(fs.readFileSync(path.join(__dirname,"..","popup.js"),"utf8")+
-    "\nglobalThis.testControls={refreshStatus,connectProvider,logoutProvider,initialize,safeStatusErrorMessage,safeProviderActionError,safeGatewayActionError};",context);
-  return {values,server,elements,byId,chromeCalls,intervals,controls:context.testControls,context};
+    "\nglobalThis.testControls={refreshStatus,connectProvider,logoutProvider,initialize,connectLocalGateway,popupConnectionJson,safeStatusErrorMessage,safeProviderActionError,safeGatewayActionError};",context);
+  return {values,server,elements,byId,chromeCalls,intervals,connectDeadlines,clearedConnectDeadlines,controls:context.testControls,context};
 }
 
 test("popup status refresh and local startup reject raw credential-bearing exceptions", async () => {
@@ -970,4 +979,104 @@ test("duplicate Manus status rows cannot display conflicting saved-session contr
   assert.match(unique[0].children[1].textContent,/Session saved/);
   assert.equal(unique[0].children[2].children.length,3,"unambiguous linked Manus permits Log out");
   assert.equal(unique[0].children[2].children[2].textContent,"Log out");
+});
+
+async function currentConnectionDeadline(popup) {
+  for (let attempt = 0; attempt < 16; attempt++) {
+    const active = [...popup.connectDeadlines.entries()].find(([id, timer]) =>
+      timer.ms === 12_000 && !popup.clearedConnectDeadlines.has(id));
+    if (active) return active;
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  assert.fail("popup connection request never registered its deadline");
+}
+
+test("stalled local gateway mode probe rejects and preserves disconnected state", async () => {
+  const popup = loadPopup();
+  await new Promise(resolve => setImmediate(resolve));
+  let seen;
+  popup.context.fetch = async (_url, options) => {
+    seen = options;
+    return new Promise(() => {});
+  };
+  const task = popup.controls.connectLocalGateway("http://127.0.0.1:8080", true);
+  const [id, timer] = await currentConnectionDeadline(popup);
+  assert.equal(seen.redirect, "error");
+  assert.equal(seen.signal.aborted, false);
+  timer.fn();
+  await assert.rejects(task, /Gateway connection request timed out/);
+  assert.equal(seen.signal.aborted, true);
+  assert.equal(popup.clearedConnectDeadlines.has(id), true);
+  assert.equal(popup.values.connectionMode, undefined);
+  assert.ok(!popup.chromeCalls.some(x=>x.startsWith("connect-local-relay:")));
+});
+
+test("successful local mode headers with stuck JSON body are bounded", async () => {
+  const popup = loadPopup();
+  await new Promise(resolve => setImmediate(resolve));
+  let signal;
+  popup.context.fetch = async (_url, options) => {
+    signal = options.signal;
+    return {ok:true,status:200,json:async()=>new Promise(()=>{})};
+  };
+  const task = popup.controls.connectLocalGateway("http://127.0.0.1:8080", true);
+  const [id,timer] = await currentConnectionDeadline(popup);
+  timer.fn();
+  await assert.rejects(task, /Gateway connection request timed out/);
+  assert.equal(signal.aborted, true);
+  assert.equal(popup.clearedConnectDeadlines.has(id), true);
+  assert.equal(popup.values.connectionMode, undefined);
+});
+
+test("local Pair network timeout releases only its own provisional approval", async () => {
+  const popup = loadPopup();
+  await new Promise(resolve => setImmediate(resolve));
+  const requests = [];
+  popup.context.fetch = async (url, options) => {
+    requests.push({url,options});
+    if (url.endsWith("/relay/v1/mode")) return {
+      ok:true,status:200,json:async()=>({no_pairing:false})
+    };
+    return new Promise(() => {});
+  };
+  const task = popup.byId("pair").handlers.click();
+  let timer;
+  for (let index = 0; index < 20; index++) {
+    const latest = [...popup.connectDeadlines.entries()].find(([id,entry]) =>
+      entry.ms === 12_000 && !popup.clearedConnectDeadlines.has(id) &&
+      requests.some(req=>req.url.endsWith("/relay/v1/connect/request")));
+    if (latest) { timer=latest; break; }
+    await new Promise(resolve=>setImmediate(resolve));
+  }
+  assert.ok(timer, "a reserved local Pair request must have the timeout");
+  assert.equal(popup.values.pendingApprovalRequest.generation, "f".repeat(32));
+  timer[1].fn();
+  await task;
+  assert.equal(popup.clearedConnectDeadlines.has(timer[0]), true);
+  assert.equal(popup.values.pendingApprovalRequest, null,
+    "worker must release the generation this failed popup owns");
+  assert.equal(popup.values.pendingConnection, undefined);
+  assert.equal(popup.values.token, undefined);
+  assert.ok(!popup.byId("message").textContent.includes("private"));
+});
+
+test("remote Pair stuck JSON body never commits a connection token", async () => {
+  const popup = loadPopup();
+  await new Promise(resolve=>setImmediate(resolve));
+  popup.byId("gateway").value = "https://private.example";
+  popup.byId("code").value = "12345678";
+  let signal;
+  popup.context.fetch = async (_url, options) => {
+    signal = options.signal;
+    return {ok:true,status:200,json:async()=>new Promise(()=>{})};
+  };
+  const task = popup.byId("pair").handlers.click();
+  const [id,timer] = await currentConnectionDeadline(popup);
+  timer.fn();
+  await task;
+  assert.equal(signal.aborted, true);
+  assert.equal(popup.clearedConnectDeadlines.has(id), true);
+  assert.ok(!popup.chromeCalls.some(x=>x.startsWith("connect-paired-relay:")));
+  assert.equal(popup.values.token, undefined);
+  assert.ok(!popup.byId("message").textContent.includes("private.example"));
 });
