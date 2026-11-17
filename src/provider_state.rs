@@ -43,7 +43,7 @@ const LAST_FAILED_REQUEST_TTL: Duration = Duration::from_secs(300);
 /// Every serialized field is bounded or selected from a fixed source list.
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct LastFailedRequest {
-    pub request_id: uuid::Uuid,
+    pub request_id: String,
     pub stage: &'static str,
     pub reason: &'static str,
     pub duration_ms: u64,
@@ -172,7 +172,7 @@ impl ProviderSessionRegistry {
             return;
         }
         let record = LastFailedRequest {
-            request_id,
+            request_id: request_id.to_string(),
             stage: safe_failure_stage(stage),
             reason: safe_failure_reason(reason),
             duration_ms: duration_ms.min(120_000),
