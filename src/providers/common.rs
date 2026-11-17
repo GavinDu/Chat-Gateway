@@ -1970,7 +1970,8 @@ mod picker_pointer_inert_ancestor_tests {
         );
         assert_eq!(page.evaluate("window.validClicks || 0").as_f64(), Some(2.0));
         assert_eq!(
-            page.evaluate("document.querySelector('#replaced') !== null").as_bool(),
+            page.evaluate("document.querySelector('#replaced') !== null")
+                .as_bool(),
             Some(true)
         );
 
