@@ -83,6 +83,20 @@ struct AttemptEvidence {
     outcome: Outcome,
     observed_at_ms: u64,
     generation: String,
+    /// Optional gateway-generated request UUID; not a session fingerprint.
+    request_id: Option<String>,
+}
+
+/// Optional owner-status last-failure observation, not a proof of account
+/// validity or an Obscura internal DOM/transport subphase.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GatewayFailureEvidence {
+    request_id: String,
+    stage: String,
+    reason: String,
+    duration_ms: u64,
+    observed_at_ms: u64,
 }
 
 #[derive(Deserialize)]
@@ -93,6 +107,7 @@ struct Evidence {
     snapshot: Option<SnapshotEvidence>,
     obscura: Option<ReplayEvidence>,
     attempt: Option<AttemptEvidence>,
+    gateway_failure: Option<GatewayFailureEvidence>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -139,6 +154,38 @@ fn generation(raw: &str) -> Option<uuid::Uuid> {
     uuid::Uuid::parse_str(raw).ok().filter(|id| !id.is_nil())
 }
 
+fn canonical_request_id(raw: &str) -> Option<uuid::Uuid> {
+    let id = generation(raw)?;
+    (id.to_string() == raw).then_some(id)
+}
+
+fn fixed_gateway_stage(stage: &str) -> bool {
+    matches!(
+        stage,
+        "candidate_admission" | "backend_admission" | "first_stream_event" | "json_completion"
+    )
+}
+
+fn fixed_gateway_reason(reason: &str) -> bool {
+    matches!(
+        reason,
+        "invalid_request"
+            | "model_not_found"
+            | "provider_busy"
+            | "session_expired"
+            | "challenge"
+            | "timeout"
+            | "memory"
+            | "provider_failure"
+            | "asset_blocked"
+            | "document_denied"
+            | "input_rejected"
+            | "backend_unavailable"
+            | "candidate_skipped"
+            | "unclassified"
+    )
+}
+
 fn classify(e: &Evidence, now: u64) -> Diagnosis {
     let provider = match e.provider.as_str() {
         "chatgpt" => "chatgpt",
@@ -157,6 +204,7 @@ fn classify(e: &Evidence, now: u64) -> Diagnosis {
         e.snapshot.as_ref().map(|x| x.observed_at_ms),
         e.obscura.as_ref().map(|x| x.observed_at_ms),
         e.attempt.as_ref().map(|x| x.observed_at_ms),
+        e.gateway_failure.as_ref().map(|x| x.observed_at_ms),
     ];
     if timestamps
         .into_iter()
@@ -179,6 +227,41 @@ fn classify(e: &Evidence, now: u64) -> Diagnosis {
         .collect::<Vec<_>>();
     if parsed.iter().any(Option::is_none) || parsed.windows(2).any(|pair| pair[0] != pair[1]) {
         return inconclusive(provider, "snapshot_generation_mismatch");
+    }
+    if let Some(failure) = e.gateway_failure.as_ref() {
+        if failure.duration_ms > 120_000
+            || !fixed_gateway_stage(&failure.stage)
+            || !fixed_gateway_reason(&failure.reason)
+        {
+            return inconclusive(provider, "invalid_gateway_failure_evidence");
+        }
+        let Some(attempt) = e.attempt.as_ref() else {
+            return inconclusive(provider, "missing_gateway_request_correlation");
+        };
+        let (Some(gateway_id), Some(attempt_id)) = (
+            canonical_request_id(&failure.request_id),
+            attempt.request_id.as_deref().and_then(canonical_request_id),
+        ) else {
+            return inconclusive(provider, "missing_gateway_request_correlation");
+        };
+        if gateway_id != attempt_id {
+            return inconclusive(provider, "gateway_request_id_mismatch");
+        }
+        if attempt.outcome != Outcome::Failed {
+            return inconclusive(provider, "contradictory_gateway_failure_evidence");
+        }
+        // A failure at candidate/backend admission cannot certify a later
+        // response/stream phase of the *same provider attempt*. This can
+        // happen when owner evidence incorrectly joins fallback attempts.
+        if matches!(
+            failure.stage.as_str(),
+            "candidate_admission" | "backend_admission"
+        ) && matches!(
+            attempt.stage,
+            Stage::Response | Stage::Stream | Stage::Completed
+        ) {
+            return inconclusive(provider, "conflicting_gateway_failure_stage");
+        }
     }
     if (e.snapshot.is_none() && (e.obscura.is_some() || e.attempt.is_some()))
         || (e.snapshot.as_ref().is_some_and(|snapshot| {
@@ -238,6 +321,15 @@ fn classify(e: &Evidence, now: u64) -> Diagnosis {
     }
     if obscura != Some(Auth::Verified) {
         return inconclusive(provider, "authoritative_obscura_account_verifier_missing");
+    }
+    if e.gateway_failure
+        .as_ref()
+        .is_some_and(|failure| matches!(failure.reason.as_str(), "session_expired" | "challenge"))
+    {
+        // A former first-party positive observation can be superseded by an
+        // explicit new login/challenge signal. Recheck current session state
+        // rather than mislabel the later failure as a transport defect.
+        return inconclusive(provider, "account_or_challenge_state_changed");
     }
     match e.attempt.as_ref().map(|a| (a.stage, a.outcome)) {
         Some((Stage::Composer | Stage::Send, Outcome::Failed)) => verdict(
@@ -323,6 +415,131 @@ mod tests {
         assert_eq!(checked(v.clone()).category, "adapter_input");
         v["attempt"]["outcome"] = json!("passed");
         assert_eq!(checked(v).category, "inconclusive");
+    }
+
+    fn with_gateway_failure() -> Value {
+        let mut v = base();
+        v["attempt"]["request_id"] = json!(ID);
+        v["gateway_failure"] = json!({
+            "request_id": ID,
+            "stage": "json_completion",
+            "reason": "backend_unavailable",
+            "duration_ms": 120_000,
+            "observed_at_ms": NOW
+        });
+        v
+    }
+
+    #[test]
+    fn matching_gateway_last_failure_is_only_owner_supplied_evidence_not_live_proof() {
+        let v = with_gateway_failure();
+        let result = checked(v);
+        assert_eq!(result.category, "transport_or_extraction");
+        assert!(!result.live_proof);
+        let body = serde_json::to_string(&result).unwrap();
+        assert!(!body.contains(ID));
+        assert!(!body.contains("backend_unavailable"));
+    }
+
+    #[test]
+    fn gateway_failure_requires_matching_canonical_id_and_failed_attempt() {
+        let mut v = with_gateway_failure();
+        v["gateway_failure"]["request_id"] = json!(OTHER_ID);
+        assert_eq!(checked(v.clone()).reason, "gateway_request_id_mismatch");
+        v["gateway_failure"]["request_id"] = json!(ID);
+        v["attempt"]["request_id"] = json!("COOKIE=secret");
+        assert_eq!(
+            checked(v.clone()).reason,
+            "missing_gateway_request_correlation"
+        );
+        v["attempt"]["request_id"] = json!(ID.to_uppercase());
+        assert_eq!(
+            checked(v.clone()).reason,
+            "missing_gateway_request_correlation"
+        );
+        v["attempt"]["request_id"] = json!(ID);
+        v["gateway_failure"]["request_id"] = json!("00000000-0000-0000-0000-000000000000");
+        assert_eq!(
+            checked(v.clone()).reason,
+            "missing_gateway_request_correlation"
+        );
+        v["gateway_failure"]["request_id"] = json!(ID);
+        v["attempt"].as_object_mut().unwrap().remove("request_id");
+        assert_eq!(
+            checked(v.clone()).reason,
+            "missing_gateway_request_correlation"
+        );
+        v["attempt"]["request_id"] = json!(ID);
+        v.as_object_mut().unwrap().remove("attempt");
+        assert_eq!(
+            checked(v.clone()).reason,
+            "missing_gateway_request_correlation"
+        );
+        v["attempt"] = base()["attempt"].clone();
+        v["attempt"]["request_id"] = json!(ID);
+        v["attempt"]["outcome"] = json!("passed");
+        assert_eq!(checked(v).reason, "contradictory_gateway_failure_evidence");
+    }
+
+    #[test]
+    fn gateway_failure_stage_reason_duration_and_freshness_are_strict() {
+        let mut v = with_gateway_failure();
+        v["gateway_failure"]["stage"] = json!("https://private.example/?token=secret");
+        assert_eq!(
+            checked(v.clone()).reason,
+            "invalid_gateway_failure_evidence"
+        );
+        v["gateway_failure"]["stage"] = json!("first_stream_event");
+        v["gateway_failure"]["reason"] = json!("private cookie value");
+        assert_eq!(
+            checked(v.clone()).reason,
+            "invalid_gateway_failure_evidence"
+        );
+        v["gateway_failure"]["reason"] = json!("timeout");
+        v["gateway_failure"]["duration_ms"] = json!(120_001);
+        assert_eq!(
+            checked(v.clone()).reason,
+            "invalid_gateway_failure_evidence"
+        );
+        v["gateway_failure"]["duration_ms"] = json!(90);
+        v["gateway_failure"]["observed_at_ms"] = json!(NOW - MAX_AGE_MS - 1);
+        assert_eq!(checked(v.clone()).reason, "stale_or_future_evidence");
+        v["gateway_failure"]["observed_at_ms"] = json!(NOW + CLOCK_SKEW_MS + 1);
+        assert_eq!(checked(v.clone()).reason, "stale_or_future_evidence");
+        v["gateway_failure"]["observed_at_ms"] = json!(NOW);
+        v["gateway_failure"]["token"] = json!("private-account-cookie");
+        assert!(serde_json::from_value::<Evidence>(v).is_err());
+    }
+
+    #[test]
+    fn coarse_admission_and_changed_account_states_cannot_be_transport_proof() {
+        let mut v = with_gateway_failure();
+        v["gateway_failure"]["stage"] = json!("backend_admission");
+        assert_eq!(
+            checked(v.clone()).reason,
+            "conflicting_gateway_failure_stage"
+        );
+        v["gateway_failure"]["stage"] = json!("json_completion");
+        v["gateway_failure"]["reason"] = json!("session_expired");
+        assert_eq!(
+            checked(v.clone()).reason,
+            "account_or_challenge_state_changed"
+        );
+        v["gateway_failure"]["reason"] = json!("challenge");
+        assert_eq!(checked(v).reason, "account_or_challenge_state_changed");
+    }
+
+    #[test]
+    fn gateway_failure_cannot_bypass_snapshot_generation_or_account_verification() {
+        let mut v = with_gateway_failure();
+        v["snapshot"]["generation"] = json!(OTHER_ID);
+        assert_eq!(checked(v.clone()).reason, "snapshot_generation_mismatch");
+        v["snapshot"]["generation"] = json!(ID);
+        v["obscura"]["verdict"] = json!("unknown");
+        assert_eq!(
+            checked(v).reason,
+            "authoritative_obscura_account_verifier_missing"
+        );
     }
 
     #[test]
