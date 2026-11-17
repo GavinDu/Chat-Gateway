@@ -1835,28 +1835,28 @@ pub async fn wait_for_selector(
     anyhow::bail!("timeout waiting for actionable provider composer")
 }
 
-/// Click the first matching element (obscura Element::click is
-/// synchronous, scrolls into view first, and focuses the element).
+/// Click the first actionable configured model-picker control. Resolve,
+/// validate and click CSS selectors in one browser evaluation so a SPA
+/// transition cannot invalidate a prior Rust-side actionability check.
+/// Text selectors already use a single-evaluation click.
 pub fn click_first(page: &Page, selectors: &[&str]) -> anyhow::Result<()> {
     for sel in selectors {
         if text_selector_parts(sel).is_some() {
             if click_text_selector(page, sel)? {
                 return Ok(());
             }
-        } else if let Some(el) = page.query_selector(sel) {
-            // Preserve Obscura's native click/focus semantics, but never
-            // click an invisible or pointer-inert first CSS match. Picker
-            // selectors can resolve stale SPA transition clones; the next
-            // explicitly configured selector is safer than guessing a DOM
-            // descendant or silently treating an inert control as success.
+        } else {
             let selector_js = serde_json::to_string(sel)?;
             let nontransparent = nontransparent_ancestors_expression("el");
             let pointer_enabled = pointer_enabled_ancestors_expression("el");
-            let actionable = page.evaluate(&format!(
+            let clicked = page.evaluate(&format!(
                 r#"(() => {{
                     try {{
                         const el = document.querySelector({selector_js});
-                        return !!el && el.getClientRects().length > 0 &&
+                        if (!el) return false;
+                        const actionable = () =>
+                            document.querySelector({selector_js}) === el &&
+                            el.getClientRects().length > 0 &&
                             window.getComputedStyle(el).visibility !== 'hidden' &&
                             {pointer_enabled} &&
                             {nontransparent} &&
@@ -1865,11 +1865,24 @@ pub fn click_first(page: &Page, selectors: &[&str]) -> anyhow::Result<()> {
                             !el.readOnly &&
                             el.getAttribute('aria-disabled') !== 'true' &&
                             el.getAttribute('aria-readonly') !== 'true';
+                        if (!actionable()) return false;
+                        // Preserve native-click's scroll/focus preparation where
+                        // the embedded DOM supports it. Either may synchronously
+                        // rerender or disable the control, so recheck its identity
+                        // and entire ancestor chain after each operation.
+                        if (typeof el.scrollIntoView === 'function') {{
+                            try {{ el.scrollIntoView({{ block: 'center', inline: 'nearest' }}); }}
+                            catch (_) {{ /* optional scroll unsupported in embedded DOM */ }}
+                        }}
+                        if (!actionable()) return false;
+                        if (typeof el.focus === 'function') el.focus();
+                        if (!actionable()) return false;
+                        el.click();
+                        return true;
                     }} catch (_) {{ return false; }}
                 }})()"#
             ));
-            if actionable.as_bool() == Some(true) {
-                el.click()?;
+            if clicked.as_bool() == Some(true) {
                 return Ok(());
             }
         }
@@ -1950,6 +1963,63 @@ mod picker_pointer_inert_ancestor_tests {
         page.evaluate("document.querySelector('#live').setAttribute('aria-readonly', 'true')");
         assert!(!click_text_selector(&page, "text:button=Model Next").unwrap());
         assert_eq!(page.evaluate("window.liveClicks || 0").as_f64(), Some(1.0));
+    }
+
+    #[tokio::test]
+    async fn css_picker_rechecks_synchronous_focus_invalidation_and_rerender() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <section id="disabled-after-focus">
+                <button id="poison" onfocus="this.parentElement.style.pointerEvents='none'"
+                    onclick="window.poisonClicks=(window.poisonClicks||0)+1">Old</button>
+            </section>
+            <button id="replaced" onfocus="this.setAttribute('id','retired');var successor=document.createElement('button');successor.setAttribute('id','replaced');successor.textContent='New';this.parentElement.insertBefore(successor,this)"
+                onclick="window.replacedClicks=(window.replacedClicks||0)+1">Old</button>
+            <button id="valid" onclick="window.validClicks=(window.validClicks||0)+1">Valid</button>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+
+        // A focus handler can disable the entire ancestor after the first
+        // check but before click. No stale programmatic click is permitted.
+        click_first(&page, &["#poison", "#valid"]).unwrap();
+        assert_eq!(
+            page.evaluate("window.poisonClicks || 0").as_f64(),
+            Some(0.0)
+        );
+        assert_eq!(page.evaluate("window.validClicks || 0").as_f64(), Some(1.0));
+
+        // Replacement during focus must not click either the detached node
+        // or its newly inserted (not previously validated) same-ID successor.
+        click_first(&page, &["#replaced", "#valid"]).unwrap();
+        assert_eq!(
+            page.evaluate("window.replacedClicks || 0").as_f64(),
+            Some(0.0)
+        );
+        assert_eq!(page.evaluate("window.validClicks || 0").as_f64(), Some(2.0));
+        assert_eq!(
+            page.evaluate("document.querySelector('#retired') !== null")
+                .as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            page.evaluate("document.querySelector('#replaced').textContent === 'New'")
+                .as_bool(),
+            Some(true)
+        );
+
+        page.evaluate("document.querySelector('#valid').hidden = true");
+        assert!(click_first(&page, &["#poison", "#valid"]).is_err());
+        assert_eq!(
+            page.evaluate("window.poisonClicks || 0").as_f64(),
+            Some(0.0)
+        );
     }
 }
 
