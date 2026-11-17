@@ -834,6 +834,49 @@ test("invalid browser cookie attributes fail the complete relay upload before pe
   }
 });
 
+test("partitioned provider cookies fail closed before upload without erasing saved relay state", async () => {
+  for (const partitionKey of [
+    {topLevelSite:"https://private.example"},
+    {topLevelSite:"https://chatgpt.com",hasCrossSiteAncestor:true},
+    {},
+    "forged-partition-shape",
+    0
+  ]) {
+    const storage = {
+      gateway:"http://127.0.0.1:8080",
+      token:"synthetic-install-token",
+      linkedProviders:["chatgpt"],
+      relaySnapshotVersions:{chatgpt:"prior-version"}
+    };
+    const api = loadShared([
+      {name:"plain",value:"fixture",domain:".chatgpt.com",path:"/",secure:true},
+      {name:"partitioned-private-name",value:"private-credential",domain:".chatgpt.com",
+        path:"/",secure:true,partitionKey}
+    ], true, storage);
+    await assert.rejects(
+      () => api.syncProvider("chatgpt"),
+      error => error.message ===
+        "Unsupported browser cookie partition scope; existing gateway session was preserved."
+    );
+    assert.equal(api.fetchCalls.length, 0, "partial provider snapshot must never be transmitted");
+    assert.deepEqual(storage.linkedProviders, ["chatgpt"], "owner consent is unchanged");
+    assert.equal(storage.relaySnapshotVersions.chatgpt, "prior-version");
+  }
+});
+
+test("irrelevant partitioned cookies are excluded while ordinary active cookies remain usable", async () => {
+  const api = loadShared([
+    {name:"non-partitioned",value:"fixture",domain:".chatgpt.com",path:"/",secure:true},
+    {name:"null-partition",value:"fixture",domain:".chatgpt.com",path:"/",secure:true,partitionKey:null},
+    {name:"out-of-scope",value:"private",domain:".gmail.com",path:"/",secure:true,
+      partitionKey:{topLevelSite:"https://private.example"}}
+  ]);
+  const snapshot = await api.providerCookieSnapshot("chatgpt");
+  const names = JSON.parse(JSON.stringify(snapshot.cookies.map(cookie => cookie.name).sort()));
+  assert.deepEqual(names, ["non-partitioned","null-partition"]);
+  assert.ok(snapshot.cookies.every(cookie => !Object.hasOwn(cookie, "partitionKey")));
+});
+
 test("automatic sync skips unchanged snapshots but manual sync always refreshes", async () => {
   const storage = {gateway:"http://127.0.0.1:8080",token:"install-1",linkedProviders:["chatgpt"]};
   const fixtures = [{name:"session",value:"first",domain:".chatgpt.com",path:"/",secure:true,httpOnly:true}];
