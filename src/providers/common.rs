@@ -4426,7 +4426,7 @@ fn submission_snapshot(
     })
 }
 
-/// For Grok and the previously strict adapters, an assistant node count
+/// For ChatGPT, Grok and the previously strict adapters, an assistant node count
 /// increase plus an emptied composer can reflect SPA history hydration over
 /// an unaccepted draft. Require a fresh prompt-bound user turn or a newly
 /// activated generation indicator. Do not infer a completed new turn from
@@ -4438,7 +4438,7 @@ fn submission_observed_for_adapter(
     after: &SubmissionSnapshot,
     prompt: &str,
 ) -> anyhow::Result<bool> {
-    if matches!(provider, "qwen" | "grok" | "manus")
+    if matches!(provider, "chatgpt" | "qwen" | "grok" | "manus")
         && after.user_turn_count <= before.user_turn_count
         && !(after.streaming && !before.streaming)
     {
@@ -4549,11 +4549,11 @@ fn submission_accepted(before: &SubmissionSnapshot, after: &SubmissionSnapshot) 
 }
 
 #[cfg(test)]
-mod grok_fresh_submission_ack_tests {
+mod strict_fresh_submission_ack_tests {
     use super::*;
 
     #[tokio::test]
-    async fn old_answer_hydration_with_cleared_draft_is_not_grok_submission() {
+    async fn old_answer_hydration_with_cleared_draft_is_not_submission() {
         let browser = obscura_core::Browser::builder()
             .stealth(false)
             .build()
@@ -4575,7 +4575,7 @@ mod grok_fresh_submission_ack_tests {
         assert!(!before.input_empty);
 
         // The app may hydrate an old assistant turn and separately clear an
-        // unaccepted controlled draft. Neither is proof Grok received Send.
+        // unaccepted controlled draft. Neither is proof Send was accepted.
         page.evaluate(
             r#"(() => {
             document.querySelector('#prompt').value = '';
@@ -4586,10 +4586,13 @@ mod grok_fresh_submission_ack_tests {
         let hydrated = submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
         assert_eq!(hydrated.response_count, 2);
         assert!(hydrated.input_empty);
-        assert!(
-            !submission_observed_for_adapter("grok", &page, &before, &hydrated, prompt).unwrap(),
-            "Grok cannot acknowledge history hydration as new Send"
-        );
+        for provider in ["grok", "chatgpt"] {
+            assert!(
+                !submission_observed_for_adapter(provider, &page, &before, &hydrated, prompt)
+                    .unwrap(),
+                "hydrated history cannot acknowledge {provider} Send"
+            );
+        }
 
         // Only a fresh visible prompt-bound user turn proves actual uptake.
         page.evaluate(
@@ -4603,23 +4606,29 @@ mod grok_fresh_submission_ack_tests {
         );
         let with_user = submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
         assert_eq!(with_user.user_turn_count, 1);
-        assert!(
-            submission_observed_for_adapter("grok", &page, &before, &with_user, prompt).unwrap(),
-            "matching exact multiline user turn acknowledges the prompt"
-        );
+        for provider in ["grok", "chatgpt"] {
+            assert!(
+                submission_observed_for_adapter(provider, &page, &before, &with_user, prompt)
+                    .unwrap(),
+                "matching exact multiline user turn acknowledges {provider} prompt"
+            );
+        }
 
         page.evaluate(
             "document.querySelector('#new-user-turn').textContent = 'wrong previous turn'",
         );
         let wrong_user = submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
-        assert!(
-            !submission_observed_for_adapter("grok", &page, &before, &wrong_user, prompt).unwrap(),
-            "a different user's message cannot acknowledge this prompt"
-        );
+        for provider in ["grok", "chatgpt"] {
+            assert!(
+                !submission_observed_for_adapter(provider, &page, &before, &wrong_user, prompt)
+                    .unwrap(),
+                "a different user turn cannot acknowledge {provider} prompt"
+            );
+        }
     }
 
     #[tokio::test]
-    async fn only_fresh_not_inherited_grok_stop_can_acknowledge_without_user_turn() {
+    async fn only_fresh_not_inherited_stop_can_acknowledge_without_user_turn() {
         let browser = obscura_core::Browser::builder()
             .stealth(false)
             .build()
@@ -4645,17 +4654,19 @@ mod grok_fresh_submission_ack_tests {
         );
         let inherited = submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
         assert!(inherited.streaming);
-        assert!(
-            !submission_observed_for_adapter(
-                "grok",
-                &page,
-                &before_active,
-                &inherited,
-                "some draft"
-            )
-            .unwrap(),
-            "preexisting Stop is not a fresh generation event"
-        );
+        for provider in ["grok", "chatgpt"] {
+            assert!(
+                !submission_observed_for_adapter(
+                    provider,
+                    &page,
+                    &before_active,
+                    &inherited,
+                    "some draft"
+                )
+                .unwrap(),
+                "preexisting Stop is not fresh {provider} generation"
+            );
+        }
 
         page.evaluate("document.querySelector('#stop').hidden = true");
         page.evaluate("document.querySelector('#prompt').value = 'some draft'");
@@ -4664,17 +4675,19 @@ mod grok_fresh_submission_ack_tests {
         page.evaluate("document.querySelector('#stop').hidden = false");
         let freshly_active = submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
         assert!(freshly_active.streaming);
-        assert!(
-            submission_observed_for_adapter(
-                "grok",
-                &page,
-                &before_inactive,
-                &freshly_active,
-                "some draft"
-            )
-            .unwrap(),
-            "newly active visible generation may acknowledge before a user turn appears"
-        );
+        for provider in ["grok", "chatgpt"] {
+            assert!(
+                submission_observed_for_adapter(
+                    provider,
+                    &page,
+                    &before_inactive,
+                    &freshly_active,
+                    "some draft"
+                )
+                .unwrap(),
+                "freshly active generation may acknowledge {provider} before a user turn"
+            );
+        }
     }
 }
 
