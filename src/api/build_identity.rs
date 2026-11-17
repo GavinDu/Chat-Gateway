@@ -4,7 +4,12 @@ use chrono::SecondsFormat;
 
 fn safe_source_sha(value: Option<&str>) -> &str {
     value
-        .filter(|sha| sha.len() == 40 && sha.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()))
+        .filter(|sha| {
+            sha.len() == 40
+                && sha
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        })
         .unwrap_or("unknown")
 }
 
