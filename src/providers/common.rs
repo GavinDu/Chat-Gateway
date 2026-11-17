@@ -1336,7 +1336,7 @@ mod pointer_inert_composer_ancestors_tests {
     use super::{actionable_composer_count_expression, human_type, visible_composer_exists};
 
     #[tokio::test]
-    async fn CSS_pointer_inert_ancestor_never_becomes_actionable_input() {
+    async fn css_pointer_inert_ancestor_never_becomes_actionable_input() {
         let browser = obscura_core::Browser::builder()
             .stealth(false)
             .build()
