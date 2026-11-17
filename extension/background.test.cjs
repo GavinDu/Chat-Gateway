@@ -1694,3 +1694,100 @@ test("explicit provider link recovers safely from malformed stored membership", 
   assert.deepEqual(Array.from(state.linkedProviders),["chatgpt"]);
   assert.equal((await send("commit-provider-link")).committed,true);
 });
+
+function pendingApprovalPollFixture(fetchImpl) {
+  const f = loadBackground([], [], true);
+  const pending = {
+    gateway:"http://127.0.0.1:8080", request_id:"private-request-id",
+    poll_secret:"private-poll-secret", expires:Date.now() + 300_000,
+    approvalGeneration:"installed-gen"
+  };
+  const state = {pendingConnection:pending};
+  const requests = [];
+  f.sandbox.normalizeGateway = gateway => gateway;
+  f.sandbox.AbortController = AbortController;
+  f.sandbox.chrome.permissions = {contains:async () => true};
+  f.sandbox.chrome.storage.local.get = async () => ({...state});
+  f.sandbox.chrome.storage.local.remove = async key => {delete state[key];};
+  f.sandbox.chrome.alarms.clear = async () => true;
+  f.sandbox.fetch = async (url, options) => {
+    requests.push({url, options});
+    return fetchImpl(url, options);
+  };
+  return {f, pending, state, requests};
+}
+
+async function findApprovalDeadline(f) {
+  for (let index = 0; index < 12; index++) {
+    const entry = [...f.timers.entries()].find(([, timer]) => timer.delay === 12_000);
+    if (entry) return entry;
+    await flushAsyncWork();
+  }
+  assert.fail("approval poll did not install its bounded deadline");
+}
+
+test("hung approval fetch times out and releases the singleton for retry", async () => {
+  let requestCount = 0;
+  const {f, state, pending, requests} = pendingApprovalPollFixture(() => {
+    requestCount++;
+    return requestCount === 1
+      ? new Promise(() => {})
+      : {status:202, ok:true};
+  });
+  const first = f.sandbox.pollConnection();
+  const [id, timer] = await findApprovalDeadline(f);
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].options.redirect, "error");
+  const signal = requests[0].options.signal;
+  assert.equal(signal.aborted, false);
+  timer.callback();
+  await assert.rejects(first, /Connection approval poll timed out/);
+  assert.equal(signal.aborted, true);
+  assert.equal(f.clearedTimers.has(id), true);
+  assert.equal(state.pendingConnection, pending,
+    "a network deadline must not discard unexpired approval");
+  assert.ok(!JSON.stringify({message:"Connection approval poll timed out. Retry or reconnect."})
+    .includes(pending.poll_secret));
+  await f.sandbox.pollConnection();
+  assert.equal(requestCount, 2,
+    "the failed in-flight poll must release the coalescing latch");
+  assert.equal(state.pendingConnection, pending);
+});
+
+test("approval JSON body hang obeys the same deadline as the fetch", async () => {
+  let parseCount = 0;
+  const {f, state, pending, requests} = pendingApprovalPollFixture(() => ({
+    status:200, ok:true, json:async () => {
+      parseCount++;
+      return new Promise(() => {});
+    }
+  }));
+  const check = f.sandbox.pollConnection();
+  const [id, timer] = await findApprovalDeadline(f);
+  for (let index = 0; index < 8 && !parseCount; index++) await flushAsyncWork();
+  assert.equal(parseCount, 1, "successful headers must not escape the body deadline");
+  timer.callback();
+  await assert.rejects(check, /Connection approval poll timed out/);
+  assert.equal(requests[0].options.signal.aborted, true);
+  assert.equal(f.clearedTimers.has(id), true);
+  assert.equal(state.pendingConnection, pending);
+});
+
+test("pending 202 approval returns without JSON parsing, abort or lost consent", async () => {
+  let parses = 0;
+  const {f, state, pending, requests} = pendingApprovalPollFixture(() => ({
+    status:202, ok:true, json:async () => {parses++; return {}; }
+  }));
+  await f.sandbox.pollConnection();
+  const [id] = await findApprovalDeadline(f);
+  assert.equal(parses, 0);
+  assert.equal(requests[0].options.signal.aborted, false);
+  assert.equal(f.clearedTimers.has(id), true);
+  assert.equal(state.pendingConnection, pending);
+});
+
+test("410 expired approval still clears only the matched pending request", async () => {
+  const {f, state} = pendingApprovalPollFixture(() => ({status:410, ok:false}));
+  await assert.rejects(f.sandbox.pollConnection(), /Connection approval unavailable/);
+  assert.equal(state.pendingConnection, undefined);
+});
