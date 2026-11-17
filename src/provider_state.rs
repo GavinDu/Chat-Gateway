@@ -94,7 +94,6 @@ fn safe_failure_reason(reason: &str) -> &'static str {
     }
 }
 
-
 /// An opaque, non-credential-derived epoch for one provider/worker account
 /// observation. No cookie hashes, raw account data or tokens are retained.
 #[derive(Debug)]
@@ -176,10 +175,7 @@ impl ProviderSessionRegistry {
             stage: safe_failure_stage(stage),
             reason: safe_failure_reason(reason),
             duration_ms: duration_ms.min(120_000),
-            observed_at_utc: chrono::Utc::now().to_rfc3339_opts(
-                chrono::SecondsFormat::Secs,
-                true,
-            ),
+            observed_at_utc: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         };
         slot.last_failure = Some((record, Instant::now()));
     }
@@ -933,7 +929,10 @@ mod bounded_request_diagnostic_tests {
         reg.record_request_failure("grok", FIRST, "candidate_admission", "provider_busy", 2);
         assert_eq!(reg.last_request_attempts.lock().unwrap().len(), 2);
         assert!(reg.last_failed_request("grok").is_none());
-        assert_eq!(reg.last_failed_request("metaai").unwrap().duration_ms, 120_000);
+        assert_eq!(
+            reg.last_failed_request("metaai").unwrap().duration_ms,
+            120_000
+        );
         reg.clear_last_request("chatgpt");
         assert!(reg.last_failed_request("chatgpt").is_none());
         assert!(reg.last_failed_request("metaai").is_some());
@@ -957,10 +956,22 @@ mod bounded_request_diagnostic_tests {
         assert_eq!(record.stage, "unknown");
         assert_eq!(record.reason, "unclassified");
         assert_eq!(record.duration_ms, 120_000);
-        for private in ["private.example", "bearer_secret", "credential", "verysecret"] {
+        for private in [
+            "private.example",
+            "bearer_secret",
+            "credential",
+            "verysecret",
+        ] {
             assert!(!serialized.contains(private));
         }
-        assert_eq!(serde_json::to_value(&record).unwrap().as_object().unwrap().len(), 5);
+        assert_eq!(
+            serde_json::to_value(&record)
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .len(),
+            5
+        );
     }
 
     #[test]
