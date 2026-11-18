@@ -726,6 +726,97 @@ fn sanitize_page_location(provider: Provider, url: &str) -> &'static str {
     }
 }
 
+/// The configured match probe returns the exact matching CSS selector.
+/// Selector attribute values can contain account IDs, prompts or bearer text;
+/// only fixed role names and match status may cross TestAdapterReport's JSON
+/// boundary. Keep the original internal selector matching and order intact.
+fn redact_test_adapter_probe(raw: Vec<(String, Option<String>)>) -> Vec<(String, Option<String>)> {
+    raw.into_iter()
+        .map(|(role, selector)| {
+            let safe_role = match role.as_str() {
+                "input" => "input",
+                "send" => "send",
+                "response" => "response",
+                _ => "unknown_role",
+            };
+            (safe_role.to_owned(), selector.map(|_| "matched".to_owned()))
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod adapter_probe_redaction_tests {
+    use super::*;
+
+    #[test]
+    fn raw_selector_and_unrecognized_role_never_enter_serialized_report() {
+        let report = TestAdapterReport {
+            probe: redact_test_adapter_probe(vec![
+                (
+                    "input".to_string(),
+                    Some("textarea[data-token='Bearer secret-value']".to_string()),
+                ),
+                ("send".to_string(), None),
+                (
+                    "private-role/account-id".to_string(),
+                    Some("button[title='private-value']".to_string()),
+                ),
+            ]),
+            ..Default::default()
+        };
+        assert_eq!(
+            report.probe,
+            vec![
+                ("input".to_owned(), Some("matched".to_owned())),
+                ("send".to_owned(), None),
+                ("unknown_role".to_owned(), Some("matched".to_owned())),
+            ]
+        );
+        let text = serde_json::to_string(&report).unwrap();
+        for sensitive in [
+            "secret-value",
+            "Bearer",
+            "private-role",
+            "account-id",
+            "data-token",
+            "private-value",
+        ] {
+            assert!(!text.contains(sensitive), "probe leaked a selector");
+        }
+    }
+
+    #[tokio::test]
+    async fn real_obscura_selector_matching_keeps_result_but_redacts_css() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = "<html><body><textarea data-secret='Bearer-private'></textarea></body></html>";
+        let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        let inputs = ["textarea[data-secret='Bearer-private']"];
+        let sends = ["button[data-secret='private-missing']"];
+        let source = providers::common::probe_selector_groups(
+            &page,
+            &[("input", &inputs), ("send", &sends)],
+        );
+        assert!(source[0].1.as_deref().unwrap().contains("Bearer-private"));
+        let safe = redact_test_adapter_probe(source);
+        assert_eq!(safe[0], ("input".to_owned(), Some("matched".to_owned())));
+        assert_eq!(safe[1], ("send".to_owned(), None));
+        let report = TestAdapterReport {
+            probe: safe,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&report).unwrap();
+        assert!(!json.contains("Bearer-private"));
+        assert!(!json.contains("private-missing"));
+    }
+}
+
 /// Fixed selector names only: never log arbitrary field attributes or values.
 fn diagnostic_input_controls(page: &obscura_core::Page) -> Vec<String> {
     [
@@ -1339,7 +1430,9 @@ pub(super) fn browser_thread(
                                     ("send", &sends),
                                     ("response", &responses),
                                 ];
-                                report.probe = providers::common::probe_selector_groups(&page, &sets);
+                                report.probe = redact_test_adapter_probe(
+                                    providers::common::probe_selector_groups(&page, &sets),
+                                );
                                 report.input_controls = diagnostic_input_controls(&page);
                                 // Phase 1 — input (20s, Go's budget).
                                 let input_sel = match providers::common::wait_for_selector(&mut page, sets[0].1, 20000).await {
