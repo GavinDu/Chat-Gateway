@@ -77,8 +77,8 @@
       // A previously closed CONNECTING socket must never resurrect when
       // its delayed TLS open returns after the local close deadline.
       if (this._state !== 0) {
-        await invoke({op:'release',id:this._id});
-        if (this._state !== 3) this._finish(1006,'',false);
+        if (this._state === 3) await invoke({op:'release',id:this._id});
+        else this._finish(1006,'',false);
         return;
       }
       this._state = 1;
