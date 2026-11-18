@@ -703,9 +703,7 @@ fn sanitize_page_location(url: &str) -> String {
 /// Selector attribute values can contain account IDs, prompts or bearer text;
 /// only fixed role names and match status may cross TestAdapterReport's JSON
 /// boundary. Keep the original internal selector matching and order intact.
-fn redact_test_adapter_probe(
-    raw: Vec<(String, Option<String>)>,
-) -> Vec<(String, Option<String>)> {
+fn redact_test_adapter_probe(raw: Vec<(String, Option<String>)>) -> Vec<(String, Option<String>)> {
     raw.into_iter()
         .map(|(role, selector)| {
             let safe_role = match role.as_str() {
@@ -714,10 +712,7 @@ fn redact_test_adapter_probe(
                 "response" => "response",
                 _ => "unknown_role",
             };
-            (
-                safe_role.to_owned(),
-                selector.map(|_| "matched".to_owned()),
-            )
+            (safe_role.to_owned(), selector.map(|_| "matched".to_owned()))
         })
         .collect()
 }
@@ -772,7 +767,9 @@ mod adapter_probe_redaction_tests {
         let mut page = browser.new_page().await.unwrap();
         let html = "<html><body><textarea data-secret='Bearer-private'></textarea></body></html>";
         let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
-        page.goto(&format!("data:text/html,{encoded}")).await.unwrap();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
         let inputs = ["textarea[data-secret='Bearer-private']"];
         let sends = ["button[data-secret='private-missing']"];
         let source = providers::common::probe_selector_groups(
