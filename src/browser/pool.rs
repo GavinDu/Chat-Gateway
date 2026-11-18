@@ -96,7 +96,10 @@ fn browser_worker_unavailable() -> anyhow::Error {
 
 #[cfg(test)]
 mod test_adapter_restore_tests {
-    use super::{record_test_adapter_restore_result, TestAdapterReport};
+    use super::{
+        record_test_adapter_error, record_test_adapter_restore_result, TestAdapterErrorPhase,
+        TestAdapterReport,
+    };
 
     #[test]
     fn restore_success_allows_adapter_probe_to_continue() {
@@ -122,6 +125,34 @@ mod test_adapter_restore_tests {
             report.errors,
             vec!["session_restore_failed"]
         );
+    }
+
+    #[test]
+    fn all_worker_error_phases_redact_upstream_display_and_debug_data() {
+        let source = anyhow::anyhow!(
+            "https://private.invalid/path?token=secret; Bearer hidden; cookie=private"
+        );
+        for (phase, category) in [
+            (TestAdapterErrorPhase::OpenPage, "open_page_failed"),
+            (TestAdapterErrorPhase::SessionFileLoad, "session_file_load_failed"),
+            (TestAdapterErrorPhase::InputSelector, "input_selector_unavailable"),
+            (TestAdapterErrorPhase::InputType, "input_type_failed"),
+            (TestAdapterErrorPhase::Send, "send_submission_failed"),
+        ] {
+            let mut report = TestAdapterReport::default();
+            record_test_adapter_error(&mut report, phase, &source);
+            assert_eq!(report.errors, [category]);
+            let serialized = serde_json::to_string(&report).unwrap();
+            assert!(serialized.contains(category));
+            for private in [
+                "https://private.invalid/",
+                "token=secret",
+                "Bearer hidden",
+                "cookie=private",
+            ] {
+                assert!(!serialized.contains(private), "untrusted error leaked");
+            }
+        }
     }
 
     #[test]
@@ -289,6 +320,40 @@ pub struct LoginCompleted {
     pub session_path: String,
     pub warm_swapped: bool,
     pub warning: Option<String>,
+}
+
+/// Every failure of --test-adapter has a fixed public code. Never expose
+/// Obscura, vault, DOM, network or caller stage Error::Display in JSON.
+#[derive(Clone, Copy)]
+enum TestAdapterErrorPhase {
+    OpenPage,
+    SessionFileLoad,
+    InputSelector,
+    InputType,
+    Send,
+}
+
+impl TestAdapterErrorPhase {
+    fn code(self) -> &'static str {
+        match self {
+            Self::OpenPage => "open_page_failed",
+            Self::SessionFileLoad => "session_file_load_failed",
+            Self::InputSelector => "input_selector_unavailable",
+            Self::InputType => "input_type_failed",
+            Self::Send => "send_submission_failed",
+        }
+    }
+}
+
+/// Deliberately ignore the upstream error object; only this static enum's
+/// category reaches the response. Retain a parameter so the entire path is
+/// executable with injected secrets in a regression test.
+fn record_test_adapter_error(
+    report: &mut TestAdapterReport,
+    phase: TestAdapterErrorPhase,
+    _source_error: &anyhow::Error,
+) {
+    report.errors.push(phase.code().to_owned());
 }
 
 /// Never emit the upstream error *or* untrusted caller-supplied stage.
