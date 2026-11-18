@@ -3,6 +3,11 @@
 (() => {
   const attempt = __ATTEMPT__;
   if (location.origin !== __ORIGIN__) return {state:'off_origin'};
+  // The full URL may carry a private thread/account token. Keep it in this
+  // first-party realm and use it only to fence an asynchronous page change.
+  const initialHref = location.href;
+  const samePage = () => location.origin === __ORIGIN__ &&
+                         location.href === initialHref;
   const key = '__chatGatewayChatgptSessionReadiness';
   const previous = globalThis[key];
   if (previous) {
@@ -13,7 +18,10 @@
   globalThis[key] = probe;
   const finish = state => {
     if (globalThis[key] !== probe || probe.state !== 'pending') return;
-    probe.state = state;
+    // A completed request for an older same-origin SPA route or navigated
+    // document cannot prove the currently displayed account. Also prevent an
+    // earlier 401 from demanding a new login in the later page.
+    probe.state = samePage() ? state : 'unavailable';
     clearTimeout(probe.timer);
   };
   probe.timer = setTimeout(() => {
@@ -21,7 +29,8 @@
     try { probe.controller.abort(); } catch (_) {}
   }, __TIMEOUT_MS__);
   try {
-    fetch('/api/auth/session', {credentials:'include', cache:'no-store', signal:probe.controller.signal})
+    fetch('/api/auth/session', {credentials:'include', cache:'no-store',
+      redirect:'error', signal:probe.controller.signal})
       .then(async response => {
         probe.http = response.status;
         if (response.status === 401) { finish('needs_login'); return; }
