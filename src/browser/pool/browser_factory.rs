@@ -241,16 +241,12 @@ mod disposable_context_tests {
             serde_yaml::from_str("obscura:\n  stealth: false\nproviders: []\n").unwrap();
         let live = build_browser(&cfg).unwrap();
         live.cookies()
-            .set(
-                "SID=fixture-live; Secure; Path=/",
-                "https://chatgpt.com/",
-            )
+            .set("SID=fixture-live; Secure; Path=/", "https://chatgpt.com/")
             .unwrap();
 
-        let mut staged =
-            new_disposable_provider_stage(&cfg, crate::providers::Provider::MetaAI)
-                .await
-                .unwrap();
+        let mut staged = new_disposable_provider_stage(&cfg, crate::providers::Provider::MetaAI)
+            .await
+            .unwrap();
         assert!(staged.browser().cookies().get_all().is_empty());
         staged
             .browser()
@@ -276,10 +272,9 @@ mod disposable_context_tests {
         assert_eq!(cookies.len(), 1);
         assert_eq!(cookies[0].value, "fixture-live");
 
-        let cold =
-            new_disposable_provider_stage(&cfg, crate::providers::Provider::MetaAI)
-                .await
-                .unwrap();
+        let cold = new_disposable_provider_stage(&cfg, crate::providers::Provider::MetaAI)
+            .await
+            .unwrap();
         assert!(cold.browser().cookies().get_all().is_empty());
     }
 
