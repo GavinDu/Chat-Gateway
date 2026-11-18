@@ -1319,7 +1319,8 @@ pub(super) fn browser_thread(
                                 // Classify the landed page without exposing prompts,
                                 // thread ids, account tokens or cookie values.
                                 report.page = Some(sanitize_page_location(provider, &page.url()).to_owned());
-                                report.restored_cookie_count = Some(browser.cookies().get_all().len());
+                                report.restored_cookie_count =
+                                    Some(session::provider_cookie_count(&browser, provider.name()));
                                 // Phase 0 — session check.
                                 if providers::common::is_login_page(&page) {
                                     report.errors.push("session expired: re-login required before running --test-adapter".to_string());
