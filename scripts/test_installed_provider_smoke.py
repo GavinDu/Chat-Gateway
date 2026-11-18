@@ -59,6 +59,39 @@ class ParserContractTests(unittest.TestCase):
                 validate_json(answer(), altered, "chatgpt", "fixture")
             self.assertEqual(error.exception.category, category)
 
+    def test_request_id_requires_canonical_non_nil_uuid_for_json_and_sse(self):
+        valid = str(uuid.uuid4())
+        valid_sse = consume_sse([
+            'data: {"choices":[{"delta":{"content":"OK"}}]}\\n',
+            'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\\n',
+            "data: [DONE]\\n",
+        ])
+        headers = sample_headers()
+        headers["X-Request-Id"] = valid
+        validate_json(answer(), headers, "chatgpt", "fixture")
+        validate_sse(valid_sse, headers, "chatgpt", "fixture")
+
+        for bad in (
+            "00000000-0000-0000-0000-000000000000",
+            valid.upper(),
+            "{" + valid + "}",
+            "urn:uuid:" + valid,
+            " " + valid,
+            valid + " ",
+            "token=secret session=private",
+            "",
+        ):
+            headers["X-Request-Id"] = bad
+            for validate, response in (
+                (validate_json, answer()),
+                (validate_sse, valid_sse),
+            ):
+                with self.subTest(bad=bad, validator=validate.__name__):
+                    with self.assertRaises(SmokeFailure) as error:
+                        validate(response, headers, "chatgpt", "fixture")
+                    self.assertEqual(error.exception.category, "missing_request_id")
+                    self.assertNotIn("secret", str(error.exception))
+
     def test_sse_rejects_partial_error_missing_done_and_wrong_markers(self):
         base = [
             'data: {"choices":[{"delta":{"content":"OK"}}]}\n',
