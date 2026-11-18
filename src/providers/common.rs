@@ -1267,8 +1267,9 @@ fn nontransparent_ancestors_expression(element: &str) -> String {
 /// button itself overrides the inherited style to pointer-events:auto.
 /// Keep the JS loop-local distinct from callers' button/input names.
 fn pointer_enabled_ancestors_expression(element: &str) -> String {
+    let metaai_editor = include_str!("metaai_composer_pointer.js").replace("__ELEMENT__", element);
     format!(
-        "(() => {{ for (let pointerAncestor = {element}; pointerAncestor; pointerAncestor = pointerAncestor.parentElement) {{ if (window.getComputedStyle(pointerAncestor).pointerEvents === 'none') return false; }} return true; }})()"
+        "(() => {{ for (let pointerAncestor = {element}; pointerAncestor; pointerAncestor = pointerAncestor.parentElement) {{ if (window.getComputedStyle(pointerAncestor).pointerEvents === 'none') return {metaai_editor}; }} return true; }})()"
     )
 }
 
@@ -1444,7 +1445,11 @@ fn composer_draft_expression(element: &str) -> String {
 
 /// Re-read the actionable composer after framework renders, not just after
 /// the initial typing event. Never log the prompt when the value changes.
-fn composer_retains_prompt(page: &Page, selector: &str, prompt: &str) -> anyhow::Result<bool> {
+pub(crate) fn composer_retains_prompt(
+    page: &Page,
+    selector: &str,
+    prompt: &str,
+) -> anyhow::Result<bool> {
     let selector_js = serde_json::to_string(selector)?;
     let el_js = visible_input_query(&selector_js);
     let prompt_js = serde_json::to_string(prompt)?;
@@ -2067,7 +2072,65 @@ pub async fn human_type(page: &Page, selectors: &[&str], text: &str) -> anyhow::
     human_type_with_provider(page, selectors, text, None).await
 }
 
-async fn human_type_with_provider(
+pub(crate) async fn submit_metaai_focused(page: &mut Page, prompt: &str) -> anyhow::Result<()> {
+    let expected = serde_json::to_string(prompt)?;
+    let read = include_str!("metaai_user_turn.js").replace("__PROMPT__", &expected);
+    let before = page.evaluate(&read)["count"].as_f64().unwrap_or(0.0);
+    let send = include_str!("metaai_keyboard_send.js").replace("__PROMPT__", &expected);
+    let status = page.evaluate(&send);
+    if status.as_str() != Some("dispatched") {
+        anyhow::bail!("Meta AI send unavailable, disabled, ambiguous or draft changed");
+    }
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        drive_page(page, Duration::from_millis(100)).await;
+        require_page_provider_origin("metaai", page)?;
+        let after = page.evaluate(&read);
+        if after["valid"] == true
+            && after["draft_empty"] == true
+            && after["count"].as_f64().unwrap_or(0.0) > before
+        {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(anyhow::Error::new(ProviderSubmissionUnacknowledgedError));
+        }
+    }
+}
+
+pub(crate) async fn type_provider_prompt(
+    page: &mut Page,
+    selectors: &[&str],
+    text: &str,
+    provider: Option<&str>,
+) -> anyhow::Result<()> {
+    if provider == Some("metaai") {
+        let selector = selectors
+            .iter()
+            .copied()
+            .find(|selector| visible_composer_exists(page, &[*selector]))
+            .ok_or_else(|| anyhow::anyhow!("actionable provider composer unavailable"))?;
+        let script = include_str!("metaai_paste.js")
+            .replace("__SELECTOR__", &serde_json::to_string(selector)?)
+            .replace("__PROMPT__", &serde_json::to_string(text)?);
+        if page.evaluate(&script).as_bool() != Some(true) {
+            return Err(anyhow::Error::new(ProviderComposerInputRejectedError));
+        }
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            drive_page(page, Duration::from_millis(50)).await;
+            if composer_retains_prompt(page, selector, text)? {
+                return Ok(());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(anyhow::Error::new(ProviderComposerInputRejectedError));
+            }
+        }
+    }
+    human_type_with_provider(page, selectors, text, provider).await
+}
+
+pub(crate) async fn human_type_with_provider(
     page: &Page,
     selectors: &[&str],
     text: &str,
@@ -4770,7 +4833,7 @@ pub async fn send_prompt(
     if let Some(provider) = expected_submission_provider {
         require_submission_provider_route(provider, page)?;
     }
-    if let Err(error) = human_type_with_provider(page, &inputs, prompt, send_guard_provider).await {
+    if let Err(error) = type_provider_prompt(page, &inputs, prompt, send_guard_provider).await {
         tracing::warn!(
             provider = provider,
             stage = "input_dispatch",
@@ -4808,6 +4871,9 @@ pub async fn send_prompt(
     }
     if matches!(provider, "perplexity" | "manus") {
         require_unique_actionable_composer(page, &inputs)?;
+    }
+    if provider == "metaai" {
+        return submit_metaai_focused(page, prompt).await;
     }
     let sends = set.send_refs();
     // The click/Enter dispatch is not proof that a controlled SPA accepted

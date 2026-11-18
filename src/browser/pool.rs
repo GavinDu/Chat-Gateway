@@ -404,10 +404,8 @@ pub struct TestAdapterReport {
     pub send_controls: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub input_controls: Vec<String>,
-    /// Only fixed origin-status categories; never serialize page URL paths.
-    /// The legacy-named cookie count is current *provider-scoped* jar
-    /// presence after attempted replay, not proof of restored credentials,
-    /// account login or Chrome/Obscura snapshot parity.
+    /// Sanitized page origin/path and restored cookie count help classify
+    /// logged-out or challenge pages without exposing query data or values.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub page: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

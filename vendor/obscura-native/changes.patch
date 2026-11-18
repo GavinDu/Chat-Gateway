@@ -1,0 +1,480 @@
+--- a/obscura-browser/src/profiles.rs
++++ b/obscura-browser/src/profiles.rs
+@@ -87,7 +87,8 @@
+     if env_enabled("OBSCURA_ROTATE_PROFILE") {
+         return random_profile();
+     }
+-    &PROFILES[0]
++    // Match the native HTTP transport's stable Chrome 145 Windows profile.
++    &PROFILES[2]
+ }
+ 
+ fn env_enabled(key: &str) -> bool {
+--- a/obscura-js/Cargo.toml
++++ b/obscura-js/Cargo.toml
+@@ -20,6 +20,8 @@
+ deno_core = "0.412"
+ 
+ [dependencies]
++futures-util = "0.3"
++async-stream = "0.3"
+ obscura-dom = { workspace = true }
+ obscura-net = { workspace = true }
+ deno_core = "0.412"
+--- a/obscura-js/js/bootstrap.js
++++ b/obscura-js/js/bootstrap.js
+@@ -8548,7 +8548,10 @@
+     redirected: exposeRedirectMetadata && !!parsed.redirected,
+   });
+   _attachResponseAbort(response, signal);
+-  if (typeof parsed.bodyRid === 'number') {
++  if (typeof parsed.bodyStreamRid === 'number') {
++    response._fetchBody = _createNativeStreamBody(parsed.bodyStreamRid, cleanup,
++      error => signalState && signalState.aborted ? signalState.reason : error);
++  } else if (typeof parsed.bodyRid === 'number') {
+     // ponytail: preserve bounded one-chunk bodies; incremental delivery needs
+     // stream backpressure rather than eagerly queuing every network chunk.
+     const promise = __obscuraCore.ops.op_fetch_body(parsed.bodyRid)
+@@ -9045,8 +9048,24 @@
+       this._bodyUsed = true;
+       if (this._bodyAborted) throw this._bodyAbortReason;
+     }
++    _readBodyBytes() {
++      if (this._fetchBody?.nativeStream && this._bodyStream) return _collectNativeResponseReader(this._bodyStream.getReader());
++      return this._fetchBody ? this._fetchBody.promise : this._bodyBytes;
++    }
+     get body() {
+       if (this._bodyNull) return null;
++      if (this._fetchBody?.nativeStream) {
++        if(this._bodyStream)return this._bodyStream;
++        if(this._bodyUsed)throw new TypeError("Body is already consumed");
++        const response=this,body=this._fetchBody;
++        const stream=this._bodyStream=new ReadableStream({
++          async pull(controller){try{const item=await body.read();if(item.done)controller.close();else controller.enqueue(item.value);}catch(error){controller.error(error);}},
++          cancel(reason){response._bodyUsed=true;return body.cancel(reason);}
++        });
++        const getReader=stream.getReader.bind(stream);
++        stream.getReader=function(...args){response._bodyUsed=true;return getReader(...args);};
++        return stream;
++      }
+       if (this._bodyUsed) throw new TypeError("Body is already consumed");
+       if (!this._bodyStream) {
+         this._bodyStream = new ReadableStream({
+@@ -9084,13 +9103,16 @@
+       return this._bodyStream;
+     }
+     get bodyUsed() { return this._bodyUsed; }
+-    async text() { this._consumeBody(); return _decodeBodyWithCharset(this._fetchBody ? await this._fetchBody.promise : this._bodyBytes, this.headers); }
+-    async json() { this._consumeBody(); return JSON.parse(await _decodeBodyWithCharset(this._fetchBody ? await this._fetchBody.promise : this._bodyBytes, this.headers)); }
+-    async arrayBuffer() { this._consumeBody(); return _arrayBufferFromBytes(this._fetchBody ? await this._fetchBody.promise : this._bodyBytes); }
+-    async blob() { this._consumeBody(); return new Blob([this._fetchBody ? await this._fetchBody.promise : this._bodyBytes]); }
++    async text() { this._consumeBody(); return _decodeBodyWithCharset(await this._readBodyBytes(), this.headers); }
++    async json() { this._consumeBody(); return JSON.parse(await _decodeBodyWithCharset(await this._readBodyBytes(), this.headers)); }
++    async arrayBuffer() { this._consumeBody(); return _arrayBufferFromBytes(await this._readBodyBytes()); }
++    async blob() { this._consumeBody(); return new Blob([await this._readBodyBytes()]); }
+     clone() {
+       const copy = _createInternalResponse(this._bodyNull ? null : this._bodyBytes, { status: this.status, statusText: this.statusText, headers: this.headers, type: this.type, url: this.url, redirected: this.redirected });
+-      if (this._fetchBody) {
++      if (this._fetchBody?.nativeStream) {
++        if(this._bodyUsed)throw new TypeError("Body is already consumed");
++        copy._fetchBody=this._fetchBody.clone();
++      } else if (this._fetchBody) {
+         const promise = this._fetchBody.promise.then(bytes => bytes.slice());
+         promise.catch(() => {});
+         this._fetchBody.resource.consumers++;
+@@ -19041,6 +19063,164 @@
+   }
+ })();
+ 
++
++function _createNativeStreamBody(rid,cleanup,mapError){
++  const hub={chunks:[],done:false,error:null,pending:null,branches:new Set(),cleaned:false};
++  const finish=()=>{if(!hub.cleaned){hub.cleaned=true;cleanup();}};
++  const pull=async()=>{
++    if(!hub.pending && !hub.done && !hub.error){
++      hub.pending=(async()=>{
++        try{const bytes=await __obscuraCore.ops.op_fetch_body_chunk(rid);if(!bytes.length){hub.done=true;finish();}else hub.chunks.push(bytes);}
++        catch(error){hub.error=mapError(error);finish();}
++        finally{hub.pending=null;}
++      })();
++    }
++    if(hub.pending)await hub.pending;
++  };
++  const branch=()=>{
++    const record={index:0,cancelled:false};hub.branches.add(record);let collected;
++    const body={nativeStream:true,
++      async read(){while(true){if(record.cancelled)return {done:true,value:undefined};if(hub.error)throw hub.error;if(record.index<hub.chunks.length)return {done:false,value:hub.chunks[record.index++].slice()};if(hub.done)return {done:true,value:undefined};await pull();}},
++      cancel(){record.cancelled=true;if(Array.from(hub.branches).every(item=>item.cancelled)){hub.done=true;__obscuraCore.ops.op_try_close(rid);finish();}return Promise.resolve();},
++      clone:branch,
++      get promise(){if(!collected)collected=_collectNativeResponseReader(body);return collected;}
++    };return body;
++  };return branch();
++}
++async function _collectNativeResponseReader(reader){
++  const chunks=[];let length=0;
++  while(true){const item=await reader.read();if(item.done)break;chunks.push(item.value);length+=item.value.length;}
++  const bytes=new Uint8Array(length);let offset=0;for(const chunk of chunks){bytes.set(chunk,offset);offset+=chunk.length;}return bytes;
++}
++
++(() => {
++  const NativeStream = globalThis.ReadableStream;
++  if (typeof NativeStream !== 'function' || NativeStream.__obscuraPullCompat) return;
++  let probe;
++  try { probe = new NativeStream({start(controller) { controller.close(); }}); }
++  catch (_) { return; }
++  if (!Array.isArray(probe._reads) || !Array.isArray(probe._queue) ||
++      !probe._source || typeof NativeStream.prototype.getReader !== 'function') return;
++  const nativeGetReader = NativeStream.prototype.getReader;
++  class PullReadableStream extends NativeStream {
++    constructor(source = {}, strategy = {}) {
++      source ??= {};
++      strategy ??= {};
++      const requestedWatermark = strategy.highWaterMark;
++      const highWaterMark = requestedWatermark === undefined
++        ? (source.type === 'bytes' ? 0 : 1) : Number(requestedWatermark);
++      if (!Number.isFinite(highWaterMark) || highWaterMark < 0) throw new RangeError('Invalid highWaterMark');
++      const size = strategy.size;
++      if (size !== undefined && typeof size !== 'function') throw new TypeError('Invalid stream size algorithm');
++      const queuedSizes = [];
++      let queuedSize = 0;
++      let failed = false;
++      let stream;
++      let controller;
++      let started = false;
++      let terminal = false;
++      let pulling = false;
++      let again = false;
++      const kick = () => {
++        if (!stream || !started || terminal || stream._state !== 'readable' || typeof source.pull !== 'function') return;
++        // Normal streams prefill their queue after start, before a reader is
++        // attached. Demand-only pulling can strand startup handshakes.
++        if (!stream._reads.length && highWaterMark <= queuedSize) return;
++        if (pulling) { again = true; return; }
++        pulling = true;
++        Promise.resolve().then(() => { if (!terminal) return source.pull.call(source, controller); }).then(() => {
++          pulling = false;
++          if (again) { again = false; kick(); }
++        }, error => {
++          pulling = false;
++          // A late rejected pull must never poison a stream that already
++          // delivered its final queued chunk and closed, or was cancelled.
++          // The pinned fallback error() would otherwise erase that chunk.
++          if (terminal) { again = false; return; }
++          controller.error(error);
++        });
++      };
++      super({
++        start(nativeController) {
++          controller = {
++            enqueue(value) {
++              if (terminal) return nativeController.enqueue(value);
++              if (!stream?._reads.length) {
++                let amount;
++                try {
++                  amount = size === undefined ? 1 : Number(size(value));
++                  if (!Number.isFinite(amount) || amount < 0) throw new RangeError('Invalid chunk size');
++                } catch (error) { controller.error(error); throw error; }
++                queuedSizes.push(amount);
++                queuedSize += amount;
++              }
++              nativeController.enqueue(value);
++              kick();
++            },
++            close() { terminal = true; nativeController.close(); },
++            error(reason) { terminal = true; failed = true; queuedSizes.length = 0; queuedSize = 0; nativeController.error(reason); },
++            get desiredSize() {
++              if (failed || stream?._state === 'errored') return null;
++              if (stream?._state === 'closed' || (terminal && !queuedSizes.length)) return 0;
++              return highWaterMark - queuedSize;
++            }
++          };
++          // The pinned fallback forwards rejected start promises into its
++          // native error(), which can destroy a final queued chunk even after
++          // close() requested termination. Ignore only *late* start failures
++          // when the source already closed or the reader cancelled.
++          let startResult;
++          try {
++            startResult = source.start?.call(source, controller);
++          } catch (error) {
++            if (!terminal) throw error;
++          }
++          return Promise.resolve(startResult).then(
++            () => { started = true; kick(); },
++            error => { if (!terminal) throw error; }
++          );
++        },
++        cancel(reason) { terminal = true; queuedSizes.length = 0; queuedSize = 0; return source.cancel?.call(source, reason); }
++      }, strategy);
++      stream = this;
++      this._pullIfNeeded = kick;
++      this._dequeued = () => { if (queuedSizes.length) queuedSize = Math.max(0, queuedSize - queuedSizes.shift()); };
++    }
++    getReader(...args) {
++      const reader = nativeGetReader.apply(this, args);
++      const nativeRead = reader.read.bind(reader);
++      // Preserve a delegated reader's arguments (e.g. a byte/BYOB view).
++      // The pinned fallback may ignore them; silently dropping is incorrect.
++      reader.read = (...args) => {
++        const queued = this._queue.length > 0;
++        const pending = nativeRead(...args);
++        if (queued) {
++          // A delegated read can reject without consuming its queued chunk
++          // (e.g. an invalid BYOB view). Releasing backpressure before a
++          // fulfilled read would permit an extra pull while the queue is full.
++          Promise.resolve(pending).then(
++            result => {
++              if (result && result.done === false) {
++                this._dequeued();
++                this._pullIfNeeded();
++              }
++            },
++            () => {} // Retain queue credit and the original rejection.
++          );
++        } else {
++          // An empty queue's pending read still needs an immediate pull.
++          this._pullIfNeeded();
++        }
++        return pending;
++      };
++      return reader;
++    }
++  }
++  Object.defineProperty(PullReadableStream, 'name', {value: 'ReadableStream'});
++  Object.defineProperty(PullReadableStream, '__obscuraPullCompat', {value: true});
++  globalThis.ReadableStream = PullReadableStream;
++})();
++
+ (function _markBuiltinsNative() {
+   var seen = new Set();
+   function walk(ctor) {
+--- a/obscura-js/src/ops.rs
++++ b/obscura-js/src/ops.rs
+@@ -1,3 +1,4 @@
++use futures_util::StreamExt;
+ use std::cell::{Cell, RefCell};
+ use std::collections::{HashMap, HashSet, VecDeque};
+ use std::rc::Rc;
+@@ -1065,6 +1066,28 @@
+     result?.map(|bytes| if resource.opaque { Vec::new() } else { bytes })
+ }
+ 
++struct FetchStreamBodyResource {
++    stream: RefCell<Option<std::pin::Pin<Box<dyn futures_util::Stream<Item = Result<Vec<u8>, deno_error::JsErrorBox>>>>>>,
++    cancel: Rc<CancelHandle>,
++}
++impl Resource for FetchStreamBodyResource {
++    fn close(self: Rc<Self>) {self.cancel.cancel();self.stream.borrow_mut().take();}
++}
++#[op2]
++#[buffer]
++async fn op_fetch_body_chunk(state: Rc<RefCell<OpState>>, rid: u32) -> Result<Vec<u8>, deno_error::JsErrorBox> {
++    let resource=state.borrow().resource_table.get::<FetchStreamBodyResource>(rid).map_err(|_|deno_error::JsErrorBox::type_error("Stream body is closed"))?;
++    let mut stream=resource.stream.borrow_mut().take().ok_or_else(||deno_error::JsErrorBox::type_error("Stream body read is already pending"))?;
++    let result=stream.next().or_cancel(resource.cancel.clone()).await;
++    match result {
++        Ok(Some(Ok(bytes))) if !resource.cancel.is_canceled() => {*resource.stream.borrow_mut()=Some(stream);Ok(bytes)}
++        other => {
++            if let Ok(closed)=state.borrow_mut().resource_table.take_any(rid){closed.close();}
++            match other {Ok(None)=>Ok(Vec::new()),Ok(Some(Err(error)))=>Err(error),_=>Err(deno_error::JsErrorBox::generic("Response body was cancelled"))}
++        }
++    }
++}
++
+ async fn fetch_body_result(
+     state: &RefCell<OpState>,
+     mut metadata: serde_json::Value,
+@@ -4664,6 +4687,20 @@
+             req_headers.insert(k.to_lowercase(), v.clone());
+         }
+ 
++        if !internal_load {
++            let site = if !current_is_cross_origin { "same-origin" }
++                else if cookie_initiator.as_ref().is_some_and(|source| same_site(source, &parsed_current)) { "same-site" }
++                else { "cross-site" };
++            req_headers.insert("sec-fetch-site".into(), site.into());
++            req_headers.insert("sec-fetch-mode".into(), mode.clone());
++            req_headers.insert("sec-fetch-dest".into(), String::new());
++            req_headers.entry("accept".into()).or_insert_with(|| "*/*".into());
++            if let Some(source) = cookie_initiator.as_ref() {
++                if matches!(source.scheme(), "http" | "https") && !(source.scheme()=="https" && parsed_current.scheme()=="http") {
++                    req_headers.entry("referer".into()).or_insert_with(|| format!("{}/",source.origin().ascii_serialization()));
++                }
++            }
++        }
+         let credentials_allowed = credentials.allows(&page_origin, &current_url);
+         let cookie_context = credentials_allowed.then(|| {
+             if cookie_initiator
+@@ -4676,7 +4713,7 @@
+             }
+         });
+         let r = stealth
+-            .send_single_headers_with_context(
++            .send_single_stream_headers_with_context(
+                 &current_method,
+                 &parsed_current,
+                 &req_headers,
+@@ -4804,12 +4841,55 @@
+         "opaque": opaque,
+         "headers": script_headers,
+     });
++    let is_event_stream=resp_headers.get("content-type").is_some_and(|value|value.to_ascii_lowercase().contains("text/event-stream"));
++    if !internal_load && !opaque && !matches!(status, 204 | 205 | 304) && current_method != "HEAD" && is_event_stream {
++        let body_state=Rc::downgrade(&state);
++        let stream: std::pin::Pin<Box<dyn futures_util::Stream<Item=Result<Vec<u8>,deno_error::JsErrorBox>>>>=Box::pin(async_stream::try_stream! {
++            let _page_in_flight=page_in_flight;
++            let mut network_guard=network_guard;
++            let mut source=response.body;
++            let mut resp_bytes=Vec::new();
++            while let Some(chunk)=source.next().await {
++                let chunk=chunk.map_err(|_|deno_error::JsErrorBox::generic("Streaming response read failed"))?;
++                resp_bytes.extend_from_slice(&chunk);
++                yield chunk;
++            }
++        if let Some(ref cbs) = callbacks {
++            if cbs.has_response_callbacks().await {
++                let resp = fetch_response(
++                    current_url.as_str(), status, resp_headers.clone(),
++                    resp_bytes.clone(), redirected_from,
++                );
++                let info = RequestInfo {
++                    url: resp.url.clone(), method: current_method.clone(),
++                    headers: resp_headers.clone(), resource_type,
++                };
++                cbs.fire_response(&info, &resp).await;
++            }
++        }
++        if let Some(state) = body_state.upgrade() {
++            let mut event = network_guard.event.take().unwrap();
++            event.url = current_url;
++            event.method = current_method;
++            event.status = status;
++            event.response_headers = resp_headers;
++            event.body_size = resp_bytes.len();
++            event.timestamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
++                .unwrap_or_default().as_secs_f64();
++            record_js_network_completion(&state, event, &String::from_utf8_lossy(&resp_bytes), false);
++        } else { network_guard.event = None; }
++        });
++        let rid=state.borrow_mut().resource_table.add(FetchStreamBodyResource {stream:RefCell::new(Some(stream)),cancel:cancel.unwrap_or_else(CancelHandle::new_rc)});
++        let mut metadata=metadata;metadata["bodyStreamRid"]=serde_json::json!(rid);return Ok(metadata.to_string());
++    }
+     let body_state = Rc::downgrade(&state);
+     let body = Box::pin(async move {
+         let _page_in_flight = page_in_flight;
+         let mut network_guard = network_guard;
+-        let resp_bytes = response.body.await
+-            .map_err(|error| deno_error::JsErrorBox::generic(error.to_string()))?;
++        let mut source=response.body;
++        let mut resp_bytes=Vec::new();
++        while let Some(chunk)=source.next().await {resp_bytes.extend_from_slice(&chunk.map_err(|_|deno_error::JsErrorBox::generic("Response body read failed"))?);}
++
+         if let Some(ref cbs) = callbacks {
+             if cbs.has_response_callbacks().await {
+                 let resp = fetch_response(
+@@ -7781,6 +7861,7 @@
+         op_fetch_cancel_handle(),
+         op_abort_signal_state(),
+         op_fetch_body(),
++        op_fetch_body_chunk(),
+         op_get_cookies(),
+         op_set_cookie(),
+         op_storage_access(),
+--- a/obscura-net/src/wreq_client.rs
++++ b/obscura-net/src/wreq_client.rs
+@@ -201,6 +201,13 @@
+     pub status: u16,
+     pub headers: HashMap<String, String>,
+     pub body: futures_util::future::BoxFuture<'static, Result<Vec<u8>, ObscuraNetError>>,
++}
++
++#[cfg(feature = "stealth")]
++pub struct StealthStreamResponseHeaders {
++    pub status: u16,
++    pub headers: HashMap<String, String>,
++    pub body: futures_util::stream::BoxStream<'static, Result<Vec<u8>, ObscuraNetError>>,
+ }
+ 
+ #[cfg(feature = "stealth")]
+@@ -518,6 +525,24 @@
+ 
+     /// Preserve request policy and cookie handling while deferring body reads.
+     pub async fn send_single_headers_with_context(
++        &self, method: &str, url: &Url, headers: &HashMap<String, String>,
++        body: &[u8], cookie_context: Option<SameSiteContext>, store_cookies: bool,
++        max_body_bytes: usize,
++    ) -> Result<StealthResponseHeaders, ObscuraNetError> {
++        let response = self.send_single_stream_headers_with_context(method, url, headers, body, cookie_context, store_cookies, max_body_bytes).await?;
++        Ok(StealthResponseHeaders {
++            status: response.status,
++            headers: response.headers,
++            body: Box::pin(async move {
++                let mut source=response.body;
++                let mut bytes=Vec::new();
++                while let Some(chunk)=source.next().await {bytes.extend_from_slice(&chunk?);}
++                Ok(bytes)
++            }),
++        })
++    }
++
++    pub async fn send_single_stream_headers_with_context(
+         &self,
+         method: &str,
+         url: &Url,
+@@ -526,13 +551,13 @@
+         cookie_context: Option<SameSiteContext>,
+         store_cookies: bool,
+         max_body_bytes: usize,
+-    ) -> Result<StealthResponseHeaders, ObscuraNetError> {
++    ) -> Result<StealthStreamResponseHeaders, ObscuraNetError> {
+         if is_tracker_blocked(url, self.block_trackers) {
+             tracing::debug!("Blocked tracker: {}", url);
+-            return Ok(StealthResponseHeaders {
++            return Ok(StealthStreamResponseHeaders {
+                 status: 0,
+                 headers: HashMap::new(),
+-                body: Box::pin(async { Ok(Vec::new()) }),
++                body: Box::pin(futures_util::stream::empty()),
+             });
+         }
+ 
+@@ -575,14 +600,35 @@
+             .iter()
+             .map(|(k, v)| (k.as_str().to_lowercase(), v.to_str().unwrap_or("").to_string()))
+             .collect();
++        if resp.headers().get("content-length").and_then(|value|value.to_str().ok()).and_then(|value|value.parse::<u64>().ok()).is_some_and(|length|length>max_body_bytes as u64) {
++            return Err(response_too_large(url,max_body_bytes));
++        }
+         let body_url = url.clone();
+-        Ok(StealthResponseHeaders {
++        Ok(StealthStreamResponseHeaders {
+             status: status.as_u16(),
+             headers: response_headers,
+-            body: Box::pin(async move {
+-                let _in_flight = in_flight;
+-                read_wreq_body_limited(resp, &body_url, max_body_bytes).await
+-            }),
++            body: Box::pin(futures_util::stream::try_unfold(
++                (resp.bytes_stream().boxed(), in_flight, 0usize),
++                move |(mut source, guard, mut total)| {
++                    let body_url = body_url.clone();
++                    async move {
++                        loop {
++                            match source.next().await {
++                                Some(Ok(chunk)) => {
++                                    if chunk.is_empty() { continue; }
++                                    if chunk.len() > max_body_bytes.saturating_sub(total) {
++                                        return Err(response_too_large(&body_url, max_body_bytes));
++                                    }
++                                    total += chunk.len();
++                                    return Ok(Some((chunk.to_vec(), (source, guard, total))));
++                                }
++                                Some(Err(_)) => return Err(ObscuraNetError::Network("Failed to read streaming response body".into())),
++                                None => return Ok(None),
++                            }
++                        }
++                    }
++                },
++            )),
+         })
+     }
+ 

@@ -299,12 +299,25 @@ fn has_challenge_marker(url: &str, body: &str) -> bool {
         .any(|needle| body.contains(needle))
 }
 
+const MANAGED_CHALLENGE_SHELL_JS: &str = r#"(() => {
+        const title=(document.title||'').trim().toLowerCase();
+        if (!['just a moment...', 'just a moment', 'attention required! | cloudflare'].includes(title)) return false;
+        return Array.from(document.scripts).some(script=>{
+            try {
+                const source=new URL(script.src,location.href);
+                return source.origin===location.origin &&
+                    source.pathname.startsWith('/cdn-cgi/challenge-platform/');
+            } catch (_) { return false; }
+        });
+    })()"#;
+
 /// Detect challenge pages without attempting to solve or bypass them.
 pub fn is_challenge_page(page: &Page) -> bool {
     let url = page.url();
     let evaluation = page.evaluate(NON_MESSAGE_CHALLENGE_TEXT_JS);
     let body = evaluation.as_str().unwrap_or("");
-    has_challenge_marker(&url, body)
+    let managed_challenge = page.evaluate(MANAGED_CHALLENGE_SHELL_JS).as_bool() == Some(true);
+    managed_challenge || has_challenge_marker(&url, body)
 }
 
 #[cfg(test)]
@@ -726,5 +739,26 @@ mod tests {
             Some("challenge page detected")
         );
         assert_eq!(second.provider_disabled_reason("provider-a"), None);
+    }
+}
+
+#[cfg(test)]
+mod managed_challenge_shell_regressions {
+    #[tokio::test]
+    async fn managed_shell_requires_both_title_and_same_origin_challenge_script() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        page.goto("data:text/html,%3Chtml%3E%3Chead%3E%3Ctitle%3EJust%20a%20moment...%3C/title%3E%3C/head%3E%3Cbody%3E%3C/body%3E%3C/html%3E").await.unwrap();
+        page.evaluate("document.head.insertAdjacentHTML('beforeend', '<script src=\"https://chatgpt.com/cdn-cgi/challenge-platform/fixture\"></script>')");
+        let probe =
+            super::MANAGED_CHALLENGE_SHELL_JS.replace("location.origin", "'https://chatgpt.com'");
+        assert_eq!(page.evaluate(&probe).as_bool(), Some(true));
+        page.evaluate("document.title='ChatGPT'");
+        assert_eq!(page.evaluate(&probe).as_bool(), Some(false));
+        page.evaluate("(() => {document.title='Just a moment...';document.querySelector('script').setAttribute('src','https://foreign.invalid/cdn-cgi/challenge-platform/fixture');return true;})()");
+        assert_eq!(page.evaluate(&probe).as_bool(), Some(false));
     }
 }

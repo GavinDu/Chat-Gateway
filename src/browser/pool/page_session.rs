@@ -541,7 +541,7 @@ mod chatgpt_stream_preload_tests {
         page.add_preload_script(&fixture_script);
         page.goto(&encoded_data_page(
             r#"<html><body><script>
-            globalThis.__wasPatched = ReadableStream.__chatGatewayPullCompat === true;
+            globalThis.__wasPatched = ReadableStream.__chatGatewayPullCompat === true || ReadableStream.__obscuraPullCompat === true;
             const stream = new ReadableStream({
                 pull(controller) {
                     globalThis.__pulls = (globalThis.__pulls || 0) + 1;

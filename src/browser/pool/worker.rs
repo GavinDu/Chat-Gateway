@@ -558,30 +558,7 @@ fn diagnostic_input_selector<'a>(
 /// Probe the visible editor, never the first hidden duplicate DOM match.
 /// The test string stays inside the page and is not included in diagnostics.
 fn diagnostic_prompt_retained(page: &obscura_core::Page, selector: &str, prompt: &str) -> bool {
-    let (Ok(selector), Ok(prompt)) = (
-        serde_json::to_string(selector),
-        serde_json::to_string(prompt),
-    ) else {
-        return false;
-    };
-    let script = format!(
-        r#"(() => {{
-            const el = Array.from(document.querySelectorAll({selector})).find(el =>
-                el.getClientRects().length > 0 &&
-                window.getComputedStyle(el).visibility !== 'hidden' &&
-                !el.closest('[hidden], [inert], [aria-hidden="true"], [aria-disabled="true"]') &&
-                !el.disabled && !el.matches(':disabled') &&
-                !el.closest('fieldset[disabled]') && !el.readOnly &&
-                el.getAttribute('aria-disabled') !== 'true' &&
-                el.getAttribute('aria-readonly') !== 'true' &&
-                el.getAttribute('contenteditable') !== 'false'
-            );
-            if (!el) return false;
-            const value = 'value' in el ? el.value : (el.innerText || el.textContent || '');
-            return typeof value === 'string' && value.trim() === {prompt}.trim();
-        }})()"#
-    );
-    page.evaluate(&script).as_bool() == Some(true)
+    providers::common::composer_retains_prompt(page, selector, prompt).unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -646,6 +623,41 @@ mod adapter_diagnostic_composer_tests {
             &page,
             "#aria-inherited",
             "diagnostic draft"
+        ));
+    }
+}
+
+#[cfg(test)]
+mod rich_text_diagnostic_retention_tests {
+    #[tokio::test]
+    async fn visible_editor_text_wins_over_synthetic_value() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html =
+            "<html><body><div id='editor' contenteditable='true'>exact draft</div></body></html>";
+        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        page.evaluate("document.getElementById('editor').value='misleading'");
+        assert!(super::diagnostic_prompt_retained(
+            &page,
+            "#editor",
+            "exact draft"
+        ));
+        assert!(!super::diagnostic_prompt_retained(
+            &page,
+            "#editor",
+            "misleading"
+        ));
+        page.evaluate("document.getElementById('editor').textContent=''");
+        assert!(!super::diagnostic_prompt_retained(
+            &page,
+            "#editor",
+            "exact draft"
         ));
     }
 }
@@ -1449,7 +1461,7 @@ pub(super) fn browser_thread(
                                 // Phase 2 — dummy prompt (Go RunAdapterTest).
                                 const DUMMY: &str = "chat-gateway selector test — please reply with the word OK";
                                 let input_result =
-                                    providers::common::human_type(&page, &[input_sel], DUMMY).await;
+                                    providers::common::type_provider_prompt(&mut page, &[input_sel], DUMMY, Some(provider.name())).await;
                                 if let Err(error) = input_result {
                                     record_test_adapter_error(&mut report, TestAdapterErrorPhase::InputType, &error);
                                     finish(report);
@@ -1480,7 +1492,12 @@ pub(super) fn browser_thread(
                                 }
                                 let baseline = adapter.response_text(&page).filter(|t| !t.is_empty());
                                 // Phase 3 — send button or Enter (5s).
-                                match providers::common::click_send_or_enter(&mut page, sets[1].1, input_sel, 5000).await {
+                                let submitted = if provider == Provider::MetaAI {
+                                    providers::common::submit_metaai_focused(&mut page, DUMMY).await.map(|_| false)
+                                } else {
+                                    providers::common::click_send_or_enter(&mut page, sets[1].1, input_sel, 5000).await
+                                };
+                                match submitted {
                                     Ok(clicked) => report.send_clicked = clicked,
                                     Err(error) => {
                                         record_test_adapter_error(&mut report, TestAdapterErrorPhase::Send, &error);
