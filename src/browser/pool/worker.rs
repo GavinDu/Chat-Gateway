@@ -1258,8 +1258,8 @@ pub(super) fn browser_thread(
                                 // goto, localStorage after, then re-goto).
                                 let mut page = match super::browser_factory::new_provider_page(&browser, provider).await {
                                     Ok(p) => p,
-                                    Err(_) => {
-                                        report.errors.push("open_page_failed".to_string());
+                                    Err(error) => {
+                                        record_test_adapter_error(&mut report, TestAdapterErrorPhase::OpenPage, &error);
                                         finish(report);
                                         return;
                                     }
@@ -1269,8 +1269,8 @@ pub(super) fn browser_thread(
                                 crate::browser::network_tap::attach_provider_network_tap(&mut page, provider);
                                 let session_file = match session::load_session_file(provider.name()) {
                                     Ok(file) => file,
-                                    Err(_) => {
-                                        report.errors.push("session_file_load_failed".to_string());
+                                    Err(error) => {
+                                        record_test_adapter_error(&mut report, TestAdapterErrorPhase::SessionFileLoad, &error);
                                         None
                                     }
                                 };
@@ -1317,9 +1317,9 @@ pub(super) fn browser_thread(
                                 // Phase 1 — input (20s, Go's budget).
                                 let input_sel = match providers::common::wait_for_selector(&mut page, sets[0].1, 20000).await {
                                     Ok(()) => diagnostic_input_selector(&page, sets[0].1).unwrap_or(sets[0].1[0]),
-                                    Err(_) => {
+                                    Err(error) => {
                                         report.input_controls = diagnostic_input_controls(&page);
-                                        report.errors.push("input_selector_unavailable".to_string());
+                                        record_test_adapter_error(&mut report, TestAdapterErrorPhase::InputSelector, &error);
                                         finish(report);
                                         return;
                                     }
@@ -1329,8 +1329,8 @@ pub(super) fn browser_thread(
                                 const DUMMY: &str = "chat-gateway selector test — please reply with the word OK";
                                 let input_result =
                                     providers::common::human_type(&page, &[input_sel], DUMMY).await;
-                                if input_result.is_err() {
-                                    report.errors.push("input_type_failed".to_string());
+                                if let Err(error) = input_result {
+                                    record_test_adapter_error(&mut report, TestAdapterErrorPhase::InputType, &error);
                                     finish(report);
                                     return;
                                 }
@@ -1361,8 +1361,8 @@ pub(super) fn browser_thread(
                                 // Phase 3 — send button or Enter (5s).
                                 match providers::common::click_send_or_enter(&mut page, sets[1].1, input_sel, 5000).await {
                                     Ok(clicked) => report.send_clicked = clicked,
-                                    Err(_) => {
-                                        report.errors.push("send_submission_failed".to_string());
+                                    Err(error) => {
+                                        record_test_adapter_error(&mut report, TestAdapterErrorPhase::Send, &error);
                                         finish(report);
                                         return;
                                     }
