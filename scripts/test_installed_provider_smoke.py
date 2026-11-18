@@ -313,6 +313,62 @@ class ExecutionContractTests(unittest.TestCase):
                 self.assertEqual(row["sse"], {"status":"skipped","reason":"owner_deferred"})
         self.assertNotIn("model-", json.dumps(report))
 
+    def test_expected_binary_source_sha_preflights_without_sending_on_mismatch(self):
+        class VersionedGateway(FakeGateway):
+            def __init__(self, source_sha):
+                super().__init__()
+                self.source_sha = source_sha
+                self.calls = []
+
+            def open(self, req, timeout):
+                self.calls.append(req.full_url.rsplit("/", 1)[-1])
+                if req.full_url.endswith("/health"):
+                    return FakeResponse(json.dumps({
+                        "status": "ok",
+                        "build": {"source_sha": self.source_sha},
+                    }).encode())
+                return super().open(req, timeout)
+
+        wrong = VersionedGateway("a" * 40)
+        report = execute("http://127.0.0.1:8080", "", 8, wrong,
+                         expected_source_sha="b" * 40)
+        self.assertEqual(report["phase"], "preflight_failed")
+        self.assertEqual(report["identity"]["source_sha"], "a" * 40)
+        self.assertEqual(len(report["providers"]), 8)
+        self.assertTrue(all(row["json"] == {
+            "status": "skipped", "reason": "source_sha_mismatch",
+        } for row in report["providers"]))
+        self.assertEqual(wrong.calls, ["health"])
+        self.assertEqual(wrong.posts, [])
+
+        unknown = VersionedGateway(None)
+        report = execute("http://127.0.0.1:8080", "", 8, unknown,
+                         expected_source_sha="a" * 40)
+        self.assertEqual(report["phase"], "preflight_failed")
+        self.assertEqual(report["identity"]["source_sha"], "unknown")
+        self.assertEqual(unknown.calls, ["health"])
+        self.assertEqual(unknown.posts, [])
+
+        for bad in ("A" * 40, "a" * 39, "a" * 40 + " token=secret",
+                    "unknown", ""):
+            gateway = VersionedGateway("a" * 40)
+            with self.subTest(bad=bad), self.assertRaises(SmokeFailure) as error:
+                execute("http://127.0.0.1:8080", "", 8, gateway,
+                        expected_source_sha=bad)
+            self.assertEqual(error.exception.category, "invalid_expected_source_sha")
+            self.assertEqual(gateway.calls, [])
+            self.assertNotIn("secret", str(error.exception))
+
+        correct = VersionedGateway("a" * 40)
+        report = execute("http://127.0.0.1:8080", "", 8, correct,
+                         expected_source_sha="a" * 40)
+        self.assertEqual(report["phase"], "completed")
+        self.assertEqual(correct.posts, [
+            ("chatgpt", False), ("chatgpt", True),
+            ("metaai", False), ("metaai", True),
+        ])
+        self.assertNotIn("token=secret", json.dumps(report))
+
     def test_explicit_selection_rejects_unknown_duplicates_and_empty(self):
         self.assertEqual(parse_selected_providers("chatgpt,metaai"), FOCUS_PROVIDERS)
         self.assertEqual(parse_selected_providers("metaai"), ("metaai",))
