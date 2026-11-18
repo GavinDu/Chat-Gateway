@@ -730,15 +730,15 @@ mod adapter_probe_redaction_tests {
     fn raw_selector_and_unrecognized_role_never_enter_serialized_report() {
         let report = TestAdapterReport {
             probe: redact_test_adapter_probe(vec![
-            (
-                "input".to_string(),
-                Some("textarea[data-token='Bearer secret-value']".to_string()),
-            ),
-            ("send".to_string(), None),
-            (
-                "private-role/account-id".to_string(),
-                Some("button[title='private-value']".to_string()),
-            ),
+                (
+                    "input".to_string(),
+                    Some("textarea[data-token='Bearer secret-value']".to_string()),
+                ),
+                ("send".to_string(), None),
+                (
+                    "private-role/account-id".to_string(),
+                    Some("button[title='private-value']".to_string()),
+                ),
             ]),
             ..Default::default()
         };
