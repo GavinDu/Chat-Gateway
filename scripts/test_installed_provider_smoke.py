@@ -490,6 +490,18 @@ class ExecutionContractTests(unittest.TestCase):
         self.assertEqual(error.exception.category, "invalid_selection")
         self.assertEqual(gateway.posts, [])
 
+    def test_repeat_flag_without_execute_never_contacts_installed_gateway(self):
+        output = io.StringIO()
+        with patch.object(sys, "argv", [
+            "installed_provider_smoke.py", "--repeat",
+        ]), patch("installed_provider_smoke.execute",
+                  side_effect=AssertionError("unexpected gateway network")), redirect_stdout(output):
+            self.assertEqual(main(), 0)
+        report = json.loads(output.getvalue())
+        self.assertEqual(report["phase"], "not_executed")
+        self.assertTrue(all(row["repeat"]["status"] == "skipped"
+                            for row in report["providers"]))
+
     def test_without_execute_no_network_access_or_hidden_success(self):
         output = io.StringIO()
         with patch.object(sys, "argv", ["installed_provider_smoke.py"]), patch(
