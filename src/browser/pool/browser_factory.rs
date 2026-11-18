@@ -3,6 +3,21 @@ use crate::config::AppConfig;
 use anyhow::Result;
 
 pub(super) fn build_browser(cfg: &AppConfig) -> Result<obscura_core::Browser> {
+    build_browser_with_storage(cfg, true)
+}
+
+/// Create a *separate* pinned Obscura Browser for a future candidate replay.
+/// The published Browser::new_page() shares one BrowserContext cookie jar,
+/// localStorage and IndexedDB with every other page on that Browser. A second
+/// Browser (without storage_dir) owns fresh independent context state instead.
+/// This factory does not import cookies, navigate or promote the candidate;
+/// the live worker still owns the existing persistent Browser until #1385.
+#[allow(dead_code)] // The staged-activation caller is a separate, gated issue (#1385).
+pub(super) fn build_disposable_browser(cfg: &AppConfig) -> Result<obscura_core::Browser> {
+    build_browser_with_storage(cfg, false)
+}
+
+fn build_browser_with_storage(cfg: &AppConfig, persistent: bool) -> Result<obscura_core::Browser> {
     let mut builder = obscura_core::Browser::builder().stealth(cfg.obscura.stealth);
     if let Some(user_agent) = cfg
         .obscura
@@ -13,20 +28,25 @@ pub(super) fn build_browser(cfg: &AppConfig) -> Result<obscura_core::Browser> {
     {
         builder = builder.user_agent(user_agent.to_owned());
     }
-    let storage = cfg
-        .obscura
-        .storage_dir
-        .clone()
-        .filter(|s| !s.is_empty())
-        .or_else(|| {
-            if cfg.server.chrome_profile_dir.is_empty() {
-                None
-            } else {
-                Some(cfg.server.chrome_profile_dir.clone())
-            }
-        });
-    if let Some(dir) = storage {
-        builder = builder.storage_dir(dir);
+    // Never pass either the explicit Obscura directory or the legacy Chrome
+    // profile fallback to an isolated staging Browser. Even a failed candidate
+    // must not read or write the live user's profile or cookie persistence.
+    if persistent {
+        let storage = cfg
+            .obscura
+            .storage_dir
+            .clone()
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                if cfg.server.chrome_profile_dir.is_empty() {
+                    None
+                } else {
+                    Some(cfg.server.chrome_profile_dir.clone())
+                }
+            });
+        if let Some(dir) = storage {
+            builder = builder.storage_dir(dir);
+        }
     }
     Ok(builder.build()?)
 }
@@ -107,5 +127,114 @@ mod compatibility_tests {
                 "the page must expose window.origin before app scripts execute"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod disposable_context_tests {
+    use super::*;
+
+    fn cfg(explicit_dir: &str, legacy_dir: &str) -> AppConfig {
+        serde_yaml::from_str(&format!(
+            "server:\n  chrome_profile_dir: '{legacy_dir}'\nobscura:\n  stealth: false\n  user_agent: 'Gateway Synthetic UA/1.0'\n  storage_dir: '{explicit_dir}'\nproviders: []\n"
+        ))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn disposable_browsers_never_inherit_or_mutate_live_cookie_jar() {
+        let cfg: AppConfig =
+            serde_yaml::from_str("obscura:\n  stealth: false\nproviders: []\n").unwrap();
+        let live = build_browser(&cfg).unwrap();
+        live.cookies()
+            .set(
+                "SID=fixture-live; Secure; HttpOnly; Path=/",
+                "https://chatgpt.com/",
+            )
+            .unwrap();
+
+        let candidate = build_disposable_browser(&cfg).unwrap();
+        assert!(candidate.cookies().get_all().is_empty());
+        candidate
+            .cookies()
+            .set(
+                "SID=fixture-candidate; Secure; HttpOnly; Path=/",
+                "https://chatgpt.com/",
+            )
+            .unwrap();
+        candidate
+            .cookies()
+            .set(
+                "SID=fixture-meta; Secure; HttpOnly; Path=/",
+                "https://meta.ai/",
+            )
+            .unwrap();
+
+        // Browser::new_page() is intentionally used through the same factory
+        // preloads, but pages from *different* Browsers cannot share the jar.
+        let mut candidate_page = new_page(&candidate).await.unwrap();
+        let mut live_page = new_page(&live).await.unwrap();
+        let offline = "data:text/html,%3Chtml%3E%3Cbody%3Efixture%3C%2Fbody%3E%3C%2Fhtml%3E";
+        candidate_page.goto(offline).await.unwrap();
+        live_page.goto(offline).await.unwrap();
+        assert_eq!(
+            candidate_page.evaluate("document.body.textContent"),
+            serde_json::json!("fixture")
+        );
+        assert_eq!(
+            live_page.evaluate("document.body.textContent"),
+            serde_json::json!("fixture")
+        );
+
+        let live_cookies = live.cookies().get_all();
+        assert_eq!(live_cookies.len(), 1);
+        assert_eq!(live_cookies[0].value, "fixture-live");
+        assert_eq!(candidate.cookies().get_all().len(), 2);
+        drop(candidate_page);
+        drop(candidate);
+        assert_eq!(live.cookies().get_all().len(), 1);
+        assert_eq!(live.cookies().get_all()[0].value, "fixture-live");
+
+        let cold_candidate = build_disposable_browser(&cfg).unwrap();
+        assert!(cold_candidate.cookies().get_all().is_empty());
+    }
+
+    #[tokio::test]
+    async fn staging_does_not_read_or_write_either_configured_profile_directory() {
+        let root = std::env::temp_dir().join(format!(
+            "chat-gateway-disposable-context-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let explicit = root.join("obscura");
+        let fallback = root.join("chrome");
+        let cfg = cfg(explicit.to_str().unwrap(), fallback.to_str().unwrap());
+        {
+            let candidate = build_disposable_browser(&cfg).unwrap();
+            let mut page = new_page(&candidate).await.unwrap();
+            page.goto("data:text/html,%3Chtml%3E%3C%2Fhtml%3E")
+                .await
+                .unwrap();
+            assert_eq!(
+                page.evaluate("navigator.userAgent"),
+                serde_json::json!("Gateway Synthetic UA/1.0"),
+            );
+            candidate
+                .cookies()
+                .set("SID=fixture; Secure; Path=/", "https://chatgpt.com/")
+                .unwrap();
+            assert_eq!(candidate.cookies().get_all().len(), 1);
+        }
+        assert!(
+            !explicit.exists(),
+            "staging must not touch obscura.storage_dir"
+        );
+        assert!(
+            !fallback.exists(),
+            "staging must not touch chrome_profile_dir"
+        );
+        assert!(
+            !root.exists(),
+            "disposable context must not leave a profile"
+        );
     }
 }
