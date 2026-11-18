@@ -251,6 +251,23 @@ impl ProviderSessionRegistry {
         self.credentials_verified_at(provider, Instant::now())
     }
 
+    /// Historical positive in the *current* worker/verification epoch only.
+    /// Never publish this as a current auth verdict: a five-minute-old proof
+    /// has expired for status, but can still protect its live page from a
+    /// destructive shared-cookie-jar replay when the applied marker is lost.
+    pub fn has_prior_positive_account_observation(&self, provider: &str) -> bool {
+        self.credential_proofs
+            .lock()
+            .ok()
+            .and_then(|proofs| {
+                proofs
+                    .by_provider
+                    .get(provider)
+                    .map(|entry| entry.first_party_verified_at.is_some())
+            })
+            .unwrap_or(false)
+    }
+
     pub fn invalidate_credentials(&self, provider: &str) {
         if let Ok(mut proofs) = self.credential_proofs.lock() {
             proofs.by_provider.remove(provider);
@@ -841,6 +858,40 @@ mod credential_evidence_lifecycle_tests {
         assert!(!reg.credentials_verified("chatgpt"));
         assert!(reg.record_credentials_verified("chatgpt", second));
         assert!(reg.credentials_verified("chatgpt"));
+    }
+
+    #[test]
+    fn expired_status_proof_still_blocks_destructive_replay_in_current_epoch() {
+        let reg = ProviderSessionRegistry::default();
+        assert!(!reg.has_prior_positive_account_observation("chatgpt"));
+        let chat = reg.begin_credential_verification("chatgpt").unwrap();
+        assert!(!reg.has_prior_positive_account_observation("chatgpt"));
+        assert!(reg.record_credentials_verified("chatgpt", chat));
+
+        // The public verification verdict expires, but the same live page
+        // remains unsafe to replace without an isolated staging cookie jar.
+        let after_ttl = Instant::now() + CREDENTIAL_PROOF_TTL + Duration::from_secs(1);
+        assert!(!reg.credentials_verified_at("chatgpt", after_ttl));
+        assert!(reg.has_prior_positive_account_observation("chatgpt"));
+        assert!(!reg.has_prior_positive_account_observation("metaai"));
+
+        // Starting a new epoch can no longer borrow an old positive.
+        let next = reg.begin_credential_verification("chatgpt").unwrap();
+        assert!(!reg.has_prior_positive_account_observation("chatgpt"));
+        assert!(!reg.record_credentials_verified("chatgpt", chat));
+        assert!(reg.record_credentials_verified("chatgpt", next));
+
+        reg.record_needs_login("chatgpt");
+        assert!(!reg.has_prior_positive_account_observation("chatgpt"));
+        let after_login = reg.begin_credential_verification("chatgpt").unwrap();
+        assert!(reg.record_credentials_verified("chatgpt", after_login));
+        reg.record_unlinked("chatgpt");
+        assert!(!reg.has_prior_positive_account_observation("chatgpt"));
+
+        let before_restart = reg.begin_credential_verification("chatgpt").unwrap();
+        assert!(reg.record_credentials_verified("chatgpt", before_restart));
+        reg.invalidate_all_credentials();
+        assert!(!reg.has_prior_positive_account_observation("chatgpt"));
     }
 
     #[test]
