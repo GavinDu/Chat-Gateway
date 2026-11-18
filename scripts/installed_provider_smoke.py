@@ -43,6 +43,7 @@ FIXED_CATEGORIES = frozenset({
     "sse_incomplete", "invalid_models", "gateway_not_ready",
     "gateway_unreachable", "response_too_large", "invalid_response",
     "invalid_header", "invalid_gateway_url", "invalid_selection",
+    "invalid_expected_source_sha", "source_sha_mismatch",
 })
 
 
@@ -284,9 +285,15 @@ def _report(phase: str, identity: dict | None = None,
 def execute(
     base_url: str, api_key: str, timeout: int, opener=None,
     selected_providers: tuple[str, ...] = FOCUS_PROVIDERS,
+    expected_source_sha: str | None = None,
 ) -> dict:
     # Validate before any network call, even the local read-only preflight.
     parse_selected_providers(",".join(selected_providers))
+    if expected_source_sha is not None and (
+        not isinstance(expected_source_sha, str)
+        or SHA_PATTERN.fullmatch(expected_source_sha) is None
+    ):
+        raise SmokeFailure("invalid_expected_source_sha")
     validate_canary_target(base_url, api_key, local_no_key=True)
     if timeout < 1 or timeout > 600:
         raise SmokeFailure("invalid_response")
@@ -295,6 +302,11 @@ def execute(
     identity = _identity(health)
     if identity["health"] != "ok":
         return _report("preflight_failed", identity, reason="gateway_not_ready")
+    # A source checkout or image tag is not evidence of the running binary.
+    # Refuse synthetic provider sends if the owner supplied an expected
+    # revision and the actual compile-time /health.build SHA does not match.
+    if expected_source_sha is not None and identity["source_sha"] != expected_source_sha:
+        return _report("preflight_failed", identity, reason="source_sha_mismatch")
     models = model_inventory(_get_json(base_url, api_key, "/v1/models", timeout, opener))
     results = run_matrix(
         models, lambda provider, model, stream: _call(
@@ -311,6 +323,8 @@ def main() -> int:
     parser.add_argument("--timeout", type=int, default=150)
     parser.add_argument("--execute", action="store_true",
                         help="Explicitly authorize synthetic live requests")
+    parser.add_argument("--expected-source-sha",
+                        help="Optional 40-lowercase-hex running binary source SHA; mismatch prevents sends")
     parser.add_argument("--providers", default="chatgpt,metaai",
                         help="Comma-separated explicit provider allowlist (default: chatgpt,metaai)")
     args = parser.parse_args()
@@ -324,7 +338,8 @@ def main() -> int:
         return 0
     try:
         report = execute(args.base_url, os.environ.get("CHAT_GATEWAY_API_KEY", ""),
-                         args.timeout, selected_providers=selected)
+                         args.timeout, selected_providers=selected,
+                         expected_source_sha=args.expected_source_sha)
     except Exception as error:
         # Never reflect upstream error text, URLs, credentials or prompt content.
         report = _report("preflight_failed", reason=_safe_error(error))
