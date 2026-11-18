@@ -47,10 +47,8 @@ mod test_adapter_isolated_browser_tests {
 
     #[test]
     fn active_diagnostic_cookie_restore_owner_is_not_live_browser() {
-        let cfg: AppConfig = serde_yaml::from_str(
-            "obscura:\n  stealth: false\nproviders: []\n",
-        )
-        .unwrap();
+        let cfg: AppConfig =
+            serde_yaml::from_str("obscura:\n  stealth: false\nproviders: []\n").unwrap();
         let live = super::browser_factory::build_browser(&cfg).unwrap();
         live.cookies()
             .set(
