@@ -168,8 +168,14 @@ mod disposable_context_tests {
         let offline = "data:text/html,%3Chtml%3E%3Cbody%3Efixture%3C%2Fbody%3E%3C%2Fhtml%3E";
         candidate_page.goto(offline).await.unwrap();
         live_page.goto(offline).await.unwrap();
-        assert_eq!(candidate_page.evaluate("document.body.textContent"), "fixture".into());
-        assert_eq!(live_page.evaluate("document.body.textContent"), "fixture".into());
+        assert_eq!(
+            candidate_page.evaluate("document.body.textContent"),
+            serde_json::json!("fixture")
+        );
+        assert_eq!(
+            live_page.evaluate("document.body.textContent"),
+            serde_json::json!("fixture")
+        );
 
         let live_cookies = live.cookies().get_all();
         assert_eq!(live_cookies.len(), 1);
