@@ -62,9 +62,9 @@ class ParserContractTests(unittest.TestCase):
     def test_request_id_requires_canonical_non_nil_uuid_for_json_and_sse(self):
         valid = str(uuid.uuid4())
         valid_sse = consume_sse([
-            'data: {"choices":[{"delta":{"content":"OK"}}]}\\n',
-            'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\\n',
-            "data: [DONE]\\n",
+            'data: {"choices":[{"delta":{"content":"OK"}}]}\n',
+            'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n',
+            "data: [DONE]\n",
         ])
         headers = sample_headers()
         headers["X-Request-Id"] = valid
