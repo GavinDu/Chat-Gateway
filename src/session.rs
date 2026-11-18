@@ -2102,6 +2102,70 @@ mod cookie_restore_result_tests {
     }
 }
 
+/// Read-only evidence of material *eligible* for the chosen provider.
+/// Presence of cookies or origin storage is not proof of account validity.
+/// All counts are bounded; no names, domains, values or stable hashes escape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ReplayMaterialCoverage {
+    eligible_cookies: u16,
+    excluded_cookies: u16,
+    invalid_provider_cookies: u16,
+    normalized_scopes: u16,
+    observed_storage_entries: u16,
+}
+
+impl ReplayMaterialCoverage {
+    fn category(self) -> &'static str {
+        if self.eligible_cookies > 0 {
+            "eligible_cookie_material_unverified"
+        } else if self.observed_storage_entries > 0 {
+            "storage_only_presence_unverified"
+        } else {
+            "no_applicable_provider_material"
+        }
+    }
+}
+
+fn bounded_material_count(count: usize) -> u16 {
+    count.min(512) as u16
+}
+
+pub(crate) fn provider_replay_material_coverage(
+    file: &SessionFile,
+    provider: &str,
+    now_epoch: f64,
+) -> ReplayMaterialCoverage {
+    // Normalize in exactly the same way as restoration. The values in
+    // these records remain private; only bounded counts are returned.
+    let (cookies, normalized) = resolve_cookie_scope_duplicates(&file.cookies);
+    let mut eligible = 0usize;
+    let mut excluded = 0usize;
+    let mut invalid = 0usize;
+    for cookie in cookies {
+        if !cookie_domain_allowed(provider, &cookie.domain) {
+            excluded += 1;
+        } else if !restored_cookie_fields_safe(&cookie)
+            || cookie.validate_browser_metadata().is_err()
+            || cookie
+                .expires
+                .is_some_and(|expiry| expiry >= 0.0 && expiry <= now_epoch)
+        {
+            invalid += 1;
+        } else {
+            eligible += 1;
+        }
+    }
+    ReplayMaterialCoverage {
+        eligible_cookies: bounded_material_count(eligible),
+        excluded_cookies: bounded_material_count(excluded),
+        invalid_provider_cookies: bounded_material_count(invalid),
+        normalized_scopes: bounded_material_count(normalized),
+        // Origin-storage keys are not allowlisted for the extension relay.
+        // This field means "observed", not "eligible authenticated state".
+        observed_storage_entries: bounded_material_count(file.local_storage.len()),
+    }
+}
+
 /// Check all eligible snapshot cookies before touching the shared browser
 /// cookie jar. A malformed or expired later cookie must not leave a partially
 /// restored session, and refresh callers preflight before clearing credentials.
