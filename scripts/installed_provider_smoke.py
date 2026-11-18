@@ -8,8 +8,9 @@ contains all eight provider rows.
 No owner session is accessed unless --execute is supplied. The output is
 redacted metadata only: never print response bodies, prompts, model IDs,
 authentication material, conversation IDs or arbitrary upstream errors.
-This checks one fresh JSON turn, then a fresh SSE turn per provider; it does
-not certify restart or memory continuity.
+The default checks one fresh JSON turn, then a fresh SSE turn per provider.
+An explicit --execute --repeat also checks two distinct JSON prompts inside one
+new conversation; it does not certify restart or cross-provider continuity.
 """
 from __future__ import annotations
 
@@ -34,6 +35,7 @@ PROVIDERS = (
 )
 FOCUS_PROVIDERS = ("chatgpt", "metaai")
 PROMPT = "Reply exactly OK"
+SECOND_PROMPT = "Reply exactly TWO"
 MAX_JSON_BYTES = 262_144
 SHA_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 BUILD_TIME_PATTERN = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
@@ -44,6 +46,7 @@ FIXED_CATEGORIES = frozenset({
     "gateway_unreachable", "response_too_large", "invalid_response",
     "invalid_header", "invalid_gateway_url", "invalid_selection",
     "invalid_expected_source_sha", "source_sha_mismatch",
+    "reused_request_id",
 })
 
 
@@ -136,7 +139,8 @@ def model_inventory(models: dict) -> dict[str, str]:
     return found
 
 
-def validate_json(payload: dict, headers, provider: str, conversation_id: str) -> None:
+def validate_json(payload: dict, headers, provider: str, conversation_id: str,
+                  expected_answer: str = "OK") -> None:
     if headers.get("X-Gateway-Provider", "").lower() != provider:
         raise SmokeFailure("wrong_provider")
     if headers.get("X-Conversation-Id") != conversation_id:
@@ -153,11 +157,12 @@ def validate_json(payload: dict, headers, provider: str, conversation_id: str) -
     if not isinstance(message, dict) or message.get("role") != "assistant":
         raise SmokeFailure("invalid_response")
     # A different or stale response must never pass; only exact marker text.
-    if message.get("content") != "OK":
+    if message.get("content") != expected_answer:
         raise SmokeFailure("unexpected_answer")
 
 
-def validate_sse(parsed: dict, headers, provider: str, conversation_id: str) -> None:
+def validate_sse(parsed: dict, headers, provider: str, conversation_id: str,
+                 expected_answer: str = "OK") -> None:
     if headers.get("X-Gateway-Provider", "").lower() != provider:
         raise SmokeFailure("wrong_provider")
     if headers.get("X-Conversation-Id") != conversation_id:
@@ -166,16 +171,18 @@ def validate_sse(parsed: dict, headers, provider: str, conversation_id: str) -> 
         raise SmokeFailure("missing_request_id")
     if parsed["provider_error"] or not parsed["saw_done"]:
         raise SmokeFailure("sse_incomplete")
-    if parsed["content"] != "OK":
+    if parsed["content"] != expected_answer:
         raise SmokeFailure("unexpected_answer")
 
 
 def _call(base_url: str, api_key: str, model: str, provider: str,
-          stream: bool, timeout: int, opener) -> dict:
-    conversation_id = str(uuid.uuid4())
+          stream: bool, timeout: int, opener,
+          conversation_id: str | None = None, prompt: str = PROMPT,
+          expected_answer: str = "OK") -> dict:
+    conversation_id = conversation_id or str(uuid.uuid4())
     body = json.dumps({
         "model": model, "stream": stream,
-        "messages": [{"role": "user", "content": PROMPT}],
+        "messages": [{"role": "user", "content": prompt}],
     }, separators=(",", ":")).encode("utf-8")
     headers = gateway_headers(
         api_key, "text/event-stream" if stream else "application/json"
@@ -193,16 +200,43 @@ def _call(base_url: str, api_key: str, model: str, provider: str,
             raise SmokeFailure("invalid_response")
         if stream:
             parsed = consume_sse(bounded_sse_lines(response), start)
-            validate_sse(parsed, response.headers, provider, conversation_id)
+            validate_sse(parsed, response.headers, provider, conversation_id,
+                         expected_answer)
         else:
             parsed = _json_document(_read_limited(response))
-            validate_json(parsed, response.headers, provider, conversation_id)
+            validate_json(parsed, response.headers, provider, conversation_id,
+                          expected_answer)
     # Keep only a canonical UUID and bounded timing; never store parsed content.
     return {
         "status": "passed", "request_id": request_id,
         "duration_ms": min(600_000, max(0, int((time.monotonic() - start) * 1000))),
     }
 
+
+
+def _two_turn_json(base_url: str, api_key: str, model: str, provider: str,
+                   timeout: int, opener) -> dict:
+    """Two different expected answers in a fresh shared conversation.
+
+    The conversation UUID is never emitted; the two request IDs are safe
+    canonical gateway-generated correlation handles, not credentials.
+    This runs only after the owner's explicit --execute --repeat opt-in.
+    """
+    conversation_id = str(uuid.uuid4())
+    first = _call(base_url, api_key, model, provider, False, timeout, opener,
+                  conversation_id=conversation_id, prompt=PROMPT,
+                  expected_answer="OK")
+    second = _call(base_url, api_key, model, provider, False, timeout, opener,
+                   conversation_id=conversation_id, prompt=SECOND_PROMPT,
+                   expected_answer="TWO")
+    if first["request_id"] == second["request_id"]:
+        raise SmokeFailure("reused_request_id")
+    return {
+        "status": "passed",
+        "first_request_id": first["request_id"],
+        "second_request_id": second["request_id"],
+        "duration_ms": min(600_000, first["duration_ms"] + second["duration_ms"]),
+    }
 
 def _skipped(reason: str) -> dict:
     return {"status": "skipped", "reason": reason}
@@ -221,6 +255,7 @@ def parse_selected_providers(raw: str) -> tuple[str, ...]:
 def run_matrix(
     models: dict[str, str], sender,
     selected_providers: tuple[str, ...] = FOCUS_PROVIDERS,
+    repeat_sender=None,
 ) -> list[dict]:
     selected = set(parse_selected_providers(",".join(selected_providers)))
     results = []
@@ -228,12 +263,14 @@ def run_matrix(
         item = {
             "provider": provider, "json": _skipped("model_not_advertised"),
             "sse": _skipped("json_not_passed"),
-            "repeat": _skipped("separate_acceptance"),
+            "repeat": _skipped("prerequisite_not_passed" if repeat_sender
+                               else "separate_acceptance"),
             "restart": _skipped("separate_acceptance"),
         }
         if provider not in selected:
             item["json"] = _skipped("owner_deferred")
             item["sse"] = _skipped("owner_deferred")
+            item["repeat"] = _skipped("owner_deferred")
             results.append(item)
             continue
         model = models.get(provider)
@@ -247,6 +284,12 @@ def run_matrix(
                     item["sse"] = sender(provider, model, True)
                 except Exception as error:
                     item["sse"] = {"status": "failed", "category": _safe_error(error)}
+            if (repeat_sender is not None and item["json"]["status"] == "passed"
+                    and item["sse"]["status"] == "passed"):
+                try:
+                    item["repeat"] = repeat_sender(provider, model)
+                except Exception as error:
+                    item["repeat"] = {"status": "failed", "category": _safe_error(error)}
         results.append(item)
     return results
 
@@ -286,6 +329,7 @@ def execute(
     base_url: str, api_key: str, timeout: int, opener=None,
     selected_providers: tuple[str, ...] = FOCUS_PROVIDERS,
     expected_source_sha: str | None = None,
+    repeat: bool = False,
 ) -> dict:
     # Validate before any network call, even the local read-only preflight.
     parse_selected_providers(",".join(selected_providers))
@@ -311,7 +355,10 @@ def execute(
     results = run_matrix(
         models, lambda provider, model, stream: _call(
             base_url, api_key, model, provider, stream, timeout, opener
-        ), selected_providers
+        ), selected_providers,
+        repeat_sender=(lambda provider, model: _two_turn_json(
+            base_url, api_key, model, provider, timeout, opener
+        )) if repeat else None,
     )
     return _report("completed", identity, results)
 
@@ -323,6 +370,8 @@ def main() -> int:
     parser.add_argument("--timeout", type=int, default=150)
     parser.add_argument("--execute", action="store_true",
                         help="Explicitly authorize synthetic live requests")
+    parser.add_argument("--repeat", action="store_true",
+                        help="With --execute, also check a distinct second JSON turn in one conversation")
     parser.add_argument("--expected-source-sha",
                         help="Optional 40-lowercase-hex running binary source SHA; mismatch prevents sends")
     parser.add_argument("--providers", default="chatgpt,metaai",
@@ -339,7 +388,8 @@ def main() -> int:
     try:
         report = execute(args.base_url, os.environ.get("CHAT_GATEWAY_API_KEY", ""),
                          args.timeout, selected_providers=selected,
-                         expected_source_sha=args.expected_source_sha)
+                         expected_source_sha=args.expected_source_sha,
+                         repeat=args.repeat)
     except Exception as error:
         # Never reflect upstream error text, URLs, credentials or prompt content.
         report = _report("preflight_failed", reason=_safe_error(error))
@@ -347,6 +397,7 @@ def main() -> int:
     return 0 if report["phase"] == "completed" and all(
         item["json"]["status"] == "passed"
         and item["sse"]["status"] == "passed"
+        and (not args.repeat or item["repeat"]["status"] == "passed")
         for item in report["providers"] if item["provider"] in selected
     ) else 1
 

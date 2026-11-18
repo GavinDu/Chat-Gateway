@@ -224,6 +224,7 @@ class FakeResponse:
 class FakeGateway:
     def __init__(self):
         self.posts = []
+        self.turns = []
 
     def open(self, req, timeout):
         assert timeout == 8
@@ -239,16 +240,48 @@ class FakeGateway:
         model = content["model"]
         provider = model.split("/")[0]
         self.posts.append((provider, content["stream"]))
+        prompt = content["messages"][0]["content"]
         req_id = req.get_header("X-conversation-id")
         assert isinstance(req_id, str)
+        self.turns.append((provider, content["stream"], req_id, prompt))
         headers = sample_headers(provider, req_id)
         if content["stream"]:
             data = (b'data: {"choices":[{"delta":{"content":"OK"}}]}\n'
                     b'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n'
                     b'data: [DONE]\n')
         else:
-            data = json.dumps(answer()).encode()
+            data = json.dumps(answer("TWO" if prompt == "Reply exactly TWO"
+                                     else "OK")).encode()
         return FakeResponse(data, headers)
+
+
+class FaultyRepeatGateway(FakeGateway):
+    def __init__(self, fault):
+        super().__init__()
+        self.fault = fault
+        self.previous_json_request = None
+
+    def open(self, req, timeout):
+        response = super().open(req, timeout)
+        if not req.full_url.endswith("/v1/chat/completions"):
+            return response
+        payload = json.loads(req.data)
+        prompt = payload["messages"][0]["content"]
+        if prompt == "Reply exactly OK" and not payload["stream"]:
+            self.previous_json_request = response.headers["X-Request-Id"]
+        if prompt != "Reply exactly TWO":
+            return response
+        if self.fault == "stale":
+            response.body = json.dumps(answer("OK")).encode()
+        elif self.fault == "duplicate_request":
+            response.headers["X-Request-Id"] = self.previous_json_request
+        elif self.fault == "wrong_provider":
+            response.headers["X-Gateway-Provider"] = "metaai"
+        elif self.fault == "wrong_conversation":
+            response.headers["X-Conversation-Id"] = str(uuid.uuid4())
+        elif self.fault == "incomplete":
+            response.body = json.dumps(answer("TWO", finish="length")).encode()
+        return response
 
 
 class ExecutionContractTests(unittest.TestCase):
@@ -312,6 +345,78 @@ class ExecutionContractTests(unittest.TestCase):
                 self.assertEqual(row["json"], {"status":"skipped","reason":"owner_deferred"})
                 self.assertEqual(row["sse"], {"status":"skipped","reason":"owner_deferred"})
         self.assertNotIn("model-", json.dumps(report))
+
+    def test_opt_in_second_turn_reuses_one_conversation_and_requires_distinct_answer(self):
+        gateway = FakeGateway()
+        report = execute("http://127.0.0.1:8080", "", 8, gateway, repeat=True)
+        self.assertEqual(report["phase"], "completed")
+        self.assertEqual(len(report["providers"]), 8)
+        for provider in FOCUS_PROVIDERS:
+            records = [item for item in gateway.turns if item[0] == provider]
+            self.assertEqual(len(records), 4)
+            # Existing fresh JSON and SSE are independent conversations.
+            self.assertNotEqual(records[0][2], records[1][2])
+            # Explicit repeat has one new shared conversation, but the second
+            # user turn and answer cannot be the previous turn's stale reply.
+            self.assertEqual(records[2][2], records[3][2])
+            self.assertNotEqual(records[1][2], records[2][2])
+            self.assertEqual(records[2][3], "Reply exactly OK")
+            self.assertEqual(records[3][3], "Reply exactly TWO")
+            self.assertEqual(records[2][1:], (False, records[2][2], "Reply exactly OK"))
+            self.assertEqual(records[3][1:], (False, records[3][2], "Reply exactly TWO"))
+            row = next(item for item in report["providers"]
+                       if item["provider"] == provider)
+            self.assertEqual(row["json"]["status"], "passed")
+            self.assertEqual(row["sse"]["status"], "passed")
+            self.assertEqual(row["repeat"]["status"], "passed")
+            self.assertNotEqual(row["repeat"]["first_request_id"],
+                                row["repeat"]["second_request_id"])
+            self.assertEqual(row["restart"],
+                             {"status": "skipped", "reason": "separate_acceptance"})
+        for row in report["providers"]:
+            if row["provider"] not in FOCUS_PROVIDERS:
+                self.assertEqual(row["repeat"],
+                                 {"status": "skipped", "reason": "owner_deferred"})
+        redacted = json.dumps(report)
+        for private in ("Reply exactly", "TWO", "model-chatgpt", "conversation_id"):
+            self.assertNotIn(private, redacted)
+
+    def test_distinct_repeat_rejects_stale_request_reuse_wrong_scope_and_incomplete_finish(self):
+        for fault, expected in [
+            ("stale", "unexpected_answer"),
+            ("duplicate_request", "reused_request_id"),
+            ("wrong_provider", "wrong_provider"),
+            ("wrong_conversation", "wrong_conversation"),
+            ("incomplete", "incomplete_finish"),
+        ]:
+            with self.subTest(fault=fault):
+                gateway = FaultyRepeatGateway(fault)
+                report = execute("http://127.0.0.1:8080", "", 8, gateway,
+                                 selected_providers=("chatgpt",), repeat=True)
+                row = next(x for x in report["providers"]
+                           if x["provider"] == "chatgpt")
+                self.assertEqual(row["json"]["status"], "passed")
+                self.assertEqual(row["sse"]["status"], "passed")
+                self.assertEqual(row["repeat"],
+                                 {"status": "failed", "category": expected})
+                self.assertEqual(row["restart"]["status"], "skipped")
+                self.assertNotIn("Reply exactly", json.dumps(report))
+                self.assertNotIn("model-chatgpt", json.dumps(report))
+
+    def test_repeat_opt_in_never_runs_if_json_or_sse_prerequisite_fails(self):
+        repeat_calls = []
+        def sender(provider, _model, stream):
+            if provider == "chatgpt" and stream:
+                raise SmokeFailure("sse_incomplete")
+            return {"status": "passed", "request_id": str(uuid.uuid4())}
+        rows = run_matrix({"chatgpt": "model", "metaai": "model"}, sender,
+                          repeat_sender=lambda provider, model: repeat_calls.append(
+                              (provider, model)) or {"status": "passed"})
+        chatgpt = next(row for row in rows if row["provider"] == "chatgpt")
+        self.assertEqual(chatgpt["sse"]["status"], "failed")
+        self.assertEqual(chatgpt["repeat"],
+                         {"status": "skipped", "reason": "prerequisite_not_passed"})
+        self.assertEqual(repeat_calls, [("metaai", "model")])
 
     def test_expected_binary_source_sha_preflights_without_sending_on_mismatch(self):
         class VersionedGateway(FakeGateway):
@@ -384,6 +489,18 @@ class ExecutionContractTests(unittest.TestCase):
                     selected_providers=("chatgpt","invalid"))
         self.assertEqual(error.exception.category, "invalid_selection")
         self.assertEqual(gateway.posts, [])
+
+    def test_repeat_flag_without_execute_never_contacts_installed_gateway(self):
+        output = io.StringIO()
+        with patch.object(sys, "argv", [
+            "installed_provider_smoke.py", "--repeat",
+        ]), patch("installed_provider_smoke.execute",
+                  side_effect=AssertionError("unexpected gateway network")), redirect_stdout(output):
+            self.assertEqual(main(), 0)
+        report = json.loads(output.getvalue())
+        self.assertEqual(report["phase"], "not_executed")
+        self.assertTrue(all(row["repeat"]["status"] == "skipped"
+                            for row in report["providers"]))
 
     def test_without_execute_no_network_access_or_hidden_success(self):
         output = io.StringIO()
