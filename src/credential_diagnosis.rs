@@ -304,6 +304,27 @@ fn classify(e: &Evidence, now: u64) -> Diagnosis {
         return inconclusive(provider, "missing_snapshot_correlation");
     }
 
+    // A later browser login, new imported snapshot, or successful Obscura
+    // account observation cannot retroactively establish authentication when
+    // an earlier request failed. Freshness and matching opaque generation
+    // alone are insufficient to assert causal request-phase attribution.
+    // Gateway failure status is recorded *after* a request; it is not an
+    // account prerequisite and is separately checked by request UUID above.
+    if let Some(attempt) = e.attempt.as_ref() {
+        let verified_prerequisites = [
+            e.chrome.as_ref().map(|proof| proof.observed_at_ms),
+            e.snapshot.as_ref().map(|state| state.observed_at_ms),
+            e.obscura.as_ref().map(|proof| proof.observed_at_ms),
+        ];
+        if verified_prerequisites
+            .into_iter()
+            .flatten()
+            .any(|time| time > attempt.observed_at_ms)
+        {
+            return inconclusive(provider, "post_attempt_evidence");
+        }
+    }
+
     let chrome = e.chrome.as_ref().map(|x| x.verdict);
     let obscura = e.obscura.as_ref().map(|x| x.verdict);
     let snapshot = e.snapshot.as_ref().map(|x| x.state);
@@ -670,6 +691,46 @@ mod tests {
         assert_eq!(checked(v.clone()).category, "capture_or_import");
         v["snapshot"]["state"] = json!("saved_activation_pending");
         assert_eq!(checked(v).category, "activation_pending");
+    }
+
+    #[test]
+    fn request_diagnosis_rejects_auth_and_import_evidence_recorded_after_failure() {
+        // Every observation is individually fresh and uses the same source
+        // generation. Later login/import/replay still cannot prove what
+        // happened when the earlier request failed.
+        for source in ["chrome", "snapshot", "obscura"] {
+            let mut evidence = base();
+            evidence[source]["observed_at_ms"] = json!(NOW + 1_000);
+            let decision = checked(evidence);
+            assert_eq!(decision.category, "inconclusive", "{source}");
+            assert_eq!(decision.reason, "post_attempt_evidence", "{source}");
+            assert!(!decision.live_proof);
+        }
+
+        // The same guard applies to a replay-versus-browser discrepancy:
+        // later Chrome positivity cannot establish the earlier jar state.
+        let mut mismatch = base();
+        mismatch["obscura"]["verdict"] = json!("unauthenticated");
+        mismatch["chrome"]["observed_at_ms"] = json!(NOW + 1_000);
+        assert_eq!(checked(mismatch).reason, "post_attempt_evidence");
+    }
+
+    #[test]
+    fn request_diagnosis_keeps_prior_proof_and_later_correlated_status_distinct() {
+        let mut evidence = base();
+        evidence["chrome"]["observed_at_ms"] = json!(NOW - 10_000);
+        evidence["snapshot"]["observed_at_ms"] = json!(NOW - 9_000);
+        evidence["obscura"]["observed_at_ms"] = json!(NOW - 1_000);
+        assert_eq!(checked(evidence).category, "transport_or_extraction");
+
+        let mut status = with_gateway_failure();
+        status["gateway_failure"]["observed_at_ms"] = json!(NOW + 2_000);
+        let decision = checked(status);
+        assert_eq!(decision.category, "transport_or_extraction");
+        assert!(!decision.live_proof);
+        let serialized = serde_json::to_string(&decision).unwrap();
+        assert!(!serialized.contains(ID));
+        assert!(!serialized.contains("token=private"));
     }
 
     #[test]
