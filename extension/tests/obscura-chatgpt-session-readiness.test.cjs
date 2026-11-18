@@ -18,7 +18,8 @@ const validSession = () => ({
 
 async function run({origin="https://chatgpt.com", status=200,
                     session=validSession(), changeAt=null,
-                    navigation="same_origin", rejected=false} = {}) {
+                    navigation="same_origin", rejected=false,
+                    redirected=false, responseUrl=null} = {}) {
   const location = {
     origin, href: origin + "/c/original-private-thread"
   };
@@ -39,6 +40,7 @@ async function run({origin="https://chatgpt.com", status=200,
       if (changeAt === "fetch") changePage();
       return {
         status, ok: status >= 200 && status < 300,
+        redirected, url: responseUrl === null ? origin + "/api/auth/session" : responseUrl,
         json: async () => {
           if (changeAt === "json") changePage();
           return session;
@@ -63,7 +65,9 @@ test("verified first-party snapshot is source-scoped, no account data crosses re
   assert.equal(calls[0].route,"/api/auth/session");
   assert.equal(calls[0].options.credentials,"include");
   assert.equal(calls[0].options.cache,"no-store");
-  assert.equal(calls[0].options.redirect,"error");
+  // Pinned Obscura only exposes real redirect metadata with "follow";
+  // the verifier must fail closed on Response.redirected and final URL.
+  assert.equal(calls[0].options.redirect,"follow");
   assert(calls[0].options.signal);
   assert.deepEqual(Object.keys(report).sort(),["http","state"]);
   const json=JSON.stringify(report);
@@ -79,6 +83,11 @@ test("explicit logout, challenge, malformed and redirected responses stay distin
   assert.equal((await run({session:{}})).report.state,"needs_login");
   assert.equal((await run({session:[]})).report.state,"unavailable");
   assert.equal((await run({rejected:true})).report.state,"unavailable");
+  assert.equal((await run({redirected:true})).report.state,"unavailable");
+  assert.equal((await run({responseUrl:"https://foreign.private.invalid/auth/session"})).report.state,"unavailable");
+  assert.equal((await run({responseUrl:"https://chatgpt.com/c/not-session"})).report.state,"unavailable");
+  assert.equal((await run({responseUrl:""})).report.state,"unavailable");
+  assert.equal((await run({status:401,redirected:true})).report.state,"unavailable");
   const foreign=await run({origin:"https://different.private.invalid"});
   assert.equal(foreign.report.state,"off_origin");
   assert.equal(foreign.calls.length,0);
