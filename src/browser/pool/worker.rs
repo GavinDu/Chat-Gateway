@@ -5,6 +5,78 @@
 //! command delivery remain in the parent pool module.
 use super::*;
 
+/// A diagnostic replay must not overwrite the live cookie jar or owner vault.
+/// Keep deferred providers unchanged until their separate owner acceptance
+/// cycle; ChatGPT/Meta AI are the only active recovery providers.
+fn test_adapter_uses_disposable_browser(provider: Provider) -> bool {
+    matches!(provider, Provider::ChatGPT | Provider::MetaAI)
+}
+
+fn test_adapter_browser(
+    config: &AppConfig,
+    live: &obscura_core::Browser,
+    provider: Provider,
+) -> Result<obscura_core::Browser> {
+    if test_adapter_uses_disposable_browser(provider) {
+        super::browser_factory::build_disposable_browser(config)
+    } else {
+        Ok(live.clone())
+    }
+}
+
+#[cfg(test)]
+mod test_adapter_isolated_browser_tests {
+    use super::*;
+
+    #[test]
+    fn only_active_chatgpt_metaai_probe_uses_disposable_context_no_vault_save() {
+        assert!(test_adapter_uses_disposable_browser(Provider::ChatGPT));
+        assert!(test_adapter_uses_disposable_browser(Provider::MetaAI));
+        for provider in [
+            Provider::Claude,
+            Provider::Grok,
+            Provider::Qwen,
+            Provider::Gemini,
+            Provider::Perplexity,
+            Provider::Mistral,
+            Provider::Manus,
+        ] {
+            assert!(!test_adapter_uses_disposable_browser(provider));
+        }
+    }
+
+    #[test]
+    fn active_diagnostic_cookie_restore_owner_is_not_live_browser() {
+        let cfg: AppConfig = serde_yaml::from_str(
+            "obscura:\n  stealth: false\nproviders: []\n",
+        )
+        .unwrap();
+        let live = super::browser_factory::build_browser(&cfg).unwrap();
+        live.cookies()
+            .set(
+                "SID=live-synthetic; Secure; Path=/",
+                "https://chatgpt.com/",
+            )
+            .unwrap();
+        for provider in [Provider::ChatGPT, Provider::MetaAI] {
+            let candidate = test_adapter_browser(&cfg, &live, provider).unwrap();
+            assert!(candidate.cookies().get_all().is_empty());
+            candidate
+                .cookies()
+                .set(
+                    "SID=candidate-synthetic; Secure; Path=/",
+                    "https://chatgpt.com/",
+                )
+                .unwrap();
+            assert_eq!(candidate.cookies().get_all().len(), 1);
+            assert_eq!(live.cookies().get_all().len(), 1);
+            assert_eq!(live.cookies().get_all()[0].value, "live-synthetic");
+            drop(candidate);
+            assert_eq!(live.cookies().get_all()[0].value, "live-synthetic");
+        }
+    }
+}
+
 /// Session restore/save failures may contain upstream URLs, vault paths, or
 /// credential-bearing text. Only stable categories cross the log boundary;
 /// the surrounding fixed log message identifies the failing operation.
@@ -1357,6 +1429,7 @@ pub(super) fn browser_thread(
                         }
                         Command::TestAdapter { provider, reply } => {
                             let browser = browser.clone();
+                            let cfg = cfg.clone();
                             let registry = registry.clone();
                             let adapter_session_write_tracker = session_write_tracker.clone();
                             let operation_gate = operation_gate.clone();
@@ -1371,9 +1444,39 @@ pub(super) fn browser_thread(
                                     finish(report);
                                     return;
                                 };
-                                // Fresh page with the saved session applied
-                                // (same warm-up ordering: cookies before
-                                // goto, localStorage after, then re-goto).
+                                let isolated = test_adapter_uses_disposable_browser(provider);
+                                // Fail closed on missing/unreadable saved credentials
+                                // BEFORE opening a candidate page, bridge or network.
+                                // Deferred provider behavior remains unchanged.
+                                let session_file = match session::load_session_file(provider.name()) {
+                                    Ok(file) => file,
+                                    Err(error) => {
+                                        record_test_adapter_error(&mut report, TestAdapterErrorPhase::SessionFileLoad, &error);
+                                        if isolated {
+                                            finish(report);
+                                            return;
+                                        }
+                                        None
+                                    }
+                                };
+                                if isolated && session_file.is_none() {
+                                    report.errors.push("session_snapshot_missing".to_owned());
+                                    finish(report);
+                                    return;
+                                }
+                                // A new Page on a shared Browser is NOT an isolated
+                                // context in the pinned Obscura engine. For the
+                                // active providers, stage the test on a separate
+                                // nonpersistent Browser, and keep both owners in
+                                // this worker-local task through the entire probe.
+                                let browser = match test_adapter_browser(&cfg, &browser, provider) {
+                                    Ok(candidate) => candidate,
+                                    Err(error) => {
+                                        record_test_adapter_error(&mut report, TestAdapterErrorPhase::OpenPage, &error);
+                                        finish(report);
+                                        return;
+                                    }
+                                };
                                 let mut page = match super::browser_factory::new_provider_page(&browser, provider).await {
                                     Ok(p) => p,
                                     Err(error) => {
@@ -1382,16 +1485,7 @@ pub(super) fn browser_thread(
                                         return;
                                     }
                                 };
-                                // Test-adapter navigation uses an independent page, so attach
-                                // the same sanitized network diagnostics before its first load.
                                 crate::browser::network_tap::attach_provider_network_tap(&mut page, provider);
-                                let session_file = match session::load_session_file(provider.name()) {
-                                    Ok(file) => file,
-                                    Err(error) => {
-                                        record_test_adapter_error(&mut report, TestAdapterErrorPhase::SessionFileLoad, &error);
-                                        None
-                                    }
-                                };
                                 if !record_test_adapter_restore_result(
                                     &mut report,
                                     "session restore failed",
@@ -1506,11 +1600,16 @@ pub(super) fn browser_thread(
                                 }
                                 if !report.response_token {
                                     report.errors.push("response: no token within 45s".to_string());
-                                } else if let Err(error) =
-                                    session::save_session_if_changed(&browser, &page, provider.name(), &adapter_session_write_tracker).await
-                                {
-                                    tracing::warn!(provider = provider.name(), category = session_worker_failure_category(&error), "probe session snapshot failed");
+                                } else if !isolated {
+                                    // Legacy/deferred provider behavior unchanged.
+                                    if let Err(error) =
+                                        session::save_session_if_changed(&browser, &page, provider.name(), &adapter_session_write_tracker).await
+                                    {
+                                        tracing::warn!(provider = provider.name(), category = session_worker_failure_category(&error), "probe session snapshot failed");
+                                    }
                                 }
+                                // An active-provider synthetic diagnostic must
+                                // never rewrite the encrypted owner's snapshot.
                                 finish(report);
                             });
                         }
