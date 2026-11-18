@@ -1115,6 +1115,94 @@ fn same_revocation_cookie_scope(target: (&str, &str, &str), remaining: (&str, &s
     target.0 == remaining.0 && target.1.eq_ignore_ascii_case(remaining.1) && target.2 == remaining.2
 }
 
+/// Operator diagnostics must not treat the browser-wide cookie jar as
+/// provider replay evidence. Count only the requested provider's approved
+/// domains, and cap the count without revealing names, values or URL paths.
+/// A matching cookie is still NOT proof that the snapshot was correctly
+/// restored or that the first-party account is authenticated.
+fn count_provider_cookie_domains<'a>(
+    provider: &str,
+    domains: impl Iterator<Item = &'a str>,
+) -> usize {
+    domains
+        .filter(|domain| cookie_domain_allowed(provider, domain))
+        .take(513)
+        .count()
+        .min(512)
+}
+
+pub(crate) fn provider_cookie_count(browser: &Browser, provider: &str) -> usize {
+    let cookies = browser.cookies().get_all();
+    count_provider_cookie_domains(
+        provider,
+        cookies.iter().map(|cookie| cookie.domain.as_str()),
+    )
+}
+
+#[cfg(test)]
+mod provider_cookie_count_tests {
+    use super::*;
+
+    #[test]
+    fn provider_scopes_do_not_count_other_providers_or_lookalike_domains() {
+        let domains = [
+            "chatgpt.com",
+            ".chatgpt.com",
+            "login.chatgpt.com",
+            "openai.com",
+            ".meta.ai",
+            "www.meta.ai",
+            "chatgpt.com.attacker.invalid",
+            "meta.ai.attacker.invalid",
+            "not a valid domain",
+        ];
+        assert_eq!(
+            count_provider_cookie_domains("chatgpt", domains.iter().copied()),
+            4
+        );
+        assert_eq!(
+            count_provider_cookie_domains("metaai", domains.iter().copied()),
+            2
+        );
+        assert_eq!(
+            count_provider_cookie_domains("unknown", domains.iter().copied()),
+            0
+        );
+    }
+
+    #[test]
+    fn provider_material_count_is_bounded_without_exposing_cookie_values() {
+        assert_eq!(
+            count_provider_cookie_domains("chatgpt", std::iter::repeat_n("chatgpt.com", 600)),
+            512
+        );
+        assert_eq!(
+            count_provider_cookie_domains(
+                "chatgpt",
+                ["CHATGPT.COM", ".chatgpt.com", "chatgpt.com.evil.invalid"].into_iter()
+            ),
+            2
+        );
+    }
+
+    #[test]
+    fn actual_obscura_jar_count_is_provider_scoped_not_shared_jar_size() {
+        let browser = Browser::builder().stealth(false).build().unwrap();
+        browser
+            .cookies()
+            .set("synthetic-chat=one; Path=/; Secure", "https://chatgpt.com/")
+            .unwrap();
+        browser
+            .cookies()
+            .set("synthetic-meta=two; Path=/; Secure", "https://www.meta.ai/")
+            .unwrap();
+        assert_eq!(browser.cookies().get_all().len(), 2);
+        assert_eq!(provider_cookie_count(&browser, "chatgpt"), 1);
+        assert_eq!(provider_cookie_count(&browser, "metaai"), 1);
+        assert_eq!(provider_cookie_count(&browser, "perplexity"), 0);
+    }
+}
+
 /// Remove cookies for one provider from Obscura's shared browser jar.
 /// Every deletion is verified; failure aborts unlink before persistent records
 /// are deleted, preventing a false success response for live credentials.
