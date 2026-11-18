@@ -120,8 +120,40 @@ mod test_adapter_restore_tests {
         assert!(!should_continue);
         assert_eq!(
             report.errors,
-            vec!["session restore failed: injected restore failure"]
+            vec!["session_restore_failed"]
         );
+    }
+
+    #[test]
+    fn untrusted_restore_error_and_stage_never_enter_serialized_diagnostics() {
+        let mut report = TestAdapterReport::default();
+        let private = anyhow::anyhow!(
+            "https://private.invalid/session?token=secret; cookie=private; /vault/secret"
+        );
+        assert!(!record_test_adapter_restore_result(
+            &mut report,
+            "session restore failed",
+            Err(private)
+        ));
+        let mut untrusted_stage = TestAdapterReport::default();
+        assert!(!record_test_adapter_restore_result(
+            &mut untrusted_stage,
+            "stage=private-cookie",
+            Err(anyhow::anyhow!("Bearer secret-value"))
+        ));
+        assert_eq!(report.errors, ["session_restore_failed"]);
+        assert_eq!(
+            untrusted_stage.errors,
+            ["test_adapter_operation_failed"]
+        );
+        for serialized in [
+            serde_json::to_string(&report).unwrap(),
+            serde_json::to_string(&untrusted_stage).unwrap(),
+        ] {
+            for private in ["private", "cookie", "Bearer", "token=", "vault", "secret"] {
+                assert!(!serialized.contains(private), "leaked untrusted error material");
+            }
+        }
     }
 }
 
@@ -252,7 +284,18 @@ pub struct LoginCompleted {
     pub warning: Option<String>,
 }
 
-/// Record a TestAdapter restore failure and signal that probing must stop.
+/// Never emit the upstream error *or* untrusted caller-supplied stage.
+/// Obscura/vault errors can carry URLs, bearer credentials and storage paths.
+/// The report crosses the gateway operator API boundary as serialized JSON.
+fn test_adapter_restore_failure_category(stage: &str) -> &'static str {
+    match stage {
+        "session restore failed" => "session_restore_failed",
+        _ => "test_adapter_operation_failed",
+    }
+}
+
+/// Record a TestAdapter restore failure and stop probing without exposing
+/// arbitrary browser, network, vault or account error material.
 fn record_test_adapter_restore_result(
     report: &mut TestAdapterReport,
     stage: &str,
@@ -260,8 +303,10 @@ fn record_test_adapter_restore_result(
 ) -> bool {
     match result {
         Ok(()) => true,
-        Err(error) => {
-            report.errors.push(format!("{stage}: {error}"));
+        Err(_) => {
+            report
+                .errors
+                .push(test_adapter_restore_failure_category(stage).to_owned());
             false
         }
     }
