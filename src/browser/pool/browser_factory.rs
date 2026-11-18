@@ -236,6 +236,55 @@ mod disposable_context_tests {
     }
 
     #[tokio::test]
+    async fn disposable_provider_stage_owns_browser_and_page_until_drop() {
+        let cfg: AppConfig =
+            serde_yaml::from_str("obscura:\\n  stealth: false\\nproviders: []\\n")
+                .unwrap();
+        let live = build_browser(&cfg).unwrap();
+        live.cookies()
+            .set(
+                "SID=fixture-live; Secure; Path=/",
+                "https://chatgpt.com/",
+            )
+            .unwrap();
+
+        let mut staged =
+            new_disposable_provider_stage(&cfg, crate::providers::Provider::MetaAI)
+                .await
+                .unwrap();
+        assert!(staged.browser().cookies().get_all().is_empty());
+        staged
+            .browser()
+            .cookies()
+            .set(
+                "SID=fixture-candidate; Secure; Path=/",
+                "https://chatgpt.com/",
+            )
+            .unwrap();
+        staged
+            .page_mut()
+            .goto("data:text/html,%3Chtml%3E%3Cbody%3Eisolated%3C%2Fbody%3E%3C%2Fhtml%3E")
+            .await
+            .unwrap();
+        assert_eq!(
+            staged.page_mut().evaluate("document.body.textContent"),
+            serde_json::json!("isolated")
+        );
+
+        // An abandoned candidate owns no part of the previous live jar.
+        drop(staged);
+        let cookies = live.cookies().get_all();
+        assert_eq!(cookies.len(), 1);
+        assert_eq!(cookies[0].value, "fixture-live");
+
+        let cold =
+            new_disposable_provider_stage(&cfg, crate::providers::Provider::MetaAI)
+                .await
+                .unwrap();
+        assert!(cold.browser().cookies().get_all().is_empty());
+    }
+
+    #[tokio::test]
     async fn staging_does_not_read_or_write_either_configured_profile_directory() {
         let root = std::env::temp_dir().join(format!(
             "chat-gateway-disposable-context-{}",
