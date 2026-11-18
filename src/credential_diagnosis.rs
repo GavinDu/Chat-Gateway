@@ -481,9 +481,9 @@ mod tests {
         ] {
             v["gateway_failure"]["observed_at_utc"] = json!(invalid);
             assert_eq!(
-            checked(v.clone()).reason,
-            "invalid_gateway_failure_evidence"
-        );
+                checked(v.clone()).reason,
+                "invalid_gateway_failure_evidence"
+            );
         }
     }
 
