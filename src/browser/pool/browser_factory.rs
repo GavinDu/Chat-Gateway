@@ -95,8 +95,8 @@ pub(super) async fn new_page(browser: &obscura_core::Browser) -> Result<obscura_
     Ok(page)
 }
 
-/// Attach the private socket bridge only before ChatGPT page navigation.
-/// Other provider pages retain the original embedded browser transport.
+/// Attach provider-scoped compatibility before any provider navigation.
+/// Unrelated providers retain the original embedded browser transport.
 pub(super) async fn new_provider_page(
     browser: &obscura_core::Browser,
     provider: crate::providers::Provider,
@@ -104,6 +104,9 @@ pub(super) async fn new_provider_page(
     let mut page = new_page(browser).await?;
     if provider == crate::providers::Provider::ChatGPT {
         crate::browser::chatgpt_websocket::attach(browser, &mut page);
+    } else if provider == crate::providers::Provider::MetaAI {
+        page.add_preload_script(include_str!("metaai_response.js"));
+        crate::browser::chatgpt_websocket::attach_metaai(browser, &mut page);
     }
     Ok(page)
 }
@@ -315,5 +318,75 @@ mod disposable_context_tests {
             !root.exists(),
             "disposable context must not leave a profile"
         );
+    }
+}
+
+#[cfg(test)]
+mod engine_regression_tests {
+    #[tokio::test]
+    async fn srcdoc_initialization_reenters_dom_without_aborting_provider_worker() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        page.goto("data:text/html,%3Chtml%3E%3Cbody%3E%3C/body%3E%3C/html%3E")
+            .await
+            .unwrap();
+        page.evaluate(r#"document.body.innerHTML = '<iframe srcdoc="<p>frame</p>"></iframe>';"#);
+        page.settle(50).await;
+        assert_eq!(
+            page.evaluate("document.querySelector('iframe').contentDocument.body.textContent")
+                .as_str(),
+            Some("frame")
+        );
+        page.evaluate(
+            r#"(() => {
+                document.body.innerHTML = '';
+                const frame = document.createElement('iframe');
+                frame.srcdoc = '<body><span>inner</span></body>';
+                document.body.appendChild(frame);
+            })()"#,
+        );
+        page.settle(50).await;
+        assert_eq!(
+            page.evaluate(
+                r#"(() => {
+                    const span = document.querySelector('iframe').contentDocument.querySelector('span');
+                    span.textContent = 'touched';
+                    return span.textContent;
+                })()"#,
+            )
+            .as_str(),
+            Some("touched")
+        );
+    }
+
+    #[tokio::test]
+    async fn pinned_meta_response_body_keeps_the_original_consumed_stream() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        page.goto("data:text/html,<body>response contract fixture</body>")
+            .await
+            .unwrap();
+        // Permit only this data-origin fixture; production script stays
+        // exact-HTTPS Meta AI scoped and leaves native Response untouched.
+        let script = include_str!("metaai_response.js")
+            .replace("location.protocol !== 'https:'", "location.protocol !== 'data:'")
+            .replace("['meta.ai', 'www.meta.ai']", "['']");
+        page.evaluate(&script);
+        let result = page.evaluate(
+            r#"(() => {
+                const response = new Response('synthetic body');
+                const stream = response.body;
+                stream.getReader();
+                return {same: response.body === stream, used: response.bodyUsed};
+            })()"#,
+        );
+        assert_eq!(result["same"].as_bool(), Some(true));
+        assert_eq!(result["used"].as_bool(), Some(true));
     }
 }
