@@ -143,22 +143,31 @@ mod disposable_context_tests {
 
     #[tokio::test]
     async fn disposable_browsers_never_inherit_or_mutate_live_cookie_jar() {
-        let cfg: AppConfig = serde_yaml::from_str(
-            "obscura:\n  stealth: false\nproviders: []\n",
-        )
-        .unwrap();
+        let cfg: AppConfig =
+            serde_yaml::from_str("obscura:\n  stealth: false\nproviders: []\n").unwrap();
         let live = build_browser(&cfg).unwrap();
         live.cookies()
-            .set("SID=fixture-live; Secure; HttpOnly; Path=/", "https://chatgpt.com/")
+            .set(
+                "SID=fixture-live; Secure; HttpOnly; Path=/",
+                "https://chatgpt.com/",
+            )
             .unwrap();
 
         let candidate = build_disposable_browser(&cfg).unwrap();
         assert!(candidate.cookies().get_all().is_empty());
-        candidate.cookies()
-            .set("SID=fixture-candidate; Secure; HttpOnly; Path=/", "https://chatgpt.com/")
+        candidate
+            .cookies()
+            .set(
+                "SID=fixture-candidate; Secure; HttpOnly; Path=/",
+                "https://chatgpt.com/",
+            )
             .unwrap();
-        candidate.cookies()
-            .set("SID=fixture-meta; Secure; HttpOnly; Path=/", "https://meta.ai/")
+        candidate
+            .cookies()
+            .set(
+                "SID=fixture-meta; Secure; HttpOnly; Path=/",
+                "https://meta.ai/",
+            )
             .unwrap();
 
         // Browser::new_page() is intentionally used through the same factory
@@ -193,7 +202,8 @@ mod disposable_context_tests {
     #[tokio::test]
     async fn staging_does_not_read_or_write_either_configured_profile_directory() {
         let root = std::env::temp_dir().join(format!(
-            "chat-gateway-disposable-context-{}", uuid::Uuid::new_v4()
+            "chat-gateway-disposable-context-{}",
+            uuid::Uuid::new_v4()
         ));
         let explicit = root.join("obscura");
         let fallback = root.join("chrome");
@@ -214,8 +224,17 @@ mod disposable_context_tests {
                 .unwrap();
             assert_eq!(candidate.cookies().get_all().len(), 1);
         }
-        assert!(!explicit.exists(), "staging must not touch obscura.storage_dir");
-        assert!(!fallback.exists(), "staging must not touch chrome_profile_dir");
-        assert!(!root.exists(), "disposable context must not leave a profile");
+        assert!(
+            !explicit.exists(),
+            "staging must not touch obscura.storage_dir"
+        );
+        assert!(
+            !fallback.exists(),
+            "staging must not touch chrome_profile_dir"
+        );
+        assert!(
+            !root.exists(),
+            "disposable context must not leave a profile"
+        );
     }
 }
