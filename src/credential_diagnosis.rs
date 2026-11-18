@@ -305,6 +305,19 @@ fn classify(e: &Evidence, now: u64) -> Diagnosis {
     let obscura = e.obscura.as_ref().map(|x| x.verdict);
     let snapshot = e.snapshot.as_ref().map(|x| x.state);
 
+    // Meta AI has no source-established first-party account-verifier contract.
+    // A claimed positive (or explicit rejection) from manually supplied evidence
+    // cannot turn a failed request into an Obscura blame or re-login verdict.
+    // Remove this fence only when #1329 ships a source-bound verifier.
+    if provider == "metaai"
+        && [chrome, obscura]
+            .into_iter()
+            .flatten()
+            .any(|auth| matches!(auth, Auth::Verified | Auth::Unauthenticated))
+    {
+        return inconclusive(provider, "metaai_account_verifier_not_established");
+    }
+
     if chrome == Some(Auth::Unauthenticated) && obscura == Some(Auth::Verified) {
         return inconclusive(provider, "contradictory_account_observations");
     }
@@ -682,6 +695,53 @@ mod tests {
         let result = checked(v);
         assert_eq!(result.category, "inconclusive");
         assert!(!result.live_proof);
+    }
+
+    #[test]
+    fn unsupported_metaai_account_claims_cannot_assign_login_or_runtime_blame() {
+        let mut v = base();
+        v["provider"] = json!("metaai");
+
+        // A manual JSON claim is not a supported account verifier. No
+        // Meta AI endpoint/response schema has been established by #1329.
+        for context in ["chrome", "obscura"] {
+            for claim in ["verified", "unauthenticated"] {
+                v["chrome"]["verdict"] = json!("unknown");
+                v["obscura"]["verdict"] = json!("unknown");
+                v[context]["verdict"] = json!(claim);
+                for stage in ["composer", "send", "response", "stream"] {
+                    v["attempt"]["stage"] = json!(stage);
+                    let result = checked(v.clone());
+                    assert_eq!(result.category, "inconclusive", "{context}/{claim}/{stage}");
+                    assert_eq!(result.reason, "metaai_account_verifier_not_established");
+                    assert_eq!(result.next_action, "collect_current_correlated_evidence");
+                    assert!(!result.live_proof);
+                    let body = serde_json::to_string(&result).unwrap();
+                    assert!(!body.contains(ID));
+                    assert!(!body.contains("cookie"));
+                }
+            }
+        }
+
+        // With unknown/unsupported account evidence, independent capture
+        // failures can still be reported without inventing login status.
+        v["chrome"]["verdict"] = json!("unsupported");
+        v["obscura"]["verdict"] = json!("unknown");
+        v["snapshot"]["state"] = json!("missing");
+        assert_eq!(checked(v.clone()).category, "capture_or_import");
+        v["snapshot"]["state"] = json!("applied");
+        assert_eq!(
+            checked(v).reason,
+            "authoritative_obscura_account_verifier_missing"
+        );
+
+        // Do not regress the supported ChatGPT diagnosis classification.
+        let chatgpt = base();
+        assert_eq!(checked(chatgpt.clone()).category, "transport_or_extraction");
+        let mut chatgpt = chatgpt;
+        chatgpt["chrome"]["verdict"] = json!("unauthenticated");
+        chatgpt["obscura"]["verdict"] = json!("unknown");
+        assert_eq!(checked(chatgpt).category, "browser_login_attention");
     }
 
     #[test]
