@@ -224,6 +224,7 @@ class FakeResponse:
 class FakeGateway:
     def __init__(self):
         self.posts = []
+        self.turns = []
 
     def open(self, req, timeout):
         assert timeout == 8
@@ -239,15 +240,18 @@ class FakeGateway:
         model = content["model"]
         provider = model.split("/")[0]
         self.posts.append((provider, content["stream"]))
+        prompt = content["messages"][0]["content"]
         req_id = req.get_header("X-conversation-id")
         assert isinstance(req_id, str)
+        self.turns.append((provider, content["stream"], req_id, prompt))
         headers = sample_headers(provider, req_id)
         if content["stream"]:
             data = (b'data: {"choices":[{"delta":{"content":"OK"}}]}\n'
                     b'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n'
                     b'data: [DONE]\n')
         else:
-            data = json.dumps(answer()).encode()
+            data = json.dumps(answer("TWO" if prompt == "Reply exactly TWO"
+                                     else "OK")).encode()
         return FakeResponse(data, headers)
 
 
