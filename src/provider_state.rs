@@ -258,16 +258,15 @@ impl ProviderSessionRegistry {
     pub fn has_prior_positive_account_observation(&self, provider: &str) -> bool {
         self.credential_proofs
             .lock()
-            .ok()
-            .and_then(|proofs| {
+            .map(|proofs| {
                 proofs
                     .by_provider
                     .get(provider)
-                    .map(|entry| entry.first_party_verified_at.is_some())
+                    .is_some_and(|entry| entry.first_party_verified_at.is_some())
             })
-            // Poisoned proof storage cannot certify absence of an old
-            // verified live page. This method is safety-only: block a
-            // destructive replay rather than interpreting unknown as false.
+            // Distinguish a readable, absent proof (false) from a poisoned
+            // mutex (unknown). Only the latter blocks replay conservatively.
+            // Neither outcome is published as an authentication verdict.
             .unwrap_or(true)
     }
 
