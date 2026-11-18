@@ -50,19 +50,25 @@ function firstPartyChatgptTab(url) {
 
 async function verifyChatgptActiveTab() {
   const attempt = ++chatgptCheckGeneration;
+  // A Chrome tab/script/permission callback may settle after another explicit
+  // verification was started. Only the current attempt can publish a verdict.
+  const report = text => {
+    if (attempt === chatgptCheckGeneration) message(text);
+  };
   const action = $("verify-chatgpt");
   action.disabled = true;
-  message("Checking the active ChatGPT tab without syncing credentials.");
+  report("Checking the active ChatGPT tab without syncing credentials.");
   try {
     if (typeof chrome.tabs?.query !== "function" ||
         typeof chrome.scripting?.executeScript !== "function") {
-      message("Chrome active-tab account verification is unavailable in this extension.");
+      report("Chrome active-tab account verification is unavailable in this extension.");
       return;
     }
     const tabs = await chrome.tabs.query({active:true, currentWindow:true});
+    if (attempt !== chatgptCheckGeneration) return;
     if (!Array.isArray(tabs) || tabs.length !== 1 ||
         !Number.isSafeInteger(tabs[0]?.id) || !firstPartyChatgptTab(tabs[0].url)) {
-      message("Open an existing signed-in chatgpt.com tab, then retry verification.");
+      report("Open an existing signed-in chatgpt.com tab, then retry verification.");
       return;
     }
     const tabId = tabs[0].id;
@@ -73,11 +79,12 @@ async function verifyChatgptActiveTab() {
       world: "MAIN",
       func: probeActiveChatgptAccount
     });
+    if (attempt !== chatgptCheckGeneration) return;
     const current = await chrome.tabs.query({active:true, currentWindow:true});
     if (attempt !== chatgptCheckGeneration ||
         current?.length !== 1 || current[0]?.id !== tabId ||
         !firstPartyChatgptTab(current[0].url)) {
-      message("Tab changed during verification. Result discarded.");
+      report("Tab changed during verification. Result discarded.");
       return;
     }
     const result = Array.isArray(runs) && runs.length === 1 ? runs[0]?.result : null;
@@ -90,21 +97,21 @@ async function verifyChatgptActiveTab() {
         typeof result.checked_at !== "string" ||
         !Number.isFinite(Date.parse(result.checked_at)) ||
         Math.abs(Date.now() - Date.parse(result.checked_at)) > 30000) {
-      message("Chrome account verification returned unsupported evidence.");
+      report("Chrome account verification returned unsupported evidence.");
       return;
     }
     if (result.authentication === "verified" &&
         result.reason === "first_party_session_confirmed") {
-      message("ChatGPT account verified in this Chrome tab. Gateway credential replay remains unverified.");
+      report("ChatGPT account verified in this Chrome tab. Gateway credential replay remains unverified.");
     } else if (result.authentication === "unauthenticated" &&
         ["provider_rejected_session", "provider_reports_no_session"].includes(result.reason)) {
-      message("ChatGPT explicitly reports no active account in this Chrome tab. Saved gateway credentials were not changed.");
+      report("ChatGPT explicitly reports no active account in this Chrome tab. Saved gateway credentials were not changed.");
     } else {
-      message("ChatGPT account verification inconclusive. No session was changed or resynced.");
+      report("ChatGPT account verification inconclusive. No session was changed or resynced.");
     }
   } catch (_) {
     // Browser permission failures can include internal tab URLs or other data.
-    message("Chrome account verification unavailable. No session was changed.");
+    report("Chrome account verification unavailable. No session was changed.");
   } finally {
     if (attempt === chatgptCheckGeneration) action.disabled = false;
   }
