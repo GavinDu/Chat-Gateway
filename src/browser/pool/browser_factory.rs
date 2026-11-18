@@ -375,7 +375,10 @@ mod engine_regression_tests {
         // Permit only this data-origin fixture; production script stays
         // exact-HTTPS Meta AI scoped and leaves native Response untouched.
         let script = include_str!("metaai_response.js")
-            .replace("location.protocol !== 'https:'", "location.protocol !== 'data:'")
+            .replace(
+                "location.protocol !== 'https:'",
+                "location.protocol !== 'data:'",
+            )
             .replace("['meta.ai', 'www.meta.ai']", "['']");
         page.evaluate(&script);
         let result = page.evaluate(
