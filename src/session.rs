@@ -3847,11 +3847,8 @@ mod replay_material_coverage_tests {
 
         let mut expired = fixture("SID", "expired-private", ".chatgpt.com");
         expired.expires = Some(50.0);
-        let expired = provider_replay_material_coverage(
-            &snapshot(vec![expired], &[]),
-            "chatgpt",
-            1000.0,
-        );
+        let expired =
+            provider_replay_material_coverage(&snapshot(vec![expired], &[]), "chatgpt", 1000.0);
         assert_eq!(expired.category(), "no_applicable_provider_material");
         assert_eq!(expired.invalid_provider_cookies, 1);
         assert_eq!(expired.eligible_cookies, 0);
