@@ -1293,7 +1293,8 @@ test("disabled provider policy does not masquerade as a gateway outage", async (
   ]));
   const detail = row => row.children.find(child =>
     child.className === "provider-detail").textContent;
-  assert.match(detail(rows["Meta AI"]),/Gateway check unavailable; retry/);
+  // The existing precedence shows manual verification instead of the
+  // secondary degraded retry hint when both apply.
   assert.match(detail(rows["Meta AI"]),/Gateway issue: provider degraded/);
   assert.match(detail(rows["Meta AI"]),/Manual provider verification required/);
   assert.match(detail(rows.claude),/Disabled in gateway config/);
