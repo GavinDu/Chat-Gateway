@@ -2376,6 +2376,19 @@ pub fn restore_cookies(browser: &Browser, file: &SessionFile, provider: &str) ->
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs_f64();
+    let coverage = provider_replay_material_coverage(file, provider, now_epoch);
+    // This is not a verification verdict. A successful restore can still
+    // have zero in-scope provider cookies, especially in legacy snapshots.
+    tracing::debug!(
+        provider,
+        category = coverage.category(),
+        eligible_cookies = coverage.eligible_cookies,
+        excluded_cookies = coverage.excluded_cookies,
+        invalid_provider_cookies = coverage.invalid_provider_cookies,
+        normalized_scopes = coverage.normalized_scopes,
+        observed_storage_entries = coverage.observed_storage_entries,
+        "provider snapshot material coverage before cookie replay"
+    );
     let mut failed_writes = 0usize;
     let mut expected_restores = Vec::new();
     let (cookies, dropped) = resolve_cookie_scope_duplicates(&file.cookies);
