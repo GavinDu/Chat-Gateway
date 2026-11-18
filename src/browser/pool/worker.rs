@@ -14,11 +14,13 @@ fn test_adapter_uses_disposable_browser(provider: Provider) -> bool {
 
 fn test_adapter_browser(
     config: &AppConfig,
-    live: &obscura_core::Browser,
+    live: &Rc<obscura_core::Browser>,
     provider: Provider,
-) -> Result<obscura_core::Browser> {
+) -> Result<Rc<obscura_core::Browser>> {
     if test_adapter_uses_disposable_browser(provider) {
-        super::browser_factory::build_disposable_browser(config)
+        Ok(Rc::new(super::browser_factory::build_disposable_browser(
+            config,
+        )?))
     } else {
         Ok(live.clone())
     }
@@ -49,7 +51,7 @@ mod test_adapter_isolated_browser_tests {
     fn active_diagnostic_cookie_restore_owner_is_not_live_browser() {
         let cfg: AppConfig =
             serde_yaml::from_str("obscura:\n  stealth: false\nproviders: []\n").unwrap();
-        let live = super::browser_factory::build_browser(&cfg).unwrap();
+        let live = Rc::new(super::browser_factory::build_browser(&cfg).unwrap());
         live.cookies()
             .set(
                 "SID=live-synthetic; Secure; Path=/",
