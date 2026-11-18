@@ -143,6 +143,17 @@ fn metaai_document_denied_before_composer(
     observed_document_403 && !evidence.login_url && !evidence.challenge_visible
 }
 
+// A challenge can replace the page while the composer wait drives hydration.
+// Only a verified origin of an active recovery provider may trip its circuit.
+fn focused_provider_preflight_challenge(
+    provider: &str,
+    evidence: &ComposerPreflightEvidence,
+) -> bool {
+    matches!(provider, "chatgpt" | "metaai")
+        && evidence.provider_origin
+        && evidence.challenge_visible
+}
+
 /// The browser worker waits for a composer *before* invoking the provider
 /// adapter. A timeout here otherwise bypasses adapter-level diagnostics.
 /// Never record the selector, URL, prompt, page text or upstream error string.
@@ -178,6 +189,9 @@ fn report_composer_preflight_failure(
             iframe_element_count = ?evidence.iframe_element_count,
             "provider composer readiness evidence"
         );
+        if focused_provider_preflight_challenge(provider, &evidence) {
+            return anyhow::Error::new(providers::ProviderChallengeError::new(provider));
+        }
         if provider == "metaai"
             && metaai_document_denied_before_composer(observed_bootstrap_403, &evidence)
         {
@@ -558,30 +572,7 @@ fn diagnostic_input_selector<'a>(
 /// Probe the visible editor, never the first hidden duplicate DOM match.
 /// The test string stays inside the page and is not included in diagnostics.
 fn diagnostic_prompt_retained(page: &obscura_core::Page, selector: &str, prompt: &str) -> bool {
-    let (Ok(selector), Ok(prompt)) = (
-        serde_json::to_string(selector),
-        serde_json::to_string(prompt),
-    ) else {
-        return false;
-    };
-    let script = format!(
-        r#"(() => {{
-            const el = Array.from(document.querySelectorAll({selector})).find(el =>
-                el.getClientRects().length > 0 &&
-                window.getComputedStyle(el).visibility !== 'hidden' &&
-                !el.closest('[hidden], [inert], [aria-hidden="true"], [aria-disabled="true"]') &&
-                !el.disabled && !el.matches(':disabled') &&
-                !el.closest('fieldset[disabled]') && !el.readOnly &&
-                el.getAttribute('aria-disabled') !== 'true' &&
-                el.getAttribute('aria-readonly') !== 'true' &&
-                el.getAttribute('contenteditable') !== 'false'
-            );
-            if (!el) return false;
-            const value = 'value' in el ? el.value : (el.innerText || el.textContent || '');
-            return typeof value === 'string' && value.trim() === {prompt}.trim();
-        }})()"#
-    );
-    page.evaluate(&script).as_bool() == Some(true)
+    providers::common::composer_retains_prompt(page, selector, prompt).unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -646,6 +637,41 @@ mod adapter_diagnostic_composer_tests {
             &page,
             "#aria-inherited",
             "diagnostic draft"
+        ));
+    }
+}
+
+#[cfg(test)]
+mod rich_text_diagnostic_retention_tests {
+    #[tokio::test]
+    async fn visible_editor_text_wins_over_synthetic_value() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html =
+            "<html><body><div id='editor' contenteditable='true'>exact draft</div></body></html>";
+        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        page.evaluate("document.getElementById('editor').value='misleading'");
+        assert!(super::diagnostic_prompt_retained(
+            &page,
+            "#editor",
+            "exact draft"
+        ));
+        assert!(!super::diagnostic_prompt_retained(
+            &page,
+            "#editor",
+            "misleading"
+        ));
+        page.evaluate("document.getElementById('editor').textContent=''");
+        assert!(!super::diagnostic_prompt_retained(
+            &page,
+            "#editor",
+            "exact draft"
         ));
     }
 }
@@ -1202,6 +1228,9 @@ pub(super) fn browser_thread(
                                         &adapter.effective_selectors().input_refs(),
                                         error,
                                     );
+                                    if classified.is::<providers::ProviderChallengeError>() {
+                                        provider_guard.disable_provider(provider.name(), "challenge page detected; manual review required");
+                                    }
                                     let _ = chunks.send(Err(classified)).await;
                                     return;
                                 }
@@ -1449,7 +1478,7 @@ pub(super) fn browser_thread(
                                 // Phase 2 — dummy prompt (Go RunAdapterTest).
                                 const DUMMY: &str = "chat-gateway selector test — please reply with the word OK";
                                 let input_result =
-                                    providers::common::human_type(&page, &[input_sel], DUMMY).await;
+                                    providers::common::type_provider_prompt(&mut page, &[input_sel], DUMMY, Some(provider.name())).await;
                                 if let Err(error) = input_result {
                                     record_test_adapter_error(&mut report, TestAdapterErrorPhase::InputType, &error);
                                     finish(report);
@@ -1480,7 +1509,12 @@ pub(super) fn browser_thread(
                                 }
                                 let baseline = adapter.response_text(&page).filter(|t| !t.is_empty());
                                 // Phase 3 — send button or Enter (5s).
-                                match providers::common::click_send_or_enter(&mut page, sets[1].1, input_sel, 5000).await {
+                                let submitted = if provider == Provider::MetaAI {
+                                    providers::common::submit_metaai_focused(&mut page, DUMMY).await.map(|_| false)
+                                } else {
+                                    providers::common::click_send_or_enter(&mut page, sets[1].1, input_sel, 5000).await
+                                };
+                                match submitted {
                                     Ok(clicked) => report.send_clicked = clicked,
                                     Err(error) => {
                                         record_test_adapter_error(&mut report, TestAdapterErrorPhase::Send, &error);
@@ -2008,5 +2042,39 @@ mod refresh_cancellation_tests {
         );
         drop(held);
         assert!(waiting.await.is_some());
+    }
+}
+
+#[cfg(test)]
+mod late_challenge_regressions {
+    use super::*;
+
+    #[test]
+    fn post_wait_challenge_requires_active_provider_and_verified_origin() {
+        let mut evidence = ComposerPreflightEvidence {
+            document_ready: "complete",
+            provider_origin: true,
+            login_url: false,
+            challenge_visible: false,
+            configured_input_present: false,
+            generic_editor_present: false,
+            generic_editor_actionable: false,
+            body_element_count: Some(24),
+            script_element_count: Some(3),
+            external_script_count: Some(2),
+            iframe_element_count: Some(1),
+        };
+        assert!(!focused_provider_preflight_challenge("chatgpt", &evidence));
+        evidence.challenge_visible = true;
+        assert!(focused_provider_preflight_challenge("chatgpt", &evidence));
+        assert!(focused_provider_preflight_challenge("metaai", &evidence));
+        assert!(!focused_provider_preflight_challenge("claude", &evidence));
+        assert!(!focused_provider_preflight_challenge(
+            "untrusted",
+            &evidence
+        ));
+        evidence.provider_origin = false;
+        assert!(!focused_provider_preflight_challenge("chatgpt", &evidence));
+        assert!(!focused_provider_preflight_challenge("metaai", &evidence));
     }
 }
