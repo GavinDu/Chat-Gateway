@@ -403,9 +403,13 @@ async function refreshStatus(force = false) {
       : item.activation === "cancelled" ? "Browser activation cancelled"
       : item.activation === "not_attempted" ? "Browser activation not attempted"
       : null;
-    const blocker = item.manual_verification_required === true ? "Manual provider verification required; open website"
+    // A deliberately disabled provider is policy, not a gateway outage.
+    // Preserve session/consent display, but do not present stale runtime
+    // errors or a manual account action for a provider not being routed.
+    const blocker = item.enabled === false ? null
+      : item.manual_verification_required === true ? "Manual provider verification required; open website"
       : item.availability === "degraded" ? "Gateway check unavailable; retry" : null;
-    const runtimeIssue = item.issue && item.issue !== "authentication_unverified"
+    const runtimeIssue = item.enabled !== false && item.issue && item.issue !== "authentication_unverified"
       ? "Gateway issue: " + safeProviderIssueLabel(item.issue, GATEWAY_PROVIDER_ISSUES) : null;
     const sync = diagnostics?.extension?.provider_sync?.[item.provider];
     const extensionIssue = safeProviderIssueLabel(sync?.issue, EXTENSION_SYNC_ISSUES);
@@ -415,7 +419,8 @@ async function refreshStatus(force = false) {
     // An upload/check is not a verified login. The health call may fail
     // while this extension still remembers an earlier successful import.
     const staleSync = sync?.stale === true ? "Extension sync status stale (gateway check failed)" : null;
-    const lastFailedRequest = safeLastFailedRequest(item.provider, item.last_failed_request);
+    const lastFailedRequest = item.enabled === false ? null
+      : safeLastFailedRequest(item.provider, item.last_failed_request);
     status.textContent = [enabled, linked, browser, auth,
       ...(activation ? [activation] : []),
       ...(blocker ? [blocker] : []),

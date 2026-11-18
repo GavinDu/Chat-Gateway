@@ -1272,3 +1272,42 @@ test("provider status names and disabled account checks are distinct from verifi
   assert.ok(chatgptRow);
   assert.match(chatgptRow.children[1].textContent,/Session saved/);
 });
+
+
+test("disabled provider policy does not masquerade as a gateway outage", async () => {
+  const popup = loadPopup();
+  await new Promise(resolve => setImmediate(resolve));
+  popup.context.relayFetch = async () => ({
+    ok:true,status:200,json:async()=>({vault_mode:true,providers:[
+      {provider:"metaai",enabled:true,linked:true,authentication:"unknown",
+        availability:"degraded",issue:"provider_degraded",manual_verification_required:true},
+      {provider:"claude",enabled:false,linked:true,authentication:"verified",
+        availability:"degraded",issue:"provider_disabled",manual_verification_required:true},
+      {provider:"manus",enabled:null,linked:false,authentication:"unknown",
+        availability:"degraded",issue:"provider_degraded",manual_verification_required:true}
+    ]})
+  });
+  await popup.controls.refreshStatus(true);
+  const rows = Object.fromEntries(popup.byId("status").children.map(row => [
+    row.children[0].textContent,row
+  ]));
+  const detail = row => row.children.find(child =>
+    child.className === "provider-detail").textContent;
+  // The existing precedence shows manual verification instead of the
+  // secondary degraded retry hint when both apply.
+  assert.match(detail(rows["Meta AI"]),/Gateway issue: provider degraded/);
+  assert.match(detail(rows["Meta AI"]),/Manual provider verification required/);
+  assert.match(detail(rows.claude),/Disabled in gateway config/);
+  assert.match(detail(rows.claude),/Account check deferred \(provider disabled\)/);
+  assert.match(detail(rows.claude),/Session saved/);
+  assert.doesNotMatch(detail(rows.claude),
+    /Gateway issue|Gateway check unavailable|Manual provider verification required|Login verified/);
+  const disabledActions = rows.claude.children.find(child =>
+    child.className === "provider-actions").children;
+  assert.equal(disabledActions[0].disabled,true,"Sync remains disabled by policy");
+  assert.equal(disabledActions[1].textContent,"Open website");
+  assert.equal(disabledActions[2].textContent,"Log out");
+  // Unknown enablement is not permission to suppress real warning evidence.
+  assert.match(detail(rows.manus),/Gateway enablement unverified/);
+  assert.match(detail(rows.manus),/Gateway issue: provider degraded/);
+});
