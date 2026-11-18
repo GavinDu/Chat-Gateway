@@ -1118,6 +1118,83 @@ test("unverified sync status still rolls back tentative consent", async () => {
 });
 
 
+test("stale ChatGPT tab-query completion cannot overwrite a newer verified account check", async () => {
+  const popup=loadPopup();
+  for(let i=0;i<5;i++) await new Promise(resolve=>setImmediate(resolve));
+  let releaseOld;
+  let queries=0;
+  popup.context.chrome.tabs.query = async () => {
+    if (++queries===1) return new Promise(resolve=>{releaseOld=resolve;});
+    return [{id:42,url:"https://chatgpt.com/"}];
+  };
+  let injections=0;
+  popup.context.chrome.scripting = {async executeScript() {
+    injections++;
+    return [{result:{
+      provider:"chatgpt",context:"chrome_active_tab",authentication:"verified",
+      reason:"first_party_session_confirmed",checked_at:new Date().toISOString(),
+      exported_snapshot_verified:false
+    }}];
+  }};
+  const older=popup.controls.verifyChatgptActiveTab();
+  const newer=popup.controls.verifyChatgptActiveTab();
+  await newer;
+  assert.equal(injections,1,"stale queued tab query must not inject on another tab");
+  assert.match(popup.byId("message").textContent,/Gateway credential replay remains unverified/);
+  assert.equal(popup.byId("verify-chatgpt").disabled,false);
+  releaseOld([{id:24,url:"https://meta.ai/"}]);
+  await older;
+  assert.match(popup.byId("message").textContent,/Gateway credential replay remains unverified/);
+  assert.equal(popup.byId("verify-chatgpt").disabled,false);
+});
+
+test("stale Chrome scripting success and thrown tab errors cannot replace newer verdict", async () => {
+  const popup=loadPopup();
+  for(let i=0;i<5;i++) await new Promise(resolve=>setImmediate(resolve));
+  popup.context.chrome.tabs.query = async () => [{id:42,url:"https://chatgpt.com/"}];
+  let startOld;
+  const oldStarted=new Promise(resolve=>{startOld=resolve;});
+  let releaseOld;
+  let calls=0;
+  popup.context.chrome.scripting = {async executeScript() {
+    if (++calls===1) {
+      startOld();
+      return new Promise(resolve=>{releaseOld=resolve;});
+    }
+    return [{result:{
+      provider:"chatgpt",context:"chrome_active_tab",authentication:"verified",
+      reason:"first_party_session_confirmed",checked_at:new Date().toISOString(),
+      exported_snapshot_verified:false
+    }}];
+  }};
+  const older=popup.controls.verifyChatgptActiveTab();
+  await oldStarted;
+  await popup.controls.verifyChatgptActiveTab();
+  releaseOld([{result:{
+    provider:"chatgpt",context:"chrome_active_tab",authentication:"unauthenticated",
+    reason:"provider_rejected_session",checked_at:new Date().toISOString(),
+    exported_snapshot_verified:false
+  }}]);
+  await older;
+  assert.equal(calls,2);
+  assert.match(popup.byId("message").textContent,/account verified in this Chrome tab/);
+  assert.doesNotMatch(popup.byId("message").textContent,/no active account/);
+
+  let rejectOld;
+  let queries=0;
+  popup.context.chrome.tabs.query = async () => {
+    if (++queries===1) return new Promise((_,reject)=>{rejectOld=reject;});
+    return [{id:42,url:"https://chatgpt.com/"}];
+  };
+  const third=popup.controls.verifyChatgptActiveTab();
+  await popup.controls.verifyChatgptActiveTab();
+  rejectOld(new Error("private token=secret"));
+  await third;
+  assert.match(popup.byId("message").textContent,/account verified in this Chrome tab/);
+  assert.doesNotMatch(popup.byId("message").textContent,/secret|unavailable/);
+  assert.equal(popup.byId("verify-chatgpt").disabled,false);
+});
+
 test("user-initiated ChatGPT verification is tab-scoped, read-only and does not sync", async () => {
   const popup = loadPopup();
   for(let i=0;i<5;i++) await new Promise(resolve=>setImmediate(resolve));
