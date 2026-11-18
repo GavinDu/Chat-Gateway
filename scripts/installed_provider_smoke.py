@@ -396,6 +396,7 @@ def main() -> int:
     return 0 if report["phase"] == "completed" and all(
         item["json"]["status"] == "passed"
         and item["sse"]["status"] == "passed"
+        and (not args.repeat or item["repeat"]["status"] == "passed")
         for item in report["providers"] if item["provider"] in selected
     ) else 1
 
