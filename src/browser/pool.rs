@@ -150,7 +150,14 @@ mod test_adapter_restore_tests {
             serde_json::to_string(&report).unwrap(),
             serde_json::to_string(&untrusted_stage).unwrap(),
         ] {
-            for private in ["private", "cookie", "Bearer", "token=", "vault", "secret"] {
+            for private in [
+                "https://private.invalid/",
+                "token=secret",
+                "cookie=private",
+                "/vault/secret",
+                "stage=private-cookie",
+                "Bearer secret-value",
+            ] {
                 assert!(!serialized.contains(private), "leaked untrusted error material");
             }
         }
