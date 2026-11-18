@@ -121,10 +121,7 @@ mod test_adapter_restore_tests {
             Err(anyhow::anyhow!("injected restore failure")),
         );
         assert!(!should_continue);
-        assert_eq!(
-            report.errors,
-            vec!["session_restore_failed"]
-        );
+        assert_eq!(report.errors, vec!["session_restore_failed"]);
     }
 
     #[test]
@@ -134,8 +131,14 @@ mod test_adapter_restore_tests {
         );
         for (phase, category) in [
             (TestAdapterErrorPhase::OpenPage, "open_page_failed"),
-            (TestAdapterErrorPhase::SessionFileLoad, "session_file_load_failed"),
-            (TestAdapterErrorPhase::InputSelector, "input_selector_unavailable"),
+            (
+                TestAdapterErrorPhase::SessionFileLoad,
+                "session_file_load_failed",
+            ),
+            (
+                TestAdapterErrorPhase::InputSelector,
+                "input_selector_unavailable",
+            ),
             (TestAdapterErrorPhase::InputType, "input_type_failed"),
             (TestAdapterErrorPhase::Send, "send_submission_failed"),
         ] {
@@ -173,10 +176,7 @@ mod test_adapter_restore_tests {
             Err(anyhow::anyhow!("Bearer secret-value"))
         ));
         assert_eq!(report.errors, ["session_restore_failed"]);
-        assert_eq!(
-            untrusted_stage.errors,
-            ["test_adapter_operation_failed"]
-        );
+        assert_eq!(untrusted_stage.errors, ["test_adapter_operation_failed"]);
         for serialized in [
             serde_json::to_string(&report).unwrap(),
             serde_json::to_string(&untrusted_stage).unwrap(),
@@ -189,7 +189,10 @@ mod test_adapter_restore_tests {
                 "stage=private-cookie",
                 "Bearer secret-value",
             ] {
-                assert!(!serialized.contains(private), "leaked untrusted error material");
+                assert!(
+                    !serialized.contains(private),
+                    "leaked untrusted error material"
+                );
             }
         }
     }
