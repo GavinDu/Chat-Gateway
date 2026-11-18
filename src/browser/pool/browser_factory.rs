@@ -51,6 +51,42 @@ fn build_browser_with_storage(cfg: &AppConfig, persistent: bool) -> Result<obscu
     Ok(builder.build()?)
 }
 
+/// Own a disposable candidate's page and cookie/context owner together.
+/// The pinned V8-backed Page is !Send, so the pair must stay on the browser
+/// worker's LocalSet. Field order drops the Page (and its bridge) first,
+/// before the Browser and its independent cookie/localStorage context.
+/// This is a staging *primitive*, never proof of imported account readiness.
+#[must_use]
+#[allow(dead_code)] // Production admission/atomic promotion is tracked in #1385.
+pub(super) struct DisposableProviderStage {
+    page: obscura_core::Page,
+    browser: obscura_core::Browser,
+}
+
+#[allow(dead_code)] // Only future gated RefreshSession can use these borrows.
+impl DisposableProviderStage {
+    pub(super) fn browser(&self) -> &obscura_core::Browser {
+        &self.browser
+    }
+
+    pub(super) fn page_mut(&mut self) -> &mut obscura_core::Page {
+        &mut self.page
+    }
+}
+
+/// Allocate a new provider page only after the independent, nonpersistent
+/// context exists. No navigation, credential import or side effects on the
+/// live Browser occur. Do not promote only `page` without `browser`.
+#[allow(dead_code)]
+pub(super) async fn new_disposable_provider_stage(
+    cfg: &AppConfig,
+    provider: crate::providers::Provider,
+) -> Result<DisposableProviderStage> {
+    let browser = build_disposable_browser(cfg)?;
+    let page = new_provider_page(&browser, provider).await?;
+    Ok(DisposableProviderStage { page, browser })
+}
+
 /// Apply page-level compatibility before any provider script executes.
 pub(super) async fn new_page(browser: &obscura_core::Browser) -> Result<obscura_core::Page> {
     let mut page = browser.new_page().await?;
