@@ -29,10 +29,20 @@
     try { probe.controller.abort(); } catch (_) {}
   }, __TIMEOUT_MS__);
   try {
+    // Pinned Obscura op_fetch_url follows redirects regardless of Request's
+    // "error" setting, while its bootstrap masks Response.redirected unless
+    // mode is "follow". Explicit follow exposes final URL + redirect metadata
+    // so this verifier can reject every redirected/foreign endpoint response
+    // instead of mistaking a redirected 200 for first-party session proof.
     fetch('/api/auth/session', {credentials:'include', cache:'no-store',
-      redirect:'error', signal:probe.controller.signal})
+      redirect:'follow', signal:probe.controller.signal})
       .then(async response => {
         probe.http = response.status;
+        if (response.redirected ||
+            (__ORIGIN__ !== 'null' &&
+              response.url !== __ORIGIN__ + '/api/auth/session')) {
+          finish('unavailable'); return;
+        }
         if (response.status === 401) { finish('needs_login'); return; }
         if (!response.ok) { finish('unavailable'); return; }
         const session = await response.json();
