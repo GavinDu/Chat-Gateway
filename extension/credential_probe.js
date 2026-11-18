@@ -14,6 +14,16 @@ async function probeActiveChatgptAccount() {
       (location.port && location.port !== "443")) {
     return report("unknown", "unsupported_origin");
   }
+  // An existing first-party tab can navigate while the asynchronous fetch
+  // or JSON body parsing is pending. Never attach a result observed in an
+  // older document/account route to the currently active tab. The URL stays
+  // strictly inside this execution context; even a fragment may be private.
+  const initialHref = location.href;
+  const documentUnchanged = () =>
+    location.protocol === "https:" &&
+    ["chatgpt.com", "www.chatgpt.com"].includes(location.hostname) &&
+    (!location.port || location.port === "443") &&
+    location.href === initialHref;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 10_000);
   try {
@@ -21,11 +31,9 @@ async function probeActiveChatgptAccount() {
       credentials: "include", cache: "no-store", redirect: "error",
       signal: controller.signal, headers: {Accept: "application/json"}
     });
-    // A navigation or origin change makes the eventual result stale.
-    if (location.protocol !== "https:" ||
-        !["chatgpt.com", "www.chatgpt.com"].includes(location.hostname)) {
-      return report("unknown", "tab_changed");
-    }
+    // Same-tab SPA route/port changes are also stale, not merely off-origin
+    // redirects. A later signed-in page cannot prove the prior page's state.
+    if (!documentUnchanged()) return report("unknown", "tab_changed");
     if (response.status === 401) {
       return report("unauthenticated", "provider_rejected_session", 401);
     }
@@ -34,6 +42,9 @@ async function probeActiveChatgptAccount() {
         Number.isInteger(response.status) ? response.status : null);
     }
     const session = await response.json();
+    // Body parsing is a separate await. Do not certify a previous account
+    // after a same-origin SPA route or a cross-origin document change.
+    if (!documentUnchanged()) return report("unknown", "tab_changed");
     if (!session || typeof session !== "object" || Array.isArray(session)) {
       return report("unknown", "unrecognized_session_response", 200);
     }
