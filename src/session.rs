@@ -1163,7 +1163,7 @@ mod provider_cookie_count_tests {
         assert_eq!(
             count_provider_cookie_domains(
                 "chatgpt",
-                std::iter::repeat("chatgpt.com").take(600)
+                std::iter::repeat_n("chatgpt.com", 600)
             ),
             512
         );
