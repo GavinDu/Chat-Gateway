@@ -1424,7 +1424,9 @@ pub(super) fn browser_thread(
                                         applied_imports.borrow().get(&provider).map(String::as_str),
                                         &fingerprint,
                                         pages.borrow().contains_key(&provider),
-                                        provider_sessions.credentials_verified(provider.name()),
+                                        provider_sessions.has_prior_positive_account_observation(
+                                            provider.name(),
+                                        ),
                                     )?;
                                     // Begin only after the non-mutating replay guard passes.
                                     // Other adapters, including Meta AI, have no verifier.

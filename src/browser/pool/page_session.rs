@@ -53,6 +53,8 @@ pub(super) fn guard_live_replay(
 /// A verified first-party session on a live page must not be replaced merely
 /// because its applied fingerprint marker was cleared by page lifecycle.
 /// Without a private staging jar there is no safe rollback of shared cookies.
+/// This safety-only predicate includes a formerly positive observation after
+/// its five-minute auth-status TTL expires. Never expose it as a verified login.
 /// Keep cold/unverified first import eligible, and preserve the existing known
 /// fingerprint mismatch check before touching credential-verification epochs.
 pub(super) fn guard_verified_live_replay(
@@ -60,7 +62,7 @@ pub(super) fn guard_verified_live_replay(
     applied_fingerprint: Option<&str>,
     candidate_fingerprint: &str,
     live_page_present: bool,
-    credentials_verified: bool,
+    prior_first_party_positive: bool,
 ) -> Result<()> {
     guard_live_replay(
         provider,
@@ -71,7 +73,7 @@ pub(super) fn guard_verified_live_replay(
     if matches!(provider, Provider::ChatGPT | Provider::MetaAI)
         && live_page_present
         && applied_fingerprint.is_none()
-        && credentials_verified
+        && prior_first_party_positive
     {
         return Err(ReplayRequiresIsolatedContext.into());
     }
@@ -233,6 +235,33 @@ mod live_replay_guard_tests {
         );
         // Explicitly deferred providers keep their own replay policy.
         assert!(guard_verified_live_replay(Provider::Grok, None, "new", true, true).is_ok());
+    }
+
+    #[test]
+    fn historical_positive_is_safety_only_not_a_fresh_login_verdict() {
+        // The guard only inspects a prior source-backed positive, not its
+        // freshness. The registry's public credentials_verified() still
+        // applies the five-minute TTL independently.
+        let reg = crate::provider_state::ProviderSessionRegistry::default();
+        let epoch = reg.begin_credential_verification("chatgpt").unwrap();
+        assert!(reg.record_credentials_verified("chatgpt", epoch));
+        assert!(guard_verified_live_replay(
+            Provider::ChatGPT,
+            None,
+            "fresh-candidate",
+            true,
+            reg.has_prior_positive_account_observation("chatgpt"),
+        )
+        .is_err());
+        reg.invalidate_credentials("chatgpt");
+        assert!(guard_verified_live_replay(
+            Provider::ChatGPT,
+            None,
+            "fresh-candidate",
+            true,
+            reg.has_prior_positive_account_observation("chatgpt"),
+        )
+        .is_ok());
     }
 
     #[test]
