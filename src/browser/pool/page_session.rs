@@ -206,38 +206,33 @@ mod live_replay_guard_tests {
             mutation_called = true;
         }
         let err = result.unwrap_err();
-        assert!(err.downcast_ref::<ReplayRequiresIsolatedContext>().is_some());
+        assert!(err
+            .downcast_ref::<ReplayRequiresIsolatedContext>()
+            .is_some());
         assert_eq!(err.to_string(), "replay_deferred_requires_isolated_context");
         assert!(!mutation_called, "shared jar must not be touched");
-        assert!(registry.credentials_verified("chatgpt"), "source proof unchanged");
+        assert!(
+            registry.credentials_verified("chatgpt"),
+            "source proof unchanged"
+        );
 
         // The same safety rule will apply when Meta AI has a source-backed
         // account verifier; it currently must not infer a positive from cookies.
-        assert!(guard_verified_live_replay(
-            Provider::MetaAI, None, "new", true, true
-        ).is_err());
+        assert!(guard_verified_live_replay(Provider::MetaAI, None, "new", true, true).is_err());
         // Unverified first import may still proceed without forced resync.
-        assert!(guard_verified_live_replay(
-            Provider::ChatGPT, None, "first", true, false
-        ).is_ok());
-        assert!(guard_verified_live_replay(
-            Provider::MetaAI, None, "first", true, false
-        ).is_ok());
+        assert!(guard_verified_live_replay(Provider::ChatGPT, None, "first", true, false).is_ok());
+        assert!(guard_verified_live_replay(Provider::MetaAI, None, "first", true, false).is_ok());
         // No live page means there is no prior page to preserve.
-        assert!(guard_verified_live_replay(
-            Provider::ChatGPT, None, "first", false, true
-        ).is_ok());
+        assert!(guard_verified_live_replay(Provider::ChatGPT, None, "first", false, true).is_ok());
         // A known identical applied snapshot can be reverified read-only.
-        assert!(guard_verified_live_replay(
-            Provider::ChatGPT, Some("same"), "same", true, true
-        ).is_ok());
-        assert!(guard_verified_live_replay(
-            Provider::ChatGPT, Some("old"), "new", true, false
-        ).is_err());
+        assert!(
+            guard_verified_live_replay(Provider::ChatGPT, Some("same"), "same", true, true).is_ok()
+        );
+        assert!(
+            guard_verified_live_replay(Provider::ChatGPT, Some("old"), "new", true, false).is_err()
+        );
         // Explicitly deferred providers keep their own replay policy.
-        assert!(guard_verified_live_replay(
-            Provider::Grok, None, "new", true, true
-        ).is_ok());
+        assert!(guard_verified_live_replay(Provider::Grok, None, "new", true, true).is_ok());
     }
 
     #[test]
