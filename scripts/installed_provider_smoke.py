@@ -59,9 +59,13 @@ def _request_id(headers) -> str | None:
     if not isinstance(raw, str):
         return None
     try:
-        return str(uuid.UUID(raw))
+        parsed = uuid.UUID(raw)
     except (ValueError, AttributeError):
         return None
+    # A gateway-generated request ID must not be a nil/normalized/foreign
+    # spelling. Never echo untrusted header data into a diagnostic report.
+    canonical = str(parsed)
+    return canonical if parsed.int != 0 and canonical == raw else None
 
 
 def _read_limited(response, maximum=MAX_JSON_BYTES) -> bytes:
