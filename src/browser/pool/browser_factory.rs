@@ -238,8 +238,7 @@ mod disposable_context_tests {
     #[tokio::test]
     async fn disposable_provider_stage_owns_browser_and_page_until_drop() {
         let cfg: AppConfig =
-            serde_yaml::from_str("obscura:\\n  stealth: false\\nproviders: []\\n")
-                .unwrap();
+            serde_yaml::from_str("obscura:\n  stealth: false\nproviders: []\n").unwrap();
         let live = build_browser(&cfg).unwrap();
         live.cookies()
             .set(
