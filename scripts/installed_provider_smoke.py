@@ -8,8 +8,9 @@ contains all eight provider rows.
 No owner session is accessed unless --execute is supplied. The output is
 redacted metadata only: never print response bodies, prompts, model IDs,
 authentication material, conversation IDs or arbitrary upstream errors.
-This checks one fresh JSON turn, then a fresh SSE turn per provider; it does
-not certify restart or memory continuity.
+The default checks one fresh JSON turn, then a fresh SSE turn per provider.
+An explicit --execute --repeat also checks two distinct JSON prompts inside one
+new conversation; it does not certify restart or cross-provider continuity.
 """
 from __future__ import annotations
 
