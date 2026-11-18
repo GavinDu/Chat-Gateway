@@ -265,7 +265,10 @@ impl ProviderSessionRegistry {
                     .get(provider)
                     .map(|entry| entry.first_party_verified_at.is_some())
             })
-            .unwrap_or(false)
+            // Poisoned proof storage cannot certify absence of an old
+            // verified live page. This method is safety-only: block a
+            // destructive replay rather than interpreting unknown as false.
+            .unwrap_or(true)
     }
 
     pub fn invalidate_credentials(&self, provider: &str) {
@@ -892,6 +895,21 @@ mod credential_evidence_lifecycle_tests {
         assert!(reg.record_credentials_verified("chatgpt", before_restart));
         reg.invalidate_all_credentials();
         assert!(!reg.has_prior_positive_account_observation("chatgpt"));
+    }
+
+    #[test]
+    fn poisoned_proof_registry_cannot_allow_unsafe_markerless_replay() {
+        let reg = ProviderSessionRegistry::default();
+        let clone = reg.clone();
+        let outcome = std::thread::spawn(move || {
+            let _guard = clone.credential_proofs.lock().unwrap();
+            panic!("synthetic proof registry poison");
+        })
+        .join();
+        assert!(outcome.is_err());
+        // This flag is a replay admission barrier, not a login verdict.
+        assert!(reg.has_prior_positive_account_observation("chatgpt"));
+        assert!(!reg.credentials_verified("chatgpt"));
     }
 
     #[test]
