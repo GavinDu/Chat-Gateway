@@ -350,9 +350,7 @@ class ExecutionContractTests(unittest.TestCase):
         self.assertEqual(unknown.posts, [])
 
         for bad in ("A" * 40, "a" * 39, "a" * 40 + " token=secret",
-                    "unknown", "", None):
-            if bad is None:
-                continue  # omitted optional constraint retains legacy behavior
+                    "unknown", ""):
             gateway = VersionedGateway("a" * 40)
             with self.subTest(bad=bad), self.assertRaises(SmokeFailure) as error:
                 execute("http://127.0.0.1:8080", "", 8, gateway,
