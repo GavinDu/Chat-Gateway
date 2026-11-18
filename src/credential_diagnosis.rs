@@ -154,12 +154,15 @@ fn fresh(at: u64, now: u64) -> bool {
 }
 
 fn generation(raw: &str) -> Option<uuid::Uuid> {
-    uuid::Uuid::parse_str(raw).ok().filter(|id| !id.is_nil())
+    let id = uuid::Uuid::parse_str(raw).ok().filter(|id| !id.is_nil())?;
+    // Snapshot, imported-page and attempt generations are opaque source
+    // identifiers. Do not normalize unsupported owner-supplied spellings into
+    // a seemingly correlated credential/replay record.
+    (id.to_string() == raw).then_some(id)
 }
 
 fn canonical_request_id(raw: &str) -> Option<uuid::Uuid> {
-    let id = generation(raw)?;
-    (id.to_string() == raw).then_some(id)
+    generation(raw)
 }
 
 /// Only a single source-owned timestamp shape may establish recency. Direct
@@ -758,6 +761,37 @@ mod tests {
         v["snapshot"]["generation"] = json!(ID);
         v["secret_token"] = json!("bearer highly-secret");
         assert!(serde_json::from_value::<Evidence>(v).is_err());
+    }
+
+    #[test]
+    fn snapshot_generation_requires_exact_canonical_spelling_in_each_context() {
+        let invalid = [
+            ID.to_uppercase(),
+            format!("{{{ID}}}"),
+            format!("urn:uuid:{ID}"),
+            format!(" {ID}"),
+            format!("{ID} "),
+            "00000000-0000-0000-0000-000000000000".to_owned(),
+            "https://private.example/?cookie=secret".to_owned(),
+        ];
+        for context in ["snapshot", "obscura", "attempt"] {
+            for raw in &invalid {
+                let mut v = base();
+                v[context]["generation"] = json!(raw);
+                let result = checked(v);
+                assert_eq!(
+                    result.reason, "snapshot_generation_mismatch",
+                    "{context} must not normalize supplied generation"
+                );
+                assert_eq!(result.category, "inconclusive");
+                assert!(!result.live_proof);
+                let body = serde_json::to_string(&result).unwrap();
+                assert!(!body.contains("secret"));
+                assert!(!body.contains("private.example"));
+            }
+        }
+        // Only a truly identical source-canonical generation may correlate.
+        assert_eq!(checked(base()).category, "transport_or_extraction");
     }
 
     #[test]
