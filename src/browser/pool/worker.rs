@@ -1419,11 +1419,12 @@ pub(super) fn browser_thread(
                                     // Protect its prior session/proof until isolated staging
                                     // exists. Borrowed hashes never cross an await or log.
                                     let fingerprint = session::session_state_hash(&file)?;
-                                    page_session::guard_live_replay(
+                                    page_session::guard_verified_live_replay(
                                         provider,
                                         applied_imports.borrow().get(&provider).map(String::as_str),
                                         &fingerprint,
                                         pages.borrow().contains_key(&provider),
+                                        provider_sessions.credentials_verified(provider.name()),
                                     )?;
                                     // Begin only after the non-mutating replay guard passes.
                                     // Other adapters, including Meta AI, have no verifier.
