@@ -3775,3 +3775,107 @@ mod session_snapshot_delete_tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 }
+
+#[cfg(test)]
+mod replay_material_coverage_tests {
+    use super::*;
+
+    fn fixture(name: &str, value: &str, domain: &str) -> Cookie {
+        Cookie {
+            name: name.to_owned(),
+            value: value.to_owned(),
+            domain: domain.to_owned(),
+            path: "/".to_owned(),
+            secure: true,
+            http_only: true,
+            expires: None,
+            same_site: None,
+        }
+    }
+
+    fn snapshot(cookies: Vec<Cookie>, storage: &[(&str, &str)]) -> SessionFile {
+        SessionFile {
+            cookies,
+            local_storage: storage
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+                .collect(),
+            ts: "synthetic".to_owned(),
+        }
+    }
+
+    #[test]
+    fn coverage_never_confuses_unrelated_cookie_records_with_provider_replay() {
+        let foreign = fixture("SID", "secret-meta", ".meta.ai");
+        let empty = provider_replay_material_coverage(&snapshot(vec![], &[]), "chatgpt", 1000.0);
+        assert_eq!(empty.category(), "no_applicable_provider_material");
+        assert_eq!(empty.eligible_cookies, 0);
+
+        let unrelated = provider_replay_material_coverage(
+            &snapshot(vec![foreign.clone()], &[]),
+            "chatgpt",
+            1000.0,
+        );
+        assert_eq!(unrelated.category(), "no_applicable_provider_material");
+        assert_eq!(unrelated.excluded_cookies, 1);
+        assert_eq!(unrelated.eligible_cookies, 0);
+
+        let mixed = provider_replay_material_coverage(
+            &snapshot(
+                vec![foreign, fixture("SID", "secret-chat", ".chatgpt.com")],
+                &[],
+            ),
+            "chatgpt",
+            1000.0,
+        );
+        assert_eq!(mixed.category(), "eligible_cookie_material_unverified");
+        assert_eq!(mixed.eligible_cookies, 1);
+        assert_eq!(mixed.excluded_cookies, 1);
+        assert!(!format!("{mixed:?}").contains("secret"));
+    }
+
+    #[test]
+    fn storage_only_and_expired_cookie_evidence_remain_unverified() {
+        let storage_only = provider_replay_material_coverage(
+            &snapshot(vec![], &[("bearer", "secret-access-token")]),
+            "chatgpt",
+            1000.0,
+        );
+        assert_eq!(storage_only.category(), "storage_only_presence_unverified");
+        assert_eq!(storage_only.observed_storage_entries, 1);
+        assert!(!format!("{storage_only:?}").contains("bearer"));
+
+        let mut expired = fixture("SID", "expired-private", ".chatgpt.com");
+        expired.expires = Some(50.0);
+        let expired = provider_replay_material_coverage(
+            &snapshot(vec![expired], &[]),
+            "chatgpt",
+            1000.0,
+        );
+        assert_eq!(expired.category(), "no_applicable_provider_material");
+        assert_eq!(expired.invalid_provider_cookies, 1);
+        assert_eq!(expired.eligible_cookies, 0);
+    }
+
+    #[test]
+    fn source_scope_normalization_does_not_claim_an_extra_cookie() {
+        let domain = fixture("SID", "same-private", ".chatgpt.com");
+        let mut host = domain.clone();
+        host.domain = "chatgpt.com".to_owned();
+        let coverage = provider_replay_material_coverage(
+            &snapshot(vec![domain, host], &[]),
+            "chatgpt",
+            1000.0,
+        );
+        assert_eq!(coverage.eligible_cookies, 1);
+        assert_eq!(coverage.normalized_scopes, 1);
+        assert_eq!(coverage.category(), "eligible_cookie_material_unverified");
+    }
+
+    #[test]
+    fn bounded_aggregate_counts_cannot_expand_untrusted_snapshot_cardinality() {
+        assert_eq!(bounded_material_count(0), 0);
+        assert_eq!(bounded_material_count(12), 12);
+        assert_eq!(bounded_material_count(usize::MAX), 512);
+    }
+}
