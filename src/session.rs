@@ -2102,6 +2102,70 @@ mod cookie_restore_result_tests {
     }
 }
 
+/// Read-only evidence of material *eligible* for the chosen provider.
+/// Presence of cookies or origin storage is not proof of account validity.
+/// All counts are bounded; no names, domains, values or stable hashes escape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ReplayMaterialCoverage {
+    eligible_cookies: u16,
+    excluded_cookies: u16,
+    invalid_provider_cookies: u16,
+    normalized_scopes: u16,
+    observed_storage_entries: u16,
+}
+
+impl ReplayMaterialCoverage {
+    fn category(self) -> &'static str {
+        if self.eligible_cookies > 0 {
+            "eligible_cookie_material_unverified"
+        } else if self.observed_storage_entries > 0 {
+            "storage_only_presence_unverified"
+        } else {
+            "no_applicable_provider_material"
+        }
+    }
+}
+
+fn bounded_material_count(count: usize) -> u16 {
+    count.min(512) as u16
+}
+
+pub(crate) fn provider_replay_material_coverage(
+    file: &SessionFile,
+    provider: &str,
+    now_epoch: f64,
+) -> ReplayMaterialCoverage {
+    // Normalize in exactly the same way as restoration. The values in
+    // these records remain private; only bounded counts are returned.
+    let (cookies, normalized) = resolve_cookie_scope_duplicates(&file.cookies);
+    let mut eligible = 0usize;
+    let mut excluded = 0usize;
+    let mut invalid = 0usize;
+    for cookie in cookies {
+        if !cookie_domain_allowed(provider, &cookie.domain) {
+            excluded += 1;
+        } else if !restored_cookie_fields_safe(&cookie)
+            || cookie.validate_browser_metadata().is_err()
+            || cookie
+                .expires
+                .is_some_and(|expiry| expiry >= 0.0 && expiry <= now_epoch)
+        {
+            invalid += 1;
+        } else {
+            eligible += 1;
+        }
+    }
+    ReplayMaterialCoverage {
+        eligible_cookies: bounded_material_count(eligible),
+        excluded_cookies: bounded_material_count(excluded),
+        invalid_provider_cookies: bounded_material_count(invalid),
+        normalized_scopes: bounded_material_count(normalized),
+        // Origin-storage keys are not allowlisted for the extension relay.
+        // This field means "observed", not "eligible authenticated state".
+        observed_storage_entries: bounded_material_count(file.local_storage.len()),
+    }
+}
+
 /// Check all eligible snapshot cookies before touching the shared browser
 /// cookie jar. A malformed or expired later cookie must not leave a partially
 /// restored session, and refresh callers preflight before clearing credentials.
@@ -2312,6 +2376,19 @@ pub fn restore_cookies(browser: &Browser, file: &SessionFile, provider: &str) ->
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs_f64();
+    let coverage = provider_replay_material_coverage(file, provider, now_epoch);
+    // This is not a verification verdict. A successful restore can still
+    // have zero in-scope provider cookies, especially in legacy snapshots.
+    tracing::debug!(
+        provider,
+        category = coverage.category(),
+        eligible_cookies = coverage.eligible_cookies,
+        excluded_cookies = coverage.excluded_cookies,
+        invalid_provider_cookies = coverage.invalid_provider_cookies,
+        normalized_scopes = coverage.normalized_scopes,
+        observed_storage_entries = coverage.observed_storage_entries,
+        "provider snapshot material coverage before cookie replay"
+    );
     let mut failed_writes = 0usize;
     let mut expected_restores = Vec::new();
     let (cookies, dropped) = resolve_cookie_scope_duplicates(&file.cookies);
@@ -3696,5 +3773,106 @@ mod session_snapshot_delete_tests {
         assert!(delete_session_snapshot_from_paths(&vault, &legacy).is_err());
         assert!(vault.is_file(), "encrypted recovery copy must be retained");
         std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod replay_material_coverage_tests {
+    use super::*;
+
+    fn fixture(name: &str, value: &str, domain: &str) -> Cookie {
+        Cookie {
+            name: name.to_owned(),
+            value: value.to_owned(),
+            domain: domain.to_owned(),
+            path: "/".to_owned(),
+            secure: true,
+            http_only: true,
+            expires: None,
+            same_site: None,
+        }
+    }
+
+    fn snapshot(cookies: Vec<Cookie>, storage: &[(&str, &str)]) -> SessionFile {
+        SessionFile {
+            cookies,
+            local_storage: storage
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+                .collect(),
+            ts: "synthetic".to_owned(),
+        }
+    }
+
+    #[test]
+    fn coverage_never_confuses_unrelated_cookie_records_with_provider_replay() {
+        let foreign = fixture("SID", "secret-meta", ".meta.ai");
+        let empty = provider_replay_material_coverage(&snapshot(vec![], &[]), "chatgpt", 1000.0);
+        assert_eq!(empty.category(), "no_applicable_provider_material");
+        assert_eq!(empty.eligible_cookies, 0);
+
+        let unrelated = provider_replay_material_coverage(
+            &snapshot(vec![foreign.clone()], &[]),
+            "chatgpt",
+            1000.0,
+        );
+        assert_eq!(unrelated.category(), "no_applicable_provider_material");
+        assert_eq!(unrelated.excluded_cookies, 1);
+        assert_eq!(unrelated.eligible_cookies, 0);
+
+        let mixed = provider_replay_material_coverage(
+            &snapshot(
+                vec![foreign, fixture("SID", "secret-chat", ".chatgpt.com")],
+                &[],
+            ),
+            "chatgpt",
+            1000.0,
+        );
+        assert_eq!(mixed.category(), "eligible_cookie_material_unverified");
+        assert_eq!(mixed.eligible_cookies, 1);
+        assert_eq!(mixed.excluded_cookies, 1);
+        assert!(!format!("{mixed:?}").contains("secret"));
+    }
+
+    #[test]
+    fn storage_only_and_expired_cookie_evidence_remain_unverified() {
+        let storage_only = provider_replay_material_coverage(
+            &snapshot(vec![], &[("bearer", "secret-access-token")]),
+            "chatgpt",
+            1000.0,
+        );
+        assert_eq!(storage_only.category(), "storage_only_presence_unverified");
+        assert_eq!(storage_only.observed_storage_entries, 1);
+        assert!(!format!("{storage_only:?}").contains("bearer"));
+
+        let mut expired = fixture("SID", "expired-private", ".chatgpt.com");
+        expired.expires = Some(50.0);
+        let expired =
+            provider_replay_material_coverage(&snapshot(vec![expired], &[]), "chatgpt", 1000.0);
+        assert_eq!(expired.category(), "no_applicable_provider_material");
+        assert_eq!(expired.invalid_provider_cookies, 1);
+        assert_eq!(expired.eligible_cookies, 0);
+    }
+
+    #[test]
+    fn source_scope_normalization_does_not_claim_an_extra_cookie() {
+        let domain = fixture("SID", "same-private", ".chatgpt.com");
+        let mut host = domain.clone();
+        host.domain = "chatgpt.com".to_owned();
+        let coverage = provider_replay_material_coverage(
+            &snapshot(vec![domain, host], &[]),
+            "chatgpt",
+            1000.0,
+        );
+        assert_eq!(coverage.eligible_cookies, 1);
+        assert_eq!(coverage.normalized_scopes, 1);
+        assert_eq!(coverage.category(), "eligible_cookie_material_unverified");
+    }
+
+    #[test]
+    fn bounded_aggregate_counts_cannot_expand_untrusted_snapshot_cardinality() {
+        assert_eq!(bounded_material_count(0), 0);
+        assert_eq!(bounded_material_count(12), 12);
+        assert_eq!(bounded_material_count(usize::MAX), 512);
     }
 }
