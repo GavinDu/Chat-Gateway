@@ -1267,9 +1267,8 @@ fn nontransparent_ancestors_expression(element: &str) -> String {
 /// button itself overrides the inherited style to pointer-events:auto.
 /// Keep the JS loop-local distinct from callers' button/input names.
 fn pointer_enabled_ancestors_expression(element: &str) -> String {
-    let metaai_editor = include_str!("metaai_composer_pointer.js").replace("__ELEMENT__", element);
     format!(
-        "(() => {{ for (let pointerAncestor = {element}; pointerAncestor; pointerAncestor = pointerAncestor.parentElement) {{ if (window.getComputedStyle(pointerAncestor).pointerEvents === 'none') return {metaai_editor}; }} return true; }})()"
+        "(() => {{ for (let pointerAncestor = {element}; pointerAncestor; pointerAncestor = pointerAncestor.parentElement) {{ if (window.getComputedStyle(pointerAncestor).pointerEvents === 'none') return false; }} return true; }})()"
     )
 }
 
@@ -1445,7 +1444,11 @@ fn composer_draft_expression(element: &str) -> String {
 
 /// Re-read the actionable composer after framework renders, not just after
 /// the initial typing event. Never log the prompt when the value changes.
-fn composer_retains_prompt(page: &Page, selector: &str, prompt: &str) -> anyhow::Result<bool> {
+pub(crate) fn composer_retains_prompt(
+    page: &Page,
+    selector: &str,
+    prompt: &str,
+) -> anyhow::Result<bool> {
     let selector_js = serde_json::to_string(selector)?;
     let el_js = visible_input_query(&selector_js);
     let prompt_js = serde_json::to_string(prompt)?;
@@ -2068,7 +2071,7 @@ pub async fn human_type(page: &Page, selectors: &[&str], text: &str) -> anyhow::
     human_type_with_provider(page, selectors, text, None).await
 }
 
-async fn human_type_with_provider(
+pub(crate) async fn human_type_with_provider(
     page: &Page,
     selectors: &[&str],
     text: &str,
@@ -6894,58 +6897,5 @@ mod provider_fixture_selector_tests {
                 );
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod metaai_pointer_override_tests {
-    #[tokio::test]
-    async fn first_party_unique_hit_editor_only() {
-        let browser = obscura_core::Browser::builder()
-            .stealth(false)
-            .build()
-            .unwrap();
-        let mut page = browser.new_page().await.unwrap();
-        let html = r#"<html><body><section style="pointer-events:none">
-          <div id="editor" role="textbox" contenteditable="true" style="pointer-events:auto;width:300px;height:100px">fixture</div>
-        </section><div id="overlay">overlay</div></body></html>"#;
-        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
-        page.goto(&format!("data:text/html,{encoded}"))
-            .await
-            .unwrap();
-        let script = include_str!("metaai_composer_pointer.js")
-            .replace("__ELEMENT__", "document.getElementById('editor')");
-        page.evaluate("document.elementFromPoint=()=>document.getElementById('editor')");
-        assert_eq!(
-            page.evaluate(&script).as_bool(),
-            Some(false),
-            "foreign origin"
-        );
-        let fixture = script.replace("location.origin", "'https://www.meta.ai'");
-        assert_eq!(page.evaluate(&fixture).as_bool(), Some(true));
-        page.evaluate("document.elementFromPoint=()=>document.getElementById('overlay')");
-        assert_eq!(
-            page.evaluate(&fixture).as_bool(),
-            Some(false),
-            "obstructed editor"
-        );
-        page.evaluate("document.elementFromPoint=()=>document.getElementById('editor');document.getElementById('editor').setAttribute('aria-disabled','true')");
-        assert_eq!(
-            page.evaluate(&fixture).as_bool(),
-            Some(false),
-            "disabled editor"
-        );
-        page.evaluate("document.getElementById('editor').removeAttribute('aria-disabled');document.getElementById('editor').parentElement.setAttribute('role','dialog')");
-        assert_eq!(
-            page.evaluate(&fixture).as_bool(),
-            Some(false),
-            "dialog editor"
-        );
-        page.evaluate("document.getElementById('editor').parentElement.removeAttribute('role');document.getElementById('editor').insertAdjacentHTML('afterend','<div role=\"textbox\" contenteditable=\"true\" style=\"pointer-events:auto\">duplicate</div>')");
-        assert_eq!(
-            page.evaluate(&fixture).as_bool(),
-            Some(false),
-            "ambiguous editor"
-        );
     }
 }
