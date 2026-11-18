@@ -652,51 +652,78 @@ mod adapter_diagnostic_composer_tests {
 
 #[cfg(test)]
 mod adapter_diagnostic_location_tests {
+    use super::*;
+
     #[test]
-    fn page_location_diagnostics_strip_query_fragment_and_userinfo() {
+    fn page_diagnostics_never_expose_private_thread_or_account_url_components() {
+        for (provider, raw) in [
+            (
+                Provider::ChatGPT,
+                "https://chatgpt.com/c/thread-secret?prompt=private#token",
+            ),
+            (
+                Provider::ChatGPT,
+                "https://chatgpt.com/account/bearer-secret",
+            ),
+            (
+                Provider::MetaAI,
+                "https://www.meta.ai/chat/private-account-token",
+            ),
+        ] {
+            let category = sanitize_page_location(provider, raw);
+            assert_eq!(category, "provider_origin");
+            let serialized = serde_json::to_string(&category).unwrap();
+            for private in ["secret", "private", "token", "/c/", "bearer"] {
+                assert!(!serialized.contains(private));
+            }
+        }
+    }
+
+    #[test]
+    fn off_provider_and_ambiguous_authorities_fail_closed_without_url_disclosure() {
+        for url in [
+            "https://chatgpt.com.attacker.invalid/c/private",
+            "https://user:password@chatgpt.com/c/private",
+            "https://chatgpt.com@attacker.invalid/c/private",
+            "https://chatgpt%2ecom/c/private",
+            "https://www.meta.ai/c/private",
+            "data:text/html,<p>private bearer</p>",
+            "file:///vault/private",
+            "https://private.invalid/login",
+            "not-a-url?secret",
+        ] {
+            assert_eq!(
+                sanitize_page_location(Provider::ChatGPT, url),
+                "unexpected_origin"
+            );
+        }
         assert_eq!(
-            super::sanitize_page_location("https://chatgpt.com/c/abc?prompt=secret#frag"),
-            "https://chatgpt.com/c/abc"
+            sanitize_page_location(Provider::MetaAI, "https://chatgpt.com/c/private"),
+            "unexpected_origin"
         );
         assert_eq!(
-            super::sanitize_page_location("https://user:pass@chatgpt.com/c/abc"),
-            "https://chatgpt.com/c/abc"
+            sanitize_page_location(Provider::ChatGPT, "about:blank"),
+            "blank_page"
         );
         assert_eq!(
-            super::sanitize_page_location("https://user:pass@chatgpt.com"),
-            "https://chatgpt.com"
-        );
-        assert_eq!(super::sanitize_page_location("about:blank"), "about:blank");
-        assert!(
-            super::sanitize_page_location(&format!("https://chatgpt.com/{}", "a".repeat(400)))
-                .chars()
-                .count()
-                <= 256
+            sanitize_page_location(Provider::ChatGPT, "about:blank?token=secret"),
+            "unexpected_origin"
         );
     }
 }
 
-/// Provider pages can put prompts, thread ids or account tokens in the URL
-/// query or fragment. Keep only a bounded scheme/host/path prefix.
-fn sanitize_page_location(url: &str) -> String {
-    let base = url.split(['?', '#']).next().unwrap_or(url);
-    let without_userinfo = match base.split_once("://") {
-        Some((scheme, rest)) => match rest.split_once('/') {
-            Some((authority, path)) if authority.contains('@') => {
-                let host = authority
-                    .rsplit_once('@')
-                    .map_or(authority, |(_, host)| host);
-                format!("{scheme}://{host}/{path}")
-            }
-            None if rest.contains('@') => {
-                let host = rest.rsplit_once('@').map_or(rest, |(_, host)| host);
-                format!("{scheme}://{host}")
-            }
-            _ => base.to_string(),
-        },
-        None => base.to_string(),
-    };
-    without_userinfo.chars().take(256).collect()
+/// Provider pages can contain thread, prompt or account secrets anywhere in
+/// the URL, including the path. Never serialize a truncated or partially
+/// redacted URL to operator-facing TestAdapterReport; report fixed origin
+/// categories only, using the already-reviewed strict HTTPS origin validator.
+fn sanitize_page_location(provider: Provider, url: &str) -> &'static str {
+    if url == "about:blank" {
+        "blank_page"
+    } else if pool_policy::provider_thread_url_is_same_origin(url, provider.login_url()) {
+        "provider_origin"
+    } else {
+        "unexpected_origin"
+    }
 }
 
 /// Fixed selector names only: never log arbitrary field attributes or values.
@@ -1291,7 +1318,7 @@ pub(super) fn browser_thread(
                                 providers::common::drive_page(&mut page, Duration::from_millis(1200)).await;
                                 // Classify the landed page without exposing prompts,
                                 // thread ids, account tokens or cookie values.
-                                report.page = Some(sanitize_page_location(&page.url()));
+                                report.page = Some(sanitize_page_location(provider, &page.url()).to_owned());
                                 report.restored_cookie_count = Some(browser.cookies().get_all().len());
                                 // Phase 0 — session check.
                                 if providers::common::is_login_page(&page) {
