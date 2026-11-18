@@ -1133,7 +1133,10 @@ fn count_provider_cookie_domains<'a>(
 
 pub(crate) fn provider_cookie_count(browser: &Browser, provider: &str) -> usize {
     let cookies = browser.cookies().get_all();
-    count_provider_cookie_domains(provider, cookies.iter().map(|cookie| cookie.domain.as_str()))
+    count_provider_cookie_domains(
+        provider,
+        cookies.iter().map(|cookie| cookie.domain.as_str()),
+    )
 }
 
 #[cfg(test)]
@@ -1153,18 +1156,24 @@ mod provider_cookie_count_tests {
             "meta.ai.attacker.invalid",
             "not a valid domain",
         ];
-        assert_eq!(count_provider_cookie_domains("chatgpt", domains.iter().copied()), 4);
-        assert_eq!(count_provider_cookie_domains("metaai", domains.iter().copied()), 2);
-        assert_eq!(count_provider_cookie_domains("unknown", domains.iter().copied()), 0);
+        assert_eq!(
+            count_provider_cookie_domains("chatgpt", domains.iter().copied()),
+            4
+        );
+        assert_eq!(
+            count_provider_cookie_domains("metaai", domains.iter().copied()),
+            2
+        );
+        assert_eq!(
+            count_provider_cookie_domains("unknown", domains.iter().copied()),
+            0
+        );
     }
 
     #[test]
     fn provider_material_count_is_bounded_without_exposing_cookie_values() {
         assert_eq!(
-            count_provider_cookie_domains(
-                "chatgpt",
-                std::iter::repeat_n("chatgpt.com", 600)
-            ),
+            count_provider_cookie_domains("chatgpt", std::iter::repeat_n("chatgpt.com", 600)),
             512
         );
         assert_eq!(
