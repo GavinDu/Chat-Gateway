@@ -2254,28 +2254,68 @@ pub(crate) fn provider_replay_material_coverage(
     }
 }
 
-/// Check all eligible snapshot cookies before touching the shared browser
-/// cookie jar. A malformed or expired later cookie must not leave a partially
-/// restored session, and refresh callers preflight before clearing credentials.
-pub(crate) fn preflight_cookie_restore(file: &SessionFile, provider: &str) -> Result<()> {
-    ensure_unambiguous_same_scope_cookie_values(&file.cookies, provider)?;
-    let (cookies, _) = resolve_cookie_scope_duplicates(&file.cookies);
-    let now_epoch = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs_f64();
-    let invalid = cookies
+/// Plan replay without mutating saved credentials or the shared cookie jar.
+/// Expired cookies are not credentials to restore. Only the two recovery
+/// providers opt into expiry-aware replay; malformed metadata still fails closed.
+fn planned_cookie_replay(
+    file: &SessionFile,
+    provider: &str,
+    now_epoch: f64,
+) -> Result<(Vec<Cookie>, usize)> {
+    let expiry_aware = matches!(provider, "chatgpt" | "metaai");
+    let invalid = file
+        .cookies
         .iter()
         .filter(|cookie| {
             cookie_domain_allowed(provider, &cookie.domain)
                 && (!restored_cookie_fields_safe(cookie)
-                    || cookie.validate_browser_metadata().is_err()
-                    || cookie
-                        .expires
-                        .is_some_and(|expiry| expiry >= 0.0 && expiry <= now_epoch))
+                    || cookie.validate_browser_metadata().is_err())
         })
         .count();
-    ensure_cookie_restore_complete(invalid)
+    ensure_cookie_restore_complete(invalid)?;
+    let expired = |cookie: &Cookie| {
+        cookie
+            .expires
+            .is_some_and(|expiry| expiry >= 0.0 && expiry <= now_epoch)
+    };
+    let candidates: Vec<Cookie> = file
+        .cookies
+        .iter()
+        .filter(|cookie| {
+            !expiry_aware || !cookie_domain_allowed(provider, &cookie.domain) || !expired(cookie)
+        })
+        .cloned()
+        .collect();
+    if expiry_aware {
+        let had_expired = file
+            .cookies
+            .iter()
+            .any(|cookie| cookie_domain_allowed(provider, &cookie.domain) && expired(cookie));
+        let has_live = candidates
+            .iter()
+            .any(|cookie| cookie_domain_allowed(provider, &cookie.domain));
+        anyhow::ensure!(
+            !had_expired || has_live,
+            "no live provider cookies remain in saved session"
+        );
+    }
+    ensure_unambiguous_same_scope_cookie_values(&candidates, provider)?;
+    let (cookies, dropped) = resolve_cookie_scope_duplicates(&candidates);
+    let invalid = cookies
+        .iter()
+        .filter(|cookie| cookie_domain_allowed(provider, &cookie.domain) && expired(cookie))
+        .count();
+    ensure_cookie_restore_complete(invalid)?;
+    Ok((cookies, dropped))
+}
+
+/// Validate the complete replay plan before any shared-jar mutation.
+pub(crate) fn preflight_cookie_restore(file: &SessionFile, provider: &str) -> Result<()> {
+    let now_epoch = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64();
+    planned_cookie_replay(file, provider, now_epoch).map(|_| ())
 }
 
 /// Build one Set-Cookie restore header without exposing its credential value in
@@ -2458,12 +2498,12 @@ fn replay_fidelity_limits(source: &[Cookie], normalized_count: usize) -> ReplayF
 /// Restore step 1 (BEFORE goto): put the saved cookies into the browser's
 /// cookie store so the first navigation is already authenticated.
 pub fn restore_cookies(browser: &Browser, file: &SessionFile, provider: &str) -> Result<()> {
-    preflight_cookie_restore(file, provider)?;
-    let store = browser.cookies();
     let now_epoch = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs_f64();
+    let (cookies, dropped) = planned_cookie_replay(file, provider, now_epoch)?;
+    let store = browser.cookies();
     let coverage = provider_replay_material_coverage(file, provider, now_epoch);
     // This is not a verification verdict. A successful restore can still
     // have zero in-scope provider cookies, especially in legacy snapshots.
@@ -2479,7 +2519,6 @@ pub fn restore_cookies(browser: &Browser, file: &SessionFile, provider: &str) ->
     );
     let mut failed_writes = 0usize;
     let mut expected_restores = Vec::new();
-    let (cookies, dropped) = resolve_cookie_scope_duplicates(&file.cookies);
     let fidelity = replay_fidelity_limits(&file.cookies, dropped);
     if dropped > 0 {
         // Counts only: cookie names, domains and values are credentials.
@@ -2972,6 +3011,84 @@ mod cookie_scope_tests {
             assert_eq!(error, "failed to restore 1 provider session cookie(s)");
             assert!(browser.cookies().get_all().is_empty());
         }
+    }
+
+    #[tokio::test]
+    async fn recovery_replay_ignores_expired_ancillary_without_rewriting_snapshot() {
+        for (provider, domain) in [("chatgpt", "chatgpt.com"), ("metaai", "www.meta.ai")] {
+            let browser = Browser::builder().stealth(false).build().unwrap();
+            let mut live = cookie("session", "live-fixture", "/");
+            live.domain = domain.into();
+            live.expires = None;
+            let mut old = live.clone();
+            old.name = "ancillary".into();
+            old.expires = Some(1.0);
+            let file = SessionFile {
+                cookies: vec![old, live],
+                local_storage: HashMap::new(),
+                ts: "fixture".into(),
+            };
+            preflight_cookie_restore(&file, provider).unwrap();
+            restore_cookies(&browser, &file, provider).unwrap();
+            let restored = browser.cookies().get_all();
+            assert_eq!(restored.len(), 1);
+            assert_eq!(restored[0].name, "session");
+            assert_eq!(restored[0].value, "live-fixture");
+            assert_eq!(file.cookies.len(), 2, "saved snapshot is not rewritten");
+        }
+    }
+
+    #[tokio::test]
+    async fn recovery_replay_all_expired_or_malformed_is_atomic() {
+        for malformed in [false, true] {
+            let browser = Browser::builder().stealth(false).build().unwrap();
+            browser
+                .cookies()
+                .set("preserved=dummy; Secure; Path=/", "https://chatgpt.com/")
+                .unwrap();
+            let mut old = cookie("old", "private-fixture", "/");
+            old.domain = "chatgpt.com".into();
+            old.expires = Some(1.0);
+            let mut cookies = vec![old];
+            if malformed {
+                let mut live = cookie("live", "private-fixture", "/");
+                live.domain = "chatgpt.com".into();
+                cookies.push(live);
+                cookies[0].path = "/bad;inject".into();
+            }
+            let file = SessionFile {
+                cookies,
+                local_storage: HashMap::new(),
+                ts: "fixture".into(),
+            };
+            let error = restore_cookies(&browser, &file, "chatgpt")
+                .unwrap_err()
+                .to_string();
+            assert!(!error.contains("private-fixture"));
+            let remaining = browser.cookies().get_all();
+            assert_eq!(remaining.len(), 1);
+            assert_eq!(remaining[0].name, "preserved");
+        }
+    }
+
+    #[test]
+    fn recovery_replay_filters_expiry_before_resolving_scope() {
+        let mut old = cookie("same", "expired-fixture", "/");
+        old.domain = ".chatgpt.com".into();
+        old.expires = Some(1.0);
+        let mut live = old.clone();
+        live.domain = "chatgpt.com".into();
+        live.value = "live-fixture".into();
+        live.expires = None;
+        let file = SessionFile {
+            cookies: vec![old, live],
+            local_storage: HashMap::new(),
+            ts: "fixture".into(),
+        };
+        let (plan, _) = planned_cookie_replay(&file, "chatgpt", 1000.0).unwrap();
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0].domain, "chatgpt.com");
+        assert_eq!(plan[0].value, "live-fixture");
     }
 
     #[tokio::test]
