@@ -3,6 +3,21 @@ use crate::config::AppConfig;
 use anyhow::Result;
 
 pub(super) fn build_browser(cfg: &AppConfig) -> Result<obscura_core::Browser> {
+    build_browser_with_storage(cfg, true)
+}
+
+/// Create a *separate* pinned Obscura Browser for a future candidate replay.
+/// The published Browser::new_page() shares one BrowserContext cookie jar,
+/// localStorage and IndexedDB with every other page on that Browser. A second
+/// Browser (without storage_dir) owns fresh independent context state instead.
+/// This factory does not import cookies, navigate or promote the candidate;
+/// the live worker still owns the existing persistent Browser until #1385.
+#[allow(dead_code)] // The staged-activation caller is a separate, gated issue (#1385).
+pub(super) fn build_disposable_browser(cfg: &AppConfig) -> Result<obscura_core::Browser> {
+    build_browser_with_storage(cfg, false)
+}
+
+fn build_browser_with_storage(cfg: &AppConfig, persistent: bool) -> Result<obscura_core::Browser> {
     let mut builder = obscura_core::Browser::builder().stealth(cfg.obscura.stealth);
     if let Some(user_agent) = cfg
         .obscura
@@ -13,20 +28,25 @@ pub(super) fn build_browser(cfg: &AppConfig) -> Result<obscura_core::Browser> {
     {
         builder = builder.user_agent(user_agent.to_owned());
     }
-    let storage = cfg
-        .obscura
-        .storage_dir
-        .clone()
-        .filter(|s| !s.is_empty())
-        .or_else(|| {
-            if cfg.server.chrome_profile_dir.is_empty() {
-                None
-            } else {
-                Some(cfg.server.chrome_profile_dir.clone())
-            }
-        });
-    if let Some(dir) = storage {
-        builder = builder.storage_dir(dir);
+    // Never pass either the explicit Obscura directory or the legacy Chrome
+    // profile fallback to an isolated staging Browser. Even a failed candidate
+    // must not read or write the live user's profile or cookie persistence.
+    if persistent {
+        let storage = cfg
+            .obscura
+            .storage_dir
+            .clone()
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                if cfg.server.chrome_profile_dir.is_empty() {
+                    None
+                } else {
+                    Some(cfg.server.chrome_profile_dir.clone())
+                }
+            });
+        if let Some(dir) = storage {
+            builder = builder.storage_dir(dir);
+        }
     }
     Ok(builder.build()?)
 }
