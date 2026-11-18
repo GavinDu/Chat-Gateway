@@ -728,8 +728,8 @@ mod adapter_probe_redaction_tests {
 
     #[test]
     fn raw_selector_and_unrecognized_role_never_enter_serialized_report() {
-        let mut report = TestAdapterReport::default();
-        report.probe = redact_test_adapter_probe(vec![
+        let report = TestAdapterReport {
+            probe: redact_test_adapter_probe(vec![
             (
                 "input".to_string(),
                 Some("textarea[data-token='Bearer secret-value']".to_string()),
@@ -739,7 +739,9 @@ mod adapter_probe_redaction_tests {
                 "private-role/account-id".to_string(),
                 Some("button[title='private-value']".to_string()),
             ),
-        ]);
+            ]),
+            ..Default::default()
+        };
         assert_eq!(
             report.probe,
             vec![
@@ -781,8 +783,10 @@ mod adapter_probe_redaction_tests {
         let safe = redact_test_adapter_probe(source);
         assert_eq!(safe[0], ("input".to_owned(), Some("matched".to_owned())));
         assert_eq!(safe[1], ("send".to_owned(), None));
-        let mut report = TestAdapterReport::default();
-        report.probe = safe;
+        let report = TestAdapterReport {
+            probe: safe,
+            ..Default::default()
+        };
         let json = serde_json::to_string(&report).unwrap();
         assert!(!json.contains("Bearer-private"));
         assert!(!json.contains("private-missing"));
