@@ -1327,7 +1327,9 @@ pub(super) fn browser_thread(
                                 report.input_found = true;
                                 // Phase 2 — dummy prompt (Go RunAdapterTest).
                                 const DUMMY: &str = "chat-gateway selector test — please reply with the word OK";
-                                if providers::common::human_type(&page, &[input_sel], DUMMY).await.is_err() {
+                                let input_result =
+                                    providers::common::human_type(&page, &[input_sel], DUMMY).await;
+                                if input_result.is_err() {
                                     report.errors.push("input_type_failed".to_string());
                                     finish(report);
                                     return;
