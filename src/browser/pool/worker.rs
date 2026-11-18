@@ -1258,8 +1258,8 @@ pub(super) fn browser_thread(
                                 // goto, localStorage after, then re-goto).
                                 let mut page = match super::browser_factory::new_provider_page(&browser, provider).await {
                                     Ok(p) => p,
-                                    Err(e) => {
-                                        report.errors.push(format!("open page: {e}"));
+                                    Err(_) => {
+                                        report.errors.push("open_page_failed".to_string());
                                         finish(report);
                                         return;
                                     }
@@ -1269,8 +1269,8 @@ pub(super) fn browser_thread(
                                 crate::browser::network_tap::attach_provider_network_tap(&mut page, provider);
                                 let session_file = match session::load_session_file(provider.name()) {
                                     Ok(file) => file,
-                                    Err(error) => {
-                                        report.errors.push(format!("session file load failed: {error}"));
+                                    Err(_) => {
+                                        report.errors.push("session_file_load_failed".to_string());
                                         None
                                     }
                                 };
@@ -1317,9 +1317,9 @@ pub(super) fn browser_thread(
                                 // Phase 1 — input (20s, Go's budget).
                                 let input_sel = match providers::common::wait_for_selector(&mut page, sets[0].1, 20000).await {
                                     Ok(()) => diagnostic_input_selector(&page, sets[0].1).unwrap_or(sets[0].1[0]),
-                                    Err(e) => {
+                                    Err(_) => {
                                         report.input_controls = diagnostic_input_controls(&page);
-                                        report.errors.push(format!("input: {e}"));
+                                        report.errors.push("input_selector_unavailable".to_string());
                                         finish(report);
                                         return;
                                     }
@@ -1327,8 +1327,8 @@ pub(super) fn browser_thread(
                                 report.input_found = true;
                                 // Phase 2 — dummy prompt (Go RunAdapterTest).
                                 const DUMMY: &str = "chat-gateway selector test — please reply with the word OK";
-                                if let Err(e) = providers::common::human_type(&page, &[input_sel], DUMMY).await {
-                                    report.errors.push(format!("input type: {e}"));
+                                if providers::common::human_type(&page, &[input_sel], DUMMY).await.is_err() {
+                                    report.errors.push("input_type_failed".to_string());
                                     finish(report);
                                     return;
                                 }
@@ -1359,8 +1359,8 @@ pub(super) fn browser_thread(
                                 // Phase 3 — send button or Enter (5s).
                                 match providers::common::click_send_or_enter(&mut page, sets[1].1, input_sel, 5000).await {
                                     Ok(clicked) => report.send_clicked = clicked,
-                                    Err(e) => {
-                                        report.errors.push(format!("send: {e}"));
+                                    Err(_) => {
+                                        report.errors.push("send_submission_failed".to_string());
                                         finish(report);
                                         return;
                                     }
