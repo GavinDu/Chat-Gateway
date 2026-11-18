@@ -1,9 +1,10 @@
 [package]
+publish = false
 name = "obscura-js"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
-repository.workspace = true
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/h4ckf0r0day/obscura"
 
 [features]
 default = []
@@ -22,24 +23,24 @@ deno_core = "0.412"
 [dependencies]
 futures-util = "0.3"
 async-stream = "0.3"
-obscura-dom = { workspace = true }
-obscura-net = { workspace = true }
+obscura-dom = { git = "https://github.com/h4ckf0r0day/obscura", rev = "0e2ee76383b95a14e51203799c4abc6790d6c7df", version = "0.1.0" }
+obscura-net = { path = "../obscura-net", version = "0.1.0" }
 deno_core = "0.412"
-tokio = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
-url = { workspace = true }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1" }
+url = { version = "2" }
 # document.domain must reject public suffixes (including private suffixes such
 # as github.io), not just compare dotted strings.  `psl` embeds the Mozilla
 # Public Suffix List and adds no runtime I/O.
 psl = "2"
-tracing = { workspace = true }
-thiserror = { workspace = true }
-anyhow = { workspace = true }
-reqwest = { workspace = true }
-html5ever = { workspace = true }
+tracing = { version = "0.1" }
+thiserror = { version = "2" }
+anyhow = { version = "1" }
+reqwest = { version = "0.12", features = ["gzip", "brotli", "deflate", "rustls-tls", "socks"], default-features = false }
+html5ever = { version = "0.39" }
 deno_error = "0.7"
-base64 = { workspace = true }
+base64 = { version = "0.22" }
 sha1 = "0.10"
 sha2 = "0.10"
 # WebCrypto (crypto.subtle) primitives. RustCrypto, pure Rust, no CMake/OpenSSL,
@@ -54,4 +55,4 @@ pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
 hkdf = "0.12"
 # CSPRNG for getRandomValues / randomUUID (replaces Math.random).
 getrandom = "0.2"
-obscura-render = { workspace = true, optional = true }
+obscura-render = { git = "https://github.com/h4ckf0r0day/obscura", rev = "0e2ee76383b95a14e51203799c4abc6790d6c7df", version = "0.1.0", optional = true }

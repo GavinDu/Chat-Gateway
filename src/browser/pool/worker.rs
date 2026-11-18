@@ -143,6 +143,17 @@ fn metaai_document_denied_before_composer(
     observed_document_403 && !evidence.login_url && !evidence.challenge_visible
 }
 
+// A challenge can replace the page while the composer wait drives hydration.
+// Only a verified origin of an active recovery provider may trip its circuit.
+fn focused_provider_preflight_challenge(
+    provider: &str,
+    evidence: &ComposerPreflightEvidence,
+) -> bool {
+    matches!(provider, "chatgpt" | "metaai")
+        && evidence.provider_origin
+        && evidence.challenge_visible
+}
+
 /// The browser worker waits for a composer *before* invoking the provider
 /// adapter. A timeout here otherwise bypasses adapter-level diagnostics.
 /// Never record the selector, URL, prompt, page text or upstream error string.
@@ -178,6 +189,9 @@ fn report_composer_preflight_failure(
             iframe_element_count = ?evidence.iframe_element_count,
             "provider composer readiness evidence"
         );
+        if focused_provider_preflight_challenge(provider, &evidence) {
+            return anyhow::Error::new(providers::ProviderChallengeError::new(provider));
+        }
         if provider == "metaai"
             && metaai_document_denied_before_composer(observed_bootstrap_403, &evidence)
         {
@@ -1214,6 +1228,9 @@ pub(super) fn browser_thread(
                                         &adapter.effective_selectors().input_refs(),
                                         error,
                                     );
+                                    if classified.is::<providers::ProviderChallengeError>() {
+                                        provider_guard.disable_provider(provider.name(), "challenge page detected; manual review required");
+                                    }
                                     let _ = chunks.send(Err(classified)).await;
                                     return;
                                 }
@@ -2025,5 +2042,39 @@ mod refresh_cancellation_tests {
         );
         drop(held);
         assert!(waiting.await.is_some());
+    }
+}
+
+#[cfg(test)]
+mod late_challenge_regressions {
+    use super::*;
+
+    #[test]
+    fn post_wait_challenge_requires_active_provider_and_verified_origin() {
+        let mut evidence = ComposerPreflightEvidence {
+            document_ready: "complete",
+            provider_origin: true,
+            login_url: false,
+            challenge_visible: false,
+            configured_input_present: false,
+            generic_editor_present: false,
+            generic_editor_actionable: false,
+            body_element_count: Some(24),
+            script_element_count: Some(3),
+            external_script_count: Some(2),
+            iframe_element_count: Some(1),
+        };
+        assert!(!focused_provider_preflight_challenge("chatgpt", &evidence));
+        evidence.challenge_visible = true;
+        assert!(focused_provider_preflight_challenge("chatgpt", &evidence));
+        assert!(focused_provider_preflight_challenge("metaai", &evidence));
+        assert!(!focused_provider_preflight_challenge("claude", &evidence));
+        assert!(!focused_provider_preflight_challenge(
+            "untrusted",
+            &evidence
+        ));
+        evidence.provider_origin = false;
+        assert!(!focused_provider_preflight_challenge("chatgpt", &evidence));
+        assert!(!focused_provider_preflight_challenge("metaai", &evidence));
     }
 }

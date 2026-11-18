@@ -1,3 +1,52 @@
+--- a/obscura-browser/Cargo.toml
++++ b/obscura-browser/Cargo.toml
+@@ -1,9 +1,10 @@
+ [package]
++publish = false
+ name = "obscura-browser"
+-version.workspace = true
+-edition.workspace = true
+-license.workspace = true
+-repository.workspace = true
++version = "0.1.0"
++edition = "2021"
++license = "Apache-2.0"
++repository = "https://github.com/h4ckf0r0day/obscura"
+ 
+ [features]
+ default = []
+@@ -11,19 +12,19 @@
+ render = ["obscura-js/render", "dep:image"]
+ 
+ [dependencies]
+-obscura-dom = { workspace = true }
+-obscura-net = { workspace = true }
+-obscura-js = { workspace = true }
+-tokio = { workspace = true }
++obscura-dom = { git = "https://github.com/h4ckf0r0day/obscura", rev = "0e2ee76383b95a14e51203799c4abc6790d6c7df", version = "0.1.0" }
++obscura-net = { path = "../obscura-net", version = "0.1.0" }
++obscura-js = { path = "../obscura-js", version = "0.1.0" }
++tokio = { version = "1", features = ["full"] }
+ futures = "0.3"
+-url = { workspace = true }
+-tracing = { workspace = true }
+-thiserror = { workspace = true }
+-anyhow = { workspace = true }
+-serde = { workspace = true }
+-serde_json = { workspace = true }
+-base64 = { workspace = true }
++url = { version = "2" }
++tracing = { version = "0.1" }
++thiserror = { version = "2" }
++anyhow = { version = "1" }
++serde = { version = "1", features = ["derive"] }
++serde_json = { version = "1" }
++base64 = { version = "0.22" }
+ image = { version = "0.25", default-features = false, features = ["jpeg", "png"], optional = true }
+ 
+ [dev-dependencies]
+-tokio = { workspace = true, features = ["test-util"] }
++tokio = { version = "1", features = ["full", "test-util"] }
 --- a/obscura-browser/src/profiles.rs
 +++ b/obscura-browser/src/profiles.rs
 @@ -87,7 +87,8 @@
@@ -12,15 +61,66 @@
  fn env_enabled(key: &str) -> bool {
 --- a/obscura-js/Cargo.toml
 +++ b/obscura-js/Cargo.toml
-@@ -20,6 +20,8 @@
+@@ -1,9 +1,10 @@
+ [package]
++publish = false
+ name = "obscura-js"
+-version.workspace = true
+-edition.workspace = true
+-license.workspace = true
+-repository.workspace = true
++version = "0.1.0"
++edition = "2021"
++license = "Apache-2.0"
++repository = "https://github.com/h4ckf0r0day/obscura"
+ 
+ [features]
+ default = []
+@@ -20,24 +21,26 @@
  deno_core = "0.412"
  
  [dependencies]
+-obscura-dom = { workspace = true }
+-obscura-net = { workspace = true }
 +futures-util = "0.3"
 +async-stream = "0.3"
- obscura-dom = { workspace = true }
- obscura-net = { workspace = true }
++obscura-dom = { git = "https://github.com/h4ckf0r0day/obscura", rev = "0e2ee76383b95a14e51203799c4abc6790d6c7df", version = "0.1.0" }
++obscura-net = { path = "../obscura-net", version = "0.1.0" }
  deno_core = "0.412"
+-tokio = { workspace = true }
+-serde = { workspace = true }
+-serde_json = { workspace = true }
+-url = { workspace = true }
++tokio = { version = "1", features = ["full"] }
++serde = { version = "1", features = ["derive"] }
++serde_json = { version = "1" }
++url = { version = "2" }
+ # document.domain must reject public suffixes (including private suffixes such
+ # as github.io), not just compare dotted strings.  `psl` embeds the Mozilla
+ # Public Suffix List and adds no runtime I/O.
+ psl = "2"
+-tracing = { workspace = true }
+-thiserror = { workspace = true }
+-anyhow = { workspace = true }
+-reqwest = { workspace = true }
+-html5ever = { workspace = true }
++tracing = { version = "0.1" }
++thiserror = { version = "2" }
++anyhow = { version = "1" }
++reqwest = { version = "0.12", features = ["gzip", "brotli", "deflate", "rustls-tls", "socks"], default-features = false }
++html5ever = { version = "0.39" }
+ deno_error = "0.7"
+-base64 = { workspace = true }
++base64 = { version = "0.22" }
+ sha1 = "0.10"
+ sha2 = "0.10"
+ # WebCrypto (crypto.subtle) primitives. RustCrypto, pure Rust, no CMake/OpenSSL,
+@@ -52,4 +55,4 @@
+ hkdf = "0.12"
+ # CSPRNG for getRandomValues / randomUUID (replaces Math.random).
+ getrandom = "0.2"
+-obscura-render = { workspace = true, optional = true }
++obscura-render = { git = "https://github.com/h4ckf0r0day/obscura", rev = "0e2ee76383b95a14e51203799c4abc6790d6c7df", version = "0.1.0", optional = true }
 --- a/obscura-js/js/bootstrap.js
 +++ b/obscura-js/js/bootstrap.js
 @@ -8548,7 +8548,10 @@
@@ -379,6 +479,45 @@
          op_get_cookies(),
          op_set_cookie(),
          op_storage_access(),
+--- a/obscura-net/Cargo.toml
++++ b/obscura-net/Cargo.toml
+@@ -1,23 +1,24 @@
+ [package]
++publish = false
+ name = "obscura-net"
+-version.workspace = true
+-edition.workspace = true
+-license.workspace = true
+-repository.workspace = true
++version = "0.1.0"
++edition = "2021"
++license = "Apache-2.0"
++repository = "https://github.com/h4ckf0r0day/obscura"
+ 
+ [features]
+ default = []
+ stealth = ["wreq", "wreq-util", "futures-util"]
+ 
+ [dependencies]
+-obscura-ssrf = { workspace = true }
+-reqwest = { workspace = true }
+-tokio = { workspace = true }
+-url = { workspace = true }
+-serde = { workspace = true }
+-serde_json = { workspace = true }
+-tracing = { workspace = true }
+-thiserror = { workspace = true }
++obscura-ssrf = { git = "https://github.com/h4ckf0r0day/obscura", rev = "0e2ee76383b95a14e51203799c4abc6790d6c7df", version = "0.1.0" }
++reqwest = { version = "0.12", features = ["gzip", "brotli", "deflate", "rustls-tls", "socks"], default-features = false }
++tokio = { version = "1", features = ["full"] }
++url = { version = "2" }
++serde = { version = "1", features = ["derive"] }
++serde_json = { version = "1" }
++tracing = { version = "0.1" }
++thiserror = { version = "2" }
+ async-trait = "0.1"
+ encoding_rs = "0.8"
+ tempfile = "3"
 --- a/obscura-net/src/wreq_client.rs
 +++ b/obscura-net/src/wreq_client.rs
 @@ -201,6 +201,13 @@

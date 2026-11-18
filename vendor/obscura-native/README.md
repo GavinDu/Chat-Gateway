@@ -7,9 +7,11 @@ Cargo source patches unify the local and upstream crate identities.
 
 `UPSTREAM_SHA256.json` records the original bytes of every copied file.
 `changes.patch` contains the runtime and crate-manifest differences against
-that upstream revision. The parent Cargo.toml is packaging for this isolated
-three-crate workspace; it resolves unchanged native crates to the pinned Git
-revision. The original license is included.
+that upstream revision. The parent Cargo.toml groups this isolated three-crate
+workspace. Each carried crate declares explicit package/dependency metadata,
+including versions and the pinned Git revision, so dependency auditors need
+not infer inherited workspace entries. These local copies are not published
+as crates. The original license is included.
 
 Changes:
 

@@ -1,23 +1,24 @@
 [package]
+publish = false
 name = "obscura-net"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
-repository.workspace = true
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/h4ckf0r0day/obscura"
 
 [features]
 default = []
 stealth = ["wreq", "wreq-util", "futures-util"]
 
 [dependencies]
-obscura-ssrf = { workspace = true }
-reqwest = { workspace = true }
-tokio = { workspace = true }
-url = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
-tracing = { workspace = true }
-thiserror = { workspace = true }
+obscura-ssrf = { git = "https://github.com/h4ckf0r0day/obscura", rev = "0e2ee76383b95a14e51203799c4abc6790d6c7df", version = "0.1.0" }
+reqwest = { version = "0.12", features = ["gzip", "brotli", "deflate", "rustls-tls", "socks"], default-features = false }
+tokio = { version = "1", features = ["full"] }
+url = { version = "2" }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1" }
+tracing = { version = "0.1" }
+thiserror = { version = "2" }
 async-trait = "0.1"
 encoding_rs = "0.8"
 tempfile = "3"
