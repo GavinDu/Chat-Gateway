@@ -6,10 +6,26 @@ const vm = require("node:vm");
 const source = fs.readFileSync("extension/credential_probe.js","utf8");
 
 async function probe({hostname="chatgpt.com",protocol="https:",port="",status=200,
-                      session={},reject=false,deadline=false} = {}) {
+                      session={},reject=false,deadline=false,
+                      changeAfter=null, navigation="same_origin"} = {}) {
   let calls=0;
+  const initialHref = protocol + "//" + hostname + (port ? ":" + port : "") +
+    "/c/initial-account-route";
+  const location = {hostname,protocol,port,href:initialHref};
+  const navigate = () => {
+    if (navigation === "cross_origin") {
+      location.hostname = "private-foreign.invalid";
+      location.href = "https://private-foreign.invalid/account/secret";
+    } else if (navigation === "new_port") {
+      location.port = "8443";
+      location.href = "https://chatgpt.com:8443/account/secret";
+    } else {
+      // A same-tab SPA route can change account context without changing origin.
+      location.href = "https://chatgpt.com/c/different-account-secret";
+    }
+  };
   const context = {
-    location:{hostname,protocol,port}, Date, AbortController,
+    location, Date, AbortController,
     setTimeout:deadline ? callback=>{queueMicrotask(callback);return 1;} : setTimeout,
     clearTimeout: deadline ? ()=>{} : clearTimeout,
     fetch:async (route,options)=>{
@@ -20,7 +36,11 @@ async function probe({hostname="chatgpt.com",protocol="https:",port="",status=20
       assert.equal(options.redirect,"error");
       if(deadline){await Promise.resolve();throw new Error("private timeout");}
       if(reject)throw new Error("secret bearer token");
-      return {status,json:async()=>session};
+      if (changeAfter === "fetch") navigate();
+      return {status,json:async()=>{
+        if (changeAfter === "json") navigate();
+        return session;
+      }};
     }
   };
   const value=await vm.runInNewContext(source+"\nglobalThis.probeActiveChatgptAccount()",context);
@@ -69,4 +89,33 @@ test("only supported explicit rejection is unauthenticated; failures are unknown
     assert.equal(value.authentication,"unknown");
     assert(!JSON.stringify(value).includes("private"));
   }
+});
+
+test("first-party proof is discarded when same tab navigates across either awaited boundary",async()=>{
+  const session = {
+    user:{email:"private@example.test"},accessToken:"bearer-private-secret",
+    expires:new Date(Date.now()+60_000).toISOString()
+  };
+  for (const changeAfter of ["fetch","json"]) {
+    for (const navigation of ["same_origin","cross_origin","new_port"]) {
+      const {value,calls} = await probe({session,changeAfter,navigation});
+      assert.equal(calls,1, changeAfter + "/" + navigation);
+      assert.equal(value.authentication,"unknown",changeAfter + "/" + navigation);
+      assert.equal(value.reason,"tab_changed",changeAfter + "/" + navigation);
+      assert.equal(value.exported_snapshot_verified,false);
+      const serialized = JSON.stringify(value);
+      for (const secret of ["bearer-private-secret","different-account-secret",
+                             "private-foreign.invalid","8443","private@example.test"]) {
+        assert(!serialized.includes(secret), "private location or account leaked");
+      }
+    }
+  }
+});
+
+test("negative first-party claims also fail closed if page changes before status is handled",async()=>{
+  const after = await probe({status:401,changeAfter:"fetch"});
+  assert.equal(after.value.authentication,"unknown");
+  assert.equal(after.value.reason,"tab_changed");
+  const before = await probe({status:401});
+  assert.equal(before.value.authentication,"unauthenticated");
 });
