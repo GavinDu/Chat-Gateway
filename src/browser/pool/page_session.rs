@@ -212,11 +212,9 @@ mod login_save_marker_commit_tests {
             (Provider::ChatGPT, "old-chatgpt-generation".to_owned()),
             (Provider::MetaAI, "other-metaai-generation".to_owned()),
         ]));
-        let error = invalidate_applied_after_login_save(
-            &markers,
-            Provider::ChatGPT,
-            async { Err::<(), _>(anyhow::anyhow!("private-failing-save-path")) },
-        )
+        let error = invalidate_applied_after_login_save(&markers, Provider::ChatGPT, async {
+            Err::<(), _>(anyhow::anyhow!("private-failing-save-path"))
+        })
         .await
         .unwrap_err();
         assert_eq!(error.to_string(), "login_session_snapshot_save_failed");
@@ -236,11 +234,9 @@ mod login_save_marker_commit_tests {
             (Provider::ChatGPT, "old-chatgpt-generation".to_owned()),
             (Provider::MetaAI, "other-metaai-generation".to_owned()),
         ]));
-        let confirmed = invalidate_applied_after_login_save(
-            &markers,
-            Provider::ChatGPT,
-            async { Ok::<_, anyhow::Error>(true) },
-        )
+        let confirmed = invalidate_applied_after_login_save(&markers, Provider::ChatGPT, async {
+            Ok::<_, anyhow::Error>(true)
+        })
         .await
         .unwrap();
         assert!(confirmed);
