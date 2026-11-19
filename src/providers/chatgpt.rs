@@ -165,9 +165,12 @@ mod imported_chatgpt_session_tests {
         )
         .await;
         let error = verify_credentials(&mut page).await.unwrap_err();
-        assert!(error
-            .downcast_ref::<crate::browser::pool::ProviderSessionExpiredError>()
-            .is_none(), "malformed account response is not proven logout");
+        assert!(
+            error
+                .downcast_ref::<crate::browser::pool::ProviderSessionExpiredError>()
+                .is_none(),
+            "malformed account response is not proven logout"
+        );
         assert!(error.to_string().contains("unavailable"));
         assert!(!error.to_string().contains("accessToken"));
         assert!(!error.to_string().contains("fixture"));
