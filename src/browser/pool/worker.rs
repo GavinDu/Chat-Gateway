@@ -1119,9 +1119,10 @@ pub(super) fn browser_thread(
                                     "provider warm-up failed; page withheld and saved session retained");
                                 continue;
                             } else {
-                                // Verify the restored session before publishing this page as
-                                // usable. Expired credentials are revoked from disk and from
-                                // the embedded browser before interactive login is requested.
+                                // This URL/composer startup probe is NOT authoritative
+                                // first-party account verification. Active ChatGPT/Meta AI
+                                // snapshots must survive ambiguous login-page redirects;
+                                // legacy deferred providers are separately tracked.
                                 let verification = match registry.get(&provider) {
                                     Some(adapter) => verify_session_page(provider, &page, adapter.as_ref()),
                                     None => Err(anyhow::anyhow!("provider adapter is not registered")),
@@ -1130,6 +1131,20 @@ pub(super) fn browser_thread(
                                     Ok(true) => provider_sessions.record_success(provider.name()),
                                     // No chat input is inconclusive, not evidence of expiry.
                                     Ok(false) => {}
+                                    Err(error) if error.downcast_ref::<ProviderSessionExpiredError>().is_some()
+                                        && super::diagnostics::startup_dom_login_must_preserve_snapshot(provider) => {
+                                        // A login-looking URL can be a challenge, blocked
+                                        // bootstrap or route redesign, not expired owner
+                                        // credentials. Never erase the encrypted snapshot
+                                        // or clear this Browser's shared cookie/storage jar
+                                        // from an unverified DOM observation.
+                                        provider_sessions.record_probe_failure(provider.name());
+                                        tracing::warn!(
+                                            provider = %pcfg.name,
+                                            reason = "startup_login_url_unverified",
+                                            "startup login page is inconclusive; saved session retained"
+                                        );
+                                    }
                                     Err(error) if error.downcast_ref::<ProviderSessionExpiredError>().is_some() => {
                                         let cleanup = (|| -> Result<()> {
                                             session::clear_provider_cookies(&browser, provider.name())?;
