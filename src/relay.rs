@@ -1348,16 +1348,16 @@ fn account_probe_worker_consistent(start: u64, end: u64, alive: bool) -> bool {
     alive && start == end
 }
 
-fn account_probe_response(
+fn account_probe_record(
     provider: &'static str,
     verdict: &'static str,
     reason: &'static str,
     worker_generation: Option<u64>,
-) -> Response {
+) -> serde_json::Value {
     // No source account ID, cookie/body, URL, request parameters or credential
     // fingerprint can enter this fixed response. The attempt UUID is random,
     // not credential-derived or a claim that the Chrome snapshot was applied.
-    let result = serde_json::json!({
+    serde_json::json!({
         "schema_version": 1,
         "provider": provider,
         "context": "obscura_warm_page",
@@ -1368,10 +1368,23 @@ fn account_probe_response(
         "worker_generation": worker_generation,
         "exported_snapshot_verified": false,
         "applied_snapshot_verified": false
-    });
+    })
+}
+
+fn account_probe_response(
+    provider: &'static str,
+    verdict: &'static str,
+    reason: &'static str,
+    worker_generation: Option<u64>,
+) -> Response {
     (
         [(header::CACHE_CONTROL, "no-store"), (header::PRAGMA, "no-cache")],
-        Json(result),
+        Json(account_probe_record(
+            provider,
+            verdict,
+            reason,
+            worker_generation,
+        )),
     )
         .into_response()
 }
@@ -1498,32 +1511,41 @@ mod first_party_account_relay_tests {
             response.headers().get(header::CACHE_CONTROL).unwrap(),
             "no-store"
         );
-        let (verdict, reason) = account_probe_result(
-            crate::browser::pool::FirstPartyAccountVerdict::Verified
-        );
-        assert_eq!(verdict, "verified");
-        assert_eq!(reason, "first_party_session_confirmed");
-        // The report has no mechanism to certify Chrome export/import parity,
-        // even if the warm Page's own first-party account was confirmed.
-        let fixed = serde_json::json!({
-            "context": "obscura_warm_page",
-            "exported_snapshot_verified": false,
-            "applied_snapshot_verified": false
-        });
+        let (verdict, reason) =
+            account_probe_result(crate::browser::pool::FirstPartyAccountVerdict::Verified);
+        let fixed = account_probe_record("chatgpt", verdict, reason, Some(2));
+        assert_eq!(fixed["schema_version"], 1);
+        assert_eq!(fixed["provider"], "chatgpt");
+        assert_eq!(fixed["context"], "obscura_warm_page");
+        assert_eq!(fixed["authentication"], "verified");
+        assert_eq!(fixed["reason"], "first_party_session_confirmed");
+        assert_eq!(fixed["worker_generation"], 2);
+        // A positive warm Page *still* cannot certify Chrome export/import or
+        // actual applied snapshot parity without source-owned lineage.
         assert_eq!(fixed["exported_snapshot_verified"], false);
         assert_eq!(fixed["applied_snapshot_verified"], false);
+        assert_eq!(fixed.as_object().unwrap().len(), 10);
+        let uuid = fixed["attempt_id"].as_str().unwrap();
+        assert!(!uuid::Uuid::parse_str(uuid).unwrap().is_nil());
+        let observed = fixed["checked_at_utc"].as_str().unwrap();
+        assert!(chrono::DateTime::parse_from_rfc3339(observed).is_ok());
+        let safe = fixed.to_string();
         for source in [
             "secret-cookie-value",
             "private-access-token",
             "https://chatgpt.com/c/private?key=secret",
+            "account_id",
+            "accessToken",
+            "cookie",
+            "session_generation",
         ] {
-            assert!(!format!("{verdict}{reason}").contains(source));
+            assert!(!safe.contains(source));
         }
     }
 
     #[test]
     fn rejects_absent_extension_origin_and_stale_worker_generation() {
-        assert!(!super::requested_extension_id(&HeaderMap::new()).is_some());
+        assert!(super::requested_extension_id(&HeaderMap::new()).is_none());
         assert!(!account_probe_worker_consistent(1, 2, true));
         assert!(!account_probe_worker_consistent(2, 2, false));
         assert!(account_probe_worker_consistent(2, 2, true));
