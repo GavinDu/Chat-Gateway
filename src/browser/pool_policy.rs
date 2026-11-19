@@ -45,6 +45,66 @@ pub(super) fn provider_thread_url_is_same_origin(candidate: &str, provider_home:
         )
 }
 
+/// Derive a fixed HTTPS origin only from a source-owned provider home URL.
+/// This is for the in-page localStorage write fence, not an auth check.
+/// Return None for ambiguous authorities or non-HTTPS URLs instead of ever
+/// allowing a caller-supplied redirect to choose the injection origin.
+pub(super) fn provider_storage_origin(provider_home: &str) -> Option<String> {
+    let uri = verified_https_provider_uri(provider_home)?;
+    Some(format!(
+        "https://{}",
+        uri.authority()?.as_str().to_ascii_lowercase()
+    ))
+}
+
+#[cfg(test)]
+mod storage_origin_policy_tests {
+    use super::*;
+
+    #[test]
+    fn provider_origin_derivation_rejects_ambiguous_or_untrusted_urls() {
+        assert_eq!(
+            provider_storage_origin("https://chatgpt.com/").as_deref(),
+            Some("https://chatgpt.com")
+        );
+        assert_eq!(
+            provider_storage_origin("https://www.meta.ai/").as_deref(),
+            Some("https://www.meta.ai")
+        );
+        for candidate in [
+            "http://chatgpt.com/",
+            "https://chatgpt.com@attacker.example/",
+            "https://chatgpt.com\\@attacker.example/",
+            "https://chatgpt.com%2eattacker.example/",
+            "data:text/html,fixture",
+            "https:///",
+        ] {
+            assert!(provider_storage_origin(candidate).is_none(), "{candidate}");
+        }
+    }
+
+    #[test]
+    fn page_redirect_must_match_configured_https_origin_before_storage_replay() {
+        for (home, same_origin) in [
+            ("https://chatgpt.com/", "https://chatgpt.com/auth/login?return=%2Fc"),
+            ("https://www.meta.ai/", "https://www.meta.ai/chat/"),
+        ] {
+            assert!(provider_thread_url_is_same_origin(same_origin, home));
+        }
+        for (home, redirected) in [
+            ("https://chatgpt.com/", "https://evil.example/login?cookie=secret"),
+            ("https://chatgpt.com/", "http://chatgpt.com/"),
+            ("https://chatgpt.com/", "https://chatgpt.com.attacker.example/"),
+            ("https://chatgpt.com/", "https://chatgpt.com@evil.example/"),
+            ("https://www.meta.ai/", "https://meta.ai/"),
+            ("https://www.meta.ai/", "https://accounts.facebook.com/"),
+            ("https://www.meta.ai/", "data:text/html,opaque"),
+        ] {
+            assert!(!provider_thread_url_is_same_origin(redirected, home));
+        }
+    }
+}
+
 /// A provider landing URL with a conversation selector is not a fresh
 /// composer, even when its path is the homepage. This check is deliberately
 /// provider-agnostic: an unknown query-based redirect must not mix the
