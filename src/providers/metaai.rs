@@ -83,3 +83,110 @@ impl SiteAdapter for MetaAIAdapter {
         SELECTORS.effective(&self.cfg.selectors)
     }
 }
+
+#[cfg(test)]
+mod native_flow_regressions {
+    use obscura_core::{Browser, Page};
+
+    async fn fixture(page: &mut Page, body: &str) {
+        let html = format!("<html><body>{body}</body></html>");
+        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+    }
+
+    fn script(source: &str, origin: &str, prompt: &str) -> String {
+        source
+            .replace("location.origin", &serde_json::to_string(origin).unwrap())
+            .replace("__PROMPT__", &serde_json::to_string(prompt).unwrap())
+    }
+
+    #[tokio::test]
+    async fn visible_multiline_turn_excludes_draft_assistant_and_hidden_text() {
+        let browser = Browser::builder().stealth(false).build().unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        fixture(
+            &mut page,
+            r#"<main>
+            <div id="turn"><div><span>line one
+line two</span><span hidden>hidden secret</span></div></div>
+            <div class="prose">line one
+line two</div>
+            <nav><div>line one
+line two</div></nav>
+            <div style="opacity:0">line one
+line two</div>
+            <div contenteditable="true" role="textbox" data-lexical-editor="true"></div>
+        </main>"#,
+        )
+        .await;
+        let read = script(
+            include_str!("metaai_user_turn.js"),
+            "https://www.meta.ai",
+            "line one\nline two",
+        );
+        let value = page.evaluate(&read);
+        assert_eq!(value["count"], 1);
+        assert_eq!(value["draft_empty"], true);
+        let foreign = script(
+            include_str!("metaai_user_turn.js"),
+            "https://foreign.invalid",
+            "line one\nline two",
+        );
+        assert_eq!(page.evaluate(&foreign)["valid"], false);
+        page.evaluate(
+            "document.querySelector('[contenteditable]').textContent='line one\\nline two'",
+        );
+        assert_eq!(page.evaluate(&read)["count"], 1);
+        assert_eq!(page.evaluate(&read)["draft_empty"], false);
+        page.evaluate("document.querySelector('#turn').hidden=true");
+        assert_eq!(page.evaluate(&read)["count"], 0);
+    }
+
+    #[tokio::test]
+    async fn focused_keyboard_send_is_single_and_fails_closed() {
+        let browser = Browser::builder().stealth(false).build().unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        fixture(&mut page, r#"<main><section style="pointer-events:none">
+            <div id="editor" contenteditable="true" role="textbox" data-lexical-editor="true" style="pointer-events:auto">fixture prompt</div>
+            <button aria-label="Send">Send</button></section></main>"#).await;
+        page.evaluate("(() => {globalThis.calls=0;const editor=document.querySelector('#editor');editor.focus();editor.addEventListener('keydown',event=>{if(event.key==='Enter'){globalThis.calls++;event.preventDefault();}});return true;})()");
+        let send = script(
+            include_str!("metaai_keyboard_send.js"),
+            "https://www.meta.ai",
+            "fixture prompt",
+        );
+        assert_eq!(page.evaluate(&send), "dispatched", "{}", page.evaluate("JSON.stringify({focused:document.activeElement===document.querySelector('#editor'),rect:document.querySelector('#editor').getClientRects().length,styles:Array.from(document.querySelectorAll('html,body,main,section,#editor')).map(n=>({tag:n.tagName,opacity:getComputedStyle(n).opacity,visibility:getComputedStyle(n).visibility}))})"));
+        assert_eq!(page.evaluate("globalThis.calls").as_f64(), Some(1.0));
+        page.evaluate("document.querySelector('button').setAttribute('disabled','')");
+        assert_eq!(page.evaluate(&send), "send_disabled");
+        page.evaluate("(() => {document.querySelector('button').removeAttribute('disabled');document.querySelector('#editor').textContent='changed';return true;})()");
+        assert_eq!(page.evaluate(&send), "draft_changed");
+        page.evaluate("(() => {document.querySelector('#editor').textContent='fixture prompt';document.body.insertAdjacentHTML('beforeend','<div aria-modal=\"true\">Modal</div>');return true;})()");
+        assert_eq!(page.evaluate(&send), "modal");
+        assert_eq!(page.evaluate("globalThis.calls").as_f64(), Some(1.0));
+        let foreign = script(
+            include_str!("metaai_keyboard_send.js"),
+            "https://foreign.invalid",
+            "fixture prompt",
+        );
+        assert_eq!(page.evaluate(&foreign), "off_origin");
+    }
+
+    #[tokio::test]
+    async fn focused_editor_helper_can_be_embedded_with_caller_named_el() {
+        let browser = Browser::builder().stealth(false).build().unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        fixture(&mut page, r#"<section style="pointer-events:none"><div id="editor" contenteditable="true" role="textbox" data-lexical-editor="true" style="pointer-events:auto">draft</div></section>"#).await;
+        page.evaluate("document.querySelector('#editor').focus()");
+        let helper = include_str!("metaai_composer_pointer.js")
+            .replace("location.origin", "'https://www.meta.ai'")
+            .replace("__ELEMENT__", "el");
+        let probe =
+            format!("(() => {{ const el=document.querySelector('#editor'); return {helper}; }})()");
+        assert_eq!(page.evaluate(&probe), true);
+        page.evaluate("document.querySelector('#editor').setAttribute('aria-readonly','true')");
+        assert_eq!(page.evaluate(&probe), false);
+    }
+}
