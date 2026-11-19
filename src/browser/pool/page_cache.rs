@@ -189,19 +189,17 @@ impl PageLease {
             }
         }
     }
-    /// Direct response-observer evidence: Mistral first-party script HTTP 403 or
-    /// Meta AI first-party document HTTP 403. This stays page-scoped and is
-    /// discarded on replacement or eviction, never across providers.
     /// Match session persistence to the Browser whose cookie jar backs this
     /// exact leased Page. Existing unowned pages still use the unchanged
     /// shared worker Browser. A future isolated Page must never save cookies
     /// from the unrelated legacy jar.
     pub(super) fn browser_for_session_save(&self, shared: &Rc<Browser>) -> Rc<Browser> {
-        self.browser_owner
-            .as_ref()
-            .map_or_else(|| shared.clone(), Rc::clone)
+        Rc::clone(self.browser_owner.as_ref().unwrap_or(shared))
     }
 
+    /// Direct response-observer evidence: Mistral first-party script HTTP 403 or
+    /// Meta AI first-party document HTTP 403. This stays page-scoped and is
+    /// discarded on replacement or eviction, never across providers.
     pub(super) fn observed_bootstrap_403(&self) -> bool {
         self.bootstrap_403
             .as_ref()
@@ -265,7 +263,8 @@ mod tests {
             .unwrap();
         let cfg: crate::config::AppConfig =
             serde_yaml::from_str("obscura:\n  stealth: false\nproviders: []\n").unwrap();
-        let isolated = Rc::new(super::super::browser_factory::build_disposable_browser(&cfg).unwrap());
+        let isolated =
+            Rc::new(super::super::browser_factory::build_disposable_browser(&cfg).unwrap());
         isolated
             .cookies()
             .set("SID=isolated-only; Secure; Path=/", "https://chatgpt.com/")
