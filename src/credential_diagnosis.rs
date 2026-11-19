@@ -601,9 +601,15 @@ mod tests {
         assert!(!safe.contains("cookie"));
 
         evidence["gateway_failure"]["observed_at_ms"] = json!(NOW);
-        assert_eq!(checked(evidence.clone()).category, "transport_or_extraction");
+        assert_eq!(
+            checked(evidence.clone()).category,
+            "transport_or_extraction"
+        );
         evidence["gateway_failure"]["observed_at_ms"] = json!(NOW + 1_000);
-        assert_eq!(checked(evidence.clone()).category, "transport_or_extraction");
+        assert_eq!(
+            checked(evidence.clone()).category,
+            "transport_or_extraction"
+        );
 
         evidence["provider"] = json!("metaai");
         evidence["chrome"]["verdict"] = json!("unsupported");
@@ -621,23 +627,23 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .remove("observed_at_ms");
-        let prior_utc = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(
-            (NOW - 1_000) as i64,
-        )
-        .unwrap()
-        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let prior_utc =
+            chrono::DateTime::<chrono::Utc>::from_timestamp_millis((NOW - 1_000) as i64)
+                .unwrap()
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         evidence["gateway_failure"]["observed_at_utc"] = json!(prior_utc);
         assert_eq!(
             checked(evidence.clone()).reason,
             "gateway_failure_precedes_attempt"
         );
-        let current_utc = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(
-            NOW as i64,
-        )
-        .unwrap()
-        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let current_utc = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(NOW as i64)
+            .unwrap()
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         evidence["gateway_failure"]["observed_at_utc"] = json!(current_utc);
-        assert_eq!(checked(evidence.clone()).category, "transport_or_extraction");
+        assert_eq!(
+            checked(evidence.clone()).category,
+            "transport_or_extraction"
+        );
 
         // Request identity remains a mandatory separate source fence.
         evidence["gateway_failure"]["request_id"] = json!(OTHER_ID);
