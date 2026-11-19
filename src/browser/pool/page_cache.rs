@@ -113,6 +113,38 @@ impl ProviderPageCache {
         Ok(())
     }
 
+    /// A private owner was already admitted in this worker: retaining a
+    /// freshly opened legacy shared-Browser login Page after explicit unlink
+    /// would bypass the cold-path fence on the next send. Discard the cleanup
+    /// Page and leave the provider cold until a generation-fenced re-login.
+    pub(super) fn finish_unlink(
+        &mut self,
+        provider: Provider,
+        cleaned_global_page: Rc<Page>,
+        script_403: Option<Arc<AtomicBool>>,
+    ) {
+        if self.isolated_once.contains(&provider) {
+            self.remove(&provider);
+        } else {
+            self.insert_with_bootstrap_status(provider, cleaned_global_page, script_403);
+        }
+    }
+
+    /// Detect accidental owned-to-unowned downgrades even if another worker
+    /// path inserts a Page before ensure_provider_page checks the cold cache.
+    /// Existing owned Pages remain usable; only stale shared contexts fail.
+    pub(super) fn require_cached_context_safe(&self, provider: Provider) -> Result<()> {
+        if self.isolated_once.contains(&provider)
+            && self
+                .pages
+                .get(&provider)
+                .is_some_and(|entry| entry.browser_owner.is_none())
+        {
+            anyhow::bail!("isolated_context_rehydration_required");
+        }
+        Ok(())
+    }
+
     fn insert_entry(
         &mut self,
         provider: Provider,
@@ -168,6 +200,7 @@ impl PageLease {
     pub(super) fn take(pages: &SharedPages, provider: Provider) -> Result<Self> {
         let (cached, observed, epoch) = {
             let mut cache = pages.borrow_mut();
+            cache.require_cached_context_safe(provider)?;
             let cached = cache
                 .pages
                 .remove(&provider)
@@ -267,6 +300,103 @@ impl Drop for PageLease {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn unlink_of_isolated_owner_drops_private_and_cleanup_pages_without_global_fallback() {
+        let global = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        global
+            .cookies()
+            .set("SID=global-keep; Secure; Path=/", "https://chatgpt.com/")
+            .unwrap();
+        let owned = Rc::new(
+            obscura_core::Browser::builder()
+                .stealth(false)
+                .build()
+                .unwrap(),
+        );
+        let weak = Rc::downgrade(&owned);
+        let page = owned.new_page().await.unwrap();
+        let cache = Rc::new(RefCell::new(ProviderPageCache::new(1)));
+        cache
+            .borrow_mut()
+            .insert_owned(Provider::ChatGPT, page, owned.clone(), None);
+        drop(owned);
+        let cleaned = Rc::new(global.new_page().await.unwrap());
+        cache
+            .borrow_mut()
+            .finish_unlink(Provider::ChatGPT, cleaned, None);
+        assert!(weak.upgrade().is_none());
+        assert!(!cache.borrow().contains_key(&Provider::ChatGPT));
+        assert_eq!(
+            super::super::worker::ensure_provider_page(&global, &cache, Provider::ChatGPT)
+                .await
+                .unwrap_err()
+                .to_string(),
+            "isolated_context_rehydration_required"
+        );
+        assert_eq!(global.cookies().get_all()[0].value, "global-keep");
+        // Another provider can still use the single idle cache slot.
+        let meta = global.new_page().await.unwrap();
+        cache.borrow_mut().insert(Provider::MetaAI, Rc::new(meta));
+        assert!(cache.borrow().contains_key(&Provider::MetaAI));
+    }
+
+    #[tokio::test]
+    async fn stale_owned_marker_rejects_accidentally_inserted_global_page_on_every_lease() {
+        let global = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let private = Rc::new(
+            obscura_core::Browser::builder()
+                .stealth(false)
+                .build()
+                .unwrap(),
+        );
+        let pages = Rc::new(RefCell::new(ProviderPageCache::new(1)));
+        let owned_page = private.new_page().await.unwrap();
+        pages
+            .borrow_mut()
+            .insert_owned(Provider::MetaAI, owned_page, private, None);
+        // Simulate a future incorrect code path: the cache itself must not
+        // allow the unowned Page to be driven just because it is non-cold.
+        pages
+            .borrow_mut()
+            .insert(Provider::MetaAI, Rc::new(global.new_page().await.unwrap()));
+        assert_eq!(
+            pages
+                .borrow()
+                .require_cached_context_safe(Provider::MetaAI)
+                .unwrap_err()
+                .to_string(),
+            "isolated_context_rehydration_required"
+        );
+        assert!(PageLease::take(&pages, Provider::MetaAI).is_err());
+        assert!(pages.borrow().contains_key(&Provider::MetaAI));
+        assert!(super::super::worker::ensure_provider_page(&global, &pages, Provider::MetaAI)
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn never_isolated_logout_keeps_legacy_login_page() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let pages = Rc::new(RefCell::new(ProviderPageCache::new(1)));
+        let page = Rc::new(browser.new_page().await.unwrap());
+        pages
+            .borrow_mut()
+            .finish_unlink(Provider::Claude, page.clone(), None);
+        assert!(pages.borrow().contains_key(&Provider::Claude));
+        let lease = PageLease::take(&pages, Provider::Claude).unwrap();
+        drop(lease);
+        assert!(pages.borrow().contains_key(&Provider::Claude));
+    }
+
     #[tokio::test]
     async fn evicted_isolated_page_never_reenters_global_cookie_jar() {
         let global = obscura_core::Browser::builder()
