@@ -1180,13 +1180,19 @@ mod failed_lazy_page_restore_tests {
     }
 }
 
-async fn ensure_provider_page(
+pub(super) async fn ensure_provider_page(
     browser: &obscura_core::Browser,
     pages: &SharedPages,
     provider: Provider,
 ) -> Result<bool> {
-    if pages.borrow().contains_key(&provider) {
-        return Ok(false);
+    {
+        let cache = pages.borrow();
+        if cache.contains_key(&provider) {
+            return Ok(false);
+        }
+        // An evicted private context must never be silently recreated on
+        // the shared Browser; fail before opening a Page or reading cookies.
+        cache.require_legacy_shared_replay_safe(provider)?;
     }
     let mut page = browser_factory::new_provider_page(browser, provider).await?;
     let network_bootstrap_403 =
@@ -1985,6 +1991,10 @@ pub(super) fn browser_thread(
                                         return Ok(());
                                     };
                                     if reply.is_closed() { return Ok(()); }
+                                    // RefreshSession still mutates the legacy global Browser.
+                                    // A prior isolated owner may have been evicted by the
+                                    // one-Page LRU; never treat cold as permission to downgrade.
+                                    pages.borrow().require_legacy_shared_replay_safe(provider)?;
                                     let file = session::load_session_file(provider.name())?
                                         .ok_or_else(|| anyhow::anyhow!("imported provider session is missing"))?;
                                     // Reject malformed metadata before touching live state.
