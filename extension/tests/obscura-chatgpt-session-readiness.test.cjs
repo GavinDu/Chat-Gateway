@@ -95,7 +95,7 @@ test("explicit logout, challenge, malformed and redirected responses stay distin
 
 test("Obscura never treats whitespace or missing accessToken as a first-party verified account", async () => {
   const expires = new Date(Date.now() + 60_000).toISOString();
-  for (const accessToken of ["", " ", "  \\t\\n  ", null, undefined]) {
+  for (const accessToken of ["", " ", "  \t\n  ", null, undefined]) {
     const {report,calls} = await run({
       session: {user:{fixture:true},accessToken,expires}
     });
