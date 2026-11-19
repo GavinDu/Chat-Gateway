@@ -2694,7 +2694,11 @@ fn restore_local_storage_inner(
     expected_origin: Option<&str>,
 ) -> Result<()> {
     for (k, v) in &file.local_storage {
-        let script = local_storage_restore_script_with_origin(k, v, expected_origin).ok_or_else(|| {
+        let script = match expected_origin {
+            Some(origin) => local_storage_restore_script_with_origin(k, v, Some(origin)),
+            None => local_storage_restore_script(k, v),
+        }
+        .ok_or_else(|| {
             anyhow::anyhow!("failed to serialize provider localStorage restore script")
         })?;
         let restored = page.evaluate(&script);
