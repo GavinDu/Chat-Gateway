@@ -1906,6 +1906,72 @@ fn active_storage_capture_script(expected_origin: &str) -> Result<Zeroizing<Stri
 }
 
 #[cfg(test)]
+mod prototype_storage_capture_fidelity_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn literal_prototype_property_keys_round_trip_through_pinned_obscura_json() {
+        let browser = Browser::builder().stealth(false).build().unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        page.goto("data:text/html,<body>synthetic-storage-fidelity</body>")
+            .await
+            .unwrap();
+        let keys = [
+            "__proto__",
+            "constructor",
+            "toString",
+            "key\\\"with\\backslash\\nand-newline",
+        ];
+        let values = [
+            "value-proto",
+            "value-constructor",
+            "value-tostring",
+            "synthetic-escaped\\\"();throw new Error('no execution')//",
+        ];
+        let keys_json = serde_json::to_string(&keys).unwrap();
+        let values_json = serde_json::to_string(&values).unwrap();
+
+        // An ordinary Object's "__proto__" assignment can invoke its
+        // setter rather than creating the desired own string property.
+        // Both the strict ChatGPT capture and the deferred/legacy capture
+        // must instead retain *every* exact storage key and value.
+        for expected_origin in [Some("https://chatgpt.com"), None] {
+            let script = storage_capture_script(expected_origin).unwrap();
+            assert!(script.contains("Object.defineProperty(o, k,"));
+            let evaluation = format!(
+                "(() => {{ const location = {{ origin: 'https://chatgpt.com' }}; const keys = {keys_json}; const values = {values_json}; const localStorage = {{ length: keys.length, key: i => keys[i], getItem: key => values[keys.indexOf(key)] }}; return {}; }})()",
+                script.as_str()
+            );
+            let output = page.evaluate(&evaluation);
+            let captured = parse_local_storage_snapshot(output).unwrap();
+            assert_eq!(captured.len(), keys.len());
+            for (key, value) in keys.iter().zip(values.iter()) {
+                assert_eq!(captured.get(*key).map(String::as_str), Some(*value));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn guarded_capture_rejects_foreign_origin_before_reading_special_keys() {
+        let browser = Browser::builder().stealth(false).build().unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        page.goto("data:text/html,<body>foreign-source</body>")
+            .await
+            .unwrap();
+        let script = active_storage_capture_script("https://chatgpt.com").unwrap();
+        let evaluation = format!(
+            "(() => {{ const location = {{ origin: 'https://evil.example' }}; let reads = 0; const localStorage = {{ get length() {{ reads++; return 1; }}, key: () => '__proto__', getItem: () => 'private-value' }}; const result = {}; return {{ result, reads }}; }})()",
+            script.as_str()
+        );
+        let denial = page.evaluate(&evaluation);
+        assert!(denial.get("result").is_some_and(serde_json::Value::is_null));
+        assert_eq!(denial.get("reads").and_then(serde_json::Value::as_u64), Some(0));
+        assert!(script.find("location.origin !==").unwrap()
+            < script.find("localStorage.length").unwrap());
+    }
+}
+
+#[cfg(test)]
 mod active_storage_capture_tests {
     use super::*;
 
