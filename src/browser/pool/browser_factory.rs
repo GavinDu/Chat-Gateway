@@ -481,8 +481,12 @@ mod staged_snapshot_preflight_tests {
             }]
         }))
         .unwrap();
-        assert!(session::replay_candidate_has_applicable_material(&live, "chatgpt"));
-        assert!(!session::replay_candidate_has_applicable_material(&live, "metaai"));
+        assert!(session::replay_candidate_has_applicable_material(
+            &live, "chatgpt"
+        ));
+        assert!(!session::replay_candidate_has_applicable_material(
+            &live, "metaai"
+        ));
         let storage_only: session::SessionFile = serde_json::from_value(json!({
             "ts": "synthetic",
             "local_storage": {"synthetic-key": "private-storage-never-log"},
@@ -512,7 +516,9 @@ mod staged_snapshot_preflight_tests {
             }]
         }))
         .unwrap();
-        assert!(!session::replay_candidate_has_applicable_material(&expired, "chatgpt"));
+        assert!(!session::replay_candidate_has_applicable_material(
+            &expired, "chatgpt"
+        ));
     }
 
     #[tokio::test]
