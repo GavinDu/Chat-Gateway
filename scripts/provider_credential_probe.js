@@ -38,6 +38,7 @@
     const tokenPresent = typeof body.accessToken === 'string' && body.accessToken.trim().length > 0;
     const expiry = typeof body.expires === 'string' ? Date.parse(body.expires) : NaN;
     if (user && typeof user === 'object' && !Array.isArray(user) &&
+        Object.keys(user).length > 0 &&
         tokenPresent && Number.isFinite(expiry) && expiry > Date.now()) {
       return report('chatgpt', 'verified', 'first_party_session_confirmed', 200);
     }

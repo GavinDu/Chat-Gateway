@@ -241,6 +241,65 @@ function loadPopup({failCookieDomain = null, includeSecondProvider = false, manu
   return {values,server,elements,byId,chromeCalls,intervals,connectDeadlines,clearedConnectDeadlines,controls:context.testControls,context};
 }
 
+test("ChatGPT active-tab first-party proof rejects empty user shape without leaking session", async () => {
+  // Isolate the explicit script: the popup itself has unrelated async polling
+  // that must never count as first-party account-verifier network traffic.
+  const context = {
+    Date, Promise, AbortController, setTimeout, clearTimeout,
+    location:{protocol:"https:",hostname:"chatgpt.com",port:"",href:"https://chatgpt.com/"}
+  };
+  vm.createContext(context);
+  vm.runInContext(fs.readFileSync(path.join(__dirname,"..","credential_probe.js"),"utf8"),context);
+  const future = () => new Date(Date.now() + 60_000).toISOString();
+  const session = user => ({user,accessToken:"private-fixture-token",expires:future()});
+  for(const [payload,status,authentication,reason] of [
+    [session({}),200,"unknown","incomplete_or_expired_session_evidence"],
+    [session({fixture:true}),200,"verified","first_party_session_confirmed"],
+    [{},200,"unauthenticated","provider_reports_no_session"],
+    [{user:null},200,"unauthenticated","provider_reports_no_session"],
+    [session({fixture:true}),401,"unauthenticated","provider_rejected_session"],
+    [session({fixture:true}),403,"unknown","provider_or_network_blocked"],
+  ]) {
+    let fetchCount = 0;
+    context.fetch = async (url,options) => {
+      ++fetchCount;
+      assert.equal(url,"/api/auth/session");
+      assert.equal(options.credentials,"include");
+      assert.equal(options.redirect,"error");
+      return {status,json:async()=>payload};
+    };
+    const result = await vm.runInContext("probeActiveChatgptAccount()",context);
+    assert.equal(result.authentication,authentication);
+    assert.equal(result.reason,reason);
+    assert.equal(result.exported_snapshot_verified,false);
+    assert.equal(fetchCount,1);
+    const safe = JSON.stringify(result);
+    assert(!safe.includes("private-fixture-token"));
+    assert(!safe.includes("fixture:true"));
+  }
+});
+
+test("standalone ChatGPT probe agrees that an empty user cannot verify credentials", async () => {
+  const code = fs.readFileSync(path.join(__dirname,"..","..","scripts","provider_credential_probe.js"),"utf8");
+  const ctx = {
+    location:{protocol:"https:",hostname:"chatgpt.com",port:"",href:"https://chatgpt.com/"},
+    Date,AbortController,Promise,setTimeout,clearTimeout,
+    fetch:async()=>({status:200,json:async()=>({
+      user:{},accessToken:"private-fixture-token",expires:new Date(Date.now()+60000).toISOString()
+    })})
+  };
+  const partial = await vm.runInNewContext(code,ctx);
+  assert.equal(partial.authentication,"unknown");
+  assert.equal(partial.reason,"incomplete_or_expired_session_evidence");
+  assert(!JSON.stringify(partial).includes("private-fixture-token"));
+  ctx.fetch = async()=>({status:200,json:async()=>({
+    user:{fixture:true},accessToken:"private-fixture-token",expires:new Date(Date.now()+60000).toISOString()
+  })});
+  const positive = await vm.runInNewContext(code,ctx);
+  assert.equal(positive.authentication,"verified");
+  assert.equal(positive.exported_snapshot_verified,false);
+});
+
 test("popup status refresh and local startup reject raw credential-bearing exceptions", async () => {
   const popup = loadPopup();
   await new Promise(resolve => setImmediate(resolve));

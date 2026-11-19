@@ -49,7 +49,10 @@
         if (!session || typeof session !== 'object' || Array.isArray(session)) {
           finish('unavailable'); return;
         }
-        const user = !!session.user && typeof session.user === 'object' && !Array.isArray(session.user);
+        // `{user:{}}` is not a source-backed account. Preserve unknown
+        // rather than claiming verified or forcing re-login on schema drift.
+        const user = !!session.user && typeof session.user === 'object' &&
+                     !Array.isArray(session.user) && Object.keys(session.user).length > 0;
         const token = typeof session.accessToken === 'string' &&
                       session.accessToken.trim().length > 0;
         const future = typeof session.expires === 'string' && Date.parse(session.expires) > Date.now();

@@ -48,8 +48,10 @@ async function probeActiveChatgptAccount() {
     if (!session || typeof session !== "object" || Array.isArray(session)) {
       return report("unknown", "unrecognized_session_response", 200);
     }
+    // An empty user object is a partial/schema-drift response, not positive
+    // first-party account evidence. Never expose the fields or their values.
     const validUser = session.user && typeof session.user === "object" &&
-      !Array.isArray(session.user);
+      !Array.isArray(session.user) && Object.keys(session.user).length > 0;
     const tokenPresent = typeof session.accessToken === "string" &&
       session.accessToken.trim().length > 0;
     const expiry = typeof session.expires === "string" ? Date.parse(session.expires) : NaN;
