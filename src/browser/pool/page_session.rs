@@ -191,7 +191,11 @@ pub(super) async fn invalidate_applied_after_login_save<F, T>(
 where
     F: std::future::Future<Output = Result<T>>,
 {
-    let outcome = persist.await?;
+    // Persistence errors may include private vault paths or storage details.
+    // This command boundary reports only a fixed diagnostic category.
+    let outcome = persist
+        .await
+        .map_err(|_| anyhow::anyhow!("login_session_snapshot_save_failed"))?;
     applied.borrow_mut().remove(&provider);
     Ok(outcome)
 }
@@ -215,7 +219,7 @@ mod login_save_marker_commit_tests {
         )
         .await
         .unwrap_err();
-        assert!(error.to_string().contains("private-failing-save-path"));
+        assert_eq!(error.to_string(), "login_session_snapshot_save_failed");
         assert_eq!(
             markers.borrow().get(&Provider::ChatGPT).map(String::as_str),
             Some("old-chatgpt-generation")
