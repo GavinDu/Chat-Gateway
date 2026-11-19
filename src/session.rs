@@ -2223,12 +2223,32 @@ pub(crate) fn provider_replay_material_coverage(
     provider: &str,
     now_epoch: f64,
 ) -> ReplayMaterialCoverage {
-    // Normalize in exactly the same way as restoration. The values in
-    // these records remain private; only bounded counts are returned.
-    let (cookies, normalized) = resolve_cookie_scope_duplicates(&file.cookies);
+    // Active-provider restoration filters expired cookies before duplicate
+    // scope resolution; evidence must use the same candidate ordering.
+    // Count expired rows separately as invalid, never as eligible account
+    // proof, and do not reveal any cookie identity or contents.
+    let expiry_aware = matches!(provider, "chatgpt" | "metaai");
+    let mut expired_provider_rows = 0usize;
+    let candidates: Vec<Cookie> = file
+        .cookies
+        .iter()
+        .filter(|cookie| {
+            let expired = expiry_aware
+                && cookie_domain_allowed(provider, &cookie.domain)
+                && cookie
+                    .expires
+                    .is_some_and(|expiry| expiry >= 0.0 && expiry <= now_epoch);
+            if expired {
+                expired_provider_rows += 1;
+            }
+            !expired
+        })
+        .cloned()
+        .collect();
+    let (cookies, normalized) = resolve_cookie_scope_duplicates(&candidates);
     let mut eligible = 0usize;
     let mut excluded = 0usize;
-    let mut invalid = 0usize;
+    let mut invalid = expired_provider_rows;
     for cookie in cookies {
         if !cookie_domain_allowed(provider, &cookie.domain) {
             excluded += 1;
@@ -4150,6 +4170,47 @@ mod replay_material_coverage_tests {
         assert_eq!(coverage.eligible_cookies, 1);
         assert_eq!(coverage.normalized_scopes, 1);
         assert_eq!(coverage.category(), "eligible_cookie_material_unverified");
+    }
+
+    #[test]
+    fn expiry_first_coverage_matches_actual_live_scope_replay() {
+        for (provider, root) in [("chatgpt", "chatgpt.com"), ("metaai", "meta.ai")] {
+            let mut expired_preferred = fixture("SID", "expired-private", &format!(".{root}"));
+            expired_preferred.expires = Some(50.0);
+            let live = fixture("SID", "live-private", root);
+            for cookies in [
+                vec![expired_preferred.clone(), live.clone()],
+                vec![live.clone(), expired_preferred.clone()],
+            ] {
+                let file = snapshot(cookies, &[]);
+                let coverage = provider_replay_material_coverage(&file, provider, 1000.0);
+                let (planned, normalized) = planned_cookie_replay(&file, provider, 1000.0).unwrap();
+                assert_eq!(coverage.eligible_cookies, 1);
+                assert_eq!(coverage.invalid_provider_cookies, 1);
+                assert_eq!(coverage.normalized_scopes, normalized as u16);
+                assert_eq!(coverage.normalized_scopes, 0);
+                assert_eq!(coverage.category(), "eligible_cookie_material_unverified");
+                assert_eq!(planned.len(), 1);
+                assert_eq!(planned[0].value, "live-private");
+                assert!(!format!("{coverage:?}").contains("private"));
+                assert!(!format!("{coverage:?}").contains(root));
+            }
+        }
+    }
+
+    #[test]
+    fn deferred_provider_coverage_retains_legacy_scope_order() {
+        let mut expired_preferred = fixture("SID", "expired-private", ".claude.ai");
+        expired_preferred.expires = Some(50.0);
+        let live = fixture("SID", "live-private", "claude.ai");
+        let coverage = provider_replay_material_coverage(
+            &snapshot(vec![live, expired_preferred], &[]),
+            "claude",
+            1000.0,
+        );
+        assert_eq!(coverage.eligible_cookies, 0);
+        assert_eq!(coverage.invalid_provider_cookies, 1);
+        assert_eq!(coverage.normalized_scopes, 1);
     }
 
     #[test]
