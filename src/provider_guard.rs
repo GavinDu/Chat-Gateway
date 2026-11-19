@@ -299,12 +299,51 @@ fn has_challenge_marker(url: &str, body: &str) -> bool {
         .any(|needle| body.contains(needle))
 }
 
+/// This signal is only meaningful for the trusted ChatGPT first-party page.
+/// A foreign document with a similar title/script must not disable ChatGPT.
+fn is_chatgpt_https_page(url: &str) -> bool {
+    let Ok(uri) = url.parse::<axum::http::Uri>() else {
+        return false;
+    };
+    if uri.scheme_str() != Some("https") {
+        return false;
+    }
+    let Some(authority) = uri.authority() else {
+        return false;
+    };
+    matches!(
+        authority.as_str(),
+        "chatgpt.com" | "www.chatgpt.com" | "chatgpt.com:443" | "www.chatgpt.com:443"
+    )
+}
+
+/// An empty-body managed challenge is otherwise invisible to the text scan.
+/// Require both a recognized title and a first-party challenge-platform script;
+/// never inspect cookies, solve a challenge or use arbitrary page text.
+const CHATGPT_MANAGED_CHALLENGE_SHELL_JS: &str = r#"(() => {
+    const title = (document.title || '').trim().toLowerCase();
+    if (!['just a moment...', 'just a moment', 'attention required! | cloudflare'].includes(title)) return false;
+    return Array.from(document.scripts).some(script => {
+        try {
+            if (!script.src) return false;
+            const source = new URL(script.src, location.href);
+            return source.origin === location.origin &&
+                source.pathname.startsWith('/cdn-cgi/challenge-platform/');
+        } catch (_) { return false; }
+    });
+})()"#;
+
 /// Detect challenge pages without attempting to solve or bypass them.
 pub fn is_challenge_page(page: &Page) -> bool {
     let url = page.url();
     let evaluation = page.evaluate(NON_MESSAGE_CHALLENGE_TEXT_JS);
     let body = evaluation.as_str().unwrap_or("");
     has_challenge_marker(&url, body)
+        || (is_chatgpt_https_page(&url)
+            && page
+                .evaluate(CHATGPT_MANAGED_CHALLENGE_SHELL_JS)
+                .as_bool()
+                == Some(true))
 }
 
 #[cfg(test)]
@@ -726,5 +765,68 @@ mod tests {
             Some("challenge page detected")
         );
         assert_eq!(second.provider_disabled_reason("provider-a"), None);
+    }
+}
+
+#[cfg(test)]
+mod chatgpt_managed_challenge_regressions {
+    use super::*;
+
+    #[test]
+    fn managed_challenge_requires_exact_first_party_https_authority() {
+        for url in [
+            "https://chatgpt.com/",
+            "https://chatgpt.com/c/synthetic",
+            "https://www.chatgpt.com/",
+            "https://chatgpt.com:443/",
+            "https://www.chatgpt.com:443/",
+        ] {
+            assert!(is_chatgpt_https_page(url), "{url}");
+        }
+        for url in [
+            "http://chatgpt.com/",
+            "https://chatgpt.com:444/",
+            "https://user@chatgpt.com/",
+            "https://chatgpt.com.attacker.test/",
+            "https://www.chatgpt.com.evil.invalid/",
+            "data:text/html,challenge",
+            "https://meta.ai/",
+            "https://example.test/",
+        ] {
+            assert!(!is_chatgpt_https_page(url), "{url}");
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_body_shell_requires_exact_title_and_same_origin_script() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        page.goto("data:text/html,%3Chtml%3E%3Chead%3E%3Ctitle%3EJust%20a%20moment...%3C/title%3E%3C/head%3E%3Cbody%3E%3C/body%3E%3C/html%3E")
+            .await
+            .unwrap();
+        // This data:-origin fixture tests the detection predicate in isolation;
+        // production still requires is_chatgpt_https_page on the real Page URL.
+        let js = CHATGPT_MANAGED_CHALLENGE_SHELL_JS
+            .replace("location.origin", "'https://chatgpt.com'");
+        assert_eq!(page.evaluate(&js).as_bool(), Some(false), "title alone");
+        page.evaluate(
+            "document.head.insertAdjacentHTML('beforeend', '<script src=\"https://chatgpt.com/cdn-cgi/challenge-platform/fixture\"></script>')",
+        );
+        assert_eq!(page.evaluate(&js).as_bool(), Some(true), "empty-body shell");
+        page.evaluate("document.title='Ordinary ChatGPT conversation'");
+        assert_eq!(page.evaluate(&js).as_bool(), Some(false), "script alone");
+        page.evaluate("document.title='Just a moment...'");
+        page.evaluate(
+            "document.querySelector('script').src='https://chatgpt.com.attacker.invalid/cdn-cgi/challenge-platform/x'",
+        );
+        assert_eq!(page.evaluate(&js).as_bool(), Some(false), "lookalike");
+        page.evaluate(
+            "document.querySelector('script').src='https://meta.ai/cdn-cgi/challenge-platform/x'",
+        );
+        assert_eq!(page.evaluate(&js).as_bool(), Some(false), "other provider");
+        assert!(!is_challenge_page(&page), "foreign fixture cannot trip the provider guard");
     }
 }
