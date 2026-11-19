@@ -174,9 +174,19 @@ mod first_party_account_probe_tests {
     #[tokio::test]
     async fn unsupported_metaai_does_not_issue_account_fetch_or_claim_auth() {
         let mut page = page_with_auth_fixture(
-            "globalThis.calls = 0; globalThis.fetch = async () => {calls++;throw new Error('private account');};",
+            r#"(() => {
+                globalThis.calls = 0;
+                globalThis.fetch = async () => {
+                    globalThis.calls++;
+                    throw new Error('private account');
+                };
+            })()"#,
         )
         .await;
+        // A multi-statement page script must execute as an expression in
+        // pinned Obscura. Verify the sentinel exists *before* the probe;
+        // otherwise a missing counter would not prove the no-fetch contract.
+        assert_eq!(page.evaluate("globalThis.calls").as_f64(), Some(0.0));
         assert_eq!(
             verify_existing_first_party_page(Provider::MetaAI, &mut page).await,
             FirstPartyAccountVerdict::Unsupported
