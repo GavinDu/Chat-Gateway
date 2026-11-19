@@ -192,6 +192,16 @@ impl PageLease {
     /// Direct response-observer evidence: Mistral first-party script HTTP 403 or
     /// Meta AI first-party document HTTP 403. This stays page-scoped and is
     /// discarded on replacement or eviction, never across providers.
+    /// Match session persistence to the Browser whose cookie jar backs this
+    /// exact leased Page. Existing unowned pages still use the unchanged
+    /// shared worker Browser. A future isolated Page must never save cookies
+    /// from the unrelated legacy jar.
+    pub(super) fn browser_for_session_save(&self, shared: &Rc<Browser>) -> Rc<Browser> {
+        self.browser_owner
+            .as_ref()
+            .map_or_else(|| shared.clone(), Rc::clone)
+    }
+
     pub(super) fn observed_bootstrap_403(&self) -> bool {
         self.bootstrap_403
             .as_ref()
@@ -241,6 +251,50 @@ impl Drop for PageLease {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn session_save_browser_tracks_exact_owned_page_not_global_cookie_jar() {
+        let shared = Rc::new(
+            obscura_core::Browser::builder()
+                .stealth(false)
+                .build()
+                .unwrap(),
+        );
+        shared
+            .cookies()
+            .set("SID=global-only; Secure; Path=/", "https://chatgpt.com/")
+            .unwrap();
+        let cfg: crate::config::AppConfig =
+            serde_yaml::from_str("obscura:\n  stealth: false\nproviders: []\n").unwrap();
+        let isolated = Rc::new(super::super::browser_factory::build_disposable_browser(&cfg).unwrap());
+        isolated
+            .cookies()
+            .set("SID=isolated-only; Secure; Path=/", "https://chatgpt.com/")
+            .unwrap();
+        let owned_page =
+            super::super::browser_factory::new_provider_page(&isolated, Provider::ChatGPT)
+                .await
+                .unwrap();
+        let pages = Rc::new(RefCell::new(ProviderPageCache::new(2)));
+        pages
+            .borrow_mut()
+            .insert_owned(Provider::ChatGPT, owned_page, isolated.clone(), None);
+        let lease = PageLease::take(&pages, Provider::ChatGPT).unwrap();
+        let selected = lease.browser_for_session_save(&shared);
+        assert!(Rc::ptr_eq(&selected, &isolated));
+        assert!(!Rc::ptr_eq(&selected, &shared));
+        assert_eq!(selected.cookies().get_all()[0].value, "isolated-only");
+        assert_eq!(shared.cookies().get_all()[0].value, "global-only");
+        drop(lease);
+        drop(selected);
+
+        let legacy = shared.new_page().await.unwrap();
+        pages.borrow_mut().insert(Provider::MetaAI, Rc::new(legacy));
+        let legacy_lease = PageLease::take(&pages, Provider::MetaAI).unwrap();
+        let selected_legacy = legacy_lease.browser_for_session_save(&shared);
+        assert!(Rc::ptr_eq(&selected_legacy, &shared));
+        assert_eq!(selected_legacy.cookies().get_all()[0].value, "global-only");
+    }
+
     #[tokio::test]
     async fn script_error_evidence_follows_only_its_original_page_and_lease() {
         let browser = obscura_core::Browser::builder()
