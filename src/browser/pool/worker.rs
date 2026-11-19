@@ -803,6 +803,24 @@ async fn session_mutation_permit<'a, T>(
     }
 }
 
+/// An explicit owner Cancel is a real cleanup operation, not a passive
+/// status response. It must not remove login UI state while LoginComplete is
+/// saving credentials or while LoginStart/UnlinkSession is driving the shared
+/// Browser. Unlike abandoned LoginComplete requests, Cancel still commits
+/// cleanup if its response receiver disconnects while queued.
+async fn cancel_pending_login_after_browser_operations(
+    operation_gate: &tokio::sync::Mutex<()>,
+    login_pages: &Rc<RefCell<HashMap<Provider, Rc<obscura_core::Page>>>>,
+    login_meta: &Rc<RefCell<HashMap<Provider, LoginMeta>>>,
+    provider: Provider,
+) {
+    let _operation = operation_gate.lock().await;
+    // No RefCell borrow survives any await; removing a pending login page
+    // here does not remove an already committed warm provider session.
+    login_pages.borrow_mut().remove(&provider);
+    login_meta.borrow_mut().remove(&provider);
+}
+
 /// Adapter diagnostics must use the same actionable input as the send path:
 /// hidden autosizers and disabled composers cannot receive a real prompt.
 fn diagnostic_input_selector<'a>(
@@ -2240,9 +2258,19 @@ pub(super) fn browser_thread(
                             });
                         }
                         Command::LoginCancel { provider, reply } => {
-                            login_pages.borrow_mut().remove(&provider);
-                            login_meta.borrow_mut().remove(&provider);
-                            let _ = reply.send(Ok(()));
+                            let operation_gate = operation_gate.clone();
+                            let login_pages = login_pages.clone();
+                            let login_meta = login_meta.clone();
+                            tokio::task::spawn_local(async move {
+                                cancel_pending_login_after_browser_operations(
+                                    &operation_gate,
+                                    &login_pages,
+                                    &login_meta,
+                                    provider,
+                                )
+                                .await;
+                                let _ = reply.send(Ok(()));
+                            });
                         }
                         Command::LoginComplete { provider, mut reply } => {
                             let operation_gate = operation_gate.clone();
@@ -2511,6 +2539,98 @@ mod queued_send_cancellation_tests {
         let (tx, _rx) = mpsc::channel::<Result<ProviderChunk>>(1);
         let output = send_unless_disconnected(&tx, async { 7 }).await;
         assert_eq!(output, Some(7));
+    }
+}
+
+#[cfg(test)]
+mod login_cancel_gate_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn cancel_waits_for_inflight_save_and_preserves_another_providers_login_page() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        browser
+            .cookies()
+            .set("SID=global-fixture; Secure; Path=/", "https://chatgpt.com/")
+            .unwrap();
+        let chat_page = Rc::new(browser.new_page().await.unwrap());
+        let weak = Rc::downgrade(&chat_page);
+        let meta_page = Rc::new(browser.new_page().await.unwrap());
+        let login_pages = Rc::new(RefCell::new(HashMap::from([
+            (Provider::ChatGPT, chat_page),
+            (Provider::MetaAI, meta_page),
+        ])));
+        let login_meta = Rc::new(RefCell::new(HashMap::from([
+            (Provider::ChatGPT, LoginMeta { last_seen: Instant::now() }),
+            (Provider::MetaAI, LoginMeta { last_seen: Instant::now() }),
+        ])));
+        let gate = tokio::sync::Mutex::new(());
+        let completing_save = gate.lock().await;
+        let cancel = cancel_pending_login_after_browser_operations(
+            &gate, &login_pages, &login_meta, Provider::ChatGPT,
+        );
+        tokio::pin!(cancel);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), &mut cancel)
+                .await
+                .is_err()
+        );
+        assert!(login_pages.borrow().contains_key(&Provider::ChatGPT));
+        assert!(login_meta.borrow().contains_key(&Provider::ChatGPT));
+        drop(completing_save);
+        tokio::time::timeout(Duration::from_secs(1), cancel)
+            .await
+            .unwrap();
+        assert!(weak.upgrade().is_none(), "abandoned Page owner must drop");
+        assert!(!login_pages.borrow().contains_key(&Provider::ChatGPT));
+        assert!(!login_meta.borrow().contains_key(&Provider::ChatGPT));
+        assert!(login_pages.borrow().contains_key(&Provider::MetaAI));
+        assert!(login_meta.borrow().contains_key(&Provider::MetaAI));
+        assert_eq!(browser.cookies().get_all()[0].value, "global-fixture");
+    }
+
+    #[tokio::test]
+    async fn explicit_cancel_cleanup_still_commits_after_response_disconnects() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let login_page = Rc::new(browser.new_page().await.unwrap());
+        let login_pages = Rc::new(RefCell::new(HashMap::from([
+            (Provider::ChatGPT, login_page),
+        ])));
+        let login_meta = Rc::new(RefCell::new(HashMap::from([
+            (Provider::ChatGPT, LoginMeta { last_seen: Instant::now() }),
+        ])));
+        let gate = tokio::sync::Mutex::new(());
+        let active_login_complete = gate.lock().await;
+        let (reply, receiver) = oneshot::channel::<Result<()>>();
+        drop(receiver);
+        // Cancellation is an explicit owner cleanup operation, unlike an
+        // abandoned LoginComplete request. It is still committed after gate.
+        let cancel = async {
+            cancel_pending_login_after_browser_operations(
+                &gate, &login_pages, &login_meta, Provider::ChatGPT,
+            )
+            .await;
+            let _ = reply.send(Ok(()));
+        };
+        tokio::pin!(cancel);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), &mut cancel)
+                .await
+                .is_err()
+        );
+        assert!(login_pages.borrow().contains_key(&Provider::ChatGPT));
+        drop(active_login_complete);
+        tokio::time::timeout(Duration::from_secs(1), cancel)
+            .await
+            .unwrap();
+        assert!(!login_pages.borrow().contains_key(&Provider::ChatGPT));
+        assert!(!login_meta.borrow().contains_key(&Provider::ChatGPT));
     }
 }
 
