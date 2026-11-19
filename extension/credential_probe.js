@@ -56,7 +56,12 @@ async function probeActiveChatgptAccount() {
     if (validUser && tokenPresent && Number.isFinite(expiry) && expiry > Date.now()) {
       return report("verified", "first_party_session_confirmed", 200);
     }
-    if (!Object.keys(session).length || (session.user === null && !tokenPresent)) {
+    // A partial/changed 200 response can contain user:null alongside
+    // upstream error fields. Only the reviewed empty or exact-null shapes
+    // establish absence of a session; never turn arbitrary JSON into logout.
+    const sessionKeys = Object.keys(session);
+    if (sessionKeys.length === 0 ||
+        (sessionKeys.length === 1 && sessionKeys[0] === "user" && session.user === null)) {
       return report("unauthenticated", "provider_reports_no_session", 200);
     }
     return report("unknown", "incomplete_or_expired_session_evidence", 200);
