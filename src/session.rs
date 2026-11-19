@@ -2907,13 +2907,13 @@ mod replay_storage_readback_tests {
             &page,
             "setItem(k,v) { globalThis.__writes = (globalThis.__writes || 0) + 1; }, getItem(_k) { return 'untrusted'; }",
         );
-        let error = restore_local_storage_for_origin(
-            &page,
-            &synthetic_snapshot(),
-            "https://chatgpt.com",
-        )
-        .unwrap_err();
-        assert_eq!(error.to_string(), "failed to restore provider localStorage entry");
+        let error =
+            restore_local_storage_for_origin(&page, &synthetic_snapshot(), "https://chatgpt.com")
+                .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "failed to restore provider localStorage entry"
+        );
         assert_eq!(page.evaluate("globalThis.__writes || 0"), json!(0));
     }
 
@@ -2921,12 +2921,9 @@ mod replay_storage_readback_tests {
     fn guard_before_both_set_and_get_with_json_literal_escaped_credentials() {
         let key = "key\\\";globalThis.__pwned=true;//";
         let value = "private\\nsecret\\\";fetch('https://bad.example')//";
-        let script = local_storage_restore_script_with_origin(
-            key,
-            value,
-            Some("https://chatgpt.com"),
-        )
-        .unwrap();
+        let script =
+            local_storage_restore_script_with_origin(key, value, Some("https://chatgpt.com"))
+                .unwrap();
         let guard = script.find("location.origin !==").unwrap();
         let setter = script.find("localStorage.setItem").unwrap();
         let getter = script.find("localStorage.getItem").unwrap();
