@@ -134,7 +134,8 @@ impl PageSession {
         bounded_warmup(SESSION_WARMUP_TIMEOUT, async {
             let cookie_restore = session_file
                 .map(|file| session::restore_cookies(browser, file, provider.name()))
-                .transpose();
+                .transpose()
+                .map(|_| ());
             // Active providers fail before navigation on an import error:
             // a partially applied cookie jar is not a reason to load provider
             // scripts or a login route. Deferred providers keep their legacy
