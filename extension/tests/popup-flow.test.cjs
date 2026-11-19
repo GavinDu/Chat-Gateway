@@ -1363,7 +1363,7 @@ test("paired comparison quarantines untrusted gateway proof, leaks no URL or tok
   await popup.controls.compareChatgptBrowserAndGateway();
   assert.equal(popup.byId("message").textContent,
     "Paired account checks unavailable. No sessions changed or resynced.");
-}
+});
 
 test("paired comparison displays independent negative and unknown account verdicts",async()=>{
   for(const [gateway,reason,label] of [
