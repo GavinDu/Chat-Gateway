@@ -2562,4 +2562,79 @@ mod refresh_cancellation_tests {
         drop(held);
         assert!(waiting.await.is_some());
     }
-}
+    #[tokio::test]
+    async fn login_complete_waits_for_shared_global_gate_before_provider_lock() {
+        let operation_gate = tokio::sync::Mutex::new(());
+        let provider_lock = tokio::sync::Mutex::new(());
+        // Models a refresh/unlink with exclusive rights over the shared jar.
+        let active_refresh = operation_gate.lock().await;
+        let (mut reply, _rx) = oneshot::channel::<Result<LoginCompleted>>();
+        let complete = async {
+            let _operation = session_mutation_permit(&mut reply, &operation_gate)
+                .await
+                .expect("receiver is connected");
+            let _provider = provider_lock.lock().await;
+            true
+        };
+        tokio::pin!(complete);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), &mut complete)
+                .await
+                .is_err()
+        );
+        // Cannot prematurely claim the provider lock while waiting for the
+        // global Browser gate, preserving global -> provider lock ordering.
+        assert!(provider_lock.try_lock().is_ok());
+        drop(active_refresh);
+        assert!(tokio::time::timeout(Duration::from_secs(1), complete)
+            .await
+            .unwrap());
+    }
+
+    #[tokio::test]
+    async fn abandoned_login_complete_cannot_reopen_snapshot_after_unlink() {
+        let operation_gate = tokio::sync::Mutex::new(());
+        let active_unlink = operation_gate.lock().await;
+        let (mut reply, rx) = oneshot::channel::<Result<LoginCompleted>>();
+        let waiting = session_mutation_permit(&mut reply, &operation_gate);
+        tokio::pin!(waiting);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), &mut waiting)
+                .await
+                .is_err()
+        );
+        // The caller went away before a prior unlink finished. The pending
+        // completion cannot acquire the gate after that unlink has committed.
+        drop(rx);
+        assert!(tokio::time::timeout(Duration::from_secs(1), waiting)
+            .await
+            .unwrap()
+            .is_none());
+        drop(active_unlink);
+        assert!(operation_gate.try_lock().is_ok());
+    }
+
+    #[tokio::test]
+    async fn shared_gate_serializes_cross_provider_login_and_refresh() {
+        let global = tokio::sync::Mutex::new(());
+        let provider_a = tokio::sync::Mutex::new(());
+        let provider_b = tokio::sync::Mutex::new(());
+        let held_a = provider_a.lock().await;
+        let (mut complete_reply, _receiver) = oneshot::channel::<Result<LoginCompleted>>();
+        let complete = async {
+            let _operation = session_mutation_permit(&mut complete_reply, &global)
+                .await
+                .unwrap();
+            let _guard = provider_b.lock().await;
+            true
+        };
+        tokio::pin!(complete);
+        // A provider-A lock alone must not prevent provider B's commit:
+        // only the global gate covers both providers' shared cookie jar.
+        assert!(tokio::time::timeout(Duration::from_secs(1), complete)
+            .await
+            .unwrap());
+        drop(held_a);
+        assert!(global.try_lock().is_ok());
+    }
+}}
