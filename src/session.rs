@@ -1860,9 +1860,60 @@ pub(crate) fn session_state_hash(file: &SessionFile) -> Result<String> {
     Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
+/// Capturing storage from a redirected SSO/challenge document would save a
+/// different security principal's data as ChatGPT/Meta AI credentials. Use the
+/// same strict source-owned HTTPS policy as replay; never trust the observed
+/// URL to determine the expected origin or include it in any error.
+fn expected_active_capture_origin(provider: &str, current_url: &str) -> Result<Option<String>> {
+    if !matches!(provider, "chatgpt" | "metaai") {
+        return Ok(None);
+    }
+    let home = crate::providers::Provider::from_name(provider)
+        .ok_or_else(|| anyhow::anyhow!("provider_session_capture_origin_mismatch"))?
+        .login_url();
+    if !crate::browser::pool_policy::provider_thread_url_is_same_origin(current_url, home) {
+        anyhow::bail!("provider_session_capture_origin_mismatch");
+    }
+    let expected = crate::browser::pool_policy::provider_storage_origin(home)
+        .ok_or_else(|| anyhow::anyhow!("provider_session_capture_origin_mismatch"))?;
+    Ok(Some(expected))
+}
+
+/// A synchronous in-page check before any storage enumeration prevents a
+/// navigation race between host Page.url() and Page.evaluate(). The script
+/// contains only a source-owned public origin, never credential material.
+fn active_storage_capture_script(expected_origin: &str) -> Result<Zeroizing<String>> {
+    let literal = serde_json::to_string(expected_origin)
+        .map_err(|_| anyhow::anyhow!("provider_session_capture_origin_mismatch"))?;
+    Ok(Zeroizing::new(format!(
+        "(function(){{ if (location.origin !== {literal}) return null; const o = {{}}; for (let i = 0; i < localStorage.length; i++) {{ const k = localStorage.key(i); o[k] = localStorage.getItem(k); }} return o; }})()"
+    )))
+}
+
 async fn capture_session(browser: &Browser, page: &Page, provider: &str) -> Result<SessionFile> {
-    let ls_value = page.evaluate("(function(){ const o = {}; for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); o[k] = localStorage.getItem(k); } return o; })()");
-    let local_storage = parse_local_storage_snapshot(ls_value)?;
+    let expected_origin = expected_active_capture_origin(provider, &page.url())?;
+    let ls_value = match expected_origin.as_deref() {
+        Some(origin) => {
+            let guarded = active_storage_capture_script(origin)?;
+            page.evaluate(&guarded)
+        }
+        // Deferred adapters retain their previously established capture path.
+        None => page.evaluate("(function(){ const o = {}; for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); o[k] = localStorage.getItem(k); } return o; })()"),
+    };
+    if expected_origin.is_some() {
+        // A null result means the in-page origin fence refused the read or
+        // script evaluation was unavailable. Never persist empty evidence.
+        if ls_value.is_null() || expected_active_capture_origin(provider, &page.url())? != expected_origin {
+            anyhow::bail!("provider_session_capture_origin_mismatch");
+        }
+    }
+    let local_storage = parse_local_storage_snapshot(ls_value).map_err(|error| {
+        if expected_origin.is_some() {
+            anyhow::anyhow!("provider_session_capture_storage_unavailable")
+        } else {
+            error
+        }
+    })?;
     // Obscura's cookie store is browser-wide. Persist only cookies in the
     // provider's known domain family; otherwise saving one provider can copy
     // unrelated logged-in sessions into every other provider's session file.
