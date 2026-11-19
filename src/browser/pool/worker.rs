@@ -789,10 +789,11 @@ async fn acquire_page_lock<'a>(
         .map_err(|_| anyhow::Error::new(ProviderBusyError))
 }
 
-/// Abandoned refreshes must not wait behind a send and mutate its session later.
-/// Once activation starts, finish it atomically with respect to this lock.
-async fn session_refresh_permit<'a>(
-    reply: &mut oneshot::Sender<Result<()>>,
+/// A disconnected refresh or interactive LoginComplete must never acquire a
+/// shared Browser-driving gate later and mutate its saved credentials. This
+/// cancellation-aware permit preserves the global gate -> provider lock order.
+async fn session_mutation_permit<'a, T>(
+    reply: &mut oneshot::Sender<Result<T>>,
     lock: &'a tokio::sync::Mutex<()>,
 ) -> Option<tokio::sync::MutexGuard<'a, ()>> {
     tokio::select! {
@@ -2040,10 +2041,10 @@ pub(super) fn browser_thread(
                             let locks = locks.clone();
                             tokio::task::spawn_local(async move {
                                 let res: Result<()> = async {
-                                    let Some(_operation) = session_refresh_permit(&mut reply, &operation_gate).await else { return Ok(()); };
+                                    let Some(_operation) = session_mutation_permit(&mut reply, &operation_gate).await else { return Ok(()); };
                                     let lock = locks.borrow().get(&provider).cloned()
                                         .ok_or_else(|| anyhow::anyhow!("provider page lock missing"))?;
-                                    let Some(_guard) = session_refresh_permit(&mut reply, &lock).await else {
+                                    let Some(_guard) = session_mutation_permit(&mut reply, &lock).await else {
                                         return Ok(());
                                     };
                                     if reply.is_closed() { return Ok(()); }
@@ -2243,7 +2244,8 @@ pub(super) fn browser_thread(
                             login_meta.borrow_mut().remove(&provider);
                             let _ = reply.send(Ok(()));
                         }
-                        Command::LoginComplete { provider, reply } => {
+                        Command::LoginComplete { provider, mut reply } => {
+                            let operation_gate = operation_gate.clone();
                             let browser = browser.clone();
                             let registry = registry.clone();
                             let pages = pages.clone();
@@ -2253,6 +2255,16 @@ pub(super) fn browser_thread(
                             let login_session_write_tracker = session_write_tracker.clone();
                             let applied_imports = applied_imports.clone();
                             tokio::task::spawn_local(async move {
+                                // Serialize manual login snapshot writes + Page swaps
+                                // with sends, refresh, unlink and subsequent LoginStart.
+                                let Some(_operation) =
+                                    session_mutation_permit(&mut reply, &operation_gate).await
+                                else {
+                                    return;
+                                };
+                                if reply.is_closed() {
+                                    return;
+                                }
                                 sweep_login_pages(&login_pages, &login_meta);
                                 let res: Result<LoginCompleted> = async {
                                     let Some(login_page) = login_pages.borrow().get(&provider).cloned() else {
@@ -2267,7 +2279,11 @@ pub(super) fn browser_thread(
                                     // the swapped page.
                                     let lock = locks.borrow().get(&provider).cloned()
                                         .unwrap_or_else(|| Rc::new(tokio::sync::Mutex::new(())));
-                                    let _guard = lock.lock().await;
+                                    let Some(_guard) =
+                                        session_mutation_permit(&mut reply, &lock).await
+                                    else {
+                                        return Err(anyhow::anyhow!("login_completion_abandoned"));
+                                    };
                                     // A private owner might have been admitted after
                                     // LoginStart; no old global snapshot may overwrite it.
                                     require_global_login_safe(&pages, provider)?;
@@ -2507,7 +2523,7 @@ mod refresh_cancellation_tests {
         let (mut tx, rx) = oneshot::channel::<Result<()>>();
         drop(rx);
         let lock = tokio::sync::Mutex::new(());
-        assert!(session_refresh_permit(&mut tx, &lock).await.is_none());
+        assert!(session_mutation_permit(&mut tx, &lock).await.is_none());
     }
 
     #[tokio::test]
@@ -2515,7 +2531,7 @@ mod refresh_cancellation_tests {
         let lock = Rc::new(tokio::sync::Mutex::new(()));
         let held = lock.lock().await;
         let (mut tx, rx) = oneshot::channel::<Result<()>>();
-        let waiting = session_refresh_permit(&mut tx, &lock);
+        let waiting = session_mutation_permit(&mut tx, &lock);
         tokio::pin!(waiting);
         assert!(
             tokio::time::timeout(Duration::from_millis(10), &mut waiting)
@@ -2536,7 +2552,7 @@ mod refresh_cancellation_tests {
         let lock = tokio::sync::Mutex::new(());
         let held = lock.lock().await;
         let (mut tx, _rx) = oneshot::channel::<Result<()>>();
-        let waiting = session_refresh_permit(&mut tx, &lock);
+        let waiting = session_mutation_permit(&mut tx, &lock);
         tokio::pin!(waiting);
         assert!(
             tokio::time::timeout(Duration::from_millis(10), &mut waiting)
