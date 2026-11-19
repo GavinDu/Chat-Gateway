@@ -1197,11 +1197,14 @@ pub(super) fn browser_thread(
                                             );
                                             continue;
                                         }
-                                        if let Err(navigation_error) = page.goto(provider.login_url()).await {
+                                        if let Err(_navigation_error) = page.goto(provider.login_url()).await {
                                             provider_sessions.record_probe_failure(provider.name());
                                             tracing::error!(
                                                 provider = %pcfg.name,
-                                                category = session_worker_failure_category(&navigation_error),
+                                                // Obscura's native error is not anyhow::Error.
+                                                // This navigation path has only a fixed redacted
+                                                // session-operation failure label.
+                                                category = "session_operation_failed",
                                                 "provider navigation after expired-session cleanup failed; page withheld"
                                             );
                                             continue;
