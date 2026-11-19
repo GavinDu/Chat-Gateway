@@ -210,7 +210,8 @@ impl ProviderSessionRegistry {
 
     /// Invalidate the public positive verdict before a new read-only check.
     /// Retain only the non-public replay safety latch for the same live worker
-    /// context. An explicit logout/rejection/reset still removes the latch.
+    /// context. Explicit logout/rejection or worker restart removes the latch;
+    /// a retry reset does not authorize replacing the old shared cookie jar.
     /// Only matching epochs may publish a later source-verified verdict.
     pub fn begin_credential_verification(&self, provider: &str) -> Option<uuid::Uuid> {
         let mut proofs = self.credential_proofs.lock().ok()?;
