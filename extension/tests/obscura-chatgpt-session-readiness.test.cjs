@@ -93,6 +93,24 @@ test("explicit logout, challenge, malformed and redirected responses stay distin
   assert.equal(foreign.calls.length,0);
 });
 
+test("Obscura never treats whitespace or missing accessToken as a first-party verified account", async () => {
+  const expires = new Date(Date.now() + 60_000).toISOString();
+  for (const accessToken of ["", " ", "  \t\n  ", null, undefined]) {
+    const {report,calls} = await run({
+      session: {user:{fixture:true},accessToken,expires}
+    });
+    assert.equal(calls.length, 1);
+    assert.equal(report.state, "unavailable", JSON.stringify(accessToken));
+    assert.equal(report.http, 200);
+    const output=JSON.stringify(report);
+    assert(!output.includes("accessToken"));
+    assert(!output.includes("fixture"));
+  }
+  // The corresponding Chrome active-tab verifier already requires trim().
+  // Neither context may declare the other one's saved-session snapshot valid.
+  assert.equal((await run()).report.state,"verified");
+});
+
 test("changed first-party SPA route during fetch or JSON parse cannot certify previous account", async () => {
   for (const changeAt of ["fetch","json"]) {
     for (const navigation of ["same_origin","off_origin"]) {
