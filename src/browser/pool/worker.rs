@@ -2562,6 +2562,7 @@ mod refresh_cancellation_tests {
         drop(held);
         assert!(waiting.await.is_some());
     }
+
     #[tokio::test]
     async fn login_complete_waits_for_shared_global_gate_before_provider_lock() {
         let operation_gate = tokio::sync::Mutex::new(());
@@ -2637,4 +2638,4 @@ mod refresh_cancellation_tests {
         drop(held_a);
         assert!(global.try_lock().is_ok());
     }
-}}
+}
