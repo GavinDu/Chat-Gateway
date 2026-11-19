@@ -237,6 +237,29 @@ pub struct ObscuraPool {
     session_writes: SessionWriteTracker,
 }
 
+/// A read-only source-backed account check on the *current* warmed page.
+/// This is deliberately distinct from the legacy URL/composer readiness probe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // Operator-facing paired proof UI is tracked in #1328.
+pub enum FirstPartyAccountVerdict {
+    Verified,
+    ExplicitUnauthenticated,
+    Unknown,
+    Unsupported,
+}
+
+#[allow(dead_code)] // Kept fixed and redacted for future extension status.
+impl FirstPartyAccountVerdict {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Verified => "verified",
+            Self::ExplicitUnauthenticated => "unauthenticated",
+            Self::Unknown => "unknown",
+            Self::Unsupported => "unsupported",
+        }
+    }
+}
+
 enum Command {
     Discover {
         provider: Provider,
@@ -260,6 +283,10 @@ enum Command {
     VerifySession {
         provider: Provider,
         reply: oneshot::Sender<Result<bool>>,
+    },
+    VerifyFirstPartyAccount {
+        provider: Provider,
+        reply: oneshot::Sender<Result<FirstPartyAccountVerdict>>,
     },
     TestAdapter {
         provider: Provider,
@@ -751,6 +778,28 @@ impl ObscuraPool {
             .read()
             .await
             .send(Command::VerifySession {
+                provider,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| browser_worker_unavailable())?;
+        rx.await.map_err(|_| browser_worker_unavailable())?
+    }
+
+    /// Operator-triggered first-party verification of the *existing* warm
+    /// Obscura page. This never refreshes a snapshot, navigates, sends chat,
+    /// or changes the owner vault. Unverified/unavailable stays Unknown and
+    /// only source-supported ChatGPT can produce Verified/Unauthenticated.
+    /// Pairing, context generation and source/image proof are separate #1328.
+    #[allow(dead_code)] // Paired relay/extension action is a later gated child.
+    pub async fn verify_first_party_account(&self, name: &str) -> Result<FirstPartyAccountVerdict> {
+        let provider =
+            Provider::from_name(name).ok_or_else(|| anyhow::anyhow!("unknown provider"))?;
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .read()
+            .await
+            .send(Command::VerifyFirstPartyAccount {
                 provider,
                 reply: tx,
             })
