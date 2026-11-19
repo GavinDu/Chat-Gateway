@@ -334,23 +334,6 @@ fn classify(e: &Evidence, now: u64) -> Diagnosis {
         }
     }
 
-    // A first-party account observation collected before the supplied applied
-    // snapshot checkpoint does not prove account state *on that checkpoint*.
-    // These are observation times, not an engine-owned application timestamp;
-    // fail conservatively rather than claim credential replay or downstream
-    // adapter/transport attribution from a potentially earlier page state.
-    if let (Some(snapshot), Some(obscura)) = (&e.snapshot, &e.obscura) {
-        if snapshot.state == SnapshotState::Applied
-            && matches!(obscura.verdict, Auth::Verified | Auth::Unauthenticated)
-            && obscura.observed_at_ms < snapshot.observed_at_ms
-        {
-            return inconclusive(
-                provider,
-                "account_proof_predates_applied_snapshot_observation",
-            );
-        }
-    }
-
     let chrome = e.chrome.as_ref().map(|x| x.verdict);
     let obscura = e.obscura.as_ref().map(|x| x.verdict);
     let snapshot = e.snapshot.as_ref().map(|x| x.state);
@@ -366,6 +349,23 @@ fn classify(e: &Evidence, now: u64) -> Diagnosis {
             .any(|auth| matches!(auth, Auth::Verified | Auth::Unauthenticated))
     {
         return inconclusive(provider, "metaai_account_verifier_not_established");
+    }
+
+    // A first-party account observation collected before the supplied applied
+    // snapshot checkpoint does not prove account state *on that checkpoint*.
+    // These are observation times, not an engine-owned application timestamp;
+    // fail conservatively rather than claim credential replay or downstream
+    // adapter/transport attribution from a potentially earlier page state.
+    if let (Some(snapshot), Some(obscura)) = (&e.snapshot, &e.obscura) {
+        if snapshot.state == SnapshotState::Applied
+            && matches!(obscura.verdict, Auth::Verified | Auth::Unauthenticated)
+            && obscura.observed_at_ms < snapshot.observed_at_ms
+        {
+            return inconclusive(
+                provider,
+                "account_proof_predates_applied_snapshot_observation",
+            );
+        }
     }
 
     if chrome == Some(Auth::Unauthenticated) && obscura == Some(Auth::Verified) {
@@ -912,6 +912,17 @@ mod tests {
             checked(evidence.clone()).reason,
             "account_proof_predates_applied_snapshot_observation"
         );
+        // Meta AI has no authoritative account verifier at all; that
+        // unsupported verdict must remain the stronger diagnosis regardless
+        // of how owner-supplied observation times are ordered.
+        let mut meta = base();
+        meta["provider"] = json!("metaai");
+        meta["obscura"]["observed_at_ms"] = json!(NOW - 1_000);
+        assert_eq!(
+            checked(meta).reason,
+            "metaai_account_verifier_not_established"
+        );
+
         // Equal-time checkpoints remain eligible for existing typed logic.
         evidence["obscura"]["observed_at_ms"] = json!(NOW);
         assert_eq!(checked(evidence).category, "replay_or_binding");
