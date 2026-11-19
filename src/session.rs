@@ -1897,7 +1897,11 @@ mod active_storage_capture_tests {
     #[test]
     fn active_provider_capture_requires_exact_source_owned_https_origin() {
         for (provider, actual, expected) in [
-            ("chatgpt", "https://chatgpt.com/c/thread?private=fixture", "https://chatgpt.com"),
+            (
+                "chatgpt",
+                "https://chatgpt.com/c/thread?private=fixture",
+                "https://chatgpt.com",
+            ),
             ("metaai", "https://www.meta.ai/chat/", "https://www.meta.ai"),
         ] {
             assert_eq!(
@@ -1910,8 +1914,7 @@ mod active_storage_capture_tests {
         // Only active providers enforce this new capture fence. Do not
         // silently broaden auth classifications for deferred adapters.
         assert_eq!(
-            expected_active_capture_origin("claude", "data:text/html,legacy")
-                .unwrap(),
+            expected_active_capture_origin("claude", "data:text/html,legacy").unwrap(),
             None
         );
     }
@@ -1919,14 +1922,20 @@ mod active_storage_capture_tests {
     #[test]
     fn foreign_redirects_and_ambiguous_authorities_are_fixed_redacted_failures() {
         for (provider, url) in [
-            ("chatgpt", "https://accounts.google.com/login?token=private-fixture"),
+            (
+                "chatgpt",
+                "https://accounts.google.com/login?token=private-fixture",
+            ),
             ("chatgpt", "https://chatgpt.com.evil.example/c/thread"),
             ("chatgpt", "https://chatgpt.com@evil.example/"),
             ("chatgpt", "http://chatgpt.com/"),
             ("chatgpt", "data:text/html,foreign"),
             ("metaai", "https://meta.ai/"),
             ("metaai", "https://www.meta.ai.evil.example/"),
-            ("metaai", "https://www.facebook.com/login?account=private-fixture"),
+            (
+                "metaai",
+                "https://www.facebook.com/login?account=private-fixture",
+            ),
             ("metaai", "https://www.meta.ai%2eattacker.example/"),
         ] {
             let err = expected_active_capture_origin(provider, url).unwrap_err();
@@ -1953,7 +1962,9 @@ mod active_storage_capture_tests {
         );
         let positive = page.evaluate(&valid);
         assert_eq!(
-            positive.get("fixture-key").and_then(serde_json::Value::as_str),
+            positive
+                .get("fixture-key")
+                .and_then(serde_json::Value::as_str),
             Some("synthetic-value")
         );
 
@@ -1962,10 +1973,15 @@ mod active_storage_capture_tests {
             script.as_str()
         );
         let denial = page.evaluate(&foreign);
-        assert_eq!(denial.get("reads").and_then(serde_json::Value::as_u64), Some(0));
+        assert_eq!(
+            denial.get("reads").and_then(serde_json::Value::as_u64),
+            Some(0)
+        );
         assert!(denial.get("result").is_some_and(serde_json::Value::is_null));
-        assert!(script.find("location.origin !==").unwrap() <
-            script.find("localStorage.length").unwrap());
+        assert!(
+            script.find("location.origin !==").unwrap()
+                < script.find("localStorage.length").unwrap()
+        );
     }
 
     #[tokio::test]
@@ -2002,7 +2018,9 @@ async fn capture_session(browser: &Browser, page: &Page, provider: &str) -> Resu
     if expected_origin.is_some() {
         // A null result means the in-page origin fence refused the read or
         // script evaluation was unavailable. Never persist empty evidence.
-        if ls_value.is_null() || expected_active_capture_origin(provider, &page.url())? != expected_origin {
+        if ls_value.is_null()
+            || expected_active_capture_origin(provider, &page.url())? != expected_origin
+        {
             anyhow::bail!("provider_session_capture_origin_mismatch");
         }
     }
