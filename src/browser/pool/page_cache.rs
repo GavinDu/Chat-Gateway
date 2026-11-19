@@ -362,9 +362,11 @@ mod tests {
             .insert_owned(Provider::MetaAI, owned_page, private, None);
         // Simulate a future incorrect code path: the cache itself must not
         // allow the unowned Page to be driven just because it is non-cold.
+        // Do not hold RefCell borrow while a pinned Obscura page is created.
+        let erroneous_global_page = global.new_page().await.unwrap();
         pages
             .borrow_mut()
-            .insert(Provider::MetaAI, Rc::new(global.new_page().await.unwrap()));
+            .insert(Provider::MetaAI, Rc::new(erroneous_global_page));
         assert_eq!(
             pages
                 .borrow()
