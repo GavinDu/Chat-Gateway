@@ -1239,6 +1239,10 @@ pub(super) async fn ensure_provider_page(
 ) -> Result<bool> {
     {
         let cache = pages.borrow();
+        // Even a non-cold page is unsafe if a legacy fallback accidentally
+        // replaced the previously isolated Browser owner. An early cached
+        // return must not bypass the private-context requirement.
+        cache.require_cached_context_safe(provider)?;
         if cache.contains_key(&provider) {
             return Ok(false);
         }
@@ -2171,7 +2175,6 @@ pub(super) fn browser_thread(
                                     let lock = locks.borrow().get(&provider).cloned()
                                         .unwrap_or_else(|| Rc::new(tokio::sync::Mutex::new(())));
                                     let _guard = lock.lock().await;
-                                    applied_imports.borrow_mut().remove(&provider);
                                     let mut page = super::browser_factory::new_provider_page(&browser, provider).await?;
                                     let network_bootstrap_403 = crate::browser::network_tap::attach_provider_network_tap(&mut page, provider);
                                     page.goto(provider.login_url()).await?;
@@ -2184,7 +2187,12 @@ pub(super) fn browser_thread(
                                     session::clear_provider_cookies(&browser, provider.name())?;
                                     page.goto(provider.login_url()).await?;
                                     let removed = session::delete_session_snapshot(provider.name())?;
-                                    pages.borrow_mut().insert_with_bootstrap_status(
+                                    // Commit only after deletion succeeds. If this provider
+                                    // ever owned a private context, drop both the prior
+                                    // context and this global cleanup Page rather than
+                                    // caching a shared Page that bypasses the cold fence.
+                                    applied_imports.borrow_mut().remove(&provider);
+                                    pages.borrow_mut().finish_unlink(
                                         provider,
                                         Rc::new(page),
                                         network_bootstrap_403,
