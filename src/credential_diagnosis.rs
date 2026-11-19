@@ -12,6 +12,9 @@ use std::{
 
 const MAX_FILE: u64 = 16 * 1024;
 const MAX_AGE_MS: u64 = 5 * 60 * 1000;
+// The observed gateway wall clock may exceed its 120s request deadline by a
+// bounded scheduling/serialization tail; elapsed time is not failure-phase proof.
+const MAX_GATEWAY_FAILURE_DURATION_MS: u64 = 180_000;
 const CLOCK_SKEW_MS: u64 = 30 * 1000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -259,7 +262,7 @@ fn classify(e: &Evidence, now: u64) -> Diagnosis {
     }
     if let Some(failure) = e.gateway_failure.as_ref() {
         if gateway_failure_timestamp(failure).is_none()
-            || failure.duration_ms > 120_000
+            || failure.duration_ms > MAX_GATEWAY_FAILURE_DURATION_MS
             || !fixed_gateway_stage(&failure.stage)
             || !fixed_gateway_reason(&failure.reason)
         {
@@ -617,6 +620,43 @@ mod tests {
     }
 
     #[test]
+    fn real_120_second_timeout_tail_is_valid_evidence_not_account_proof() {
+        // Meta AI's observed 120.030s installed failure is just above the
+        // upstream 120s deadline; this cannot alone imply expired credentials.
+        let mut v = with_gateway_failure();
+        v["gateway_failure"]["duration_ms"] = json!(120_030);
+        assert_eq!(checked(v.clone()).category, "transport_or_extraction");
+        assert!(!checked(v.clone()).live_proof);
+
+        v["provider"] = json!("metaai");
+        v["chrome"]["verdict"] = json!("unsupported");
+        v["obscura"]["verdict"] = json!("unknown");
+        let no_account_proof = checked(v.clone());
+        assert_eq!(no_account_proof.category, "inconclusive");
+        assert_eq!(
+            no_account_proof.reason,
+            "authoritative_obscura_account_verifier_missing"
+        );
+        assert!(!no_account_proof.live_proof);
+
+        v["gateway_failure"]["request_id"] = json!(OTHER_ID);
+        assert_eq!(checked(v.clone()).reason, "gateway_request_id_mismatch");
+        v["gateway_failure"]["request_id"] = json!(ID);
+        v["snapshot"]["generation"] = json!(OTHER_ID);
+        assert_eq!(checked(v.clone()).reason, "snapshot_generation_mismatch");
+        v["snapshot"]["generation"] = json!(ID);
+        v["gateway_failure"]["duration_ms"] =
+            json!(MAX_GATEWAY_FAILURE_DURATION_MS + 1);
+        assert_eq!(checked(v.clone()).reason, "invalid_gateway_failure_evidence");
+
+        let safe = serde_json::to_string(&checked(v)).unwrap();
+        assert!(!safe.contains(ID));
+        assert!(!safe.contains(OTHER_ID));
+        assert!(!safe.contains("token"));
+        assert!(!safe.contains("cookie"));
+    }
+
+    #[test]
     fn gateway_failure_stage_reason_duration_and_freshness_are_strict() {
         let mut v = with_gateway_failure();
         v["gateway_failure"]["stage"] = json!("https://private.example/?token=secret");
@@ -631,7 +671,7 @@ mod tests {
             "invalid_gateway_failure_evidence"
         );
         v["gateway_failure"]["reason"] = json!("timeout");
-        v["gateway_failure"]["duration_ms"] = json!(120_001);
+        v["gateway_failure"]["duration_ms"] = json!(MAX_GATEWAY_FAILURE_DURATION_MS + 1);
         assert_eq!(
             checked(v.clone()).reason,
             "invalid_gateway_failure_evidence"
