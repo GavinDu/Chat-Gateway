@@ -105,6 +105,20 @@ mod session_worker_error_redaction_tests {
             "browser_worker_unavailable"
         );
         assert!(!session_worker_failure_category(&secret).contains("secret"));
+        // Engine navigation/cleanup/worker-start errors may embed owner
+        // filesystem paths or bearer-bearing first-party URLs. Log only a
+        // fixed status category; never interpolate the original Display.
+        for source in [
+            "https://chatgpt.com/c/private-thread?token=private",
+            "/Users/private/Library/Chat-Gateway/vault-key-file",
+            "provider cleanup rejected cookie=value-private",
+        ] {
+            let error = anyhow::anyhow!("{source}");
+            let category = session_worker_failure_category(&error);
+            assert_eq!(category, "session_operation_failed");
+            assert!(!category.contains("private"));
+            assert!(!category.contains("token"));
+        }
     }
 }
 
@@ -1178,7 +1192,7 @@ pub(super) fn browser_thread(
                                             provider_sessions.record_probe_failure(provider.name());
                                             tracing::error!(
                                                 provider = %pcfg.name,
-                                                %cleanup_error,
+                                                category = session_worker_failure_category(&cleanup_error),
                                                 "expired provider session cleanup failed; page withheld"
                                             );
                                             continue;
@@ -1187,7 +1201,7 @@ pub(super) fn browser_thread(
                                             provider_sessions.record_probe_failure(provider.name());
                                             tracing::error!(
                                                 provider = %pcfg.name,
-                                                %navigation_error,
+                                                category = session_worker_failure_category(&navigation_error),
                                                 "provider navigation after expired-session cleanup failed; page withheld"
                                             );
                                             continue;
@@ -1212,7 +1226,11 @@ pub(super) fn browser_thread(
                             locks.borrow_mut().insert(provider, Rc::new(tokio::sync::Mutex::new(())));
                             tracing::info!(provider = %pcfg.name, url = provider.login_url(), "page warmed");
                         }
-                        Err(e) => tracing::warn!(provider = %pcfg.name, "warm failed: {e}"),
+                        Err(e) => tracing::warn!(
+                            provider = %pcfg.name,
+                            category = session_worker_failure_category(&e),
+                            "provider page could not be created during warm-up"
+                        ),
                     }
                 }
                 tracing::info!("ObscuraPool warmed: {} pages", pages.borrow().len());
