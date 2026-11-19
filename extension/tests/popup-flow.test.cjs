@@ -1221,6 +1221,53 @@ test("user-initiated ChatGPT verification is tab-scoped, read-only and does not 
   assert.deepEqual(popup.chromeCalls,priorCalls,"verification must not sync or modify gateway link");
 });
 
+test("same-origin tab route drift after injected probe invalidates account verdict without URL disclosure", async () => {
+  const initial = "https://chatgpt.com/c/private-initial";
+  const destinations = [
+    "https://chatgpt.com/c/private-next",
+    "https://chatgpt.com/c/private-initial?account=private-other",
+    "https://chatgpt.com/c/private-initial#private-other"
+  ];
+  for (const authentication of ["verified", "unauthenticated"]) {
+    for (const currentUrl of destinations) {
+      const popup=loadPopup();
+      for (let i=0; i<5; i++) await new Promise(resolve=>setImmediate(resolve));
+      let requests=0, scriptInvocations=0;
+      popup.context.chrome.tabs.query = async () => [{
+        id:42,url:++requests===1 ? initial : currentUrl
+      }];
+      popup.context.chrome.scripting={async executeScript(options) {
+        assert.equal(options.target.tabId,42);
+        scriptInvocations++;
+        return [{result:{
+          provider:"chatgpt",context:"chrome_active_tab",authentication,
+          reason:authentication==="verified" ? "first_party_session_confirmed" : "provider_rejected_session",
+          checked_at:new Date().toISOString(), exported_snapshot_verified:false
+        }}];
+      }};
+      const priorCalls=[...popup.chromeCalls];
+      await popup.controls.verifyChatgptActiveTab();
+      assert.equal(scriptInvocations,1);
+      assert.match(popup.byId("message").textContent,/Tab changed during verification/);
+      assert.doesNotMatch(popup.byId("message").textContent,/verified in this Chrome tab|no active account/);
+      assert.doesNotMatch(popup.byId("message").textContent,/private-initial|private-next|private-other/);
+      assert.deepEqual(popup.chromeCalls,priorCalls,"stale read-only check must not sync credentials");
+    }
+  }
+
+  const unchanged=loadPopup();
+  for (let i=0; i<5; i++) await new Promise(resolve=>setImmediate(resolve));
+  unchanged.context.chrome.tabs.query=async()=>[{id:42,url:initial}];
+  unchanged.context.chrome.scripting={executeScript:async()=>[{result:{
+    provider:"chatgpt",context:"chrome_active_tab",authentication:"verified",
+    reason:"first_party_session_confirmed",checked_at:new Date().toISOString(),
+    exported_snapshot_verified:false
+  }}]};
+  await unchanged.controls.verifyChatgptActiveTab();
+  assert.match(unchanged.byId("message").textContent,/account verified in this Chrome tab/);
+  assert.doesNotMatch(unchanged.byId("message").textContent,/private-initial/);
+});
+
 test("active-tab verification refuses foreign origins and stale tab changes", async () => {
   const popup = loadPopup();
   for(let i=0;i<5;i++) await new Promise(resolve=>setImmediate(resolve));
