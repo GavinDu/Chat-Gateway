@@ -377,9 +377,11 @@ mod tests {
         );
         assert!(PageLease::take(&pages, Provider::MetaAI).is_err());
         assert!(pages.borrow().contains_key(&Provider::MetaAI));
-        assert!(super::super::worker::ensure_provider_page(&global, &pages, Provider::MetaAI)
-            .await
-            .is_err());
+        assert!(
+            super::super::worker::ensure_provider_page(&global, &pages, Provider::MetaAI)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
