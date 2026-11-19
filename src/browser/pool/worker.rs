@@ -74,6 +74,123 @@ mod test_adapter_isolated_browser_tests {
     }
 }
 
+/// Only the source-backed ChatGPT first-party session check may assert
+/// account readiness. A visible editor or Meta AI anonymous response cannot.
+/// Never emit the upstream error or mutate cached session/account status here.
+fn first_party_account_result(result: Result<()>) -> FirstPartyAccountVerdict {
+    match result {
+        Ok(()) => FirstPartyAccountVerdict::Verified,
+        Err(error) if error.downcast_ref::<ProviderSessionExpiredError>().is_some() => {
+            FirstPartyAccountVerdict::ExplicitUnauthenticated
+        }
+        Err(_) => FirstPartyAccountVerdict::Unknown,
+    }
+}
+
+async fn verify_existing_first_party_page(
+    provider: Provider,
+    page: &mut obscura_core::Page,
+) -> FirstPartyAccountVerdict {
+    if provider != Provider::ChatGPT {
+        return FirstPartyAccountVerdict::Unsupported;
+    }
+    first_party_account_result(providers::chatgpt::verify_credentials(page).await)
+}
+
+#[cfg(test)]
+mod first_party_account_probe_tests {
+    use super::*;
+
+    async fn page_with_auth_fixture(source: &str) -> obscura_core::Page {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        page.goto(
+            "data:text/html,<html data-chat-gateway-test-fixture><body>read only session</body></html>",
+        )
+        .await
+        .unwrap();
+        page.evaluate(source);
+        page
+    }
+
+    #[tokio::test]
+    async fn source_backed_warm_page_account_probe_is_distinct_from_composer() {
+        let mut valid = page_with_auth_fixture(
+            r#"globalThis.fetch = async (url, options) => {
+                if (url !== '/api/auth/session' || options.credentials !== 'include') {
+                    throw new Error('private invalid route');
+                }
+                return new Response(JSON.stringify({
+                    user:{fixture:true}, accessToken:'synthetic-not-a-real-token',
+                    expires:new Date(Date.now()+60000).toISOString()
+                }));
+            };"#,
+        )
+        .await;
+        assert_eq!(
+            verify_existing_first_party_page(Provider::ChatGPT, &mut valid).await,
+            FirstPartyAccountVerdict::Verified
+        );
+
+        let mut rejected = page_with_auth_fixture(
+            "globalThis.fetch = async () => new Response('{}', {status:401});",
+        )
+        .await;
+        assert_eq!(
+            verify_existing_first_party_page(Provider::ChatGPT, &mut rejected).await,
+            FirstPartyAccountVerdict::ExplicitUnauthenticated
+        );
+
+        let mut challenged = page_with_auth_fixture(
+            "globalThis.fetch = async () => new Response('{}', {status:403});",
+        )
+        .await;
+        assert_eq!(
+            verify_existing_first_party_page(Provider::ChatGPT, &mut challenged).await,
+            FirstPartyAccountVerdict::Unknown
+        );
+        let mut missing = page_with_auth_fixture(
+            "globalThis.fetch = async () => new Response(JSON.stringify({user:{fixture:true},accessToken:' ',expires:new Date(Date.now()+60000).toISOString()}));",
+        )
+        .await;
+        assert_eq!(
+            verify_existing_first_party_page(Provider::ChatGPT, &mut missing).await,
+            FirstPartyAccountVerdict::Unknown
+        );
+        assert_eq!(FirstPartyAccountVerdict::Verified.as_str(), "verified");
+        assert_eq!(
+            FirstPartyAccountVerdict::ExplicitUnauthenticated.as_str(),
+            "unauthenticated"
+        );
+    }
+
+    #[tokio::test]
+    async fn unsupported_metaai_does_not_issue_account_fetch_or_claim_auth() {
+        let mut page = page_with_auth_fixture(
+            "globalThis.calls = 0; globalThis.fetch = async () => {calls++;throw new Error('private account');};",
+        )
+        .await;
+        assert_eq!(
+            verify_existing_first_party_page(Provider::MetaAI, &mut page).await,
+            FirstPartyAccountVerdict::Unsupported
+        );
+        assert_eq!(page.evaluate("globalThis.calls").as_f64(), Some(0.0));
+        assert_eq!(FirstPartyAccountVerdict::Unknown.as_str(), "unknown");
+        assert_eq!(FirstPartyAccountVerdict::Unsupported.as_str(), "unsupported");
+    }
+
+    #[test]
+    fn unknown_account_error_never_includes_raw_upstream_error_in_verdict() {
+        let error = anyhow::anyhow!("private account cookie and URL");
+        let verdict = first_party_account_result(Err(error));
+        assert_eq!(verdict, FirstPartyAccountVerdict::Unknown);
+        assert!(!verdict.as_str().contains("private"));
+    }
+}
+
 /// Session restore/save failures may contain upstream URLs, vault paths, or
 /// credential-bearing text. Only stable categories cross the log boundary;
 /// the surrounding fixed log message identifies the failing operation.
@@ -1498,6 +1615,44 @@ pub(super) fn browser_thread(
                                     // An inconclusive probe is false, never a verified login.
                                     // Preserve the distinction used during warm-up and by status.
                                     verify_session_page(provider, &page, adapter.as_ref())
+                                }.await;
+                                let _ = reply.send(result);
+                            });
+                        }
+                        Command::VerifyFirstPartyAccount { provider, reply } => {
+                            let pages = pages.clone();
+                            let locks = locks.clone();
+                            let operation_gate = operation_gate.clone();
+                            tokio::task::spawn_local(async move {
+                                if reply.is_closed() { return; }
+                                let result: Result<FirstPartyAccountVerdict> = async {
+                                    // No reviewed account contract for Meta AI or deferred
+                                    // providers: do not navigate, create a page, or fetch.
+                                    if provider != Provider::ChatGPT {
+                                        return Ok(FirstPartyAccountVerdict::Unsupported);
+                                    }
+                                    // Preserve the existing send/refresh lock order:
+                                    // global browser-driving gate, then provider page lock.
+                                    let _operation = operation_gate.lock().await;
+                                    if reply.is_closed() {
+                                        return Ok(FirstPartyAccountVerdict::Unknown);
+                                    }
+                                    let Some(lock) = locks.borrow().get(&provider).cloned() else {
+                                        return Ok(FirstPartyAccountVerdict::Unknown);
+                                    };
+                                    let _guard = lock.lock().await;
+                                    if reply.is_closed() || !pages.borrow().contains_key(&provider) {
+                                        return Ok(FirstPartyAccountVerdict::Unknown);
+                                    }
+                                    // PageLease takes ownership of the *actual* warm page
+                                    // and restores it on success, error or cancellation.
+                                    // No RefCell borrow crosses an await, and the probe
+                                    // cannot mutate vault, applied fingerprint, or state.
+                                    let mut page = match PageLease::take(&pages, provider) {
+                                        Ok(page) => page,
+                                        Err(_) => return Ok(FirstPartyAccountVerdict::Unknown),
+                                    };
+                                    Ok(verify_existing_first_party_page(provider, &mut page).await)
                                 }.await;
                                 let _ = reply.send(result);
                             });
