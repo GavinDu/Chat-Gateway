@@ -283,6 +283,13 @@ fn classify(e: &Evidence, now: u64) -> Diagnosis {
         if attempt.outcome != Outcome::Failed {
             return inconclusive(provider, "contradictory_gateway_failure_evidence");
         }
+        // Owner status is observed after the failed request, never before it.
+        // A matching UUID alone cannot make contradictory clock order causal.
+        if gateway_failure_timestamp(failure)
+            .is_some_and(|observed_at| observed_at < attempt.observed_at_ms)
+        {
+            return inconclusive(provider, "gateway_failure_precedes_attempt");
+        }
         // A failure at candidate/backend admission cannot certify a later
         // response/stream phase of the *same provider attempt*. This can
         // happen when owner evidence incorrectly joins fallback attempts.
@@ -577,6 +584,64 @@ mod tests {
         let body = serde_json::to_string(&result).unwrap();
         assert!(!body.contains(ID));
         assert!(!body.contains("backend_unavailable"));
+    }
+
+    #[test]
+    fn gateway_last_failure_must_follow_the_failed_attempt() {
+        let mut evidence = with_gateway_failure();
+        evidence["attempt"]["observed_at_ms"] = json!(NOW);
+        evidence["gateway_failure"]["observed_at_ms"] = json!(NOW - 1);
+        let early = checked(evidence.clone());
+        assert_eq!(early.category, "inconclusive");
+        assert_eq!(early.reason, "gateway_failure_precedes_attempt");
+        assert!(!early.live_proof);
+        let safe = serde_json::to_string(&early).unwrap();
+        assert!(!safe.contains(ID));
+        assert!(!safe.contains("token"));
+        assert!(!safe.contains("cookie"));
+
+        evidence["gateway_failure"]["observed_at_ms"] = json!(NOW);
+        assert_eq!(checked(evidence.clone()).category, "transport_or_extraction");
+        evidence["gateway_failure"]["observed_at_ms"] = json!(NOW + 1_000);
+        assert_eq!(checked(evidence.clone()).category, "transport_or_extraction");
+
+        evidence["provider"] = json!("metaai");
+        evidence["chrome"]["verdict"] = json!("unsupported");
+        evidence["obscura"]["verdict"] = json!("unknown");
+        assert_eq!(
+            checked(evidence.clone()).reason,
+            "authoritative_obscura_account_verifier_missing"
+        );
+
+        // The UTC-only owner-status timestamp has identical ordering rules.
+        evidence["provider"] = json!("chatgpt");
+        evidence["chrome"]["verdict"] = json!("verified");
+        evidence["obscura"]["verdict"] = json!("verified");
+        evidence["gateway_failure"]
+            .as_object_mut()
+            .unwrap()
+            .remove("observed_at_ms");
+        let prior_utc = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(
+            (NOW - 1_000) as i64,
+        )
+        .unwrap()
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        evidence["gateway_failure"]["observed_at_utc"] = json!(prior_utc);
+        assert_eq!(
+            checked(evidence.clone()).reason,
+            "gateway_failure_precedes_attempt"
+        );
+        let current_utc = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(
+            NOW as i64,
+        )
+        .unwrap()
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        evidence["gateway_failure"]["observed_at_utc"] = json!(current_utc);
+        assert_eq!(checked(evidence.clone()).category, "transport_or_extraction");
+
+        // Request identity remains a mandatory separate source fence.
+        evidence["gateway_failure"]["request_id"] = json!(OTHER_ID);
+        assert_eq!(checked(evidence).reason, "gateway_request_id_mismatch");
     }
 
     #[test]
