@@ -275,7 +275,10 @@ mod tests {
             .unwrap();
         global
             .cookies()
-            .set("SID=global-untouched; Secure; Path=/", "https://chatgpt.com/")
+            .set(
+                "SID=global-untouched; Secure; Path=/",
+                "https://chatgpt.com/",
+            )
             .unwrap();
         let private_a = Rc::new(
             obscura_core::Browser::builder()
@@ -339,7 +342,9 @@ mod tests {
         );
         let page = browser.new_page().await.unwrap();
         let pages = Rc::new(RefCell::new(ProviderPageCache::new(1)));
-        pages.borrow_mut().insert_owned(Provider::ChatGPT, page, browser, None);
+        pages
+            .borrow_mut()
+            .insert_owned(Provider::ChatGPT, page, browser, None);
         let lease = PageLease::take(&pages, Provider::ChatGPT).unwrap();
         // Explicit cache invalidation during a lease prevents its late Drop
         // from resurrecting an owned context or permitting global replay.
