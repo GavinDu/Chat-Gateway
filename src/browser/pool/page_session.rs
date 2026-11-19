@@ -292,7 +292,10 @@ mod live_replay_guard_tests {
             .unwrap_err()
             .downcast_ref::<ReplayRequiresIsolatedContext>()
             .is_some());
-        assert!(!destructive_write, "recheck did not authorize shared-jar writes");
+        assert!(
+            !destructive_write,
+            "recheck did not authorize shared-jar writes"
+        );
 
         // Current proof must be established from the *new* epoch only.
         assert!(registry.record_credentials_verified("chatgpt", second));
