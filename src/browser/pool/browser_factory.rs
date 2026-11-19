@@ -111,6 +111,12 @@ pub(super) async fn stage_provider_saved_snapshot(
     ) {
         bail!("candidate_provider_not_in_recovery_scope");
     }
+    // An entirely empty snapshot has nothing to replay into a fresh Browser.
+    // Do not misinterpret a subsequent anonymous page load as credential reuse.
+    // Storage-only candidate material remains allowed but never proves login.
+    if snapshot.cookies.is_empty() && snapshot.local_storage.is_empty() {
+        bail!("candidate_snapshot_no_material");
+    }
     // Keep source-owned validation before *any* Page allocation or navigation.
     // Discard untrusted error Display; this boundary never logs cookie metadata.
     session::preflight_cookie_restore(snapshot, provider.name())
@@ -413,6 +419,22 @@ mod staged_snapshot_preflight_tests {
         let actual = live.cookies().get_all();
         assert_eq!(actual.len(), 1);
         assert_eq!(actual[0].value, "live-value");
+    }
+
+    #[tokio::test]
+    async fn empty_saved_snapshot_is_not_a_credential_candidate() {
+        let cfg = config();
+        let empty: session::SessionFile = serde_json::from_value(json!({
+            "ts": "fixture", "local_storage": {}, "cookies": []
+        }))
+        .unwrap();
+        for provider in [Provider::ChatGPT, Provider::MetaAI] {
+            let error = match stage_provider_saved_snapshot(&cfg, provider, &empty).await {
+                Ok(_) => panic!("empty candidate must not navigate"),
+                Err(error) => error,
+            };
+            assert_eq!(error.to_string(), "candidate_snapshot_no_material");
+        }
     }
 
     #[tokio::test]
