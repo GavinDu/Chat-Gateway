@@ -768,8 +768,9 @@ impl ObscuraPool {
             .map_err(|_| anyhow::anyhow!("browser thread dropped current URL reply"))?
     }
 
-    /// Read-only authentication probe on the warmed page. The browser worker
-    /// serializes it with sends through the provider's page lock.
+    /// Legacy read-only URL/composer readiness probe on the warmed page,
+    /// NOT first-party account authentication. Use the separate source-backed
+    /// verify_first_party_account command when account proof is required.
     pub async fn verify_session(&self, name: &str) -> Result<bool> {
         let provider =
             Provider::from_name(name).ok_or_else(|| anyhow::anyhow!("unknown provider {name}"))?;
