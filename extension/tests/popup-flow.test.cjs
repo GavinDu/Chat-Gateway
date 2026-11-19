@@ -237,7 +237,7 @@ function loadPopup({failCookieDomain = null, includeSecondProvider = false, manu
   vm.createContext(context);
   vm.runInContext(fs.readFileSync(path.join(__dirname,"..","credential_probe.js"),"utf8"),context);
   vm.runInContext(fs.readFileSync(path.join(__dirname,"..","popup.js"),"utf8")+
-    "\nglobalThis.testControls={refreshStatus,connectProvider,logoutProvider,initialize,connectLocalGateway,popupConnectionJson,safeStatusErrorMessage,safeProviderActionError,safeGatewayActionError,verifyChatgptActiveTab,safeLastFailedRequest};",context);
+    "\nglobalThis.testControls={refreshStatus,connectProvider,logoutProvider,initialize,connectLocalGateway,popupConnectionJson,safeStatusErrorMessage,safeProviderActionError,safeGatewayActionError,verifyChatgptActiveTab,compareChatgptBrowserAndGateway,safeWarmChatgptAccountRecord,safeLastFailedRequest};",context);
   return {values,server,elements,byId,chromeCalls,intervals,connectDeadlines,clearedConnectDeadlines,controls:context.testControls,context};
 }
 
@@ -1219,6 +1219,170 @@ test("user-initiated ChatGPT verification is tab-scoped, read-only and does not 
   assert.match(popup.byId("message").textContent, /Gateway credential replay remains unverified/);
   assert.equal(popup.byId("verify-chatgpt").disabled,false);
   assert.deepEqual(popup.chromeCalls,priorCalls,"verification must not sync or modify gateway link");
+});
+
+
+function pairChatgptFixture(popup) {
+  popup.values.connectionMode="local";
+  popup.values.gateway="http://127.0.0.1:8080";
+  popup.values.linkedProviders=["chatgpt"];
+  popup.values.providerLinkEpochs={chatgpt:"paired-link-epoch"};
+  popup.values.relayConnectionEpoch="paired-relay-epoch";
+  popup.context.chrome.tabs.query=async()=>[{id:42,url:"https://chatgpt.com/c/private-chat-id"}];
+  popup.context.chrome.scripting={executeScript:async options=>{
+    assert.equal(options.target.tabId,42);
+    assert.equal(options.target.allFrames,false);
+    assert.equal(options.world,"MAIN");
+    return [{result:{
+      provider:"chatgpt",context:"chrome_active_tab",
+      authentication:"verified",reason:"first_party_session_confirmed",
+      http_status:200,checked_at:new Date().toISOString(),
+      exported_snapshot_verified:false
+    }}];
+  }};
+}
+function warmChatgptFixture(overrides={}) {
+  return {
+    schema_version:1,provider:"chatgpt",context:"obscura_warm_page",
+    authentication:"verified",reason:"first_party_session_confirmed",
+    checked_at_utc:new Date().toISOString().replace(".000Z","Z")
+      .replace(/\.\d{3}Z$/,"Z"),
+    attempt_id:"123e4567-e89b-42d3-a456-426614174000",
+    worker_generation:3,
+    exported_snapshot_verified:false,applied_snapshot_verified:false,
+    ...overrides
+  };
+}
+
+test("explicit paired account comparison uses no automatic probe, upload or parity claim",async()=>{
+  const popup=loadPopup();
+  for(let i=0;i<5;i++) await new Promise(resolve=>setImmediate(resolve));
+  pairChatgptFixture(popup);
+  const requests=[];
+  popup.context.relayFetch=async (path,options,expected)=>{
+    requests.push({path,options,expected});
+    return {ok:true,status:200,json:async()=>warmChatgptFixture()};
+  };
+  assert.equal(requests.length,0);
+  const priorCalls=[...popup.chromeCalls];
+  await popup.controls.compareChatgptBrowserAndGateway();
+  assert.equal(requests.length,1);
+  assert.equal(requests[0].path,"/relay/v1/account-verification/chatgpt");
+  assert.equal(requests[0].options.method,"POST");
+  assert.equal(requests[0].options.body,"{}");
+  assert.equal(requests[0].expected.provider,"chatgpt");
+  assert.equal(requests[0].expected.linkEpoch,"paired-link-epoch");
+  assert.equal(requests[0].expected.gateway,popup.values.gateway);
+  assert.match(popup.byId("message").textContent,/Chrome tab: verified/);
+  assert.match(popup.byId("message").textContent,/Obscura warm page: verified/);
+  assert.match(popup.byId("message").textContent,/applied-snapshot match NOT verified/);
+  assert.doesNotMatch(popup.byId("message").textContent,/same account|snapshot restored|private-chat-id|123e4567/);
+  assert.equal(popup.byId("verify-chatgpt-gateway").disabled,false);
+  assert.equal(popup.byId("verify-chatgpt").disabled,false);
+  assert.deepEqual(popup.chromeCalls,priorCalls,"no mutation/sync worker call");
+  // The ordinary connected heartbeat uses status only and must never call
+  // the account-verification endpoint without a direct user click.
+  requests.length=0;
+  await popup.intervals.find(x=>x.ms===30_000).fn();
+  assert(!requests.some(req=>req.path.includes("account-verification")));
+});
+
+test("paired comparison refuses unlinked or pending account consent before probing either side",async()=>{
+  for(const state of [
+    {},
+    {connectionMode:"local"},
+    {connectionMode:"local",linkedProviders:["chatgpt"]},
+    {connectionMode:"local",linkedProviders:["chatgpt"],
+      providerLinkEpochs:{chatgpt:"epoch"},providerLinkPendingAttempts:{chatgpt:"pending"}}
+  ]){
+    const popup=loadPopup();
+    for(let i=0;i<5;i++) await new Promise(resolve=>setImmediate(resolve));
+    pairChatgptFixture(popup);
+    for(const key of ["connectionMode","linkedProviders","providerLinkEpochs","providerLinkPendingAttempts"]){
+      delete popup.values[key];
+    }
+    Object.assign(popup.values,state);
+    let fetched=0,injected=0;
+    popup.context.relayFetch=async()=>{fetched++;throw Error("private fetch");};
+    popup.context.chrome.scripting={executeScript:async()=>{injected++;return [];}};
+    await popup.controls.compareChatgptBrowserAndGateway();
+    assert.equal(fetched,0);
+    assert.equal(injected,0);
+    assert.match(popup.byId("message").textContent,/Connect and link ChatGPT/);
+  }
+});
+
+test("paired comparison rejects changed link epoch and same-origin tab navigation after async work",async()=>{
+  for(const mode of ["link_epoch","tab_route"]){
+    const popup=loadPopup();
+    for(let i=0;i<5;i++) await new Promise(resolve=>setImmediate(resolve));
+    pairChatgptFixture(popup);
+    let count=0;
+    const base=popup.context.chrome.tabs.query;
+    popup.context.chrome.tabs.query=async()=>{
+      const tabs=await base();
+      count++;
+      return mode==="tab_route" && count>=3
+        ? [{id:42,url:"https://chatgpt.com/c/private-other-account"}] : tabs;
+    };
+    popup.context.relayFetch=async()=>{
+      if(mode==="link_epoch")popup.values.providerLinkEpochs.chatgpt="new-login-epoch";
+      return {ok:true,json:async()=>warmChatgptFixture()};
+    };
+    await popup.controls.compareChatgptBrowserAndGateway();
+    const shown=popup.byId("message").textContent;
+    assert.match(shown,/Result discarded/);
+    assert.doesNotMatch(shown,/Chrome tab: verified|Obscura warm page: verified|private-other-account/);
+  }
+});
+
+test("paired comparison quarantines untrusted gateway proof, leaks no URL or token",async()=>{
+  const invalids=[
+    {exported_snapshot_verified:true},
+    {applied_snapshot_verified:true},
+    {account_id:"private account"},
+    {worker_generation:-1},
+    {checked_at_utc:"1999-01-01T00:00:00Z"},
+    {authentication:"verified",reason:"first_party_check_inconclusive"},
+    {reason:"token=private upstream body"}
+  ];
+  for(const invalid of invalids){
+    const popup=loadPopup();
+    for(let i=0;i<5;i++) await new Promise(resolve=>setImmediate(resolve));
+    pairChatgptFixture(popup);
+    popup.context.relayFetch=async()=>({ok:true,json:async()=>warmChatgptFixture(invalid)});
+    await popup.controls.compareChatgptBrowserAndGateway();
+    const shown=popup.byId("message").textContent;
+    assert.match(shown,/Gateway account verification returned unsupported evidence/);
+    assert.doesNotMatch(shown,/private|token=|account_id|snapshot restored|Chrome tab: verified/);
+  }
+  const popup=loadPopup();
+  for(let i=0;i<5;i++) await new Promise(resolve=>setImmediate(resolve));
+  pairChatgptFixture(popup);
+  popup.context.relayFetch=async()=>{throw Error("token=private https://private.invalid/");};
+  await popup.controls.compareChatgptBrowserAndGateway();
+  assert.equal(popup.byId("message").textContent,
+    "Paired account checks unavailable. No sessions changed or resynced.");
+});
+
+test("paired comparison displays independent negative and unknown account verdicts",async()=>{
+  for(const [gateway,reason,label] of [
+    ["unauthenticated","provider_rejected_session","not signed in"],
+    ["unknown","first_party_check_inconclusive","unknown"],
+    ["unsupported","account_verifier_not_established","unsupported"]
+  ]){
+    const popup=loadPopup();
+    for(let i=0;i<5;i++) await new Promise(resolve=>setImmediate(resolve));
+    pairChatgptFixture(popup);
+    popup.context.relayFetch=async()=>({ok:true,json:async()=>warmChatgptFixture({
+      authentication:gateway,reason
+    })});
+    await popup.controls.compareChatgptBrowserAndGateway();
+    assert.match(popup.byId("message").textContent,
+      new RegExp("Obscura warm page: " + label));
+    assert.match(popup.byId("message").textContent,/match NOT verified/);
+    assert.doesNotMatch(popup.byId("message").textContent,/same account/);
+  }
 });
 
 test("same-origin tab route drift after injected probe invalidates account verdict without URL disclosure", async () => {
