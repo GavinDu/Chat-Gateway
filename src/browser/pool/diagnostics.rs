@@ -16,12 +16,13 @@ impl std::fmt::Display for ProviderSessionExpiredError {
 
 impl std::error::Error for ProviderSessionExpiredError {}
 
-/// The generic login-URL probe is only DOM evidence, not an authoritative
-/// account verdict. In the active recovery scope, it must never authorize
-/// discarding the original encrypted snapshot or clearing the shared jar.
-/// The deferred providers retain their legacy behavior until separately
-/// audited; first-party ChatGPT 401 is handled by a distinct verifier.
-pub(super) fn startup_dom_login_must_preserve_snapshot(provider: Provider) -> bool {
+/// Neither a startup login-looking URL nor a failed navigation/import is
+/// an authoritative account rejection. Active recovery must not intentionally
+/// erase the original encrypted snapshot or the shared browser's prior jar.
+/// This guard does not roll back partial cookie writes by PageSession::open;
+/// that still requires isolated Browser+Page staging (#1385).
+/// Deferred providers keep their prior policy until separately audited.
+pub(super) fn startup_ambiguous_failure_must_preserve_snapshot(provider: Provider) -> bool {
     matches!(provider, Provider::ChatGPT | Provider::MetaAI)
 }
 
@@ -210,8 +211,14 @@ mod inconclusive_session_probe_tests {
             .is_some());
         for provider in [Provider::ChatGPT, Provider::MetaAI] {
             assert!(
-                super::startup_dom_login_must_preserve_snapshot(provider),
+                super::startup_ambiguous_failure_must_preserve_snapshot(provider),
                 "active startup DOM probe must never authorize vault deletion"
+            );
+            // A failed PageSession::open is equally inconclusive: its error
+            // cannot authorize clearing old profile cookies or localStorage.
+            assert!(
+                super::startup_ambiguous_failure_must_preserve_snapshot(provider),
+                "failed active replay must withhold page without a cleanup write"
             );
         }
         for provider in [
@@ -224,7 +231,7 @@ mod inconclusive_session_probe_tests {
             Provider::Manus,
         ] {
             assert!(
-                !super::startup_dom_login_must_preserve_snapshot(provider),
+                !super::startup_ambiguous_failure_must_preserve_snapshot(provider),
                 "deferred provider startup behavior is outside this P0 slice"
             );
         }
