@@ -16,6 +16,15 @@ impl std::fmt::Display for ProviderSessionExpiredError {
 
 impl std::error::Error for ProviderSessionExpiredError {}
 
+/// The generic login-URL probe is only DOM evidence, not an authoritative
+/// account verdict. In the active recovery scope, it must never authorize
+/// discarding the original encrypted snapshot or clearing the shared jar.
+/// The deferred providers retain their legacy behavior until separately
+/// audited; first-party ChatGPT 401 is handled by a distinct verifier.
+pub(super) fn startup_dom_login_must_preserve_snapshot(provider: Provider) -> bool {
+    matches!(provider, Provider::ChatGPT | Provider::MetaAI)
+}
+
 /// A page with a visible textarea is not proof of provider readiness when
 /// redirects or unrelated tabs have moved it away from the provider origin.
 /// Keep this origin check separate from authentication proof: a matching origin
@@ -190,6 +199,36 @@ mod inconclusive_session_probe_tests {
             .downcast_ref::<ProviderSessionExpiredError>()
             .is_some());
     }
+    #[test]
+    fn active_login_route_does_not_authorize_destructive_snapshot_invalidation() {
+        // The same typed error can originate from URL/composer shape alone:
+        // it is not a source-backed /api/auth/session 401.
+        let url_only = classify_session_probe(true, false).unwrap_err();
+        assert!(url_only
+            .downcast_ref::<ProviderSessionExpiredError>()
+            .is_some());
+        for provider in [Provider::ChatGPT, Provider::MetaAI] {
+            assert!(
+                super::startup_dom_login_must_preserve_snapshot(provider),
+                "active startup DOM probe must never authorize vault deletion"
+            );
+        }
+        for provider in [
+            Provider::Claude,
+            Provider::Grok,
+            Provider::Qwen,
+            Provider::Gemini,
+            Provider::Mistral,
+            Provider::Perplexity,
+            Provider::Manus,
+        ] {
+            assert!(
+                !super::startup_dom_login_must_preserve_snapshot(provider),
+                "deferred provider startup behavior is outside this P0 slice"
+            );
+        }
+    }
+
     #[test]
     fn login_complete_requires_proven_composer_readiness() {
         assert!(require_login_completion_ready(Ok(true)).is_ok());
