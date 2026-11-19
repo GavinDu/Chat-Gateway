@@ -2283,21 +2283,28 @@ fn planned_cookie_replay(
     now_epoch: f64,
 ) -> Result<(Vec<Cookie>, usize)> {
     let expiry_aware = matches!(provider, "chatgpt" | "metaai");
-    let invalid = file
-        .cookies
-        .iter()
-        .filter(|cookie| {
-            cookie_domain_allowed(provider, &cookie.domain)
-                && (!restored_cookie_fields_safe(cookie)
-                    || cookie.validate_browser_metadata().is_err())
-        })
-        .count();
-    ensure_cookie_restore_complete(invalid)?;
+    // A genuinely expired ancillary cookie is never reintroduced to the
+    // active provider jar. Discard it before validating the fields that
+    // would only matter when constructing a Set-Cookie header. Otherwise
+    // an obsolete malformed entry could block usable nonexpired sessions.
+    // NaN/nonfinite/negative expiry is NOT a genuine expired cookie and
+    // still fails through validate_browser_metadata below.
     let expired = |cookie: &Cookie| {
         cookie
             .expires
             .is_some_and(|expiry| expiry >= 0.0 && expiry <= now_epoch)
     };
+    let invalid = file
+        .cookies
+        .iter()
+        .filter(|cookie| {
+            cookie_domain_allowed(provider, &cookie.domain)
+                && !(expiry_aware && expired(cookie))
+                && (!restored_cookie_fields_safe(cookie)
+                    || cookie.validate_browser_metadata().is_err())
+        })
+        .count();
+    ensure_cookie_restore_complete(invalid)?;
     let candidates: Vec<Cookie> = file
         .cookies
         .iter()
@@ -3127,29 +3134,44 @@ mod cookie_scope_tests {
     }
 
     #[tokio::test]
-    async fn expired_cookie_with_storage_still_validates_metadata_before_jar_writes() {
-        let browser = Browser::builder().stealth(false).build().unwrap();
-        browser
-            .cookies()
-            .set("preserved=dummy; Secure; Path=/", "https://chatgpt.com/")
-            .unwrap();
-        let mut old = cookie("ancillary", "secret-stale-fixture", "/");
-        old.domain = "chatgpt.com".into();
-        old.path = "/bad;inject".into();
-        old.expires = Some(1.0);
-        let file = SessionFile {
-            cookies: vec![old],
-            local_storage: HashMap::from([("key".to_owned(), "secret-value".to_owned())]),
-            ts: "fixture".into(),
-        };
-        let error = restore_cookies(&browser, &file, "chatgpt")
-            .unwrap_err()
-            .to_string();
-        assert!(!error.contains("secret-stale-fixture"));
-        assert!(!error.contains("secret-value"));
-        let remaining = browser.cookies().get_all();
-        assert_eq!(remaining.len(), 1);
-        assert_eq!(remaining[0].value, "dummy");
+    async fn genuinely_expired_malformed_ancillary_is_discarded_before_jar_writes() {
+        for (provider, domain) in [("chatgpt", "chatgpt.com"), ("metaai", "meta.ai")] {
+            let browser = Browser::builder().stealth(false).build().unwrap();
+            browser
+                .cookies()
+                .set("preserved=dummy; Secure; Path=/", &format!("https://{domain}/"))
+                .unwrap();
+            let mut old = cookie("ancillary", "secret-stale-fixture", "/");
+            old.domain = domain.into();
+            old.path = "/bad;inject".into();
+            old.same_site = Some("Unknown".into());
+            old.expires = Some(1.0);
+            let mut live = cookie("live-session", "synthetic-live", "/");
+            live.domain = domain.into();
+            let file = SessionFile {
+                cookies: vec![old.clone(), live],
+                local_storage: HashMap::new(),
+                ts: "fixture".into(),
+            };
+            preflight_cookie_restore(&file, provider).unwrap();
+            let (planned, _) = planned_cookie_replay(&file, provider, 1000.0).unwrap();
+            assert_eq!(planned.len(), 1);
+            assert_eq!(planned[0].name, "live-session");
+            restore_cookies(&browser, &file, provider).unwrap();
+            assert_eq!(browser.cookies().get_all().len(), 2);
+            assert!(browser.cookies().get_all().iter().all(|item| item.name != "ancillary"));
+
+            // A malformed nonexpired credential still rejects the complete
+            // plan before any new jar writes; no implicit login inference.
+            old.expires = None;
+            let invalid_file = SessionFile {
+                cookies: vec![old],
+                local_storage: HashMap::new(),
+                ts: "fixture".into(),
+            };
+            let error = preflight_cookie_restore(&invalid_file, provider).unwrap_err();
+            assert_eq!(error.to_string(), "failed to restore 1 provider session cookie(s)");
+        }
     }
 
     #[test]
@@ -3167,6 +3189,60 @@ mod cookie_scope_tests {
                 "storage_only_presence_unverified"
             );
         }
+    }
+
+    #[test]
+    fn expired_malformed_cookie_filter_never_accepts_invalid_expiry_or_empty_replay() {
+        for (provider, domain) in [("chatgpt", "chatgpt.com"), ("metaai", "meta.ai")] {
+            let mut expired = cookie("old-invalid", "do-not-emit", "/bad;inject");
+            expired.domain = domain.into();
+            expired.expires = Some(1.0);
+            let file = SessionFile {
+                cookies: vec![expired.clone()],
+                local_storage: HashMap::new(),
+                ts: "fixture".into(),
+            };
+            assert_eq!(
+                planned_cookie_replay(&file, provider, 1000.0)
+                    .unwrap_err()
+                    .to_string(),
+                "no live provider cookies remain in saved session"
+            );
+            let with_storage = SessionFile {
+                local_storage: HashMap::from([("key".into(), "private-test-storage".into())]),
+                ..file
+            };
+            let (planned, _) = planned_cookie_replay(&with_storage, provider, 1000.0).unwrap();
+            assert!(planned.is_empty(), "storage-only candidate is not authenticated proof");
+
+            for bad_expiry in [f64::NAN, f64::INFINITY, -2.0] {
+                expired.expires = Some(bad_expiry);
+                let malformed = SessionFile {
+                    cookies: vec![expired.clone()],
+                    local_storage: HashMap::new(),
+                    ts: "fixture".into(),
+                };
+                let err = planned_cookie_replay(&malformed, provider, 1000.0).unwrap_err();
+                assert_eq!(err.to_string(), "failed to restore 1 provider session cookie(s)");
+                assert!(!err.to_string().contains("do-not-emit"));
+            }
+        }
+        // Expiry-aware omission is a scoped recovery policy, not permission
+        // for the seven deferred provider parsers to ignore invalid metadata.
+        let mut deferred = cookie("old-invalid", "private-deferred", "/bad;inject");
+        deferred.domain = "claude.ai".into();
+        deferred.expires = Some(1.0);
+        let file = SessionFile {
+            cookies: vec![deferred],
+            local_storage: HashMap::new(),
+            ts: "fixture".into(),
+        };
+        assert_eq!(
+            planned_cookie_replay(&file, "claude", 1000.0)
+                .unwrap_err()
+                .to_string(),
+            "failed to restore 1 provider session cookie(s)"
+        );
     }
 
     #[test]
