@@ -2822,10 +2822,12 @@ mod replay_storage_origin_tests {
             .unwrap();
         let error = restore_local_storage_for_origin(&page, &snapshot(), "https://chatgpt.com")
             .unwrap_err();
-        assert_eq!(error.to_string(), "failed to restore provider localStorage entry");
+        assert_eq!(
+            error.to_string(),
+            "failed to restore provider localStorage entry"
+        );
         assert!(!error.to_string().contains("private-storage"));
-        let invalid = restore_local_storage_for_origin(&page, &snapshot(), "null")
-            .unwrap_err();
+        let invalid = restore_local_storage_for_origin(&page, &snapshot(), "null").unwrap_err();
         assert_eq!(invalid.to_string(), "provider_storage_origin_mismatch");
     }
 }
