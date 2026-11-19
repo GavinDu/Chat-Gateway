@@ -365,7 +365,10 @@ impl ProviderSessionRegistry {
             .lock()
             .map_err(|_| anyhow::anyhow!("provider state unavailable"))?
             .remove(provider);
-        self.invalidate_credentials(provider);
+        // A retry reset revokes current account proof, not the former live
+        // context's replay safety. Only explicit logout/known auth rejection
+        // or worker disposal may release this fail-closed latch.
+        self.invalidate_current_verdict_for_challenge(provider);
         self.clear_last_request(provider);
         Ok(())
     }
@@ -946,7 +949,8 @@ mod credential_evidence_lifecycle_tests {
         assert!(!registry.record_credentials_verified("chatgpt", pending));
 
         registry.reset_for_retry("chatgpt").unwrap();
-        assert!(!registry.has_prior_positive_account_observation("chatgpt"));
+        assert!(registry.has_prior_positive_account_observation("chatgpt"));
+        assert!(!registry.credentials_verified("chatgpt"));
         let again = registry.begin_credential_verification("chatgpt").unwrap();
         assert!(registry.record_credentials_verified("chatgpt", again));
         registry.record_needs_login("chatgpt");
