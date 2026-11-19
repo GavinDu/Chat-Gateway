@@ -2,7 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
-function fixture(hostname = 'chatgpt.com', options = {}) {
+function fixture(hostname = 'chatgpt.com', options = {}, provider = 'chatgpt') {
   const commands = [];
   const packets = [];
   let reader;
@@ -39,6 +39,7 @@ function fixture(hostname = 'chatgpt.com', options = {}) {
     script = script.replace('const CLOSE_TIMEOUT_MS = 10000;',
       `const CLOSE_TIMEOUT_MS = ${options.closeTimeoutMs};`);
   }
+  script = script.replace("['chatgpt.com', 'www.chatgpt.com']", provider === 'metaai' ? "['meta.ai', 'www.meta.ai']" : "['chatgpt.com', 'www.chatgpt.com']");
   vm.runInContext(script, context);
   return {context,commands,original,push};
 }
@@ -153,4 +154,37 @@ test('close during delayed connect cannot resurrect a socket after deadline', as
   assert.equal(opens,0);
   assert.equal(closes,1);
   assert.equal(f.commands.filter(c=>c.op==='release').length,1);
+});
+
+test('Meta AI page bridge forwards a real binary conversation frame and preserves origin isolation', async () => {
+  const f = fixture('www.meta.ai', {}, 'metaai');
+  const socket = new f.context.WebSocket('wss://gateway.meta.ai/ws/clippy');
+  socket.binaryType = 'arraybuffer';
+  await new Promise((resolve, reject) => {
+    socket.onerror = () => reject(new Error('unexpected Meta AI transport failure'));
+    socket.onopen = () => socket.send(new Uint8Array([8, 1, 255]));
+    socket.onmessage = event => {
+      assert.deepEqual([...new Uint8Array(event.data)], [8, 1, 255]);
+      socket.close(1000, 'fixture');
+    };
+    socket.onclose = resolve;
+  });
+  assert.equal(f.commands.filter(command => command.op === 'send').length, 1);
+  assert.equal(f.commands.find(command => command.op === 'open').url, 'wss://gateway.meta.ai/ws/clippy');
+  const foreign = fixture('chatgpt.com', {}, 'metaai');
+  assert.equal(foreign.context.WebSocket, foreign.original);
+  assert.equal(foreign.commands.length, 0);
+});
+
+test('Meta AI close while connect is pending releases exactly once before the deadline', async () => {
+  const f = fixture('www.meta.ai', {delayOpenMs:5,closeTimeoutMs:1000}, 'metaai');
+  const socket = new f.context.WebSocket('wss://gateway.meta.ai/ws/clippy');
+  let opens = 0;
+  socket.onopen = () => {opens++;};
+  const closed = new Promise(resolve => {socket.onclose = resolve;});
+  socket.close();
+  await closed;
+  assert.equal(opens, 0);
+  assert.equal(socket.readyState, 3);
+  assert.equal(f.commands.filter(c => c.op === 'release').length, 1);
 });
