@@ -178,6 +178,98 @@ where
     Ok(true)
 }
 
+/// A manual LoginComplete must not revoke the known-applied snapshot digest
+/// until the replacement credential snapshot was actually persisted. A failed
+/// save or cancelled future preserves the old marker so a later relay import
+/// cannot mistake a failed save for a successfully rotated credential set.
+/// No RefCell borrow survives the awaited persistence operation.
+pub(super) async fn invalidate_applied_after_login_save<F, T>(
+    applied: &std::cell::RefCell<std::collections::HashMap<Provider, String>>,
+    provider: Provider,
+    persist: F,
+) -> Result<T>
+where
+    F: std::future::Future<Output = Result<T>>,
+{
+    // Persistence errors may include private vault paths or storage details.
+    // This command boundary reports only a fixed diagnostic category.
+    let outcome = persist
+        .await
+        .map_err(|_| anyhow::anyhow!("login_session_snapshot_save_failed"))?;
+    applied.borrow_mut().remove(&provider);
+    Ok(outcome)
+}
+
+#[cfg(test)]
+mod login_save_marker_commit_tests {
+    use super::*;
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+
+    #[tokio::test]
+    async fn failed_save_leaves_old_applied_marker_and_other_provider_unchanged() {
+        let markers = RefCell::new(HashMap::from([
+            (Provider::ChatGPT, "old-chatgpt-generation".to_owned()),
+            (Provider::MetaAI, "other-metaai-generation".to_owned()),
+        ]));
+        let error = invalidate_applied_after_login_save(&markers, Provider::ChatGPT, async {
+            Err::<(), _>(anyhow::anyhow!("private-failing-save-path"))
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(error.to_string(), "login_session_snapshot_save_failed");
+        assert_eq!(
+            markers.borrow().get(&Provider::ChatGPT).map(String::as_str),
+            Some("old-chatgpt-generation")
+        );
+        assert_eq!(
+            markers.borrow().get(&Provider::MetaAI).map(String::as_str),
+            Some("other-metaai-generation")
+        );
+    }
+
+    #[tokio::test]
+    async fn successful_save_invalidates_only_committed_provider() {
+        let markers = RefCell::new(HashMap::from([
+            (Provider::ChatGPT, "old-chatgpt-generation".to_owned()),
+            (Provider::MetaAI, "other-metaai-generation".to_owned()),
+        ]));
+        let confirmed = invalidate_applied_after_login_save(&markers, Provider::ChatGPT, async {
+            Ok::<_, anyhow::Error>(true)
+        })
+        .await
+        .unwrap();
+        assert!(confirmed);
+        assert!(!markers.borrow().contains_key(&Provider::ChatGPT));
+        assert_eq!(
+            markers.borrow().get(&Provider::MetaAI).map(String::as_str),
+            Some("other-metaai-generation")
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_save_cannot_revoke_live_applied_marker() {
+        let markers = RefCell::new(HashMap::from([(
+            Provider::ChatGPT,
+            "old-chatgpt-generation".to_owned(),
+        )]));
+        let cancelled = tokio::time::timeout(
+            Duration::from_millis(10),
+            invalidate_applied_after_login_save(
+                &markers,
+                Provider::ChatGPT,
+                std::future::pending::<Result<()>>(),
+            ),
+        )
+        .await;
+        assert!(cancelled.is_err());
+        assert_eq!(
+            markers.borrow().get(&Provider::ChatGPT).map(String::as_str),
+            Some("old-chatgpt-generation")
+        );
+    }
+}
+
 /// Build the replacement completely before mutating the warm-page cache.
 /// A failed cookie restore, navigation, or storage replay must not drop the
 /// existing page; the import fingerprint remains retryable as well.

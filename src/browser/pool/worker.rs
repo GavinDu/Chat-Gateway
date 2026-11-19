@@ -2279,13 +2279,18 @@ pub(super) fn browser_thread(
                                     super::diagnostics::require_login_completion_ready(
                                         verify_session_page(provider, &login_page, adapter.as_ref())
                                     )?;
-                                    applied_imports.borrow_mut().remove(&provider);
-                                    // Same format/path as every other save:
-                                    // sessions/<provider>.json via
-                                    // session::save_session (cookies from
-                                    // the browser-wide CookieStore +
-                                    // localStorage from this page).
-                                    session::save_session(&browser, &login_page, provider.name(), &login_session_write_tracker).await?;
+                                    // A failed/aborted save must not revoke the applied
+                                    // generation for the existing warm session.
+                                    page_session::invalidate_applied_after_login_save(
+                                        &applied_imports,
+                                        provider,
+                                        session::save_session(
+                                            &browser,
+                                            &login_page,
+                                            provider.name(),
+                                            &login_session_write_tracker,
+                                        ),
+                                    ).await?;
                                     pages.borrow_mut().insert(provider, login_page);
                                     login_pages.borrow_mut().remove(&provider);
                                     login_meta.borrow_mut().remove(&provider);
