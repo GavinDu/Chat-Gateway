@@ -86,15 +86,24 @@ mod storage_origin_policy_tests {
     #[test]
     fn page_redirect_must_match_configured_https_origin_before_storage_replay() {
         for (home, same_origin) in [
-            ("https://chatgpt.com/", "https://chatgpt.com/auth/login?return=%2Fc"),
+            (
+                "https://chatgpt.com/",
+                "https://chatgpt.com/auth/login?return=%2Fc",
+            ),
             ("https://www.meta.ai/", "https://www.meta.ai/chat/"),
         ] {
             assert!(provider_thread_url_is_same_origin(same_origin, home));
         }
         for (home, redirected) in [
-            ("https://chatgpt.com/", "https://evil.example/login?cookie=secret"),
+            (
+                "https://chatgpt.com/",
+                "https://evil.example/login?cookie=secret",
+            ),
             ("https://chatgpt.com/", "http://chatgpt.com/"),
-            ("https://chatgpt.com/", "https://chatgpt.com.attacker.example/"),
+            (
+                "https://chatgpt.com/",
+                "https://chatgpt.com.attacker.example/",
+            ),
             ("https://chatgpt.com/", "https://chatgpt.com@evil.example/"),
             ("https://www.meta.ai/", "https://meta.ai/"),
             ("https://www.meta.ai/", "https://accounts.facebook.com/"),
