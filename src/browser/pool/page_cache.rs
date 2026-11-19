@@ -391,6 +391,7 @@ mod tests {
         pages
             .borrow_mut()
             .finish_unlink(Provider::Claude, page.clone(), None);
+        drop(page);
         assert!(pages.borrow().contains_key(&Provider::Claude));
         let lease = PageLease::take(&pages, Provider::Claude).unwrap();
         drop(lease);
