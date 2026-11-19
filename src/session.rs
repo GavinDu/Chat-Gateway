@@ -2279,10 +2279,7 @@ pub(crate) fn provider_replay_material_coverage(
 /// The same bounded, expiry-aware coverage calculation used by the canonical
 /// restore path supplies this conservative admission policy. Origin storage
 /// is observed-only material, never authenticated account proof.
-pub(crate) fn replay_candidate_has_applicable_material(
-    file: &SessionFile,
-    provider: &str,
-) -> bool {
+pub(crate) fn replay_candidate_has_applicable_material(file: &SessionFile, provider: &str) -> bool {
     let now_epoch = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
