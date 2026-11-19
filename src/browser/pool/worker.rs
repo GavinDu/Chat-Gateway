@@ -2564,20 +2564,31 @@ mod login_cancel_gate_tests {
             (Provider::MetaAI, meta_page),
         ])));
         let login_meta = Rc::new(RefCell::new(HashMap::from([
-            (Provider::ChatGPT, LoginMeta { last_seen: Instant::now() }),
-            (Provider::MetaAI, LoginMeta { last_seen: Instant::now() }),
+            (
+                Provider::ChatGPT,
+                LoginMeta {
+                    last_seen: Instant::now(),
+                },
+            ),
+            (
+                Provider::MetaAI,
+                LoginMeta {
+                    last_seen: Instant::now(),
+                },
+            ),
         ])));
         let gate = tokio::sync::Mutex::new(());
         let completing_save = gate.lock().await;
         let cancel = cancel_pending_login_after_browser_operations(
-            &gate, &login_pages, &login_meta, Provider::ChatGPT,
+            &gate,
+            &login_pages,
+            &login_meta,
+            Provider::ChatGPT,
         );
         tokio::pin!(cancel);
-        assert!(
-            tokio::time::timeout(Duration::from_millis(10), &mut cancel)
-                .await
-                .is_err()
-        );
+        assert!(tokio::time::timeout(Duration::from_millis(10), &mut cancel)
+            .await
+            .is_err());
         assert!(login_pages.borrow().contains_key(&Provider::ChatGPT));
         assert!(login_meta.borrow().contains_key(&Provider::ChatGPT));
         drop(completing_save);
@@ -2599,12 +2610,16 @@ mod login_cancel_gate_tests {
             .build()
             .unwrap();
         let login_page = Rc::new(browser.new_page().await.unwrap());
-        let login_pages = Rc::new(RefCell::new(HashMap::from([
-            (Provider::ChatGPT, login_page),
-        ])));
-        let login_meta = Rc::new(RefCell::new(HashMap::from([
-            (Provider::ChatGPT, LoginMeta { last_seen: Instant::now() }),
-        ])));
+        let login_pages = Rc::new(RefCell::new(HashMap::from([(
+            Provider::ChatGPT,
+            login_page,
+        )])));
+        let login_meta = Rc::new(RefCell::new(HashMap::from([(
+            Provider::ChatGPT,
+            LoginMeta {
+                last_seen: Instant::now(),
+            },
+        )])));
         let gate = tokio::sync::Mutex::new(());
         let active_login_complete = gate.lock().await;
         let (reply, receiver) = oneshot::channel::<Result<()>>();
@@ -2613,17 +2628,18 @@ mod login_cancel_gate_tests {
         // abandoned LoginComplete request. It is still committed after gate.
         let cancel = async {
             cancel_pending_login_after_browser_operations(
-                &gate, &login_pages, &login_meta, Provider::ChatGPT,
+                &gate,
+                &login_pages,
+                &login_meta,
+                Provider::ChatGPT,
             )
             .await;
             let _ = reply.send(Ok(()));
         };
         tokio::pin!(cancel);
-        assert!(
-            tokio::time::timeout(Duration::from_millis(10), &mut cancel)
-                .await
-                .is_err()
-        );
+        assert!(tokio::time::timeout(Duration::from_millis(10), &mut cancel)
+            .await
+            .is_err());
         assert!(login_pages.borrow().contains_key(&Provider::ChatGPT));
         drop(active_login_complete);
         tokio::time::timeout(Duration::from_secs(1), cancel)
