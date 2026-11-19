@@ -156,9 +156,11 @@ impl PageLease {
                 .ok_or_else(|| anyhow::anyhow!("provider page is not available"))?;
             cache.order.retain(|entry| *entry != provider);
             let observed = cache.bootstrap_403.remove(&provider);
-            let epoch = cache.epochs.get(&provider).copied().ok_or_else(|| {
-                anyhow::anyhow!("provider page generation is not available")
-            })?;
+            let epoch = cache
+                .epochs
+                .get(&provider)
+                .copied()
+                .ok_or_else(|| anyhow::anyhow!("provider page generation is not available"))?;
             (cached, observed, epoch)
         };
         let CachedProviderPage {
@@ -316,9 +318,8 @@ mod tests {
     async fn isolated_browser_owner_survives_lease_and_drops_on_eviction() {
         let cfg: crate::config::AppConfig =
             serde_yaml::from_str("obscura:\n  stealth: false\nproviders: []\n").unwrap();
-        let browser = Rc::new(
-            super::super::browser_factory::build_disposable_browser(&cfg).unwrap(),
-        );
+        let browser =
+            Rc::new(super::super::browser_factory::build_disposable_browser(&cfg).unwrap());
         let weak = Rc::downgrade(&browser);
         browser
             .cookies()
@@ -341,10 +342,7 @@ mod tests {
             "cache must own the staged Browser"
         );
         let mut lease = PageLease::take(&cache, Provider::ChatGPT).unwrap();
-        assert!(
-            weak.upgrade().is_some(),
-            "leased Page retains its Browser"
-        );
+        assert!(weak.upgrade().is_some(), "leased Page retains its Browser");
         lease
             .goto("data:text/html,<body>leased</body>")
             .await
@@ -381,9 +379,8 @@ mod tests {
     async fn stale_owned_page_lease_cannot_resurrect_after_provider_removal() {
         let cfg: crate::config::AppConfig =
             serde_yaml::from_str("obscura:\n  stealth: false\nproviders: []\n").unwrap();
-        let browser = Rc::new(
-            super::super::browser_factory::build_disposable_browser(&cfg).unwrap(),
-        );
+        let browser =
+            Rc::new(super::super::browser_factory::build_disposable_browser(&cfg).unwrap());
         let weak = Rc::downgrade(&browser);
         let page = super::super::browser_factory::new_provider_page(&browser, Provider::ChatGPT)
             .await
@@ -405,9 +402,8 @@ mod tests {
     async fn late_owned_lease_cannot_evict_newer_provider_at_capacity() {
         let cfg: crate::config::AppConfig =
             serde_yaml::from_str("obscura:\n  stealth: false\nproviders: []\n").unwrap();
-        let browser = Rc::new(
-            super::super::browser_factory::build_disposable_browser(&cfg).unwrap(),
-        );
+        let browser =
+            Rc::new(super::super::browser_factory::build_disposable_browser(&cfg).unwrap());
         let weak = Rc::downgrade(&browser);
         let page = super::super::browser_factory::new_provider_page(&browser, Provider::ChatGPT)
             .await
@@ -430,16 +426,18 @@ mod tests {
         assert_eq!(cache.borrow().len(), 1);
         assert!(cache.borrow().contains_key(&Provider::MetaAI));
         assert!(!cache.borrow().contains_key(&Provider::ChatGPT));
-        assert!(weak.upgrade().is_none(), "stale stage cannot evict newer Page");
+        assert!(
+            weak.upgrade().is_none(),
+            "stale stage cannot evict newer Page"
+        );
     }
 
     #[tokio::test]
     async fn borrowed_owned_page_fails_lease_without_losing_context_or_evidence() {
         let cfg: crate::config::AppConfig =
             serde_yaml::from_str("obscura:\n  stealth: false\nproviders: []\n").unwrap();
-        let browser = Rc::new(
-            super::super::browser_factory::build_disposable_browser(&cfg).unwrap(),
-        );
+        let browser =
+            Rc::new(super::super::browser_factory::build_disposable_browser(&cfg).unwrap());
         let weak = Rc::downgrade(&browser);
         let page = super::super::browser_factory::new_provider_page(&browser, Provider::MetaAI)
             .await
