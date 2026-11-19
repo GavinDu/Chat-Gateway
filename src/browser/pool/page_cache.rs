@@ -216,7 +216,11 @@ impl Drop for PageLease {
     fn drop(&mut self) {
         if let Some(page) = self.page.take() {
             let mut cache = self.pages.borrow_mut();
-            if cache.epochs.get(&self.provider) == Some(&self.epoch) {
+            // A newer provider may fill the bounded cache while this Page is
+            // leased. Its late Drop must not evict that newer active entry.
+            if cache.epochs.get(&self.provider) == Some(&self.epoch)
+                && cache.pages.len() < cache.capacity
+            {
                 cache.insert_entry(
                     self.provider,
                     CachedProviderPage {
@@ -395,6 +399,38 @@ mod tests {
         drop(lease);
         assert!(!pages.borrow().contains_key(&Provider::ChatGPT));
         assert!(weak.upgrade().is_none(), "stale stage owner must be freed");
+    }
+
+    #[tokio::test]
+    async fn late_owned_lease_cannot_evict_newer_provider_at_capacity() {
+        let cfg: crate::config::AppConfig =
+            serde_yaml::from_str("obscura:\n  stealth: false\nproviders: []\n").unwrap();
+        let browser = Rc::new(
+            super::super::browser_factory::build_disposable_browser(&cfg).unwrap(),
+        );
+        let weak = Rc::downgrade(&browser);
+        let page = super::super::browser_factory::new_provider_page(&browser, Provider::ChatGPT)
+            .await
+            .unwrap();
+        let cache = Rc::new(RefCell::new(ProviderPageCache::new(1)));
+        cache
+            .borrow_mut()
+            .insert_owned(Provider::ChatGPT, page, browser.clone(), None);
+        drop(browser);
+        let lease = PageLease::take(&cache, Provider::ChatGPT).unwrap();
+        let other = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let other_page = other.new_page().await.unwrap();
+        cache
+            .borrow_mut()
+            .insert(Provider::MetaAI, Rc::new(other_page));
+        drop(lease);
+        assert_eq!(cache.borrow().len(), 1);
+        assert!(cache.borrow().contains_key(&Provider::MetaAI));
+        assert!(!cache.borrow().contains_key(&Provider::ChatGPT));
+        assert!(weak.upgrade().is_none(), "stale stage cannot evict newer Page");
     }
 
     #[tokio::test]
