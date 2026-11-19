@@ -1092,41 +1092,44 @@ pub(super) fn browser_thread(
                                 }
                             };
                             if restore_failed {
-                                if super::diagnostics::startup_ambiguous_failure_must_preserve_snapshot(provider) {
-                                    // The shared Obscura cookie jar may contain preexisting
-                                    // owner state. A failed navigation or partial restore is
-                                    // not account rejection; deliberately clearing cookies
-                                    // or origin storage would destroy recoverable credentials.
-                                    // Withhold the Page, and require isolated staging before
-                                    // asserting rollback of any partial candidate writes.
-                                    provider_sessions.record_probe_failure(provider.name());
-                                    tracing::warn!(
-                                        provider = %pcfg.name,
-                                        reason = "startup_replay_failed_unverified",
-                                        "provider warm-up inconclusive; saved snapshot and browser jar retained"
-                                    );
-                                    continue;
-                                }
-                                // Legacy deferred providers retain existing cleanup policy.
-                                // Failed navigation alone never deletes the vault snapshot.
-                                let cleanup = (|| -> Result<()> {
-                                    session::clear_provider_cookies(&browser, provider.name())?;
-                                    let cleared = page.evaluate(
-                                        "(() => { try { localStorage.clear(); return true; } catch (_) { return false; } })()"
-                                    );
-                                    if cleared != serde_json::Value::Bool(true) {
-                                        anyhow::bail!("provider localStorage cleanup failed");
+                                // Failed navigation/import is not account rejection. The
+                                // cleanup admission function never executes destructive
+                                // shared-jar writes for the two active providers; a future
+                                // isolated stage must handle possible partial candidate
+                                // writes that preceded this failure.
+                                let cleanup = super::diagnostics::cleanup_failed_startup_restore(
+                                    provider,
+                                    || -> Result<()> {
+                                        session::clear_provider_cookies(&browser, provider.name())?;
+                                        let cleared = page.evaluate(
+                                            "(() => { try { localStorage.clear(); return true; } catch (_) { return false; } })()"
+                                        );
+                                        if cleared != serde_json::Value::Bool(true) {
+                                            anyhow::bail!("provider localStorage cleanup failed");
+                                        }
+                                        Ok(())
+                                    },
+                                );
+                                match cleanup {
+                                    Ok(false) => {
+                                        provider_sessions.record_probe_failure(provider.name());
+                                        tracing::warn!(
+                                            provider = %pcfg.name,
+                                            reason = "startup_replay_failed_unverified",
+                                            "provider warm-up inconclusive; saved snapshot and browser jar retained"
+                                        );
+                                        continue;
                                     }
-                                    Ok(())
-                                })();
-                                if let Err(error) = cleanup {
-                                    provider_sessions.record_probe_failure(provider.name());
-                                    tracing::error!(
-                                        provider = %pcfg.name,
-                                        category = session_worker_failure_category(&error),
-                                        "could not clear a partially restored provider session; page withheld"
-                                    );
-                                    continue;
+                                    Err(error) => {
+                                        provider_sessions.record_probe_failure(provider.name());
+                                        tracing::error!(
+                                            provider = %pcfg.name,
+                                            category = session_worker_failure_category(&error),
+                                            "could not clear a partially restored provider session; page withheld"
+                                        );
+                                        continue;
+                                    }
+                                    Ok(true) => {}
                                 }
                                 provider_sessions.record_probe_failure(provider.name());
                                 tracing::warn!(provider = %pcfg.name,
