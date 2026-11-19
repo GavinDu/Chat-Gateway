@@ -3212,8 +3212,9 @@ mod cookie_scope_tests {
                 "no live provider cookies remain in saved session"
             );
             // SessionFile owns zeroizing credential fields and implements
-            // Drop, so never move its cookie vector via struct update.
-            let mut with_storage = file.clone();
+            // Drop but deliberately is not Clone. Moving the *whole* file
+            // preserves its single owner and zeroizing Drop implementation.
+            let mut with_storage = file;
             with_storage
                 .local_storage
                 .insert("key".into(), "private-test-storage".into());
