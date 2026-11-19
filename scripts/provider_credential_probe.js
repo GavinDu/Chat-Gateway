@@ -17,6 +17,13 @@
   if (!['chatgpt.com', 'www.chatgpt.com'].includes(location.hostname)) {
     return report(null, 'unknown', 'unsupported_origin');
   }
+  // A SPA route can change while the session request or JSON parse awaits.
+  // Compare the full URL only inside the first-party realm; never print it.
+  const initialHref = location.href;
+  const samePage = () => location.protocol === 'https:' &&
+    (!location.port || location.port === '443') &&
+    ['chatgpt.com', 'www.chatgpt.com'].includes(location.hostname) &&
+    location.href === initialHref;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 10000);
   try {
@@ -24,6 +31,7 @@
       credentials: 'include', cache: 'no-store', redirect: 'error',
       headers: {Accept: 'application/json'}, signal: controller.signal
     });
+    if (!samePage()) return report('chatgpt', 'unknown', 'tab_changed');
     if (response.status === 401) {
       return report('chatgpt', 'unauthenticated', 'provider_rejected_session', 401);
     }
@@ -31,6 +39,7 @@
       return report('chatgpt', 'unknown', 'provider_or_network_blocked', response.status);
     }
     const body = await response.json();
+    if (!samePage()) return report('chatgpt', 'unknown', 'tab_changed');
     if (!body || typeof body !== 'object' || Array.isArray(body)) {
       return report('chatgpt', 'unknown', 'unrecognized_session_response', 200);
     }
@@ -46,6 +55,7 @@
     }
     return report('chatgpt', 'unknown', 'incomplete_or_expired_session_evidence', 200);
   } catch (_) {
+    if (!samePage()) return report('chatgpt', 'unknown', 'tab_changed');
     return report('chatgpt', 'unknown',
       controller.signal.aborted ? 'verification_timeout' : 'verification_unavailable');
   } finally {
