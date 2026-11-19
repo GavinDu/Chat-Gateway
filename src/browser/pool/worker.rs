@@ -1630,8 +1630,12 @@ pub(super) fn browser_thread(
                                 // this provider's page lock is still held. A cancelled send
                                 // returns above without persisting a partial session.
                                 if completion_rx.await.unwrap_or(false) {
+                                    // A promoted private Page must persist cookies from
+                                    // its own Browser, not the legacy shared worker jar.
+                                    // Legacy pages intentionally retain the old fallback.
+                                    let session_browser = page.browser_for_session_save(&browser_for_save);
                                     if let Err(error) = session::save_session_if_changed(
-                                        &browser_for_save,
+                                        &session_browser,
                                         &page,
                                         &provider_name,
                                         &send_session_write_tracker,
