@@ -38,6 +38,10 @@ pub(super) struct ProviderPageCache {
     bootstrap_403: HashMap<Provider, Arc<AtomicBool>>,
     order: VecDeque<Provider>,
     capacity: usize,
+    // A lease may be cancelled after logout or page replacement. Only the
+    // exact entry generation it took may be restored on Drop.
+    epochs: HashMap<Provider, u64>,
+    next_epoch: u64,
 }
 
 impl ProviderPageCache {
@@ -47,6 +51,8 @@ impl ProviderPageCache {
             bootstrap_403: HashMap::new(),
             order: VecDeque::new(),
             capacity: capacity.max(1),
+            epochs: HashMap::new(),
+            next_epoch: 0,
         }
     }
     pub(super) fn insert(&mut self, provider: Provider, page: Rc<Page>) {
@@ -104,6 +110,11 @@ impl ProviderPageCache {
             }
         }
         self.order.push_back(provider);
+        self.next_epoch = self
+            .next_epoch
+            .checked_add(1)
+            .expect("provider page epoch exhausted");
+        self.epochs.insert(provider, self.next_epoch);
         self.pages.insert(provider, entry);
         if let Some(observed) = script_403 {
             self.bootstrap_403.insert(provider, observed);
@@ -112,6 +123,9 @@ impl ProviderPageCache {
     pub(super) fn remove(&mut self, provider: &Provider) -> Option<CachedProviderPage> {
         self.order.retain(|value| value != provider);
         self.bootstrap_403.remove(provider);
+        // Leave an epoch tombstone even when the Page is checked out in a
+        // lease. Its delayed destructor must never undo explicit unlink.
+        self.epochs.remove(provider);
         self.pages.remove(provider)
     }
 }
@@ -130,14 +144,23 @@ pub(super) struct PageLease {
     pages: SharedPages,
     provider: Provider,
     bootstrap_403: Option<Arc<AtomicBool>>,
+    epoch: u64,
 }
 impl PageLease {
     pub(super) fn take(pages: &SharedPages, provider: Provider) -> Result<Self> {
-        let observed = pages.borrow().bootstrap_403.get(&provider).cloned();
-        let cached = pages
-            .borrow_mut()
-            .remove(&provider)
-            .ok_or_else(|| anyhow::anyhow!("provider page is not available"))?;
+        let (cached, observed, epoch) = {
+            let mut cache = pages.borrow_mut();
+            let cached = cache
+                .pages
+                .remove(&provider)
+                .ok_or_else(|| anyhow::anyhow!("provider page is not available"))?;
+            cache.order.retain(|entry| *entry != provider);
+            let observed = cache.bootstrap_403.remove(&provider);
+            let epoch = cache.epochs.get(&provider).copied().ok_or_else(|| {
+                anyhow::anyhow!("provider page generation is not available")
+            })?;
+            (cached, observed, epoch)
+        };
         let CachedProviderPage {
             page,
             browser_owner,
@@ -149,6 +172,7 @@ impl PageLease {
                 pages: pages.clone(),
                 provider,
                 bootstrap_403: observed,
+                epoch,
             }),
             Err(page) => {
                 pages.borrow_mut().insert_entry(
@@ -191,14 +215,19 @@ impl DerefMut for PageLease {
 impl Drop for PageLease {
     fn drop(&mut self) {
         if let Some(page) = self.page.take() {
-            self.pages.borrow_mut().insert_entry(
-                self.provider,
-                CachedProviderPage {
-                    page: Rc::new(page),
-                    browser_owner: self.browser_owner.take(),
-                },
-                self.bootstrap_403.take(),
-            );
+            let mut cache = self.pages.borrow_mut();
+            if cache.epochs.get(&self.provider) == Some(&self.epoch) {
+                cache.insert_entry(
+                    self.provider,
+                    CachedProviderPage {
+                        page: Rc::new(page),
+                        browser_owner: self.browser_owner.take(),
+                    },
+                    self.bootstrap_403.take(),
+                );
+            }
+            // Otherwise this was a stale lease after logout/replacement.
+            // Drop Page and its previous Browser owner, never resurrect it.
         }
     }
 }
@@ -342,6 +371,30 @@ mod tests {
             weak.upgrade().is_none(),
             "eviction drops staged Browser and Page"
         );
+    }
+
+    #[tokio::test]
+    async fn stale_owned_page_lease_cannot_resurrect_after_provider_removal() {
+        let cfg: crate::config::AppConfig =
+            serde_yaml::from_str("obscura:\n  stealth: false\nproviders: []\n").unwrap();
+        let browser = Rc::new(
+            super::super::browser_factory::build_disposable_browser(&cfg).unwrap(),
+        );
+        let weak = Rc::downgrade(&browser);
+        let page = super::super::browser_factory::new_provider_page(&browser, Provider::ChatGPT)
+            .await
+            .unwrap();
+        let pages = Rc::new(RefCell::new(ProviderPageCache::new(1)));
+        pages
+            .borrow_mut()
+            .insert_owned(Provider::ChatGPT, page, browser.clone(), None);
+        drop(browser);
+        let lease = PageLease::take(&pages, Provider::ChatGPT).unwrap();
+        // Explicit unlink while a Page is checked out leaves a tombstone.
+        pages.borrow_mut().remove(&Provider::ChatGPT);
+        drop(lease);
+        assert!(!pages.borrow().contains_key(&Provider::ChatGPT));
+        assert!(weak.upgrade().is_none(), "stale stage owner must be freed");
     }
 
     #[tokio::test]
