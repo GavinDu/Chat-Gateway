@@ -803,6 +803,24 @@ async fn session_mutation_permit<'a, T>(
     }
 }
 
+/// An explicit owner Cancel is a real cleanup operation, not a passive
+/// status response. It must not remove login UI state while LoginComplete is
+/// saving credentials or while LoginStart/UnlinkSession is driving the shared
+/// Browser. Unlike abandoned LoginComplete requests, Cancel still commits
+/// cleanup if its response receiver disconnects while queued.
+async fn cancel_pending_login_after_browser_operations(
+    operation_gate: &tokio::sync::Mutex<()>,
+    login_pages: &Rc<RefCell<HashMap<Provider, Rc<obscura_core::Page>>>>,
+    login_meta: &Rc<RefCell<HashMap<Provider, LoginMeta>>>,
+    provider: Provider,
+) {
+    let _operation = operation_gate.lock().await;
+    // No RefCell borrow survives any await; removing a pending login page
+    // here does not remove an already committed warm provider session.
+    login_pages.borrow_mut().remove(&provider);
+    login_meta.borrow_mut().remove(&provider);
+}
+
 /// Adapter diagnostics must use the same actionable input as the send path:
 /// hidden autosizers and disabled composers cannot receive a real prompt.
 fn diagnostic_input_selector<'a>(
@@ -2240,9 +2258,19 @@ pub(super) fn browser_thread(
                             });
                         }
                         Command::LoginCancel { provider, reply } => {
-                            login_pages.borrow_mut().remove(&provider);
-                            login_meta.borrow_mut().remove(&provider);
-                            let _ = reply.send(Ok(()));
+                            let operation_gate = operation_gate.clone();
+                            let login_pages = login_pages.clone();
+                            let login_meta = login_meta.clone();
+                            tokio::task::spawn_local(async move {
+                                cancel_pending_login_after_browser_operations(
+                                    &operation_gate,
+                                    &login_pages,
+                                    &login_meta,
+                                    provider,
+                                )
+                                .await;
+                                let _ = reply.send(Ok(()));
+                            });
                         }
                         Command::LoginComplete { provider, mut reply } => {
                             let operation_gate = operation_gate.clone();
