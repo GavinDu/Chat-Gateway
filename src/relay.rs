@@ -1378,7 +1378,10 @@ fn account_probe_response(
     worker_generation: Option<u64>,
 ) -> Response {
     (
-        [(header::CACHE_CONTROL, "no-store"), (header::PRAGMA, "no-cache")],
+        [
+            (header::CACHE_CONTROL, "no-store"),
+            (header::PRAGMA, "no-cache"),
+        ],
         Json(account_probe_record(
             provider,
             verdict,
@@ -1439,18 +1442,12 @@ pub async fn verify_first_party_account(
     let Some(gate) = app.relay.import_gates.for_provider(provider_name) else {
         return account_probe_response(provider_name, "unknown", "relay_unavailable", None);
     };
-    let _guard =
-        match tokio::time::timeout(ACCOUNT_PROBE_QUEUE_TIMEOUT, gate.lock_owned()).await {
-            Ok(guard) => guard,
-            Err(_) => {
-                return account_probe_response(
-                    provider_name,
-                    "unknown",
-                    "session_mutation_busy",
-                    None,
-                );
-            }
-        };
+    let _guard = match tokio::time::timeout(ACCOUNT_PROBE_QUEUE_TIMEOUT, gate.lock_owned()).await {
+        Ok(guard) => guard,
+        Err(_) => {
+            return account_probe_response(provider_name, "unknown", "session_mutation_busy", None);
+        }
+    };
 
     if !app.pool.worker_alive() {
         return account_probe_response(provider_name, "unknown", "worker_unavailable", None);
