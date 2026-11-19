@@ -2294,8 +2294,11 @@ fn planned_cookie_replay(
         let has_live = candidates
             .iter()
             .any(|cookie| cookie_domain_allowed(provider, &cookie.domain));
+        // A previously captured first-party origin-storage snapshot may
+        // still be replayable even when its ancillary cookies expired. This
+        // is only candidate material, never authentication proof.
         anyhow::ensure!(
-            !had_expired || has_live,
+            !had_expired || has_live || !file.local_storage.is_empty(),
             "no live provider cookies remain in saved session"
         );
     }
@@ -3068,6 +3071,81 @@ mod cookie_scope_tests {
             let remaining = browser.cookies().get_all();
             assert_eq!(remaining.len(), 1);
             assert_eq!(remaining[0].name, "preserved");
+        }
+    }
+
+    #[tokio::test]
+    async fn expired_provider_cookies_do_not_block_storage_only_candidate_replay() {
+        for (provider, domain) in [("chatgpt", "chatgpt.com"), ("metaai", "www.meta.ai")] {
+            let browser = Browser::builder().stealth(false).build().unwrap();
+            let mut old = cookie("ancillary", "sensitive-stale-fixture", "/");
+            old.domain = domain.into();
+            old.expires = Some(1.0);
+            let file = SessionFile {
+                cookies: vec![old],
+                local_storage: HashMap::from([(
+                    "provider-storage".to_owned(),
+                    "sensitive-storage-fixture".to_owned(),
+                )]),
+                ts: "fixture".into(),
+            };
+            preflight_cookie_restore(&file, provider).unwrap();
+            restore_cookies(&browser, &file, provider).unwrap();
+            assert!(browser.cookies().get_all().is_empty());
+            assert_eq!(
+                file.cookies.len(),
+                1,
+                "encrypted source must not be rewritten"
+            );
+            assert_eq!(file.local_storage.len(), 1);
+            assert_eq!(
+                provider_replay_material_coverage(&file, provider, 1000.0).category(),
+                "storage_only_presence_unverified",
+                "candidate material is never account verification"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn expired_cookie_with_storage_still_validates_metadata_before_jar_writes() {
+        let browser = Browser::builder().stealth(false).build().unwrap();
+        browser
+            .cookies()
+            .set("preserved=dummy; Secure; Path=/", "https://chatgpt.com/")
+            .unwrap();
+        let mut old = cookie("ancillary", "secret-stale-fixture", "/");
+        old.domain = "chatgpt.com".into();
+        old.path = "/bad;inject".into();
+        old.expires = Some(1.0);
+        let file = SessionFile {
+            cookies: vec![old],
+            local_storage: HashMap::from([("key".to_owned(), "secret-value".to_owned())]),
+            ts: "fixture".into(),
+        };
+        let error = restore_cookies(&browser, &file, "chatgpt")
+            .unwrap_err()
+            .to_string();
+        assert!(!error.contains("secret-stale-fixture"));
+        assert!(!error.contains("secret-value"));
+        let remaining = browser.cookies().get_all();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].value, "dummy");
+    }
+
+    #[test]
+    fn storage_only_snapshot_without_cookies_remains_eligible_but_unverified() {
+        let file = SessionFile {
+            cookies: Vec::new(),
+            local_storage: HashMap::from([("key".to_owned(), "value".to_owned())]),
+            ts: "fixture".into(),
+        };
+        for provider in ["chatgpt", "metaai"] {
+            let (planned, _) = planned_cookie_replay(&file, provider, 1000.0).unwrap();
+            assert!(planned.is_empty());
+            assert_eq!(
+                provider_replay_material_coverage(&file, provider, 1000.0).category(),
+                "storage_only_presence_unverified"
+            );
         }
     }
 
