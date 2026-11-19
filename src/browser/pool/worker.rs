@@ -1119,6 +1119,64 @@ fn diagnostic_input_controls(page: &obscura_core::Page) -> Vec<String> {
     .collect()
 }
 
+/// This lazy page warm-up path must use the *same* no-destructive-cleanup
+/// rule as worker startup. Do not clear an active session on 403/challenge,
+/// transport timeout or partial cookie restoration. This does not roll back
+/// any partial shared-jar writes; that requires #1385 isolated staging.
+fn cleanup_failed_lazy_page_restore(
+    browser: &obscura_core::Browser,
+    provider: Provider,
+) -> Result<bool> {
+    super::diagnostics::cleanup_failed_startup_restore(provider, || {
+        session::clear_provider_cookies(browser, provider.name())?;
+        Ok(())
+    })
+}
+
+#[cfg(test)]
+mod failed_lazy_page_restore_tests {
+    use super::*;
+
+    #[test]
+    fn active_recovery_provider_lazy_errors_never_revoke_existing_cookies() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        for (provider, origin) in [
+            (Provider::ChatGPT, "https://chatgpt.com/"),
+            (Provider::MetaAI, "https://meta.ai/"),
+        ] {
+            browser.cookies().set("SID=synthetic; Secure; Path=/", origin).unwrap();
+            assert!(!cleanup_failed_lazy_page_restore(&browser, provider).unwrap());
+            assert!(browser.cookies().get_all().iter().any(|cookie| {
+                cookie.value == "synthetic" &&
+                cookie.domain == origin.trim_start_matches("https://").trim_end_matches('/')
+            }));
+        }
+    }
+
+    #[test]
+    fn deferred_lazy_cleanup_remains_provider_scoped() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        browser
+            .cookies()
+            .set("SID=keep; Secure; Path=/", "https://chatgpt.com/")
+            .unwrap();
+        browser
+            .cookies()
+            .set("SID=discard; Secure; Path=/", "https://claude.ai/")
+            .unwrap();
+        assert!(cleanup_failed_lazy_page_restore(&browser, Provider::Claude).unwrap());
+        let cookies = browser.cookies().get_all();
+        assert_eq!(cookies.len(), 1);
+        assert_eq!(cookies[0].value, "keep");
+    }
+}
+
 async fn ensure_provider_page(
     browser: &obscura_core::Browser,
     pages: &SharedPages,
@@ -1132,7 +1190,10 @@ async fn ensure_provider_page(
         crate::browser::network_tap::attach_provider_network_tap(&mut page, provider);
     let snapshot = session::load_session_file(provider.name())?;
     if let Err(error) = PageSession::open(browser, &mut page, provider, snapshot.as_ref()).await {
-        session::clear_provider_cookies(browser, provider.name())?;
+        // An ambiguous warmup, navigation or cookie-readback failure is not
+        // evidence that an already saved active-provider login expired.
+        // The startup worker uses the same source-owned preservation policy.
+        cleanup_failed_lazy_page_restore(browser, provider)?;
         return Err(error);
     }
     pages
