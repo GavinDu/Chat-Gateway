@@ -782,14 +782,21 @@ mod tests {
         for gateway_stage in ["candidate_admission", "backend_admission"] {
             evidence["gateway_failure"]["stage"] = json!(gateway_stage);
             for attempted_phase in [
-                "bootstrap", "composer", "send", "response", "stream", "completed",
+                "bootstrap",
+                "composer",
+                "send",
+                "response",
+                "stream",
+                "completed",
             ] {
                 evidence["attempt"]["stage"] = json!(attempted_phase);
                 let decision = checked(evidence.clone());
-                assert_eq!(decision.category, "inconclusive", "{gateway_stage}/{attempted_phase}");
                 assert_eq!(
-                    decision.reason,
-                    "conflicting_gateway_failure_stage",
+                    decision.category, "inconclusive",
+                    "{gateway_stage}/{attempted_phase}"
+                );
+                assert_eq!(
+                    decision.reason, "conflicting_gateway_failure_stage",
                     "{gateway_stage}/{attempted_phase}"
                 );
                 assert!(!decision.live_proof);
