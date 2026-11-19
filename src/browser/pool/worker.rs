@@ -1193,15 +1193,33 @@ mod isolated_interactive_login_guard_tests {
 
     #[tokio::test]
     async fn isolated_owner_blocks_legacy_login_even_after_eviction() {
-        let shared = obscura_core::Browser::builder().stealth(false).build().unwrap();
-        shared.cookies().set("SID=shared-unchanged; Secure; Path=/", "https://chatgpt.com/").unwrap();
+        let shared = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        shared
+            .cookies()
+            .set(
+                "SID=shared-unchanged; Secure; Path=/",
+                "https://chatgpt.com/",
+            )
+            .unwrap();
         let pages = Rc::new(RefCell::new(ProviderPageCache::new(1)));
         for provider in [Provider::ChatGPT, Provider::MetaAI] {
-            let private = Rc::new(obscura_core::Browser::builder().stealth(false).build().unwrap());
+            let private = Rc::new(
+                obscura_core::Browser::builder()
+                    .stealth(false)
+                    .build()
+                    .unwrap(),
+            );
             let page = private.new_page().await.unwrap();
-            pages.borrow_mut().insert_owned(provider, page, private, None);
+            pages
+                .borrow_mut()
+                .insert_owned(provider, page, private, None);
             assert_eq!(
-                require_global_login_safe(&pages, provider).unwrap_err().to_string(),
+                require_global_login_safe(&pages, provider)
+                    .unwrap_err()
+                    .to_string(),
                 "isolated_context_rehydration_required"
             );
         }
@@ -2241,10 +2259,10 @@ pub(super) fn browser_thread(
                                     // the swapped page.
                                     let lock = locks.borrow().get(&provider).cloned()
                                         .unwrap_or_else(|| Rc::new(tokio::sync::Mutex::new(())));
+                                    let _guard = lock.lock().await;
                                     // A private owner might have been admitted after
                                     // LoginStart; no old global snapshot may overwrite it.
                                     require_global_login_safe(&pages, provider)?;
-                                    let _guard = lock.lock().await;
                                     if crate::provider_guard::is_challenge_page(&login_page) {
                                         anyhow::bail!("provider challenge requires manual completion before saving a session");
                                     }
