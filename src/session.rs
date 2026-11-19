@@ -3141,7 +3141,10 @@ mod cookie_scope_tests {
             let browser = Browser::builder().stealth(false).build().unwrap();
             browser
                 .cookies()
-                .set("preserved=dummy; Secure; Path=/", &format!("https://{domain}/"))
+                .set(
+                    "preserved=dummy; Secure; Path=/",
+                    &format!("https://{domain}/"),
+                )
                 .unwrap();
             let mut old = cookie("ancillary", "secret-stale-fixture", "/");
             old.domain = domain.into();
@@ -3161,7 +3164,11 @@ mod cookie_scope_tests {
             assert_eq!(planned[0].name, "live-session");
             restore_cookies(&browser, &file, provider).unwrap();
             assert_eq!(browser.cookies().get_all().len(), 2);
-            assert!(browser.cookies().get_all().iter().all(|item| item.name != "ancillary"));
+            assert!(browser
+                .cookies()
+                .get_all()
+                .iter()
+                .all(|item| item.name != "ancillary"));
 
             // A malformed nonexpired credential still rejects the complete
             // plan before any new jar writes; no implicit login inference.
@@ -3172,7 +3179,10 @@ mod cookie_scope_tests {
                 ts: "fixture".into(),
             };
             let error = preflight_cookie_restore(&invalid_file, provider).unwrap_err();
-            assert_eq!(error.to_string(), "failed to restore 1 provider session cookie(s)");
+            assert_eq!(
+                error.to_string(),
+                "failed to restore 1 provider session cookie(s)"
+            );
         }
     }
 
@@ -3219,7 +3229,10 @@ mod cookie_scope_tests {
                 .local_storage
                 .insert("key".into(), "private-test-storage".into());
             let (planned, _) = planned_cookie_replay(&with_storage, provider, 1000.0).unwrap();
-            assert!(planned.is_empty(), "storage-only candidate is not authenticated proof");
+            assert!(
+                planned.is_empty(),
+                "storage-only candidate is not authenticated proof"
+            );
 
             for bad_expiry in [f64::NAN, f64::INFINITY, -2.0] {
                 expired.expires = Some(bad_expiry);
@@ -3231,7 +3244,10 @@ mod cookie_scope_tests {
                 let err = planned_cookie_replay(&malformed, provider, 1000.0)
                     .err()
                     .expect("malformed active expiry must be rejected");
-                assert_eq!(err.to_string(), "failed to restore 1 provider session cookie(s)");
+                assert_eq!(
+                    err.to_string(),
+                    "failed to restore 1 provider session cookie(s)"
+                );
                 assert!(!err.to_string().contains("do-not-emit"));
             }
         }
