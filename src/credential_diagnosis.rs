@@ -645,9 +645,11 @@ mod tests {
         v["snapshot"]["generation"] = json!(OTHER_ID);
         assert_eq!(checked(v.clone()).reason, "snapshot_generation_mismatch");
         v["snapshot"]["generation"] = json!(ID);
-        v["gateway_failure"]["duration_ms"] =
-            json!(MAX_GATEWAY_FAILURE_DURATION_MS + 1);
-        assert_eq!(checked(v.clone()).reason, "invalid_gateway_failure_evidence");
+        v["gateway_failure"]["duration_ms"] = json!(MAX_GATEWAY_FAILURE_DURATION_MS + 1);
+        assert_eq!(
+            checked(v.clone()).reason,
+            "invalid_gateway_failure_evidence"
+        );
 
         let safe = serde_json::to_string(&checked(v)).unwrap();
         assert!(!safe.contains(ID));
