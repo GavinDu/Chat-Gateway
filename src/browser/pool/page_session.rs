@@ -159,13 +159,19 @@ mod storage_replay_origin_guard_tests {
     #[test]
     fn off_origin_redirect_is_rejected_without_leaking_page_url_or_storage() {
         for (provider, redirect) in [
-            (Provider::ChatGPT, "https://accounts.google.com/login?token=private"),
+            (
+                Provider::ChatGPT,
+                "https://accounts.google.com/login?token=private",
+            ),
             (Provider::ChatGPT, "https://chatgpt.com.evil.example/"),
             (Provider::ChatGPT, "https://chatgpt.com@evil.example/"),
             (Provider::ChatGPT, "http://chatgpt.com/"),
             (Provider::MetaAI, "https://meta.ai/"),
             (Provider::MetaAI, "https://www.meta.ai.evil.example/"),
-            (Provider::MetaAI, "https://www.facebook.com/login/?account=private"),
+            (
+                Provider::MetaAI,
+                "https://www.facebook.com/login/?account=private",
+            ),
         ] {
             let error = checked_storage_replay_origin(provider, redirect).unwrap_err();
             assert_eq!(error.to_string(), "provider_storage_origin_mismatch");
@@ -214,7 +220,9 @@ impl PageSession {
                     // origin. Check actual URL before serializing secrets and
                     // check JS location.origin again inside every setItem.
                     match checked_storage_replay_origin(provider, &page.url())? {
-                        Some(origin) => session::restore_local_storage_for_origin(page, file, &origin)?,
+                        Some(origin) => {
+                            session::restore_local_storage_for_origin(page, file, &origin)?
+                        }
                         None => session::restore_local_storage(page, file)?,
                     }
                     page.goto(provider.login_url()).await?;
