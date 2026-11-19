@@ -138,7 +138,10 @@ impl PageLease {
             .borrow_mut()
             .remove(&provider)
             .ok_or_else(|| anyhow::anyhow!("provider page is not available"))?;
-        let CachedProviderPage { page, browser_owner } = cached;
+        let CachedProviderPage {
+            page,
+            browser_owner,
+        } = cached;
         match Rc::try_unwrap(page) {
             Ok(page) => Ok(Self {
                 page: Some(page),
@@ -150,7 +153,10 @@ impl PageLease {
             Err(page) => {
                 pages.borrow_mut().insert_entry(
                     provider,
-                    CachedProviderPage { page, browser_owner },
+                    CachedProviderPage {
+                        page,
+                        browser_owner,
+                    },
                     observed,
                 );
                 anyhow::bail!("provider page is still borrowed")
@@ -276,42 +282,75 @@ mod tests {
     #[tokio::test]
     async fn isolated_browser_owner_survives_lease_and_drops_on_eviction() {
         let cfg: crate::config::AppConfig =
-            serde_yaml::from_str("obscura:\\n  stealth: false\\nproviders: []\\n").unwrap();
-        let browser = Rc::new(super::super::browser_factory::build_disposable_browser(&cfg).unwrap());
+            serde_yaml::from_str("obscura:\n  stealth: false\nproviders: []\n").unwrap();
+        let browser = Rc::new(
+            super::super::browser_factory::build_disposable_browser(&cfg).unwrap(),
+        );
         let weak = Rc::downgrade(&browser);
         browser
             .cookies()
             .set("SID=stage-only; Secure; Path=/", "https://chatgpt.com/")
             .unwrap();
-        let mut page = super::super::browser_factory::new_provider_page(&browser, Provider::ChatGPT)
+        let mut page =
+            super::super::browser_factory::new_provider_page(&browser, Provider::ChatGPT)
+                .await
+                .unwrap();
+        page.goto("data:text/html,<body>staged owner</body>")
             .await
             .unwrap();
-        page.goto("data:text/html,<body>staged owner</body>").await.unwrap();
         let cache = Rc::new(RefCell::new(ProviderPageCache::new(1)));
-        cache.borrow_mut().insert_owned(Provider::ChatGPT, page, browser.clone(), None);
+        cache
+            .borrow_mut()
+            .insert_owned(Provider::ChatGPT, page, browser.clone(), None);
         drop(browser);
-        assert!(weak.upgrade().is_some(), "cache must own the staged Browser");
+        assert!(
+            weak.upgrade().is_some(),
+            "cache must own the staged Browser"
+        );
         let mut lease = PageLease::take(&cache, Provider::ChatGPT).unwrap();
-        assert!(weak.upgrade().is_some(), "leased Page retains its Browser");
-        lease.goto("data:text/html,<body>leased</body>").await.unwrap();
-        assert_eq!(lease.evaluate("document.body.textContent"), serde_json::json!("leased"));
+        assert!(
+            weak.upgrade().is_some(),
+            "leased Page retains its Browser"
+        );
+        lease
+            .goto("data:text/html,<body>leased</body>")
+            .await
+            .unwrap();
+        assert_eq!(
+            lease.evaluate("document.body.textContent"),
+            serde_json::json!("leased")
+        );
         drop(lease); // Cooperative cancellation or normal exit restores the same owner.
         assert!(weak.upgrade().is_some());
         assert_eq!(
-            cache.borrow().get(&Provider::ChatGPT).unwrap().evaluate("document.body.textContent"),
+            cache
+                .borrow()
+                .get(&Provider::ChatGPT)
+                .unwrap()
+                .evaluate("document.body.textContent"),
             serde_json::json!("leased")
         );
-        let other = obscura_core::Browser::builder().stealth(false).build().unwrap();
+        let other = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
         let other_page = other.new_page().await.unwrap();
-        cache.borrow_mut().insert(Provider::MetaAI, Rc::new(other_page));
-        assert!(weak.upgrade().is_none(), "eviction drops staged Browser and Page");
+        cache
+            .borrow_mut()
+            .insert(Provider::MetaAI, Rc::new(other_page));
+        assert!(
+            weak.upgrade().is_none(),
+            "eviction drops staged Browser and Page"
+        );
     }
 
     #[tokio::test]
     async fn borrowed_owned_page_fails_lease_without_losing_context_or_evidence() {
         let cfg: crate::config::AppConfig =
-            serde_yaml::from_str("obscura:\\n  stealth: false\\nproviders: []\\n").unwrap();
-        let browser = Rc::new(super::super::browser_factory::build_disposable_browser(&cfg).unwrap());
+            serde_yaml::from_str("obscura:\n  stealth: false\nproviders: []\n").unwrap();
+        let browser = Rc::new(
+            super::super::browser_factory::build_disposable_browser(&cfg).unwrap(),
+        );
         let weak = Rc::downgrade(&browser);
         let page = super::super::browser_factory::new_provider_page(&browser, Provider::MetaAI)
             .await
