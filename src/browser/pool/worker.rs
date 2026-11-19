@@ -1325,8 +1325,14 @@ pub(super) fn browser_thread(
                                         &adapter.effective_selectors().input_refs(),
                                         error,
                                     );
-                                    if classified.downcast_ref::<providers::ProviderChallengeError>().is_some() {
-                                        provider_guard.disable_provider(provider.name(), "challenge page detected; manual review required");
+                                    if classified
+                                        .downcast_ref::<providers::ProviderChallengeError>()
+                                        .is_some()
+                                    {
+                                        provider_guard.disable_provider(
+                                            provider.name(),
+                                            "challenge page detected; manual review required",
+                                        );
                                     }
                                     let _ = chunks.send(Err(classified)).await;
                                     return;
