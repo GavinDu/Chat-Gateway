@@ -3211,10 +3211,12 @@ mod cookie_scope_tests {
                     .to_string(),
                 "no live provider cookies remain in saved session"
             );
-            let with_storage = SessionFile {
-                local_storage: HashMap::from([("key".into(), "private-test-storage".into())]),
-                ..file
-            };
+            // SessionFile owns zeroizing credential fields and implements
+            // Drop, so never move its cookie vector via struct update.
+            let mut with_storage = file.clone();
+            with_storage
+                .local_storage
+                .insert("key".into(), "private-test-storage".into());
             let (planned, _) = planned_cookie_replay(&with_storage, provider, 1000.0).unwrap();
             assert!(planned.is_empty(), "storage-only candidate is not authenticated proof");
 
