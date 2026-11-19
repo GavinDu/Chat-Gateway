@@ -242,10 +242,14 @@ function loadPopup({failCookieDomain = null, includeSecondProvider = false, manu
 }
 
 test("ChatGPT active-tab first-party proof rejects empty user shape without leaking session", async () => {
-  const popup = loadPopup();
-  popup.context.location = {
-    protocol:"https:", hostname:"chatgpt.com", port:"", href:"https://chatgpt.com/"
+  // Isolate the explicit script: the popup itself has unrelated async polling
+  // that must never count as first-party account-verifier network traffic.
+  const context = {
+    Date, Promise, AbortController, setTimeout, clearTimeout,
+    location:{protocol:"https:",hostname:"chatgpt.com",port:"",href:"https://chatgpt.com/"}
   };
+  vm.createContext(context);
+  vm.runInContext(fs.readFileSync(path.join(__dirname,"..","credential_probe.js"),"utf8"),context);
   const future = () => new Date(Date.now() + 60_000).toISOString();
   const session = user => ({user,accessToken:"private-fixture-token",expires:future()});
   for(const [payload,status,authentication,reason] of [
@@ -257,14 +261,14 @@ test("ChatGPT active-tab first-party proof rejects empty user shape without leak
     [session({fixture:true}),403,"unknown","provider_or_network_blocked"],
   ]) {
     let fetchCount = 0;
-    popup.context.fetch = async (url,options) => {
+    context.fetch = async (url,options) => {
       ++fetchCount;
       assert.equal(url,"/api/auth/session");
       assert.equal(options.credentials,"include");
       assert.equal(options.redirect,"error");
       return {status,json:async()=>payload};
     };
-    const result = await vm.runInContext("probeActiveChatgptAccount()",popup.context);
+    const result = await vm.runInContext("probeActiveChatgptAccount()",context);
     assert.equal(result.authentication,authentication);
     assert.equal(result.reason,reason);
     assert.equal(result.exported_snapshot_verified,false);
