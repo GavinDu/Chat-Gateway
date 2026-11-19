@@ -121,6 +121,12 @@ pub(super) async fn stage_provider_saved_snapshot(
     // Discard untrusted error Display; this boundary never logs cookie metadata.
     session::preflight_cookie_restore(snapshot, provider.name())
         .map_err(|_| anyhow!("candidate_cookie_preflight_rejected"))?;
+    // A cookie list containing only other providers' domains is not usable
+    // material for this Page. Reject before allocating a private Browser or
+    // navigating an anonymous site; storage-only candidates remain unverified.
+    if !session::replay_candidate_has_applicable_material(snapshot, provider.name()) {
+        bail!("candidate_snapshot_no_applicable_provider_material");
+    }
     let mut staged = tokio::time::timeout(
         Duration::from_secs(10),
         new_disposable_provider_stage(cfg, provider),
@@ -419,6 +425,94 @@ mod staged_snapshot_preflight_tests {
         let actual = live.cookies().get_all();
         assert_eq!(actual.len(), 1);
         assert_eq!(actual[0].value, "live-value");
+    }
+
+    #[tokio::test]
+    async fn foreign_only_cookie_snapshots_do_not_launch_provider_navigation() {
+        let cfg = config();
+        let live = build_browser(&cfg).unwrap();
+        live.cookies()
+            .set("SID=existing-live; Secure; Path=/", "https://chatgpt.com/")
+            .unwrap();
+        for (provider, foreign_domain) in [
+            (Provider::ChatGPT, ".meta.ai"),
+            (Provider::MetaAI, ".chatgpt.com"),
+            (Provider::ChatGPT, ".example.org"),
+        ] {
+            let snapshot: session::SessionFile = serde_json::from_value(json!({
+                "ts": "synthetic",
+                "local_storage": {},
+                "cookies": [{
+                    "name": "SID",
+                    "value": "private-foreign-bearer-never-log",
+                    "domain": foreign_domain,
+                    "path": "/",
+                    "secure": true,
+                    "http_only": true
+                }]
+            }))
+            .unwrap();
+            let error = match stage_provider_saved_snapshot(&cfg, provider, &snapshot).await {
+                Ok(_) => panic!("foreign cookie material must not be staged"),
+                Err(error) => error,
+            };
+            assert_eq!(
+                error.to_string(),
+                "candidate_snapshot_no_applicable_provider_material"
+            );
+            assert!(!error.to_string().contains("private-foreign"));
+        }
+        assert_eq!(live.cookies().get_all().len(), 1);
+        assert_eq!(live.cookies().get_all()[0].value, "existing-live");
+    }
+
+    #[test]
+    fn supported_cookie_or_storage_presence_is_candidate_only_not_account_proof() {
+        let live: session::SessionFile = serde_json::from_value(json!({
+            "ts": "synthetic",
+            "local_storage": {},
+            "cookies": [{
+                "name": "SID",
+                "value": "private-valid-never-log",
+                "domain": ".chatgpt.com",
+                "path": "/",
+                "secure": true,
+                "http_only": true
+            }]
+        }))
+        .unwrap();
+        assert!(session::replay_candidate_has_applicable_material(&live, "chatgpt"));
+        assert!(!session::replay_candidate_has_applicable_material(&live, "metaai"));
+        let storage_only: session::SessionFile = serde_json::from_value(json!({
+            "ts": "synthetic",
+            "local_storage": {"synthetic-key": "private-storage-never-log"},
+            "cookies": []
+        }))
+        .unwrap();
+        assert!(session::replay_candidate_has_applicable_material(
+            &storage_only,
+            "chatgpt"
+        ));
+        assert!(session::replay_candidate_has_applicable_material(
+            &storage_only,
+            "metaai"
+        ));
+        // A genuinely expired cookie alone is not active session material.
+        let expired: session::SessionFile = serde_json::from_value(json!({
+            "ts": "synthetic",
+            "local_storage": {},
+            "cookies": [{
+                "name": "SID",
+                "value": "private-expired-never-log",
+                "domain": ".chatgpt.com",
+                "path": "/",
+                "secure": true,
+                "http_only": true,
+                "expires": 100.0
+            }]
+        }))
+        .unwrap();
+        assert!(!session::replay_candidate_has_applicable_material(&expired, "chatgpt"));
     }
 
     #[tokio::test]
