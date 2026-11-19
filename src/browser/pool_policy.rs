@@ -27,7 +27,7 @@ fn verified_https_provider_uri(value: &str) -> Option<axum::http::Uri> {
 
 /// A persisted provider thread URL must remain on the provider's configured
 /// HTTPS origin, without ambiguous userinfo or encoded authority spellings.
-pub(super) fn provider_thread_url_is_same_origin(candidate: &str, provider_home: &str) -> bool {
+pub(crate) fn provider_thread_url_is_same_origin(candidate: &str, provider_home: &str) -> bool {
     let (Some(candidate), Some(home)) = (
         verified_https_provider_uri(candidate),
         verified_https_provider_uri(provider_home),
@@ -49,7 +49,7 @@ pub(super) fn provider_thread_url_is_same_origin(candidate: &str, provider_home:
 /// This is for the in-page localStorage write fence, not an auth check.
 /// Return None for ambiguous authorities or non-HTTPS URLs instead of ever
 /// allowing a caller-supplied redirect to choose the injection origin.
-pub(super) fn provider_storage_origin(provider_home: &str) -> Option<String> {
+pub(crate) fn provider_storage_origin(provider_home: &str) -> Option<String> {
     let uri = verified_https_provider_uri(provider_home)?;
     Some(format!(
         "https://{}",
