@@ -3092,7 +3092,11 @@ mod cookie_scope_tests {
             preflight_cookie_restore(&file, provider).unwrap();
             restore_cookies(&browser, &file, provider).unwrap();
             assert!(browser.cookies().get_all().is_empty());
-            assert_eq!(file.cookies.len(), 1, "encrypted source must not be rewritten");
+            assert_eq!(
+                file.cookies.len(),
+                1,
+                "encrypted source must not be rewritten"
+            );
             assert_eq!(file.local_storage.len(), 1);
             assert_eq!(
                 provider_replay_material_coverage(&file, provider, 1000.0).category(),
