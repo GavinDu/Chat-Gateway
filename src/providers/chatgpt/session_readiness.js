@@ -50,7 +50,8 @@
           finish('unavailable'); return;
         }
         const user = !!session.user && typeof session.user === 'object' && !Array.isArray(session.user);
-        const token = typeof session.accessToken === 'string' && session.accessToken.length > 0;
+        const token = typeof session.accessToken === 'string' &&
+                      session.accessToken.trim().length > 0;
         const future = typeof session.expires === 'string' && Date.parse(session.expires) > Date.now();
         if (user && token && future) finish('verified');
         else if (Object.keys(session).length === 0) finish('needs_login');
