@@ -290,16 +290,15 @@ fn classify(e: &Evidence, now: u64) -> Diagnosis {
         {
             return inconclusive(provider, "gateway_failure_precedes_attempt");
         }
-        // A failure at candidate/backend admission cannot certify a later
-        // response/stream phase of the *same provider attempt*. This can
-        // happen when owner evidence incorrectly joins fallback attempts.
+        // Candidate/backend admission failed before provider work started.
+        // It cannot establish an adapter, composer, Send, or response-phase
+        // failure on this *same* request. Joining fallback attempt evidence
+        // by a shared request UUID must fail closed instead of assigning blame.
         if matches!(
             failure.stage.as_str(),
             "candidate_admission" | "backend_admission"
-        ) && matches!(
-            attempt.stage,
-            Stage::Response | Stage::Stream | Stage::Completed
-        ) {
+        ) && attempt.stage != Stage::Unknown
+        {
             return inconclusive(provider, "conflicting_gateway_failure_stage");
         }
     }
@@ -775,6 +774,47 @@ mod tests {
         );
         v["gateway_failure"]["reason"] = json!("challenge");
         assert_eq!(checked(v).reason, "account_or_challenge_state_changed");
+    }
+
+    #[test]
+    fn coarse_gateway_admission_never_certifies_later_provider_attempt_phase() {
+        let mut evidence = with_gateway_failure();
+        for gateway_stage in ["candidate_admission", "backend_admission"] {
+            evidence["gateway_failure"]["stage"] = json!(gateway_stage);
+            for attempted_phase in [
+                "bootstrap", "composer", "send", "response", "stream", "completed",
+            ] {
+                evidence["attempt"]["stage"] = json!(attempted_phase);
+                let decision = checked(evidence.clone());
+                assert_eq!(decision.category, "inconclusive", "{gateway_stage}/{attempted_phase}");
+                assert_eq!(
+                    decision.reason,
+                    "conflicting_gateway_failure_stage",
+                    "{gateway_stage}/{attempted_phase}"
+                );
+                assert!(!decision.live_proof);
+                let safe = serde_json::to_string(&decision).unwrap();
+                for secret in [ID, "private", "cookie", "token"] {
+                    assert!(!safe.contains(secret), "{gateway_stage}/{attempted_phase}");
+                }
+            }
+            evidence["attempt"]["stage"] = json!("unknown");
+            assert_eq!(
+                checked(evidence.clone()).reason,
+                "request_phase_or_terminal_evidence_missing"
+            );
+        }
+        // The later gateway reporting checkpoints are not proof that a
+        // provider response actually started. Preserve their existing
+        // redacted adapter-input verdict on a source-verified failed attempt.
+        for gateway_stage in ["first_stream_event", "json_completion"] {
+            evidence["gateway_failure"]["stage"] = json!(gateway_stage);
+            evidence["attempt"]["stage"] = json!("composer");
+            assert_eq!(checked(evidence.clone()).category, "adapter_input");
+        }
+        // Canonical request identity is still a separate mandatory fence.
+        evidence["gateway_failure"]["request_id"] = json!(OTHER_ID);
+        assert_eq!(checked(evidence).reason, "gateway_request_id_mismatch");
     }
 
     #[test]
