@@ -3206,7 +3206,8 @@ mod cookie_scope_tests {
             };
             assert_eq!(
                 planned_cookie_replay(&file, provider, 1000.0)
-                    .unwrap_err()
+                    .err()
+                    .expect("all expired without storage must fail")
                     .to_string(),
                 "no live provider cookies remain in saved session"
             );
@@ -3224,7 +3225,9 @@ mod cookie_scope_tests {
                     local_storage: HashMap::new(),
                     ts: "fixture".into(),
                 };
-                let err = planned_cookie_replay(&malformed, provider, 1000.0).unwrap_err();
+                let err = planned_cookie_replay(&malformed, provider, 1000.0)
+                    .err()
+                    .expect("malformed active expiry must be rejected");
                 assert_eq!(err.to_string(), "failed to restore 1 provider session cookie(s)");
                 assert!(!err.to_string().contains("do-not-emit"));
             }
@@ -3241,7 +3244,8 @@ mod cookie_scope_tests {
         };
         assert_eq!(
             planned_cookie_replay(&file, "claude", 1000.0)
-                .unwrap_err()
+                .err()
+                .expect("deferred malformed cookie must remain rejected")
                 .to_string(),
             "failed to restore 1 provider session cookie(s)"
         );
