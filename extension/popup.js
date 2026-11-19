@@ -198,6 +198,21 @@ function safeChromeComparisonResult(record) {
   return record.authentication;
 }
 
+// Chrome storage and test doubles may return references to nested objects.
+// Capture primitive connection/link-epoch values before the first await so a
+// mutable shared object can never silently update the original comparison.
+function immutableChatgptConnection(state) {
+  return {
+    gateway:state.gateway,token:state.token,
+    connectionMode:state.connectionMode,
+    relayConnectionEpoch:state.relayConnectionEpoch,
+    providerLinkEpochs:{chatgpt:state.providerLinkEpochs?.chatgpt},
+    providerLinkPendingAttempts:{chatgpt:state.providerLinkPendingAttempts?.chatgpt},
+    linkedProviders:Array.isArray(state.linkedProviders)
+      ? [...state.linkedProviders] : []
+  };
+}
+
 function sameLinkedChatgptConnection(before, after) {
   return before && after && before.gateway === after.gateway &&
     before.token === after.token &&
@@ -223,8 +238,9 @@ async function compareChatgptBrowserAndGateway() {
   };
   report("Checking Chrome and gateway accounts separately, without syncing sessions.");
   try {
-    const before = await chrome.storage.local.get(CHATGPT_COMPARISON_KEYS);
+    const read = await chrome.storage.local.get(CHATGPT_COMPARISON_KEYS);
     if (attempt !== chatgptCheckGeneration) return;
+    const before = immutableChatgptConnection(read);
     if (!hasRelayConnection(before) ||
         !Array.isArray(before.linkedProviders) ||
         !before.linkedProviders.includes("chatgpt") ||
