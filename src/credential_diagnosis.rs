@@ -334,6 +334,23 @@ fn classify(e: &Evidence, now: u64) -> Diagnosis {
         }
     }
 
+    // A first-party account observation collected before the supplied applied
+    // snapshot checkpoint does not prove account state *on that checkpoint*.
+    // These are observation times, not an engine-owned application timestamp;
+    // fail conservatively rather than claim credential replay or downstream
+    // adapter/transport attribution from a potentially earlier page state.
+    if let (Some(snapshot), Some(obscura)) = (&e.snapshot, &e.obscura) {
+        if snapshot.state == SnapshotState::Applied
+            && matches!(obscura.verdict, Auth::Verified | Auth::Unauthenticated)
+            && obscura.observed_at_ms < snapshot.observed_at_ms
+        {
+            return inconclusive(
+                provider,
+                "account_proof_predates_applied_snapshot_observation",
+            );
+        }
+    }
+
     let chrome = e.chrome.as_ref().map(|x| x.verdict);
     let obscura = e.obscura.as_ref().map(|x| x.verdict);
     let snapshot = e.snapshot.as_ref().map(|x| x.state);
@@ -873,6 +890,47 @@ mod tests {
         mismatch["obscura"]["verdict"] = json!("unauthenticated");
         mismatch["chrome"]["observed_at_ms"] = json!(NOW + 1_000);
         assert_eq!(checked(mismatch).reason, "post_attempt_evidence");
+    }
+
+    #[test]
+    fn account_proof_predating_applied_snapshot_observation_cannot_assign_runtime_blame() {
+        let mut evidence = base();
+        evidence["obscura"]["observed_at_ms"] = json!(NOW - 1_000);
+        let decision = checked(evidence.clone());
+        assert_eq!(decision.category, "inconclusive");
+        assert_eq!(
+            decision.reason,
+            "account_proof_predates_applied_snapshot_observation"
+        );
+        assert!(!decision.live_proof);
+        assert!(!serde_json::to_string(&decision).unwrap().contains(ID));
+
+        // Negative account evidence observed before the applied checkpoint
+        // likewise cannot establish a replay/binding mismatch.
+        evidence["obscura"]["verdict"] = json!("unauthenticated");
+        assert_eq!(
+            checked(evidence.clone()).reason,
+            "account_proof_predates_applied_snapshot_observation"
+        );
+        // Equal-time checkpoints remain eligible for existing typed logic.
+        evidence["obscura"]["observed_at_ms"] = json!(NOW);
+        assert_eq!(checked(evidence).category, "replay_or_binding");
+    }
+
+    #[test]
+    fn account_proof_checkpoint_order_must_hold_with_correlated_gateway_failure() {
+        let mut evidence = with_gateway_failure();
+        evidence["obscura"]["observed_at_ms"] = json!(NOW - 1_000);
+        assert_eq!(
+            checked(evidence.clone()).reason,
+            "account_proof_predates_applied_snapshot_observation"
+        );
+        // A properly ordered, same-generation earlier snapshot can support
+        // source-attributed diagnosis; the gateway UUID remains mandatory.
+        evidence["snapshot"]["observed_at_ms"] = json!(NOW - 2_000);
+        assert_eq!(checked(evidence.clone()).category, "transport_or_extraction");
+        evidence["attempt"]["request_id"] = json!(OTHER_ID);
+        assert_eq!(checked(evidence).reason, "gateway_request_id_mismatch");
     }
 
     #[test]
