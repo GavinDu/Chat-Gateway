@@ -2681,8 +2681,11 @@ fn local_storage_restore_script_with_origin(
     } else {
         String::new()
     };
+    // A setter which does not throw can still silently drop or alter the
+    // value. Read it back within the same JS evaluation and return only an
+    // equality boolean, never a key or credential-bearing value.
     Some(Zeroizing::new(format!(
-        "(() => {{ try {{ {guard}localStorage.setItem({}, {}); return true; }} catch (_error) {{ return false; }} }})()",
+        "(() => {{ try {{ {guard}const key = {}; const value = {}; localStorage.setItem(key, value); return localStorage.getItem(key) === value; }} catch (_error) {{ return false; }} }})()",
         key.as_str(),
         value.as_str()
     )))
@@ -2845,7 +2848,7 @@ mod local_storage_script_tests {
         assert!(script.contains(&serde_json::to_string(key).unwrap()));
         assert!(script.contains(&serde_json::to_string(value).unwrap()));
         assert!(script.contains("localStorage.setItem("));
-        assert!(script.contains("return true"));
+        assert!(script.contains("return localStorage.getItem(key) === value"));
         assert!(script.contains("return false"));
         assert!(script.contains("catch"));
         assert!(script.ends_with(")"));
