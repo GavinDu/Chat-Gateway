@@ -1633,7 +1633,8 @@ pub(super) fn browser_thread(
                                     // A promoted private Page must persist cookies from
                                     // its own Browser, not the legacy shared worker jar.
                                     // Legacy pages intentionally retain the old fallback.
-                                    let session_browser = page.browser_for_session_save(&browser_for_save);
+                                    let session_browser =
+                                        page.browser_for_session_save(&browser_for_save);
                                     if let Err(error) = session::save_session_if_changed(
                                         &session_browser,
                                         &page,
