@@ -1092,9 +1092,23 @@ pub(super) fn browser_thread(
                                 }
                             };
                             if restore_failed {
-                                // Do not publish a partially restored page. Clear runtime
-                                // state, retaining the encrypted snapshot: a load/transport
-                                // failure does not establish expired credentials.
+                                if super::diagnostics::startup_ambiguous_failure_must_preserve_snapshot(provider) {
+                                    // The shared Obscura cookie jar may contain preexisting
+                                    // owner state. A failed navigation or partial restore is
+                                    // not account rejection; deliberately clearing cookies
+                                    // or origin storage would destroy recoverable credentials.
+                                    // Withhold the Page, and require isolated staging before
+                                    // asserting rollback of any partial candidate writes.
+                                    provider_sessions.record_probe_failure(provider.name());
+                                    tracing::warn!(
+                                        provider = %pcfg.name,
+                                        reason = "startup_replay_failed_unverified",
+                                        "provider warm-up inconclusive; saved snapshot and browser jar retained"
+                                    );
+                                    continue;
+                                }
+                                // Legacy deferred providers retain existing cleanup policy.
+                                // Failed navigation alone never deletes the vault snapshot.
                                 let cleanup = (|| -> Result<()> {
                                     session::clear_provider_cookies(&browser, provider.name())?;
                                     let cleared = page.evaluate(
@@ -1132,7 +1146,7 @@ pub(super) fn browser_thread(
                                     // No chat input is inconclusive, not evidence of expiry.
                                     Ok(false) => {}
                                     Err(error) if error.downcast_ref::<ProviderSessionExpiredError>().is_some()
-                                        && super::diagnostics::startup_dom_login_must_preserve_snapshot(provider) => {
+                                        && super::diagnostics::startup_ambiguous_failure_must_preserve_snapshot(provider) => {
                                         // A login-looking URL can be a challenge, blocked
                                         // bootstrap or route redesign, not expired owner
                                         // credentials. Never erase the encrypted snapshot
