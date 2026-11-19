@@ -16,13 +16,28 @@ impl std::fmt::Display for ProviderSessionExpiredError {
 
 impl std::error::Error for ProviderSessionExpiredError {}
 
-/// The generic login-URL probe is only DOM evidence, not an authoritative
-/// account verdict. In the active recovery scope, it must never authorize
-/// discarding the original encrypted snapshot or clearing the shared jar.
-/// The deferred providers retain their legacy behavior until separately
-/// audited; first-party ChatGPT 401 is handled by a distinct verifier.
-pub(super) fn startup_dom_login_must_preserve_snapshot(provider: Provider) -> bool {
+/// Neither a startup login-looking URL nor a failed navigation/import is
+/// an authoritative account rejection. Active recovery must not intentionally
+/// erase the original encrypted snapshot or the shared browser's prior jar.
+/// This guard does not roll back partial cookie writes by PageSession::open;
+/// that still requires isolated Browser+Page staging (#1385).
+/// Deferred providers keep their prior policy until separately audited.
+pub(super) fn startup_ambiguous_failure_must_preserve_snapshot(provider: Provider) -> bool {
     matches!(provider, Provider::ChatGPT | Provider::MetaAI)
+}
+
+/// Execute legacy startup cleanup only for providers outside the active
+/// recovery scope. The caller owns the browser/page; no credentials, cookie
+/// values or raw upstream errors are copied into this admission decision.
+pub(super) fn cleanup_failed_startup_restore<F>(provider: Provider, cleanup: F) -> Result<bool>
+where
+    F: FnOnce() -> Result<()>,
+{
+    if startup_ambiguous_failure_must_preserve_snapshot(provider) {
+        return Ok(false);
+    }
+    cleanup()?;
+    Ok(true)
 }
 
 /// A page with a visible textarea is not proof of provider readiness when
@@ -210,9 +225,19 @@ mod inconclusive_session_probe_tests {
             .is_some());
         for provider in [Provider::ChatGPT, Provider::MetaAI] {
             assert!(
-                super::startup_dom_login_must_preserve_snapshot(provider),
+                super::startup_ambiguous_failure_must_preserve_snapshot(provider),
                 "active startup DOM probe must never authorize vault deletion"
             );
+            // The exact startup cleanup adapter must not invoke destructive
+            // cookie/localStorage work for an active failed replay.
+            let mut cleared = false;
+            let outcome = super::cleanup_failed_startup_restore(provider, || {
+                cleared = true;
+                Ok(())
+            })
+            .unwrap();
+            assert!(!outcome);
+            assert!(!cleared, "failed active replay must not clear old jar");
         }
         for provider in [
             Provider::Claude,
@@ -224,10 +249,30 @@ mod inconclusive_session_probe_tests {
             Provider::Manus,
         ] {
             assert!(
-                !super::startup_dom_login_must_preserve_snapshot(provider),
+                !super::startup_ambiguous_failure_must_preserve_snapshot(provider),
                 "deferred provider startup behavior is outside this P0 slice"
             );
+            let mut cleared = false;
+            let outcome = super::cleanup_failed_startup_restore(provider, || {
+                cleared = true;
+                Ok(())
+            })
+            .unwrap();
+            assert!(outcome);
+            assert!(cleared, "deferred cleanup semantics must not change");
         }
+    }
+
+    #[test]
+    fn deferred_startup_cleanup_error_propagates_without_untrusted_details() {
+        use crate::providers::Provider;
+        let error = super::cleanup_failed_startup_restore(Provider::Claude, || {
+            anyhow::bail!("private-token-in-upstream-error")
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("private-token"));
+        // Runtime worker must only use session_worker_failure_category(&error)
+        // in its log; the cleanup helper does not serialize errors itself.
     }
 
     #[test]
