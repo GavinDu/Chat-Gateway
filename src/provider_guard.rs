@@ -340,10 +340,7 @@ pub fn is_challenge_page(page: &Page) -> bool {
     let body = evaluation.as_str().unwrap_or("");
     has_challenge_marker(&url, body)
         || (is_chatgpt_https_page(&url)
-            && page
-                .evaluate(CHATGPT_MANAGED_CHALLENGE_SHELL_JS)
-                .as_bool()
-                == Some(true))
+            && page.evaluate(CHATGPT_MANAGED_CHALLENGE_SHELL_JS).as_bool() == Some(true))
 }
 
 #[cfg(test)]
@@ -809,8 +806,8 @@ mod chatgpt_managed_challenge_regressions {
             .unwrap();
         // This data:-origin fixture tests the detection predicate in isolation;
         // production still requires is_chatgpt_https_page on the real Page URL.
-        let js = CHATGPT_MANAGED_CHALLENGE_SHELL_JS
-            .replace("location.origin", "'https://chatgpt.com'");
+        let js =
+            CHATGPT_MANAGED_CHALLENGE_SHELL_JS.replace("location.origin", "'https://chatgpt.com'");
         assert_eq!(page.evaluate(&js).as_bool(), Some(false), "title alone");
         page.evaluate(
             "document.head.insertAdjacentHTML('beforeend', '<script src=\"https://chatgpt.com/cdn-cgi/challenge-platform/fixture\"></script>')",
@@ -827,6 +824,9 @@ mod chatgpt_managed_challenge_regressions {
             "document.querySelector('script').src='https://meta.ai/cdn-cgi/challenge-platform/x'",
         );
         assert_eq!(page.evaluate(&js).as_bool(), Some(false), "other provider");
-        assert!(!is_challenge_page(&page), "foreign fixture cannot trip the provider guard");
+        assert!(
+            !is_challenge_page(&page),
+            "foreign fixture cannot trip the provider guard"
+        );
     }
 }
