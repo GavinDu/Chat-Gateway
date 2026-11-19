@@ -1444,7 +1444,11 @@ fn composer_draft_expression(element: &str) -> String {
 
 /// Re-read the actionable composer after framework renders, not just after
 /// the initial typing event. Never log the prompt when the value changes.
-fn composer_retains_prompt(page: &Page, selector: &str, prompt: &str) -> anyhow::Result<bool> {
+pub(crate) fn composer_retains_prompt(
+    page: &Page,
+    selector: &str,
+    prompt: &str,
+) -> anyhow::Result<bool> {
     let selector_js = serde_json::to_string(selector)?;
     let el_js = visible_input_query(&selector_js);
     let prompt_js = serde_json::to_string(prompt)?;
@@ -2067,7 +2071,7 @@ pub async fn human_type(page: &Page, selectors: &[&str], text: &str) -> anyhow::
     human_type_with_provider(page, selectors, text, None).await
 }
 
-async fn human_type_with_provider(
+pub(crate) async fn human_type_with_provider(
     page: &Page,
     selectors: &[&str],
     text: &str,
