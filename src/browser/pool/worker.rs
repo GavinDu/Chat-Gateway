@@ -215,6 +215,18 @@ fn metaai_document_denied_before_composer(
 /// The browser worker waits for a composer *before* invoking the provider
 /// adapter. A timeout here otherwise bypasses adapter-level diagnostics.
 /// Never record the selector, URL, prompt, page text or upstream error string.
+/// A challenge that appeared while waiting for a composer must be typed,
+/// not downgraded to a selector failure or an account-credential error.
+fn chatgpt_challenge_after_composer_wait(
+    provider: &str,
+    evidence: &ComposerPreflightEvidence,
+) -> bool {
+    provider == "chatgpt"
+        && evidence.provider_origin
+        && !evidence.login_url
+        && evidence.challenge_visible
+}
+
 fn report_composer_preflight_failure(
     provider: &str,
     page: &obscura_core::Page,
@@ -247,6 +259,9 @@ fn report_composer_preflight_failure(
             iframe_element_count = ?evidence.iframe_element_count,
             "provider composer readiness evidence"
         );
+        if chatgpt_challenge_after_composer_wait(provider, &evidence) {
+            return anyhow::Error::new(providers::ProviderChallengeError::new(provider));
+        }
         if provider == "metaai"
             && metaai_document_denied_before_composer(observed_bootstrap_403, &evidence)
         {
@@ -350,6 +365,33 @@ mod composer_preflight_diagnostic_tests {
         assert_eq!(evidence.category(), "challenge_visible");
         evidence.provider_origin = false;
         assert_eq!(evidence.category(), "unexpected_origin");
+    }
+
+    #[test]
+    fn post_wait_challenge_is_typed_only_for_expected_chatgpt_first_party() {
+        let mut evidence = ComposerPreflightEvidence {
+            document_ready: "complete",
+            provider_origin: true,
+            login_url: false,
+            challenge_visible: true,
+            configured_input_present: false,
+            generic_editor_present: false,
+            generic_editor_actionable: false,
+            body_element_count: Some(0),
+            script_element_count: Some(1),
+            external_script_count: Some(1),
+            iframe_element_count: Some(0),
+        };
+        assert!(chatgpt_challenge_after_composer_wait("chatgpt", &evidence));
+        assert!(!chatgpt_challenge_after_composer_wait("metaai", &evidence));
+        evidence.provider_origin = false;
+        assert!(!chatgpt_challenge_after_composer_wait("chatgpt", &evidence));
+        evidence.provider_origin = true;
+        evidence.login_url = true;
+        assert!(!chatgpt_challenge_after_composer_wait("chatgpt", &evidence));
+        evidence.login_url = false;
+        evidence.challenge_visible = false;
+        assert!(!chatgpt_challenge_after_composer_wait("chatgpt", &evidence));
     }
 
     #[tokio::test]
@@ -1283,6 +1325,9 @@ pub(super) fn browser_thread(
                                         &adapter.effective_selectors().input_refs(),
                                         error,
                                     );
+                                    if classified.downcast_ref::<providers::ProviderChallengeError>().is_some() {
+                                        provider_guard.disable_provider(provider.name(), "challenge page detected; manual review required");
+                                    }
                                     let _ = chunks.send(Err(classified)).await;
                                     return;
                                 }
