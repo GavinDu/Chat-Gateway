@@ -3084,7 +3084,9 @@ mod cookie_scope_tests {
                 let mut live = cookie("live", "private-fixture", "/");
                 live.domain = "chatgpt.com".into();
                 cookies.push(live);
-                cookies[0].path = "/bad;inject".into();
+                // Only a malformed *nonexpired* cookie must reject the full
+                // plan; expired ancillary fields are never replayed.
+                cookies[1].path = "/bad;inject".into();
             }
             let file = SessionFile {
                 cookies,
