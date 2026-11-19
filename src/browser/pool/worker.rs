@@ -1180,6 +1180,58 @@ mod failed_lazy_page_restore_tests {
     }
 }
 
+/// Interactive legacy LoginStart/LoginComplete use the shared worker Browser.
+/// A provider that ever owned a private context cannot safely re-enter that
+/// path until a generation-fenced transition is implemented in #1471/#1463.
+fn require_global_login_safe(pages: &SharedPages, provider: Provider) -> Result<()> {
+    pages.borrow().require_legacy_shared_replay_safe(provider)
+}
+
+#[cfg(test)]
+mod isolated_interactive_login_guard_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn isolated_owner_blocks_legacy_login_even_after_eviction() {
+        let shared = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        shared
+            .cookies()
+            .set(
+                "SID=shared-unchanged; Secure; Path=/",
+                "https://chatgpt.com/",
+            )
+            .unwrap();
+        let pages = Rc::new(RefCell::new(ProviderPageCache::new(1)));
+        for provider in [Provider::ChatGPT, Provider::MetaAI] {
+            let private = Rc::new(
+                obscura_core::Browser::builder()
+                    .stealth(false)
+                    .build()
+                    .unwrap(),
+            );
+            let page = private.new_page().await.unwrap();
+            pages
+                .borrow_mut()
+                .insert_owned(provider, page, private, None);
+            assert_eq!(
+                require_global_login_safe(&pages, provider)
+                    .unwrap_err()
+                    .to_string(),
+                "isolated_context_rehydration_required"
+            );
+        }
+        assert!(!pages.borrow().contains_key(&Provider::ChatGPT));
+        assert!(require_global_login_safe(&pages, Provider::ChatGPT).is_err());
+        assert_eq!(shared.cookies().get_all()[0].value, "shared-unchanged");
+        assert!(require_global_login_safe(&pages, Provider::Claude).is_ok());
+        let cold = Rc::new(RefCell::new(ProviderPageCache::new(1)));
+        assert!(require_global_login_safe(&cold, Provider::ChatGPT).is_ok());
+    }
+}
+
 pub(super) async fn ensure_provider_page(
     browser: &obscura_core::Browser,
     pages: &SharedPages,
@@ -2146,11 +2198,17 @@ pub(super) fn browser_thread(
                         }
                         Command::LoginStart { provider, reply } => {
                             let browser = browser.clone();
+                            let pages = pages.clone();
                             let login_pages = login_pages.clone();
                             let login_meta = login_meta.clone();
                             let operation_gate = operation_gate.clone();
                             tokio::task::spawn_local(async move {
                                 let _operation = operation_gate.lock().await;
+                                // Check before any legacy global page navigation or cookie mutation.
+                                if let Err(error) = require_global_login_safe(&pages, provider) {
+                                    let _ = reply.send(Err(error));
+                                    return;
+                                }
                                 sweep_login_pages(&login_pages, &login_meta);
                                 // A fresh login page per start (Go used an
                                 // isolated temp profile for the same
@@ -2202,6 +2260,9 @@ pub(super) fn browser_thread(
                                     let lock = locks.borrow().get(&provider).cloned()
                                         .unwrap_or_else(|| Rc::new(tokio::sync::Mutex::new(())));
                                     let _guard = lock.lock().await;
+                                    // A private owner might have been admitted after
+                                    // LoginStart; no old global snapshot may overwrite it.
+                                    require_global_login_safe(&pages, provider)?;
                                     if crate::provider_guard::is_challenge_page(&login_page) {
                                         anyhow::bail!("provider challenge requires manual completion before saving a session");
                                     }
