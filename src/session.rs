@@ -1882,12 +1882,98 @@ fn expected_active_capture_origin(provider: &str, current_url: &str) -> Result<O
 /// A synchronous in-page check before any storage enumeration prevents a
 /// navigation race between host Page.url() and Page.evaluate(). The script
 /// contains only a source-owned public origin, never credential material.
-fn active_storage_capture_script(expected_origin: &str) -> Result<Zeroizing<String>> {
-    let literal = serde_json::to_string(expected_origin)
-        .map_err(|_| anyhow::anyhow!("provider_session_capture_origin_mismatch"))?;
+/// Enumerate into own data-properties, not normal assignment into a
+/// dictionary inheriting Object.prototype. The string `__proto__` is a valid
+/// localStorage key: `o[k] = value` on a regular object can invoke the special
+/// prototype setter and silently omit that key from the saved snapshot.
+/// Using defineProperty also avoids null-prototype object serialization
+/// differences in the pinned JS-to-JSON bridge.
+fn storage_capture_script(expected_origin: Option<&str>) -> Result<Zeroizing<String>> {
+    let guard = if let Some(origin) = expected_origin {
+        let literal = serde_json::to_string(origin)
+            .map_err(|_| anyhow::anyhow!("provider_session_capture_origin_mismatch"))?;
+        format!("if (location.origin !== {literal}) return null; ")
+    } else {
+        String::new()
+    };
     Ok(Zeroizing::new(format!(
-        "(function(){{ if (location.origin !== {literal}) return null; const o = {{}}; for (let i = 0; i < localStorage.length; i++) {{ const k = localStorage.key(i); o[k] = localStorage.getItem(k); }} return o; }})()"
+        "(function(){{ {guard}const o = {{}}; for (let i = 0; i < localStorage.length; i++) {{ const k = localStorage.key(i); Object.defineProperty(o, k, {{ value: localStorage.getItem(k), enumerable: true, writable: true, configurable: true }}); }} return o; }})()"
     )))
+}
+
+fn active_storage_capture_script(expected_origin: &str) -> Result<Zeroizing<String>> {
+    storage_capture_script(Some(expected_origin))
+}
+
+#[cfg(test)]
+mod prototype_storage_capture_fidelity_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn literal_prototype_property_keys_round_trip_through_pinned_obscura_json() {
+        let browser = Browser::builder().stealth(false).build().unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        page.goto("data:text/html,<body>synthetic-storage-fidelity</body>")
+            .await
+            .unwrap();
+        let keys = [
+            "__proto__",
+            "constructor",
+            "toString",
+            "key\\\"with\\backslash\\nand-newline",
+        ];
+        let values = [
+            "value-proto",
+            "value-constructor",
+            "value-tostring",
+            "synthetic-escaped\\\"();throw new Error('no execution')//",
+        ];
+        let keys_json = serde_json::to_string(&keys).unwrap();
+        let values_json = serde_json::to_string(&values).unwrap();
+
+        // An ordinary Object's "__proto__" assignment can invoke its
+        // setter rather than creating the desired own string property.
+        // Both the strict ChatGPT capture and the deferred/legacy capture
+        // must instead retain *every* exact storage key and value.
+        for expected_origin in [Some("https://chatgpt.com"), None] {
+            let script = storage_capture_script(expected_origin).unwrap();
+            assert!(script.contains("Object.defineProperty(o, k,"));
+            let evaluation = format!(
+                "(() => {{ const location = {{ origin: 'https://chatgpt.com' }}; const keys = {keys_json}; const values = {values_json}; const localStorage = {{ length: keys.length, key: i => keys[i], getItem: key => values[keys.indexOf(key)] }}; return {}; }})()",
+                script.as_str()
+            );
+            let output = page.evaluate(&evaluation);
+            let captured = parse_local_storage_snapshot(output).unwrap();
+            assert_eq!(captured.len(), keys.len());
+            for (key, value) in keys.iter().zip(values.iter()) {
+                assert_eq!(captured.get(*key).map(String::as_str), Some(*value));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn guarded_capture_rejects_foreign_origin_before_reading_special_keys() {
+        let browser = Browser::builder().stealth(false).build().unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        page.goto("data:text/html,<body>foreign-source</body>")
+            .await
+            .unwrap();
+        let script = active_storage_capture_script("https://chatgpt.com").unwrap();
+        let evaluation = format!(
+            "(() => {{ const location = {{ origin: 'https://evil.example' }}; let reads = 0; const localStorage = {{ get length() {{ reads++; return 1; }}, key: () => '__proto__', getItem: () => 'private-value' }}; const result = {}; return {{ result, reads }}; }})()",
+            script.as_str()
+        );
+        let denial = page.evaluate(&evaluation);
+        assert!(denial.get("result").is_some_and(serde_json::Value::is_null));
+        assert_eq!(
+            denial.get("reads").and_then(serde_json::Value::as_u64),
+            Some(0)
+        );
+        assert!(
+            script.find("location.origin !==").unwrap()
+                < script.find("localStorage.length").unwrap()
+        );
+    }
 }
 
 #[cfg(test)]
@@ -2007,14 +2093,13 @@ mod active_storage_capture_tests {
 
 async fn capture_session(browser: &Browser, page: &Page, provider: &str) -> Result<SessionFile> {
     let expected_origin = expected_active_capture_origin(provider, &page.url())?;
-    let ls_value = match expected_origin.as_deref() {
-        Some(origin) => {
-            let guarded = active_storage_capture_script(origin)?;
-            page.evaluate(&guarded)
-        }
-        // Deferred adapters retain their previously established capture path.
-        None => page.evaluate("(function(){ const o = {}; for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); o[k] = localStorage.getItem(k); } return o; })()"),
+    let script = match expected_origin.as_deref() {
+        Some(origin) => active_storage_capture_script(origin)?,
+        // Deferred adapters retain their original origin policy; use the same
+        // lossless dictionary enumeration to preserve arbitrary string keys.
+        None => storage_capture_script(None)?,
     };
+    let ls_value = page.evaluate(&script);
     if expected_origin.is_some() {
         // A null result means the in-page origin fence refused the read or
         // script evaluation was unavailable. Never persist empty evidence.
