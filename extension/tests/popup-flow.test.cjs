@@ -1258,7 +1258,7 @@ test("same-origin tab route drift after injected probe invalidates account verdi
   const unchanged=loadPopup();
   for (let i=0; i<5; i++) await new Promise(resolve=>setImmediate(resolve));
   unchanged.context.chrome.tabs.query=async()=>[{id:42,url:initial}];
-  unchanged.context.chrome.scripting={async executeScript()=>[{result:{
+  unchanged.context.chrome.scripting={executeScript:async()=>[{result:{
     provider:"chatgpt",context:"chrome_active_tab",authentication:"verified",
     reason:"first_party_session_confirmed",checked_at:new Date().toISOString(),
     exported_snapshot_verified:false
