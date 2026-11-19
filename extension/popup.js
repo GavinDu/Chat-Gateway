@@ -72,6 +72,10 @@ async function verifyChatgptActiveTab() {
       return;
     }
     const tabId = tabs[0].id;
+    // A first-party SPA/account route may change *after* the injected probe
+    // resolves but before the popup queries the active tab again. Keep this
+    // potentially private URL in memory only; compare it, never display it.
+    const initialTabUrl = tabs[0].url;
     // Explicit user gesture + activeTab grants exactly this tab, not arbitrary
     // browser pages. No credential-bearing body leaves the page function.
     const runs = await chrome.scripting.executeScript({
@@ -83,6 +87,7 @@ async function verifyChatgptActiveTab() {
     const current = await chrome.tabs.query({active:true, currentWindow:true});
     if (attempt !== chatgptCheckGeneration ||
         current?.length !== 1 || current[0]?.id !== tabId ||
+        current[0]?.url !== initialTabUrl ||
         !firstPartyChatgptTab(current[0].url)) {
       report("Tab changed during verification. Result discarded.");
       return;
