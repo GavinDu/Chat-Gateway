@@ -210,7 +210,11 @@ mod cookie_restore_navigation_safety_tests {
             )
             .await
             .unwrap_err();
-            assert_eq!(navigations.get(), 0, "failed active replay must not navigate");
+            assert_eq!(
+                navigations.get(),
+                0,
+                "failed active replay must not navigate"
+            );
             // The source error is preserved for a typed/redacted outer
             // worker, but this helper never formats or logs its Display.
             assert!(error.to_string().contains("private-token"));
