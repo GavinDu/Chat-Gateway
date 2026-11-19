@@ -388,6 +388,11 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/relay/v1/mode", get(relay::relay_mode))
         .route("/relay/v1/status", get(relay::status).post(relay::status))
+        // Explicit authorized extension request only, never polled by status.
+        .route(
+            "/relay/v1/account-verification/:provider",
+            post(relay::verify_first_party_account),
+        )
         .route(
             "/relay/v1/diagnostics",
             get(relay::status).post(relay::status),
