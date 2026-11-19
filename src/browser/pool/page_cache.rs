@@ -4,7 +4,7 @@ use anyhow::Result;
 use obscura_core::{Browser, Page};
 use std::{
     cell::RefCell,
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     ops::{Deref, DerefMut},
     rc::Rc,
     sync::{
@@ -42,6 +42,10 @@ pub(super) struct ProviderPageCache {
     // exact entry generation it took may be restored on Drop.
     epochs: HashMap<Provider, u64>,
     next_epoch: u64,
+    // Non-secret worker-local tombstones: an evicted isolated Page must never
+    // fall back into the shared Browser when a provider is requested again.
+    // Full same-generation private rehydration is the separate #1471 gate.
+    isolated_once: HashSet<Provider>,
 }
 
 impl ProviderPageCache {
@@ -53,6 +57,7 @@ impl ProviderPageCache {
             capacity: capacity.max(1),
             epochs: HashMap::new(),
             next_epoch: 0,
+            isolated_once: HashSet::new(),
         }
     }
     pub(super) fn insert(&mut self, provider: Provider, page: Rc<Page>) {
@@ -85,6 +90,9 @@ impl ProviderPageCache {
         browser_owner: Rc<Browser>,
         script_403: Option<Arc<AtomicBool>>,
     ) {
+        if matches!(provider, Provider::ChatGPT | Provider::MetaAI) {
+            self.isolated_once.insert(provider);
+        }
         self.insert_entry(
             provider,
             CachedProviderPage {
@@ -93,6 +101,16 @@ impl ProviderPageCache {
             },
             script_403,
         );
+    }
+
+    /// Shared-jar replay is unsafe once this worker has admitted an isolated
+    /// context, even when its one-Page LRU has since evicted the Page. Do not
+    /// mistake a cold cache for permission to rewrite the global cookie jar.
+    pub(super) fn require_legacy_shared_replay_safe(&self, provider: Provider) -> Result<()> {
+        if self.isolated_once.contains(&provider) {
+            anyhow::bail!("isolated_context_rehydration_required");
+        }
+        Ok(())
     }
 
     fn insert_entry(
@@ -249,6 +267,96 @@ impl Drop for PageLease {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn evicted_isolated_page_never_reenters_global_cookie_jar() {
+        let global = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        global
+            .cookies()
+            .set("SID=global-untouched; Secure; Path=/", "https://chatgpt.com/")
+            .unwrap();
+        let private_a = Rc::new(
+            obscura_core::Browser::builder()
+                .stealth(false)
+                .build()
+                .unwrap(),
+        );
+        private_a
+            .cookies()
+            .set("SID=private-a; Secure; Path=/", "https://chatgpt.com/")
+            .unwrap();
+        let private_b = Rc::new(
+            obscura_core::Browser::builder()
+                .stealth(false)
+                .build()
+                .unwrap(),
+        );
+        private_b
+            .cookies()
+            .set("SID=private-b; Secure; Path=/", "https://meta.ai/")
+            .unwrap();
+        let a = private_a.new_page().await.unwrap();
+        let b = private_b.new_page().await.unwrap();
+        let a_weak = Rc::downgrade(&private_a);
+        let pages = Rc::new(RefCell::new(ProviderPageCache::new(1)));
+        pages
+            .borrow_mut()
+            .insert_owned(Provider::ChatGPT, a, private_a.clone(), None);
+        drop(private_a);
+        pages
+            .borrow_mut()
+            .insert_owned(Provider::MetaAI, b, private_b.clone(), None);
+        assert!(a_weak.upgrade().is_none(), "A's evicted Browser is dropped");
+        assert!(pages.borrow().get(&Provider::ChatGPT).is_none());
+        assert!(pages
+            .borrow()
+            .require_legacy_shared_replay_safe(Provider::ChatGPT)
+            .is_err());
+        let error = super::super::worker::ensure_provider_page(&global, &pages, Provider::ChatGPT)
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), "isolated_context_rehydration_required");
+        assert_eq!(global.cookies().get_all()[0].value, "global-untouched");
+        assert_eq!(private_b.cookies().get_all()[0].value, "private-b");
+        assert!(pages.borrow().contains_key(&Provider::MetaAI));
+        // Fresh legacy cold provider remains eligible; no other adapter is
+        // marked isolated by the two active providers' private context.
+        assert!(pages
+            .borrow()
+            .require_legacy_shared_replay_safe(Provider::Claude)
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn stale_lease_drop_does_not_erase_private_replay_tombstone() {
+        let browser = Rc::new(
+            obscura_core::Browser::builder()
+                .stealth(false)
+                .build()
+                .unwrap(),
+        );
+        let page = browser.new_page().await.unwrap();
+        let pages = Rc::new(RefCell::new(ProviderPageCache::new(1)));
+        pages.borrow_mut().insert_owned(Provider::ChatGPT, page, browser, None);
+        let lease = PageLease::take(&pages, Provider::ChatGPT).unwrap();
+        // Explicit cache invalidation during a lease prevents its late Drop
+        // from resurrecting an owned context or permitting global replay.
+        pages.borrow_mut().remove(&Provider::ChatGPT);
+        drop(lease);
+        assert!(!pages.borrow().contains_key(&Provider::ChatGPT));
+        assert!(pages
+            .borrow()
+            .require_legacy_shared_replay_safe(Provider::ChatGPT)
+            .is_err());
+        // A brand-new worker cache has no historical owner until one is
+        // admitted; it must not infer login success from this empty marker.
+        assert!(ProviderPageCache::new(1)
+            .require_legacy_shared_replay_safe(Provider::ChatGPT)
+            .is_ok());
+    }
+
     #[tokio::test]
     async fn session_save_browser_tracks_exact_owned_page_not_global_cookie_jar() {
         let shared = Rc::new(
