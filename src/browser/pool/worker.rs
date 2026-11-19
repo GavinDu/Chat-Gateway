@@ -1147,11 +1147,14 @@ mod failed_lazy_page_restore_tests {
             (Provider::ChatGPT, "https://chatgpt.com/"),
             (Provider::MetaAI, "https://meta.ai/"),
         ] {
-            browser.cookies().set("SID=synthetic; Secure; Path=/", origin).unwrap();
+            browser
+                .cookies()
+                .set("SID=synthetic; Secure; Path=/", origin)
+                .unwrap();
             assert!(!cleanup_failed_lazy_page_restore(&browser, provider).unwrap());
             assert!(browser.cookies().get_all().iter().any(|cookie| {
-                cookie.value == "synthetic" &&
-                cookie.domain == origin.trim_start_matches("https://").trim_end_matches('/')
+                cookie.value == "synthetic"
+                    && cookie.domain == origin.trim_start_matches("https://").trim_end_matches('/')
             }));
         }
     }
