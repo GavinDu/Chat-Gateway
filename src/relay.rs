@@ -1322,6 +1322,227 @@ fn authenticated_request_with_origin_mode(
     Ok(())
 }
 
+/// An explicit extension-approved account read uses *only* the current warm
+/// Obscura Page. The fixed report deliberately cannot certify any Chrome
+/// capture, encrypted persistence or applied replay generation.
+const ACCOUNT_PROBE_QUEUE_TIMEOUT: Duration = Duration::from_secs(2);
+const ACCOUNT_PROBE_WAIT_TIMEOUT: Duration = Duration::from_secs(15);
+
+fn account_probe_result(
+    verdict: crate::browser::pool::FirstPartyAccountVerdict,
+) -> (&'static str, &'static str) {
+    use crate::browser::pool::FirstPartyAccountVerdict;
+    match verdict {
+        FirstPartyAccountVerdict::Verified => ("verified", "first_party_session_confirmed"),
+        FirstPartyAccountVerdict::ExplicitUnauthenticated => {
+            ("unauthenticated", "provider_rejected_session")
+        }
+        FirstPartyAccountVerdict::Unknown => ("unknown", "first_party_check_inconclusive"),
+        FirstPartyAccountVerdict::Unsupported => {
+            ("unsupported", "account_verifier_not_established")
+        }
+    }
+}
+
+fn account_probe_worker_consistent(start: u64, end: u64, alive: bool) -> bool {
+    alive && start == end
+}
+
+fn account_probe_response(
+    provider: &'static str,
+    verdict: &'static str,
+    reason: &'static str,
+    worker_generation: Option<u64>,
+) -> Response {
+    // No source account ID, cookie/body, URL, request parameters or credential
+    // fingerprint can enter this fixed response. The attempt UUID is random,
+    // not credential-derived or a claim that the Chrome snapshot was applied.
+    let result = serde_json::json!({
+        "schema_version": 1,
+        "provider": provider,
+        "context": "obscura_warm_page",
+        "authentication": verdict,
+        "reason": reason,
+        "checked_at_utc": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        "attempt_id": uuid::Uuid::new_v4().to_string(),
+        "worker_generation": worker_generation,
+        "exported_snapshot_verified": false,
+        "applied_snapshot_verified": false
+    });
+    (
+        [(header::CACHE_CONTROL, "no-store"), (header::PRAGMA, "no-cache")],
+        Json(result),
+    )
+        .into_response()
+}
+
+/// Explicit one-shot, POST-only, first-party account check for an authorized
+/// browser extension. Unlike /relay/v1/status, this has NO CLI/no-Origin
+/// exception, cannot be polled automatically and never invokes PageSession
+/// import, sends chat, navigates or mutates the owner vault.
+pub async fn verify_first_party_account(
+    State(app): State<Arc<crate::AppState>>,
+    headers: HeaderMap,
+    Path(provider): Path<String>,
+) -> Response {
+    if !headers.contains_key(header::ORIGIN) {
+        return json_error(
+            StatusCode::FORBIDDEN,
+            "extension_origin_rejected",
+            "the configured browser extension origin is required",
+        );
+    }
+    if let Err(response) = authenticated_request(&app, &headers) {
+        return *response;
+    }
+    let provider_name = match provider.as_str() {
+        "chatgpt" => "chatgpt",
+        "metaai" => "metaai",
+        _ => {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "unsupported_account_probe",
+                "first-party account probe is only supported for active recovery providers",
+            )
+        }
+    };
+    // Meta AI currently has no authoritative signed-in-vs-anonymous
+    // account contract (#1329). Do not touch its browser or invent GraphQL.
+    if provider_name == "metaai" {
+        return account_probe_response(
+            provider_name,
+            "unsupported",
+            "metaai_account_verifier_not_established",
+            None,
+        );
+    }
+    if !app.cfg.provider(provider_name).is_some_and(|c| c.enabled) {
+        return account_probe_response(provider_name, "unknown", "provider_disabled", None);
+    }
+
+    // Relay imports/unlinks hold this same gate until actual browser activation
+    // finishes. Keep it held during the read-only check, so a concurrent
+    // relink/unlink cannot invalidate the observation before the response.
+    let Some(gate) = app.relay.import_gates.for_provider(provider_name) else {
+        return account_probe_response(provider_name, "unknown", "relay_unavailable", None);
+    };
+    let _guard =
+        match tokio::time::timeout(ACCOUNT_PROBE_QUEUE_TIMEOUT, gate.lock_owned()).await {
+            Ok(guard) => guard,
+            Err(_) => {
+                return account_probe_response(
+                    provider_name,
+                    "unknown",
+                    "session_mutation_busy",
+                    None,
+                );
+            }
+        };
+
+    if !app.pool.worker_alive() {
+        return account_probe_response(provider_name, "unknown", "worker_unavailable", None);
+    }
+    let start = app.pool.worker_generation();
+    let check = tokio::time::timeout(
+        ACCOUNT_PROBE_WAIT_TIMEOUT,
+        app.pool.verify_first_party_account(provider_name),
+    )
+    .await;
+    let end = app.pool.worker_generation();
+    if !account_probe_worker_consistent(start, end, app.pool.worker_alive()) {
+        return account_probe_response(provider_name, "unknown", "worker_generation_changed", None);
+    }
+    let (verdict, reason) = match check {
+        Ok(Ok(result)) => account_probe_result(result),
+        Ok(Err(_)) => ("unknown", "worker_unavailable"),
+        Err(_) => ("unknown", "first_party_check_timeout"),
+    };
+    account_probe_response(provider_name, verdict, reason, Some(end))
+}
+
+#[cfg(test)]
+mod first_party_account_relay_tests {
+    use super::*;
+
+    #[test]
+    fn read_only_account_result_categories_never_infer_export_or_application() {
+        use crate::browser::pool::FirstPartyAccountVerdict as V;
+        assert_eq!(
+            account_probe_result(V::Verified),
+            ("verified", "first_party_session_confirmed")
+        );
+        assert_eq!(
+            account_probe_result(V::ExplicitUnauthenticated),
+            ("unauthenticated", "provider_rejected_session")
+        );
+        assert_eq!(
+            account_probe_result(V::Unknown),
+            ("unknown", "first_party_check_inconclusive")
+        );
+        assert_eq!(
+            account_probe_result(V::Unsupported),
+            ("unsupported", "account_verifier_not_established")
+        );
+    }
+
+    #[test]
+    fn warm_page_response_is_redacted_and_snapshot_parity_never_assumed() {
+        let response = account_probe_response(
+            "chatgpt",
+            "verified",
+            "first_party_session_confirmed",
+            Some(2),
+        );
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CACHE_CONTROL).unwrap(),
+            "no-store"
+        );
+        let (verdict, reason) = account_probe_result(
+            crate::browser::pool::FirstPartyAccountVerdict::Verified
+        );
+        assert_eq!(verdict, "verified");
+        assert_eq!(reason, "first_party_session_confirmed");
+        // The report has no mechanism to certify Chrome export/import parity,
+        // even if the warm Page's own first-party account was confirmed.
+        let fixed = serde_json::json!({
+            "context": "obscura_warm_page",
+            "exported_snapshot_verified": false,
+            "applied_snapshot_verified": false
+        });
+        assert_eq!(fixed["exported_snapshot_verified"], false);
+        assert_eq!(fixed["applied_snapshot_verified"], false);
+        for source in [
+            "secret-cookie-value",
+            "private-access-token",
+            "https://chatgpt.com/c/private?key=secret",
+        ] {
+            assert!(!format!("{verdict}{reason}").contains(source));
+        }
+    }
+
+    #[test]
+    fn rejects_absent_extension_origin_and_stale_worker_generation() {
+        assert!(!super::requested_extension_id(&HeaderMap::new()).is_some());
+        assert!(!account_probe_worker_consistent(1, 2, true));
+        assert!(!account_probe_worker_consistent(2, 2, false));
+        assert!(account_probe_worker_consistent(2, 2, true));
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("https://untrusted.example"),
+        );
+        assert!(super::requested_extension_id(&headers).is_none());
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("chrome-extension://abcdefghijklmnopabcdefghijklmnop"),
+        );
+        assert!(super::requested_extension_id(&headers).is_some());
+        // The actual handler additionally calls authenticated_request, which
+        // checks configured extension ID, pairing, timestamp, nonce and rate.
+    }
+}
+
 /// Browser DOM/login-view observations are not source-backed account proof for
 /// the two active recovery targets. Only ChatGPT's actual Obscura first-party
 /// verifier may assert an authenticated account; Meta AI has no reviewed
