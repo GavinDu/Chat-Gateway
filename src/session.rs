@@ -1965,9 +1965,14 @@ mod prototype_storage_capture_fidelity_tests {
         );
         let denial = page.evaluate(&evaluation);
         assert!(denial.get("result").is_some_and(serde_json::Value::is_null));
-        assert_eq!(denial.get("reads").and_then(serde_json::Value::as_u64), Some(0));
-        assert!(script.find("location.origin !==").unwrap()
-            < script.find("localStorage.length").unwrap());
+        assert_eq!(
+            denial.get("reads").and_then(serde_json::Value::as_u64),
+            Some(0)
+        );
+        assert!(
+            script.find("location.origin !==").unwrap()
+                < script.find("localStorage.length").unwrap()
+        );
     }
 }
 
