@@ -150,6 +150,32 @@ mod tests {
         }
     }
     #[tokio::test]
+    async fn empty_user_object_with_token_and_future_expiry_is_not_account_proof() {
+        // A fake token and expiry alongside an empty user object must never
+        // make Obscura report an authenticated account. Do not infer logout.
+        let mut partial = page_with_fetch(
+            r#"(() => {globalThis.fetch=async()=>new Response(JSON.stringify({
+                user:{}, accessToken:'private-test-token',
+                expires:new Date(Date.now()+60000).toISOString()
+            }),{status:200});})()"#,
+        )
+        .await;
+        let failure = wait_on_origin(&mut partial, "null", Duration::from_secs(1))
+            .await
+            .unwrap_err();
+        assert!(failure
+            .downcast_ref::<crate::browser::pool::ProviderSessionExpiredError>()
+            .is_none());
+        assert!(!failure.to_string().contains("private-test-token"));
+        assert_eq!(
+            partial
+                .evaluate("typeof globalThis.__chatGatewayChatgptSessionReadiness")
+                .as_str(),
+            Some("undefined")
+        );
+    }
+
+    #[tokio::test]
     async fn timeout_aborts_own_fetch_and_foreign_origins_are_not_contacted() {
         let mut page=page_with_fetch(r#"(() => {globalThis.aborted=false;globalThis.fetchCalls=0;globalThis.fetch=(url,options)=>{
             fetchCalls++;options.signal.addEventListener('abort',()=>aborted=true);return new Promise(()=>{});
