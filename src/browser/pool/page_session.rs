@@ -89,6 +89,29 @@ where
         .context("provider session navigation timed out")?
 }
 
+/// A failed cookie restore is not a source-backed account rejection.
+/// ChatGPT/Meta AI must not navigate a new candidate Page with malformed or
+/// partially replayed cookies. Deferred providers retain their historical
+/// order because their failed-restore cleanup still needs an origin page.
+/// This does NOT roll back cookie writes that occurred before an error.
+async fn navigate_after_cookie_restore<F, Fut>(
+    provider: Provider,
+    cookie_restore: Result<()>,
+    navigate: F,
+) -> Result<()>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<()>>,
+{
+    if matches!(provider, Provider::ChatGPT | Provider::MetaAI) {
+        cookie_restore?;
+        navigate().await
+    } else {
+        navigate().await?;
+        cookie_restore
+    }
+}
+
 pub(super) struct PageSession;
 
 impl PageSession {
@@ -112,10 +135,15 @@ impl PageSession {
             let cookie_restore = session_file
                 .map(|file| session::restore_cookies(browser, file, provider.name()))
                 .transpose();
-            // Navigate even when cookie import failed so the caller's fail-closed
-            // cleanup can clear origin-scoped localStorage on the provider origin.
-            page.goto(provider.login_url()).await?;
-            cookie_restore?;
+            // Active providers fail before navigation on an import error:
+            // a partially applied cookie jar is not a reason to load provider
+            // scripts or a login route. Deferred providers keep their legacy
+            // navigation-before-error order for origin cleanup.
+            navigate_after_cookie_restore(provider, cookie_restore, || async {
+                page.goto(provider.login_url()).await?;
+                Ok(())
+            })
+            .await?;
             if let Some(file) = session_file {
                 if !file.local_storage.is_empty() {
                     session::restore_local_storage(page, file)?;
@@ -161,6 +189,78 @@ where
     let replacement = build().await?;
     insert(replacement);
     Ok(())
+}
+
+#[cfg(test)]
+mod cookie_restore_navigation_safety_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn active_cookie_restore_errors_abort_before_any_navigation() {
+        for provider in [Provider::ChatGPT, Provider::MetaAI] {
+            let navigations = std::cell::Cell::new(0_u8);
+            let error = navigate_after_cookie_restore(
+                provider,
+                Err(anyhow::anyhow!("private-token-in-invalid-cookie")),
+                || async {
+                    navigations.set(navigations.get() + 1);
+                    Ok(())
+                },
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(navigations.get(), 0, "failed active replay must not navigate");
+            assert!(error.to_string().contains("private-token"));
+            // The worker classifies the upstream error into a fixed category;
+            // never format this anyhow Display in an operator log.
+            assert_eq!(super::super::worker::session_worker_failure_category(&error),
+                "session_operation_failed");
+        }
+    }
+
+    #[tokio::test]
+    async fn successful_cookie_restore_preserves_one_navigation_and_error_order() {
+        for provider in [Provider::ChatGPT, Provider::MetaAI, Provider::Grok] {
+            let navigations = std::cell::Cell::new(0_u8);
+            navigate_after_cookie_restore(provider, Ok(()), || async {
+                navigations.set(navigations.get() + 1);
+                Ok(())
+            })
+            .await
+            .unwrap();
+            assert_eq!(navigations.get(), 1);
+        }
+        // Deferred providers' old origin-localStorage cleanup flow still
+        // navigates once before returning their cookie restore error.
+        for provider in [Provider::Grok, Provider::Claude] {
+            let navigations = std::cell::Cell::new(0_u8);
+            let error = navigate_after_cookie_restore(
+                provider,
+                Err(anyhow::anyhow!("synthetic-invalid-cookie")),
+                || async {
+                    navigations.set(navigations.get() + 1);
+                    Ok(())
+                },
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(navigations.get(), 1);
+            assert!(error.to_string().contains("synthetic-invalid-cookie"));
+        }
+    }
+
+    #[tokio::test]
+    async fn navigation_error_is_not_suppressed_after_successful_restore() {
+        let mut navigations = 0_u8;
+        let err = navigate_after_cookie_restore(Provider::ChatGPT, Ok(()), || async {
+            navigations += 1;
+            Err(anyhow::anyhow!("synthetic-navigation-failed"))
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(navigations, 1);
+        assert_eq!(err.to_string(), "synthetic-navigation-failed");
+    }
 }
 
 #[cfg(test)]
