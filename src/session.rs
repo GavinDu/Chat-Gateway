@@ -2274,6 +2274,20 @@ pub(crate) fn provider_replay_material_coverage(
     }
 }
 
+/// A nonempty saved snapshot might contain *only foreign-provider cookies*.
+/// In that case there is nothing eligible to apply to this provider's page.
+/// The same bounded, expiry-aware coverage calculation used by the canonical
+/// restore path supplies this conservative admission policy. Origin storage
+/// is observed-only material, never authenticated account proof.
+pub(crate) fn replay_candidate_has_applicable_material(file: &SessionFile, provider: &str) -> bool {
+    let now_epoch = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64();
+    let coverage = provider_replay_material_coverage(file, provider, now_epoch);
+    coverage.eligible_cookies > 0 || coverage.observed_storage_entries > 0
+}
+
 /// Plan replay without mutating saved credentials or the shared cookie jar.
 /// Expired cookies are not credentials to restore. Only the two recovery
 /// providers opt into expiry-aware replay; malformed metadata still fails closed.
