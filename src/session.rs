@@ -2914,7 +2914,7 @@ mod replay_storage_readback_tests {
             error.to_string(),
             "failed to restore provider localStorage entry"
         );
-        assert_eq!(page.evaluate("globalThis.__writes || 0"), json!(0));
+        assert_eq!(page.evaluate("globalThis.__writes || 0").as_f64(), Some(0.0));
     }
 
     #[test]
