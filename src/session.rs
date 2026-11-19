@@ -1890,6 +1890,105 @@ fn active_storage_capture_script(expected_origin: &str) -> Result<Zeroizing<Stri
     )))
 }
 
+#[cfg(test)]
+mod active_storage_capture_tests {
+    use super::*;
+
+    #[test]
+    fn active_provider_capture_requires_exact_source_owned_https_origin() {
+        for (provider, actual, expected) in [
+            ("chatgpt", "https://chatgpt.com/c/thread?private=fixture", "https://chatgpt.com"),
+            ("metaai", "https://www.meta.ai/chat/", "https://www.meta.ai"),
+        ] {
+            assert_eq!(
+                expected_active_capture_origin(provider, actual)
+                    .unwrap()
+                    .as_deref(),
+                Some(expected)
+            );
+        }
+        // Only active providers enforce this new capture fence. Do not
+        // silently broaden auth classifications for deferred adapters.
+        assert_eq!(
+            expected_active_capture_origin("claude", "data:text/html,legacy")
+                .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn foreign_redirects_and_ambiguous_authorities_are_fixed_redacted_failures() {
+        for (provider, url) in [
+            ("chatgpt", "https://accounts.google.com/login?token=private-fixture"),
+            ("chatgpt", "https://chatgpt.com.evil.example/c/thread"),
+            ("chatgpt", "https://chatgpt.com@evil.example/"),
+            ("chatgpt", "http://chatgpt.com/"),
+            ("chatgpt", "data:text/html,foreign"),
+            ("metaai", "https://meta.ai/"),
+            ("metaai", "https://www.meta.ai.evil.example/"),
+            ("metaai", "https://www.facebook.com/login?account=private-fixture"),
+            ("metaai", "https://www.meta.ai%2eattacker.example/"),
+        ] {
+            let err = expected_active_capture_origin(provider, url).unwrap_err();
+            assert_eq!(err.to_string(), "provider_session_capture_origin_mismatch");
+            assert!(!err.to_string().contains("private"));
+            assert!(!err.to_string().contains("evil"));
+        }
+    }
+
+    #[tokio::test]
+    async fn in_page_origin_guard_runs_before_any_local_storage_enumeration() {
+        let browser = Browser::builder().stealth(false).build().unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        page.goto("data:text/html,<body>capture-source-only-fixture</body>")
+            .await
+            .unwrap();
+        let script = active_storage_capture_script("https://chatgpt.com").unwrap();
+
+        // These synthetic lexical bindings simulate the first-party document.
+        // This is intentionally NOT a live HTTP/Chrome account proof.
+        let valid = format!(
+            "(() => {{ const location = {{ origin: 'https://chatgpt.com' }}; const localStorage = {{ length: 1, key: () => 'fixture-key', getItem: () => 'synthetic-value' }}; return {}; }})()",
+            script.as_str()
+        );
+        let positive = page.evaluate(&valid);
+        assert_eq!(
+            positive.get("fixture-key").and_then(serde_json::Value::as_str),
+            Some("synthetic-value")
+        );
+
+        let foreign = format!(
+            "(() => {{ let reads = 0; const location = {{ origin: 'https://evil.example' }}; const localStorage = {{ get length() {{ reads++; return 1; }}, key: () => 'secret-key', getItem: () => 'private-secret' }}; const result = {}; return {{ result, reads }}; }})()",
+            script.as_str()
+        );
+        let denial = page.evaluate(&foreign);
+        assert_eq!(denial.get("reads").and_then(serde_json::Value::as_u64), Some(0));
+        assert!(denial.get("result").is_some_and(serde_json::Value::is_null));
+        assert!(script.find("location.origin !==").unwrap() <
+            script.find("localStorage.length").unwrap());
+    }
+
+    #[tokio::test]
+    async fn off_provider_page_cannot_capture_or_persist_active_session_material() {
+        let browser = Browser::builder().stealth(false).build().unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        page.goto("data:text/html,<body>wrong-origin-page</body>")
+            .await
+            .unwrap();
+        for provider in ["chatgpt", "metaai"] {
+            let error = match capture_session(&browser, &page, provider).await {
+                Ok(_) => panic!("off-origin storage cannot be captured"),
+                Err(error) => error,
+            };
+            assert_eq!(
+                error.to_string(),
+                "provider_session_capture_origin_mismatch"
+            );
+            assert!(!error.to_string().contains("wrong-origin"));
+        }
+    }
+}
+
 async fn capture_session(browser: &Browser, page: &Page, provider: &str) -> Result<SessionFile> {
     let expected_origin = expected_active_capture_origin(provider, &page.url())?;
     let ls_value = match expected_origin.as_deref() {
