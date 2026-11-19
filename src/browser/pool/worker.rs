@@ -80,7 +80,11 @@ mod test_adapter_isolated_browser_tests {
 fn first_party_account_result(result: Result<()>) -> FirstPartyAccountVerdict {
     match result {
         Ok(()) => FirstPartyAccountVerdict::Verified,
-        Err(error) if error.downcast_ref::<ProviderSessionExpiredError>().is_some() => {
+        Err(error)
+            if error
+                .downcast_ref::<ProviderSessionExpiredError>()
+                .is_some() =>
+        {
             FirstPartyAccountVerdict::ExplicitUnauthenticated
         }
         Err(_) => FirstPartyAccountVerdict::Unknown,
@@ -179,7 +183,10 @@ mod first_party_account_probe_tests {
         );
         assert_eq!(page.evaluate("globalThis.calls").as_f64(), Some(0.0));
         assert_eq!(FirstPartyAccountVerdict::Unknown.as_str(), "unknown");
-        assert_eq!(FirstPartyAccountVerdict::Unsupported.as_str(), "unsupported");
+        assert_eq!(
+            FirstPartyAccountVerdict::Unsupported.as_str(),
+            "unsupported"
+        );
     }
 
     #[test]
