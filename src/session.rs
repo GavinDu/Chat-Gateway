@@ -2836,6 +2836,108 @@ mod replay_storage_origin_tests {
 }
 
 #[cfg(test)]
+mod replay_storage_readback_tests {
+    use super::*;
+    use serde_json::{json, Value};
+
+    fn synthetic_snapshot() -> SessionFile {
+        serde_json::from_value(json!({
+            "ts": "synthetic",
+            "local_storage": {
+                "fixture-token": "private-storage-value-do-not-log"
+            },
+            "cookies": []
+        }))
+        .unwrap()
+    }
+
+    async fn mock_storage_page() -> (obscura_core::Browser, Page) {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        page.goto("data:text/html,<body>storage-fixture</body>")
+            .await
+            .unwrap();
+        (browser, page)
+    }
+
+    fn install_storage_shim(page: &Page, implementation: &str) {
+        let script = format!(
+            "(() => {{ Object.defineProperty(globalThis, 'localStorage', {{ configurable: true, value: {{ {implementation} }} }}); return typeof localStorage.getItem === 'function'; }})()"
+        );
+        assert_eq!(page.evaluate(&script), Value::Bool(true));
+    }
+
+    #[tokio::test]
+    async fn readback_accepts_a_real_same_document_string_roundtrip() {
+        let (_owner, page) = mock_storage_page().await;
+        install_storage_shim(
+            &page,
+            "setItem(k,v) { this.saved = {k:String(k),v:String(v)}; }, getItem(k) { return this.saved?.k === String(k) ? this.saved.v : null; }",
+        );
+        restore_local_storage(&page, &synthetic_snapshot()).unwrap();
+        assert_eq!(
+            page.evaluate("localStorage.getItem('fixture-token')"),
+            json!("private-storage-value-do-not-log")
+        );
+    }
+
+    #[tokio::test]
+    async fn noop_corrupted_and_throwing_readbacks_fail_with_fixed_error() {
+        for implementation in [
+            "setItem(_k,_v) {}, getItem(_k) { return null; }",
+            "setItem(k,v) { this.saved = String(v)+'-tampered'; }, getItem(_k) { return this.saved; }",
+            "setItem(k,v) { this.saved = String(v); }, getItem(_k) { throw new Error('private-js-message'); }",
+        ] {
+            let (_owner, page) = mock_storage_page().await;
+            install_storage_shim(&page, implementation);
+            let error = restore_local_storage(&page, &synthetic_snapshot()).unwrap_err();
+            assert_eq!(error.to_string(), "failed to restore provider localStorage entry");
+            assert!(!error.to_string().contains("private"));
+            assert!(!error.to_string().contains("fixture-token"));
+        }
+    }
+
+    #[tokio::test]
+    async fn wrong_origin_rejects_before_even_a_mocked_storage_setter_runs() {
+        let (_owner, page) = mock_storage_page().await;
+        install_storage_shim(
+            &page,
+            "setItem(k,v) { globalThis.__writes = (globalThis.__writes || 0) + 1; }, getItem(_k) { return 'untrusted'; }",
+        );
+        let error = restore_local_storage_for_origin(
+            &page,
+            &synthetic_snapshot(),
+            "https://chatgpt.com",
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), "failed to restore provider localStorage entry");
+        assert_eq!(page.evaluate("globalThis.__writes || 0"), json!(0));
+    }
+
+    #[test]
+    fn guard_before_both_set_and_get_with_json_literal_escaped_credentials() {
+        let key = "key\\\";globalThis.__pwned=true;//";
+        let value = "private\\nsecret\\\";fetch('https://bad.example')//";
+        let script = local_storage_restore_script_with_origin(
+            key,
+            value,
+            Some("https://chatgpt.com"),
+        )
+        .unwrap();
+        let guard = script.find("location.origin !==").unwrap();
+        let setter = script.find("localStorage.setItem").unwrap();
+        let getter = script.find("localStorage.getItem").unwrap();
+        assert!(guard < setter && setter < getter);
+        assert!(script.contains(&serde_json::to_string(key).unwrap()));
+        assert!(script.contains(&serde_json::to_string(value).unwrap()));
+        assert!(script.contains("=== value"));
+    }
+}
+
+#[cfg(test)]
 mod local_storage_script_tests {
     use super::*;
 
