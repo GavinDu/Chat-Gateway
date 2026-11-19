@@ -4106,8 +4106,7 @@ mod replay_material_coverage_tests {
             ] {
                 let file = snapshot(cookies, &[]);
                 let coverage = provider_replay_material_coverage(&file, provider, 1000.0);
-                let (planned, normalized) =
-                    planned_cookie_replay(&file, provider, 1000.0).unwrap();
+                let (planned, normalized) = planned_cookie_replay(&file, provider, 1000.0).unwrap();
                 assert_eq!(coverage.eligible_cookies, 1);
                 assert_eq!(coverage.invalid_provider_cookies, 1);
                 assert_eq!(coverage.normalized_scopes, normalized as u16);
