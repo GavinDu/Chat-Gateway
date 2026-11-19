@@ -265,6 +265,51 @@ mod live_replay_guard_tests {
     }
 
     #[test]
+    fn failed_recheck_cannot_reenable_destructive_markerless_replay() {
+        let registry = crate::provider_state::ProviderSessionRegistry::default();
+        let first = registry.begin_credential_verification("chatgpt").unwrap();
+        assert!(registry.record_credentials_verified("chatgpt", first));
+
+        // A new request rotates public account proof, not the evidence that
+        // the same live cookie jar must survive a transient failed recheck.
+        let second = registry.begin_credential_verification("chatgpt").unwrap();
+        assert!(!registry.credentials_verified("chatgpt"));
+        assert!(!registry.record_credentials_verified("chatgpt", first));
+        let safety = registry.has_prior_positive_account_observation("chatgpt");
+        assert!(safety);
+        let mut destructive_write = false;
+        let verdict = guard_verified_live_replay(
+            Provider::ChatGPT,
+            None,
+            "candidate-private-fingerprint",
+            true,
+            safety,
+        );
+        if verdict.is_ok() {
+            destructive_write = true;
+        }
+        assert!(verdict
+            .unwrap_err()
+            .downcast_ref::<ReplayRequiresIsolatedContext>()
+            .is_some());
+        assert!(!destructive_write, "recheck did not authorize shared-jar writes");
+
+        // Current proof must be established from the *new* epoch only.
+        assert!(registry.record_credentials_verified("chatgpt", second));
+        assert!(registry.credentials_verified("chatgpt"));
+        registry.record_needs_login("chatgpt");
+        assert!(!registry.has_prior_positive_account_observation("chatgpt"));
+        assert!(guard_verified_live_replay(
+            Provider::ChatGPT,
+            None,
+            "candidate",
+            true,
+            registry.has_prior_positive_account_observation("chatgpt"),
+        )
+        .is_ok());
+    }
+
+    #[test]
     fn no_live_page_no_prior_applied_snapshot_and_identical_replay_remain_allowed() {
         for provider in [Provider::ChatGPT, Provider::MetaAI] {
             assert!(guard_live_replay(provider, None, "first", true).is_ok());
