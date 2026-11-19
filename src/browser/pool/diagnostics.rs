@@ -201,6 +201,7 @@ mod inconclusive_session_probe_tests {
     }
     #[test]
     fn active_login_route_does_not_authorize_destructive_snapshot_invalidation() {
+        use crate::providers::Provider;
         // The same typed error can originate from URL/composer shape alone:
         // it is not a source-backed /api/auth/session 401.
         let url_only = classify_session_probe(true, false).unwrap_err();
