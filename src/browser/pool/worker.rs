@@ -53,10 +53,7 @@ mod test_adapter_isolated_browser_tests {
             serde_yaml::from_str("obscura:\n  stealth: false\nproviders: []\n").unwrap();
         let live = Rc::new(super::browser_factory::build_browser(&cfg).unwrap());
         live.cookies()
-            .set(
-                "SID=live-synthetic; Secure; Path=/",
-                "https://chatgpt.com/",
-            )
+            .set("SID=live-synthetic; Secure; Path=/", "https://chatgpt.com/")
             .unwrap();
         for provider in [Provider::ChatGPT, Provider::MetaAI] {
             let candidate = test_adapter_browser(&cfg, &live, provider).unwrap();
