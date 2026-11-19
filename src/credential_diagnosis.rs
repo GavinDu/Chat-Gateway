@@ -939,7 +939,10 @@ mod tests {
         // A properly ordered, same-generation earlier snapshot can support
         // source-attributed diagnosis; the gateway UUID remains mandatory.
         evidence["snapshot"]["observed_at_ms"] = json!(NOW - 2_000);
-        assert_eq!(checked(evidence.clone()).category, "transport_or_extraction");
+        assert_eq!(
+            checked(evidence.clone()).category,
+            "transport_or_extraction"
+        );
         evidence["attempt"]["request_id"] = json!(OTHER_ID);
         assert_eq!(checked(evidence).reason, "gateway_request_id_mismatch");
     }
