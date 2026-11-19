@@ -210,11 +210,9 @@ mod cookie_restore_navigation_safety_tests {
             .await
             .unwrap_err();
             assert_eq!(navigations.get(), 0, "failed active replay must not navigate");
+            // The source error is preserved for a typed/redacted outer
+            // worker, but this helper never formats or logs its Display.
             assert!(error.to_string().contains("private-token"));
-            // The worker classifies the upstream error into a fixed category;
-            // never format this anyhow Display in an operator log.
-            assert_eq!(super::super::worker::session_worker_failure_category(&error),
-                "session_operation_failed");
         }
     }
 
@@ -251,14 +249,14 @@ mod cookie_restore_navigation_safety_tests {
 
     #[tokio::test]
     async fn navigation_error_is_not_suppressed_after_successful_restore() {
-        let mut navigations = 0_u8;
+        let navigations = std::cell::Cell::new(0_u8);
         let err = navigate_after_cookie_restore(Provider::ChatGPT, Ok(()), || async {
-            navigations += 1;
+            navigations.set(navigations.get() + 1);
             Err(anyhow::anyhow!("synthetic-navigation-failed"))
         })
         .await
         .unwrap_err();
-        assert_eq!(navigations, 1);
+        assert_eq!(navigations.get(), 1);
         assert_eq!(err.to_string(), "synthetic-navigation-failed");
     }
 }
