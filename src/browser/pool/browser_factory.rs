@@ -424,7 +424,10 @@ mod staged_snapshot_preflight_tests {
                 Ok(_) => panic!("deferred provider must not stage"),
                 Err(error) => error,
             };
-            assert_eq!(error.to_string(), "candidate_provider_not_in_recovery_scope");
+            assert_eq!(
+                error.to_string(),
+                "candidate_provider_not_in_recovery_scope"
+            );
         }
     }
 
@@ -439,9 +442,15 @@ mod staged_snapshot_preflight_tests {
             .cookies()
             .set("SID=candidate-only; Secure; Path=/", "https://meta.ai/")
             .unwrap();
-        page.goto("data:text/html,<body>staged</body>").await.unwrap();
+        page.goto("data:text/html,<body>staged</body>")
+            .await
+            .unwrap();
         assert_eq!(page.evaluate("document.body.textContent"), json!("staged"));
         assert_eq!(browser.cookies().get_all().len(), 1);
+        let weak = Rc::downgrade(&browser);
+        drop(page);
+        drop(browser);
+        assert!(weak.upgrade().is_none(), "candidate owner must be released");
     }
 }
 
