@@ -2660,20 +2660,45 @@ pub fn restore_cookies(browser: &Browser, file: &SessionFile, provider: &str) ->
 /// Restore step 2 (AFTER goto): localStorage is origin-scoped, so it can
 /// only be injected once the page sits on the provider origin.
 fn local_storage_restore_script(key: &str, value: &str) -> Option<Zeroizing<String>> {
+    local_storage_restore_script_with_origin(key, value, None)
+}
+
+/// The active-provider variant checks the actual page JS origin *inside the
+/// same evaluation* as setItem. A page-level URL check alone can race with a
+/// redirect between the host's navigation observation and this evaluation.
+fn local_storage_restore_script_with_origin(
+    key: &str,
+    value: &str,
+    expected_origin: Option<&str>,
+) -> Option<Zeroizing<String>> {
     // Serialized localStorage values may contain access tokens. Zeroize both
     // intermediate JSON literals and the final script after page evaluation.
     let key = Zeroizing::new(serde_json::to_string(key).ok()?);
     let value = Zeroizing::new(serde_json::to_string(value).ok()?);
+    let guard = if let Some(origin) = expected_origin {
+        let expected = serde_json::to_string(origin).ok()?;
+        format!("if (location.origin !== {expected}) return false; ")
+    } else {
+        String::new()
+    };
     Some(Zeroizing::new(format!(
-        "(() => {{ try {{ localStorage.setItem({}, {}); return true; }} catch (_error) {{ return false; }} }})()",
+        "(() => {{ try {{ {guard}localStorage.setItem({}, {}); return true; }} catch (_error) {{ return false; }} }})()",
         key.as_str(),
         value.as_str()
     )))
 }
 
-pub fn restore_local_storage(page: &Page, file: &SessionFile) -> Result<()> {
+fn restore_local_storage_inner(
+    page: &Page,
+    file: &SessionFile,
+    expected_origin: Option<&str>,
+) -> Result<()> {
     for (k, v) in &file.local_storage {
-        let script = local_storage_restore_script(k, v).ok_or_else(|| {
+        let script = match expected_origin {
+            Some(origin) => local_storage_restore_script_with_origin(k, v, Some(origin)),
+            None => local_storage_restore_script(k, v),
+        }
+        .ok_or_else(|| {
             anyhow::anyhow!("failed to serialize provider localStorage restore script")
         })?;
         let restored = page.evaluate(&script);
@@ -2684,6 +2709,26 @@ pub fn restore_local_storage(page: &Page, file: &SessionFile) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Active-provider replay must never write credential-bearing storage to a
+/// redirected/foreign document. The caller additionally validates the host
+/// Page URL before this call; each in-page script independently validates the
+/// *current* origin just before writing. No origin or storage values appear
+/// in error output.
+pub fn restore_local_storage_for_origin(
+    page: &Page,
+    file: &SessionFile,
+    expected_origin: &str,
+) -> Result<()> {
+    if !expected_origin.starts_with("https://") {
+        anyhow::bail!("provider_storage_origin_mismatch");
+    }
+    restore_local_storage_inner(page, file, Some(expected_origin))
+}
+
+pub fn restore_local_storage(page: &Page, file: &SessionFile) -> Result<()> {
+    restore_local_storage_inner(page, file, None)
 }
 
 #[cfg(test)]
@@ -2733,6 +2778,57 @@ mod session_file_read_tests {
         let result = load_session_file_from_path(&path);
         std::fs::remove_dir_all(dir).unwrap();
         assert!(result.is_err());
+    }
+}
+
+#[cfg(test)]
+mod replay_storage_origin_tests {
+    use super::*;
+
+    fn snapshot() -> SessionFile {
+        serde_json::from_value(serde_json::json!({
+            "ts": "synthetic",
+            "local_storage": {"secret-key": "private-storage-bearer-never-output"},
+            "cookies": []
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn origin_check_precedes_storage_write_in_secret_bearing_script() {
+        let script = local_storage_restore_script_with_origin(
+            "token\\nquoted",
+            "private-storage-bearer-never-output\\\" );fetch('https://evil.example')",
+            Some("https://chatgpt.com"),
+        )
+        .unwrap();
+        let guard = script.find("location.origin !==").unwrap();
+        let write = script.find("localStorage.setItem(").unwrap();
+        assert!(guard < write);
+        assert!(script.contains("https://chatgpt.com"));
+        assert!(script.contains(&serde_json::to_string("token\\nquoted").unwrap()));
+        assert!(script.contains("return false"));
+    }
+
+    #[tokio::test]
+    async fn foreign_or_opaque_page_never_receives_replayed_storage_values() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        page.goto("data:text/html,<body>foreign-opaque-fixture</body>")
+            .await
+            .unwrap();
+        let error = restore_local_storage_for_origin(&page, &snapshot(), "https://chatgpt.com")
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "failed to restore provider localStorage entry"
+        );
+        assert!(!error.to_string().contains("private-storage"));
+        let invalid = restore_local_storage_for_origin(&page, &snapshot(), "null").unwrap_err();
+        assert_eq!(invalid.to_string(), "provider_storage_origin_mismatch");
     }
 }
 

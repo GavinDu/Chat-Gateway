@@ -112,6 +112,75 @@ where
     }
 }
 
+/// Only the active recovery providers require first-party replay storage
+/// enforcement; deferred adapters retain their established legacy behavior.
+/// The actual URL is intentionally never incorporated into an error, because
+/// a redirect query can contain private access tokens or account metadata.
+fn checked_storage_replay_origin(provider: Provider, actual_url: &str) -> Result<Option<String>> {
+    if !matches!(provider, Provider::ChatGPT | Provider::MetaAI) {
+        return Ok(None);
+    }
+    if !super::pool_policy::provider_thread_url_is_same_origin(actual_url, provider.login_url()) {
+        anyhow::bail!("provider_storage_origin_mismatch");
+    }
+    let origin = super::pool_policy::provider_storage_origin(provider.login_url())
+        .ok_or_else(|| anyhow::anyhow!("provider_storage_origin_mismatch"))?;
+    Ok(Some(origin))
+}
+
+#[cfg(test)]
+mod storage_replay_origin_guard_tests {
+    use super::*;
+
+    #[test]
+    fn first_party_current_url_can_write_storage_but_never_certifies_login() {
+        assert_eq!(
+            checked_storage_replay_origin(Provider::ChatGPT, "https://chatgpt.com/")
+                .unwrap()
+                .as_deref(),
+            Some("https://chatgpt.com")
+        );
+        assert_eq!(
+            checked_storage_replay_origin(
+                Provider::MetaAI,
+                "https://www.meta.ai/chat/?private=synthetic"
+            )
+            .unwrap()
+            .as_deref(),
+            Some("https://www.meta.ai")
+        );
+        // Deferred providers remain on the same legacy replay path.
+        assert_eq!(
+            checked_storage_replay_origin(Provider::Claude, "https://login.example/").unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn off_origin_redirect_is_rejected_without_leaking_page_url_or_storage() {
+        for (provider, redirect) in [
+            (
+                Provider::ChatGPT,
+                "https://accounts.google.com/login?token=private",
+            ),
+            (Provider::ChatGPT, "https://chatgpt.com.evil.example/"),
+            (Provider::ChatGPT, "https://chatgpt.com@evil.example/"),
+            (Provider::ChatGPT, "http://chatgpt.com/"),
+            (Provider::MetaAI, "https://meta.ai/"),
+            (Provider::MetaAI, "https://www.meta.ai.evil.example/"),
+            (
+                Provider::MetaAI,
+                "https://www.facebook.com/login/?account=private",
+            ),
+        ] {
+            let error = checked_storage_replay_origin(provider, redirect).unwrap_err();
+            assert_eq!(error.to_string(), "provider_storage_origin_mismatch");
+            assert!(!error.to_string().contains("private"));
+            assert!(!error.to_string().contains("evil"));
+        }
+    }
+}
+
 pub(super) struct PageSession;
 
 impl PageSession {
@@ -147,7 +216,15 @@ impl PageSession {
             .await?;
             if let Some(file) = session_file {
                 if !file.local_storage.is_empty() {
-                    session::restore_local_storage(page, file)?;
+                    // Navigation may have redirected to a foreign login/SSO
+                    // origin. Check actual URL before serializing secrets and
+                    // check JS location.origin again inside every setItem.
+                    match checked_storage_replay_origin(provider, &page.url())? {
+                        Some(origin) => {
+                            session::restore_local_storage_for_origin(page, file, &origin)?
+                        }
+                        None => session::restore_local_storage(page, file)?,
+                    }
                     page.goto(provider.login_url()).await?;
                 }
             }
