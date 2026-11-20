@@ -914,7 +914,11 @@ mod relay_import_noop_tests {
                 encrypt_session_snapshot(&incoming, provider, &previous_key).unwrap(),
                 encrypt_session_snapshot(
                     &incoming,
-                    if provider == "chatgpt" { "metaai" } else { "chatgpt" },
+                    if provider == "chatgpt" {
+                        "metaai"
+                    } else {
+                        "chatgpt"
+                    },
                     &key,
                 )
                 .unwrap(),
@@ -926,13 +930,20 @@ mod relay_import_noop_tests {
                     error.to_string(),
                     "existing provider session vault cannot be authenticated"
                 );
-                assert!(error.downcast_ref::<RelayVaultAuthenticationError>().is_some());
+                assert!(error
+                    .downcast_ref::<RelayVaultAuthenticationError>()
+                    .is_some());
                 assert_eq!(
                     std::fs::read(&target).unwrap(),
                     invalid_bytes,
                     "failure must leave the exact prior vault bytes intact"
                 );
-                for private in ["private-credential", domain, "key", "chat-gateway-relay-vault"] {
+                for private in [
+                    "private-credential",
+                    domain,
+                    "key",
+                    "chat-gateway-relay-vault",
+                ] {
                     assert!(!error.to_string().contains(private));
                 }
             }
@@ -948,7 +959,10 @@ mod relay_import_noop_tests {
             ts: "fixture".into(),
         };
         assert!(!relay_vault_snapshot_unchanged("gemini", &empty, &key, &deferred).unwrap());
-        assert_eq!(std::fs::read(&deferred).unwrap(), b"corrupt-deferred-record");
+        assert_eq!(
+            std::fs::read(&deferred).unwrap(),
+            b"corrupt-deferred-record"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 }
