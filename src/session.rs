@@ -4785,14 +4785,19 @@ mod replay_material_coverage_tests {
                     .is_some());
                 assert_eq!(error.to_string(), "provider_session_no_applicable_material");
                 assert_eq!(
-                    preflight_cookie_restore(&file, provider).unwrap_err().to_string(),
+                    preflight_cookie_restore(&file, provider)
+                        .unwrap_err()
+                        .to_string(),
                     "provider_session_no_applicable_material"
                 );
 
                 let browser = Browser::builder().stealth(false).build().unwrap();
                 browser
                     .cookies()
-                    .set("preserved=unchanged; Secure; Path=/", &format!("https://{own_host}/"))
+                    .set(
+                        "preserved=unchanged; Secure; Path=/",
+                        &format!("https://{own_host}/"),
+                    )
                     .unwrap();
                 let error = restore_cookies(&browser, &file, provider).unwrap_err();
                 assert_eq!(error.to_string(), "provider_session_no_applicable_material");
