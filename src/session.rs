@@ -1855,7 +1855,11 @@ pub(crate) fn session_state_hash(file: &SessionFile) -> Result<String> {
             // Expiry is an f64 from imported browser metadata. Compare the
             // serialized bit pattern for deterministic ties without a partial
             // ordering/unwrap on malformed legacy values.
-            .then_with(|| left.expires.map(f64::to_bits).cmp(&right.expires.map(f64::to_bits)))
+            .then_with(|| {
+                left.expires
+                    .map(f64::to_bits)
+                    .cmp(&right.expires.map(f64::to_bits))
+            })
             .then_with(|| left.same_site.cmp(&right.same_site))
     });
     let serialized = Zeroizing::new(serde_json::to_vec(&(local_storage, cookies))?);
