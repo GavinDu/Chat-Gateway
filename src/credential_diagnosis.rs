@@ -855,11 +855,12 @@ mod tests {
             evidence["gateway_failure"]["stage"] = json!(gateway_stage);
             // Match the live producer's distinct admission reason vocabulary:
             // candidate admission cannot emit backend_unavailable.
-            evidence["gateway_failure"]["reason"] = json!(if gateway_stage == "candidate_admission" {
-                "candidate_skipped"
-            } else {
-                "backend_unavailable"
-            });
+            evidence["gateway_failure"]["reason"] =
+                json!(if gateway_stage == "candidate_admission" {
+                    "candidate_skipped"
+                } else {
+                    "backend_unavailable"
+                });
             for attempted_phase in [
                 "bootstrap",
                 "composer",
