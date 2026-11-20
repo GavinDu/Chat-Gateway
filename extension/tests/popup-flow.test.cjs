@@ -1366,7 +1366,7 @@ test("paired comparison discards Chrome proof that expires while gateway call is
     // Chrome was fresh on entry, but becomes stale before the final result.
     now+=10_000;
     return {ok:true,json:async()=>warmChatgptFixture({
-      checked_at_utc:new Date(now).toISOString().replace(/\\.\\d{3}Z$/,"Z")
+      checked_at_utc:new Date(now).toISOString().slice(0,19)+"Z"
     })};
   };
   const calls=[...popup.chromeCalls];
@@ -1391,7 +1391,7 @@ test("paired comparison rejects divergent source clocks even when each record is
     exported_snapshot_verified:false
   }}]};
   popup.context.relayFetch=async()=>({ok:true,json:async()=>warmChatgptFixture({
-    checked_at_utc:new Date(now-25_000).toISOString().replace(/\\.\\d{3}Z$/,"Z")
+    checked_at_utc:new Date(now-25_000).toISOString().slice(0,19)+"Z"
   })});
   const calls=[...popup.chromeCalls];
   await popup.controls.compareChatgptBrowserAndGateway();
