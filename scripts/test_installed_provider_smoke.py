@@ -404,6 +404,77 @@ class ExecutionContractTests(unittest.TestCase):
         self.assertEqual(rows[0]["sse"]["status"], "passed")
         self.assertNotIn("secret", json.dumps(rows))
 
+    def test_http_200_validation_failure_preserves_only_current_response_uuid(self):
+        class Faulty200Gateway(FakeGateway):
+            def __init__(self, mode):
+                super().__init__()
+                self.mode = mode
+                self.failed_id = None
+
+            def open(self, req, timeout):
+                response = super().open(req, timeout)
+                if not req.full_url.endswith("/v1/chat/completions"):
+                    return response
+                stream = json.loads(req.data)["stream"]
+                if self.mode in ("missing_done", "error_after_content") and not stream:
+                    return response
+                if self.mode not in ("missing_done", "error_after_content") and stream:
+                    return response
+                self.failed_id = response.headers["X-Request-Id"]
+                if self.mode == "wrong_answer":
+                    response.body = json.dumps(answer("stale")).encode()
+                elif self.mode == "bad_json":
+                    response.body = b'{"credentials": "secret",'
+                elif self.mode == "read_error":
+                    def private_read(_maximum):
+                        raise OSError("private body URL https://secret.invalid")
+                    response.read = private_read
+                elif self.mode == "missing_id":
+                    response.headers["X-Request-Id"] = "cookie=secret"
+                    response.body = json.dumps(answer("stale")).encode()
+                elif self.mode == "missing_done":
+                    response.body = (
+                        b'data: {"choices":[{"delta":{"content":"OK"}}]}\n'
+                        b'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n')
+                elif self.mode == "error_after_content":
+                    response.body = (
+                        b'data: {"choices":[{"delta":{"content":"OK"}}]}\n'
+                        b'data: {"error":{"message":"secret upstream body"}}\n'
+                        b'data: [DONE]\n')
+                return response
+
+        for mode, category in (
+            ("wrong_answer", "unexpected_answer"),
+            ("bad_json", "invalid_json"),
+            ("read_error", "gateway_unreachable"),
+            ("missing_id", "missing_request_id"),
+            ("missing_done", "sse_incomplete"),
+            ("error_after_content", "sse_incomplete"),
+        ):
+            with self.subTest(mode=mode):
+                gateway = Faulty200Gateway(mode)
+                report = execute("http://127.0.0.1:8080", "", 8, gateway,
+                                 selected_providers=("chatgpt",))
+                self.assertEqual(report["phase"], "completed")
+                focused = report["providers"][0]
+                failed = focused["sse"] if mode in ("missing_done", "error_after_content") else focused["json"]
+                self.assertEqual(failed["status"], "failed")
+                self.assertEqual(failed["category"], category)
+                if mode == "missing_id":
+                    self.assertNotIn("request_id", failed)
+                else:
+                    self.assertEqual(failed["request_id"], gateway.failed_id)
+                self.assertEqual(report["providers"][1]["json"],
+                                 {"status":"skipped","reason":"owner_deferred"})
+                for private in ("secret", "stale", "upstream", "credentials",
+                                "private body", "conversation_id", "model-chatgpt"):
+                    self.assertNotIn(private, json.dumps(report))
+                if mode in ("missing_done", "error_after_content"):
+                    self.assertEqual(focused["json"]["status"], "passed")
+                else:
+                    self.assertEqual(focused["sse"],
+                                     {"status":"skipped","reason":"json_not_passed"})
+
     def test_failed_json_isolated_and_sse_skipped_for_that_provider(self):
         calls = []
 
@@ -496,8 +567,17 @@ class ExecutionContractTests(unittest.TestCase):
                            if x["provider"] == "chatgpt")
                 self.assertEqual(row["json"]["status"], "passed")
                 self.assertEqual(row["sse"]["status"], "passed")
-                self.assertEqual(row["repeat"],
-                                 {"status": "failed", "category": expected})
+                self.assertEqual(row["repeat"]["status"], "failed")
+                self.assertEqual(row["repeat"]["category"], expected)
+                if fault == "duplicate_request":
+                    # The cross-turn duplicate check runs after both HTTP
+                    # responses are complete; it has no new failed request
+                    # to claim as the origin of that composite violation.
+                    self.assertNotIn("request_id", row["repeat"])
+                else:
+                    observed = row["repeat"]["request_id"]
+                    self.assertEqual(str(uuid.UUID(observed)), observed)
+                    self.assertNotEqual(uuid.UUID(observed).int, 0)
                 self.assertEqual(row["restart"]["status"], "skipped")
                 self.assertNotIn("Reply exactly", json.dumps(report))
                 self.assertNotIn("model-chatgpt", json.dumps(report))

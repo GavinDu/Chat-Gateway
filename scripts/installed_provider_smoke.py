@@ -53,8 +53,11 @@ FIXED_CATEGORIES = frozenset({
 class SmokeFailure(Exception):
     """A fixed safe code; upstream text must never enter this exception."""
 
-    def __init__(self, category: str):
+    def __init__(self, category: str, request_id: str | None = None):
         self.category = category
+        # Only the runner's canonical response-header ID can be published.
+        # The constructor is deliberately not an attribution/attestation check.
+        self.request_id = request_id
         super().__init__(category)
 
 
@@ -116,8 +119,12 @@ def _failed_http_attempt(error: Exception) -> dict:
     result = {"status": "failed", "category": _safe_error(error)}
     if isinstance(error, urllib.error.HTTPError):
         request_id = _request_id(error.headers)
-        if request_id is not None:
-            result["request_id"] = request_id
+    elif isinstance(error, SmokeFailure):
+        request_id = _request_id({"X-Request-Id": error.request_id})
+    else:
+        request_id = None
+    if request_id is not None:
+        result["request_id"] = request_id
     return result
 
 
@@ -219,14 +226,22 @@ def _call(base_url: str, api_key: str, model: str, provider: str,
         request_id = _request_id(response.headers)
         if not 200 <= response.status < 300:
             raise SmokeFailure("invalid_response")
-        if stream:
-            parsed = consume_sse(bounded_sse_lines(response), start)
-            validate_sse(parsed, response.headers, provider, conversation_id,
-                         expected_answer)
-        else:
-            parsed = _json_document(_read_limited(response))
-            validate_json(parsed, response.headers, provider, conversation_id,
-                          expected_answer)
+        try:
+            if stream:
+                parsed = consume_sse(bounded_sse_lines(response), start)
+                validate_sse(parsed, response.headers, provider, conversation_id,
+                             expected_answer)
+            else:
+                parsed = _json_document(_read_limited(response))
+                validate_json(parsed, response.headers, provider, conversation_id,
+                              expected_answer)
+        except Exception as error:
+            # Response headers have already arrived. Retain only their safe
+            # canonical correlation UUID when validation/body read fails;
+            # never serialize the upstream body or exception details.
+            if request_id is not None:
+                raise SmokeFailure(_safe_error(error), request_id) from None
+            raise
     # Keep only a canonical UUID and bounded timing; never store parsed content.
     return {
         "status": "passed", "request_id": request_id,
