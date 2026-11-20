@@ -220,13 +220,12 @@ impl ProviderSessionRegistry {
         // in release builds. The fixed redacted labels are still retained for
         // debugging, but an offline consumer must classify their source as
         // unverified rather than attribute provider or credential blame.
-        let source_failure_schema_version = if raw_pair_supported
-            && source_failure_pair_valid(stage, reason)
-        {
-            FAILURE_SOURCE_SCHEMA_VERSION
-        } else {
-            0
-        };
+        let source_failure_schema_version =
+            if raw_pair_supported && source_failure_pair_valid(stage, reason) {
+                FAILURE_SOURCE_SCHEMA_VERSION
+            } else {
+                0
+            };
         let record = LastFailedRequest {
             source_failure_schema_version,
             request_id: request_id.to_string(),
