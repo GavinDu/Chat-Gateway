@@ -2845,6 +2845,55 @@ mod restored_cookie_readback_scope_tests {
     }
 
     #[test]
+    fn pinned_obscura_cookie_jar_exposes_host_only_and_domain_scope() {
+        // Separate disposable browsers avoid the pinned jar's normalized
+        // name/domain/path collision, and require no provider login/network.
+        let host = Browser::builder().stealth(false).build().unwrap();
+        let domain = Browser::builder().stealth(false).build().unwrap();
+        host.cookies()
+            .set(
+                "synthetic-session=synthetic-secret-bearer; Path=/; Secure; HttpOnly",
+                "https://chatgpt.com/",
+            )
+            .unwrap();
+        domain
+            .cookies()
+            .set(
+                "synthetic-session=synthetic-secret-bearer; Domain=.chatgpt.com; Path=/; Secure; HttpOnly",
+                "https://chatgpt.com/",
+            )
+            .unwrap();
+        let host_readback: Vec<Cookie> = host
+            .cookies()
+            .get_all()
+            .into_iter()
+            .map(Cookie::from)
+            .collect();
+        let domain_readback: Vec<Cookie> = domain
+            .cookies()
+            .get_all()
+            .into_iter()
+            .map(Cookie::from)
+            .collect();
+        assert_eq!(host_readback.len(), 1);
+        assert_eq!(domain_readback.len(), 1);
+        // The exact header scope must be observable; otherwise fail this
+        // source-level regression instead of reporting full restore parity.
+        assert!(restored_cookie_readback_matches(
+            &cookie("chatgpt.com"),
+            &host_readback[0]
+        ));
+        assert!(restored_cookie_readback_matches(
+            &cookie(".chatgpt.com"),
+            &domain_readback[0]
+        ));
+        assert!(!restored_cookie_readback_matches(
+            &host_readback[0],
+            &domain_readback[0]
+        ));
+    }
+
+    #[test]
     fn readback_requires_exact_name_path_value_and_security_flags() {
         let expected = cookie(".chatgpt.com");
         let mut actual = expected.clone();
