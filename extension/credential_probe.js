@@ -48,6 +48,23 @@ async function probeActiveChatgptAccount() {
     if (!session || typeof session !== "object" || Array.isArray(session)) {
       return report("unknown", "unrecognized_session_response", 200);
     }
+    // A refresh error or expired access token cannot certify this account,
+    // even when the outer session expiry remains in the future. Claims stay
+    // private and can only reject stale evidence, never prove authentication.
+    if (session.error) return report("unknown", "incomplete_or_expired_session_evidence", 200);
+    const tokenCurrent = (() => {
+      if (typeof session.accessToken !== 'string') return false;
+      const parts = session.accessToken.split('.');
+      if (parts.length !== 3) return true; // Preserve opaque-token support.
+      try {
+        const encoded = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+        if (!encoded || encoded.length > 32768) return false;
+        const payload = JSON.parse(atob(encoded + '='.repeat((4 - encoded.length % 4) % 4)));
+        return payload && typeof payload === 'object' && !Array.isArray(payload) &&
+          (payload.exp === undefined || (typeof payload.exp === 'number' &&
+            Number.isFinite(payload.exp) && payload.exp * 1000 > Date.now()));
+      } catch (_) { return false; }
+    })();
     // An empty user object is a partial/schema-drift response, not positive
     // first-party account evidence. Never expose the fields or their values.
     const validUser = session.user && typeof session.user === "object" &&
@@ -55,7 +72,7 @@ async function probeActiveChatgptAccount() {
     const tokenPresent = typeof session.accessToken === "string" &&
       session.accessToken.trim().length > 0;
     const expiry = typeof session.expires === "string" ? Date.parse(session.expires) : NaN;
-    if (validUser && tokenPresent && Number.isFinite(expiry) && expiry > Date.now()) {
+    if (validUser && tokenPresent && tokenCurrent && Number.isFinite(expiry) && expiry > Date.now()) {
       return report("verified", "first_party_session_confirmed", 200);
     }
     // A partial/changed 200 response can contain user:null alongside
