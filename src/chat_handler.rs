@@ -90,7 +90,9 @@ fn record_safe_attempt_failure(
     // Prevent future handler changes from silently emitting an unversioned
     // stage/reason combination the offline diagnosis tool cannot interpret.
     // This asserts only static producer-owned labels, never provider data.
-    debug_assert!(crate::provider_state::source_failure_pair_valid(stage, reason));
+    debug_assert!(crate::provider_state::source_failure_pair_valid(
+        stage, reason
+    ));
     let duration_ms = provider_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
     provider_sessions.record_request_failure(provider, request_id, stage, reason, duration_ms);
     tracing::warn!(
