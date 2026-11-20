@@ -741,6 +741,64 @@ test("unknown unprocessable-session errors retain generic guidance without forwa
 });
 
 
+test("typed 503 staged-vault failure protects old record without cached replay success", async () => {
+  for (const provider of ["chatgpt", "metaai"]) {
+    const storage = {
+      gateway:"http://127.0.0.1:8080", connectionMode:"local",
+      linkedProviders:[provider], providerLinkEpochs:{[provider]:"current-consent"}
+    };
+    const cookieDomain = provider === "chatgpt" ? ".chatgpt.com" : ".meta.ai";
+    const api = loadShared([
+      {name:"session",value:"secret-cookie-value",domain:cookieDomain,
+       path:"/",secure:true,httpOnly:true}
+    ], true, storage, {
+      fetchResponse:{ok:false,status:503,json:async()=>({
+        error:{code:"session_vault_precommit_failed",
+          message:"private key cookie=very-secret user@example.test"}
+      })}
+    });
+    await assert.rejects(() => api.syncProvider(provider), error => {
+      assert.match(error.message, /new encrypted session before saving/);
+      assert.match(error.message, /previous saved vault was preserved/);
+      assert.match(error.message, /do not clear or relink credentials/);
+      for (const privateValue of ["very-secret", "user@example.test", "secret-cookie-value",
+        "private key", "Sign in to the provider"]) {
+        assert.ok(!error.message.includes(privateValue));
+      }
+      return true;
+    });
+    assert.equal(api.fetchCalls.length, 1, "no automatic second upload");
+    assert.equal(storage.relaySnapshotVersions, undefined,
+      "precommit failure cannot be cached as an applied snapshot");
+    assert.deepEqual(storage.linkedProviders, [provider]);
+  }
+});
+
+test("precommit warning requires exact 503 status and exact stable error code", async () => {
+  for (const [status, responseBody] of [
+    [503,{error:{code:"unknown",message:"session_vault_precommit_failed secret"}}],
+    [400,{error:{code:"session_vault_precommit_failed",message:"private"}}],
+    [500,{error:{code:"session_vault_precommit_failed",message:"private"}}]
+  ]) {
+    const storage = {
+      gateway:"http://127.0.0.1:8080",connectionMode:"local",
+      linkedProviders:["chatgpt"],providerLinkEpochs:{chatgpt:"consent"}
+    };
+    const api = loadShared([{name:"session",value:"private",
+      domain:".chatgpt.com",path:"/",secure:true}],true,storage, {
+      fetchResponse:{ok:false,status,json:async()=>responseBody}
+    });
+    await assert.rejects(() => api.syncProvider("chatgpt"), error => {
+      assert.match(error.message, /Gateway rejected session update/);
+      assert.ok(!error.message.includes("previous saved vault was preserved"));
+      assert.ok(!error.message.includes("private"));
+      return true;
+    });
+    assert.equal(api.fetchCalls.length, 1);
+    assert.equal(storage.relaySnapshotVersions, undefined);
+  }
+});
+
 test("typed missing-cookie import error gives login guidance without leaking gateway response", async () => {
   const api = loadShared([{name:"fixture",value:"dummy",domain:".google.com",path:"/",secure:true,httpOnly:true}], true,
     {gateway:"http://127.0.0.1:8080",token:"fixture-token",linkedProviders:["gemini"]},
