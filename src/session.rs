@@ -3013,8 +3013,12 @@ mod local_storage_snapshot_tests {
             assert_eq!(err.to_string(), "provider_local_storage_snapshot_invalid");
             let diagnostic = format!("{err:#}");
             for sensitive in [
-                "access_token", "1234567890123456", "secret-key",
-                "synthetic-private-secret", "bearer", "unexpected",
+                "access_token",
+                "1234567890123456",
+                "secret-key",
+                "synthetic-private-secret",
+                "bearer",
+                "unexpected",
             ] {
                 assert!(!diagnostic.contains(sensitive));
             }
@@ -3029,8 +3033,14 @@ mod local_storage_snapshot_tests {
             "prototype":"kept",
         });
         let parsed = parse_local_storage_snapshot(valid).unwrap();
-        assert_eq!(parsed.get("__proto__").map(String::as_str), Some("synthetic-private-value"));
-        assert_eq!(parsed.get("constructor").map(String::as_str), Some("synthetic-other-value"));
+        assert_eq!(
+            parsed.get("__proto__").map(String::as_str),
+            Some("synthetic-private-value")
+        );
+        assert_eq!(
+            parsed.get("constructor").map(String::as_str),
+            Some("synthetic-other-value")
+        );
         assert_eq!(parsed.get("prototype").map(String::as_str), Some("kept"));
     }
 }
