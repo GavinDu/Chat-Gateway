@@ -1647,6 +1647,18 @@ pub(super) fn browser_thread(
                                     let _ = chunks.send(Err(anyhow::Error::new(providers::ProviderChallengeError::new(provider.name())))).await;
                                     return;
                                 }
+                                // A stale session may render a sign-in form on the
+                                // provider's landing URL. Check account evidence
+                                // before waiting for a composer, so a failed token
+                                // refresh is not misdiagnosed as selector drift.
+                                if provider == Provider::ChatGPT {
+                                    let Some(account) = send_unless_disconnected(&chunks,
+                                        providers::chatgpt::verify_credentials(&mut page)).await else { return; };
+                                    if let Err(error) = account {
+                                        let _ = chunks.send(Err(error)).await;
+                                        return;
+                                    }
+                                }
                                 let Some(composer) = send_unless_disconnected(&chunks,
                                     providers::common::wait_for_selector(&mut page, &adapter.effective_selectors().input_refs(), 15_000)).await else { return; };
                                 if let Err(error) = composer {

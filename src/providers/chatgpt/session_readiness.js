@@ -51,12 +51,29 @@
         }
         // `{user:{}}` is not a source-backed account. Preserve unknown
         // rather than claiming verified or forcing re-login on schema drift.
+        // HTTP 200 and the outer session expiry do not make a failed
+        // refresh or an expired access token usable. JWT claims can only
+        // reject stale evidence here; they never establish account proof.
+        if (session.error) { finish('unavailable'); return; }
+        const tokenCurrent = (() => {
+          if (typeof session.accessToken !== 'string') return false;
+          const parts = session.accessToken.split('.');
+          if (parts.length !== 3) return true; // Preserve opaque-token support.
+          try {
+            const encoded = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+            if (!encoded || encoded.length > 32768) return false;
+            const payload = JSON.parse(atob(encoded + '='.repeat((4 - encoded.length % 4) % 4)));
+            return payload && typeof payload === 'object' && !Array.isArray(payload) &&
+              (payload.exp === undefined || (typeof payload.exp === 'number' &&
+                Number.isFinite(payload.exp) && payload.exp * 1000 > Date.now()));
+          } catch (_) { return false; }
+        })();
         const user = !!session.user && typeof session.user === 'object' &&
                      !Array.isArray(session.user) && Object.keys(session.user).length > 0;
         const token = typeof session.accessToken === 'string' &&
                       session.accessToken.trim().length > 0;
         const future = typeof session.expires === 'string' && Date.parse(session.expires) > Date.now();
-        if (user && token && future) finish('verified');
+        if (user && token && tokenCurrent && future) finish('verified');
         else if (Object.keys(session).length === 0) finish('needs_login');
         else finish('unavailable');
       }).catch(() => finish('unavailable'));
