@@ -885,6 +885,61 @@ mod relay_vault_precommit_tests {
     }
 
     #[test]
+    fn verifier_panic_removes_only_owned_staging_and_preserves_prior_vault() {
+        let root = std::env::temp_dir().join(format!(
+            "chat-gateway-panic-safe-stage-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let destination = root.join("synthetic.vault");
+        let original = b"prior-synthetic-ciphertext";
+        std::fs::write(&destination, original).unwrap();
+
+        let result = std::panic::catch_unwind(|| {
+            let _ = write_session_file_atomically_checked(
+                &destination,
+                b"new-synthetic-ciphertext",
+                |_staged| -> Result<()> {
+                    panic!("injected verification panic");
+                },
+            );
+        });
+        assert!(result.is_err(), "unwind must not silently report success");
+        assert_eq!(
+            std::fs::read(&destination).unwrap(),
+            original,
+            "panic during verification cannot remove the previous vault"
+        );
+        assert_eq!(
+            std::fs::read_dir(&root).unwrap().count(),
+            1,
+            "no orphaned sensitive .tmp file may remain after unwinding"
+        );
+
+        std::fs::remove_file(&destination).unwrap();
+        let first_link = std::panic::catch_unwind(|| {
+            let _ = write_session_file_atomically_checked(
+                &destination,
+                b"first-link-synthetic-ciphertext",
+                |_staged| -> Result<()> {
+                    panic!("injected first-link verification panic");
+                },
+            );
+        });
+        assert!(first_link.is_err());
+        assert!(
+            !destination.exists(),
+            "a failed first link cannot publish a vault"
+        );
+        assert_eq!(
+            std::fs::read_dir(&root).unwrap().count(),
+            0,
+            "first-link unwind cannot leave owned .tmp credentials"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn staged_encrypted_vault_must_verify_before_replacing_last_valid_snapshot() {
         let root = std::env::temp_dir().join(format!(
             "chat-gateway-precommit-vault-{}",
@@ -2360,6 +2415,22 @@ fn write_session_file_atomically(destination: &Path, serialized: &[u8]) -> Resul
     write_session_file_atomically_checked(destination, serialized, |_| Ok(()))
 }
 
+/// A unique staging file is ours only after create_new succeeds. Its contents
+/// may be encrypted credentials, so remove it on every non-commit exit,
+/// including unwinding from a buggy verifier. Never remove the destination.
+struct OwnedSessionStage {
+    path: std::path::PathBuf,
+    committed: bool,
+}
+
+impl Drop for OwnedSessionStage {
+    fn drop(&mut self) {
+        if !self.committed {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
 /// Commit a fully synced, uniquely owned staging file only after its verifier
 /// accepts it. This never replaces the last good vault on verify failure.
 fn write_session_file_atomically_checked(
@@ -2383,25 +2454,24 @@ fn write_session_file_atomically_checked(
     // Do not remove the path if create_new fails: in that case the temp path
     // may belong to another process and was not created by this invocation.
     let mut output = options.open(&temp_path)?;
-    let write_result = (|| -> Result<()> {
+    let mut owned = OwnedSessionStage {
+        path: std::path::PathBuf::from(&temp_path),
+        committed: false,
+    };
+    // On any write/sync/verify/rename error, or a verifier panic, Drop
+    // removes only this invocation's owned staging file.
+    let written = (|| -> Result<()> {
         output.write_all(serialized)?;
         output.sync_all()?;
         Ok(())
     })();
     drop(output);
-
-    if let Err(error) = write_result {
-        let _ = std::fs::remove_file(&temp_path);
-        return Err(error);
-    }
-    if let Err(error) = verify_staged(Path::new(&temp_path)) {
-        let _ = std::fs::remove_file(&temp_path);
-        return Err(error);
-    }
-    if let Err(error) = std::fs::rename(&temp_path, destination) {
-        let _ = std::fs::remove_file(&temp_path);
-        return Err(error.into());
-    }
+    written?;
+    verify_staged(&owned.path)?;
+    std::fs::rename(&owned.path, destination)?;
+    // Once the atomic replacement succeeded, do not remove the destination
+    // even if the caller encounters an unrelated later error.
+    owned.committed = true;
     Ok(())
 }
 
