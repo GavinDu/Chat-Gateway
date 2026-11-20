@@ -210,13 +210,19 @@ impl ProviderSessionRegistry {
         if slot.request_id != request_id {
             return;
         }
+        // Check the actual producer labels *before* sanitizing. Otherwise an
+        // unrecognized raw JSON completion reason could sanitize to the
+        // valid "unclassified" label and falsely claim this source contract.
+        let raw_pair_supported = source_failure_pair_valid(stage, reason);
         let stage = safe_failure_stage(stage);
         let reason = safe_failure_reason(reason);
         // A future producer mismatch must never advertise the current grammar
         // in release builds. The fixed redacted labels are still retained for
         // debugging, but an offline consumer must classify their source as
         // unverified rather than attribute provider or credential blame.
-        let source_failure_schema_version = if source_failure_pair_valid(stage, reason) {
+        let source_failure_schema_version = if raw_pair_supported
+            && source_failure_pair_valid(stage, reason)
+        {
             FAILURE_SOURCE_SCHEMA_VERSION
         } else {
             0
@@ -1223,6 +1229,8 @@ mod bounded_request_diagnostic_tests {
             ("backend_admission", "candidate_skipped"),
             ("first_stream_event", "candidate_skipped"),
             ("unexpected", "private?token=secret"),
+            ("json_completion", "bearer=secret"),
+            ("first_stream_event", "unexpected-private-reason"),
         ] {
             reg.record_request_failure("chatgpt", FIRST, stage, reason, 99);
             let record = reg.last_failed_request("chatgpt").unwrap();
