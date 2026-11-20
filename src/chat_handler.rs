@@ -87,6 +87,10 @@ fn record_safe_attempt_failure(
     reason: &'static str,
     provider_started: Instant,
 ) {
+    // Prevent future handler changes from silently emitting an unversioned
+    // stage/reason combination the offline diagnosis tool cannot interpret.
+    // This asserts only static producer-owned labels, never provider data.
+    debug_assert!(crate::provider_state::source_failure_pair_valid(stage, reason));
     let duration_ms = provider_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
     provider_sessions.record_request_failure(provider, request_id, stage, reason, duration_ms);
     tracing::warn!(
@@ -103,6 +107,35 @@ fn record_safe_attempt_failure(
 mod safe_attempt_phase_tests {
     use super::safe_backend_reason;
     use crate::chat_backend::{GatewayError, GatewayErrorKind};
+
+    #[test]
+    fn producer_typed_error_categories_match_versioned_diagnostic_contract() {
+        use crate::provider_state::source_failure_pair_valid;
+        for kind in [
+            GatewayErrorKind::InvalidRequest,
+            GatewayErrorKind::ModelNotFound,
+            GatewayErrorKind::ProviderBusy,
+            GatewayErrorKind::SessionExpired,
+            GatewayErrorKind::Challenge,
+            GatewayErrorKind::Timeout,
+            GatewayErrorKind::Memory,
+            GatewayErrorKind::ProviderFailure,
+            GatewayErrorKind::ProviderAssetBlocked,
+            GatewayErrorKind::ProviderDocumentDenied,
+            GatewayErrorKind::ProviderInputRejected,
+            GatewayErrorKind::BackendUnavailable,
+        ] {
+            let reason = safe_backend_reason(Some(kind));
+            assert!(source_failure_pair_valid("backend_admission", reason));
+            assert!(source_failure_pair_valid("first_stream_event", reason));
+            assert!(!source_failure_pair_valid("json_completion", reason));
+        }
+        assert!(source_failure_pair_valid(
+            "first_stream_event",
+            safe_backend_reason(None)
+        ));
+        assert!(source_failure_pair_valid("json_completion", "unclassified"));
+    }
 
     #[test]
     fn typed_backend_labels_never_depend_on_untrusted_message() {
