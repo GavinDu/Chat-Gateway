@@ -471,6 +471,26 @@ fn checked_evidence_file_identity(
     Ok(())
 }
 
+/// Open owner-supplied evidence without following a final-component symlink
+/// or blocking on a FIFO substituted after the lstat check. Device/inode
+/// verification on the returned descriptor is still required before reading.
+fn open_evidence_without_following(path: &Path) -> anyhow::Result<fs::File> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(path)
+            .map_err(|_| anyhow::anyhow!("credential evidence unavailable"))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        anyhow::bail!("credential evidence unavailable");
+    }
+}
+
 pub(crate) fn diagnose_file(path: &Path) -> anyhow::Result<String> {
     // Read-only local operator input. Reject symlinks and oversized files;
     // do not reflect filesystem or parser errors with credential-bearing data.
@@ -479,11 +499,10 @@ pub(crate) fn diagnose_file(path: &Path) -> anyhow::Result<String> {
     if !info.is_file() || info.file_type().is_symlink() || info.len() > MAX_FILE {
         anyhow::bail!("credential evidence unavailable");
     }
-    // A symlink or replacement file can be installed after the lstat.
-    // File::open may follow it; validate the actual descriptor before any
-    // read rather than trusting the earlier pathname metadata.
-    let file =
-        fs::File::open(path).map_err(|_| anyhow::anyhow!("credential evidence unavailable"))?;
+    // A symlink, FIFO or replacement file can appear after lstat. Refuse
+    // to follow/block on the final component, then validate the actual
+    // descriptor before reading any owner-supplied bytes.
+    let file = open_evidence_without_following(path)?;
     let opened = file
         .metadata()
         .map_err(|_| anyhow::anyhow!("credential evidence unavailable"))?;
@@ -513,6 +532,65 @@ pub(crate) fn diagnose_file(path: &Path) -> anyhow::Result<String> {
 mod evidence_file_identity_tests {
     use super::*;
     use std::os::unix::fs::symlink;
+
+    #[test]
+    fn nofollow_rejects_symlink_to_the_same_previously_checked_inode() {
+        let root = std::env::temp_dir().join(format!(
+            "chat-gateway-nofollow-evidence-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir(&root).unwrap();
+        let checked = root.join("checked.json");
+        let original = root.join("original.json");
+        fs::write(&checked, b"synthetic-evidence").unwrap();
+        let inspected = fs::symlink_metadata(&checked).unwrap();
+        fs::rename(&checked, &original).unwrap();
+        symlink(&original, &checked).unwrap();
+
+        // The descriptor identity would be the same as the inspected file;
+        // O_NOFOLLOW must independently reject following the substituted link.
+        let failure = open_evidence_without_following(&checked).unwrap_err();
+        assert_eq!(failure.to_string(), "credential evidence unavailable");
+        assert!(inspected.is_file());
+        assert!(!inspected.file_type().is_symlink());
+        assert_eq!(fs::read(&original).unwrap(), b"synthetic-evidence");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn nonblocking_open_rejects_fifo_replacement_without_waiting_for_writer() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+
+        let root = std::env::temp_dir().join(format!(
+            "chat-gateway-nonblock-evidence-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir(&root).unwrap();
+        let checked = root.join("checked.json");
+        let original = root.join("original.json");
+        fs::write(&checked, b"synthetic-evidence").unwrap();
+        let inspected = fs::symlink_metadata(&checked).unwrap();
+        fs::rename(&checked, &original).unwrap();
+
+        // SAFETY: The CString owns a NUL-terminated pathname, whose buffer
+        // remains valid for the full duration of this POSIX mkfifo call.
+        // The test creates only a new FIFO within its unique temporary dir.
+        let c_path = CString::new(checked.as_os_str().as_bytes()).unwrap();
+        let rc = unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) };
+        assert_eq!(rc, 0);
+
+        // Opening the FIFO as read-only with O_NONBLOCK returns even when no
+        // writer exists. The opened descriptor is nonregular, so reject it
+        // *before* reading/parsing any bytes from the substituted path.
+        let opened = open_evidence_without_following(&checked).unwrap();
+        let failure =
+            checked_evidence_file_identity(&inspected, &opened.metadata().unwrap()).unwrap_err();
+        assert_eq!(failure.to_string(), "credential evidence unavailable");
+        assert!(!opened.metadata().unwrap().is_file());
+        assert_eq!(fs::read(&original).unwrap(), b"synthetic-evidence");
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn checked_file_and_replaced_symlink_have_different_file_ids_before_read() {
