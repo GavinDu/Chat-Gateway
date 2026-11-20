@@ -39,10 +39,46 @@ const CREDENTIAL_PROOF_TTL: Duration = Duration::from_secs(300);
 
 const LAST_FAILED_REQUEST_TTL: Duration = Duration::from_secs(300);
 
+/// Producer-owned version of the fixed, redacted request-failure stage/reason
+/// contract. Never infer it from a caller's claim or a local checkout; a
+/// versionless historical status cannot be attributed to this emitter.
+pub(crate) const FAILURE_SOURCE_SCHEMA_VERSION: u8 = 1;
+
+/// The only stage/reason combinations emitted by the current chat handler.
+/// Keep these pure, bounded labels in sync with safe_backend_reason and
+/// record_safe_attempt_failure. Unsupported evidence must remain inconclusive.
+pub(crate) fn source_failure_pair_valid(stage: &str, reason: &str) -> bool {
+    let typed_backend = matches!(
+        reason,
+        "invalid_request"
+            | "model_not_found"
+            | "provider_busy"
+            | "session_expired"
+            | "challenge"
+            | "timeout"
+            | "memory"
+            | "provider_failure"
+            | "asset_blocked"
+            | "document_denied"
+            | "input_rejected"
+            | "backend_unavailable"
+    );
+    match stage {
+        "candidate_admission" => matches!(reason, "provider_busy" | "candidate_skipped"),
+        "backend_admission" => typed_backend,
+        "first_stream_event" => typed_backend || reason == "unclassified",
+        "json_completion" => reason == "unclassified",
+        _ => false,
+    }
+}
+
 /// Diagnostics for a gateway-generated request, not an upstream session.
 /// Every serialized field is bounded or selected from a fixed source list.
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct LastFailedRequest {
+    /// Additive version marker carried by this exact source emitter.
+    /// A versionless old installed image must not be interpreted as current.
+    pub source_failure_schema_version: u8,
     pub request_id: String,
     pub stage: &'static str,
     pub reason: &'static str,
@@ -175,6 +211,7 @@ impl ProviderSessionRegistry {
             return;
         }
         let record = LastFailedRequest {
+            source_failure_schema_version: FAILURE_SOURCE_SCHEMA_VERSION,
             request_id: request_id.to_string(),
             stage: safe_failure_stage(stage),
             reason: safe_failure_reason(reason),
@@ -1050,9 +1087,50 @@ mod bounded_request_diagnostic_tests {
         );
         let latest = reg.last_failed_request("chatgpt").unwrap();
         assert_eq!(latest.request_id.to_string(), SECOND);
+        assert_eq!(latest.source_failure_schema_version, FAILURE_SOURCE_SCHEMA_VERSION);
         assert_eq!(latest.stage, "first_stream_event");
         assert_eq!(latest.reason, "backend_unavailable");
         assert_eq!(latest.duration_ms, 123);
+    }
+
+    #[test]
+    fn declared_source_failure_pairs_are_versioned_and_bounded() {
+        assert_eq!(FAILURE_SOURCE_SCHEMA_VERSION, 1);
+        for reason in ["provider_busy", "candidate_skipped"] {
+            assert!(source_failure_pair_valid("candidate_admission", reason));
+        }
+        for reason in [
+            "invalid_request",
+            "model_not_found",
+            "provider_busy",
+            "session_expired",
+            "challenge",
+            "timeout",
+            "memory",
+            "provider_failure",
+            "asset_blocked",
+            "document_denied",
+            "input_rejected",
+            "backend_unavailable",
+        ] {
+            assert!(source_failure_pair_valid("backend_admission", reason));
+            assert!(source_failure_pair_valid("first_stream_event", reason));
+            assert!(!source_failure_pair_valid("json_completion", reason));
+        }
+        assert!(source_failure_pair_valid("first_stream_event", "unclassified"));
+        assert!(source_failure_pair_valid("json_completion", "unclassified"));
+        for (stage, reason) in [
+            ("candidate_admission", "backend_unavailable"),
+            ("backend_admission", "candidate_skipped"),
+            ("backend_admission", "unclassified"),
+            ("first_stream_event", "candidate_skipped"),
+            ("json_completion", "candidate_skipped"),
+            ("json_completion", "timeout"),
+            ("unknown", "unclassified"),
+            ("json_completion", "cookie=secret"),
+        ] {
+            assert!(!source_failure_pair_valid(stage, reason), "{stage}/{reason}");
+        }
     }
 
     #[test]
