@@ -3,13 +3,13 @@
 //! This does NOT verify credentials, load the vault or contact providers. Only
 //! source-verified account checks may legitimately create "verified" evidence.
 use serde::Deserialize;
-use zeroize::Zeroizing;
 use std::{
     fs,
     io::Read,
     path::Path,
     time::{SystemTime, UNIX_EPOCH},
 };
+use zeroize::Zeroizing;
 
 const MAX_FILE: u64 = 16 * 1024;
 const MAX_AGE_MS: u64 = 5 * 60 * 1000;
