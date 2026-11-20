@@ -741,6 +741,65 @@ test("unknown unprocessable-session errors retain generic guidance without forwa
 });
 
 
+test("typed 409 vault failure preserves credentials and gives key recovery guidance", async () => {
+  const storage = {
+    gateway:"http://127.0.0.1:8080", connectionMode:"local",
+    token:"synthetic-token", linkedProviders:["chatgpt"],
+    providerLinkEpochs:{chatgpt:"consent-epoch"}
+  };
+  const api = loadShared([
+    {name:"session",value:"private-session-value",domain:".chatgpt.com",
+      path:"/",secure:true,httpOnly:true}
+  ], true, storage, {
+    fetchResponse:{ok:false,status:409,json:async()=>({
+      error:{code:"session_vault_unreadable",
+        message:"private cookie and key secret account@example.test"}
+    })}
+  });
+  await assert.rejects(() => api.syncProvider("chatgpt"), error => {
+    assert.match(error.message, /saved vault was preserved/);
+    assert.match(error.message, /vault key configuration/);
+    assert.match(error.message, /do not clear or relink/);
+    for (const sensitive of ["private-session-value", "cookie", "account@example.test", "secret"]) {
+      assert.ok(!error.message.includes(sensitive));
+    }
+    assert.ok(!error.message.includes("Sign in to the provider"));
+    return true;
+  });
+  assert.equal(api.fetchCalls.length, 1, "no automatic resync or second POST");
+  assert.deepEqual(storage.linkedProviders, ["chatgpt"], "preserve consent");
+  assert.equal(storage.relaySnapshotVersions, undefined,
+    "typed local vault conflict must never cache an activated snapshot digest");
+});
+
+test("untyped or status-mismatched vault errors cannot impersonate protected recovery", async () => {
+  for (const [status, code, responseBody] of [
+    [409,"unexpected_error", {error:{code:"unexpected_error",message:"private bearer"}}],
+    [400,"session_vault_unreadable", {error:{code:"session_vault_unreadable",
+      message:"private token"}}],
+    [409,"session_vault_unreadable", {error:{code:"unrelated_error",
+      message:"session_vault_unreadable private password"}}],
+  ]) {
+    const storage = {
+      gateway:"http://127.0.0.1:8080", connectionMode:"local",
+      linkedProviders:["metaai"], providerLinkEpochs:{metaai:"consent-epoch"}
+    };
+    const api = loadShared([
+      {name:"session",value:"private-fixture",domain:".meta.ai",path:"/",secure:true}
+    ], true, storage, {
+      fetchResponse:{ok:false,status,json:async()=>responseBody}
+    });
+    await assert.rejects(() => api.syncProvider("metaai"), error => {
+      assert.match(error.message, /Gateway rejected session update/);
+      assert.ok(!error.message.includes("saved vault was preserved"));
+      assert.ok(!error.message.includes("private"));
+      return true;
+    });
+    assert.equal(api.fetchCalls.length, 1);
+    assert.equal(storage.relaySnapshotVersions, undefined);
+  }
+});
+
 test("typed missing-cookie import error gives login guidance without leaking gateway response", async () => {
   const api = loadShared([{name:"fixture",value:"dummy",domain:".google.com",path:"/",secure:true,httpOnly:true}], true,
     {gateway:"http://127.0.0.1:8080",token:"fixture-token",linkedProviders:["gemini"]},
