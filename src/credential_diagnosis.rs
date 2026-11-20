@@ -401,6 +401,16 @@ fn classify(e: &Evidence, now: u64) -> Diagnosis {
     if snapshot != Some(SnapshotState::Applied) {
         return inconclusive(provider, "applied_snapshot_unproven");
     }
+    // A correlated gateway failure is later than the account observations.
+    // Explicit session expiry or a challenge supersedes earlier Chrome/Obscura
+    // verdicts, including an apparent mismatch; it cannot prove replay blame.
+    // Validation of UUID, chronology and stage already happened above.
+    if e.gateway_failure
+        .as_ref()
+        .is_some_and(|failure| matches!(failure.reason.as_str(), "session_expired" | "challenge"))
+    {
+        return inconclusive(provider, "account_or_challenge_state_changed");
+    }
     if chrome == Some(Auth::Verified) && obscura == Some(Auth::Unauthenticated) {
         return verdict(
             provider,
@@ -411,15 +421,6 @@ fn classify(e: &Evidence, now: u64) -> Diagnosis {
     }
     if obscura != Some(Auth::Verified) {
         return inconclusive(provider, "authoritative_obscura_account_verifier_missing");
-    }
-    if e.gateway_failure
-        .as_ref()
-        .is_some_and(|failure| matches!(failure.reason.as_str(), "session_expired" | "challenge"))
-    {
-        // A former first-party positive observation can be superseded by an
-        // explicit new login/challenge signal. Recheck current session state
-        // rather than mislabel the later failure as a transport defect.
-        return inconclusive(provider, "account_or_challenge_state_changed");
     }
     match e.attempt.as_ref().map(|a| (a.stage, a.outcome)) {
         Some((Stage::Composer | Stage::Send, Outcome::Failed)) => verdict(
@@ -791,6 +792,45 @@ mod tests {
         );
         v["gateway_failure"]["reason"] = json!("challenge");
         assert_eq!(checked(v).reason, "account_or_challenge_state_changed");
+    }
+
+    #[test]
+    fn correlated_auth_state_change_supersedes_apparent_replay_mismatch() {
+        let mut evidence = with_gateway_failure();
+        evidence["obscura"]["verdict"] = json!("unauthenticated");
+        // A non-auth gateway failure does not override the regular mismatch.
+        assert_eq!(checked(evidence.clone()).category, "replay_or_binding");
+
+        for signal in ["session_expired", "challenge"] {
+            evidence["gateway_failure"]["reason"] = json!(signal);
+            let changed = checked(evidence.clone());
+            assert_eq!(changed.category, "inconclusive");
+            assert_eq!(changed.reason, "account_or_challenge_state_changed");
+            assert!(!changed.live_proof);
+            let safe = serde_json::to_string(&changed).unwrap();
+            for private in [ID, OTHER_ID, "private", "cookie", "token"] {
+                assert!(!safe.contains(private));
+            }
+
+            // A different or noncanonical request cannot assert supersession.
+            evidence["gateway_failure"]["request_id"] = json!(OTHER_ID);
+            assert_eq!(checked(evidence.clone()).reason, "gateway_request_id_mismatch");
+            evidence["gateway_failure"]["request_id"] = json!(ID.to_uppercase());
+            assert_eq!(
+                checked(evidence.clone()).reason,
+                "missing_gateway_request_correlation"
+            );
+            evidence["gateway_failure"]["request_id"] = json!(ID);
+            evidence["gateway_failure"]["observed_at_ms"] = json!(NOW - MAX_AGE_MS - 1);
+            assert_eq!(checked(evidence.clone()).reason, "stale_or_future_evidence");
+            evidence["gateway_failure"]["observed_at_ms"] = json!(NOW);
+            evidence["gateway_failure"]["stage"] = json!("backend_admission");
+            assert_eq!(checked(evidence.clone()).reason, "conflicting_gateway_failure_stage");
+            evidence["gateway_failure"]["stage"] = json!("json_completion");
+        }
+
+        evidence.as_object_mut().unwrap().remove("gateway_failure");
+        assert_eq!(checked(evidence).category, "replay_or_binding");
     }
 
     #[test]
