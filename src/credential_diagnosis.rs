@@ -582,7 +582,10 @@ mod tests {
         let mut v = with_gateway_failure();
         assert_eq!(checked(v.clone()).category, "transport_or_extraction");
 
-        v["gateway_failure"].as_object_mut().unwrap().remove("source_failure_schema_version");
+        v["gateway_failure"]
+            .as_object_mut()
+            .unwrap()
+            .remove("source_failure_schema_version");
         let legacy = checked(v.clone());
         assert_eq!(legacy.reason, "source_schema_unverified");
         assert!(!legacy.live_proof);
