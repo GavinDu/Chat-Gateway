@@ -863,6 +863,112 @@ mod relay_import_noop_tests {
     }
 }
 
+#[cfg(test)]
+mod relay_vault_precommit_tests {
+    use super::*;
+
+    fn synthetic(provider: &str, domain: &str, value: &str) -> SessionFile {
+        let _ = provider;
+        SessionFile {
+            local_storage: HashMap::new(),
+            cookies: vec![Cookie {
+                name: "synthetic".into(),
+                value: value.into(),
+                domain: domain.into(),
+                path: "/".into(),
+                secure: true,
+                http_only: true,
+                expires: None,
+                same_site: None,
+            }],
+            ts: "synthetic-only".into(),
+        }
+    }
+
+    #[test]
+    fn staged_encrypted_vault_must_verify_before_replacing_last_valid_snapshot() {
+        let root = std::env::temp_dir().join(format!(
+            "chat-gateway-precommit-vault-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let key = [42_u8; 32];
+        let wrong_key = [41_u8; 32];
+
+        for (provider, domain, foreign) in [
+            ("chatgpt", ".chatgpt.com", "metaai"),
+            ("metaai", ".meta.ai", "chatgpt"),
+        ] {
+            let destination = root.join(format!("{provider}.vault"));
+            let old = synthetic(provider, domain, "old-synthetic-session");
+            let new = synthetic(provider, domain, "new-synthetic-session");
+            let original_ciphertext = encrypt_session_snapshot(&old, provider, &key).unwrap();
+            let updated_ciphertext = encrypt_session_snapshot(&new, provider, &key).unwrap();
+            write_session_file_atomically(&destination, &original_ciphertext).unwrap();
+
+            for failure in 0..5 {
+                let failed = write_session_file_atomically_checked(
+                    &destination,
+                    if failure == 4 {
+                        b"damaged-stage".as_slice()
+                    } else {
+                        updated_ciphertext.as_slice()
+                    },
+                    |staged| match failure {
+                        0 => Err(anyhow::Error::new(RelayVaultPrecommitVerificationError)),
+                        1 => verify_relay_vault_staging(staged, provider, &new, &wrong_key),
+                        2 => verify_relay_vault_staging(staged, foreign, &new, &key),
+                        3 => verify_relay_vault_staging(staged, provider, &old, &key),
+                        _ => verify_relay_vault_staging(staged, provider, &new, &key),
+                    },
+                )
+                .unwrap_err();
+                assert!(failed.downcast_ref::<RelayVaultPrecommitVerificationError>().is_some());
+                assert_eq!(
+                    failed.to_string(),
+                    "session-vault precommit verification failed"
+                );
+                assert_eq!(std::fs::read(&destination).unwrap(), original_ciphertext);
+                let entries = std::fs::read_dir(&root).unwrap().count();
+                // One provider destination per iteration, never an orphaned
+                // .tmp file after injected verification failure.
+                assert_eq!(entries, 1);
+            }
+
+            write_session_file_atomically_checked(
+                &destination,
+                &updated_ciphertext,
+                |staged| verify_relay_vault_staging(staged, provider, &new, &key),
+            )
+            .unwrap();
+            assert_eq!(std::fs::read(&destination).unwrap(), updated_ciphertext);
+            let opened = decrypt_session_snapshot(
+                &std::fs::read(&destination).unwrap(),
+                provider,
+                &key,
+            )
+            .unwrap();
+            assert!(
+                session_state_hash(&opened).unwrap() == session_state_hash(&new).unwrap(),
+                "verified new vault must match the expected synthetic snapshot"
+            );
+            std::fs::remove_file(&destination).unwrap();
+        }
+
+        let fresh = root.join("fresh.vault");
+        let err = write_session_file_atomically_checked(
+            &fresh,
+            b"synthetic-not-a-session",
+            |_staged| Err(anyhow::Error::new(RelayVaultPrecommitVerificationError)),
+        )
+        .unwrap_err();
+        assert!(err.downcast_ref::<RelayVaultPrecommitVerificationError>().is_some());
+        assert!(!fresh.exists(), "failed first-link verification must not publish a vault");
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
 /// Migrate one legacy plaintext snapshot into the encrypted vault. Isolated
 /// paths make migration failure handling testable without process-wide env or
 /// working-directory changes.
