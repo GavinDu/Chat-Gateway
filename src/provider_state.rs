@@ -39,10 +39,46 @@ const CREDENTIAL_PROOF_TTL: Duration = Duration::from_secs(300);
 
 const LAST_FAILED_REQUEST_TTL: Duration = Duration::from_secs(300);
 
+/// Producer-owned version of the fixed, redacted request-failure stage/reason
+/// contract. Never infer it from a caller's claim or a local checkout; a
+/// versionless historical status cannot be attributed to this emitter.
+pub(crate) const FAILURE_SOURCE_SCHEMA_VERSION: u8 = 1;
+
+/// The only stage/reason combinations emitted by the current chat handler.
+/// Keep these pure, bounded labels in sync with safe_backend_reason and
+/// record_safe_attempt_failure. Unsupported evidence must remain inconclusive.
+pub(crate) fn source_failure_pair_valid(stage: &str, reason: &str) -> bool {
+    let typed_backend = matches!(
+        reason,
+        "invalid_request"
+            | "model_not_found"
+            | "provider_busy"
+            | "session_expired"
+            | "challenge"
+            | "timeout"
+            | "memory"
+            | "provider_failure"
+            | "asset_blocked"
+            | "document_denied"
+            | "input_rejected"
+            | "backend_unavailable"
+    );
+    match stage {
+        "candidate_admission" => matches!(reason, "provider_busy" | "candidate_skipped"),
+        "backend_admission" => typed_backend,
+        "first_stream_event" => typed_backend || reason == "unclassified",
+        "json_completion" => reason == "unclassified",
+        _ => false,
+    }
+}
+
 /// Diagnostics for a gateway-generated request, not an upstream session.
 /// Every serialized field is bounded or selected from a fixed source list.
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct LastFailedRequest {
+    /// Additive version marker carried by this exact source emitter.
+    /// A versionless old installed image must not be interpreted as current.
+    pub source_failure_schema_version: u8,
     pub request_id: String,
     pub stage: &'static str,
     pub reason: &'static str,
@@ -174,10 +210,27 @@ impl ProviderSessionRegistry {
         if slot.request_id != request_id {
             return;
         }
+        // Check the actual producer labels *before* sanitizing. Otherwise an
+        // unrecognized raw JSON completion reason could sanitize to the
+        // valid "unclassified" label and falsely claim this source contract.
+        let raw_pair_supported = source_failure_pair_valid(stage, reason);
+        let stage = safe_failure_stage(stage);
+        let reason = safe_failure_reason(reason);
+        // A future producer mismatch must never advertise the current grammar
+        // in release builds. The fixed redacted labels are still retained for
+        // debugging, but an offline consumer must classify their source as
+        // unverified rather than attribute provider or credential blame.
+        let source_failure_schema_version =
+            if raw_pair_supported && source_failure_pair_valid(stage, reason) {
+                FAILURE_SOURCE_SCHEMA_VERSION
+            } else {
+                0
+            };
         let record = LastFailedRequest {
+            source_failure_schema_version,
             request_id: request_id.to_string(),
-            stage: safe_failure_stage(stage),
-            reason: safe_failure_reason(reason),
+            stage,
+            reason,
             duration_ms: duration_ms.min(120_000),
             observed_at_utc: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         };
@@ -1050,9 +1103,59 @@ mod bounded_request_diagnostic_tests {
         );
         let latest = reg.last_failed_request("chatgpt").unwrap();
         assert_eq!(latest.request_id.to_string(), SECOND);
+        assert_eq!(
+            latest.source_failure_schema_version,
+            FAILURE_SOURCE_SCHEMA_VERSION
+        );
         assert_eq!(latest.stage, "first_stream_event");
         assert_eq!(latest.reason, "backend_unavailable");
         assert_eq!(latest.duration_ms, 123);
+    }
+
+    #[test]
+    fn declared_source_failure_pairs_are_versioned_and_bounded() {
+        assert_eq!(FAILURE_SOURCE_SCHEMA_VERSION, 1);
+        for reason in ["provider_busy", "candidate_skipped"] {
+            assert!(source_failure_pair_valid("candidate_admission", reason));
+        }
+        for reason in [
+            "invalid_request",
+            "model_not_found",
+            "provider_busy",
+            "session_expired",
+            "challenge",
+            "timeout",
+            "memory",
+            "provider_failure",
+            "asset_blocked",
+            "document_denied",
+            "input_rejected",
+            "backend_unavailable",
+        ] {
+            assert!(source_failure_pair_valid("backend_admission", reason));
+            assert!(source_failure_pair_valid("first_stream_event", reason));
+            assert!(!source_failure_pair_valid("json_completion", reason));
+        }
+        assert!(source_failure_pair_valid(
+            "first_stream_event",
+            "unclassified"
+        ));
+        assert!(source_failure_pair_valid("json_completion", "unclassified"));
+        for (stage, reason) in [
+            ("candidate_admission", "backend_unavailable"),
+            ("backend_admission", "candidate_skipped"),
+            ("backend_admission", "unclassified"),
+            ("first_stream_event", "candidate_skipped"),
+            ("json_completion", "candidate_skipped"),
+            ("json_completion", "timeout"),
+            ("unknown", "unclassified"),
+            ("json_completion", "cookie=secret"),
+        ] {
+            assert!(
+                !source_failure_pair_valid(stage, reason),
+                "{stage}/{reason}"
+            );
+        }
     }
 
     #[test]
@@ -1093,6 +1196,10 @@ mod bounded_request_diagnostic_tests {
         assert_eq!(record.stage, "unknown");
         assert_eq!(record.reason, "unclassified");
         assert_eq!(record.duration_ms, 120_000);
+        assert_eq!(
+            record.source_failure_schema_version, 0,
+            "unsupported static stage/reason must not claim source version 1"
+        );
         for private in [
             "private.example",
             "bearer_secret",
@@ -1107,8 +1214,45 @@ mod bounded_request_diagnostic_tests {
                 .as_object()
                 .unwrap()
                 .len(),
-            5
+            6
         );
+    }
+
+    #[test]
+    fn producer_release_build_never_versions_impossible_stage_reason_pair() {
+        let reg = ProviderSessionRegistry::default();
+        reg.begin_request_attempt("chatgpt", FIRST);
+        for (stage, reason) in [
+            ("candidate_admission", "backend_unavailable"),
+            ("json_completion", "timeout"),
+            ("backend_admission", "candidate_skipped"),
+            ("first_stream_event", "candidate_skipped"),
+            ("unexpected", "private?token=secret"),
+            ("json_completion", "bearer=secret"),
+            ("first_stream_event", "unexpected-private-reason"),
+        ] {
+            reg.record_request_failure("chatgpt", FIRST, stage, reason, 99);
+            let record = reg.last_failed_request("chatgpt").unwrap();
+            assert_eq!(record.source_failure_schema_version, 0, "{stage}/{reason}");
+            let safe = serde_json::to_string(&record).unwrap();
+            assert!(!safe.contains("private?token=secret"));
+            assert!(!safe.contains("candidate_skipped") || reason == "candidate_skipped");
+        }
+        for (stage, reason) in [
+            ("candidate_admission", "candidate_skipped"),
+            ("backend_admission", "timeout"),
+            ("first_stream_event", "unclassified"),
+            ("json_completion", "unclassified"),
+        ] {
+            reg.record_request_failure("chatgpt", FIRST, stage, reason, 99);
+            assert_eq!(
+                reg.last_failed_request("chatgpt")
+                    .unwrap()
+                    .source_failure_schema_version,
+                FAILURE_SOURCE_SCHEMA_VERSION,
+                "{stage}/{reason}"
+            );
+        }
     }
 
     #[test]

@@ -56,6 +56,29 @@ privately; do not publish cookie values, stable cookie digests, account IDs or
 credential-bearing URLs. An independent control must actually replay the same
 exported snapshot before it can establish that distinction.
 
+## Versioned gateway failure attribution
+
+New gateway owner status includes a fixed `source_failure_schema_version` in
+`last_failed_request`, alongside the generated request UUID, stage, reason,
+duration and observation time. Copy that field from the **actual installed
+gateway's authorized status**, not from the local checkout or a guessed image.
+The offline `credential-diagnose` evidence file's `gateway_failure` record must
+carry the same integer. Older status without it, a zero marker for
+unsupported producer labels, or a newer unknown version is
+`source_schema_unverified`: it remains *inconclusive*, not proof of a broken
+provider or expired session. This validation is enforced by the producer in
+release builds as well as by the offline reader.
+
+Version 1 source emission supports only candidate-admission busy/skipped
+reasons, typed backend-admission reasons, typed-or-unclassified first-stream
+reasons, and unclassified JSON-completion reasons. Any other stage/reason pair
+is `inconsistent_gateway_stage_reason`. The offline tool also requires a
+matching request UUID, chronological observations and matching snapshot
+generation; its `live_proof` stays false. Do not put arbitrary upstream error
+messages, cookies, bearer URLs, account identities or credential digests into
+this report. Even a versioned status is not installed image/build attestation,
+successful Chrome-to-Obscura replay or a verified signed-in Meta AI account.
+
 ## Current investigation
 
 Only ChatGPT and Meta AI are active targets. Reuse existing saved sessions first.
