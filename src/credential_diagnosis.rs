@@ -471,6 +471,26 @@ fn checked_evidence_file_identity(
     Ok(())
 }
 
+/// Open owner-supplied evidence without following a final-component symlink
+/// or blocking on a FIFO substituted after the lstat check. Device/inode
+/// verification on the returned descriptor is still required before reading.
+fn open_evidence_without_following(path: &Path) -> anyhow::Result<fs::File> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(path)
+            .map_err(|_| anyhow::anyhow!("credential evidence unavailable"))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        anyhow::bail!("credential evidence unavailable");
+    }
+}
+
 pub(crate) fn diagnose_file(path: &Path) -> anyhow::Result<String> {
     // Read-only local operator input. Reject symlinks and oversized files;
     // do not reflect filesystem or parser errors with credential-bearing data.
@@ -482,8 +502,7 @@ pub(crate) fn diagnose_file(path: &Path) -> anyhow::Result<String> {
     // A symlink or replacement file can be installed after the lstat.
     // File::open may follow it; validate the actual descriptor before any
     // read rather than trusting the earlier pathname metadata.
-    let file =
-        fs::File::open(path).map_err(|_| anyhow::anyhow!("credential evidence unavailable"))?;
+    let file = open_evidence_without_following(path)?;
     let opened = file
         .metadata()
         .map_err(|_| anyhow::anyhow!("credential evidence unavailable"))?;
