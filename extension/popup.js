@@ -508,9 +508,37 @@ const SAFE_LAST_FAILURE_REASONS = new Set([
   "asset_blocked", "document_denied", "input_rejected",
   "backend_unavailable", "candidate_skipped", "unclassified"
 ]);
+// Keep this fixed producer grammar aligned with
+// src/provider_state.rs::source_failure_pair_valid, schema version 1.
+// Versionless old/unknown source records cannot assign runtime blame.
+const SOURCE_FAILURE_RECORD_KEYS = new Set([
+  "source_failure_schema_version", "request_id", "stage",
+  "reason", "duration_ms", "observed_at_utc"
+]);
+const SAFE_TYPED_BACKEND_FAILURE_REASONS = new Set([
+  "invalid_request", "model_not_found", "provider_busy", "session_expired",
+  "challenge", "timeout", "memory", "provider_failure", "asset_blocked",
+  "document_denied", "input_rejected", "backend_unavailable"
+]);
+function sourceGatewayFailurePairValid(stage, reason) {
+  if (stage === "candidate_admission") {
+    return reason === "provider_busy" || reason === "candidate_skipped";
+  }
+  if (stage === "backend_admission") {
+    return SAFE_TYPED_BACKEND_FAILURE_REASONS.has(reason);
+  }
+  if (stage === "first_stream_event") {
+    return SAFE_TYPED_BACKEND_FAILURE_REASONS.has(reason) || reason === "unclassified";
+  }
+  return stage === "json_completion" && reason === "unclassified";
+}
 function safeLastFailedRequest(provider, record) {
   if (provider !== "chatgpt" && provider !== "metaai") return null;
-  if (!record || typeof record !== "object" || Array.isArray(record)) return null;
+  if (!record || typeof record !== "object" || Array.isArray(record) ||
+      Object.keys(record).length !== SOURCE_FAILURE_RECORD_KEYS.size ||
+      !Object.keys(record).every(key => SOURCE_FAILURE_RECORD_KEYS.has(key)) ||
+      record.source_failure_schema_version !== 1 ||
+      !sourceGatewayFailurePairValid(record.stage, record.reason)) return null;
   if (typeof record.request_id !== "string" ||
       !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(record.request_id) ||
       !SAFE_LAST_FAILURE_STAGES.has(record.stage) ||
