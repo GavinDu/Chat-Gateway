@@ -151,8 +151,8 @@ mod vault_key_file_tests {
     #[test]
     fn vault_key_file_nofollow_and_nonblock_deny_fifo_or_symlink_swap() {
         use std::ffi::CString;
-        use std::os::unix::{ffi::OsStrExt, fs::symlink};
         use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::{ffi::OsStrExt, fs::symlink};
         let root = std::env::temp_dir().join(format!(
             "chat-gateway-key-file-nonblock-{}",
             uuid::Uuid::new_v4()
@@ -1761,9 +1761,7 @@ fn checked_vault_key_file_identity(
         if inspected.dev() != opened.dev() || inspected.ino() != opened.ino() {
             anyhow::bail!("CHAT_GATEWAY_VAULT_KEY_FILE changed during validation");
         }
-        if inspected.permissions().mode() & 0o077 != 0
-            || opened.permissions().mode() & 0o077 != 0
-        {
+        if inspected.permissions().mode() & 0o077 != 0 || opened.permissions().mode() & 0o077 != 0 {
             anyhow::bail!(
                 "CHAT_GATEWAY_VAULT_KEY_FILE must not be accessible by group or other users"
             );
