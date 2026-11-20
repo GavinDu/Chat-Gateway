@@ -181,19 +181,19 @@ mod vault_key_file_tests {
         let path = root.join("bounded.key");
         std::fs::write(&path, vec![b'1'; MAX_VAULT_KEY_FILE_BYTES as usize + 1]).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
-        let oversize = read_vault_key_file(&path)
-            .err()
-            .expect("oversized key rejected")
-            .to_string();
+        let oversize = match read_vault_key_file(&path) {
+            Ok(_) => panic!("oversized key must be rejected"),
+            Err(error) => error.to_string(),
+        };
         assert_eq!(
             oversize,
             "CHAT_GATEWAY_VAULT_KEY_FILE must be a bounded regular file"
         );
         std::fs::write(&path, vec![0xff; 64]).unwrap();
-        let malformed = read_vault_key_file(&path)
-            .err()
-            .expect("malformed key rejected")
-            .to_string();
+        let malformed = match read_vault_key_file(&path) {
+            Ok(_) => panic!("malformed key must be rejected"),
+            Err(error) => error.to_string(),
+        };
         assert_eq!(malformed, "CHAT_GATEWAY_VAULT_KEY_FILE is not UTF-8");
         assert!(!oversize.contains("bounded.key"));
         assert!(!malformed.contains("bounded.key"));
