@@ -858,8 +858,97 @@ mod relay_import_noop_tests {
         file.cookies[0].same_site = Some("Strict".into());
         assert!(!relay_vault_snapshot_unchanged("chatgpt", &file, &key, &target).unwrap());
         std::fs::write(&target, b"corrupt-envelope").unwrap();
-        assert!(!relay_vault_snapshot_unchanged("chatgpt", &file, &key, &target).unwrap());
+        let error = relay_vault_snapshot_unchanged("chatgpt", &file, &key, &target).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "existing provider session vault cannot be authenticated"
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), b"corrupt-envelope");
         std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn active_relay_preserves_existing_unreadable_vault_for_key_recovery() {
+        let root = std::env::temp_dir().join(format!(
+            "chat-gateway-relay-vault-preservation-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let key = [17_u8; 32];
+        let previous_key = [19_u8; 32];
+        for (provider, domain) in [("chatgpt", ".chatgpt.com"), ("metaai", ".meta.ai")] {
+            let incoming = SessionFile {
+                local_storage: HashMap::new(),
+                cookies: vec![Cookie {
+                    name: "synthetic".into(),
+                    value: "private-credential-fixture".into(),
+                    domain: domain.into(),
+                    path: "/".into(),
+                    secure: true,
+                    http_only: true,
+                    expires: None,
+                    same_site: None,
+                }],
+                ts: "fixture".into(),
+            };
+            let target = root.join(format!("{provider}.vault"));
+            assert!(
+                !relay_vault_snapshot_unchanged(provider, &incoming, &key, &target).unwrap(),
+                "first link with no vault must remain allowed"
+            );
+            let valid = encrypt_session_snapshot(&incoming, provider, &key).unwrap();
+            std::fs::write(&target, &valid).unwrap();
+            assert!(relay_vault_snapshot_unchanged(provider, &incoming, &key, &target).unwrap());
+
+            let different = SessionFile {
+                local_storage: HashMap::new(),
+                cookies: vec![],
+                ts: "different".into(),
+            };
+            assert!(
+                !relay_vault_snapshot_unchanged(provider, &different, &key, &target).unwrap(),
+                "authenticated different snapshot must permit a normal update"
+            );
+
+            for invalid_bytes in [
+                b"corrupt-envelope".to_vec(),
+                encrypt_session_snapshot(&incoming, provider, &previous_key).unwrap(),
+                encrypt_session_snapshot(
+                    &incoming,
+                    if provider == "chatgpt" { "metaai" } else { "chatgpt" },
+                    &key,
+                )
+                .unwrap(),
+            ] {
+                std::fs::write(&target, &invalid_bytes).unwrap();
+                let error =
+                    relay_vault_snapshot_unchanged(provider, &incoming, &key, &target).unwrap_err();
+                assert_eq!(
+                    error.to_string(),
+                    "existing provider session vault cannot be authenticated"
+                );
+                assert_eq!(
+                    std::fs::read(&target).unwrap(),
+                    invalid_bytes,
+                    "failure must leave the exact prior vault bytes intact"
+                );
+                for private in ["private-credential", domain, "key", "chat-gateway-relay-vault"] {
+                    assert!(!error.to_string().contains(private));
+                }
+            }
+            // Deferred provider behavior is unchanged; the fail-closed gate
+            // applies only to the two signed-in account-recovery providers.
+            std::fs::remove_file(&target).unwrap();
+        }
+        let deferred = root.join("gemini.vault");
+        std::fs::write(&deferred, b"corrupt-deferred-record").unwrap();
+        let empty = SessionFile {
+            local_storage: HashMap::new(),
+            cookies: Vec::new(),
+            ts: "fixture".into(),
+        };
+        assert!(!relay_vault_snapshot_unchanged("gemini", &empty, &key, &deferred).unwrap());
+        assert_eq!(std::fs::read(&deferred).unwrap(), b"corrupt-deferred-record");
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
 
