@@ -534,6 +534,65 @@ mod evidence_file_identity_tests {
     use std::os::unix::fs::symlink;
 
     #[test]
+    fn nofollow_rejects_symlink_to_the_same_previously_checked_inode() {
+        let root = std::env::temp_dir().join(format!(
+            "chat-gateway-nofollow-evidence-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir(&root).unwrap();
+        let checked = root.join("checked.json");
+        let original = root.join("original.json");
+        fs::write(&checked, b"synthetic-evidence").unwrap();
+        let inspected = fs::symlink_metadata(&checked).unwrap();
+        fs::rename(&checked, &original).unwrap();
+        symlink(&original, &checked).unwrap();
+
+        // The descriptor identity would be the same as the inspected file;
+        // O_NOFOLLOW must independently reject following the substituted link.
+        let failure = open_evidence_without_following(&checked).unwrap_err();
+        assert_eq!(failure.to_string(), "credential evidence unavailable");
+        assert!(inspected.is_file());
+        assert!(!inspected.file_type().is_symlink());
+        assert_eq!(fs::read(&original).unwrap(), b"synthetic-evidence");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn nonblocking_open_rejects_fifo_replacement_without_waiting_for_writer() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+
+        let root = std::env::temp_dir().join(format!(
+            "chat-gateway-nonblock-evidence-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir(&root).unwrap();
+        let checked = root.join("checked.json");
+        let original = root.join("original.json");
+        fs::write(&checked, b"synthetic-evidence").unwrap();
+        let inspected = fs::symlink_metadata(&checked).unwrap();
+        fs::rename(&checked, &original).unwrap();
+
+        // SAFETY: The CString owns a NUL-terminated pathname, whose buffer
+        // remains valid for the full duration of this POSIX mkfifo call.
+        // The test creates only a new FIFO within its unique temporary dir.
+        let c_path = CString::new(checked.as_os_str().as_bytes()).unwrap();
+        let rc = unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) };
+        assert_eq!(rc, 0);
+
+        // Opening the FIFO as read-only with O_NONBLOCK returns even when no
+        // writer exists. The opened descriptor is nonregular, so reject it
+        // *before* reading/parsing any bytes from the substituted path.
+        let opened = open_evidence_without_following(&checked).unwrap();
+        let failure =
+            checked_evidence_file_identity(&inspected, &opened.metadata().unwrap()).unwrap_err();
+        assert_eq!(failure.to_string(), "credential evidence unavailable");
+        assert!(!opened.metadata().unwrap().is_file());
+        assert_eq!(fs::read(&original).unwrap(), b"synthetic-evidence");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn checked_file_and_replaced_symlink_have_different_file_ids_before_read() {
         let root = std::env::temp_dir().join(format!(
             "chat-gateway-evidence-identity-{}",
