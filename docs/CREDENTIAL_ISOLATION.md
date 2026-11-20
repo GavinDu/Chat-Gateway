@@ -63,8 +63,11 @@ New gateway owner status includes a fixed `source_failure_schema_version` in
 duration and observation time. Copy that field from the **actual installed
 gateway's authorized status**, not from the local checkout or a guessed image.
 The offline `credential-diagnose` evidence file's `gateway_failure` record must
-carry the same integer. Older status without it is `source_schema_unverified`:
-it remains *inconclusive*, not proof of a broken provider or expired session.
+carry the same integer. Older status without it, a zero marker for
+unsupported producer labels, or a newer unknown version is
+`source_schema_unverified`: it remains *inconclusive*, not proof of a broken
+provider or expired session. This validation is enforced by the producer in
+release builds as well as by the offline reader.
 
 Version 1 source emission supports only candidate-admission busy/skipped
 reasons, typed backend-admission reasons, typed-or-unclassified first-stream
