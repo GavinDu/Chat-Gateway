@@ -1346,6 +1346,115 @@ test("explicit paired account comparison uses no automatic probe, upload or pari
   assert(!requests.some(req=>req.path.includes("account-verification")));
 });
 
+
+test("new explicit paired check aborts the older in-flight account POST without resync",async()=>{
+  const popup=loadPopup();
+  for(let i=0;i<5;i++) await new Promise(resolve=>setImmediate(resolve));
+  pairChatgptFixture(popup);
+  const priorCalls=[...popup.chromeCalls];
+  let started;
+  const oldStarted=new Promise(resolve=>{started=resolve;});
+  let aborted=0, requests=0;
+  popup.context.relayFetch=async (_path,options)=>{
+    requests++;
+    if(requests===1) {
+      return new Promise((_,reject)=>{
+        options.signal.addEventListener("abort",()=>{
+          aborted++;
+          reject(new Error("private first-request error token=secret"));
+        },{once:true});
+        started();
+      });
+    }
+    assert.equal(options.signal.aborted,false);
+    return {ok:true,json:async()=>warmChatgptFixture()};
+  };
+  const older=popup.controls.compareChatgptBrowserAndGateway();
+  await oldStarted;
+  const newer=popup.controls.compareChatgptBrowserAndGateway();
+  await Promise.all([older,newer]);
+  assert.equal(aborted,1,"newer explicit check must abort older warm-page request");
+  assert.equal(requests,2,"do not automatically retry or poll");
+  assert.match(popup.byId("message").textContent,/Chrome tab: verified/);
+  assert.match(popup.byId("message").textContent,/Obscura warm page: verified/);
+  assert.doesNotMatch(popup.byId("message").textContent,/private|secret|unavailable/);
+  assert.equal(popup.byId("verify-chatgpt").disabled,false);
+  assert.equal(popup.byId("verify-chatgpt-gateway").disabled,false);
+  assert.deepEqual(popup.chromeCalls,priorCalls,"checks cannot sync or mutate saved sessions");
+});
+
+test("old request cleanup cannot lose the newer paired abort owner",async()=>{
+  const popup=loadPopup();
+  for(let i=0;i<5;i++) await new Promise(resolve=>setImmediate(resolve));
+  pairChatgptFixture(popup);
+  let startFirst,startSecond,rejectFirst;
+  const firstStarted=new Promise(resolve=>{startFirst=resolve;});
+  const secondStarted=new Promise(resolve=>{startSecond=resolve;});
+  let requests=0,firstAborted=0,secondAborted=0;
+  popup.context.relayFetch=async (_path,options)=>{
+    requests++;
+    if(requests===1) {
+      return new Promise((_,reject)=>{
+        rejectFirst=reject;
+        options.signal.addEventListener("abort",()=>{firstAborted++;},{once:true});
+        startFirst();
+      });
+    }
+    return new Promise((_,reject)=>{
+      options.signal.addEventListener("abort",()=>{
+        secondAborted++;
+        reject(new Error("redacted private second response"));
+      },{once:true});
+      startSecond();
+    });
+  };
+  const first=popup.controls.compareChatgptBrowserAndGateway();
+  await firstStarted;
+  const second=popup.controls.compareChatgptBrowserAndGateway();
+  await secondStarted;
+  assert.equal(firstAborted,1);
+  // The first fetch may reject *after* the second check acquired ownership.
+  rejectFirst(new Error("redacted private first response"));
+  await first;
+  await popup.controls.verifyChatgptActiveTab();
+  await second;
+  assert.equal(secondAborted,1,"old finally must not clear the second controller");
+  assert.equal(requests,2);
+  assert.match(popup.byId("message").textContent,/account verified in this Chrome tab/);
+  assert.doesNotMatch(popup.byId("message").textContent,/private|redacted/);
+});
+
+test("explicit Chrome-only verification aborts prior paired POST but never syncs",async()=>{
+  const popup=loadPopup();
+  for(let i=0;i<5;i++) await new Promise(resolve=>setImmediate(resolve));
+  pairChatgptFixture(popup);
+  let started;
+  const pending=new Promise(resolve=>{started=resolve;});
+  let aborted=0,requests=0;
+  popup.context.relayFetch=async (_path,options)=>{
+    requests++;
+    return new Promise((_,reject)=>{
+      options.signal.addEventListener("abort",()=>{
+        aborted++;
+        reject(new Error("ignored private response"));
+      },{once:true});
+      started();
+    });
+  };
+  const priorCalls=[...popup.chromeCalls];
+  const older=popup.controls.compareChatgptBrowserAndGateway();
+  await pending;
+  const newer=popup.controls.verifyChatgptActiveTab();
+  await Promise.all([older,newer]);
+  assert.equal(aborted,1);
+  assert.equal(requests,1,"Chrome-only verification must never call the gateway");
+  assert.match(popup.byId("message").textContent,/account verified in this Chrome tab/);
+  assert.doesNotMatch(popup.byId("message").textContent,/ignored private response|Paired account checks unavailable/);
+  assert.deepEqual(popup.chromeCalls,priorCalls);
+  assert.equal(popup.byId("verify-chatgpt").disabled,false);
+  assert.equal(popup.byId("verify-chatgpt-gateway").disabled,false);
+});
+
 test("paired comparison discards Chrome proof that expires while gateway call is pending",async()=>{
   const popup=loadPopup();
   for(let i=0;i<5;i++) await new Promise(resolve=>setImmediate(resolve));
