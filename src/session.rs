@@ -2541,6 +2541,20 @@ pub(crate) fn replay_candidate_has_applicable_material(file: &SessionFile, provi
     coverage.eligible_cookies > 0 || coverage.observed_storage_entries > 0
 }
 
+/// A saved session was present, but contains no credentials applicable to
+/// the selected recovery provider. This is not proof of a rejected account
+/// and must not be reclassified as a generic Obscura refresh failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ProviderSnapshotNoApplicableMaterialError;
+
+impl std::fmt::Display for ProviderSnapshotNoApplicableMaterialError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("provider_session_no_applicable_material")
+    }
+}
+
+impl std::error::Error for ProviderSnapshotNoApplicableMaterialError {}
+
 /// Plan replay without mutating saved credentials or the shared cookie jar.
 /// Expired cookies are not credentials to restore. Only the two recovery
 /// providers opt into expiry-aware replay; malformed metadata still fails closed.
@@ -2595,6 +2609,13 @@ fn planned_cookie_replay(
             !had_expired || has_live || !file.local_storage.is_empty(),
             "no live provider cookies remain in saved session"
         );
+        // Isolated staging already rejects an inapplicable candidate, but the
+        // startup/lazy/refresh callers can invoke direct cookie restore. A
+        // saved snapshot containing no applicable material must not yield a
+        // vacuous "restored" result and activate an anonymous provider page.
+        if !has_live && file.local_storage.is_empty() {
+            return Err(ProviderSnapshotNoApplicableMaterialError.into());
+        }
     }
     ensure_unambiguous_same_scope_cookie_values(&candidates, provider)?;
     let (cookies, dropped) = resolve_cookie_scope_duplicates(&candidates);
@@ -4739,6 +4760,71 @@ mod replay_material_coverage_tests {
         assert_eq!(coverage.eligible_cookies, 1);
         assert_eq!(coverage.normalized_scopes, 1);
         assert_eq!(coverage.category(), "eligible_cookie_material_unverified");
+    }
+
+    #[tokio::test]
+    async fn direct_active_restore_rejects_foreign_or_empty_material_before_cookie_writes() {
+        for (provider, own_host, foreign_domain) in [
+            ("chatgpt", "chatgpt.com", ".meta.ai"),
+            ("metaai", "www.meta.ai", ".chatgpt.com"),
+        ] {
+            let foreign = fixture("SID", "foreign-private-value", foreign_domain);
+            let mut foreign_host = foreign.clone();
+            foreign_host.domain = foreign_domain.trim_start_matches('.').to_owned();
+            for cookies in [
+                vec![],
+                vec![foreign.clone()],
+                vec![foreign.clone(), foreign_host.clone()],
+            ] {
+                let file = snapshot(cookies, &[]);
+                let error = planned_cookie_replay(&file, provider, 1000.0)
+                    .err()
+                    .expect("an inapplicable saved session must fail");
+                assert!(error
+                    .downcast_ref::<ProviderSnapshotNoApplicableMaterialError>()
+                    .is_some());
+                assert_eq!(error.to_string(), "provider_session_no_applicable_material");
+                assert_eq!(
+                    preflight_cookie_restore(&file, provider)
+                        .unwrap_err()
+                        .to_string(),
+                    "provider_session_no_applicable_material"
+                );
+
+                let browser = Browser::builder().stealth(false).build().unwrap();
+                browser
+                    .cookies()
+                    .set(
+                        "preserved=unchanged; Secure; Path=/",
+                        &format!("https://{own_host}/"),
+                    )
+                    .unwrap();
+                let error = restore_cookies(&browser, &file, provider).unwrap_err();
+                assert_eq!(error.to_string(), "provider_session_no_applicable_material");
+                let retained = browser.cookies().get_all();
+                assert_eq!(retained.len(), 1);
+                assert_eq!(retained[0].name, "preserved");
+                assert_eq!(retained[0].value, "unchanged");
+                assert!(!error.to_string().contains("foreign-private-value"));
+            }
+
+            let own = fixture("OWN", "own-private-value", own_host);
+            let mixed = snapshot(vec![foreign.clone(), own], &[]);
+            preflight_cookie_restore(&mixed, provider).unwrap();
+            let with_storage = snapshot(
+                vec![foreign.clone()],
+                &[("provider-store", "fake-storage-secret")],
+            );
+            // Origin storage only is eligible for application, never a
+            // source-backed authenticated account verdict.
+            assert!(planned_cookie_replay(&with_storage, provider, 1000.0).is_ok());
+            preflight_cookie_restore(&with_storage, provider).unwrap();
+        }
+
+        // Preserve legacy deferred-provider behavior: unrelated cookies have
+        // historically been ignored by the later restore loop.
+        let deferred = snapshot(vec![fixture("SID", "private", ".meta.ai")], &[]);
+        assert!(planned_cookie_replay(&deferred, "claude", 1000.0).is_ok());
     }
 
     #[test]

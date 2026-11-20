@@ -108,6 +108,7 @@ enum RelayActivationIssue {
     DocumentDenied,
     ManualVerification,
     SessionExpired,
+    NoApplicableMaterial,
 }
 
 impl RelayActivationIssue {
@@ -120,6 +121,7 @@ impl RelayActivationIssue {
             Self::DocumentDenied => "provider_document_denied",
             Self::ManualVerification => "manual_verification_required",
             Self::SessionExpired => "provider_session_expired",
+            Self::NoApplicableMaterial => "provider_session_no_applicable_material",
         }
     }
 }
@@ -152,6 +154,11 @@ fn relay_activation_error_kind(error: &anyhow::Error) -> RelayActivationIssue {
         .is_some()
     {
         RelayActivationIssue::SessionExpired
+    } else if error
+        .downcast_ref::<crate::session::ProviderSnapshotNoApplicableMaterialError>()
+        .is_some()
+    {
+        RelayActivationIssue::NoApplicableMaterial
     } else {
         RelayActivationIssue::RefreshFailed
     }
@@ -365,6 +372,11 @@ mod relay_activation_state_tests {
             relay_activation_error_kind(&denied),
             RelayActivationIssue::DocumentDenied
         );
+        let absent = anyhow::Error::new(crate::session::ProviderSnapshotNoApplicableMaterialError);
+        let category = relay_activation_error_kind(&absent);
+        assert_eq!(category, RelayActivationIssue::NoApplicableMaterial);
+        assert_eq!(category.as_str(), "provider_session_no_applicable_material");
+        assert!(!category.as_str().contains("private"));
     }
 }
 
