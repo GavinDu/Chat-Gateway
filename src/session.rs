@@ -969,6 +969,37 @@ fn relay_vault_snapshot_unchanged(
     Ok(session_state_hash(&existing)? == session_state_hash(incoming)?)
 }
 
+/// Fixed, source-neutral error for a staged relay-vault verification
+/// failure. Neither filesystem paths nor decryption details may escape.
+#[derive(Debug)]
+pub struct RelayVaultPrecommitVerificationError;
+
+impl std::fmt::Display for RelayVaultPrecommitVerificationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("session-vault precommit verification failed")
+    }
+}
+
+impl std::error::Error for RelayVaultPrecommitVerificationError {}
+
+fn verify_relay_vault_staging(
+    staged: &Path,
+    provider: &str,
+    expected: &SessionFile,
+    key: &[u8; 32],
+) -> Result<()> {
+    let verified = (|| -> Result<()> {
+        let written = Zeroizing::new(std::fs::read(staged)?);
+        let restored = decrypt_session_snapshot(&written, provider, key)?;
+        anyhow::ensure!(
+            session_state_hash(&restored)? == session_state_hash(expected)?,
+            "private staged session mismatch"
+        );
+        Ok(())
+    })();
+    verified.map_err(|_| anyhow::Error::new(RelayVaultPrecommitVerificationError))
+}
+
 /// A credential-free capture cannot establish a linked browser session.
 /// Carry a fixed, redacted error type so the relay can give a specific action
 /// rather than incorrectly suggesting a vault configuration problem.
@@ -1047,19 +1078,12 @@ pub fn import_relay_session(provider: &str, file: &SessionFile) -> Result<()> {
         return Ok(());
     }
     let encrypted = encrypt_session_snapshot(&file, provider, &key)?;
-    write_session_file_atomically(Path::new(&destination), &encrypted)?;
-    let verified = (|| -> Result<()> {
-        let written = std::fs::read(&destination)?;
-        let restored = decrypt_session_snapshot(&written, provider, &key)?;
-        if session_state_hash(&restored)? != session_state_hash(&file)? {
-            anyhow::bail!("session-vault read-back validation failed");
-        }
-        Ok(())
-    })();
-    if let Err(error) = verified {
-        let _ = std::fs::remove_file(&destination);
-        return Err(error);
-    }
+    // Verify the complete encrypted staging file BEFORE its atomic rename.
+    // On failure, the writer removes only its owned temporary file; it must
+    // never delete a previously valid destination to signal readback failure.
+    write_session_file_atomically_checked(Path::new(&destination), &encrypted, |staged| {
+        verify_relay_vault_staging(staged, provider, &file, &key)
+    })?;
     remove_legacy_session_snapshot(provider)?;
 
     tracing::info!(
@@ -2227,6 +2251,16 @@ async fn write_session_snapshot(
 }
 
 fn write_session_file_atomically(destination: &Path, serialized: &[u8]) -> Result<()> {
+    write_session_file_atomically_checked(destination, serialized, |_| Ok(()))
+}
+
+/// Commit a fully synced, uniquely owned staging file only after its verifier
+/// accepts it. This never replaces the last good vault on verify failure.
+fn write_session_file_atomically_checked(
+    destination: &Path,
+    serialized: &[u8],
+    verify_staged: impl FnOnce(&Path) -> Result<()>,
+) -> Result<()> {
     let temp_path = format!(
         "{}.tmp-{}-{}",
         destination.display(),
@@ -2251,6 +2285,10 @@ fn write_session_file_atomically(destination: &Path, serialized: &[u8]) -> Resul
     drop(output);
 
     if let Err(error) = write_result {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(error);
+    }
+    if let Err(error) = verify_staged(Path::new(&temp_path)) {
         let _ = std::fs::remove_file(&temp_path);
         return Err(error);
     }
