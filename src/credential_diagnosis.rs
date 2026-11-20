@@ -441,6 +441,36 @@ fn classify(e: &Evidence, now: u64) -> Diagnosis {
     }
 }
 
+/// The caller's lstat and its subsequent open are separate operations.
+/// Validate the opened descriptor before reading any potentially private
+/// evidence. On Unix the object identity, not just file type/length, must
+/// match the one inspected before open (including same-size replacements).
+fn checked_evidence_file_identity(
+    inspected: &fs::Metadata,
+    opened: &fs::Metadata,
+) -> anyhow::Result<()> {
+    if !inspected.is_file()
+        || inspected.file_type().is_symlink()
+        || inspected.len() > MAX_FILE
+        || !opened.is_file()
+        || opened.len() > MAX_FILE
+    {
+        anyhow::bail!("credential evidence unavailable");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if inspected.dev() != opened.dev() || inspected.ino() != opened.ino() {
+            anyhow::bail!("credential evidence unavailable");
+        }
+    }
+    // Without a portable object-ID contract, do not treat a file opened
+    // after lstat as the same checked object.
+    #[cfg(not(unix))]
+    anyhow::bail!("credential evidence unavailable");
+    Ok(())
+}
+
 pub(crate) fn diagnose_file(path: &Path) -> anyhow::Result<String> {
     // Read-only local operator input. Reject symlinks and oversized files;
     // do not reflect filesystem or parser errors with credential-bearing data.
@@ -449,11 +479,18 @@ pub(crate) fn diagnose_file(path: &Path) -> anyhow::Result<String> {
     if !info.is_file() || info.file_type().is_symlink() || info.len() > MAX_FILE {
         anyhow::bail!("credential evidence unavailable");
     }
-    // Bound reads even when an operator-managed file changes after lstat.
+    // A symlink or replacement file can be installed after the lstat.
+    // File::open may follow it; validate the actual descriptor before any
+    // read rather than trusting the earlier pathname metadata.
+    let file =
+        fs::File::open(path).map_err(|_| anyhow::anyhow!("credential evidence unavailable"))?;
+    let opened = file
+        .metadata()
+        .map_err(|_| anyhow::anyhow!("credential evidence unavailable"))?;
+    checked_evidence_file_identity(&info, &opened)?;
+    // Bound reads even when an operator-managed file changes after open.
     // Never allocate or parse an unbounded credential-bearing JSON document.
-    let mut reader = fs::File::open(path)
-        .map_err(|_| anyhow::anyhow!("credential evidence unavailable"))?
-        .take(MAX_FILE + 1);
+    let mut reader = file.take(MAX_FILE + 1);
     let mut bytes = Vec::new();
     reader
         .read_to_end(&mut bytes)
