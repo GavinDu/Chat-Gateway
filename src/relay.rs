@@ -1977,8 +1977,42 @@ fn relay_import_failure_category(error: &anyhow::Error) -> &'static str {
         .is_some()
     {
         "missing_session_cookies"
+    } else if error
+        .downcast_ref::<crate::session::RelayVaultAuthenticationError>()
+        .is_some()
+    {
+        // An unreadable saved AES-GCM vault is NOT browser-auth rejection.
+        // Keep the old ciphertext for an explicit vault-key investigation.
+        "stored_vault_unreadable"
     } else {
         "snapshot_rejected"
+    }
+}
+
+/// Only fixed, source-authenticated categories may determine the public
+/// error. Do not pass through upstream messages, paths, cookies or key data.
+fn relay_import_failure_response_parts(category: &str) -> (StatusCode, &'static str, &'static str) {
+    match category {
+        "persistence_worker_unavailable" => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "session_import_unavailable",
+            "relay persistence worker unavailable; retry after service recovery",
+        ),
+        "missing_session_cookies" => (
+            StatusCode::BAD_REQUEST,
+            "session_missing_credentials",
+            "no provider cookies were captured; sign in to the provider and retry linking",
+        ),
+        "stored_vault_unreadable" => (
+            StatusCode::CONFLICT,
+            "session_vault_unreadable",
+            "existing encrypted session cannot be authenticated; preserve it and verify the gateway vault key configuration before retrying",
+        ),
+        _ => (
+            StatusCode::BAD_REQUEST,
+            "session_import_rejected",
+            "session was rejected; check vault configuration and provider permissions",
+        ),
     }
 }
 
@@ -2045,6 +2079,65 @@ mod relay_import_diagnostic_redaction_tests {
             "missing_session_cookies"
         );
         assert!(!super::relay_import_failure_category(&error).contains('@'));
+    }
+
+    #[test]
+    fn unreadable_vault_is_not_a_browser_credential_rejection() {
+        let error = anyhow::Error::new(crate::session::RelayVaultAuthenticationError);
+        let category = super::relay_import_failure_category(&error);
+        assert_eq!(category, "stored_vault_unreadable");
+        let (status, code, message) = super::relay_import_failure_response_parts(category);
+        assert_eq!(status, super::StatusCode::CONFLICT);
+        assert_eq!(code, "session_vault_unreadable");
+        assert!(message.contains("preserve"));
+        assert!(message.contains("vault key"));
+        for disallowed in [
+            "sign in",
+            "login",
+            "cookie=",
+            "bearer",
+            "token=",
+            "/sessions/",
+        ] {
+            assert!(!message.contains(disallowed));
+            assert!(!code.contains(disallowed));
+        }
+        assert!(!category.contains('@'));
+    }
+
+    #[test]
+    fn existing_import_errors_preserve_status_and_reject_raw_strings() {
+        for (error, expected_category, expected_status, expected_code) in [
+            (
+                anyhow::Error::new(super::RelaySnapshotWorkerUnavailable),
+                "persistence_worker_unavailable",
+                super::StatusCode::SERVICE_UNAVAILABLE,
+                "session_import_unavailable",
+            ),
+            (
+                anyhow::Error::new(crate::session::RelayMissingCookiesError),
+                "missing_session_cookies",
+                super::StatusCode::BAD_REQUEST,
+                "session_missing_credentials",
+            ),
+            (
+                anyhow::anyhow!("cookie=private; bearer=secret; /sessions/token"),
+                "snapshot_rejected",
+                super::StatusCode::BAD_REQUEST,
+                "session_import_rejected",
+            ),
+        ] {
+            let category = super::relay_import_failure_category(&error);
+            assert_eq!(category, expected_category);
+            let (status, code, message) = super::relay_import_failure_response_parts(category);
+            assert_eq!(status, expected_status);
+            assert_eq!(code, expected_code);
+            for private in ["private", "secret", "/sessions/token", "bearer="] {
+                assert!(!category.contains(private));
+                assert!(!code.contains(private));
+                assert!(!message.contains(private));
+            }
+        }
     }
 
     #[test]
@@ -2246,25 +2339,8 @@ pub async fn import_session(
                     category,
                     "browser relay session import unsuccessful"
                 );
-                let response = if category == "persistence_worker_unavailable" {
-                    json_error(
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        "session_import_unavailable",
-                        "relay persistence worker unavailable; retry after service recovery",
-                    )
-                } else if category == "missing_session_cookies" {
-                    json_error(
-                        StatusCode::BAD_REQUEST,
-                        "session_missing_credentials",
-                        "no provider cookies were captured; sign in to the provider and retry linking",
-                    )
-                } else {
-                    json_error(
-                        StatusCode::BAD_REQUEST,
-                        "session_import_rejected",
-                        "session was rejected; check vault configuration and provider permissions",
-                    )
-                };
+                let (status, code, message) = relay_import_failure_response_parts(category);
+                let response = json_error(status, code, message);
                 (response, None)
             }
         }

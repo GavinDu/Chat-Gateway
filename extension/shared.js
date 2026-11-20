@@ -357,6 +357,14 @@ async function syncProvider(provider, {
   const response = await relayFetch("/relay/v1/session/" + encodeURIComponent(provider), {
     method:"POST", body:JSON.stringify(snapshot)
   }, {gateway, token, connectionMode, provider, linkEpoch});
+  if (!response.ok && response.status === 409) {
+    const failure = await response.json().catch(() => null);
+    if (failure?.error?.code === "session_vault_unreadable") {
+      // An existing encrypted vault is protected, not proof of a logged-out
+      // browser. Do not infer login failure, retry the upload or cache success.
+      throw new Error("The gateway could not open its existing encrypted session. The saved vault was preserved. Verify the gateway vault key configuration; do not clear or relink credentials.");
+    }
+  }
   if (!response.ok && (response.status === 422 || response.status === 400)) {
     const failure = await response.json().catch(() => null);
     if (response.status === 422 && failure?.error?.code === "cookie_scope_conflict") {
