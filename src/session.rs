@@ -2576,7 +2576,14 @@ fn planned_cookie_replay(
         .cookies
         .iter()
         .filter(|cookie| {
-            !expiry_aware || !cookie_domain_allowed(provider, &cookie.domain) || !expired(cookie)
+            // ChatGPT/Meta AI replay is provider-scoped. Do not copy unrelated
+            // credential values into the plan or count foreign scope twins as
+            // this provider's normalization. Deferred adapters retain legacy
+            // inclusion so their existing restore ordering stays unchanged.
+            if expiry_aware && !cookie_domain_allowed(provider, &cookie.domain) {
+                return false;
+            }
+            !expiry_aware || !expired(cookie)
         })
         .cloned()
         .collect();
@@ -4739,6 +4746,47 @@ mod replay_material_coverage_tests {
         assert_eq!(coverage.eligible_cookies, 1);
         assert_eq!(coverage.normalized_scopes, 1);
         assert_eq!(coverage.category(), "eligible_cookie_material_unverified");
+    }
+
+    #[test]
+    fn active_replay_plan_does_not_normalize_or_copy_foreign_cookie_twins() {
+        for (provider, own_domain, foreign_domain) in [
+            ("chatgpt", ".chatgpt.com", ".meta.ai"),
+            ("metaai", ".meta.ai", ".chatgpt.com"),
+        ] {
+            let foreign = fixture("SID", "private-foreign", foreign_domain);
+            let mut foreign_host = foreign.clone();
+            foreign_host.domain = foreign_domain.trim_start_matches('.').to_owned();
+            let own = fixture("SID", "private-own", own_domain);
+
+            let source = snapshot(vec![foreign.clone(), foreign_host.clone()], &[]);
+            let (planned, dropped) = planned_cookie_replay(&source, provider, 1000.0).unwrap();
+            assert!(planned.is_empty());
+            assert_eq!(dropped, 0, "foreign twins cannot normalize this provider");
+
+            let source = snapshot(vec![foreign, own.clone(), foreign_host], &[]);
+            let (planned, dropped) = planned_cookie_replay(&source, provider, 1000.0).unwrap();
+            assert_eq!(planned.len(), 1);
+            assert_eq!(planned[0].value, "private-own");
+            assert_eq!(dropped, 0);
+
+            let mut own_host = own.clone();
+            own_host.domain = own_domain.trim_start_matches('.').to_owned();
+            let source = snapshot(vec![own, own_host], &[]);
+            let (planned, dropped) = planned_cookie_replay(&source, provider, 1000.0).unwrap();
+            assert_eq!(planned.len(), 1);
+            assert_eq!(dropped, 1, "actual provider scope twin must count");
+        }
+
+        // Deferred providers retain the historical all-cookie replay plan,
+        // even though the later restore loop ignores out-of-scope material.
+        let foreign = fixture("SID", "private-deferred", ".meta.ai");
+        let mut foreign_host = foreign.clone();
+        foreign_host.domain = "meta.ai".to_owned();
+        let source = snapshot(vec![foreign, foreign_host], &[]);
+        let (legacy, dropped) = planned_cookie_replay(&source, "claude", 1000.0).unwrap();
+        assert_eq!(legacy.len(), 1);
+        assert_eq!(dropped, 1);
     }
 
     #[test]
