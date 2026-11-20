@@ -668,6 +668,7 @@ async function refreshStatus(force = false) {
       : item.activation === "cancelled" ? "Browser activation cancelled"
       : item.activation === "not_attempted" ? "Browser activation not attempted"
       : null;
+    const activationDetail = safeActivationIssueDetail(item);
     // A deliberately disabled provider is policy, not a gateway outage.
     // Preserve session/consent display, but do not present stale runtime
     // errors or a manual account action for a provider not being routed.
@@ -688,7 +689,7 @@ async function refreshStatus(force = false) {
       : safeLastFailedRequest(item.provider, item.last_failed_request);
     status.textContent = [enabled, linked, browser, auth,
       ...(activation ? [activation] : []),
-      ...(safeActivationIssueDetail(item) ? [safeActivationIssueDetail(item)] : []),
+      ...(activationDetail ? [activationDetail] : []),
       ...(blocker ? [blocker] : []),
       ...(runtimeIssue ? [runtimeIssue] : []),
       ...(extensionIssue ? ["Extension sync: " + extensionIssue] : []),
