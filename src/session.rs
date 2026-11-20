@@ -927,7 +927,10 @@ mod relay_vault_precommit_tests {
             );
         });
         assert!(first_link.is_err());
-        assert!(!destination.exists(), "a failed first link cannot publish a vault");
+        assert!(
+            !destination.exists(),
+            "a failed first link cannot publish a vault"
+        );
         assert_eq!(
             std::fs::read_dir(&root).unwrap().count(),
             0,
