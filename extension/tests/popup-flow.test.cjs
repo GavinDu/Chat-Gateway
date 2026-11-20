@@ -4,7 +4,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
 
-function loadPopup({failCookieDomain = null, includeSecondProvider = false, manualVerification = false, localRelay = false, activation = null, diagnosticsSync = null, diagnosticsFailure = null, pairedDisconnectReject = false, pairedConnectReject = false, remotePairToken = "b".repeat(64), syncStatus = undefined} = {}) {
+function loadPopup({failCookieDomain = null, includeSecondProvider = false, manualVerification = false, localRelay = false, activation = null, activationIssue = null, diagnosticsSync = null, diagnosticsFailure = null, pairedDisconnectReject = false, pairedConnectReject = false, remotePairToken = "b".repeat(64), syncStatus = undefined} = {}) {
   const elements = new Map();
   const chromeCalls = [];
   const intervals = [];
@@ -206,7 +206,7 @@ function loadPopup({failCookieDomain = null, includeSecondProvider = false, manu
     relayFetch:async()=>{chromeCalls.push("http:relay-status");return {ok:true,status:200,json:async()=>({
       providers:[
         {provider:"metaai",enabled:true,linked:server.linked,authentication:server.linked?"unknown":"needs_login",
-          availability:manualVerification?"degraded":"unknown",manual_verification_required:manualVerification,activation},
+          availability:manualVerification?"degraded":"unknown",manual_verification_required:manualVerification,activation,activation_issue:activationIssue},
         ...(includeSecondProvider ? [{provider:"claude",enabled:true,linked:false,authentication:"needs_login",availability:"unknown"}] : []),
       ],
       vault_mode:true,
@@ -538,6 +538,70 @@ test("browser activation statuses stay distinct from login verification", async 
     assert.match(status, /Login unverified/, "session activation cannot imply authentication");
     assert.ok(status.includes(expected), "show only fixed activation categories");
     assert.doesNotMatch(status, /Login verified/);
+  }
+});
+
+test("dashboard separates typed pending and failed activation reasons from login verification", async () => {
+  for (const [phase, reason, detail] of [
+    ["pending", "wait_expired", "Activation detail: wait expired"],
+    ["failed", "browser_worker_unavailable", "Activation detail: browser worker unavailable"],
+    ["failed", "refresh_failed", "Activation detail: refresh failed"],
+    ["failed", "provider_session_expired", "Activation detail: provider session expired"],
+    ["failed", "provider_session_no_applicable_material",
+      "Activation detail: provider session no applicable material"],
+    ["failed", "manual_verification_required", "Activation detail: manual verification required"]
+  ]) {
+    const popup=loadPopup({activation:phase, activationIssue:reason});
+    popup.server.linked=true;
+    await popup.controls.refreshStatus();
+    const detailText=popup.byId("status").children[0].children
+      .find(child=>child.className==="provider-detail").textContent;
+    assert.ok(detailText.includes(detail));
+    assert.ok(detailText.includes("Login unverified"), "activation cannot verify credentials");
+    assert.ok(!detailText.includes("Login needed"), "activation cannot demand re-login");
+    assert.equal(popup.chromeCalls.filter(call=>call==="sync-provider:metaai").length,0);
+  }
+});
+
+test("activation diagnostics fail closed for contradictory or untrusted status", async () => {
+  const secret="https://private.invalid/?token=secret&poll_secret=private";
+  for (const [phase, reason, expected] of [
+    ["failed", "wait_expired", "Activation detail: unverified status"],
+    ["pending", "provider_session_expired", "Activation detail: unverified status"],
+    ["pending", "refresh_failed", "Activation detail: unverified status"],
+    ["failed", "refresh_failed "+secret, "Activation detail: unverified status"],
+    ["failed", {error:secret}, "Activation detail: unverified status"],
+    ["failed", 42, "Activation detail: unverified status"],
+    ["ready", "provider_session_expired", null],
+    ["cancelled", "refresh_failed", null],
+    ["not_attempted", "refresh_failed", null]
+  ]) {
+    const popup=loadPopup({activation:phase,activationIssue:reason});
+    popup.server.linked=true;
+    await popup.controls.refreshStatus();
+    const detailText=popup.byId("status").children[0].children
+      .find(child=>child.className==="provider-detail").textContent;
+    if(expected===null) assert.ok(!detailText.includes("Activation detail:"));
+    else assert.ok(detailText.includes(expected));
+    for(const token of ["private.invalid", "poll_secret", "token=secret"]) {
+      assert.ok(!detailText.includes(token), "never echo raw activation errors");
+    }
+    assert.ok(detailText.includes("Login unverified"));
+  }
+  for (const linked of [false, true]) {
+    const popup=loadPopup({activation:"failed",activationIssue:"refresh_failed"});
+    popup.server.linked=linked;
+    if(linked) {
+      popup.context.relayFetch=async()=>({ok:true,status:200,json:async()=>({
+        providers:[{provider:"metaai",enabled:false,linked:true,authentication:"unknown",
+          activation:"failed",activation_issue:"refresh_failed"}],vault_mode:true
+      })});
+    }
+    await popup.controls.refreshStatus();
+    const detail=popup.byId("status").children[0].children
+      .find(child=>child.className==="provider-detail").textContent;
+    assert.ok(!detail.includes("Activation detail:"),
+      "unlinked or disabled providers cannot display stale activation errors");
   }
 });
 
