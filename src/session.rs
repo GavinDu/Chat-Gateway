@@ -1212,9 +1212,11 @@ pub fn clear_provider_cookies(browser: &Browser, provider: &str) -> Result<usize
     let mut cleared = 0;
     for browser_cookie in cookies {
         let mut cookie = Cookie::from(browser_cookie);
-        // The old value is never written back; ignore it when validating the
-        // deletion tuple so unusual but valid values do not leave stale cookies.
-        cookie.value.clear();
+        // The old value is never written back. Explicitly wipe the owned
+        // bearer before constructing a revocation header: String::clear
+        // merely reduces length, leaving its previous allocation unwiped
+        // when Cookie::drop subsequently zeroizes an empty string.
+        cookie.value.zeroize();
         if !cookie_domain_allowed(provider, &cookie.domain) {
             continue;
         }
@@ -1246,6 +1248,32 @@ pub fn clear_provider_cookies(browser: &Browser, provider: &str) -> Result<usize
 #[cfg(test)]
 mod cookie_revocation_scope_tests {
     use super::same_revocation_cookie_scope;
+
+    #[test]
+    fn unlink_cookie_value_is_wiped_before_revocation_header_formatting() {
+        use super::{cookie_expiration_header, Cookie};
+        use zeroize::Zeroize;
+
+        let mut cookie = Cookie {
+            name: "synthetic-sid".into(),
+            value: "synthetic-private-bearer".into(),
+            domain: ".chatgpt.com".into(),
+            path: "/".into(),
+            secure: true,
+            http_only: true,
+            expires: None,
+            same_site: None,
+        };
+        // Match the unlink path: wipe, don't just shorten the String.
+        cookie.value.zeroize();
+        assert!(cookie.value.is_empty());
+        let expired = cookie_expiration_header(&cookie).unwrap();
+        assert!(expired.starts_with("synthetic-sid=; Max-Age=0; Path=/"));
+        assert!(expired.contains("Domain=.chatgpt.com"));
+        assert!(expired.contains("; Secure"));
+        assert!(expired.contains("; HttpOnly"));
+        assert!(!expired.contains("synthetic-private-bearer"));
+    }
 
     #[test]
     fn host_only_and_domain_scoped_cookies_are_distinct_revocation_targets() {
