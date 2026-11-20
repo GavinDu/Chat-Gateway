@@ -301,6 +301,20 @@ fn classify(e: &Evidence, now: u64) -> Diagnosis {
         {
             return inconclusive(provider, "conflicting_gateway_failure_stage");
         }
+        // Preserve the producer's stage/reason relationship. These pairs
+        // cannot be emitted by chat_handler; accepting them as independent
+        // fixed labels would let contradictory offline evidence blame a
+        // different request phase. Existing admission/attempt conflict wins
+        // above, so this additional check cannot mask that stronger evidence.
+        if (failure.stage == "candidate_admission"
+            && !matches!(
+                failure.reason.as_str(),
+                "provider_busy" | "candidate_skipped"
+            ))
+            || (failure.stage != "candidate_admission" && failure.reason == "candidate_skipped")
+        {
+            return inconclusive(provider, "inconsistent_gateway_stage_reason");
+        }
     }
     if (e.snapshot.is_none() && (e.obscura.is_some() || e.attempt.is_some()))
         || (e.snapshot.as_ref().is_some_and(|snapshot| {
@@ -518,6 +532,47 @@ mod tests {
             "observed_at_ms": NOW
         });
         v
+    }
+
+    #[test]
+    fn gateway_candidate_stage_reason_pairs_must_match_the_source_emitter() {
+        let mut v = with_gateway_failure();
+        v["attempt"]["stage"] = json!("unknown");
+        v["gateway_failure"]["stage"] = json!("candidate_admission");
+        for valid in ["provider_busy", "candidate_skipped"] {
+            v["gateway_failure"]["reason"] = json!(valid);
+            let result = checked(v.clone());
+            assert_eq!(result.reason, "request_phase_or_terminal_evidence_missing");
+            assert!(!result.live_proof);
+        }
+        for invalid in ["backend_unavailable", "session_expired", "unclassified"] {
+            v["gateway_failure"]["reason"] = json!(invalid);
+            let result = checked(v.clone());
+            assert_eq!(result.reason, "inconsistent_gateway_stage_reason");
+            assert!(!result.live_proof);
+        }
+
+        v["attempt"]["stage"] = json!("response");
+        for stage in ["backend_admission", "first_stream_event", "json_completion"] {
+            v["gateway_failure"]["stage"] = json!(stage);
+            v["gateway_failure"]["reason"] = json!("candidate_skipped");
+            let result = checked(v.clone());
+            let expected = if stage == "backend_admission" {
+                "conflicting_gateway_failure_stage"
+            } else {
+                "inconsistent_gateway_stage_reason"
+            };
+            assert_eq!(result.reason, expected);
+            let serialized = serde_json::to_string(&result).unwrap();
+            assert!(!serialized.contains(ID));
+            assert!(!serialized.contains("candidate_skipped"));
+            assert!(!result.live_proof);
+        }
+
+        // Legacy synthetic JSON completion fixtures retain their existing behavior.
+        let normal = checked(with_gateway_failure());
+        assert_eq!(normal.category, "transport_or_extraction");
+        assert!(!normal.live_proof);
     }
 
     #[test]
@@ -798,6 +853,14 @@ mod tests {
         let mut evidence = with_gateway_failure();
         for gateway_stage in ["candidate_admission", "backend_admission"] {
             evidence["gateway_failure"]["stage"] = json!(gateway_stage);
+            // Match the live producer's distinct admission reason vocabulary:
+            // candidate admission cannot emit backend_unavailable.
+            evidence["gateway_failure"]["reason"] =
+                json!(if gateway_stage == "candidate_admission" {
+                    "candidate_skipped"
+                } else {
+                    "backend_unavailable"
+                });
             for attempted_phase in [
                 "bootstrap",
                 "composer",
