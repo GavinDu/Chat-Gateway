@@ -114,7 +114,12 @@ pub(super) fn streamed_provider_response(attempt: StreamingAttempt) -> Response 
             yield Ok(Event::default().data(error.to_string()));
         } else {
             if let Some(error) = persist_error {
-                tracing::error!(conversation_id = %conv_stream, %error, "conversation persistence failed after stream");
+                tracing::error!(
+                    request_id = %request_id_c,
+                    provider = %provider_c,
+                    failure_category = persistence_failure_log_category(&error),
+                    "conversation persistence failed after stream"
+                );
                 let error = serde_json::json!({
                     "error": { "message": "conversation could not be persisted", "type": "server_error", "code": "memory_persistence_failed" }
                 });
