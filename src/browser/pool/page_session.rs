@@ -846,7 +846,7 @@ mod chatgpt_stream_preload_tests {
     }
 
     #[tokio::test]
-    async fn pinned_obscura_preload_runs_before_author_scripts_and_unblocks_pull() {
+    async fn native_pull_stream_is_preserved_before_author_scripts_and_unblocks_pull() {
         // The *only* host bypass lives in this in-memory data: fixture.
         // Production always evaluates the exact HTTPS ChatGPT origin guard.
         let original = include_str!("chatgpt_streams.js");
@@ -858,10 +858,14 @@ mod chatgpt_stream_preload_tests {
             .build()
             .unwrap();
         let mut page = browser.new_page().await.unwrap();
+        page.add_preload_script("globalThis.__nativeStreamBeforePreload = ReadableStream;");
         page.add_preload_script(&fixture_script);
         page.goto(&encoded_data_page(
             r#"<html><body><script>
-            globalThis.__wasPatched = ReadableStream.__chatGatewayPullCompat === true;
+            globalThis.__nativeStreamPreserved =
+                ReadableStream === globalThis.__nativeStreamBeforePreload &&
+                ReadableStream.__obscuraPullCompat === true &&
+                ReadableStream.__chatGatewayPullCompat !== true;
             const stream = new ReadableStream({
                 pull(controller) {
                     globalThis.__pulls = (globalThis.__pulls || 0) + 1;
@@ -880,7 +884,7 @@ mod chatgpt_stream_preload_tests {
         .unwrap();
         crate::providers::common::drive_page(&mut page, Duration::from_millis(60)).await;
         assert_eq!(
-            page.evaluate("globalThis.__wasPatched").as_bool(),
+            page.evaluate("globalThis.__nativeStreamPreserved").as_bool(),
             Some(true)
         );
         assert_eq!(
