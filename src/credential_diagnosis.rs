@@ -61,6 +61,10 @@ enum Outcome {
 struct AccountEvidence {
     verdict: Auth,
     observed_at_ms: u64,
+    /// Optional opaque snapshot generation supplied by the source that
+    /// performed the Chrome account check. A provider-name/timestamp-only
+    /// positive verdict cannot prove the same credentials were replayed.
+    generation: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -248,6 +252,7 @@ fn classify(e: &Evidence, now: u64) -> Diagnosis {
 
     // A cross-generation report is never evidence about the same credentials.
     let ids = [
+        e.chrome.as_ref().and_then(|x| x.generation.as_deref()),
         e.snapshot.as_ref().and_then(|x| x.generation.as_deref()),
         e.obscura.as_ref().map(|x| x.generation.as_str()),
         e.attempt.as_ref().map(|x| x.generation.as_str()),
@@ -402,6 +407,17 @@ fn classify(e: &Evidence, now: u64) -> Diagnosis {
         return inconclusive(provider, "applied_snapshot_unproven");
     }
     if chrome == Some(Auth::Verified) && obscura == Some(Auth::Unauthenticated) {
+        // A browser check from another session can be fresh and valid yet
+        // unrelated to this imported snapshot. Never blame replay/binding
+        // unless Chrome explicitly claims the same canonical generation;
+        // the global generation check above rejects mismatches.
+        if e.chrome
+            .as_ref()
+            .and_then(|x| x.generation.as_deref())
+            .is_none()
+        {
+            return inconclusive(provider, "chrome_snapshot_correlation_missing");
+        }
         return verdict(
             provider,
             "replay_or_binding",
@@ -484,7 +500,7 @@ mod tests {
     fn base() -> Value {
         json!({
             "provider":"chatgpt",
-            "chrome":{"verdict":"verified","observed_at_ms":NOW},
+            "chrome":{"verdict":"verified","observed_at_ms":NOW,"generation":ID},
             "snapshot":{"state":"applied","observed_at_ms":NOW,"generation":ID},
             "obscura":{"verdict":"verified","observed_at_ms":NOW,"generation":ID},
             "attempt":{"stage":"response","outcome":"failed","observed_at_ms":NOW,"generation":ID}
@@ -963,6 +979,48 @@ mod tests {
         let serialized = serde_json::to_string(&decision).unwrap();
         assert!(!serialized.contains(ID));
         assert!(!serialized.contains("token=private"));
+    }
+
+    #[test]
+    fn replay_mismatch_requires_chrome_proof_bound_to_exact_snapshot_generation() {
+        let mut v = base();
+        v["obscura"]["verdict"] = json!("unauthenticated");
+        assert_eq!(checked(v.clone()).category, "replay_or_binding");
+
+        v["chrome"].as_object_mut().unwrap().remove("generation");
+        let no_capture_lineage = checked(v.clone());
+        assert_eq!(no_capture_lineage.category, "inconclusive");
+        assert_eq!(
+            no_capture_lineage.reason,
+            "chrome_snapshot_correlation_missing"
+        );
+        assert!(!no_capture_lineage.live_proof);
+
+        for invalid in [
+            OTHER_ID.to_owned(),
+            ID.to_uppercase(),
+            "00000000-0000-0000-0000-000000000000".to_owned(),
+            "https://private.example/?cookie=secret".to_owned(),
+        ] {
+            v["chrome"]["generation"] = json!(invalid);
+            let mismatch = checked(v.clone());
+            assert_eq!(mismatch.category, "inconclusive");
+            assert_eq!(mismatch.reason, "snapshot_generation_mismatch");
+            let safe = serde_json::to_string(&mismatch).unwrap();
+            assert!(!safe.contains(ID));
+            assert!(!safe.contains(OTHER_ID));
+            assert!(!safe.contains("private.example"));
+            assert!(!safe.contains("cookie"));
+        }
+
+        v["chrome"]["generation"] = json!(ID);
+        v["chrome"]["observed_at_ms"] = json!(NOW - MAX_AGE_MS - 1);
+        assert_eq!(checked(v.clone()).reason, "stale_or_future_evidence");
+        v["chrome"]["observed_at_ms"] = json!(NOW + CLOCK_SKEW_MS + 1);
+        assert_eq!(checked(v.clone()).reason, "stale_or_future_evidence");
+
+        v["chrome"]["observed_at_ms"] = json!(NOW);
+        assert_eq!(checked(v).category, "replay_or_binding");
     }
 
     #[test]
