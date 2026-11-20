@@ -884,7 +884,8 @@ mod chatgpt_stream_preload_tests {
         .unwrap();
         crate::providers::common::drive_page(&mut page, Duration::from_millis(60)).await;
         assert_eq!(
-            page.evaluate("globalThis.__nativeStreamPreserved").as_bool(),
+            page.evaluate("globalThis.__nativeStreamPreserved")
+                .as_bool(),
             Some(true)
         );
         assert_eq!(
