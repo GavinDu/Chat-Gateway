@@ -1383,6 +1383,47 @@ test("new explicit paired check aborts the older in-flight account POST without 
   assert.deepEqual(popup.chromeCalls,priorCalls,"checks cannot sync or mutate saved sessions");
 });
 
+test("old request cleanup cannot lose the newer paired abort owner",async()=>{
+  const popup=loadPopup();
+  for(let i=0;i<5;i++) await new Promise(resolve=>setImmediate(resolve));
+  pairChatgptFixture(popup);
+  let startFirst,startSecond,rejectFirst;
+  const firstStarted=new Promise(resolve=>{startFirst=resolve;});
+  const secondStarted=new Promise(resolve=>{startSecond=resolve;});
+  let requests=0,firstAborted=0,secondAborted=0;
+  popup.context.relayFetch=async (_path,options)=>{
+    requests++;
+    if(requests===1) {
+      return new Promise((_,reject)=>{
+        rejectFirst=reject;
+        options.signal.addEventListener("abort",()=>{firstAborted++;},{once:true});
+        startFirst();
+      });
+    }
+    return new Promise((_,reject)=>{
+      options.signal.addEventListener("abort",()=>{
+        secondAborted++;
+        reject(new Error("redacted private second response"));
+      },{once:true});
+      startSecond();
+    });
+  };
+  const first=popup.controls.compareChatgptBrowserAndGateway();
+  await firstStarted;
+  const second=popup.controls.compareChatgptBrowserAndGateway();
+  await secondStarted;
+  assert.equal(firstAborted,1);
+  // The first fetch may reject *after* the second check acquired ownership.
+  rejectFirst(new Error("redacted private first response"));
+  await first;
+  await popup.controls.verifyChatgptActiveTab();
+  await second;
+  assert.equal(secondAborted,1,"old finally must not clear the second controller");
+  assert.equal(requests,2);
+  assert.match(popup.byId("message").textContent,/account verified in this Chrome tab/);
+  assert.doesNotMatch(popup.byId("message").textContent,/private|redacted/);
+});
+
 test("explicit Chrome-only verification aborts prior paired POST but never syncs",async()=>{
   const popup=loadPopup();
   for(let i=0;i<5;i++) await new Promise(resolve=>setImmediate(resolve));
