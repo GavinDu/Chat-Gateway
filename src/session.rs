@@ -2823,7 +2823,9 @@ pub fn restore_cookies(browser: &Browser, file: &SessionFile, provider: &str) ->
     );
     let mut failed_writes = 0usize;
     let mut expected_restores = Vec::new();
-    let fidelity = replay_fidelity_limits(&file.cookies, dropped);
+    // Report limitations for material actually selected for this replay,
+    // not expired or foreign cookies retained in the encrypted source.
+    let fidelity = replay_fidelity_limits(&cookies, dropped);
     if dropped > 0 {
         // Counts only: cookie names, domains and values are credentials.
         tracing::info!(
@@ -4787,6 +4789,32 @@ mod replay_material_coverage_tests {
         let (legacy, dropped) = planned_cookie_replay(&source, "claude", 1000.0).unwrap();
         assert_eq!(legacy.len(), 1);
         assert_eq!(dropped, 1);
+    }
+
+    #[test]
+    fn replay_fidelity_labels_follow_selected_provider_not_foreign_metadata() {
+        let mut foreign = fixture("SID", "foreign-private-value", ".meta.ai");
+        foreign.expires = Some(2_000_000_000.0);
+        foreign.same_site = Some("Strict".to_owned());
+        let own = fixture("SID", "selected-private-value", ".chatgpt.com");
+        let file = snapshot(vec![foreign, own], &[]);
+        let (planned, normalized) = planned_cookie_replay(&file, "chatgpt", 1000.0).unwrap();
+
+        assert_eq!(planned.len(), 1);
+        assert_eq!(normalized, 0);
+        let fidelity = replay_fidelity_limits(&planned, normalized);
+        assert_eq!(fidelity.expiry, "expiry_not_provided");
+        assert_eq!(fidelity.same_site, "same_site_not_provided");
+        // The old full-snapshot input would have mislabeled the selected
+        // provider as having cookie expiry and SameSite replay limitations.
+        let unrelated = replay_fidelity_limits(&file.cookies, normalized);
+        assert_eq!(unrelated.expiry, "expiry_unobservable_in_jar_readback");
+        assert_eq!(unrelated.same_site, "same_site_unobservable_in_jar_readback");
+
+        let redacted = format!("{fidelity:?}");
+        for private in ["SID", "foreign-private-value", "selected-private-value", "meta.ai"] {
+            assert!(!redacted.contains(private));
+        }
     }
 
     #[test]
