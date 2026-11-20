@@ -301,11 +301,16 @@ impl ProviderSessionRegistry {
         }
     }
 
-    /// Worker reinitialization must reject a late result from the old worker.
-    /// Reuse of an old UUID across new epochs is not permitted.
+    /// Worker reinitialization must reject late account and request failures
+    /// from the disposed browser context. The request diagnostic is scoped to
+    /// that worker's generation, even if its five-minute TTL has not elapsed.
+    /// Do not change persisted sessions or separate provider readiness here.
     pub fn invalidate_all_credentials(&self) {
         if let Ok(mut proofs) = self.credential_proofs.lock() {
             proofs.by_provider.clear();
+        }
+        if let Ok(mut attempts) = self.last_request_attempts.lock() {
+            attempts.clear();
         }
     }
 
