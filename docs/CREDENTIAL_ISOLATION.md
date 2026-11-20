@@ -57,7 +57,7 @@ privately; do not publish cookie values, stable cookie digests, account IDs or
 credential-bearing URLs. An independent control must actually replay the same
 exported snapshot before it can establish that distinction.
 
-The offline `credential-diagnose` classification accepts an optional opaque,
+The offline `--diagnose-credential-evidence` classification accepts an optional opaque,
 canonical `chrome.generation` field. A `replay_or_binding` verdict requires it
 to equal the `snapshot.generation` and `obscura.generation`; otherwise an
 account discrepancy remains `inconclusive` with a fixed reason. **Do not**
