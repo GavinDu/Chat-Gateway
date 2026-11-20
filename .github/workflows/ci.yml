@@ -189,6 +189,7 @@ jobs:
           git -C "$repo" checkout --quiet "$rev"
           diff -ru vendor/taffy "$repo/vendor/taffy"
           diff -ru vendor/cosmic-text "$repo/vendor/cosmic-text"
+          python3 scripts/verify_obscura_native_vendor.py "$repo"
 
       - name: Verify wreq-util vendored patch
         run: |

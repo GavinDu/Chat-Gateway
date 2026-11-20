@@ -47,6 +47,7 @@ clap = { version = "4", features = ["derive"] }
 obscura-core = { version = "0.1.0", git = "https://github.com/h4ckf0r0day/obscura", rev = "0e2ee76383b95a14e51203799c4abc6790d6c7df", package = "obscura", features = ["render", "stealth"] }
 
 [dev-dependencies]
+obscura-browser = { git = "https://github.com/h4ckf0r0day/obscura", rev = "0e2ee76383b95a14e51203799c4abc6790d6c7df", features = ["render", "stealth"] }
 tower = { version = "0.5", features = ["util"] }
 
 [features]
@@ -68,3 +69,8 @@ wreq-util = { path = "vendor/wreq-util" }
 name = "memory_sqlite"
 path = "benches/memory_sqlite.rs"
 harness = false
+
+[patch."https://github.com/h4ckf0r0day/obscura"]
+obscura-js = { path = "vendor/obscura-native/obscura-js" }
+obscura-net = { path = "vendor/obscura-native/obscura-net" }
+obscura-browser = { path = "vendor/obscura-native/obscura-browser" }
