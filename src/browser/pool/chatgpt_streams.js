@@ -12,7 +12,6 @@
       !['chatgpt.com', 'www.chatgpt.com'].includes(location.hostname) ||
       !['', '443'].includes(String(location.port || ''))) return;
   const NativeStream = globalThis.ReadableStream;
-  if (NativeStream && NativeStream.__obscuraPullCompat) return;
   if (typeof NativeStream !== 'function' || NativeStream.__chatGatewayPullCompat) return;
   let probe;
   try { probe = new NativeStream({start(controller) { controller.close(); }}); }

@@ -269,7 +269,13 @@ impl CookieJar {
                 result.push(CookieInfo {
                     name: entry.name.clone(),
                     value: entry.value.clone(),
-                    domain: entry.domain.clone(),
+                    // Preserve the authoritative jar scope across export and
+                    // replay; host-only cookies must never be widened.
+                    domain: if entry.host_only {
+                        entry.domain.clone()
+                    } else {
+                        format!(".{}", entry.domain)
+                    },
                     path: entry.path.clone(),
                     secure: entry.secure,
                     http_only: entry.http_only,
