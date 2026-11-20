@@ -402,12 +402,16 @@ fn classify(e: &Evidence, now: u64) -> Diagnosis {
         return inconclusive(provider, "applied_snapshot_unproven");
     }
     // A correlated gateway failure is later than the account observations.
-    // Explicit session expiry or a challenge supersedes earlier Chrome/Obscura
-    // verdicts, including an apparent mismatch; it cannot prove replay blame.
-    // Validation of UUID, chronology and stage already happened above.
-    if e.gateway_failure
-        .as_ref()
-        .is_some_and(|failure| matches!(failure.reason.as_str(), "session_expired" | "challenge"))
+    // Expiry/challenge supersedes a previously verified Obscura account OR an
+    // apparent Chrome-positive / Obscura-negative mismatch; it cannot prove
+    // replay blame. Do not upgrade missing/unknown account evidence to a
+    // specific login-state diagnosis. UUID, clock and stage were checked above.
+    let prior_account_evidence = obscura == Some(Auth::Verified)
+        || (chrome == Some(Auth::Verified) && obscura == Some(Auth::Unauthenticated));
+    if prior_account_evidence
+        && e.gateway_failure
+            .as_ref()
+            .is_some_and(|failure| matches!(failure.reason.as_str(), "session_expired" | "challenge"))
     {
         return inconclusive(provider, "account_or_challenge_state_changed");
     }
@@ -829,6 +833,18 @@ mod tests {
             evidence["gateway_failure"]["stage"] = json!("json_completion");
         }
 
+        // A later gateway signal without supporting account observations
+        // does not convert unknown login into a specific expiry diagnosis.
+        evidence["obscura"]["verdict"] = json!("unknown");
+        evidence["chrome"]["verdict"] = json!("unknown");
+        evidence["gateway_failure"]["reason"] = json!("challenge");
+        assert_eq!(
+            checked(evidence.clone()).reason,
+            "authoritative_obscura_account_verifier_missing"
+        );
+
+        evidence["chrome"]["verdict"] = json!("verified");
+        evidence["obscura"]["verdict"] = json!("unauthenticated");
         evidence.as_object_mut().unwrap().remove("gateway_failure");
         assert_eq!(checked(evidence).category, "replay_or_binding");
     }
