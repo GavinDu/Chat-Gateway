@@ -1346,6 +1346,61 @@ test("explicit paired account comparison uses no automatic probe, upload or pari
   assert(!requests.some(req=>req.path.includes("account-verification")));
 });
 
+test("paired comparison discards Chrome proof that expires while gateway call is pending",async()=>{
+  const popup=loadPopup();
+  for(let i=0;i<5;i++) await new Promise(resolve=>setImmediate(resolve));
+  pairChatgptFixture(popup);
+  const started=Date.now();
+  let now=started;
+  // This clock belongs only to the VM. Never change process-wide Date.now.
+  popup.context.Date=class extends Date {static now(){return now;}};
+  popup.context.chrome.scripting={executeScript:async()=>[{result:{
+    provider:"chatgpt",context:"chrome_active_tab",authentication:"verified",
+    reason:"first_party_session_confirmed",http_status:200,
+    checked_at:new Date(started-25_000).toISOString(),
+    exported_snapshot_verified:false
+  }}]};
+  let fetched=0;
+  popup.context.relayFetch=async()=>{
+    ++fetched;
+    // Chrome was fresh on entry, but becomes stale before the final result.
+    now+=10_000;
+    return {ok:true,json:async()=>warmChatgptFixture({
+      checked_at_utc:new Date(now).toISOString().replace(/\\.\\d{3}Z$/,"Z")
+    })};
+  };
+  const calls=[...popup.chromeCalls];
+  await popup.controls.compareChatgptBrowserAndGateway();
+  assert.equal(fetched,1);
+  const shown=popup.byId("message").textContent;
+  assert.match(shown,/observations expired or differ in time/);
+  assert.doesNotMatch(shown,/Chrome tab: verified|Obscura warm page: verified/);
+  assert.deepEqual(popup.chromeCalls,calls,"must not resync or mutate credentials");
+});
+
+test("paired comparison rejects divergent source clocks even when each record is fresh",async()=>{
+  const popup=loadPopup();
+  for(let i=0;i<5;i++) await new Promise(resolve=>setImmediate(resolve));
+  pairChatgptFixture(popup);
+  const now=Date.now();
+  popup.context.Date=class extends Date {static now(){return now;}};
+  popup.context.chrome.scripting={executeScript:async()=>[{result:{
+    provider:"chatgpt",context:"chrome_active_tab",authentication:"verified",
+    reason:"first_party_session_confirmed",http_status:200,
+    checked_at:new Date(now+25_000).toISOString(),
+    exported_snapshot_verified:false
+  }}]};
+  popup.context.relayFetch=async()=>({ok:true,json:async()=>warmChatgptFixture({
+    checked_at_utc:new Date(now-25_000).toISOString().replace(/\\.\\d{3}Z$/,"Z")
+  })});
+  const calls=[...popup.chromeCalls];
+  await popup.controls.compareChatgptBrowserAndGateway();
+  const shown=popup.byId("message").textContent;
+  assert.match(shown,/observations expired or differ in time/);
+  assert.doesNotMatch(shown,/Chrome tab: verified|Obscura warm page: verified/);
+  assert.deepEqual(popup.chromeCalls,calls,"no automatic retry or resync");
+});
+
 test("paired comparison refuses unlinked or pending account consent before probing either side",async()=>{
   for(const state of [
     {},
