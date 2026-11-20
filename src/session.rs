@@ -885,6 +885,58 @@ mod relay_vault_precommit_tests {
     }
 
     #[test]
+    fn verifier_panic_removes_only_owned_staging_and_preserves_prior_vault() {
+        let root = std::env::temp_dir().join(format!(
+            "chat-gateway-panic-safe-stage-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let destination = root.join("synthetic.vault");
+        let original = b"prior-synthetic-ciphertext";
+        std::fs::write(&destination, original).unwrap();
+
+        let result = std::panic::catch_unwind(|| {
+            let _ = write_session_file_atomically_checked(
+                &destination,
+                b"new-synthetic-ciphertext",
+                |_staged| -> Result<()> {
+                    panic!("injected verification panic");
+                },
+            );
+        });
+        assert!(result.is_err(), "unwind must not silently report success");
+        assert_eq!(
+            std::fs::read(&destination).unwrap(),
+            original,
+            "panic during verification cannot remove the previous vault"
+        );
+        assert_eq!(
+            std::fs::read_dir(&root).unwrap().count(),
+            1,
+            "no orphaned sensitive .tmp file may remain after unwinding"
+        );
+
+        std::fs::remove_file(&destination).unwrap();
+        let first_link = std::panic::catch_unwind(|| {
+            let _ = write_session_file_atomically_checked(
+                &destination,
+                b"first-link-synthetic-ciphertext",
+                |_staged| -> Result<()> {
+                    panic!("injected first-link verification panic");
+                },
+            );
+        });
+        assert!(first_link.is_err());
+        assert!(!destination.exists(), "a failed first link cannot publish a vault");
+        assert_eq!(
+            std::fs::read_dir(&root).unwrap().count(),
+            0,
+            "first-link unwind cannot leave owned .tmp credentials"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn staged_encrypted_vault_must_verify_before_replacing_last_valid_snapshot() {
         let root = std::env::temp_dir().join(format!(
             "chat-gateway-precommit-vault-{}",
