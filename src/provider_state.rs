@@ -1087,7 +1087,10 @@ mod bounded_request_diagnostic_tests {
         );
         let latest = reg.last_failed_request("chatgpt").unwrap();
         assert_eq!(latest.request_id.to_string(), SECOND);
-        assert_eq!(latest.source_failure_schema_version, FAILURE_SOURCE_SCHEMA_VERSION);
+        assert_eq!(
+            latest.source_failure_schema_version,
+            FAILURE_SOURCE_SCHEMA_VERSION
+        );
         assert_eq!(latest.stage, "first_stream_event");
         assert_eq!(latest.reason, "backend_unavailable");
         assert_eq!(latest.duration_ms, 123);
@@ -1117,7 +1120,10 @@ mod bounded_request_diagnostic_tests {
             assert!(source_failure_pair_valid("first_stream_event", reason));
             assert!(!source_failure_pair_valid("json_completion", reason));
         }
-        assert!(source_failure_pair_valid("first_stream_event", "unclassified"));
+        assert!(source_failure_pair_valid(
+            "first_stream_event",
+            "unclassified"
+        ));
         assert!(source_failure_pair_valid("json_completion", "unclassified"));
         for (stage, reason) in [
             ("candidate_admission", "backend_unavailable"),
@@ -1129,7 +1135,10 @@ mod bounded_request_diagnostic_tests {
             ("unknown", "unclassified"),
             ("json_completion", "cookie=secret"),
         ] {
-            assert!(!source_failure_pair_valid(stage, reason), "{stage}/{reason}");
+            assert!(
+                !source_failure_pair_valid(stage, reason),
+                "{stage}/{reason}"
+            );
         }
     }
 
