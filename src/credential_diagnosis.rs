@@ -499,9 +499,9 @@ pub(crate) fn diagnose_file(path: &Path) -> anyhow::Result<String> {
     if !info.is_file() || info.file_type().is_symlink() || info.len() > MAX_FILE {
         anyhow::bail!("credential evidence unavailable");
     }
-    // A symlink or replacement file can be installed after the lstat.
-    // File::open may follow it; validate the actual descriptor before any
-    // read rather than trusting the earlier pathname metadata.
+    // A symlink, FIFO or replacement file can appear after lstat. Refuse
+    // to follow/block on the final component, then validate the actual
+    // descriptor before reading any owner-supplied bytes.
     let file = open_evidence_without_following(path)?;
     let opened = file
         .metadata()
