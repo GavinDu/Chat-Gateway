@@ -1609,24 +1609,82 @@ pub fn parse_vault_key(encoded: &str) -> Result<Zeroizing<[u8; 32]>> {
     Ok(Zeroizing::new(key))
 }
 
-fn read_vault_key_file(path: &Path) -> Result<Zeroizing<String>> {
-    let metadata = std::fs::symlink_metadata(path)
-        .map_err(|error| anyhow::anyhow!("cannot inspect CHAT_GATEWAY_VAULT_KEY_FILE: {error}"))?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        anyhow::bail!("CHAT_GATEWAY_VAULT_KEY_FILE must be a regular, non-symlink file");
+const MAX_VAULT_KEY_FILE_BYTES: u64 = 4096;
+
+/// Never trust a second pathname lookup as the file that passed lstat. The
+/// opened descriptor must be the same regular, private object, not a symlink,
+/// FIFO or same-length replacement. No key bytes are read before this gate.
+fn checked_vault_key_file_identity(
+    inspected: &std::fs::Metadata,
+    opened: &std::fs::Metadata,
+) -> Result<()> {
+    if !inspected.is_file()
+        || inspected.file_type().is_symlink()
+        || inspected.len() > MAX_VAULT_KEY_FILE_BYTES
+        || !opened.is_file()
+        || opened.len() > MAX_VAULT_KEY_FILE_BYTES
+    {
+        anyhow::bail!("CHAT_GATEWAY_VAULT_KEY_FILE must be a bounded regular file");
     }
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        if metadata.permissions().mode() & 0o077 != 0 {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        if inspected.dev() != opened.dev() || inspected.ino() != opened.ino() {
+            anyhow::bail!("CHAT_GATEWAY_VAULT_KEY_FILE changed during validation");
+        }
+        if opened.permissions().mode() & 0o077 != 0 {
             anyhow::bail!(
                 "CHAT_GATEWAY_VAULT_KEY_FILE must not be accessible by group or other users"
             );
         }
     }
-    Ok(Zeroizing::new(std::fs::read_to_string(path).map_err(
-        |error| anyhow::anyhow!("cannot read CHAT_GATEWAY_VAULT_KEY_FILE: {error}"),
-    )?))
+    #[cfg(not(unix))]
+    anyhow::bail!("CHAT_GATEWAY_VAULT_KEY_FILE platform validation unavailable");
+    Ok(())
+}
+
+fn open_vault_key_file_no_follow(path: &Path) -> Result<std::fs::File> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(path)
+            .map_err(|_| anyhow::anyhow!("cannot read CHAT_GATEWAY_VAULT_KEY_FILE"))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        anyhow::bail!("CHAT_GATEWAY_VAULT_KEY_FILE platform validation unavailable");
+    }
+}
+
+fn read_vault_key_file(path: &Path) -> Result<Zeroizing<String>> {
+    use std::io::Read;
+    let inspected = std::fs::symlink_metadata(path)
+        .map_err(|_| anyhow::anyhow!("cannot inspect CHAT_GATEWAY_VAULT_KEY_FILE"))?;
+    if inspected.file_type().is_symlink() || !inspected.is_file() {
+        anyhow::bail!("CHAT_GATEWAY_VAULT_KEY_FILE must be a regular, non-symlink file");
+    }
+    let file = open_vault_key_file_no_follow(path)?;
+    let opened = file
+        .metadata()
+        .map_err(|_| anyhow::anyhow!("cannot inspect CHAT_GATEWAY_VAULT_KEY_FILE"))?;
+    checked_vault_key_file_identity(&inspected, &opened)?;
+
+    // Bounded, zeroized bytes: a file can grow between metadata and read.
+    // Never keep an unbounded String or reflect OS/UTF-8 errors with key data.
+    let mut key_bytes = Zeroizing::new(Vec::with_capacity(opened.len() as usize + 1));
+    file.take(MAX_VAULT_KEY_FILE_BYTES + 1)
+        .read_to_end(&mut key_bytes)
+        .map_err(|_| anyhow::anyhow!("cannot read CHAT_GATEWAY_VAULT_KEY_FILE"))?;
+    if key_bytes.len() as u64 > MAX_VAULT_KEY_FILE_BYTES {
+        anyhow::bail!("CHAT_GATEWAY_VAULT_KEY_FILE exceeds the size limit");
+    }
+    let utf8 = std::str::from_utf8(&key_bytes)
+        .map_err(|_| anyhow::anyhow!("CHAT_GATEWAY_VAULT_KEY_FILE is not UTF-8"))?;
+    Ok(Zeroizing::new(utf8.to_owned()))
 }
 
 pub fn validate_encrypted_store_configuration() -> Result<()> {
