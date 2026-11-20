@@ -456,9 +456,10 @@ pub(crate) fn diagnose_file(path: &Path) -> anyhow::Result<String> {
         .map_err(|_| anyhow::anyhow!("credential evidence unavailable"))?
         .take(MAX_FILE + 1);
     // Owner-supplied evidence can accidentally contain secrets even when the
-    // accepted schema forbids them. Wipe raw bytes on success and on every
-    // malformed or rejected JSON path, without changing read-size bounds.
-    let mut bytes = Zeroizing::new(Vec::new());
+    // accepted schema forbids them. Reserve the entire bounded input once to
+    // avoid leaving old secret-bearing allocations behind during Vec growth.
+    // Wipe the owned raw bytes on success and on every rejected JSON path.
+    let mut bytes = Zeroizing::new(Vec::with_capacity((MAX_FILE + 1) as usize));
     reader
         .read_to_end(&mut bytes)
         .map_err(|_| anyhow::anyhow!("credential evidence unavailable"))?;
