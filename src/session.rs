@@ -1203,6 +1203,13 @@ mod provider_cookie_count_tests {
     }
 }
 
+/// Wipe the bearer while preserving only the scope needed for an expiry
+/// header. Keep this explicit: String::clear would defeat Cookie::drop's
+/// effective initialized-byte zeroization.
+fn wipe_cookie_for_revocation(cookie: &mut Cookie) {
+    cookie.value.zeroize();
+}
+
 /// Remove cookies for one provider from Obscura's shared browser jar.
 /// Every deletion is verified; failure aborts unlink before persistent records
 /// are deleted, preventing a false success response for live credentials.
@@ -1216,7 +1223,7 @@ pub fn clear_provider_cookies(browser: &Browser, provider: &str) -> Result<usize
         // bearer before constructing a revocation header: String::clear
         // merely reduces length, leaving its previous allocation unwiped
         // when Cookie::drop subsequently zeroizes an empty string.
-        cookie.value.zeroize();
+        wipe_cookie_for_revocation(&mut cookie);
         if !cookie_domain_allowed(provider, &cookie.domain) {
             continue;
         }
@@ -1251,8 +1258,7 @@ mod cookie_revocation_scope_tests {
 
     #[test]
     fn unlink_cookie_value_is_wiped_before_revocation_header_formatting() {
-        use super::{cookie_expiration_header, Cookie};
-        use zeroize::Zeroize;
+        use super::{cookie_expiration_header, wipe_cookie_for_revocation, Cookie};
 
         let mut cookie = Cookie {
             name: "synthetic-sid".into(),
@@ -1264,8 +1270,8 @@ mod cookie_revocation_scope_tests {
             expires: None,
             same_site: None,
         };
-        // Match the unlink path: wipe, don't just shorten the String.
-        cookie.value.zeroize();
+        // Exercise the exact helper used by the production unlink loop.
+        wipe_cookie_for_revocation(&mut cookie);
         assert!(cookie.value.is_empty());
         let expired = cookie_expiration_header(&cookie).unwrap();
         assert!(expired.starts_with("synthetic-sid=; Max-Age=0; Path=/"));
