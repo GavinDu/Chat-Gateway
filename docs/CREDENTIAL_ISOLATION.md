@@ -43,7 +43,8 @@ can send a test prompt after authentication succeeds.
 | Chrome explicitly unauthenticated | Browser login needs attention; preserve saved gateway state. |
 | Chrome verified, import missing/rejected | Extension capture, permissions, relay, or persistence path; inspect the typed import result. |
 | Chrome verified, import saved but activation pending | Credential snapshot reached storage; browser activation is incomplete. Not proof of invalid credentials. |
-| Chrome verified, Obscura authentication rejected | Inspect replay fidelity, expiry, partitioned cookies, local storage, origin/device binding and provider challenge. This alone does not establish an engine defect. |
+| Chrome verified on the **same source-bound capture generation**, Obscura authentication rejected after that snapshot was applied | Investigate replay fidelity, expiry, partitioned cookies, origin storage, device binding and provider challenge; this alone does not establish an engine defect. |
+| Chrome verified but not bound to the exact applied snapshot generation | Inconclusive: do not blame the relay or Obscura without correlated source evidence. |
 | Obscura authentication verified, composer missing or draft not retained | DOM/selector/input integration failed after authentication. |
 | Obscura authentication verified, Send succeeds but transport/response fails | Investigate WebSocket/fetch/stream support, application errors, and extraction selectors. Authentication may still need rechecking if the provider explicitly rejects the chat. |
 | Either runtime has 403, timeout, challenge, or unknown schema | Inconclusive; distinguish a blocked request from an explicit account rejection. |
@@ -55,6 +56,16 @@ this reason. Compare eligible cookie attributes, expiry and import application
 privately; do not publish cookie values, stable cookie digests, account IDs or
 credential-bearing URLs. An independent control must actually replay the same
 exported snapshot before it can establish that distinction.
+
+The offline `credential-diagnose` classification accepts an optional opaque,
+canonical `chrome.generation` field. A `replay_or_binding` verdict requires it
+to equal the `snapshot.generation` and `obscura.generation`; otherwise an
+account discrepancy remains `inconclusive` with a fixed reason. **Do not**
+copy a generation identifier from unrelated gateway status into a manual Chrome
+probe result: the read-only DevTools probe does not certify capture lineage.
+Only source-bound extension capture/import evidence can establish that link.
+The offline report always says `live_proof=false`; matching owner-supplied IDs
+are not independently verified credentials.
 
 ## Current investigation
 
