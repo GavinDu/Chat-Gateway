@@ -301,11 +301,16 @@ impl ProviderSessionRegistry {
         }
     }
 
-    /// Worker reinitialization must reject a late result from the old worker.
-    /// Reuse of an old UUID across new epochs is not permitted.
+    /// Worker reinitialization must reject late account and request failures
+    /// from the disposed browser context. The request diagnostic is scoped to
+    /// that worker's generation, even if its five-minute TTL has not elapsed.
+    /// Do not change persisted sessions or separate provider readiness here.
     pub fn invalidate_all_credentials(&self) {
         if let Ok(mut proofs) = self.credential_proofs.lock() {
             proofs.by_provider.clear();
+        }
+        if let Ok(mut attempts) = self.last_request_attempts.lock() {
+            attempts.clear();
         }
     }
 
@@ -1053,6 +1058,76 @@ mod bounded_request_diagnostic_tests {
         assert_eq!(latest.stage, "first_stream_event");
         assert_eq!(latest.reason, "backend_unavailable");
         assert_eq!(latest.duration_ms, 123);
+    }
+
+    #[test]
+    fn worker_restart_revokes_prior_failure_slots_and_late_callbacks() {
+        let registry = ProviderSessionRegistry::default();
+        let old_worker = registry.clone();
+        let post_restart = "4b66c0ab-cf23-4cea-8fcf-4bf73a4c1b80";
+
+        // A failed request ID is valid only for the browser worker that
+        // began that attempt. Both providers are independently tracked.
+        registry.begin_request_attempt("chatgpt", FIRST);
+        registry.record_request_failure(
+            "chatgpt",
+            FIRST,
+            "first_stream_event",
+            "backend_unavailable",
+            17_500,
+        );
+        registry.begin_request_attempt("metaai", SECOND);
+        registry.record_request_failure("metaai", SECOND, "backend_admission", "timeout", 120_000);
+        registry.record_success("metaai");
+        let meta_state_before = registry.status("metaai");
+
+        let account_epoch = registry.begin_credential_verification("chatgpt").unwrap();
+        assert!(registry.record_credentials_verified("chatgpt", account_epoch));
+        assert!(registry.last_failed_request("chatgpt").is_some());
+        assert!(registry.last_failed_request("metaai").is_some());
+
+        // This is exactly the lifecycle boundary invoked by browser_thread
+        // when a replacement Obscura worker starts. No vault or sessions are
+        // touched. Old status cannot be mistaken for a new worker attempt.
+        registry.invalidate_all_credentials();
+        assert!(!registry.credentials_verified("chatgpt"));
+        assert!(!registry.record_credentials_verified("chatgpt", account_epoch));
+        assert!(registry.last_failed_request("chatgpt").is_none());
+        assert!(registry.last_failed_request("metaai").is_none());
+        assert_eq!(registry.last_request_attempts.lock().unwrap().len(), 0);
+        assert_eq!(registry.status("metaai"), meta_state_before);
+
+        // A late old-worker callback cannot resurrect an old failure.
+        old_worker.record_request_failure("chatgpt", FIRST, "json_completion", "timeout", 120_000);
+        old_worker.record_request_failure("metaai", SECOND, "json_completion", "timeout", 120_000);
+        assert!(registry.last_failed_request("chatgpt").is_none());
+        assert!(registry.last_failed_request("metaai").is_none());
+
+        // A post-restart request gets its own slot and can publish only its
+        // own typed, redacted failure. A late old callback cannot replace it.
+        registry.begin_request_attempt("chatgpt", post_restart);
+        old_worker.record_request_failure(
+            "chatgpt",
+            FIRST,
+            "first_stream_event",
+            "session_expired",
+            120_000,
+        );
+        assert!(registry.last_failed_request("chatgpt").is_none());
+        registry.record_request_failure(
+            "chatgpt",
+            post_restart,
+            "first_stream_event",
+            "timeout",
+            250,
+        );
+        let current = registry.last_failed_request("chatgpt").unwrap();
+        assert_eq!(current.request_id, post_restart);
+        assert_eq!(current.stage, "first_stream_event");
+        assert_eq!(current.reason, "timeout");
+        assert_eq!(current.duration_ms, 250);
+        assert!(registry.last_failed_request("metaai").is_none());
+        assert_eq!(registry.last_request_attempts.lock().unwrap().len(), 1);
     }
 
     #[test]
