@@ -2792,6 +2792,80 @@ fn replay_fidelity_limits(source: &[Cookie], normalized_count: usize) -> ReplayF
     }
 }
 
+/// Exact readback identity is stronger than matching cookie contents on a
+/// normalized DNS name. Host-only and Domain-scoped cookies are different
+/// credentials even if their name/value/path/flags are otherwise identical.
+/// The pinned jar may not preserve every browser attribute; do not silently
+/// claim scope parity when an expected cookie cannot be observed.
+fn restored_cookie_readback_matches(expected: &Cookie, actual: &Cookie) -> bool {
+    same_revocation_cookie_scope(
+        (&expected.name, &expected.domain, &expected.path),
+        (&actual.name, &actual.domain, &actual.path),
+    ) && expected.value == actual.value
+        && expected.secure == actual.secure
+        && expected.http_only == actual.http_only
+}
+
+#[cfg(test)]
+mod restored_cookie_readback_scope_tests {
+    use super::*;
+
+    fn cookie(domain: &str) -> Cookie {
+        Cookie {
+            name: "synthetic-session".into(),
+            value: "synthetic-secret-bearer".into(),
+            domain: domain.into(),
+            path: "/".into(),
+            secure: true,
+            http_only: true,
+            expires: None,
+            same_site: None,
+        }
+    }
+
+    #[test]
+    fn readback_keeps_host_only_and_domain_scoped_identities_distinct() {
+        let host = cookie("chatgpt.com");
+        let scoped = cookie(".chatgpt.com");
+        assert!(restored_cookie_readback_matches(&host, &host));
+        assert!(restored_cookie_readback_matches(&scoped, &scoped));
+        assert!(!restored_cookie_readback_matches(&host, &scoped));
+        assert!(!restored_cookie_readback_matches(&scoped, &host));
+
+        // DNS letter case is irrelevant, but the leading-dot scope is not.
+        let same_host_different_case = cookie("CHATGPT.COM");
+        assert!(restored_cookie_readback_matches(
+            &host,
+            &same_host_different_case
+        ));
+        assert!(!restored_cookie_readback_matches(
+            &scoped,
+            &same_host_different_case
+        ));
+    }
+
+    #[test]
+    fn readback_requires_exact_name_path_value_and_security_flags() {
+        let expected = cookie(".chatgpt.com");
+        let mut actual = expected.clone();
+        actual.name = "different-name".into();
+        assert!(!restored_cookie_readback_matches(&expected, &actual));
+        actual = expected.clone();
+        actual.path = "/other".into();
+        assert!(!restored_cookie_readback_matches(&expected, &actual));
+        actual = expected.clone();
+        actual.value = "other-synthetic-secret".into();
+        assert!(!restored_cookie_readback_matches(&expected, &actual));
+        actual = expected.clone();
+        actual.secure = false;
+        assert!(!restored_cookie_readback_matches(&expected, &actual));
+        actual = expected.clone();
+        actual.http_only = false;
+        assert!(!restored_cookie_readback_matches(&expected, &actual));
+        assert!(restored_cookie_readback_matches(&expected, &expected));
+    }
+}
+
 /// Restore step 1 (BEFORE goto): put the saved cookies into the browser's
 /// cookie store so the first navigation is already authenticated.
 pub fn restore_cookies(browser: &Browser, file: &SessionFile, provider: &str) -> Result<()> {
@@ -2893,17 +2967,10 @@ pub fn restore_cookies(browser: &Browser, file: &SessionFile, provider: &str) ->
     // Our Cookie wrapper zeroizes the temporary readback values on drop.
     let restored: Vec<Cookie> = store.get_all().into_iter().map(Cookie::from).collect();
     for cookie in expected_restores {
-        if !restored.iter().any(|actual| {
-            actual.name == cookie.name
-                && actual.value == cookie.value
-                && actual
-                    .domain
-                    .trim_start_matches('.')
-                    .eq_ignore_ascii_case(cookie.domain.trim_start_matches('.'))
-                && actual.path == cookie.path
-                && actual.secure == cookie.secure
-                && actual.http_only == cookie.http_only
-        }) {
+        if !restored
+            .iter()
+            .any(|actual| restored_cookie_readback_matches(cookie, actual))
+        {
             failed_writes += 1;
         }
     }
