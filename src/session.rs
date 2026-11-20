@@ -2482,12 +2482,19 @@ pub(crate) fn provider_replay_material_coverage(
     // proof, and do not reveal any cookie identity or contents.
     let expiry_aware = matches!(provider, "chatgpt" | "metaai");
     let mut expired_provider_rows = 0usize;
+    let mut excluded = 0usize;
+    // The browser may have unrelated providers' cookies in a legacy import.
+    // Count those excluded rows, but never let foreign scope twins contribute
+    // to the selected provider's normalization or eligible-material evidence.
     let candidates: Vec<Cookie> = file
         .cookies
         .iter()
         .filter(|cookie| {
+            if !cookie_domain_allowed(provider, &cookie.domain) {
+                excluded += 1;
+                return false;
+            }
             let expired = expiry_aware
-                && cookie_domain_allowed(provider, &cookie.domain)
                 && cookie
                     .expires
                     .is_some_and(|expiry| expiry >= 0.0 && expiry <= now_epoch);
@@ -2500,12 +2507,9 @@ pub(crate) fn provider_replay_material_coverage(
         .collect();
     let (cookies, normalized) = resolve_cookie_scope_duplicates(&candidates);
     let mut eligible = 0usize;
-    let mut excluded = 0usize;
     let mut invalid = expired_provider_rows;
     for cookie in cookies {
-        if !cookie_domain_allowed(provider, &cookie.domain) {
-            excluded += 1;
-        } else if !restored_cookie_fields_safe(&cookie)
+        if !restored_cookie_fields_safe(&cookie)
             || cookie.validate_browser_metadata().is_err()
             || cookie
                 .expires
@@ -4704,6 +4708,51 @@ mod replay_material_coverage_tests {
         assert_eq!(mixed.eligible_cookies, 1);
         assert_eq!(mixed.excluded_cookies, 1);
         assert!(!format!("{mixed:?}").contains("secret"));
+    }
+
+    #[test]
+    fn unrelated_cookie_scope_twins_do_not_inflate_provider_normalization() {
+        let foreign_domain = fixture("SID", "foreign-private-value", ".meta.ai");
+        let mut foreign_host = foreign_domain.clone();
+        foreign_host.domain = "meta.ai".to_owned();
+        let chatgpt = fixture("SID", "chatgpt-private-value", ".chatgpt.com");
+
+        let foreign_only = provider_replay_material_coverage(
+            &snapshot(vec![foreign_domain.clone(), foreign_host.clone()], &[]),
+            "chatgpt",
+            1000.0,
+        );
+        assert_eq!(foreign_only.eligible_cookies, 0);
+        assert_eq!(foreign_only.excluded_cookies, 2);
+        assert_eq!(foreign_only.normalized_scopes, 0);
+        assert_eq!(foreign_only.category(), "no_applicable_provider_material");
+
+        let mixed = provider_replay_material_coverage(
+            &snapshot(vec![foreign_domain, chatgpt.clone(), foreign_host], &[]),
+            "chatgpt",
+            1000.0,
+        );
+        assert_eq!(mixed.eligible_cookies, 1);
+        assert_eq!(mixed.excluded_cookies, 2);
+        assert_eq!(mixed.normalized_scopes, 0);
+        assert_eq!(mixed.category(), "eligible_cookie_material_unverified");
+
+        let mut chatgpt_host = chatgpt.clone();
+        chatgpt_host.domain = "chatgpt.com".to_owned();
+        let with_provider_twin = provider_replay_material_coverage(
+            &snapshot(vec![chatgpt, chatgpt_host], &[]),
+            "chatgpt",
+            1000.0,
+        );
+        assert_eq!(with_provider_twin.eligible_cookies, 1);
+        assert_eq!(with_provider_twin.normalized_scopes, 1);
+        for result in [foreign_only, mixed, with_provider_twin] {
+            let safe = format!("{result:?}");
+            assert!(!safe.contains("private"));
+            assert!(!safe.contains("meta.ai"));
+            assert!(!safe.contains("chatgpt.com"));
+            assert!(!safe.contains("SID"));
+        }
     }
 
     #[test]
