@@ -409,9 +409,9 @@ fn classify(e: &Evidence, now: u64) -> Diagnosis {
     let prior_account_evidence = obscura == Some(Auth::Verified)
         || (chrome == Some(Auth::Verified) && obscura == Some(Auth::Unauthenticated));
     if prior_account_evidence
-        && e.gateway_failure
-            .as_ref()
-            .is_some_and(|failure| matches!(failure.reason.as_str(), "session_expired" | "challenge"))
+        && e.gateway_failure.as_ref().is_some_and(|failure| {
+            matches!(failure.reason.as_str(), "session_expired" | "challenge")
+        })
     {
         return inconclusive(provider, "account_or_challenge_state_changed");
     }
@@ -818,7 +818,10 @@ mod tests {
 
             // A different or noncanonical request cannot assert supersession.
             evidence["gateway_failure"]["request_id"] = json!(OTHER_ID);
-            assert_eq!(checked(evidence.clone()).reason, "gateway_request_id_mismatch");
+            assert_eq!(
+                checked(evidence.clone()).reason,
+                "gateway_request_id_mismatch"
+            );
             evidence["gateway_failure"]["request_id"] = json!(ID.to_uppercase());
             assert_eq!(
                 checked(evidence.clone()).reason,
@@ -829,7 +832,10 @@ mod tests {
             assert_eq!(checked(evidence.clone()).reason, "stale_or_future_evidence");
             evidence["gateway_failure"]["observed_at_ms"] = json!(NOW);
             evidence["gateway_failure"]["stage"] = json!("backend_admission");
-            assert_eq!(checked(evidence.clone()).reason, "conflicting_gateway_failure_stage");
+            assert_eq!(
+                checked(evidence.clone()).reason,
+                "conflicting_gateway_failure_stage"
+            );
             evidence["gateway_failure"]["stage"] = json!("json_completion");
         }
 
