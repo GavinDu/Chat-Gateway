@@ -210,11 +210,22 @@ impl ProviderSessionRegistry {
         if slot.request_id != request_id {
             return;
         }
+        let stage = safe_failure_stage(stage);
+        let reason = safe_failure_reason(reason);
+        // A future producer mismatch must never advertise the current grammar
+        // in release builds. The fixed redacted labels are still retained for
+        // debugging, but an offline consumer must classify their source as
+        // unverified rather than attribute provider or credential blame.
+        let source_failure_schema_version = if source_failure_pair_valid(stage, reason) {
+            FAILURE_SOURCE_SCHEMA_VERSION
+        } else {
+            0
+        };
         let record = LastFailedRequest {
-            source_failure_schema_version: FAILURE_SOURCE_SCHEMA_VERSION,
+            source_failure_schema_version,
             request_id: request_id.to_string(),
-            stage: safe_failure_stage(stage),
-            reason: safe_failure_reason(reason),
+            stage,
+            reason,
             duration_ms: duration_ms.min(120_000),
             observed_at_utc: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         };
@@ -1181,8 +1192,8 @@ mod bounded_request_diagnostic_tests {
         assert_eq!(record.reason, "unclassified");
         assert_eq!(record.duration_ms, 120_000);
         assert_eq!(
-            record.source_failure_schema_version,
-            FAILURE_SOURCE_SCHEMA_VERSION
+            record.source_failure_schema_version, 0,
+            "unsupported static stage/reason must not claim source version 1"
         );
         for private in [
             "private.example",
@@ -1200,6 +1211,41 @@ mod bounded_request_diagnostic_tests {
                 .len(),
             6
         );
+    }
+
+    #[test]
+    fn producer_release_build_never_versions_impossible_stage_reason_pair() {
+        let reg = ProviderSessionRegistry::default();
+        reg.begin_request_attempt("chatgpt", FIRST);
+        for (stage, reason) in [
+            ("candidate_admission", "backend_unavailable"),
+            ("json_completion", "timeout"),
+            ("backend_admission", "candidate_skipped"),
+            ("first_stream_event", "candidate_skipped"),
+            ("unexpected", "private?token=secret"),
+        ] {
+            reg.record_request_failure("chatgpt", FIRST, stage, reason, 99);
+            let record = reg.last_failed_request("chatgpt").unwrap();
+            assert_eq!(record.source_failure_schema_version, 0, "{stage}/{reason}");
+            let safe = serde_json::to_string(&record).unwrap();
+            assert!(!safe.contains("private?token=secret"));
+            assert!(!safe.contains("candidate_skipped") || reason == "candidate_skipped");
+        }
+        for (stage, reason) in [
+            ("candidate_admission", "candidate_skipped"),
+            ("backend_admission", "timeout"),
+            ("first_stream_event", "unclassified"),
+            ("json_completion", "unclassified"),
+        ] {
+            reg.record_request_failure("chatgpt", FIRST, stage, reason, 99);
+            assert_eq!(
+                reg.last_failed_request("chatgpt")
+                    .unwrap()
+                    .source_failure_schema_version,
+                FAILURE_SOURCE_SCHEMA_VERSION,
+                "{stage}/{reason}"
+            );
+        }
     }
 
     #[test]
