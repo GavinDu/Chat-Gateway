@@ -2077,17 +2077,24 @@ mod relay_import_diagnostic_redaction_tests {
         assert_eq!(code, "session_vault_precommit_failed");
         assert!(message.contains("prior vault was preserved"));
         assert!(message.contains("before saving"));
-        for private in ["sign in", "cookie=", "bearer=", "/sessions/", "token=", "password"] {
+        for private in [
+            "sign in",
+            "cookie=",
+            "bearer=",
+            "/sessions/",
+            "token=",
+            "password",
+        ] {
             assert!(!code.contains(private));
             assert!(!message.contains(private));
             assert!(!category.contains(private));
         }
         assert!(super::relay_precommit_failure_response_parts("snapshot_rejected").is_none());
         assert!(super::relay_precommit_failure_response_parts("missing_session_cookies").is_none());
-        assert!(super::relay_precommit_failure_response_parts(
-            "persistence_worker_unavailable"
-        )
-        .is_none());
+        assert!(
+            super::relay_precommit_failure_response_parts("persistence_worker_unavailable")
+                .is_none()
+        );
     }
 
     #[test]
