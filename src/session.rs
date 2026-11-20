@@ -2768,6 +2768,7 @@ mod restored_cookie_attribute_tests {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ReplayFidelityLimits {
     scope: &'static str,
+    scope_readback: &'static str,
     expiry: &'static str,
     same_site: &'static str,
 }
@@ -2778,6 +2779,13 @@ fn replay_fidelity_limits(source: &[Cookie], normalized_count: usize) -> ReplayF
             "scope_normalized"
         } else {
             "no_scope_normalization_observed"
+        },
+        // Pinned Obscura get_all() normalizes the leading-dot Domain marker:
+        // a successful readback cannot certify host-only vs Domain delivery.
+        scope_readback: if source.is_empty() {
+            "no_cookie_scope_to_compare"
+        } else {
+            "host_only_domain_scope_unobservable_in_jar_readback"
         },
         expiry: if source.iter().any(|cookie| cookie.expires.is_some()) {
             "expiry_unobservable_in_jar_readback"
@@ -2792,16 +2800,18 @@ fn replay_fidelity_limits(source: &[Cookie], normalized_count: usize) -> ReplayF
     }
 }
 
-/// Exact readback identity is stronger than matching cookie contents on a
-/// normalized DNS name. Host-only and Domain-scoped cookies are different
-/// credentials even if their name/value/path/flags are otherwise identical.
-/// The pinned jar may not preserve every browser attribute; do not silently
-/// claim scope parity when an expected cookie cannot be observed.
-fn restored_cookie_readback_matches(expected: &Cookie, actual: &Cookie) -> bool {
-    same_revocation_cookie_scope(
-        (&expected.name, &expected.domain, &expected.path),
-        (&actual.name, &actual.domain, &actual.path),
-    ) && expected.value == actual.value
+/// Only verifies six-field *material presence* in the pinned Obscura jar.
+/// Domain-scoped and host-only cookies are indistinguishable on its get_all()
+/// readback, so normalizing DNS here is a compatibility check, NEVER proof
+/// that the browser restored the original delivery scope.
+fn restored_cookie_material_matches(expected: &Cookie, actual: &Cookie) -> bool {
+    expected.name == actual.name
+        && expected.value == actual.value
+        && expected
+            .domain
+            .trim_start_matches('.')
+            .eq_ignore_ascii_case(actual.domain.trim_start_matches('.'))
+        && expected.path == actual.path
         && expected.secure == actual.secure
         && expected.http_only == actual.http_only
 }
@@ -2824,28 +2834,31 @@ mod restored_cookie_readback_scope_tests {
     }
 
     #[test]
-    fn readback_keeps_host_only_and_domain_scoped_identities_distinct() {
+    fn readback_material_match_does_not_certify_host_only_vs_domain_scope() {
         let host = cookie("chatgpt.com");
         let scoped = cookie(".chatgpt.com");
-        assert!(restored_cookie_readback_matches(&host, &host));
-        assert!(restored_cookie_readback_matches(&scoped, &scoped));
-        assert!(!restored_cookie_readback_matches(&host, &scoped));
-        assert!(!restored_cookie_readback_matches(&scoped, &host));
+        assert!(restored_cookie_material_matches(&host, &host));
+        assert!(restored_cookie_material_matches(&scoped, &scoped));
+        assert!(restored_cookie_material_matches(&host, &scoped));
+        assert!(restored_cookie_material_matches(&scoped, &host));
 
-        // DNS letter case is irrelevant, but the leading-dot scope is not.
         let same_host_different_case = cookie("CHATGPT.COM");
-        assert!(restored_cookie_readback_matches(
+        assert!(restored_cookie_material_matches(
             &host,
             &same_host_different_case
         ));
-        assert!(!restored_cookie_readback_matches(
-            &scoped,
-            &same_host_different_case
-        ));
+        assert_eq!(
+            replay_fidelity_limits(&[host, scoped], 0).scope_readback,
+            "host_only_domain_scope_unobservable_in_jar_readback"
+        );
+        assert_eq!(
+            replay_fidelity_limits(&[], 0).scope_readback,
+            "no_cookie_scope_to_compare"
+        );
     }
 
     #[test]
-    fn pinned_obscura_cookie_jar_exposes_host_only_and_domain_scope() {
+    fn pinned_obscura_cookie_jar_normalizes_host_only_and_domain_readback() {
         // Separate disposable browsers avoid the pinned jar's normalized
         // name/domain/path collision, and require no provider login/network.
         let host = Browser::builder().stealth(false).build().unwrap();
@@ -2877,20 +2890,21 @@ mod restored_cookie_readback_scope_tests {
             .collect();
         assert_eq!(host_readback.len(), 1);
         assert_eq!(domain_readback.len(), 1);
-        // The exact header scope must be observable; otherwise fail this
-        // source-level regression instead of reporting full restore parity.
-        assert!(restored_cookie_readback_matches(
+        // The pinned jar drops the Domain marker in both readback shapes.
+        // Compatibility requires the material but reports scope unobservable.
+        assert_eq!(host_readback[0].domain, domain_readback[0].domain);
+        assert!(restored_cookie_material_matches(
             &cookie("chatgpt.com"),
             &host_readback[0]
         ));
-        assert!(restored_cookie_readback_matches(
+        assert!(restored_cookie_material_matches(
             &cookie(".chatgpt.com"),
             &domain_readback[0]
         ));
-        assert!(!restored_cookie_readback_matches(
-            &host_readback[0],
-            &domain_readback[0]
-        ));
+        assert_eq!(
+            replay_fidelity_limits(&[cookie(".chatgpt.com")], 0).scope_readback,
+            "host_only_domain_scope_unobservable_in_jar_readback"
+        );
     }
 
     #[test]
@@ -2898,20 +2912,20 @@ mod restored_cookie_readback_scope_tests {
         let expected = cookie(".chatgpt.com");
         let mut actual = expected.clone();
         actual.name = "different-name".into();
-        assert!(!restored_cookie_readback_matches(&expected, &actual));
+        assert!(!restored_cookie_material_matches(&expected, &actual));
         actual = expected.clone();
         actual.path = "/other".into();
-        assert!(!restored_cookie_readback_matches(&expected, &actual));
+        assert!(!restored_cookie_material_matches(&expected, &actual));
         actual = expected.clone();
         actual.value = "other-synthetic-secret".into();
-        assert!(!restored_cookie_readback_matches(&expected, &actual));
+        assert!(!restored_cookie_material_matches(&expected, &actual));
         actual = expected.clone();
         actual.secure = false;
-        assert!(!restored_cookie_readback_matches(&expected, &actual));
+        assert!(!restored_cookie_material_matches(&expected, &actual));
         actual = expected.clone();
         actual.http_only = false;
-        assert!(!restored_cookie_readback_matches(&expected, &actual));
-        assert!(restored_cookie_readback_matches(&expected, &expected));
+        assert!(!restored_cookie_material_matches(&expected, &actual));
+        assert!(restored_cookie_material_matches(&expected, &expected));
     }
 }
 
@@ -2948,15 +2962,13 @@ pub fn restore_cookies(browser: &Browser, file: &SessionFile, provider: &str) ->
             "resolved duplicate provider cookie scopes before restore"
         );
     }
-    if dropped > 0
-        || fidelity.expiry == "expiry_unobservable_in_jar_readback"
-        || fidelity.same_site == "same_site_unobservable_in_jar_readback"
-    {
+    if !file.cookies.is_empty() {
         // Fixed labels only. Never log cookie names, domains, expiry times,
         // values or stable hashes. This cannot establish valid account login.
         tracing::debug!(
             provider,
             scope = fidelity.scope,
+            scope_readback = fidelity.scope_readback,
             expiry = fidelity.expiry,
             same_site = fidelity.same_site,
             "provider cookie replay fidelity is partially unobservable"
@@ -3012,13 +3024,14 @@ pub fn restore_cookies(browser: &Browser, file: &SessionFile, provider: &str) ->
         }
     }
     // set() only validates the URL; jar policy can silently discard a cookie.
-    // Verify exact persisted fields before claiming that a snapshot is active.
+    // Verify material presence before reporting jar application. The pinned
+    // jar does NOT expose host-only/Domain scope parity, expiry or SameSite.
     // Our Cookie wrapper zeroizes the temporary readback values on drop.
     let restored: Vec<Cookie> = store.get_all().into_iter().map(Cookie::from).collect();
     for cookie in expected_restores {
         if !restored
             .iter()
-            .any(|actual| restored_cookie_readback_matches(cookie, actual))
+            .any(|actual| restored_cookie_material_matches(cookie, actual))
         {
             failed_writes += 1;
         }
