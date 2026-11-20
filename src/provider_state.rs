@@ -1077,13 +1077,7 @@ mod bounded_request_diagnostic_tests {
             17_500,
         );
         registry.begin_request_attempt("metaai", SECOND);
-        registry.record_request_failure(
-            "metaai",
-            SECOND,
-            "backend_admission",
-            "timeout",
-            120_000,
-        );
+        registry.record_request_failure("metaai", SECOND, "backend_admission", "timeout", 120_000);
         registry.record_success("metaai");
         let meta_state_before = registry.status("metaai");
 
@@ -1104,20 +1098,8 @@ mod bounded_request_diagnostic_tests {
         assert_eq!(registry.status("metaai"), meta_state_before);
 
         // A late old-worker callback cannot resurrect an old failure.
-        old_worker.record_request_failure(
-            "chatgpt",
-            FIRST,
-            "json_completion",
-            "timeout",
-            120_000,
-        );
-        old_worker.record_request_failure(
-            "metaai",
-            SECOND,
-            "json_completion",
-            "timeout",
-            120_000,
-        );
+        old_worker.record_request_failure("chatgpt", FIRST, "json_completion", "timeout", 120_000);
+        old_worker.record_request_failure("metaai", SECOND, "json_completion", "timeout", 120_000);
         assert!(registry.last_failed_request("chatgpt").is_none());
         assert!(registry.last_failed_request("metaai").is_none());
 
