@@ -1180,6 +1180,10 @@ mod bounded_request_diagnostic_tests {
         assert_eq!(record.stage, "unknown");
         assert_eq!(record.reason, "unclassified");
         assert_eq!(record.duration_ms, 120_000);
+        assert_eq!(
+            record.source_failure_schema_version,
+            FAILURE_SOURCE_SCHEMA_VERSION
+        );
         for private in [
             "private.example",
             "bearer_secret",
@@ -1194,7 +1198,7 @@ mod bounded_request_diagnostic_tests {
                 .as_object()
                 .unwrap()
                 .len(),
-            5
+            6
         );
     }
 
