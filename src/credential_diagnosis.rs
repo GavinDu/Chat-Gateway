@@ -411,7 +411,11 @@ fn classify(e: &Evidence, now: u64) -> Diagnosis {
         // unrelated to this imported snapshot. Never blame replay/binding
         // unless Chrome explicitly claims the same canonical generation;
         // the global generation check above rejects mismatches.
-        if e.chrome.as_ref().and_then(|x| x.generation.as_deref()).is_none() {
+        if e.chrome
+            .as_ref()
+            .and_then(|x| x.generation.as_deref())
+            .is_none()
+        {
             return inconclusive(provider, "chrome_snapshot_correlation_missing");
         }
         return verdict(
