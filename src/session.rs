@@ -128,6 +128,22 @@ mod vault_key_file_tests {
             "CHAT_GATEWAY_VAULT_KEY_FILE must not be accessible by group or other users"
         );
         assert!(read_vault_key_file(&path).is_err());
+
+        // Preserve the original precheck semantics too: a file that was
+        // group-readable at inspection cannot be accepted by chmod'ing it
+        // private just before open.
+        let inspected_permissive = std::fs::symlink_metadata(&path).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let later_private = open_vault_key_file_no_follow(&path).unwrap();
+        assert_eq!(
+            checked_vault_key_file_identity(
+                &inspected_permissive,
+                &later_private.metadata().unwrap(),
+            )
+            .unwrap_err()
+            .to_string(),
+            "CHAT_GATEWAY_VAULT_KEY_FILE must not be accessible by group or other users"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -1745,7 +1761,9 @@ fn checked_vault_key_file_identity(
         if inspected.dev() != opened.dev() || inspected.ino() != opened.ino() {
             anyhow::bail!("CHAT_GATEWAY_VAULT_KEY_FILE changed during validation");
         }
-        if opened.permissions().mode() & 0o077 != 0 {
+        if inspected.permissions().mode() & 0o077 != 0
+            || opened.permissions().mode() & 0o077 != 0
+        {
             anyhow::bail!(
                 "CHAT_GATEWAY_VAULT_KEY_FILE must not be accessible by group or other users"
             );
