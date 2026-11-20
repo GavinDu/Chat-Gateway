@@ -95,6 +95,9 @@ struct AttemptEvidence {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct GatewayFailureEvidence {
+    /// Source-owned request failure emitter contract; absent/unknown older
+    /// installed binaries cannot claim this source's stage/reason semantics.
+    source_failure_schema_version: Option<u8>,
     request_id: String,
     stage: String,
     reason: String,
@@ -301,18 +304,16 @@ fn classify(e: &Evidence, now: u64) -> Diagnosis {
         {
             return inconclusive(provider, "conflicting_gateway_failure_stage");
         }
-        // Preserve the producer's stage/reason relationship. These pairs
-        // cannot be emitted by chat_handler; accepting them as independent
-        // fixed labels would let contradictory offline evidence blame a
-        // different request phase. Existing admission/attempt conflict wins
-        // above, so this additional check cannot mask that stronger evidence.
-        if (failure.stage == "candidate_admission"
-            && !matches!(
-                failure.reason.as_str(),
-                "provider_busy" | "candidate_skipped"
-            ))
-            || (failure.stage != "candidate_admission" && failure.reason == "candidate_skipped")
+        // A versionless historical status (or owner-supplied guess) cannot
+        // establish which binary's stage/reason grammar was actually used.
+        // Check causal request gates first so malformed or mismatched IDs
+        // retain their stronger fixed diagnostic reasons.
+        if failure.source_failure_schema_version
+            != Some(crate::provider_state::FAILURE_SOURCE_SCHEMA_VERSION)
         {
+            return inconclusive(provider, "source_schema_unverified");
+        }
+        if !crate::provider_state::source_failure_pair_valid(&failure.stage, &failure.reason) {
             return inconclusive(provider, "inconsistent_gateway_stage_reason");
         }
     }
@@ -526,7 +527,8 @@ mod tests {
         v["attempt"]["request_id"] = json!(ID);
         v["gateway_failure"] = json!({
             "request_id": ID,
-            "stage": "json_completion",
+            "source_failure_schema_version": crate::provider_state::FAILURE_SOURCE_SCHEMA_VERSION,
+            "stage": "first_stream_event",
             "reason": "backend_unavailable",
             "duration_ms": 120_000,
             "observed_at_ms": NOW
@@ -573,6 +575,62 @@ mod tests {
         let normal = checked(with_gateway_failure());
         assert_eq!(normal.category, "transport_or_extraction");
         assert!(!normal.live_proof);
+    }
+
+    #[test]
+    fn source_version_and_emitted_stage_reason_must_match_before_attribution() {
+        let mut v = with_gateway_failure();
+        assert_eq!(checked(v.clone()).category, "transport_or_extraction");
+
+        v["gateway_failure"].as_object_mut().unwrap().remove("source_failure_schema_version");
+        let legacy = checked(v.clone());
+        assert_eq!(legacy.reason, "source_schema_unverified");
+        assert!(!legacy.live_proof);
+        for wrong in [0_u8, 2, 255] {
+            v["gateway_failure"]["source_failure_schema_version"] = json!(wrong);
+            let result = checked(v.clone());
+            assert_eq!(result.reason, "source_schema_unverified");
+            assert!(!result.live_proof);
+        }
+
+        v["gateway_failure"]["source_failure_schema_version"] =
+            json!(crate::provider_state::FAILURE_SOURCE_SCHEMA_VERSION);
+        v["gateway_failure"]["stage"] = json!("json_completion");
+        v["gateway_failure"]["reason"] = json!("backend_unavailable");
+        assert_eq!(
+            checked(v.clone()).reason,
+            "inconsistent_gateway_stage_reason"
+        );
+        v["gateway_failure"]["reason"] = json!("unclassified");
+        assert_eq!(checked(v.clone()).category, "transport_or_extraction");
+
+        v["gateway_failure"]["stage"] = json!("backend_admission");
+        v["attempt"]["stage"] = json!("unknown");
+        assert_eq!(
+            checked(v.clone()).reason,
+            "inconsistent_gateway_stage_reason"
+        );
+        v["gateway_failure"]["reason"] = json!("timeout");
+        assert_eq!(
+            checked(v.clone()).reason,
+            "request_phase_or_terminal_evidence_missing"
+        );
+        v["gateway_failure"]["stage"] = json!("first_stream_event");
+        v["attempt"]["stage"] = json!("response");
+        assert_eq!(checked(v.clone()).category, "transport_or_extraction");
+
+        // The source version cannot override the existing stronger UUID and
+        // chronology fences; the returned diagnosis never includes identifiers.
+        v["gateway_failure"]["request_id"] = json!(OTHER_ID);
+        let mismatched = checked(v.clone());
+        assert_eq!(mismatched.reason, "gateway_request_id_mismatch");
+        let serialized = serde_json::to_string(&mismatched).unwrap();
+        assert!(!serialized.contains(ID));
+        assert!(!serialized.contains(OTHER_ID));
+        assert!(!mismatched.live_proof);
+        v["gateway_failure"]["request_id"] = json!(ID);
+        v["gateway_failure"]["source_failure_schema_version"] = json!("cookie=secret");
+        assert!(serde_json::from_value::<Evidence>(v).is_err());
     }
 
     #[test]
@@ -838,7 +896,7 @@ mod tests {
             checked(v.clone()).reason,
             "conflicting_gateway_failure_stage"
         );
-        v["gateway_failure"]["stage"] = json!("json_completion");
+        v["gateway_failure"]["stage"] = json!("first_stream_event");
         v["gateway_failure"]["reason"] = json!("session_expired");
         assert_eq!(
             checked(v.clone()).reason,
@@ -896,6 +954,11 @@ mod tests {
         // redacted adapter-input verdict on a source-verified failed attempt.
         for gateway_stage in ["first_stream_event", "json_completion"] {
             evidence["gateway_failure"]["stage"] = json!(gateway_stage);
+            evidence["gateway_failure"]["reason"] = json!(if gateway_stage == "json_completion" {
+                "unclassified"
+            } else {
+                "backend_unavailable"
+            });
             evidence["attempt"]["stage"] = json!("composer");
             assert_eq!(checked(evidence.clone()).category, "adapter_input");
         }
