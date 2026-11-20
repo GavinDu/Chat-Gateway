@@ -119,8 +119,18 @@ pub(super) async fn stage_provider_saved_snapshot(
     }
     // Keep source-owned validation before *any* Page allocation or navigation.
     // Discard untrusted error Display; this boundary never logs cookie metadata.
-    session::preflight_cookie_restore(snapshot, provider.name())
-        .map_err(|_| anyhow!("candidate_cookie_preflight_rejected"))?;
+    session::preflight_cookie_restore(snapshot, provider.name()).map_err(|error| {
+        if error
+            .downcast_ref::<session::ProviderSnapshotNoApplicableMaterialError>()
+            .is_some()
+        {
+            // The direct replay fence must not collapse the established
+            // staged-candidate no-material verdict into malformed metadata.
+            anyhow!("candidate_snapshot_no_applicable_provider_material")
+        } else {
+            anyhow!("candidate_cookie_preflight_rejected")
+        }
+    })?;
     // A cookie list containing only other providers' domains is not usable
     // material for this Page. Reject before allocating a private Browser or
     // navigating an anonymous site; storage-only candidates remain unverified.
