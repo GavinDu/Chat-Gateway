@@ -949,8 +949,9 @@ fn migrate_legacy_snapshot_with_remover(
 
 /// A periodic extension refresh often sends an identical cookie snapshot.
 /// Decrypting and comparing the existing vault avoids an unnecessary nonce,
-/// rewrite, fsync and read-back on every refresh. Corrupt/old-key records are
-/// not treated as matches, preserving the existing explicit re-link recovery.
+/// rewrite, fsync and read-back on every refresh. For the two active recovery
+/// providers, an existing but unreadable vault must stop the refresh before
+/// any overwrite: it may be recoverable with the previous key or backup.
 fn relay_vault_snapshot_unchanged(
     provider: &str,
     incoming: &SessionFile,
@@ -964,6 +965,13 @@ fn relay_vault_snapshot_unchanged(
     };
     let existing = match decrypt_session_snapshot(&ciphertext, provider, key) {
         Ok(file) => file,
+        Err(_) if matches!(provider, "chatgpt" | "metaai") => {
+            // Existing ciphertext may belong to an earlier key or be damaged.
+            // "Changed snapshot" would authorize write_session_file_atomically
+            // to replace it with a periodic relay capture. Preserve the bytes
+            // and keep the failure category independent of account validity.
+            anyhow::bail!("existing provider session vault cannot be authenticated");
+        }
         Err(_) => return Ok(false),
     };
     Ok(session_state_hash(&existing)? == session_state_hash(incoming)?)
