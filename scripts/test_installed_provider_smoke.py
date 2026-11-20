@@ -567,8 +567,17 @@ class ExecutionContractTests(unittest.TestCase):
                            if x["provider"] == "chatgpt")
                 self.assertEqual(row["json"]["status"], "passed")
                 self.assertEqual(row["sse"]["status"], "passed")
-                self.assertEqual(row["repeat"],
-                                 {"status": "failed", "category": expected})
+                self.assertEqual(row["repeat"]["status"], "failed")
+                self.assertEqual(row["repeat"]["category"], expected)
+                if fault == "duplicate_request":
+                    # The cross-turn duplicate check runs after both HTTP
+                    # responses are complete; it has no new failed request
+                    # to claim as the origin of that composite violation.
+                    self.assertNotIn("request_id", row["repeat"])
+                else:
+                    observed = row["repeat"]["request_id"]
+                    self.assertEqual(str(uuid.UUID(observed)), observed)
+                    self.assertNotEqual(uuid.UUID(observed).int, 0)
                 self.assertEqual(row["restart"]["status"], "skipped")
                 self.assertNotIn("Reply exactly", json.dumps(report))
                 self.assertNotIn("model-chatgpt", json.dumps(report))
