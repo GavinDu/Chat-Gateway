@@ -853,6 +853,13 @@ mod tests {
         let mut evidence = with_gateway_failure();
         for gateway_stage in ["candidate_admission", "backend_admission"] {
             evidence["gateway_failure"]["stage"] = json!(gateway_stage);
+            // Match the live producer's distinct admission reason vocabulary:
+            // candidate admission cannot emit backend_unavailable.
+            evidence["gateway_failure"]["reason"] = json!(if gateway_stage == "candidate_admission" {
+                "candidate_skipped"
+            } else {
+                "backend_unavailable"
+            });
             for attempted_phase in [
                 "bootstrap",
                 "composer",
