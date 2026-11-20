@@ -484,6 +484,28 @@ function safeProviderIssueLabel(value, allowed) {
     ? value.replaceAll("_", " ") : "unverified status";
 }
 
+// Relay activation is independent of authenticated account readiness. Only
+// source-owned fixed error codes may become human-readable text. Pending HTTP
+// timeout means the worker might still finish; it is not a failed login.
+const GATEWAY_ACTIVATION_ISSUES = new Set([
+  "wait_expired", "browser_worker_unavailable", "refresh_failed",
+  "provider_assets_blocked", "provider_document_denied",
+  "manual_verification_required", "provider_session_expired",
+  "provider_session_no_applicable_material"
+]);
+function safeActivationIssueDetail(item) {
+  if (item.enabled !== true || item.linked !== true ||
+      (item.activation !== "pending" && item.activation !== "failed")) return null;
+  const label = safeProviderIssueLabel(item.activation_issue, GATEWAY_ACTIVATION_ISSUES);
+  if (label === null) return null;
+  // A terminal issue on a still-pending attempt, or a wait timeout reported
+  // as terminal, is contradictory status evidence. Never infer account state.
+  if ((item.activation === "pending") !== (item.activation_issue === "wait_expired")) {
+    return "Activation detail: unverified status";
+  }
+  return "Activation detail: " + label;
+}
+
 // Worker diagnostics timestamps originate from new Date().toISOString().
 // Date.parse alone also accepts browser-dependent, noncanonical human strings;
 // never echo those raw values (which can be poisoned by a stale worker).
@@ -666,6 +688,7 @@ async function refreshStatus(force = false) {
       : safeLastFailedRequest(item.provider, item.last_failed_request);
     status.textContent = [enabled, linked, browser, auth,
       ...(activation ? [activation] : []),
+      ...(safeActivationIssueDetail(item) ? [safeActivationIssueDetail(item)] : []),
       ...(blocker ? [blocker] : []),
       ...(runtimeIssue ? [runtimeIssue] : []),
       ...(extensionIssue ? ["Extension sync: " + extensionIssue] : []),
