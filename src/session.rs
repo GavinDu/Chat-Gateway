@@ -4809,10 +4809,18 @@ mod replay_material_coverage_tests {
         // provider as having cookie expiry and SameSite replay limitations.
         let unrelated = replay_fidelity_limits(&file.cookies, normalized);
         assert_eq!(unrelated.expiry, "expiry_unobservable_in_jar_readback");
-        assert_eq!(unrelated.same_site, "same_site_unobservable_in_jar_readback");
+        assert_eq!(
+            unrelated.same_site,
+            "same_site_unobservable_in_jar_readback"
+        );
 
         let redacted = format!("{fidelity:?}");
-        for private in ["SID", "foreign-private-value", "selected-private-value", "meta.ai"] {
+        for private in [
+            "SID",
+            "foreign-private-value",
+            "selected-private-value",
+            "meta.ai",
+        ] {
             assert!(!redacted.contains(private));
         }
     }
