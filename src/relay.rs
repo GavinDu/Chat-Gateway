@@ -1991,9 +1991,7 @@ fn relay_import_failure_category(error: &anyhow::Error) -> &'static str {
 
 /// Only fixed, source-authenticated categories may determine the public
 /// error. Do not pass through upstream messages, paths, cookies or key data.
-fn relay_import_failure_response_parts(
-    category: &str,
-) -> (StatusCode, &'static str, &'static str) {
+fn relay_import_failure_response_parts(category: &str) -> (StatusCode, &'static str, &'static str) {
     match category {
         "persistence_worker_unavailable" => (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -2093,7 +2091,14 @@ mod relay_import_diagnostic_redaction_tests {
         assert_eq!(code, "session_vault_unreadable");
         assert!(message.contains("preserve"));
         assert!(message.contains("vault key"));
-        for disallowed in ["sign in", "login", "cookie=", "bearer", "token=", "/sessions/"] {
+        for disallowed in [
+            "sign in",
+            "login",
+            "cookie=",
+            "bearer",
+            "token=",
+            "/sessions/",
+        ] {
             assert!(!message.contains(disallowed));
             assert!(!code.contains(disallowed));
         }
