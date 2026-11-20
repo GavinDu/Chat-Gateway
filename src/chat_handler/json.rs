@@ -80,7 +80,12 @@ pub(super) async fn json_provider_response(
     )
     .await;
     if let Some(error) = persist_error {
-        tracing::error!(conversation_id = %conversation_id, %error, "conversation persistence failed");
+        tracing::error!(
+            request_id,
+            provider,
+            failure_category = persistence_failure_log_category(&error),
+            "conversation persistence failed"
+        );
         return Ok(api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "server_error",
