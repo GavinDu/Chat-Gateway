@@ -773,11 +773,10 @@ test("typed 409 vault failure preserves credentials and gives key recovery guida
 });
 
 test("untyped or status-mismatched vault errors cannot impersonate protected recovery", async () => {
-  for (const [status, code, responseBody] of [
-    [409,"unexpected_error", {error:{code:"unexpected_error",message:"private bearer"}}],
-    [400,"session_vault_unreadable", {error:{code:"session_vault_unreadable",
-      message:"private token"}}],
-    [409,"session_vault_unreadable", {error:{code:"unrelated_error",
+  for (const [status, responseBody] of [
+    [409, {error:{code:"unexpected_error",message:"private bearer"}}],
+    [400, {error:{code:"session_vault_unreadable",message:"private token"}}],
+    [409, {error:{code:"unrelated_error",
       message:"session_vault_unreadable private password"}}],
   ]) {
     const storage = {
