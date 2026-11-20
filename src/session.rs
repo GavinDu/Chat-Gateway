@@ -2381,6 +2381,76 @@ mod cookie_restore_result_tests {
     }
 
     #[test]
+    fn tied_cookie_identity_fingerprint_uses_all_persisted_metadata() {
+        let primary = Cookie {
+            name: "synthetic".into(),
+            value: "synthetic-credential-not-real".into(),
+            domain: ".chatgpt.com".into(),
+            path: "/".into(),
+            secure: true,
+            http_only: true,
+            expires: Some(2_000_000_000.0),
+            same_site: Some("Strict".into()),
+        };
+        // Legacy snapshots may contain tied identity/value records with
+        // different expiry or policy. Reordering them is *not* a new import.
+        let mut secondary = primary.clone();
+        secondary.secure = false;
+        secondary.http_only = false;
+        secondary.expires = None;
+        secondary.same_site = Some("Lax".into());
+
+        let original = SessionFile {
+            local_storage: HashMap::from([("fixture".into(), "value".into())]),
+            cookies: vec![primary.clone(), secondary.clone()],
+            ts: "synthetic-old".into(),
+        };
+        let reversed = SessionFile {
+            local_storage: original.local_storage.clone(),
+            cookies: vec![secondary.clone(), primary.clone()],
+            ts: "synthetic-new".into(),
+        };
+        let original_fingerprint = session_state_hash(&original).unwrap();
+        // Do not print any credential-derived hash, including on failure.
+        assert!(
+            original_fingerprint == session_state_hash(&reversed).unwrap(),
+            "reordering tied cookies must not invalidate a saved snapshot"
+        );
+
+        let mutations: [fn(&mut Cookie); 7] = [
+            |c| c.secure = false,
+            |c| c.http_only = false,
+            |c| c.expires = Some(2_000_000_001.0),
+            |c| c.same_site = Some("Lax".into()),
+            |c| c.value = "rotated-synthetic-value".into(),
+            |c| c.domain = "chatgpt.com".into(),
+            |c| c.path = "/distinct".into(),
+        ];
+        for mutate in mutations {
+            let mut changed = primary.clone();
+            mutate(&mut changed);
+            let changed_snapshot = SessionFile {
+                local_storage: original.local_storage.clone(),
+                cookies: vec![changed, secondary.clone()],
+                ts: original.ts.clone(),
+            };
+            assert!(
+                original_fingerprint != session_state_hash(&changed_snapshot).unwrap(),
+                "changing persisted scope, value or policy must change the fingerprint"
+            );
+        }
+        let with_changed_storage = SessionFile {
+            local_storage: HashMap::from([("fixture".into(), "updated".into())]),
+            cookies: original.cookies.clone(),
+            ts: original.ts.clone(),
+        };
+        assert!(
+            original_fingerprint != session_state_hash(&with_changed_storage).unwrap(),
+            "changing origin storage must change the fingerprint"
+        );
+    }
+
+    #[test]
     fn session_state_hash_changes_when_cookie_value_rotates() {
         let mut file = SessionFile {
             local_storage: std::collections::HashMap::new(),
