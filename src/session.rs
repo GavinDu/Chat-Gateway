@@ -1848,12 +1848,15 @@ pub(crate) fn session_state_hash(file: &SessionFile) -> Result<String> {
     let local_storage: BTreeMap<&String, &String> = file.local_storage.iter().collect();
     let mut cookies = file.cookies.clone();
     cookies.sort_by(|left, right| {
-        (&left.domain, &left.name, &left.path, &left.value).cmp(&(
-            &right.domain,
-            &right.name,
-            &right.path,
-            &right.value,
-        ))
+        (&left.domain, &left.name, &left.path, &left.value)
+            .cmp(&(&right.domain, &right.name, &right.path, &right.value))
+            .then_with(|| left.secure.cmp(&right.secure))
+            .then_with(|| left.http_only.cmp(&right.http_only))
+            // Expiry is an f64 from imported browser metadata. Compare the
+            // serialized bit pattern for deterministic ties without a partial
+            // ordering/unwrap on malformed legacy values.
+            .then_with(|| left.expires.map(f64::to_bits).cmp(&right.expires.map(f64::to_bits)))
+            .then_with(|| left.same_site.cmp(&right.same_site))
     });
     let serialized = Zeroizing::new(serde_json::to_vec(&(local_storage, cookies))?);
     let digest = Sha256::digest(&*serialized);
