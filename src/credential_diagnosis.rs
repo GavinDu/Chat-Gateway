@@ -307,7 +307,10 @@ fn classify(e: &Evidence, now: u64) -> Diagnosis {
         // different request phase. Existing admission/attempt conflict wins
         // above, so this additional check cannot mask that stronger evidence.
         if (failure.stage == "candidate_admission"
-            && !matches!(failure.reason.as_str(), "provider_busy" | "candidate_skipped"))
+            && !matches!(
+                failure.reason.as_str(),
+                "provider_busy" | "candidate_skipped"
+            ))
             || (failure.stage != "candidate_admission" && failure.reason == "candidate_skipped")
         {
             return inconclusive(provider, "inconsistent_gateway_stage_reason");
@@ -566,7 +569,7 @@ mod tests {
             assert!(!result.live_proof);
         }
 
-        // Actual, separately checked JSON completion fixtures still work.
+        // Legacy synthetic JSON completion fixtures retain their existing behavior.
         let normal = checked(with_gateway_failure());
         assert_eq!(normal.category, "transport_or_extraction");
         assert!(!normal.live_proof);
