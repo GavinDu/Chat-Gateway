@@ -867,8 +867,7 @@ mod relay_import_noop_tests {
 mod relay_vault_precommit_tests {
     use super::*;
 
-    fn synthetic(provider: &str, domain: &str, value: &str) -> SessionFile {
-        let _ = provider;
+    fn synthetic(domain: &str, value: &str) -> SessionFile {
         SessionFile {
             local_storage: HashMap::new(),
             cookies: vec![Cookie {
@@ -900,8 +899,8 @@ mod relay_vault_precommit_tests {
             ("metaai", ".meta.ai", "chatgpt"),
         ] {
             let destination = root.join(format!("{provider}.vault"));
-            let old = synthetic(provider, domain, "old-synthetic-session");
-            let new = synthetic(provider, domain, "new-synthetic-session");
+            let old = synthetic(domain, "old-synthetic-session");
+            let new = synthetic(domain, "new-synthetic-session");
             let original_ciphertext = encrypt_session_snapshot(&old, provider, &key).unwrap();
             let updated_ciphertext = encrypt_session_snapshot(&new, provider, &key).unwrap();
             write_session_file_atomically(&destination, &original_ciphertext).unwrap();
@@ -923,7 +922,9 @@ mod relay_vault_precommit_tests {
                     },
                 )
                 .unwrap_err();
-                assert!(failed.downcast_ref::<RelayVaultPrecommitVerificationError>().is_some());
+                assert!(failed
+                    .downcast_ref::<RelayVaultPrecommitVerificationError>()
+                    .is_some());
                 assert_eq!(
                     failed.to_string(),
                     "session-vault precommit verification failed"
@@ -935,19 +936,14 @@ mod relay_vault_precommit_tests {
                 assert_eq!(entries, 1);
             }
 
-            write_session_file_atomically_checked(
-                &destination,
-                &updated_ciphertext,
-                |staged| verify_relay_vault_staging(staged, provider, &new, &key),
-            )
+            write_session_file_atomically_checked(&destination, &updated_ciphertext, |staged| {
+                verify_relay_vault_staging(staged, provider, &new, &key)
+            })
             .unwrap();
             assert_eq!(std::fs::read(&destination).unwrap(), updated_ciphertext);
-            let opened = decrypt_session_snapshot(
-                &std::fs::read(&destination).unwrap(),
-                provider,
-                &key,
-            )
-            .unwrap();
+            let opened =
+                decrypt_session_snapshot(&std::fs::read(&destination).unwrap(), provider, &key)
+                    .unwrap();
             assert!(
                 session_state_hash(&opened).unwrap() == session_state_hash(&new).unwrap(),
                 "verified new vault must match the expected synthetic snapshot"
@@ -956,14 +952,18 @@ mod relay_vault_precommit_tests {
         }
 
         let fresh = root.join("fresh.vault");
-        let err = write_session_file_atomically_checked(
-            &fresh,
-            b"synthetic-not-a-session",
-            |_staged| Err(anyhow::Error::new(RelayVaultPrecommitVerificationError)),
-        )
-        .unwrap_err();
-        assert!(err.downcast_ref::<RelayVaultPrecommitVerificationError>().is_some());
-        assert!(!fresh.exists(), "failed first-link verification must not publish a vault");
+        let err =
+            write_session_file_atomically_checked(&fresh, b"synthetic-not-a-session", |_staged| {
+                Err(anyhow::Error::new(RelayVaultPrecommitVerificationError))
+            })
+            .unwrap_err();
+        assert!(err
+            .downcast_ref::<RelayVaultPrecommitVerificationError>()
+            .is_some());
+        assert!(
+            !fresh.exists(),
+            "failed first-link verification must not publish a vault"
+        );
         assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
         std::fs::remove_dir_all(root).unwrap();
     }
