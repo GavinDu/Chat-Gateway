@@ -926,6 +926,7 @@ mod relay_import_noop_tests {
                     error.to_string(),
                     "existing provider session vault cannot be authenticated"
                 );
+                assert!(error.downcast_ref::<RelayVaultAuthenticationError>().is_some());
                 assert_eq!(
                     std::fs::read(&target).unwrap(),
                     invalid_bytes,
@@ -1036,6 +1037,20 @@ fn migrate_legacy_snapshot_with_remover(
     Ok(verified)
 }
 
+/// A corrupt or old-key local vault is not evidence that the provider's
+/// browser login expired. Preserve this fixed typed reason for owner-facing
+/// diagnosis without exposing crypto internals or session material.
+#[derive(Debug)]
+pub struct RelayVaultAuthenticationError;
+
+impl std::fmt::Display for RelayVaultAuthenticationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("existing provider session vault cannot be authenticated")
+    }
+}
+
+impl std::error::Error for RelayVaultAuthenticationError {}
+
 /// A periodic extension refresh often sends an identical cookie snapshot.
 /// Decrypting and comparing the existing vault avoids an unnecessary nonce,
 /// rewrite, fsync and read-back on every refresh. For the two active recovery
@@ -1059,7 +1074,7 @@ fn relay_vault_snapshot_unchanged(
             // "Changed snapshot" would authorize write_session_file_atomically
             // to replace it with a periodic relay capture. Preserve the bytes
             // and keep the failure category independent of account validity.
-            anyhow::bail!("existing provider session vault cannot be authenticated");
+            return Err(anyhow::Error::new(RelayVaultAuthenticationError));
         }
         Err(_) => return Ok(false),
     };
