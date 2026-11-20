@@ -509,6 +509,105 @@ pub(crate) fn diagnose_file(path: &Path) -> anyhow::Result<String> {
         .map_err(|_| anyhow::anyhow!("credential diagnosis unavailable"))
 }
 
+#[cfg(all(test, unix))]
+mod evidence_file_identity_tests {
+    use super::*;
+    use std::os::unix::fs::symlink;
+
+    #[test]
+    fn checked_file_and_replaced_symlink_have_different_file_ids_before_read() {
+        let root = std::env::temp_dir().join(format!(
+            "chat-gateway-evidence-identity-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir(&root).unwrap();
+        let checked = root.join("owner-evidence.json");
+        let alternate = root.join("different-evidence.json");
+        let original = root.join("original-evidence.json");
+        // Equal lengths prove a size-only comparison is insufficient.
+        fs::write(&checked, b"safe0").unwrap();
+        fs::write(&alternate, b"other").unwrap();
+        let before = fs::symlink_metadata(&checked).unwrap();
+
+        let stable = fs::File::open(&checked).unwrap();
+        checked_evidence_file_identity(&before, &stable.metadata().unwrap()).unwrap();
+
+        // Simulate the deterministic state at a race boundary, without a
+        // flaky thread: the pathname is now a symlink to a *different* file
+        // even though the same-size old check passed.
+        fs::rename(&checked, &original).unwrap();
+        symlink(&alternate, &checked).unwrap();
+        let swapped = fs::File::open(&checked).unwrap();
+        let error =
+            checked_evidence_file_identity(&before, &swapped.metadata().unwrap()).unwrap_err();
+        assert_eq!(error.to_string(), "credential evidence unavailable");
+        assert!(!error.to_string().contains("different-evidence"));
+        assert!(!error.to_string().contains("other"));
+
+        // A swapped plain file (no symlink involved) must also fail closed.
+        fs::remove_file(&checked).unwrap();
+        fs::write(&checked, b"other").unwrap();
+        let plain = fs::File::open(&checked).unwrap();
+        assert_eq!(
+            checked_evidence_file_identity(&before, &plain.metadata().unwrap())
+                .unwrap_err()
+                .to_string(),
+            "credential evidence unavailable"
+        );
+
+        let link = root.join("explicit-symlink.json");
+        symlink(&alternate, &link).unwrap();
+        assert_eq!(
+            diagnose_file(&link).unwrap_err().to_string(),
+            "credential evidence unavailable"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn stable_evidence_is_read_but_oversized_and_nonregular_descriptors_are_denied() {
+        let root = std::env::temp_dir().join(format!(
+            "chat-gateway-evidence-regular-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir(&root).unwrap();
+        let file = root.join("synthetic-evidence.json");
+        fs::write(&file, br#"{"provider":"chatgpt"}"#).unwrap();
+        let diagnosis = diagnose_file(&file).unwrap();
+        let report: serde_json::Value = serde_json::from_str(&diagnosis).unwrap();
+        assert_eq!(report["provider"], "chatgpt");
+        assert_eq!(report["category"], "inconclusive");
+        assert_eq!(report["live_proof"], false);
+        assert!(!diagnosis.contains("cookie"));
+        assert!(!diagnosis.contains("vault"));
+
+        fs::write(&file, vec![b'X'; MAX_FILE as usize + 1]).unwrap();
+        assert_eq!(
+            diagnose_file(&file).unwrap_err().to_string(),
+            "credential evidence unavailable"
+        );
+        let before = fs::symlink_metadata(&file).unwrap();
+        let opened = fs::File::open(&file).unwrap();
+        assert_eq!(
+            checked_evidence_file_identity(&before, &opened.metadata().unwrap())
+                .unwrap_err()
+                .to_string(),
+            "credential evidence unavailable"
+        );
+        // A directory cannot be smuggled through an otherwise valid size
+        // check just because File::open on Unix supports directory handles.
+        let checked = fs::symlink_metadata(&root).unwrap();
+        let opened = fs::File::open(&root).unwrap();
+        assert_eq!(
+            checked_evidence_file_identity(&checked, &opened.metadata().unwrap())
+                .unwrap_err()
+                .to_string(),
+            "credential evidence unavailable"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
