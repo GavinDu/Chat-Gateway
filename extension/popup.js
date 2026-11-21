@@ -28,6 +28,15 @@ function showPendingApproval(pending) {
 // The result is not a gateway snapshot or an Obscura credential proof.
 // Never cache it across a tab change, connection switch, or popup closure.
 let chatgptCheckGeneration = 0;
+// Only explicit checks can cancel a previous, still-running paired account
+// request. The controller is popup-local and never controls cookie sync or
+// saved provider sessions.
+let activeChatgptPairedRequest = null;
+function cancelSupersededChatgptAccountRequest() {
+  const previous = activeChatgptPairedRequest;
+  activeChatgptPairedRequest = null;
+  previous?.abort();
+}
 const CHATGPT_VERIFIER_REASONS = new Set([
   "first_party_session_confirmed", "provider_rejected_session",
   "provider_reports_no_session", "provider_or_network_blocked",
@@ -50,6 +59,7 @@ function firstPartyChatgptTab(url) {
 
 async function verifyChatgptActiveTab() {
   const attempt = ++chatgptCheckGeneration;
+  cancelSupersededChatgptAccountRequest();
   // A Chrome tab/script/permission callback may settle after another explicit
   // verification was started. Only the current attempt can publish a verdict.
   const report = text => {
@@ -229,6 +239,7 @@ function sameLinkedChatgptConnection(before, after) {
 
 async function compareChatgptBrowserAndGateway() {
   const attempt = ++chatgptCheckGeneration;
+  cancelSupersededChatgptAccountRequest();
   const action = $("verify-chatgpt-gateway");
   const chromeOnlyAction = $("verify-chatgpt");
   action.disabled = true;
@@ -291,6 +302,7 @@ async function compareChatgptBrowserAndGateway() {
       provider:"chatgpt",linkEpoch:before.providerLinkEpochs.chatgpt
     };
     const controller = new AbortController();
+    activeChatgptPairedRequest = controller;
     let deadline;
     let gatewayRecord;
     try {
@@ -315,6 +327,10 @@ async function compareChatgptBrowserAndGateway() {
       ]);
     } finally {
       clearTimeout(deadline);
+      // An older check's cleanup must not erase the newer request's owner.
+      if (activeChatgptPairedRequest === controller) {
+        activeChatgptPairedRequest = null;
+      }
     }
     if (attempt !== chatgptCheckGeneration) return;
     const gatewayAuth = safeWarmChatgptAccountRecord(gatewayRecord);
