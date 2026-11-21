@@ -1835,13 +1835,32 @@ pub(super) fn browser_thread(
                                     // Legacy pages intentionally retain the old fallback.
                                     let session_browser =
                                         page.browser_for_session_save(&browser_for_save);
-                                    if let Err(error) = session::save_session_if_changed(
+                                    match session::save_session_if_changed(
                                         &session_browser,
                                         &page,
                                         &provider_name,
                                         &send_session_write_tracker,
                                     ).await {
-                                        tracing::warn!(provider = %provider_name, category = session_worker_failure_category(&error), "rotated session snapshot failed");
+                                        Ok(session::SessionSaveOutcome::DeferredRateLimited)
+                                            if matches!(provider_name.as_str(), "chatgpt" | "metaai") =>
+                                        {
+                                            // The reply completed, but a rotated
+                                            // credential snapshot is not durable.
+                                            // Never log the cookie or fingerprint.
+                                            tracing::warn!(
+                                                provider = %provider_name,
+                                                category = "session_snapshot_changed_write_deferred",
+                                                "rotated session snapshot is not yet durable"
+                                            );
+                                        }
+                                        Err(error) => {
+                                            tracing::warn!(
+                                                provider = %provider_name,
+                                                category = session_worker_failure_category(&error),
+                                                "rotated session snapshot failed"
+                                            );
+                                        }
+                                        _ => {}
                                     }
                                 }
                             });

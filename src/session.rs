@@ -36,6 +36,32 @@ impl SessionWriteTracker {
 }
 const SESSION_WRITE_INTERVAL: Duration = Duration::from_secs(60);
 
+/// Exact durability result of a post-send snapshot check. A changed snapshot
+/// skipped by the write throttle is not on disk and is not a successful save.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionSaveOutcome {
+    Unchanged,
+    DeferredRateLimited,
+    Persisted,
+}
+
+/// Decide whether a snapshot requires no immediate disk write. Throttling a
+/// missing prior snapshot would silently leave zero durable credentials even
+/// though the caller observed an Ok result. Never suppress that first write.
+fn nonpersisted_session_save_outcome(
+    previous_hash: Option<&str>,
+    current_hash: &str,
+    rate_limited: bool,
+) -> Option<SessionSaveOutcome> {
+    if previous_hash == Some(current_hash) {
+        Some(SessionSaveOutcome::Unchanged)
+    } else if previous_hash.is_some() && rate_limited {
+        Some(SessionSaveOutcome::DeferredRateLimited)
+    } else {
+        None
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct SessionFile {
     pub local_storage: std::collections::HashMap<String, String>,
@@ -415,7 +441,7 @@ pub trait SessionStore {
         page: &Page,
         provider: &str,
         tracker: &SessionWriteTracker,
-    ) -> Result<()>;
+    ) -> Result<SessionSaveOutcome>;
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -434,7 +460,7 @@ impl SessionStore for FileSessionStore {
         page: &Page,
         provider: &str,
         tracker: &SessionWriteTracker,
-    ) -> Result<()> {
+    ) -> Result<SessionSaveOutcome> {
         save_session_if_changed_file(browser, page, provider, tracker).await
     }
 }
@@ -466,7 +492,7 @@ impl SessionStore for VaultSessionStore {
         page: &Page,
         provider: &str,
         tracker: &SessionWriteTracker,
-    ) -> Result<()> {
+    ) -> Result<SessionSaveOutcome> {
         let file = capture_session(browser, page, provider).await?;
         self.save_file_if_changed(file, provider, tracker).await
     }
@@ -563,7 +589,7 @@ impl VaultSessionStore {
         mut file: SessionFile,
         provider: &str,
         tracker: &SessionWriteTracker,
-    ) -> Result<()> {
+    ) -> Result<SessionSaveOutcome> {
         let key = vault_key_from_env()?;
         let destination = session_vault_path(provider)?;
         let previous = match std::fs::read(&destination) {
@@ -577,16 +603,24 @@ impl VaultSessionStore {
         let current_hash = session_state_hash(&file)?;
         let previous_hash = previous.as_ref().map(session_state_hash).transpose()?;
 
-        if previous_hash.as_deref() == Some(current_hash.as_str()) {
-            remove_legacy_session_snapshot(provider)?;
-            return Ok(());
-        }
-        if tracker.is_rate_limited(provider, Instant::now()) {
-            tracing::debug!(
-                provider,
-                "encrypted session changed but snapshot write is rate-limited"
-            );
-            return Ok(());
+        if let Some(outcome) = nonpersisted_session_save_outcome(
+            previous_hash.as_deref(),
+            &current_hash,
+            tracker.is_rate_limited(provider, Instant::now()),
+        ) {
+            match outcome {
+                SessionSaveOutcome::Unchanged => remove_legacy_session_snapshot(provider)?,
+                SessionSaveOutcome::DeferredRateLimited => {
+                    tracing::debug!(
+                        provider,
+                        "encrypted session changed but snapshot write is rate-limited"
+                    );
+                }
+                SessionSaveOutcome::Persisted => {
+                    unreachable!("a skipped write cannot be persisted")
+                }
+            }
+            return Ok(outcome);
         }
         ensure_private_session_dir(Path::new("sessions")).await?;
         let encrypted = encrypt_session_snapshot(&file, provider, &key)?;
@@ -599,7 +633,56 @@ impl VaultSessionStore {
             cookies = file.cookies.len(),
             "encrypted session saved"
         );
-        Ok(())
+        Ok(SessionSaveOutcome::Persisted)
+    }
+}
+
+#[cfg(test)]
+mod session_save_outcome_tests {
+    use super::*;
+
+    #[test]
+    fn only_existing_changed_snapshots_can_be_deferred_by_throttle() {
+        use SessionSaveOutcome::{DeferredRateLimited, Unchanged};
+        assert_eq!(
+            nonpersisted_session_save_outcome(Some("same"), "same", true),
+            Some(Unchanged)
+        );
+        assert_eq!(
+            nonpersisted_session_save_outcome(Some("same"), "same", false),
+            Some(Unchanged)
+        );
+        assert_eq!(
+            nonpersisted_session_save_outcome(Some("old"), "rotated", true),
+            Some(DeferredRateLimited)
+        );
+        assert_eq!(
+            nonpersisted_session_save_outcome(Some("old"), "rotated", false),
+            None
+        );
+        assert_eq!(
+            nonpersisted_session_save_outcome(None, "first-snapshot", true),
+            None,
+            "a missing session must still be persisted while the tracker is rate limited"
+        );
+        assert_eq!(
+            nonpersisted_session_save_outcome(None, "first-snapshot", false),
+            None
+        );
+    }
+
+    #[test]
+    fn corrupt_existing_file_is_not_a_missing_snapshot() {
+        let path = std::env::temp_dir().join(format!(
+            "chat-gateway-existing-snapshot-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(&path, b"{ invalid session fixture").unwrap();
+        assert!(
+            load_session_file_from_path(&path).is_err(),
+            "malformed owner state must not authorize a first-save overwrite"
+        );
+        std::fs::remove_file(&path).unwrap();
     }
 }
 
@@ -2198,7 +2281,7 @@ pub async fn save_session_if_changed(
     page: &Page,
     provider: &str,
     tracker: &SessionWriteTracker,
-) -> Result<()> {
+) -> Result<SessionSaveOutcome> {
     if matches!(
         std::env::var("CHAT_GATEWAY_SESSION_STORE").as_deref(),
         Ok("vault")
@@ -2218,27 +2301,34 @@ async fn save_session_if_changed_file(
     page: &Page,
     provider: &str,
     tracker: &SessionWriteTracker,
-) -> Result<()> {
+) -> Result<SessionSaveOutcome> {
     let file = capture_session(browser, page, provider).await?;
     let current_hash = session_state_hash(&file)?;
     let destination = session_path(provider)?;
-    let previous_hash = std::fs::read(&destination)
-        .ok()
-        .map(Zeroizing::new)
-        .and_then(|bytes| serde_json::from_slice::<SessionFile>(&bytes).ok())
-        .and_then(|previous| session_state_hash(&previous).ok());
+    // A malformed or unreadable existing snapshot is NOT a missing one.
+    // Preserve it and fail closed rather than overwriting owner state under
+    // the first-write throttle exception. The shared loader distinguishes
+    // genuine NotFound from I/O and parsing errors without logging secrets.
+    let previous_hash = load_session_file_from_path(Path::new(&destination))?
+        .as_ref()
+        .map(session_state_hash)
+        .transpose()?;
 
-    if previous_hash.as_deref() == Some(current_hash.as_str()) {
-        return Ok(());
+    if let Some(outcome) = nonpersisted_session_save_outcome(
+        previous_hash.as_deref(),
+        &current_hash,
+        tracker.is_rate_limited(provider, Instant::now()),
+    ) {
+        if outcome == SessionSaveOutcome::DeferredRateLimited {
+            tracing::debug!(
+                provider,
+                "session changed but snapshot write is rate-limited"
+            );
+        }
+        return Ok(outcome);
     }
-    if tracker.is_rate_limited(provider, Instant::now()) {
-        tracing::debug!(
-            provider,
-            "session changed but snapshot write is rate-limited"
-        );
-        return Ok(());
-    }
-    write_session_snapshot(file, provider, tracker).await
+    write_session_snapshot(file, provider, tracker).await?;
+    Ok(SessionSaveOutcome::Persisted)
 }
 
 async fn write_session_snapshot(
