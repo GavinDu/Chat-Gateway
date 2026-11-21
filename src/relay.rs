@@ -1344,6 +1344,22 @@ fn account_probe_result(
     }
 }
 
+/// Distinguish configuration from unsupported first-party account evidence.
+/// Disabled providers cannot be probed, regardless of whether their account
+/// verification contract is implemented. This classification performs no IO.
+fn account_probe_preflight_result(
+    provider: &str,
+    enabled: bool,
+) -> Option<(&'static str, &'static str)> {
+    if !enabled {
+        Some(("unknown", "provider_disabled"))
+    } else if provider == "metaai" {
+        Some(("unsupported", "metaai_account_verifier_not_established"))
+    } else {
+        None
+    }
+}
+
 fn account_probe_worker_consistent(start: u64, end: u64, alive: bool) -> bool {
     alive && start == end
 }
@@ -1422,18 +1438,12 @@ pub async fn verify_first_party_account(
             )
         }
     };
-    // Meta AI currently has no authoritative signed-in-vs-anonymous
-    // account contract (#1329). Do not touch its browser or invent GraphQL.
-    if provider_name == "metaai" {
-        return account_probe_response(
-            provider_name,
-            "unsupported",
-            "metaai_account_verifier_not_established",
-            None,
-        );
-    }
-    if !app.cfg.provider(provider_name).is_some_and(|c| c.enabled) {
-        return account_probe_response(provider_name, "unknown", "provider_disabled", None);
+    // A disabled provider is not an account-verifier attempt. For enabled
+    // Meta AI, no authoritative first-party signed-in contract exists (#1329);
+    // do not touch its page or invent a private endpoint.
+    let enabled = app.cfg.provider(provider_name).is_some_and(|c| c.enabled);
+    if let Some((verdict, reason)) = account_probe_preflight_result(provider_name, enabled) {
+        return account_probe_response(provider_name, verdict, reason, None);
     }
 
     // Relay imports/unlinks hold this same gate until actual browser activation
@@ -1493,6 +1503,29 @@ mod first_party_account_relay_tests {
             account_probe_result(V::Unsupported),
             ("unsupported", "account_verifier_not_established")
         );
+    }
+
+    #[test]
+    fn disabled_account_probe_precedes_metaai_unsupported_verifier() {
+        assert_eq!(
+            account_probe_preflight_result("metaai", false),
+            Some(("unknown", "provider_disabled"))
+        );
+        assert_eq!(
+            account_probe_preflight_result("chatgpt", false),
+            Some(("unknown", "provider_disabled"))
+        );
+        assert_eq!(
+            account_probe_preflight_result("metaai", true),
+            Some(("unsupported", "metaai_account_verifier_not_established"))
+        );
+        // Enabled ChatGPT alone reaches the existing bounded, gated
+        // read-only verifier. None of these early states claim an account.
+        assert_eq!(account_probe_preflight_result("chatgpt", true), None);
+        for (provider, enabled) in [("metaai", false), ("chatgpt", false), ("metaai", true)] {
+            let (verdict, _) = account_probe_preflight_result(provider, enabled).unwrap();
+            assert_ne!(verdict, "verified");
+        }
     }
 
     #[test]
