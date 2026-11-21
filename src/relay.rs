@@ -2022,9 +2022,28 @@ fn relay_import_failure_category(error: &anyhow::Error) -> &'static str {
         .is_some()
     {
         "missing_session_cookies"
+    } else if error
+        .downcast_ref::<crate::session::RelayVaultPrecommitVerificationError>()
+        .is_some()
+    {
+        // The staging verifier failed before rename. Never equate a local
+        // encrypted-vault error with Chrome login or provider rejection.
+        "vault_precommit_verification_failed"
     } else {
         "snapshot_rejected"
     }
+}
+
+/// Fixed, redacted representation of a pre-commit storage failure. Do not
+/// forward inner filesystem, crypto or credential details to the extension.
+fn relay_precommit_failure_response_parts(
+    category: &str,
+) -> Option<(StatusCode, &'static str, &'static str)> {
+    (category == "vault_precommit_verification_failed").then_some((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "session_vault_precommit_failed",
+        "encrypted session verification failed before saving; any prior vault was preserved; inspect local gateway storage and retry after recovery",
+    ))
 }
 
 /// Unlink errors may contain private vault paths or provider-supplied text.
@@ -2090,6 +2109,37 @@ mod relay_import_diagnostic_redaction_tests {
             "missing_session_cookies"
         );
         assert!(!super::relay_import_failure_category(&error).contains('@'));
+    }
+
+    #[test]
+    fn staged_vault_verification_error_is_not_browser_credentials_or_login() {
+        let error = anyhow::Error::new(crate::session::RelayVaultPrecommitVerificationError);
+        let category = super::relay_import_failure_category(&error);
+        assert_eq!(category, "vault_precommit_verification_failed");
+        let (status, code, message) =
+            super::relay_precommit_failure_response_parts(category).unwrap();
+        assert_eq!(status, super::StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(code, "session_vault_precommit_failed");
+        assert!(message.contains("prior vault was preserved"));
+        assert!(message.contains("before saving"));
+        for private in [
+            "sign in",
+            "cookie=",
+            "bearer=",
+            "/sessions/",
+            "token=",
+            "password",
+        ] {
+            assert!(!code.contains(private));
+            assert!(!message.contains(private));
+            assert!(!category.contains(private));
+        }
+        assert!(super::relay_precommit_failure_response_parts("snapshot_rejected").is_none());
+        assert!(super::relay_precommit_failure_response_parts("missing_session_cookies").is_none());
+        assert!(
+            super::relay_precommit_failure_response_parts("persistence_worker_unavailable")
+                .is_none()
+        );
     }
 
     #[test]
@@ -2303,6 +2353,10 @@ pub async fn import_session(
                         "session_missing_credentials",
                         "no provider cookies were captured; sign in to the provider and retry linking",
                     )
+                } else if let Some((status, code, message)) =
+                    relay_precommit_failure_response_parts(category)
+                {
+                    json_error(status, code, message)
                 } else {
                     json_error(
                         StatusCode::BAD_REQUEST,

@@ -357,6 +357,14 @@ async function syncProvider(provider, {
   const response = await relayFetch("/relay/v1/session/" + encodeURIComponent(provider), {
     method:"POST", body:JSON.stringify(snapshot)
   }, {gateway, token, connectionMode, provider, linkEpoch});
+  if (!response.ok && response.status === 503) {
+    const failure = await response.json().catch(() => null);
+    if (failure?.error?.code === "session_vault_precommit_failed") {
+      // Storage verification failed before committing the candidate. Keep
+      // consent and prior vault unchanged; never resync or claim activation.
+      throw new Error("The gateway could not verify the new encrypted session before saving. Any previous saved vault was preserved. Check local gateway storage; do not clear or relink credentials.");
+    }
+  }
   if (!response.ok && (response.status === 422 || response.status === 400)) {
     const failure = await response.json().catch(() => null);
     if (response.status === 422 && failure?.error?.code === "cookie_scope_conflict") {
