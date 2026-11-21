@@ -2153,6 +2153,9 @@ pub(crate) fn session_state_hash(file: &SessionFile) -> Result<String> {
     // produces the same fingerprint across snapshots.
     let local_storage: BTreeMap<&String, &String> = file.local_storage.iter().collect();
     let mut cookies = file.cookies.clone();
+    // Preserve order for ambiguous duplicate identity/value records: replay
+    // historically selects the first same-scope cookie. Until metadata
+    // conflicts are rejected, those snapshots are NOT equivalent.
     cookies.sort_by(|left, right| {
         (&left.domain, &left.name, &left.path, &left.value).cmp(&(
             &right.domain,
@@ -2592,7 +2595,8 @@ fn write_session_file_atomically(destination: &Path, serialized: &[u8]) -> Resul
 /// before import writes or browser-jar mutation; the diagnostic never reveals
 /// cookie names, domains or values.
 fn ensure_unambiguous_same_scope_cookie_values(cookies: &[Cookie], provider: &str) -> Result<()> {
-    let mut seen: HashMap<(String, String, String, bool), &str> = HashMap::new();
+    let mut seen: HashMap<(String, String, String, bool), &Cookie> = HashMap::new();
+    let strict_metadata = matches!(provider, "chatgpt" | "metaai");
     for cookie in cookies {
         if !cookie_domain_allowed(provider, &cookie.domain) {
             continue;
@@ -2603,9 +2607,21 @@ fn ensure_unambiguous_same_scope_cookie_values(cookies: &[Cookie], provider: &st
             cookie.path.clone(),
             cookie.domain.starts_with('.'),
         );
-        if let Some(existing) = seen.insert(identity, cookie.value.as_str()) {
-            if existing != cookie.value {
+        if let Some(existing) = seen.insert(identity, cookie) {
+            if existing.value != cookie.value {
                 anyhow::bail!("conflicting credential values in one provider cookie scope");
+            }
+            // The legacy duplicate normalizer chooses the first copy for
+            // an exact scope. With identical values but different policy or
+            // expiry, a change in ordering changes the replayed credential
+            // metadata. Reject before import or jar mutation, not as a no-op.
+            if strict_metadata
+                && (existing.secure != cookie.secure
+                    || existing.http_only != cookie.http_only
+                    || existing.expires.map(f64::to_bits) != cookie.expires.map(f64::to_bits)
+                    || existing.same_site != cookie.same_site)
+            {
+                anyhow::bail!("conflicting provider cookie metadata in one scope");
             }
         }
     }
@@ -2688,6 +2704,91 @@ mod cookie_restore_result_tests {
         first.ts = "new".into();
         first.cookies.reverse();
         assert_eq!(first_hash, session_state_hash(&first).unwrap());
+    }
+
+    #[test]
+    fn active_replay_rejects_conflicting_same_scope_cookie_metadata() {
+        for (provider, domain) in [("chatgpt", ".chatgpt.com"), ("metaai", ".meta.ai")] {
+            let primary = Cookie {
+                name: "synthetic".into(),
+                value: "not-a-real-session".into(),
+                domain: domain.into(),
+                path: "/".into(),
+                secure: true,
+                http_only: true,
+                expires: Some(2_000_000_000.0),
+                same_site: Some("Strict".into()),
+            };
+            let mutations: [fn(&mut Cookie); 4] = [
+                |c| c.secure = false,
+                |c| c.http_only = false,
+                |c| c.expires = Some(2_000_000_001.0),
+                |c| c.same_site = Some("Lax".into()),
+            ];
+            for mutate in mutations {
+                let mut conflict = primary.clone();
+                mutate(&mut conflict);
+                for cookies in [
+                    vec![primary.clone(), conflict.clone()],
+                    vec![conflict.clone(), primary.clone()],
+                ] {
+                    let file = SessionFile {
+                        local_storage: HashMap::new(),
+                        cookies,
+                        ts: "synthetic-only".into(),
+                    };
+                    let preflight = preflight_cookie_restore(&file, provider).unwrap_err();
+                    assert_eq!(
+                        preflight.to_string(),
+                        "conflicting provider cookie metadata in one scope"
+                    );
+                    let import = import_relay_session(provider, &file).unwrap_err();
+                    assert_eq!(import.to_string(), preflight.to_string());
+                    for secret in ["not-a-real-session", domain, "synthetic"] {
+                        assert!(!import.to_string().contains(secret));
+                    }
+                }
+                let original = SessionFile {
+                    local_storage: HashMap::new(),
+                    cookies: vec![primary.clone(), conflict.clone()],
+                    ts: "older".into(),
+                };
+                let reversed = SessionFile {
+                    local_storage: HashMap::new(),
+                    cookies: vec![conflict, primary.clone()],
+                    ts: "newer".into(),
+                };
+                // Until preflight rejects an ambiguity, replay's first-wins
+                // policy makes order meaningful; never hash both as a no-op.
+                assert!(
+                    session_state_hash(&original).unwrap()
+                        != session_state_hash(&reversed).unwrap(),
+                    "ambiguous replay selection must not be hidden by a no-op digest"
+                );
+            }
+
+            // Exact same-policy copies remain a safe no-op; distinct
+            // host-only vs domain scopes retain their prior preference.
+            let identical = SessionFile {
+                local_storage: HashMap::new(),
+                cookies: vec![primary.clone(), primary.clone()],
+                ts: "safe-duplicate".into(),
+            };
+            assert!(preflight_cookie_restore(&identical, provider).is_ok());
+            let (normalized, count) = resolve_cookie_scope_duplicates(&identical.cookies);
+            assert_eq!(count, 1);
+            assert_eq!(normalized.len(), 1);
+
+            let mut host_only = primary.clone();
+            host_only.domain = domain.trim_start_matches('.').into();
+            host_only.same_site = Some("Lax".into());
+            let separate_scopes = SessionFile {
+                local_storage: HashMap::new(),
+                cookies: vec![primary.clone(), host_only],
+                ts: "host-domain".into(),
+            };
+            assert!(preflight_cookie_restore(&separate_scopes, provider).is_ok());
+        }
     }
 
     #[test]
