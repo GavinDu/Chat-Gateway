@@ -189,7 +189,11 @@ def main(argv=None):
         record = load_inputs(args.inputs)
         plan = resolve_inputs(record)
         if args.report:
-            Path(args.report).write_text(json.dumps(blocked_report(record, plan), indent=2) + "\n")
+            source, destination = Path(args.inputs), Path(args.report)
+            if (source.resolve() == destination.resolve()
+                    or (destination.exists() and source.samefile(destination))):
+                raise InputError("report_conflicts_with_inputs")
+            destination.write_text(json.dumps(blocked_report(record, plan), indent=2) + "\n")
     except InputError as error:
         print(json.dumps({"status": "blocked", "reason": str(error)}))
         return 2

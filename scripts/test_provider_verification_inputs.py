@@ -1,6 +1,7 @@
 """Input-gate contracts; no provider accounts, network or runtime access."""
 import io
 import json
+import os
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -143,6 +144,20 @@ class InputGateTests(unittest.TestCase):
         record["selection"]["providers_and_models"]["unknown_secret"] = "private"
         with self.assertRaisesRegex(InputError, "invalid_provider_selection"):
             resolve_inputs(record)
+
+    def test_result_output_cannot_overwrite_inputs_through_aliases(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "input.json"
+            source.write_text(json.dumps(complete()))
+            original = source.read_bytes()
+            alias = Path(directory) / "alias.json"
+            os.link(source, alias)
+            for destination in (source, alias):
+                with redirect_stdout(io.StringIO()) as output:
+                    code = main(["--inputs", str(source), "--report", str(destination)])
+                self.assertEqual(code, 2)
+                self.assertEqual(json.loads(output.getvalue())["reason"], "report_conflicts_with_inputs")
+                self.assertEqual(source.read_bytes(), original)
 
 
 if __name__ == "__main__":
