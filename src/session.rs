@@ -1847,13 +1847,30 @@ pub(crate) fn session_state_hash(file: &SessionFile) -> Result<String> {
     // produces the same fingerprint across snapshots.
     let local_storage: BTreeMap<&String, &String> = file.local_storage.iter().collect();
     let mut cookies = file.cookies.clone();
+    // Equal name/domain/path/value cookies can still differ in security,
+    // expiry or SameSite metadata. Sort the full serialized cookie state so
+    // permutations cannot falsely signal changed credentials or vault writes.
     cookies.sort_by(|left, right| {
-        (&left.domain, &left.name, &left.path, &left.value).cmp(&(
-            &right.domain,
-            &right.name,
-            &right.path,
-            &right.value,
-        ))
+        (
+            &left.domain,
+            &left.name,
+            &left.path,
+            &left.value,
+            left.secure,
+            left.http_only,
+            left.expires.map(f64::to_bits),
+            &left.same_site,
+        )
+            .cmp(&(
+                &right.domain,
+                &right.name,
+                &right.path,
+                &right.value,
+                right.secure,
+                right.http_only,
+                right.expires.map(f64::to_bits),
+                &right.same_site,
+            ))
     });
     let serialized = Zeroizing::new(serde_json::to_vec(&(local_storage, cookies))?);
     let digest = Sha256::digest(&*serialized);
@@ -2375,6 +2392,47 @@ mod cookie_restore_result_tests {
         first.ts = "new".into();
         first.cookies.reverse();
         assert_eq!(first_hash, session_state_hash(&first).unwrap());
+    }
+
+    #[test]
+    fn session_hash_is_permutation_invariant_when_cookie_metadata_differs() {
+        // These two synthetic same-identity cookies differ in all their
+        // security/expiry attributes. Hash ordering is not an admission rule:
+        // active-provider same-scope conflict validation occurs separately.
+        let mut first = SessionFile {
+            local_storage: std::collections::HashMap::new(),
+            cookies: vec![
+                Cookie {
+                    name: "same-name".into(),
+                    value: "synthetic-value".into(),
+                    domain: ".chatgpt.com".into(),
+                    path: "/".into(),
+                    secure: true,
+                    http_only: true,
+                    expires: Some(2_000_000_000.0),
+                    same_site: Some("Strict".into()),
+                },
+                Cookie {
+                    name: "same-name".into(),
+                    value: "synthetic-value".into(),
+                    domain: ".chatgpt.com".into(),
+                    path: "/".into(),
+                    secure: false,
+                    http_only: false,
+                    expires: None,
+                    same_site: Some("Lax".into()),
+                },
+            ],
+            ts: "old".into(),
+        };
+        let canonical = session_state_hash(&first).unwrap();
+        first.cookies.reverse();
+        first.ts = "changed".into();
+        assert_eq!(canonical, session_state_hash(&first).unwrap());
+
+        // Real metadata changes must still alter the digest.
+        first.cookies[0].same_site = Some("Strict".into());
+        assert_ne!(canonical, session_state_hash(&first).unwrap());
     }
 
     #[test]
