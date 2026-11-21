@@ -943,6 +943,9 @@ mod tests {
         assert_eq!(checked(evidence.clone()).category, "replay_or_binding");
 
         for signal in ["session_expired", "challenge"] {
+            // Preserve the v1 producer grammar after the preceding
+            // iteration's intentionally contradictory JSON-completion probe.
+            evidence["gateway_failure"]["stage"] = json!("first_stream_event");
             evidence["gateway_failure"]["reason"] = json!(signal);
             let changed = checked(evidence.clone());
             assert_eq!(changed.category, "inconclusive");
@@ -976,6 +979,9 @@ mod tests {
             evidence["gateway_failure"]["stage"] = json!("json_completion");
         }
 
+        // The final probe needs a producer-valid failure pair too; the last
+        // loop step deliberately left an impossible JSON-completion category.
+        evidence["gateway_failure"]["stage"] = json!("first_stream_event");
         // A later gateway signal without supporting account observations
         // does not convert unknown login into a specific expiry diagnosis.
         evidence["obscura"]["verdict"] = json!("unknown");
