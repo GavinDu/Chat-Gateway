@@ -212,11 +212,29 @@ mod first_party_account_probe_tests {
 /// credential-bearing text. Only stable categories cross the log boundary;
 /// the surrounding fixed log message identifies the failing operation.
 fn session_worker_failure_category(error: &anyhow::Error) -> &'static str {
+    // Only classify typed, source-owned failures. Provider/engine Display may
+    // contain account URLs, credential-bearing query strings or vault paths.
+    // A generic HTTP 403 is not an authenticated provider account rejection.
     if error
         .downcast_ref::<BrowserWorkerUnavailableError>()
         .is_some()
     {
         "browser_worker_unavailable"
+    } else if error
+        .downcast_ref::<providers::ProviderChallengeError>()
+        .is_some()
+    {
+        "manual_verification_required"
+    } else if error
+        .downcast_ref::<providers::metaai::MetaAiDocumentDeniedError>()
+        .is_some()
+    {
+        "provider_document_denied"
+    } else if error
+        .downcast_ref::<super::diagnostics::ProviderSessionExpiredError>()
+        .is_some()
+    {
+        "provider_session_expired"
     } else {
         "session_operation_failed"
     }
@@ -237,6 +255,31 @@ mod session_worker_error_redaction_tests {
         assert_eq!(
             session_worker_failure_category(&worker),
             "browser_worker_unavailable"
+        );
+        assert_eq!(
+            session_worker_failure_category(&anyhow::Error::new(
+                providers::ProviderChallengeError::new("chatgpt")
+            )),
+            "manual_verification_required"
+        );
+        assert_eq!(
+            session_worker_failure_category(&anyhow::Error::new(
+                providers::metaai::MetaAiDocumentDeniedError
+            )),
+            "provider_document_denied"
+        );
+        assert_eq!(
+            session_worker_failure_category(&anyhow::Error::new(
+                super::super::diagnostics::ProviderSessionExpiredError
+            )),
+            "provider_session_expired"
+        );
+        let wrapped = anyhow::Error::new(providers::metaai::MetaAiDocumentDeniedError)
+            .context("https://private.invalid/?token=secret&cookie=private");
+        assert_eq!(
+            session_worker_failure_category(&wrapped),
+            "provider_document_denied",
+            "source type survives untrusted context without printing it"
         );
         assert!(!session_worker_failure_category(&secret).contains("secret"));
         // Engine navigation/cleanup/worker-start errors may embed owner
