@@ -477,6 +477,36 @@ fn classify(e: &Evidence, now: u64) -> Diagnosis {
     }
 }
 
+/// The caller's lstat and its subsequent open are separate operations.
+/// Validate the opened descriptor before reading any potentially private
+/// evidence. On Unix the object identity, not just file type/length, must
+/// match the one inspected before open (including same-size replacements).
+fn checked_evidence_file_identity(
+    inspected: &fs::Metadata,
+    opened: &fs::Metadata,
+) -> anyhow::Result<()> {
+    if !inspected.is_file()
+        || inspected.file_type().is_symlink()
+        || inspected.len() > MAX_FILE
+        || !opened.is_file()
+        || opened.len() > MAX_FILE
+    {
+        anyhow::bail!("credential evidence unavailable");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if inspected.dev() != opened.dev() || inspected.ino() != opened.ino() {
+            anyhow::bail!("credential evidence unavailable");
+        }
+    }
+    // Without a portable object-ID contract, do not treat a file opened
+    // after lstat as the same checked object.
+    #[cfg(not(unix))]
+    anyhow::bail!("credential evidence unavailable");
+    Ok(())
+}
+
 pub(crate) fn diagnose_file(path: &Path) -> anyhow::Result<String> {
     // Read-only local operator input. Reject symlinks and oversized files;
     // do not reflect filesystem or parser errors with credential-bearing data.
@@ -485,11 +515,17 @@ pub(crate) fn diagnose_file(path: &Path) -> anyhow::Result<String> {
     if !info.is_file() || info.file_type().is_symlink() || info.len() > MAX_FILE {
         anyhow::bail!("credential evidence unavailable");
     }
-    // Bound reads even when an operator-managed file changes after lstat.
-    // Never allocate or parse an unbounded credential-bearing JSON document.
-    let mut reader = fs::File::open(path)
-        .map_err(|_| anyhow::anyhow!("credential evidence unavailable"))?
-        .take(MAX_FILE + 1);
+    // Validate the descriptor's identity after the pathname lstat but before
+    // reading any potentially private owner evidence.
+    let file = fs::File::open(path)
+        .map_err(|_| anyhow::anyhow!("credential evidence unavailable"))?;
+    let opened = file
+        .metadata()
+        .map_err(|_| anyhow::anyhow!("credential evidence unavailable"))?;
+    checked_evidence_file_identity(&info, &opened)?;
+    // Bound reads after descriptor verification, while retaining zeroization
+    // of the entire input buffer on every success or error path.
+    let mut reader = file.take(MAX_FILE + 1);
     // Owner-supplied evidence can accidentally contain secrets even when the
     // accepted schema forbids them. Reserve the entire bounded input once to
     // avoid leaving old secret-bearing allocations behind during Vec growth.
@@ -510,6 +546,105 @@ pub(crate) fn diagnose_file(path: &Path) -> anyhow::Result<String> {
         .min(u64::MAX as u128) as u64;
     serde_json::to_string(&classify(&e, now))
         .map_err(|_| anyhow::anyhow!("credential diagnosis unavailable"))
+}
+
+#[cfg(all(test, unix))]
+mod evidence_file_identity_tests {
+    use super::*;
+    use std::os::unix::fs::symlink;
+
+    #[test]
+    fn checked_file_and_replaced_symlink_have_different_file_ids_before_read() {
+        let root = std::env::temp_dir().join(format!(
+            "chat-gateway-evidence-identity-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir(&root).unwrap();
+        let checked = root.join("owner-evidence.json");
+        let alternate = root.join("different-evidence.json");
+        let original = root.join("original-evidence.json");
+        // Equal lengths prove a size-only comparison is insufficient.
+        fs::write(&checked, b"safe0").unwrap();
+        fs::write(&alternate, b"other").unwrap();
+        let before = fs::symlink_metadata(&checked).unwrap();
+
+        let stable = fs::File::open(&checked).unwrap();
+        checked_evidence_file_identity(&before, &stable.metadata().unwrap()).unwrap();
+
+        // Simulate the deterministic state at a race boundary, without a
+        // flaky thread: the pathname is now a symlink to a *different* file
+        // even though the same-size old check passed.
+        fs::rename(&checked, &original).unwrap();
+        symlink(&alternate, &checked).unwrap();
+        let swapped = fs::File::open(&checked).unwrap();
+        let error =
+            checked_evidence_file_identity(&before, &swapped.metadata().unwrap()).unwrap_err();
+        assert_eq!(error.to_string(), "credential evidence unavailable");
+        assert!(!error.to_string().contains("different-evidence"));
+        assert!(!error.to_string().contains("other"));
+
+        // A swapped plain file (no symlink involved) must also fail closed.
+        fs::remove_file(&checked).unwrap();
+        fs::write(&checked, b"other").unwrap();
+        let plain = fs::File::open(&checked).unwrap();
+        assert_eq!(
+            checked_evidence_file_identity(&before, &plain.metadata().unwrap())
+                .unwrap_err()
+                .to_string(),
+            "credential evidence unavailable"
+        );
+
+        let link = root.join("explicit-symlink.json");
+        symlink(&alternate, &link).unwrap();
+        assert_eq!(
+            diagnose_file(&link).unwrap_err().to_string(),
+            "credential evidence unavailable"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn stable_evidence_is_read_but_oversized_and_nonregular_descriptors_are_denied() {
+        let root = std::env::temp_dir().join(format!(
+            "chat-gateway-evidence-regular-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir(&root).unwrap();
+        let file = root.join("synthetic-evidence.json");
+        fs::write(&file, br#"{"provider":"chatgpt"}"#).unwrap();
+        let diagnosis = diagnose_file(&file).unwrap();
+        let report: serde_json::Value = serde_json::from_str(&diagnosis).unwrap();
+        assert_eq!(report["provider"], "chatgpt");
+        assert_eq!(report["category"], "inconclusive");
+        assert_eq!(report["live_proof"], false);
+        assert!(!diagnosis.contains("cookie"));
+        assert!(!diagnosis.contains("vault"));
+
+        fs::write(&file, vec![b'X'; MAX_FILE as usize + 1]).unwrap();
+        assert_eq!(
+            diagnose_file(&file).unwrap_err().to_string(),
+            "credential evidence unavailable"
+        );
+        let before = fs::symlink_metadata(&file).unwrap();
+        let opened = fs::File::open(&file).unwrap();
+        assert_eq!(
+            checked_evidence_file_identity(&before, &opened.metadata().unwrap())
+                .unwrap_err()
+                .to_string(),
+            "credential evidence unavailable"
+        );
+        // A directory cannot be smuggled through an otherwise valid size
+        // check just because File::open on Unix supports directory handles.
+        let checked = fs::symlink_metadata(&root).unwrap();
+        let opened = fs::File::open(&root).unwrap();
+        assert_eq!(
+            checked_evidence_file_identity(&checked, &opened.metadata().unwrap())
+                .unwrap_err()
+                .to_string(),
+            "credential evidence unavailable"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
 }
 
 #[cfg(test)]
