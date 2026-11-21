@@ -266,9 +266,9 @@ async function compareChatgptBrowserAndGateway() {
       target:{tabId,allFrames:false},world:"MAIN",func:probeActiveChatgptAccount
     });
     if (attempt !== chatgptCheckGeneration) return;
-    const chromeAuth = safeChromeComparisonResult(
-      Array.isArray(runs) && runs.length === 1 ? runs[0]?.result : null
-    );
+    const chromeEvidence =
+      Array.isArray(runs) && runs.length === 1 ? runs[0]?.result : null;
+    const chromeAuth = safeChromeComparisonResult(chromeEvidence);
     if (!chromeAuth) {
       report("Chrome account verification returned unsupported evidence. No sessions changed.");
       return;
@@ -333,6 +333,18 @@ async function compareChatgptBrowserAndGateway() {
     }
     if (!sameLinkedChatgptConnection(before,after)) {
       report("Gateway connection or ChatGPT link changed. Result discarded.");
+      return;
+    }
+    // Both proofs were checked at different await boundaries. A 20-second
+    // gateway request followed by final tab/storage reads can age the earlier
+    // Chrome check out of the 30-second window, even if its tab is unchanged.
+    // Revalidate both source-owned reports immediately before comparison, and
+    // require their observations to describe one bounded time window.
+    if (safeChromeComparisonResult(chromeEvidence) !== chromeAuth ||
+        safeWarmChatgptAccountRecord(gatewayRecord) !== gatewayAuth ||
+        Math.abs(Date.parse(chromeEvidence.checked_at) -
+          Date.parse(gatewayRecord.checked_at_utc)) > 30_000) {
+      report("Paired account observations expired or differ in time. Retry without syncing.");
       return;
     }
     const label = Object.freeze({
