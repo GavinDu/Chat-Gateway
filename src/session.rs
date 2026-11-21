@@ -1179,6 +1179,112 @@ mod relay_import_noop_tests {
     }
 }
 
+#[cfg(test)]
+mod relay_vault_precommit_tests {
+    use super::*;
+
+    fn synthetic(domain: &str, value: &str) -> SessionFile {
+        SessionFile {
+            local_storage: HashMap::new(),
+            cookies: vec![Cookie {
+                name: "synthetic".into(),
+                value: value.into(),
+                domain: domain.into(),
+                path: "/".into(),
+                secure: true,
+                http_only: true,
+                expires: None,
+                same_site: None,
+            }],
+            ts: "synthetic-only".into(),
+        }
+    }
+
+    #[test]
+    fn staged_encrypted_vault_must_verify_before_replacing_last_valid_snapshot() {
+        let root = std::env::temp_dir().join(format!(
+            "chat-gateway-precommit-vault-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let key = [42_u8; 32];
+        let wrong_key = [41_u8; 32];
+
+        for (provider, domain, foreign) in [
+            ("chatgpt", ".chatgpt.com", "metaai"),
+            ("metaai", ".meta.ai", "chatgpt"),
+        ] {
+            let destination = root.join(format!("{provider}.vault"));
+            let old = synthetic(domain, "old-synthetic-session");
+            let new = synthetic(domain, "new-synthetic-session");
+            let original_ciphertext = encrypt_session_snapshot(&old, provider, &key).unwrap();
+            let updated_ciphertext = encrypt_session_snapshot(&new, provider, &key).unwrap();
+            write_session_file_atomically(&destination, &original_ciphertext).unwrap();
+
+            for failure in 0..5 {
+                let failed = write_session_file_atomically_checked(
+                    &destination,
+                    if failure == 4 {
+                        b"damaged-stage".as_slice()
+                    } else {
+                        updated_ciphertext.as_slice()
+                    },
+                    |staged| match failure {
+                        0 => Err(anyhow::Error::new(RelayVaultPrecommitVerificationError)),
+                        1 => verify_relay_vault_staging(staged, provider, &new, &wrong_key),
+                        2 => verify_relay_vault_staging(staged, foreign, &new, &key),
+                        3 => verify_relay_vault_staging(staged, provider, &old, &key),
+                        _ => verify_relay_vault_staging(staged, provider, &new, &key),
+                    },
+                )
+                .unwrap_err();
+                assert!(failed
+                    .downcast_ref::<RelayVaultPrecommitVerificationError>()
+                    .is_some());
+                assert_eq!(
+                    failed.to_string(),
+                    "session-vault precommit verification failed"
+                );
+                assert_eq!(std::fs::read(&destination).unwrap(), original_ciphertext);
+                let entries = std::fs::read_dir(&root).unwrap().count();
+                // One provider destination per iteration, never an orphaned
+                // .tmp file after injected verification failure.
+                assert_eq!(entries, 1);
+            }
+
+            write_session_file_atomically_checked(&destination, &updated_ciphertext, |staged| {
+                verify_relay_vault_staging(staged, provider, &new, &key)
+            })
+            .unwrap();
+            assert_eq!(std::fs::read(&destination).unwrap(), updated_ciphertext);
+            let opened =
+                decrypt_session_snapshot(&std::fs::read(&destination).unwrap(), provider, &key)
+                    .unwrap();
+            assert!(
+                session_state_hash(&opened).unwrap() == session_state_hash(&new).unwrap(),
+                "verified new vault must match the expected synthetic snapshot"
+            );
+            std::fs::remove_file(&destination).unwrap();
+        }
+
+        let fresh = root.join("fresh.vault");
+        let err =
+            write_session_file_atomically_checked(&fresh, b"synthetic-not-a-session", |_staged| {
+                Err(anyhow::Error::new(RelayVaultPrecommitVerificationError))
+            })
+            .unwrap_err();
+        assert!(err
+            .downcast_ref::<RelayVaultPrecommitVerificationError>()
+            .is_some());
+        assert!(
+            !fresh.exists(),
+            "failed first-link verification must not publish a vault"
+        );
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
 /// Migrate one legacy plaintext snapshot into the encrypted vault. Isolated
 /// paths make migration failure handling testable without process-wide env or
 /// working-directory changes.
@@ -1307,6 +1413,37 @@ fn relay_vault_snapshot_unchanged(
     Ok(session_state_hash(&existing)? == session_state_hash(incoming)?)
 }
 
+/// Fixed, source-neutral error for a staged relay-vault verification
+/// failure. Neither filesystem paths nor decryption details may escape.
+#[derive(Debug)]
+pub struct RelayVaultPrecommitVerificationError;
+
+impl std::fmt::Display for RelayVaultPrecommitVerificationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("session-vault precommit verification failed")
+    }
+}
+
+impl std::error::Error for RelayVaultPrecommitVerificationError {}
+
+fn verify_relay_vault_staging(
+    staged: &Path,
+    provider: &str,
+    expected: &SessionFile,
+    key: &[u8; 32],
+) -> Result<()> {
+    let verified = (|| -> Result<()> {
+        let written = Zeroizing::new(std::fs::read(staged)?);
+        let restored = decrypt_session_snapshot(&written, provider, key)?;
+        anyhow::ensure!(
+            session_state_hash(&restored)? == session_state_hash(expected)?,
+            "private staged session mismatch"
+        );
+        Ok(())
+    })();
+    verified.map_err(|_| anyhow::Error::new(RelayVaultPrecommitVerificationError))
+}
+
 /// A credential-free capture cannot establish a linked browser session.
 /// Carry a fixed, redacted error type so the relay can give a specific action
 /// rather than incorrectly suggesting a vault configuration problem.
@@ -1385,19 +1522,12 @@ pub fn import_relay_session(provider: &str, file: &SessionFile) -> Result<()> {
         return Ok(());
     }
     let encrypted = encrypt_session_snapshot(&file, provider, &key)?;
-    write_session_file_atomically(Path::new(&destination), &encrypted)?;
-    let verified = (|| -> Result<()> {
-        let written = std::fs::read(&destination)?;
-        let restored = decrypt_session_snapshot(&written, provider, &key)?;
-        if session_state_hash(&restored)? != session_state_hash(&file)? {
-            anyhow::bail!("session-vault read-back validation failed");
-        }
-        Ok(())
-    })();
-    if let Err(error) = verified {
-        let _ = std::fs::remove_file(&destination);
-        return Err(error);
-    }
+    // Verify the complete encrypted staging file BEFORE its atomic rename.
+    // On failure, the writer removes only its owned temporary file; it must
+    // never delete a previously valid destination to signal readback failure.
+    write_session_file_atomically_checked(Path::new(&destination), &encrypted, |staged| {
+        verify_relay_vault_staging(staged, provider, &file, &key)
+    })?;
     remove_legacy_session_snapshot(provider)?;
 
     tracing::info!(
@@ -2669,6 +2799,16 @@ async fn write_session_snapshot(
 }
 
 fn write_session_file_atomically(destination: &Path, serialized: &[u8]) -> Result<()> {
+    write_session_file_atomically_checked(destination, serialized, |_| Ok(()))
+}
+
+/// Commit a fully synced, uniquely owned staging file only after its verifier
+/// accepts it. This never replaces the last good vault on verify failure.
+fn write_session_file_atomically_checked(
+    destination: &Path,
+    serialized: &[u8],
+    verify_staged: impl FnOnce(&Path) -> Result<()>,
+) -> Result<()> {
     let temp_path = format!(
         "{}.tmp-{}-{}",
         destination.display(),
@@ -2693,6 +2833,10 @@ fn write_session_file_atomically(destination: &Path, serialized: &[u8]) -> Resul
     drop(output);
 
     if let Err(error) = write_result {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(error);
+    }
+    if let Err(error) = verify_staged(Path::new(&temp_path)) {
         let _ = std::fs::remove_file(&temp_path);
         return Err(error);
     }
