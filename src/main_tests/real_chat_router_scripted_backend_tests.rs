@@ -152,7 +152,7 @@ async fn real_router_completion_identity_is_unique_per_turn_for_active_providers
         let mut identities = std::collections::HashSet::new();
         for stream in [false, false, true, true] {
             // The fixture retains production pacing at one millisecond.
-            tokio::time::sleep(Duration::from_millis(2)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
             let response = send(
                 app.clone(),
                 stream,
