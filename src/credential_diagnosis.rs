@@ -9,6 +9,7 @@ use std::{
     path::Path,
     time::{SystemTime, UNIX_EPOCH},
 };
+use zeroize::Zeroizing;
 
 const MAX_FILE: u64 = 16 * 1024;
 const MAX_AGE_MS: u64 = 5 * 60 * 1000;
@@ -459,7 +460,11 @@ pub(crate) fn diagnose_file(path: &Path) -> anyhow::Result<String> {
     let mut reader = fs::File::open(path)
         .map_err(|_| anyhow::anyhow!("credential evidence unavailable"))?
         .take(MAX_FILE + 1);
-    let mut bytes = Vec::new();
+    // Owner-supplied evidence can accidentally contain secrets even when the
+    // accepted schema forbids them. Reserve the entire bounded input once to
+    // avoid leaving old secret-bearing allocations behind during Vec growth.
+    // Wipe the owned raw bytes on success and on every rejected JSON path.
+    let mut bytes = Zeroizing::new(Vec::with_capacity((MAX_FILE + 1) as usize));
     reader
         .read_to_end(&mut bytes)
         .map_err(|_| anyhow::anyhow!("credential evidence unavailable"))?;
@@ -1156,6 +1161,37 @@ mod tests {
         let result = checked(value);
         assert_eq!(result.category, "inconclusive");
         assert_eq!(result.reason, "missing_snapshot_correlation");
+    }
+
+    #[test]
+    fn owner_supplied_secret_shaped_json_is_never_reflected_in_diagnosis() {
+        let path = std::env::temp_dir().join(format!(
+            "chat-gateway-evidence-zeroize-{}.json",
+            uuid::Uuid::new_v4()
+        ));
+        // Malformed input may contain a copied credential-shaped value. It is
+        // rejected with a fixed error while the raw input buffer is zeroized.
+        std::fs::write(
+            &path,
+            br#"{"provider":"chatgpt","upstream_token":"synthetic-secret-cookie","bad":]"#,
+        )
+        .unwrap();
+        let error = match diagnose_file(&path) {
+            Err(error) => error.to_string(),
+            Ok(_) => panic!("malformed owner evidence must not be accepted"),
+        };
+        assert_eq!(error, "credential evidence invalid");
+        assert!(!error.contains("synthetic-secret-cookie"));
+
+        // The valid, read-only source contract is unchanged.
+        std::fs::write(&path, br#"{"provider":"chatgpt"}"#).unwrap();
+        let report = diagnose_file(&path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&report).unwrap();
+        assert_eq!(parsed["provider"], "chatgpt");
+        assert_eq!(parsed["category"], "inconclusive");
+        assert_eq!(parsed["live_proof"], false);
+        assert!(!report.contains("synthetic-secret-cookie"));
+        std::fs::remove_file(&path).unwrap();
     }
 
     #[test]
