@@ -1070,8 +1070,112 @@ mod relay_import_noop_tests {
         file.cookies[0].same_site = Some("Strict".into());
         assert!(!relay_vault_snapshot_unchanged("chatgpt", &file, &key, &target).unwrap());
         std::fs::write(&target, b"corrupt-envelope").unwrap();
-        assert!(!relay_vault_snapshot_unchanged("chatgpt", &file, &key, &target).unwrap());
+        let error = relay_vault_snapshot_unchanged("chatgpt", &file, &key, &target).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "existing provider session vault cannot be authenticated"
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), b"corrupt-envelope");
         std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn active_relay_preserves_existing_unreadable_vault_for_key_recovery() {
+        let root = std::env::temp_dir().join(format!(
+            "chat-gateway-relay-vault-preservation-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let key = [17_u8; 32];
+        let previous_key = [19_u8; 32];
+        for (provider, domain) in [("chatgpt", ".chatgpt.com"), ("metaai", ".meta.ai")] {
+            let incoming = SessionFile {
+                local_storage: HashMap::new(),
+                cookies: vec![Cookie {
+                    name: "synthetic".into(),
+                    value: "private-credential-fixture".into(),
+                    domain: domain.into(),
+                    path: "/".into(),
+                    secure: true,
+                    http_only: true,
+                    expires: None,
+                    same_site: None,
+                }],
+                ts: "fixture".into(),
+            };
+            let target = root.join(format!("{provider}.vault"));
+            assert!(
+                !relay_vault_snapshot_unchanged(provider, &incoming, &key, &target).unwrap(),
+                "first link with no vault must remain allowed"
+            );
+            let valid = encrypt_session_snapshot(&incoming, provider, &key).unwrap();
+            std::fs::write(&target, &valid).unwrap();
+            assert!(relay_vault_snapshot_unchanged(provider, &incoming, &key, &target).unwrap());
+
+            let different = SessionFile {
+                local_storage: HashMap::new(),
+                cookies: vec![],
+                ts: "different".into(),
+            };
+            assert!(
+                !relay_vault_snapshot_unchanged(provider, &different, &key, &target).unwrap(),
+                "authenticated different snapshot must permit a normal update"
+            );
+
+            for invalid_bytes in [
+                b"corrupt-envelope".to_vec(),
+                encrypt_session_snapshot(&incoming, provider, &previous_key).unwrap(),
+                encrypt_session_snapshot(
+                    &incoming,
+                    if provider == "chatgpt" {
+                        "metaai"
+                    } else {
+                        "chatgpt"
+                    },
+                    &key,
+                )
+                .unwrap(),
+            ] {
+                std::fs::write(&target, &invalid_bytes).unwrap();
+                let error =
+                    relay_vault_snapshot_unchanged(provider, &incoming, &key, &target).unwrap_err();
+                assert_eq!(
+                    error.to_string(),
+                    "existing provider session vault cannot be authenticated"
+                );
+                assert!(error
+                    .downcast_ref::<RelayVaultAuthenticationError>()
+                    .is_some());
+                assert_eq!(
+                    std::fs::read(&target).unwrap(),
+                    invalid_bytes,
+                    "failure must leave the exact prior vault bytes intact"
+                );
+                for private in [
+                    "private-credential",
+                    domain,
+                    "key",
+                    "chat-gateway-relay-vault",
+                ] {
+                    assert!(!error.to_string().contains(private));
+                }
+            }
+            // Deferred provider behavior is unchanged; the fail-closed gate
+            // applies only to the two signed-in account-recovery providers.
+            std::fs::remove_file(&target).unwrap();
+        }
+        let deferred = root.join("gemini.vault");
+        std::fs::write(&deferred, b"corrupt-deferred-record").unwrap();
+        let empty = SessionFile {
+            local_storage: HashMap::new(),
+            cookies: Vec::new(),
+            ts: "fixture".into(),
+        };
+        assert!(!relay_vault_snapshot_unchanged("gemini", &empty, &key, &deferred).unwrap());
+        assert_eq!(
+            std::fs::read(&deferred).unwrap(),
+            b"corrupt-deferred-record"
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
 
@@ -1159,10 +1263,25 @@ fn migrate_legacy_snapshot_with_remover(
     Ok(verified)
 }
 
+/// A corrupt or old-key local vault is not evidence that the provider's
+/// browser login expired. Preserve this fixed typed reason for owner-facing
+/// diagnosis without exposing crypto internals or session material.
+#[derive(Debug)]
+pub struct RelayVaultAuthenticationError;
+
+impl std::fmt::Display for RelayVaultAuthenticationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("existing provider session vault cannot be authenticated")
+    }
+}
+
+impl std::error::Error for RelayVaultAuthenticationError {}
+
 /// A periodic extension refresh often sends an identical cookie snapshot.
 /// Decrypting and comparing the existing vault avoids an unnecessary nonce,
-/// rewrite, fsync and read-back on every refresh. Corrupt/old-key records are
-/// not treated as matches, preserving the existing explicit re-link recovery.
+/// rewrite, fsync and read-back on every refresh. For the two active recovery
+/// providers, an existing but unreadable vault must stop the refresh before
+/// any overwrite: it may be recoverable with the previous key or backup.
 fn relay_vault_snapshot_unchanged(
     provider: &str,
     incoming: &SessionFile,
@@ -1176,6 +1295,13 @@ fn relay_vault_snapshot_unchanged(
     };
     let existing = match decrypt_session_snapshot(&ciphertext, provider, key) {
         Ok(file) => file,
+        Err(_) if matches!(provider, "chatgpt" | "metaai") => {
+            // Existing ciphertext may belong to an earlier key or be damaged.
+            // "Changed snapshot" would authorize write_session_file_atomically
+            // to replace it with a periodic relay capture. Preserve the bytes
+            // and keep the failure category independent of account validity.
+            return Err(anyhow::Error::new(RelayVaultAuthenticationError));
+        }
         Err(_) => return Ok(false),
     };
     Ok(session_state_hash(&existing)? == session_state_hash(incoming)?)
