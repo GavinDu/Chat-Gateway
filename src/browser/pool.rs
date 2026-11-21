@@ -52,16 +52,25 @@ use worker::browser_thread;
 /// Type-owned evidence can indicate a challenge or first-party denial, but this
 /// diagnostic alone never establishes whether a saved credential is valid.
 fn browser_worker_restart_failure_category(error: &anyhow::Error) -> &'static str {
-    if error.downcast_ref::<BrowserWorkerUnavailableError>().is_some() {
+    if error
+        .downcast_ref::<BrowserWorkerUnavailableError>()
+        .is_some()
+    {
         "browser_worker_unavailable"
-    } else if error.downcast_ref::<providers::ProviderChallengeError>().is_some() {
+    } else if error
+        .downcast_ref::<providers::ProviderChallengeError>()
+        .is_some()
+    {
         "manual_verification_required"
     } else if error
         .downcast_ref::<providers::metaai::MetaAiDocumentDeniedError>()
         .is_some()
     {
         "provider_document_denied"
-    } else if error.downcast_ref::<ProviderSessionExpiredError>().is_some() {
+    } else if error
+        .downcast_ref::<ProviderSessionExpiredError>()
+        .is_some()
+    {
         "provider_session_expired"
     } else {
         "browser_worker_warmup_failed"
