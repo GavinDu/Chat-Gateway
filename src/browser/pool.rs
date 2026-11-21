@@ -48,6 +48,96 @@ use supervisor::{
 };
 use worker::browser_thread;
 
+/// Classify restart warm-up failures without copying provider/engine error strings.
+/// Type-owned evidence can indicate a challenge or first-party denial, but this
+/// diagnostic alone never establishes whether a saved credential is valid.
+fn browser_worker_restart_failure_category(error: &anyhow::Error) -> &'static str {
+    if error
+        .downcast_ref::<BrowserWorkerUnavailableError>()
+        .is_some()
+    {
+        "browser_worker_unavailable"
+    } else if error
+        .downcast_ref::<providers::ProviderChallengeError>()
+        .is_some()
+    {
+        "manual_verification_required"
+    } else if error
+        .downcast_ref::<providers::metaai::MetaAiDocumentDeniedError>()
+        .is_some()
+    {
+        "provider_document_denied"
+    } else if error
+        .downcast_ref::<ProviderSessionExpiredError>()
+        .is_some()
+    {
+        "provider_session_expired"
+    } else {
+        "browser_worker_warmup_failed"
+    }
+}
+
+#[cfg(test)]
+mod worker_restart_failure_redaction_tests {
+    use super::{
+        browser_worker_restart_failure_category, providers, BrowserWorkerUnavailableError,
+        ProviderSessionExpiredError,
+    };
+
+    #[test]
+    fn known_rust_source_types_are_distinct_without_error_text() {
+        assert_eq!(
+            browser_worker_restart_failure_category(&anyhow::Error::new(
+                BrowserWorkerUnavailableError
+            )),
+            "browser_worker_unavailable"
+        );
+        assert_eq!(
+            browser_worker_restart_failure_category(&anyhow::Error::new(
+                providers::ProviderChallengeError::new("chatgpt")
+            )),
+            "manual_verification_required"
+        );
+        assert_eq!(
+            browser_worker_restart_failure_category(&anyhow::Error::new(
+                providers::metaai::MetaAiDocumentDeniedError
+            )),
+            "provider_document_denied"
+        );
+        assert_eq!(
+            browser_worker_restart_failure_category(&anyhow::Error::new(
+                ProviderSessionExpiredError
+            )),
+            "provider_session_expired"
+        );
+    }
+
+    #[test]
+    fn wrapped_source_type_survives_untrusted_context() {
+        let error = anyhow::Error::new(providers::metaai::MetaAiDocumentDeniedError)
+            .context("cookie=secret https://gateway.meta.ai/?token=private");
+        assert_eq!(
+            browser_worker_restart_failure_category(&error),
+            "provider_document_denied"
+        );
+    }
+
+    #[test]
+    fn raw_errors_cannot_inject_credentials_or_fake_expiry() {
+        for raw in [
+            "HTTP 403 provider_session_expired cookie=secret",
+            "https://example.invalid/?token=private",
+            "SQL INSERT /Users/owner/private/vault",
+        ] {
+            let error = anyhow::anyhow!("{raw}").context("wrapped secret data");
+            assert_eq!(
+                browser_worker_restart_failure_category(&error),
+                "browser_worker_warmup_failed"
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod queue_capacity_tests {
     use super::effective_session_pool_size;
@@ -590,7 +680,10 @@ impl ObscuraPool {
                         backoff = Duration::from_secs(1);
                     }
                     Ok(Ok(Err(error))) => {
-                        tracing::warn!(error = %error, "browser worker restart failed during warm-up");
+                        tracing::warn!(
+                            failure_category = browser_worker_restart_failure_category(&error),
+                            "browser worker restart failed during warm-up"
+                        );
                         // Force the next supervisor pass to retry. The failed
                         // worker may still own its receiver, so merely dropping
                         // this sender would not make the channel appear closed.
