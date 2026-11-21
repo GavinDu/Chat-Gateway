@@ -1660,16 +1660,37 @@ test("last-failure UI accepts only fresh fixed server evidence for two active pr
   const current = new Date(Math.floor(Date.now() / 1000) * 1000)
     .toISOString().replace(".000Z", "Z");
   const valid = {
+    source_failure_schema_version: 1,
     request_id: "5f855e0d-5b22-4a93-b925-98db841a1ee1",
-    stage: "json_completion", reason: "backend_unavailable",
+    stage: "first_stream_event", reason: "backend_unavailable",
     duration_ms: 120_000, observed_at_utc: current
   };
   const safe = popup.controls.safeLastFailedRequest;
-  assert.match(safe("chatgpt", valid), /json completion \/ backend unavailable/);
+  assert.match(safe("chatgpt", valid), /first stream event \/ backend unavailable/);
   assert.match(safe("metaai", valid), /5f855e0d-5b22-4a93-b925-98db841a1ee1/);
   assert.equal(safe("grok", valid), null, "deferred provider has no diagnostic display");
   assert.equal(safe("chatgpt", null), null, "no evidence is not proof of success");
+  for (const [stage, reason] of [
+    ["candidate_admission", "provider_busy"],
+    ["candidate_admission", "candidate_skipped"],
+    ["backend_admission", "timeout"],
+    ["first_stream_event", "unclassified"],
+    ["json_completion", "unclassified"]
+  ]) {
+    assert.match(safe("chatgpt", {...valid, stage, reason}), /Last gateway failure:/);
+  }
   const invalid = [
+    {...valid,source_failure_schema_version:0},
+    {...valid,source_failure_schema_version:2},
+    {...valid,source_failure_schema_version:null},
+    {...valid,source_failure_schema_version:"1"},
+    {...valid,source_failure_schema_version:undefined},
+    {...valid,stage:"json_completion",reason:"backend_unavailable"},
+    {...valid,stage:"candidate_admission",reason:"backend_unavailable"},
+    {...valid,stage:"backend_admission",reason:"candidate_skipped"},
+    {...valid,stage:"first_stream_event",reason:"candidate_skipped"},
+    {...valid,stage:"backend_admission",reason:"unclassified"},
+    {...valid,account_id:"private account identifier"},
     {...valid,request_id:"token=private"},
     {...valid,stage:"json_completion token=private"},
     {...valid,reason:"https://private.example/token?cookie=secret"},
@@ -1702,7 +1723,7 @@ test("last-failure UI accepts only fresh fixed server evidence for two active pr
     row.children[0].textContent,
     row.children.find(child=>child.className==="provider-detail").textContent
   ]));
-  assert.match(texts.ChatGPT,/Last gateway failure: json completion/);
+  assert.match(texts.ChatGPT,/Last gateway failure: first stream event/);
   assert.match(texts.ChatGPT,/Login unverified/);
   assert.doesNotMatch(texts["Meta AI"],/Last gateway failure|private|cookie=secret/);
   assert.doesNotMatch(texts.grok,/Last gateway failure/);
