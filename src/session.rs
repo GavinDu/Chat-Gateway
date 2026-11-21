@@ -115,6 +115,135 @@ mod vault_key_file_tests {
 
     #[cfg(unix)]
     #[test]
+    fn vault_key_file_rejects_changed_inode_and_permissions_before_read() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!(
+            "chat-gateway-key-file-swap-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("checked.key");
+        let original = root.join("original.key");
+        write_key(&path);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let inspected = std::fs::symlink_metadata(&path).unwrap();
+        let good = open_vault_key_file_no_follow(&path).unwrap();
+        checked_vault_key_file_identity(&inspected, &good.metadata().unwrap()).unwrap();
+
+        // Same-size replacement must fail even with identical content/mode.
+        std::fs::rename(&path, &original).unwrap();
+        write_key(&path);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let replacement = open_vault_key_file_no_follow(&path).unwrap();
+        assert_eq!(
+            checked_vault_key_file_identity(&inspected, &replacement.metadata().unwrap())
+                .unwrap_err()
+                .to_string(),
+            "CHAT_GATEWAY_VAULT_KEY_FILE changed during validation"
+        );
+
+        // A permission change between check and open must be verified from
+        // the *opened* descriptor rather than the stale pathname metadata.
+        let fresh = std::fs::symlink_metadata(&path).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let permissive = open_vault_key_file_no_follow(&path).unwrap();
+        assert_eq!(
+            checked_vault_key_file_identity(&fresh, &permissive.metadata().unwrap())
+                .unwrap_err()
+                .to_string(),
+            "CHAT_GATEWAY_VAULT_KEY_FILE must not be accessible by group or other users"
+        );
+        assert!(read_vault_key_file(&path).is_err());
+
+        // Preserve the original precheck semantics too: a file that was
+        // group-readable at inspection cannot be accepted by chmod'ing it
+        // private just before open.
+        let inspected_permissive = std::fs::symlink_metadata(&path).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let later_private = open_vault_key_file_no_follow(&path).unwrap();
+        assert_eq!(
+            checked_vault_key_file_identity(
+                &inspected_permissive,
+                &later_private.metadata().unwrap(),
+            )
+            .unwrap_err()
+            .to_string(),
+            "CHAT_GATEWAY_VAULT_KEY_FILE must not be accessible by group or other users"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn vault_key_file_nofollow_and_nonblock_deny_fifo_or_symlink_swap() {
+        use std::ffi::CString;
+        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::{ffi::OsStrExt, fs::symlink};
+        let root = std::env::temp_dir().join(format!(
+            "chat-gateway-key-file-nonblock-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("checked.key");
+        let original = root.join("original.key");
+        write_key(&path);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let inspected = std::fs::symlink_metadata(&path).unwrap();
+        std::fs::rename(&path, &original).unwrap();
+
+        // SAFETY: CString retains a valid NUL-terminated path pointer for
+        // the duration of mkfifo. The unique test directory is private.
+        let name = CString::new(path.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        let opened = open_vault_key_file_no_follow(&path).unwrap();
+        assert_eq!(
+            checked_vault_key_file_identity(&inspected, &opened.metadata().unwrap())
+                .unwrap_err()
+                .to_string(),
+            "CHAT_GATEWAY_VAULT_KEY_FILE must be a bounded regular file"
+        );
+        std::fs::remove_file(&path).unwrap();
+        // A symlink pointing to the *same* previous inode must still fail
+        // O_NOFOLLOW even if a dev/inode equality check would allow it.
+        symlink(&original, &path).unwrap();
+        assert!(open_vault_key_file_no_follow(&path).is_err());
+        assert!(read_vault_key_file(&path).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn vault_key_file_bounded_read_and_utf8_error_never_include_secret() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!(
+            "chat-gateway-key-file-bound-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("bounded.key");
+        std::fs::write(&path, vec![b'1'; MAX_VAULT_KEY_FILE_BYTES as usize + 1]).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let oversize = match read_vault_key_file(&path) {
+            Ok(_) => panic!("oversized key must be rejected"),
+            Err(error) => error.to_string(),
+        };
+        assert_eq!(
+            oversize,
+            "CHAT_GATEWAY_VAULT_KEY_FILE must be a bounded regular file"
+        );
+        std::fs::write(&path, vec![0xff; 64]).unwrap();
+        let malformed = match read_vault_key_file(&path) {
+            Ok(_) => panic!("malformed key must be rejected"),
+            Err(error) => error.to_string(),
+        };
+        assert_eq!(malformed, "CHAT_GATEWAY_VAULT_KEY_FILE is not UTF-8");
+        assert!(!oversize.contains("bounded.key"));
+        assert!(!malformed.contains("bounded.key"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn vault_key_file_rejects_symlinks() {
         use std::os::unix::fs::symlink;
         let root = std::env::temp_dir().join(format!(
@@ -1726,24 +1855,82 @@ pub fn parse_vault_key(encoded: &str) -> Result<Zeroizing<[u8; 32]>> {
     Ok(Zeroizing::new(key))
 }
 
-fn read_vault_key_file(path: &Path) -> Result<Zeroizing<String>> {
-    let metadata = std::fs::symlink_metadata(path)
-        .map_err(|error| anyhow::anyhow!("cannot inspect CHAT_GATEWAY_VAULT_KEY_FILE: {error}"))?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        anyhow::bail!("CHAT_GATEWAY_VAULT_KEY_FILE must be a regular, non-symlink file");
+const MAX_VAULT_KEY_FILE_BYTES: u64 = 4096;
+
+/// Never trust a second pathname lookup as the file that passed lstat. The
+/// opened descriptor must be the same regular, private object, not a symlink,
+/// FIFO or same-length replacement. No key bytes are read before this gate.
+fn checked_vault_key_file_identity(
+    inspected: &std::fs::Metadata,
+    opened: &std::fs::Metadata,
+) -> Result<()> {
+    if !inspected.is_file()
+        || inspected.file_type().is_symlink()
+        || inspected.len() > MAX_VAULT_KEY_FILE_BYTES
+        || !opened.is_file()
+        || opened.len() > MAX_VAULT_KEY_FILE_BYTES
+    {
+        anyhow::bail!("CHAT_GATEWAY_VAULT_KEY_FILE must be a bounded regular file");
     }
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        if metadata.permissions().mode() & 0o077 != 0 {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        if inspected.dev() != opened.dev() || inspected.ino() != opened.ino() {
+            anyhow::bail!("CHAT_GATEWAY_VAULT_KEY_FILE changed during validation");
+        }
+        if inspected.permissions().mode() & 0o077 != 0 || opened.permissions().mode() & 0o077 != 0 {
             anyhow::bail!(
                 "CHAT_GATEWAY_VAULT_KEY_FILE must not be accessible by group or other users"
             );
         }
     }
-    Ok(Zeroizing::new(std::fs::read_to_string(path).map_err(
-        |error| anyhow::anyhow!("cannot read CHAT_GATEWAY_VAULT_KEY_FILE: {error}"),
-    )?))
+    #[cfg(not(unix))]
+    anyhow::bail!("CHAT_GATEWAY_VAULT_KEY_FILE platform validation unavailable");
+    Ok(())
+}
+
+fn open_vault_key_file_no_follow(path: &Path) -> Result<std::fs::File> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(path)
+            .map_err(|_| anyhow::anyhow!("cannot read CHAT_GATEWAY_VAULT_KEY_FILE"))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        anyhow::bail!("CHAT_GATEWAY_VAULT_KEY_FILE platform validation unavailable");
+    }
+}
+
+fn read_vault_key_file(path: &Path) -> Result<Zeroizing<String>> {
+    use std::io::Read;
+    let inspected = std::fs::symlink_metadata(path)
+        .map_err(|_| anyhow::anyhow!("cannot inspect CHAT_GATEWAY_VAULT_KEY_FILE"))?;
+    if inspected.file_type().is_symlink() || !inspected.is_file() {
+        anyhow::bail!("CHAT_GATEWAY_VAULT_KEY_FILE must be a regular, non-symlink file");
+    }
+    let file = open_vault_key_file_no_follow(path)?;
+    let opened = file
+        .metadata()
+        .map_err(|_| anyhow::anyhow!("cannot inspect CHAT_GATEWAY_VAULT_KEY_FILE"))?;
+    checked_vault_key_file_identity(&inspected, &opened)?;
+
+    // Bounded, zeroized bytes: a file can grow between metadata and read.
+    // Never keep an unbounded String or reflect OS/UTF-8 errors with key data.
+    let mut key_bytes = Zeroizing::new(Vec::with_capacity(opened.len() as usize + 1));
+    file.take(MAX_VAULT_KEY_FILE_BYTES + 1)
+        .read_to_end(&mut key_bytes)
+        .map_err(|_| anyhow::anyhow!("cannot read CHAT_GATEWAY_VAULT_KEY_FILE"))?;
+    if key_bytes.len() as u64 > MAX_VAULT_KEY_FILE_BYTES {
+        anyhow::bail!("CHAT_GATEWAY_VAULT_KEY_FILE exceeds the size limit");
+    }
+    let utf8 = std::str::from_utf8(&key_bytes)
+        .map_err(|_| anyhow::anyhow!("CHAT_GATEWAY_VAULT_KEY_FILE is not UTF-8"))?;
+    Ok(Zeroizing::new(utf8.to_owned()))
 }
 
 pub fn validate_encrypted_store_configuration() -> Result<()> {
