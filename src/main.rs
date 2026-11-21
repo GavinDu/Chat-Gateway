@@ -1556,6 +1556,34 @@ async fn list_conversations(
     }
 }
 
+/// Never render provider-thread failures into logs: browser failures may contain
+/// bearer-bearing page URLs and storage failures may contain private owner paths.
+/// Only a stable source-owned category is retained at this structured boundary.
+fn provider_thread_failure_log_category(_error: &anyhow::Error) -> &'static str {
+    "provider_thread_operation_failed"
+}
+
+#[cfg(test)]
+mod provider_thread_log_redaction_tests {
+    use super::provider_thread_failure_log_category;
+
+    #[test]
+    fn provider_thread_log_category_ignores_wrapped_secret_bearing_errors() {
+        for raw in [
+            "sqlite /Users/owner/private/memory.db SQL=INSERT INTO threads",
+            "https://chatgpt.com/c/secret?token=opaque&cookie=private",
+            "provider session bearer secret in query or error chain",
+        ] {
+            let error = anyhow::anyhow!("{raw}")
+                .context("wrapped private conversation and account details");
+            assert_eq!(
+                provider_thread_failure_log_category(&error),
+                "provider_thread_operation_failed"
+            );
+        }
+    }
+}
+
 async fn get_provider_thread(
     State(state): State<Arc<AppState>>,
     Path((conversation_id, provider)): Path<(String, String)>,
@@ -1591,7 +1619,10 @@ async fn get_provider_thread(
             "no provider thread is stored for this conversation and provider",
         ),
         Err(error) => {
-            tracing::error!(%error, "provider thread lookup failed");
+            tracing::error!(
+                failure_category = provider_thread_failure_log_category(&error),
+                "provider thread lookup failed"
+            );
             api_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "server_error",
@@ -1645,7 +1676,10 @@ async fn upsert_provider_thread(
     {
         Ok(()) => Json(thread).into_response(),
         Err(error) => {
-            tracing::error!(%error, conversation_id, provider, "provider thread persistence failed");
+            tracing::error!(
+                failure_category = provider_thread_failure_log_category(&error),
+                "provider thread persistence failed"
+            );
             api_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "server_error",
@@ -1672,7 +1706,10 @@ async fn persist_provider_thread(
         Ok(url) if is_reopenable_provider_thread_url(provider, &url) => url,
         Ok(_) => return,
         Err(error) => {
-            tracing::debug!(provider, %error, "provider thread URL unavailable after successful send");
+            tracing::debug!(
+                failure_category = provider_thread_failure_log_category(&error),
+                "provider thread URL unavailable after successful send"
+            );
             return;
         }
     };
@@ -1690,7 +1727,10 @@ async fn persist_provider_thread(
         .upsert_provider_thread_async(owner_key_id.to_owned(), thread)
         .await
     {
-        tracing::warn!(provider, %error, "provider thread mapping could not be persisted");
+        tracing::warn!(
+            failure_category = provider_thread_failure_log_category(&error),
+            "provider thread mapping could not be persisted"
+        );
     }
 }
 
