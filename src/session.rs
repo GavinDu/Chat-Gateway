@@ -62,7 +62,6 @@ fn nonpersisted_session_save_outcome(
     }
 }
 
-
 #[derive(Serialize, Deserialize)]
 pub struct SessionFile {
     pub local_storage: std::collections::HashMap<String, String>,
@@ -617,7 +616,9 @@ impl VaultSessionStore {
                         "encrypted session changed but snapshot write is rate-limited"
                     );
                 }
-                SessionSaveOutcome::Persisted => unreachable!("a skipped write cannot be persisted"),
+                SessionSaveOutcome::Persisted => {
+                    unreachable!("a skipped write cannot be persisted")
+                }
             }
             return Ok(outcome);
         }
@@ -668,6 +669,20 @@ mod session_save_outcome_tests {
             nonpersisted_session_save_outcome(None, "first-snapshot", false),
             None
         );
+    }
+
+    #[test]
+    fn corrupt_existing_file_is_not_a_missing_snapshot() {
+        let path = std::env::temp_dir().join(format!(
+            "chat-gateway-existing-snapshot-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(&path, b"{ invalid session fixture").unwrap();
+        assert!(
+            load_session_file_from_path(&path).is_err(),
+            "malformed owner state must not authorize a first-save overwrite"
+        );
+        std::fs::remove_file(&path).unwrap();
     }
 }
 
@@ -2254,11 +2269,14 @@ async fn save_session_if_changed_file(
     let file = capture_session(browser, page, provider).await?;
     let current_hash = session_state_hash(&file)?;
     let destination = session_path(provider)?;
-    let previous_hash = std::fs::read(&destination)
-        .ok()
-        .map(Zeroizing::new)
-        .and_then(|bytes| serde_json::from_slice::<SessionFile>(&bytes).ok())
-        .and_then(|previous| session_state_hash(&previous).ok());
+    // A malformed or unreadable existing snapshot is NOT a missing one.
+    // Preserve it and fail closed rather than overwriting owner state under
+    // the first-write throttle exception. The shared loader distinguishes
+    // genuine NotFound from I/O and parsing errors without logging secrets.
+    let previous_hash = load_session_file_from_path(Path::new(&destination))?
+        .as_ref()
+        .map(session_state_hash)
+        .transpose()?;
 
     if let Some(outcome) = nonpersisted_session_save_outcome(
         previous_hash.as_deref(),
