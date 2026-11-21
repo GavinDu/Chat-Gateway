@@ -1,0 +1,89 @@
+{
+  "input_record_version": 1,
+  "standard_version": 1,
+  "run_id": null,
+  "work_scope": {
+    "persist_standard": null,
+    "implement_verifier": null,
+    "execute_selected_checks": null,
+    "storage_destinations": null
+  },
+  "selection": {
+    "providers_and_models": null,
+    "outputs": null,
+    "content_policy": null,
+    "task_completion_contract_if_applicable": null
+  },
+  "target": {
+    "deployment_type": null,
+    "gateway_origin": null,
+    "build_choice": null,
+    "expected_commit": null,
+    "image_digest_or_native_binary_digest": null,
+    "attestation_plan": null,
+    "configuration_label": null,
+    "resource_ownership_boundary": null
+  },
+  "session": {
+    "chrome_available": null,
+    "chrome_profile_label": null,
+    "extension_revision": null,
+    "source": null,
+    "account_type": null,
+    "local_authorization_method_label": null
+  },
+  "scenarios": {
+    "fresh_capture": null,
+    "normal_replies": null,
+    "memory_recall": null,
+    "graceful_restart": null,
+    "crash_recovery": null,
+    "logout_relink": null,
+    "refresh_while_busy": null,
+    "fault_injection": null,
+    "concurrency": null,
+    "soak": null
+  },
+  "permissions": {
+    "live_requests": null,
+    "temporary_private_session_copy": null,
+    "restart_disposable_resources": null,
+    "restart_installed_service": null,
+    "logout_relink": null,
+    "fault_injection": null,
+    "load_testing": null,
+    "install_or_deploy": null,
+    "recurring_monitoring": null
+  },
+  "limits": {
+    "maximum_requests_per_provider": null,
+    "minimum_interval_ms": null,
+    "maximum_concurrency": null,
+    "queue_timeout_seconds": null,
+    "response_timeout_seconds": null,
+    "maximum_duration_seconds": null,
+    "daily_or_cost_cap": null,
+    "stop_conditions": null,
+    "retry_before_dispatch_policy": null
+  },
+  "acceptance": {
+    "mode": null,
+    "sample_count": null,
+    "soak_duration_seconds": null,
+    "minimum_success_rate": null,
+    "queue_latency_target_ms": null,
+    "first_token_latency_target_ms": null,
+    "total_latency_target_ms": null,
+    "resource_stability_target": null
+  },
+  "evidence": {
+    "local_output_directory": null,
+    "retention": null,
+    "sharing": null
+  },
+  "monitoring_if_selected": {
+    "schedule_and_timezone": null,
+    "alert_destination": null
+  },
+  "explicit_exclusions_and_reasons": null
+}

@@ -9,6 +9,11 @@ in-process - no chromiumoxide, no external `obscura serve` CDP process).
 
 ## Quick start
 
+For repeatable provider acceptance, use the
+[provider verification standard](docs/PROVIDER_VERIFICATION_STANDARD.md) and
+[required run inputs](docs/PROVIDER_VERIFICATION_INPUTS.md). They cover Chrome
+capture, Obscura execution, JSON/SSE delivery and recovery for all nine providers.
+
 **Interactive provider login:** the separately supported [Replit-native browser
 runtime](browser-login/README.md) uses sandboxed Playwright Chromium, CDP frames
 and an encrypted vault. The default distroless Docker image does **not** package

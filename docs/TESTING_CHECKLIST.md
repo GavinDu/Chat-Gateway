@@ -1,5 +1,11 @@
 # Release and pairing testing checklist
 
+Use the [provider verification standard](PROVIDER_VERIFICATION_STANDARD.md) and
+complete its [run input checklist](PROVIDER_VERIFICATION_INPUTS.md) for provider
+flow acceptance. Keep fixture, live and historical evidence separate. The
+[implementation roadmap](PROVIDER_VERIFICATION_ROADMAP.md) records tooling gaps;
+the standard does not mean that the current runners implement every gate.
+
 Run local E2E from a clean, merged `main` checkout. Print `pwd` and the main commit
 before every test stage. Use disposable containers, keys and volumes; never print
 administrator secrets, install tokens or live provider credentials in test logs.
