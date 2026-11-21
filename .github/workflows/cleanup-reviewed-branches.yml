@@ -142,6 +142,102 @@ jobs:
                 supersededPr: 46,
                 successorPr: 48,
               },
+              {
+                name: "fix/1273-atomic-picker-css-click",
+                sha: "1ef8bf69bbe773a16680f6464bd157d50b98ced0",
+                supersededPr: 1274,
+                successorPr: 1277,
+              },
+              {
+                name: "refactor/p1-285-instance-scoped-embedded-login-20261107",
+                sha: "78212a8aca4aa32db7f26ff20255b1a343c0f9a1",
+                supersededPr: 778,
+                successorPr: 777,
+              },
+              {
+                name: "feat/secure-remote-relay-after-chatservice",
+                sha: "ed1af13cfc800c991b03b7c116f4b873557e069b",
+                supersededPr: 646,
+                successorPr: 647,
+              },
+              {
+                name: "refactor/isolated-metrics-registry-fmt",
+                sha: "6d6b78c6af854f6cdc824e9a94b94b321095d92c",
+                supersededPr: 632,
+                successorPr: 630,
+              },
+              {
+                name: "test/148-memory-expiry-rustfmt-followup-20261029",
+                sha: "4da54131563cd7a7a25010d658e906fe63058f5e",
+                supersededPr: 538,
+                successorPr: 535,
+              },
+              {
+                name: "test/121-provider-thread-restart-20261029",
+                sha: "8906ee4657acc393ba8e2c64d95394659a933ab6",
+                supersededPr: 536,
+                successorPr: 539,
+              },
+              {
+                name: "refactor/116-canonical-chat-contract-20261029",
+                sha: "3d8a4de9f3fe7cfcd17f791437ee1a36433e8690",
+                supersededPr: 531,
+                successorPr: 533,
+              },
+              {
+                name: "feat/context-build-report-20261028-v2",
+                sha: "6abc062c2eea795882f0c0ea521beb1226dd6ac8",
+                supersededPr: 455,
+                successorPr: 450,
+              },
+              {
+                name: "test/vault-preserve-corrupt-record-mainline-20261028",
+                sha: "97b4d29aa5fdce092506fb6b58c5457a5d18de06",
+                supersededPr: 434,
+                successorPr: 433,
+              },
+              {
+                name: "fix/combined-sqlite-and-extension-ci",
+                sha: "51b78b609b603eae6e941f19e5fea8667a176814",
+                supersededPr: 410,
+                successorPr: 411,
+              },
+              {
+                name: "fix/extension-permissions-test-mock-20261028",
+                sha: "35ae61e082c0bbe6a24977dc0215d4b6a2f3eb2b",
+                supersededPr: 402,
+                successorPr: 404,
+              },
+              {
+                name: "test/extension-permission-fixtures",
+                sha: "54b7311ba6da2264cfa000fe98d33f731ddde508",
+                supersededPr: 401,
+                successorPr: 404,
+              },
+              {
+                name: "fix/remove-duplicate-blocking-wrappers",
+                sha: "1ed4b33eba562b35fc74e07e5dcd72c49352669b",
+                supersededPr: 399,
+                successorPr: 404,
+              },
+              {
+                name: "feat/provider-session-probe-cooldown-issue-130",
+                sha: "447405dfd74585f83db7f76885e0e5616e9b1913",
+                supersededPr: 360,
+                successorPr: 359,
+              },
+              {
+                name: "fix/relay-popup-session-state-messages",
+                sha: "e13b0f80c8374215f925d4ee89600e327eadf074",
+                supersededPr: 356,
+                successorPr: 357,
+              },
+              {
+                name: "feat/vault-maintenance-rebased-issue-108",
+                sha: "4560df6f1cb866de20ae3b205a779390dbfef850",
+                supersededPr: 350,
+                successorPr: 353,
+              },
             ];
             for (const candidate of candidates) {
               let remote;
@@ -191,7 +287,7 @@ jobs:
                 if (!candidate.sha || oldPr.state !== "closed" || oldPr.merged_at ||
                     oldPr.head.ref !== candidate.name || oldPr.head.sha !== current ||
                     oldPr.head.repo?.full_name !== context.repo.owner + "/" + context.repo.repo ||
-                    !oldPr.body?.toLowerCase().includes("supersed") ||
+                    !/supersed|duplicat|closed in favor/i.test(oldPr.body || "") ||
                     !cited.includes("#" + candidate.successorPr) ||
                     !successor.merged_at || successor.base.ref !== "main" ||
                     successor.head.repo?.full_name !== context.repo.owner + "/" + context.repo.repo) {
