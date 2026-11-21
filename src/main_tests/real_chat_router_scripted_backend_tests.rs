@@ -140,6 +140,59 @@ async fn send_prompt(
 }
 
 #[tokio::test]
+async fn real_router_completion_identity_is_unique_per_turn_for_active_providers() {
+    for provider in ["metaai", "chatgpt"] {
+        let (app, _) = fixture(
+            &[provider],
+            (0..4)
+                .map(|_| response_events("synthetic answer"))
+                .collect(),
+            None,
+        );
+        let mut identities = std::collections::HashSet::new();
+        for stream in [false, false, true, true] {
+            // The fixture retains production pacing at one millisecond.
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+            let response = send(
+                app.clone(),
+                stream,
+                &format!("{provider}/fake-model"),
+                "shared_conversation_001",
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                response.headers()["X-Conversation-Id"],
+                "shared_conversation_001"
+            );
+            let body = to_bytes(response.into_body(), 65_536).await.unwrap();
+            let events: Vec<serde_json::Value> = if stream {
+                let text = std::str::from_utf8(&body).unwrap();
+                assert!(text.contains("data: [DONE]"));
+                text.lines()
+                    .filter_map(|line| line.strip_prefix("data: "))
+                    .filter(|data| *data != "[DONE]")
+                    .map(|data| serde_json::from_str(data).unwrap())
+                    .collect()
+            } else {
+                vec![serde_json::from_slice(&body).unwrap()]
+            };
+            assert!(!events.is_empty());
+            let first = &events[0];
+            let id = first["id"].as_str().unwrap();
+            assert!(
+                identities.insert(id.to_owned()),
+                "separate turns reused a completion ID"
+            );
+            for event in &events {
+                assert_eq!(event["id"], first["id"]);
+                assert_eq!(event["created"], first["created"]);
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn real_router_json_success_commits_one_canonical_turn() {
     let (app, state) = fixture(
         &["chatgpt"],

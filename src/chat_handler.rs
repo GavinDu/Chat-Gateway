@@ -6,7 +6,9 @@
 //! extractor stays in `main.rs` and is exercised by the existing real-router
 //! scripted-backend tests.
 use super::*;
-use crate::chat_render::{completion_response_headers, json_completion_body, sse_completion_chunk};
+use crate::chat_render::{
+    completion_response_headers, json_completion_body, sse_completion_chunk, CompletionIdentity,
+};
 use crate::chat_request::{prepare_chat_request, PreparedChatRequest};
 
 mod json;
@@ -590,24 +592,31 @@ mod completion_response_builder_tests {
 
     #[test]
     fn sse_role_content_and_terminal_chunks_share_identity_and_openai_shape() {
-        let conversation = "fixture-conversation-123";
+        let identity = CompletionIdentity::new();
         let model = "fixture-model";
         let role = sse_completion_chunk(
-            conversation,
+            &identity,
             model,
             serde_json::json!({ "role": "assistant" }),
             None,
         );
         let content = sse_completion_chunk(
-            conversation,
+            &identity,
             model,
             serde_json::json!({ "content": "fixture output" }),
             None,
         );
-        let finish = sse_completion_chunk(conversation, model, serde_json::json!({}), Some("stop"));
+        let finish = sse_completion_chunk(&identity, model, serde_json::json!({}), Some("stop"));
 
         for chunk in [&role, &content, &finish] {
-            assert_eq!(chunk["id"], "chatcmpl-fixture-");
+            assert_eq!(chunk["id"], role["id"]);
+            assert_eq!(chunk["created"], role["created"]);
+            let id = chunk["id"]
+                .as_str()
+                .unwrap()
+                .strip_prefix("chatcmpl-")
+                .unwrap();
+            assert!(uuid::Uuid::parse_str(id).is_ok());
             assert_eq!(chunk["model"], model);
             assert_eq!(chunk["object"], "chat.completion.chunk");
             assert_eq!(chunk["choices"][0]["index"], 0);
@@ -628,8 +637,19 @@ mod completion_response_builder_tests {
     fn json_response_preserves_usage_and_conversation_identity() {
         let conversation_id = "fixture-conversation-123";
         let content = "Hello from a fixture";
-        let body = json_completion_body(conversation_id, "fixture-model", content, 11);
-        assert_eq!(body["id"], "chatcmpl-fixture-");
+        let body = json_completion_body(
+            &CompletionIdentity::new(),
+            conversation_id,
+            "fixture-model",
+            content,
+            11,
+        );
+        let id = body["id"]
+            .as_str()
+            .unwrap()
+            .strip_prefix("chatcmpl-")
+            .unwrap();
+        assert!(uuid::Uuid::parse_str(id).is_ok());
         assert_eq!(body["conversation_id"], conversation_id);
         assert_eq!(body["model"], "fixture-model");
         assert_eq!(body["choices"][0]["message"]["content"], content);

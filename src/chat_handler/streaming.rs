@@ -22,6 +22,7 @@ pub(super) fn streamed_provider_response(attempt: StreamingAttempt) -> Response 
     } = attempt;
     let conversation_for_headers = conv_stream.clone();
     let provider_for_headers = provider_c.clone();
+    let identity = CompletionIdentity::new();
     let sse_stream = async_stream::stream! {
         let _permit = permit;
         let mut accumulator = chat_service::ResponseAccumulator::new(provider_started_c);
@@ -30,7 +31,7 @@ pub(super) fn streamed_provider_response(attempt: StreamingAttempt) -> Response 
         // OpenAI-compatible clients expect the assistant role on the
         // first stream chunk, before content deltas.
         let role = sse_completion_chunk(
-            &conv_stream,
+            &identity,
             &model_c,
             serde_json::json!({ "role": "assistant" }),
             None,
@@ -50,7 +51,7 @@ pub(super) fn streamed_provider_response(attempt: StreamingAttempt) -> Response 
                 chat_service::StreamUpdate::Delta(content)
                 | chat_service::StreamUpdate::CompleteWithDelta(content) => {
                     let data = sse_completion_chunk(
-                        &conv_stream,
+                        &identity,
                         &model_c,
                         serde_json::json!({ "content": content }),
                         None,
@@ -124,7 +125,7 @@ pub(super) fn streamed_provider_response(attempt: StreamingAttempt) -> Response 
             }
             let completion_tokens = estimate_tokens(&full);
             let mut finish = sse_completion_chunk(
-                &conv_stream,
+                &identity,
                 &model_c,
                 serde_json::json!({}),
                 Some("stop"),
