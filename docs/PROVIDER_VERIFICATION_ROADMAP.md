@@ -10,8 +10,10 @@ listed in [the input checklist](PROVIDER_VERIFICATION_INPUTS.md).
 - Make acceptance use the actual production completion endpoint and terminal
   success. The current adapter diagnostic stops after first changed text and
   uses a separate send path; it cannot certify completed delivery.
-- Implement versioned input/result validation and explicit missing-input
-  reporting. No live defaults or implicit provider expansion.
+- Input preflight is implemented in `scripts/provider_verification_inputs.py`.
+  It lists missing explicit inputs and produces blocked stage records without
+  network/session access. Its complete-input exit is not live evidence. Full
+  result validation and the canonical live executor remain separate work.
 - Add fixed stage/reason/duration/submission-state events for all providers.
   Current request-failure diagnostics cover only ChatGPT/Meta AI and coarse
   stages. Preserve request correlation without metric-cardinality growth.
@@ -21,8 +23,10 @@ listed in [the input checklist](PROVIDER_VERIFICATION_INPUTS.md).
 
 ## Correctness and recoverability
 
-- Generate one completion ID and creation timestamp per attempt. Current
-  rendering derives IDs from the conversation prefix and recomputes SSE time.
+- Completion rendering now creates one ID and timestamp per response, with
+  real-router regression coverage for repeated Meta AI and ChatGPT JSON/SSE
+  turns in the same conversation. This replaces the audited conversation-prefix
+  IDs and per-chunk timestamps; exact-head release validation is still required.
 - Expose rotated-session save outcome separately from successful reply delivery.
   The current worker logs save failure after forwarding completion. Add
   fault/restart checks and recovery without resending the delivered prompt.

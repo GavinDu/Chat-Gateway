@@ -86,6 +86,23 @@ Resolve every required input before dependent implementation or live execution.
 Read-only inspection and preparation that do not depend on those answers can
 continue. Material scope changes require updated inputs.
 
+Run the implemented input preflight from the repository root:
+
+```sh
+python3 -B scripts/provider_verification_inputs.py \
+  --inputs /private/location/run-inputs.json \
+  --report /private/location/input-preflight-results.json
+```
+
+It prints selected providers and unresolved field names without reading sessions,
+starting a runtime or making network requests. Exit 2 means inputs are missing
+or invalid; exit 0 means the checked input fields are complete. Both outcomes
+leave every execution stage blocked until an executor observes it. Expected
+commit/digest values are never reported as observed runtime identity. Lifecycle
+and load executors must additionally calculate the cost of their selected
+scenarios before execution; the current preflight costs normal replies and
+two-turn memory recall only.
+
 The runner then performs preflight, attests identity, executes selected checks,
 records every outcome and cleans up only test-owned resources. End with passed,
 failed, blocked and unsupported stages, exact build identity, budget used,

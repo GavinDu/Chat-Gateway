@@ -6,6 +6,22 @@ use axum::http::HeaderMap;
 
 use crate::api::{add_gateway_headers, estimate_tokens};
 
+/// One completion owns one identity, independently of its conversation.
+/// Reuse this value for every event in a streamed response.
+pub(crate) struct CompletionIdentity {
+    id: String,
+    created: i64,
+}
+
+impl CompletionIdentity {
+    pub(crate) fn new() -> Self {
+        Self {
+            id: format!("chatcmpl-{}", uuid::Uuid::new_v4()),
+            created: chrono::Utc::now().timestamp(),
+        }
+    }
+}
+
 /// Keep JSON and SSE response headers in one place so the two transports
 /// cannot silently diverge on conversation identity and provider metadata.
 pub(crate) fn completion_response_headers(
@@ -29,15 +45,15 @@ pub(crate) fn completion_response_headers(
 /// terminal deltas. Keeping identity and creation metadata in one place
 /// prevents transport-specific edits from changing only one chunk shape.
 pub(crate) fn sse_completion_chunk(
-    conversation_id: &str,
+    identity: &CompletionIdentity,
     model: &str,
     delta: serde_json::Value,
     finish_reason: Option<&str>,
 ) -> serde_json::Value {
     serde_json::json!({
-        "id": format!("chatcmpl-{}", &conversation_id[..8]),
+        "id": identity.id,
         "object": "chat.completion.chunk",
-        "created": chrono::Utc::now().timestamp(),
+        "created": identity.created,
         "model": model,
         "choices": [{ "delta": delta, "index": 0, "finish_reason": finish_reason }],
     })
@@ -46,6 +62,7 @@ pub(crate) fn sse_completion_chunk(
 /// Pure response construction: the live handler controls persistence and
 /// success metrics, while this helper only renders the OpenAI JSON envelope.
 pub(crate) fn json_completion_body(
+    identity: &CompletionIdentity,
     conversation_id: &str,
     model: &str,
     content: &str,
@@ -53,9 +70,9 @@ pub(crate) fn json_completion_body(
 ) -> serde_json::Value {
     let completion_tokens = estimate_tokens(content);
     serde_json::json!({
-        "id": format!("chatcmpl-{}", &conversation_id[..8]),
+        "id": identity.id,
         "object": "chat.completion",
-        "created": chrono::Utc::now().timestamp(),
+        "created": identity.created,
         "model": model,
         "choices": [{ "message": { "role": "assistant", "content": content }, "finish_reason": "stop", "index": 0 }],
         "usage": {
@@ -66,4 +83,22 @@ pub(crate) fn json_completion_body(
         "x_usage_estimated": true,
         "conversation_id": conversation_id,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transports_preserve_the_completion_timestamp_instead_of_sampling_each_event() {
+        let identity = CompletionIdentity {
+            id: "chatcmpl-synthetic".to_owned(),
+            created: 1,
+        };
+        let json = json_completion_body(&identity, "conversation_a", "model", "answer", 1);
+        let sse = sse_completion_chunk(&identity, "model", serde_json::json!({}), Some("stop"));
+        assert_eq!(json["created"], 1);
+        assert_eq!(sse["created"], 1);
+        assert_eq!(json["id"], sse["id"]);
+    }
 }

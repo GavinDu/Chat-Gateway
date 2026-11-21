@@ -89,7 +89,13 @@ pub(super) async fn json_provider_response(
         ));
     }
 
-    let body = json_completion_body(conversation_id, model, &full, prompt_tokens);
+    let body = json_completion_body(
+        &CompletionIdentity::new(),
+        conversation_id,
+        model,
+        &full,
+        prompt_tokens,
+    );
     let headers = completion_response_headers(conversation_id, provider, provider_model, false);
     Ok((headers, Json(body)).into_response())
 }
