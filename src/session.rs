@@ -1826,8 +1826,10 @@ fn restored_cookie_fields_safe(cookie: &Cookie) -> bool {
 fn parse_local_storage_snapshot(
     value: serde_json::Value,
 ) -> Result<std::collections::HashMap<String, String>> {
+    // localStorage may hold reusable authentication material. Never include
+    // untrusted Serde diagnostics in logs or caller-visible error chains.
     serde_json::from_value(value)
-        .map_err(|error| anyhow::anyhow!("decoding provider localStorage snapshot: {error}"))
+        .map_err(|_| anyhow::anyhow!("provider_local_storage_snapshot_invalid"))
 }
 
 /// Ensure the directory holding reusable provider credentials is private.
@@ -3001,8 +3003,45 @@ mod local_storage_snapshot_tests {
 
     #[test]
     fn rejects_invalid_local_storage_snapshot_instead_of_silently_emptying_it() {
-        assert!(parse_local_storage_snapshot(serde_json::json!(["unexpected"])).is_err());
-        assert!(parse_local_storage_snapshot(serde_json::json!({"theme": 42})).is_err());
+        for invalid in [
+            serde_json::json!(["unexpected"]),
+            serde_json::json!({"theme": 42}),
+            serde_json::json!({"access_token": 1234567890123456_u64}),
+            serde_json::json!({"secret-key": {"bearer":"synthetic-private-secret"}}),
+        ] {
+            let err = parse_local_storage_snapshot(invalid).unwrap_err();
+            assert_eq!(err.to_string(), "provider_local_storage_snapshot_invalid");
+            let diagnostic = format!("{err:#}");
+            for sensitive in [
+                "access_token",
+                "1234567890123456",
+                "secret-key",
+                "synthetic-private-secret",
+                "bearer",
+                "unexpected",
+            ] {
+                assert!(!diagnostic.contains(sensitive));
+            }
+        }
+    }
+
+    #[test]
+    fn reserved_keys_keep_their_exact_values_in_valid_local_storage() {
+        let valid = serde_json::json!({
+            "__proto__":"synthetic-private-value",
+            "constructor":"synthetic-other-value",
+            "prototype":"kept",
+        });
+        let parsed = parse_local_storage_snapshot(valid).unwrap();
+        assert_eq!(
+            parsed.get("__proto__").map(String::as_str),
+            Some("synthetic-private-value")
+        );
+        assert_eq!(
+            parsed.get("constructor").map(String::as_str),
+            Some("synthetic-other-value")
+        );
+        assert_eq!(parsed.get("prototype").map(String::as_str), Some("kept"));
     }
 }
 
