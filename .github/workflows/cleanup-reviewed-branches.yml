@@ -49,6 +49,99 @@ jobs:
                 name: "chore/auto-delete-merged-pr-heads-20261107",
                 mergedPrHead: true,
               },
+              // Historical closed/unmerged branches explicitly superseded
+              // by merged main PRs. Verify closed PR provenance and complete
+              // old-file path coverage in successor before every deletion.
+              {
+                name: "fix/backend-typed-provider-errors-20261102",
+                sha: "b01f3211bc8aa8ac10f4f72f9eecc7079b60fa6c",
+                supersededPr: 658,
+                successorPr: 657,
+              },
+              {
+                name: "refactor/app-background-workers-20261102",
+                sha: "794b25cfa9ef5f9de83d3c78385b26acc36b811e",
+                supersededPr: 654,
+                successorPr: 656,
+              },
+              {
+                name: "fix/session-write-tracker-mainline",
+                sha: "a3a1e84b237693a2824e437404af977a3d8b5da1",
+                supersededPr: 634,
+                successorPr: 635,
+              },
+              {
+                name: "refactor/283-extract-request-security-helpers-20261030",
+                sha: "3a4efed06dee65f59a6dbb7156b764863c4308b9",
+                supersededPr: 596,
+                successorPr: 602,
+              },
+              {
+                name: "test/121-async-thread-map-isolation-20261030",
+                sha: "d3748fed41c7a16961ba43a2708306846c2ac900",
+                supersededPr: 590,
+                successorPr: 593,
+              },
+              {
+                name: "test/280-supervisor-restart-command-regression-20261030",
+                sha: "fa082800b68a078f5ef71a29ffa2a690ba6d931f",
+                supersededPr: 563,
+                successorPr: 561,
+              },
+              {
+                name: "feat/137-provider-response-tap-current-main-20261030",
+                sha: "1f23110e939bb2cd710e66812cc3be04a6203124",
+                supersededPr: 554,
+                successorPr: 555,
+              },
+              {
+                name: "refactor/116-canonical-chat-events-20261029",
+                sha: "40362b43bfa26d7cc5d2920f7c8a904dc222e017",
+                supersededPr: 530,
+                successorPr: 533,
+              },
+              {
+                name: "fix/context-budget-overflow-20261028",
+                sha: "2f150a2fdd0d6de370a42212e17ed8970fc1e12b",
+                supersededPr: 443,
+                successorPr: 446,
+              },
+              {
+                name: "feat/docker-startup-health-gate",
+                sha: "18a79b712398a260b94bc0912fb315a03fe0ee74",
+                supersededPr: 618,
+                successorPr: 619,
+              },
+              {
+                name: "test/vault-preserve-corrupt-record-127",
+                sha: "1c02a959a361d3a265f77c53d552e978ebe85eae",
+                supersededPr: 427,
+                successorPr: 433,
+              },
+              {
+                name: "fix/typed-browser-worker-unavailable-280-rebased",
+                sha: "5a7508934f10715797a0cdaf470a74ff853ab60c",
+                supersededPr: 414,
+                successorPr: 419,
+              },
+              {
+                name: "test/extension-relay-policy-issue-129",
+                sha: "e8e5ccbc8cecfad0a71fb437588d1367d46fc7c8",
+                supersededPr: 387,
+                successorPr: 394,
+              },
+              {
+                name: "feat-provider-benchmark-harness-20261027",
+                sha: "033668192e4f4ff9fa95061ce2c52315dfd0f6f9",
+                supersededPr: 229,
+                successorPr: 265,
+              },
+              {
+                name: "fix/enabled-provider-model-list",
+                sha: "3de8b6213c09d1908dccae23adea64a53070556b",
+                supersededPr: 46,
+                successorPr: 48,
+              },
             ];
             for (const candidate of candidates) {
               let remote;
@@ -85,6 +178,50 @@ jobs:
                     pr.head.ref !== candidate.name || pr.head.sha !== current ||
                     pr.head.repo?.full_name !== context.repo.owner + "/" + context.repo.repo) {
                   core.warning("Skip branch without an exact merged PR: " + candidate.name);
+                  continue;
+                }
+              } else if (candidate.supersededPr && candidate.successorPr) {
+                const oldPr = (await github.rest.pulls.get({
+                  owner, repo, pull_number: candidate.supersededPr,
+                })).data;
+                const successor = (await github.rest.pulls.get({
+                  owner, repo, pull_number: candidate.successorPr,
+                })).data;
+                const cited = (oldPr.body || "").match(/#[0-9]+/g) || [];
+                if (!candidate.sha || oldPr.state !== "closed" || oldPr.merged_at ||
+                    oldPr.head.ref !== candidate.name || oldPr.head.sha !== current ||
+                    oldPr.head.repo?.full_name !== context.repo.owner + "/" + context.repo.repo ||
+                    !oldPr.body?.toLowerCase().includes("supersed") ||
+                    !cited.includes("#" + candidate.successorPr) ||
+                    !successor.merged_at || successor.base.ref !== "main" ||
+                    successor.head.repo?.full_name !== context.repo.owner + "/" + context.repo.repo) {
+                  core.warning("Skip without explicit merged supersession: " + candidate.name);
+                  continue;
+                }
+                // Do not delete a head used by a still-open PR or PR stack.
+                const active = await github.paginate(github.rest.pulls.list, {
+                  owner, repo, head: owner + ":" + candidate.name,
+                  state: "open", per_page: 100,
+                });
+                const dependents = await github.paginate(github.rest.pulls.list, {
+                  owner, repo, base: candidate.name, state: "open", per_page: 100,
+                });
+                if (active.length || dependents.length) {
+                  core.warning("Skip branch still in an open PR graph: " + candidate.name);
+                  continue;
+                }
+                const [oldFiles, successorFiles] = await Promise.all([
+                  github.paginate(github.rest.pulls.listFiles, {
+                    owner, repo, pull_number: candidate.supersededPr, per_page: 100,
+                  }),
+                  github.paginate(github.rest.pulls.listFiles, {
+                    owner, repo, pull_number: candidate.successorPr, per_page: 100,
+                  }),
+                ]);
+                const successorPaths = new Set(successorFiles.map(file => file.filename));
+                if (!oldFiles.length ||
+                    !oldFiles.every(file => successorPaths.has(file.filename))) {
+                  core.warning("Skip supersession without complete file coverage: " + candidate.name);
                   continue;
                 }
               } else if (candidate.supersededDocument) {
