@@ -131,7 +131,9 @@ mod worker_supervisor_tests {
             std::future::pending::<()>().await;
         });
         task.abort();
-        let error = task.await.expect_err("aborted task should return JoinError");
+        let error = task
+            .await
+            .expect_err("aborted task should return JoinError");
         assert_eq!(
             super::browser_worker_join_failure_log_category(&error),
             "browser_worker_join_failed"
