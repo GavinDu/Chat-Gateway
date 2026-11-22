@@ -3567,7 +3567,7 @@ mod restored_cookie_readback_scope_tests {
     }
 
     #[test]
-    fn pinned_obscura_cookie_jar_normalizes_host_only_and_domain_readback() {
+    fn pinned_obscura_cookie_jar_readback_does_not_prove_original_scope() {
         // Separate disposable browsers avoid the pinned jar's normalized
         // name/domain/path collision, and require no provider login/network.
         let host = Browser::builder().stealth(false).build().unwrap();
@@ -3599,9 +3599,15 @@ mod restored_cookie_readback_scope_tests {
             .collect();
         assert_eq!(host_readback.len(), 1);
         assert_eq!(domain_readback.len(), 1);
-        // The pinned jar drops the Domain marker in both readback shapes.
-        // Compatibility requires the material but reports scope unobservable.
-        assert_eq!(host_readback[0].domain, domain_readback[0].domain);
+        // The pinned jar's readback of a Domain cookie can retain or omit
+        // the leading dot depending on its internal storage path. Domain
+        // spelling is not evidence that the original host-only/Domain scope
+        // was preserved. Check only the comparable normalized host, while
+        // reporting the original delivery scope as unobservable.
+        assert_eq!(
+            host_readback[0].domain.trim_start_matches('.'),
+            domain_readback[0].domain.trim_start_matches('.')
+        );
         assert!(restored_cookie_material_matches(
             &cookie("chatgpt.com"),
             &host_readback[0]
