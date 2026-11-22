@@ -2409,30 +2409,16 @@ pub(crate) fn session_state_hash(file: &SessionFile) -> Result<String> {
     // produces the same fingerprint across snapshots.
     let local_storage: BTreeMap<&String, &String> = file.local_storage.iter().collect();
     let mut cookies = file.cookies.clone();
-    // Equal name/domain/path/value cookies can still differ in security,
-    // expiry or SameSite metadata. Sort the full serialized cookie state so
-    // permutations cannot falsely signal changed credentials or vault writes.
+    // Preserve order for ambiguous duplicate identity/value records: replay
+    // historically selects the first same-scope cookie. Until metadata
+    // conflicts are rejected, those snapshots are NOT equivalent.
     cookies.sort_by(|left, right| {
-        (
-            &left.domain,
-            &left.name,
-            &left.path,
-            &left.value,
-            left.secure,
-            left.http_only,
-            left.expires.map(f64::to_bits),
-            &left.same_site,
-        )
-            .cmp(&(
-                &right.domain,
-                &right.name,
-                &right.path,
-                &right.value,
-                right.secure,
-                right.http_only,
-                right.expires.map(f64::to_bits),
-                &right.same_site,
-            ))
+        (&left.domain, &left.name, &left.path, &left.value).cmp(&(
+            &right.domain,
+            &right.name,
+            &right.path,
+            &right.value,
+        ))
     });
     let serialized = Zeroizing::new(serde_json::to_vec(&(local_storage, cookies))?);
     let digest = Sha256::digest(&*serialized);
@@ -3073,47 +3059,6 @@ mod cookie_restore_result_tests {
             };
             assert!(preflight_cookie_restore(&separate_scopes, provider).is_ok());
         }
-    }
-
-    #[test]
-    fn session_hash_is_permutation_invariant_when_cookie_metadata_differs() {
-        // These two synthetic same-identity cookies differ in all their
-        // security/expiry attributes. Hash ordering is not an admission rule:
-        // active-provider same-scope conflict validation occurs separately.
-        let mut first = SessionFile {
-            local_storage: std::collections::HashMap::new(),
-            cookies: vec![
-                Cookie {
-                    name: "same-name".into(),
-                    value: "synthetic-value".into(),
-                    domain: ".chatgpt.com".into(),
-                    path: "/".into(),
-                    secure: true,
-                    http_only: true,
-                    expires: Some(2_000_000_000.0),
-                    same_site: Some("Strict".into()),
-                },
-                Cookie {
-                    name: "same-name".into(),
-                    value: "synthetic-value".into(),
-                    domain: ".chatgpt.com".into(),
-                    path: "/".into(),
-                    secure: false,
-                    http_only: false,
-                    expires: None,
-                    same_site: Some("Lax".into()),
-                },
-            ],
-            ts: "old".into(),
-        };
-        let canonical = session_state_hash(&first).unwrap();
-        first.cookies.reverse();
-        first.ts = "changed".into();
-        assert_eq!(canonical, session_state_hash(&first).unwrap());
-
-        // Real metadata changes must still alter the digest.
-        first.cookies[0].same_site = Some("Strict".into());
-        assert_ne!(canonical, session_state_hash(&first).unwrap());
     }
 
     #[test]
@@ -5807,7 +5752,17 @@ mod replay_material_coverage_tests {
             foreign_host.domain = foreign_domain.trim_start_matches('.').to_owned();
             let own = fixture("SID", "private-own", own_domain);
 
+            // Current main rejects foreign-only material before attempting any
+            // cookie replay; this must remain fail-closed, not a vacuous success.
             let source = snapshot(vec![foreign.clone(), foreign_host.clone()], &[]);
+            assert!(planned_cookie_replay(&source, provider, 1000.0).is_err());
+
+            // Applicable origin storage permits a scoped zero-cookie plan;
+            // foreign twins must still not be copied or counted as drops.
+            let source = snapshot(
+                vec![foreign.clone(), foreign_host.clone()],
+                &[("synthetic-preference", "not-a-credential")],
+            );
             let (planned, dropped) = planned_cookie_replay(&source, provider, 1000.0).unwrap();
             assert!(planned.is_empty());
             assert_eq!(dropped, 0, "foreign twins cannot normalize this provider");
