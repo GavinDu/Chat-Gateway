@@ -81,8 +81,38 @@ jobs:
                     if(supersededBy)break;
                   }
                 }
-                if(row.ahead!==0&&!exactMerged&&!supersededBy){
-                  row.reason="ahead of main, not proven merged or superseded (retain)";
+                // Content proof for moved/squashed heads: compare every changed
+                // path's *blob identity*, never a similar filename or file count.
+                // GitHub compare returns at most 300 files; skip ambiguous/truncated
+                // sets, renames, symlinks, submodules, and API failures.
+                let byteIdentical=false;
+                if(row.ahead!==0&&!exactMerged&&!supersededBy&&
+                   Array.isArray(cmp.files)&&cmp.files.length>0&&cmp.files.length<300&&
+                   cmp.files.every(f=>["added","modified","deleted"].includes(f.status))){
+                  byteIdentical=true;
+                  for(const file of cmp.files){
+                    let mainFile;
+                    try{
+                      mainFile=(await github.rest.repos.getContent({
+                        owner,repo,path:file.filename,ref:"main"
+                      })).data;
+                    }catch(error){
+                      if(error.status===404){
+                        if(file.status==="deleted")continue;
+                        byteIdentical=false;
+                        break;
+                      }
+                      throw error;
+                    }
+                    if(file.status==="deleted"||Array.isArray(mainFile)||
+                       mainFile.type!=="file"||mainFile.sha!==file.sha){
+                      byteIdentical=false;
+                      break;
+                    }
+                  }
+                }
+                if(row.ahead!==0&&!exactMerged&&!supersededBy&&!byteIdentical){
+                  row.reason="ahead of main, no merged/superseded or complete byte-identical proof (retain)";
                   stats.retained++;
                   report.push(row);
                   continue;
@@ -111,7 +141,7 @@ jobs:
                   report.push(row);
                   continue;
                 }
-                row.reason=row.ahead===0?"entire branch reachable from main":exactMerged?"exact merged PR head":"closed PR explicitly superseded by merged #"+supersededBy+" (file coverage verified)";
+                row.reason=row.ahead===0?"entire branch reachable from main":exactMerged?"exact merged PR head":supersededBy?"closed PR explicitly superseded by merged #"+supersededBy+" (file coverage verified)":"all branch-changed path blobs match main exactly";
                 // deleteRef has no atomic compare-and-delete. Re-check head immediately
                 // before deletion and require stable branch writers during this run.
                 await github.rest.git.deleteRef({owner,repo,ref:"heads/"+name});
@@ -132,7 +162,7 @@ jobs:
               "",
               "Repository: "+full+"; main SHA: "+context.sha,
               "",
-              "**Deletion rule:** only a zero-ahead branch, exact merged main PR head, or exact closed PR head citing a merged main successor with complete changed-file coverage; never protected refs or open PR heads/bases. Every deletion rechecks the ref.",
+              "**Deletion rule:** zero-ahead ancestry, exact merged main PR head, closed PR with explicit merged-successor and complete file-path coverage, or complete changed-file blob identity with main (no partial/truncated file sets). Never protected refs or open PR heads/bases. Every deletion rechecks the ref.",
               "",
               "- Inventory: "+branches.length+" branches before this pass",
               "- Deleted: "+stats.deleted,
