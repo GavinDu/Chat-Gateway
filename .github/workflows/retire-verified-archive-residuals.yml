@@ -1,0 +1,76 @@
+name: Retire SHA-verified archived residuals
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/retire-verified-archive-residuals.yml
+permissions:
+  contents: write
+concurrency:
+  group: branch-reconciliation
+  cancel-in-progress: false
+jobs:
+  retire-residuals:
+    if: github.repository == 'GavinDu/Chat-Gateway'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Compare live branch/tag refs and retire exactly five verified leftovers
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const {owner,repo}=context.repo;
+            const candidates=[["fix/structured-body-limit-errors-rebased","0c13f699f53d28575561079e6e12d2778c12badc"],["fix/437-remove-tab-id-v8-final-ci-20261029","57ec2b5284f5255c96188f753035f8afdf404694"],["refactor/283-diagnostics-module-and-extension-regressions-20261030","b89aa8114dfec3eaa6f01d85156d40e3da7f66eb"],["test/provider-thread-interleaved-rebased-20261029","b5d4104c95d16aafc3b153e94b8a35e3476821f3"],["test/vault-fail-closed-127-v2","78b95ebef167f9b6d6507651526a90dc29ce451c"]];
+            let removed=0,skipped=0;
+            const decisions=[];
+            for(const [name,expected] of candidates){
+              const row={name,expected,action:"RETAIN",reason:""};
+              try{
+                // Both independent refs were observed at expected SHA on 2026-11-21.
+                // Reverify now; no deletion when tag or head has changed.
+                const [head,tag]=await Promise.all([
+                  github.rest.git.getRef({owner,repo,ref:"heads/"+name}),
+                  github.rest.git.getRef({owner,repo,ref:"tags/archive/branches-20261121/"+name}),
+                ]);
+                if(head.data.object.sha!==expected||tag.data.object.sha!==expected){
+                  row.reason="branch or archive tag SHA diverged; fail closed";
+                  skipped++;decisions.push(row);continue;
+                }
+                // Read live open PR graph without per-branch filtered REST calls.
+                const prs=await github.paginate(github.rest.pulls.list,{owner,repo,state:"open",per_page:100});
+                if(prs.some(p=>
+                  p.base.ref===name||
+                  (p.head.ref===name&&p.head.repo?.full_name===owner+"/"+repo)
+                )){
+                  row.reason="open PR head/base dependency";skipped++;decisions.push(row);continue;
+                }
+                const [now,backup]=await Promise.all([
+                  github.rest.git.getRef({owner,repo,ref:"heads/"+name}),
+                  github.rest.git.getRef({owner,repo,ref:"tags/archive/branches-20261121/"+name})
+                ]);
+                if(now.data.object.sha!==expected||backup.data.object.sha!==expected){
+                  row.reason="ref moved between checks";skipped++;decisions.push(row);continue;
+                }
+                await github.rest.git.deleteRef({owner,repo,ref:"heads/"+name});
+                row.action="DELETED";
+                row.reason="same SHA preserved by verified archive tag";
+                removed++;
+                core.info("Retired residual branch "+name+" "+expected);
+              }catch(e){
+                skipped++;
+                row.reason="API error; branch retained: "+String(e.message).slice(0,160);
+                core.warning("Retained "+name+": "+row.reason);
+              }
+              decisions.push(row);
+            }
+            await core.summary.addRaw([
+            "# SHA-verified residual branch retirement",
+            "",
+            "- Deleted: "+removed,
+            "- Retained: "+skipped,
+            "",
+            "| Branch | Original SHA | Decision | Evidence |",
+            "|---|---|---|---|",
+            ...decisions.map(r=>"| "+r.name+" | "+r.expected+" | "+r.action+" | "+r.reason+" |")
+            ].join("\n")).write();
+            core.info("RESIDUAL_RETIREMENT "+JSON.stringify({removed,skipped,decisions}));
