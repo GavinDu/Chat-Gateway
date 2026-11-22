@@ -81,8 +81,40 @@ jobs:
                     if(supersededBy)break;
                   }
                 }
-                if(row.ahead!==0&&!exactMerged&&!supersededBy){
-                  row.reason="ahead of main, not proven merged or superseded (retain)";
+                // Stronger equivalence proof: compare blob SHA *and Git mode*
+                // in complete recursive trees. Avoid content-only equality that
+                // could overlook executable-bit, symlink, or submodule changes.
+                // Skip truncated compare/file trees or uncertain rename sets.
+                let byteIdentical=false;
+                if(row.ahead!==0&&!exactMerged&&!supersededBy&&
+                   Array.isArray(cmp.files)&&cmp.files.length>0&&cmp.files.length<300&&
+                   cmp.files.every(f=>["added","modified","removed","deleted"].includes(f.status))){
+                  const treeFor=async commitSha=>{
+                    const commit=(await github.rest.git.getCommit({owner,repo,commit_sha:commitSha})).data;
+                    const tree=(await github.rest.git.getTree({
+                      owner,repo,tree_sha:commit.tree.sha,recursive:"1"
+                    })).data;
+                    return tree.truncated||!Array.isArray(tree.tree)?null:
+                      new Map(tree.tree.map(item=>[item.path,item]));
+                  };
+                  const [mainTree,branchTree]=await Promise.all([
+                    treeFor(context.sha),treeFor(sha)
+                  ]);
+                  if(mainTree&&branchTree){
+                    byteIdentical=cmp.files.every(file=>{
+                      const saved=branchTree.get(file.filename);
+                      const current=mainTree.get(file.filename);
+                      if(file.status==="removed"||file.status==="deleted"){
+                        return !saved&&!current;
+                      }
+                      return saved?.type==="blob"&&current?.type==="blob"&&
+                        saved.sha===current.sha&&saved.mode===current.mode&&
+                        saved.sha===file.sha;
+                    });
+                  }
+                }
+                if(row.ahead!==0&&!exactMerged&&!supersededBy&&!byteIdentical){
+                  row.reason="ahead of main, no merged/superseded or complete byte-identical proof (retain)";
                   stats.retained++;
                   report.push(row);
                   continue;
@@ -111,7 +143,7 @@ jobs:
                   report.push(row);
                   continue;
                 }
-                row.reason=row.ahead===0?"entire branch reachable from main":exactMerged?"exact merged PR head":"closed PR explicitly superseded by merged #"+supersededBy+" (file coverage verified)";
+                row.reason=row.ahead===0?"entire branch reachable from main":exactMerged?"exact merged PR head":supersededBy?"closed PR explicitly superseded by merged #"+supersededBy+" (file coverage verified)":"all branch-changed file blobs and Git modes match main exactly";
                 // deleteRef has no atomic compare-and-delete. Re-check head immediately
                 // before deletion and require stable branch writers during this run.
                 await github.rest.git.deleteRef({owner,repo,ref:"heads/"+name});
@@ -132,7 +164,7 @@ jobs:
               "",
               "Repository: "+full+"; main SHA: "+context.sha,
               "",
-              "**Deletion rule:** only a zero-ahead branch, exact merged main PR head, or exact closed PR head citing a merged main successor with complete changed-file coverage; never protected refs or open PR heads/bases. Every deletion rechecks the ref.",
+              "**Deletion rule:** zero-ahead ancestry, exact merged main PR head, closed PR with explicit merged-successor and complete file-path coverage, or complete changed-file blob SHA plus Git mode identity with main (no partial/truncated file sets). Never protected refs or open PR heads/bases. Every deletion rechecks the ref.",
               "",
               "- Inventory: "+branches.length+" branches before this pass",
               "- Deleted: "+stats.deleted,
