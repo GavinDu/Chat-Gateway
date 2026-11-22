@@ -535,7 +535,7 @@ test("browser activation statuses stay distinct from login verification", async 
     await popup.controls.refreshStatus();
     const row = popup.elements.get("status").children[0];
     const status = row.children.find(child => child.className==="provider-detail").textContent;
-    assert.match(status, /Login unverified/, "session activation cannot imply authentication");
+    assert.match(status, /Account verification unavailable/, "session activation cannot imply authentication");
     assert.ok(status.includes(expected), "show only fixed activation categories");
     assert.doesNotMatch(status, /Login verified/);
   }
@@ -557,7 +557,7 @@ test("dashboard separates typed pending and failed activation reasons from login
     const detailText=popup.byId("status").children[0].children
       .find(child=>child.className==="provider-detail").textContent;
     assert.ok(detailText.includes(detail));
-    assert.ok(detailText.includes("Login unverified"), "activation cannot verify credentials");
+    assert.ok(detailText.includes("Account verification unavailable"), "activation cannot verify credentials");
     assert.ok(!detailText.includes("Login needed"), "activation cannot demand re-login");
     assert.equal(popup.chromeCalls.filter(call=>call==="sync-provider:metaai").length,0);
   }
@@ -586,7 +586,7 @@ test("activation diagnostics fail closed for contradictory or untrusted status",
     for(const token of ["private.invalid", "poll_secret", "token=secret"]) {
       assert.ok(!detailText.includes(token), "never echo raw activation errors");
     }
-    assert.ok(detailText.includes("Login unverified"));
+    assert.ok(detailText.includes("Account verification unavailable"));
   }
   for (const linked of [false, true]) {
     const popup=loadPopup({activation:"failed",activationIssue:"refresh_failed"});
@@ -614,7 +614,7 @@ test("popup displays last extension sync and stale status independently of auth"
   await popup.controls.refreshStatus();
   const row = popup.elements.get("status").children[0];
   const status = row.children.find(child => child.className==="provider-detail").textContent;
-  assert.match(status,/Login unverified/);
+  assert.match(status,/Account verification unavailable/);
   assert.ok(status.includes("Last extension sync attempt: "+last));
   assert.match(status,/Extension sync status stale/);
   assert.match(status,/Extension sync: gateway request failed/);
@@ -694,7 +694,7 @@ test("provider dashboard renders only exact known issue codes from gateway and w
   const known=await view("provider_document_denied","gateway_timeout");
   assert.match(known,/Gateway issue: provider document denied/);
   assert.match(known,/Extension sync: gateway timeout/);
-  assert.match(known,/Login unverified/,
+  assert.match(known,/Account verification unavailable/,
     "issue codes do not establish authenticated login");
 
   const leaked="token=private https://private.invalid/relay?poll_secret=secret";
@@ -1727,7 +1727,7 @@ test("provider status names and disabled account checks are distinct from verifi
     row.children.find(child => child.className === "provider-detail").textContent
   ]));
   assert.match(cards.ChatGPT,/Login verified/);
-  assert.match(cards["Meta AI"],/Login unverified/);
+  assert.match(cards["Meta AI"],/Account verification unavailable/);
   assert.match(cards.claude,/Disabled in gateway config/);
   assert.match(cards.claude,/Account check deferred \(provider disabled\)/);
   assert.doesNotMatch(cards.claude,/Login verified|Login needed|Login unverified/);
@@ -1776,4 +1776,33 @@ test("disabled provider policy does not masquerade as a gateway outage", async (
   // Unknown enablement is not permission to suppress real warning evidence.
   assert.match(detail(rows.manus),/Gateway enablement unverified/);
   assert.match(detail(rows.manus),/Gateway issue: provider degraded/);
+});
+
+
+test("Meta AI ready status separates chat from unsupported account verification", async () => {
+  const popup=loadPopup();
+  await new Promise(resolve=>setImmediate(resolve));
+  const ready={provider:"metaai",enabled:true,linked:true,authentication:"unknown",
+    availability:"ready",activation:"not_attempted",manual_verification_required:false,issue:null};
+  async function view(overrides={}) {
+    popup.context.relayFetch=async()=>({ok:true,status:200,json:async()=>({vault_mode:true,
+      providers:[{...ready,...overrides}]})});
+    await popup.controls.refreshStatus(true);
+    return popup.byId("status").children[0].children.find(n=>n.className==="provider-detail").textContent;
+  }
+  const healthy=await view();
+  assert.match(healthy,/Chat ready/);
+  assert.match(healthy,/Account verification unavailable/);
+  assert.doesNotMatch(healthy,/Login verified|Login unverified|Browser activation not attempted|Gateway issue:/);
+  assert.match(await view({issue:"authentication_unverified"}),/Chat ready/,"older gateway compatibility");
+  for(const overrides of [
+    {enabled:false}, {linked:false}, {availability:"unknown"}, {availability:"degraded",issue:"provider_degraded"},
+    {authentication:"needs_login"}, {manual_verification_required:true},
+    {activation_issue:"refresh_failed"}, {authentication:"unexpected"}, {manual_verification_required:"true"},
+    {activation:"pending"}, {activation:"failed"}, {activation:"cancelled"}, {activation:"unexpected"},
+    {issue:"provider_document_denied"}, {issue:"unrecognized"}
+  ]) assert.doesNotMatch(await view(overrides),/Chat ready/);
+  assert.match(await view({authentication:"needs_login"}),/Login needed/);
+  assert.match(await view({availability:"degraded",issue:"provider_degraded"}),/Chat unavailable/);
+  assert.match(await view({activation:"failed"}),/Browser activation failed/);
 });

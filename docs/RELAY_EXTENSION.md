@@ -74,6 +74,7 @@ and a separately reviewed allowlist update.
 - **Browser cookies present** does not prove an active login.
 - **Login needed** also uses the gateway's runtime session state, so an expired or missing session can be shown without opening the old login dashboard.
 - **Login verified** requires an observed authenticated login. A saved session, cookies or a routable provider alone do not prove login; **Login unverified** is shown when there is no such observation.
+- **Meta AI: Chat ready** describes the currently available chat runtime. Its account-verification capability is unsupported, shown as **Account verification unavailable**, rather than a persistent login warning. This does not claim an authenticated account. Login expiry, challenges, activation failures and degraded chat remain visible. A ready startup restore does not display an absent relay-import activation record as a failure.
 - **Gateway check unavailable; retry** indicates a degraded runtime check, rather than claiming the account is signed out.
 
 The relay does not scrape passwords, bypass provider security controls, or
@@ -90,7 +91,7 @@ Origin, valid timestamp and unique nonce. Paired remote mode retains its
 original install token checks. `linked` means a saved encrypted
 snapshot exists; `authentication: verified` requires observed login evidence.
 `unknown` and `authentication_unverified` do **not** mean the account is logged
-out. No cookies, browser storage, upstream URLs, prompt text, or raw errors are
+out. Meta AI adds `account_verification: "unsupported"`; an unknown account verdict is not a provider issue for Meta AI, while actual chat/login blockers still take precedence. No cookies, browser storage, upstream URLs, prompt text, or raw errors are
 returned.
 
 Inside the extension, `chrome.runtime.sendMessage({type:"relay-diagnostics"})`

@@ -562,6 +562,17 @@ function safeLastFailedRequest(provider, record) {
     " · request " + record.request_id + " · " + record.duration_ms + " ms";
 }
 
+// Meta AI has no reviewed first-party account verifier. Readiness describes
+// the current chat runtime, never an authenticated-account verdict.
+function metaAiChatReady(item) {
+  return item.provider === "metaai" && item.enabled === true && item.linked === true &&
+    item.availability === "ready" && [undefined, "unknown"].includes(item.authentication) &&
+    [undefined, false].includes(item.manual_verification_required) &&
+    [undefined, null].includes(item.activation_issue) &&
+    [undefined, null, "not_attempted", "ready"].includes(item.activation) &&
+    [undefined, null, "authentication_unverified"].includes(item.issue);
+}
+
 async function refreshStatus(force = false) {
   // Bind any authorization failure to the exact paired installation whose
   // health was requested, not a newer connection made during the await.
@@ -667,9 +678,14 @@ async function refreshStatus(force = false) {
     } catch {
       browser = "Browser cookie check unavailable";
     }
+    const metaReady = metaAiChatReady(item);
+    const chat = item.provider === "metaai" && providerEnabled && hasSavedSession
+      ? metaReady ? "Chat ready" : item.availability === "degraded" ? "Chat unavailable" : "Chat not checked"
+      : null;
     const auth = item.enabled === false ? "Account check deferred (provider disabled)"
-      : item.authentication === "verified" ? "Login verified"
       : item.authentication === "needs_login" ? "Login needed"
+      : item.provider === "metaai" ? "Account verification unavailable"
+      : item.authentication === "verified" ? "Login verified"
       : "Login unverified";
     // Browser activation is not proof of login. Keep the independent
     // authenticated-provider observation visible beside this fixed category.
@@ -678,7 +694,7 @@ async function refreshStatus(force = false) {
       : item.activation === "ready" ? "Browser activation completed"
       : item.activation === "failed" ? "Browser activation failed"
       : item.activation === "cancelled" ? "Browser activation cancelled"
-      : item.activation === "not_attempted" ? "Browser activation not attempted"
+      : item.activation === "not_attempted" && !metaReady ? "Browser activation not attempted"
       : null;
     const activationDetail = safeActivationIssueDetail(item);
     // A deliberately disabled provider is policy, not a gateway outage.
@@ -699,7 +715,7 @@ async function refreshStatus(force = false) {
     const staleSync = sync?.stale === true ? "Extension sync status stale (gateway check failed)" : null;
     const lastFailedRequest = item.enabled === false ? null
       : safeLastFailedRequest(item.provider, item.last_failed_request);
-    status.textContent = [enabled, linked, browser, auth,
+    status.textContent = [enabled, linked, browser, ...(chat ? [chat] : []), auth,
       ...(activation ? [activation] : []),
       ...(activationDetail ? [activationDetail] : []),
       ...(blocker ? [blocker] : []),
