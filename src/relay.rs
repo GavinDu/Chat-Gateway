@@ -1648,7 +1648,9 @@ fn provider_authentication_status(
 
 /// Fixed-category runtime diagnostics. Never return upstream errors, selectors,
 /// URLs, browser storage or credential material in the extension-facing API.
+#[allow(clippy::too_many_arguments)]
 fn relay_provider_issue(
+    provider: &str,
     linked: bool,
     enabled: bool,
     authentication: &str,
@@ -1674,7 +1676,7 @@ fn relay_provider_issue(
         Some("needs_login")
     } else if state == ProviderSessionState::Degraded {
         Some("provider_degraded")
-    } else if authentication != "verified" {
+    } else if authentication != "verified" && provider != "metaai" {
         Some("authentication_unverified")
     } else {
         None
@@ -1730,8 +1732,46 @@ mod relay_provider_issue_tests {
     use crate::provider_state::ProviderSessionState::{Degraded, NeedsLogin, Ready, Unknown};
 
     #[test]
+    fn metaai_unsupported_account_check_is_not_a_chat_failure() {
+        for state in [Ready, Unknown] {
+            assert_eq!(
+                relay_provider_issue("metaai", true, true, "unknown", state, false, None),
+                None
+            );
+            assert_eq!(
+                super::source_grounded_account_observation("metaai", Some(true), true),
+                None
+            );
+        }
+        assert_eq!(
+            relay_provider_issue("chatgpt", true, true, "unknown", Ready, false, None),
+            Some("authentication_unverified")
+        );
+        for (linked, enabled, auth, state, manual, expected) in [
+            (true, false, "unknown", Ready, false, "provider_disabled"),
+            (false, true, "unknown", Ready, false, "session_not_linked"),
+            (true, true, "needs_login", NeedsLogin, false, "needs_login"),
+            (true, true, "unknown", Degraded, false, "provider_degraded"),
+            (
+                true,
+                true,
+                "unknown",
+                Ready,
+                true,
+                "manual_verification_required",
+            ),
+        ] {
+            assert_eq!(
+                relay_provider_issue("metaai", linked, enabled, auth, state, manual, None),
+                Some(expected)
+            );
+        }
+    }
+
+    #[test]
     fn diagnostics_are_fixed_categories_not_upstream_error_text() {
         let blocked = relay_provider_issue(
+            "chatgpt",
             true,
             true,
             "unknown",
@@ -1742,6 +1782,7 @@ mod relay_provider_issue_tests {
         assert_eq!(blocked, Some("provider_assets_blocked"));
 
         let document = relay_provider_issue(
+            "chatgpt",
             true,
             true,
             "unknown",
@@ -1751,6 +1792,7 @@ mod relay_provider_issue_tests {
         );
         assert_eq!(document, Some("provider_document_denied"));
         let untrusted = relay_provider_issue(
+            "chatgpt",
             true,
             true,
             "unknown",
@@ -1761,6 +1803,7 @@ mod relay_provider_issue_tests {
         assert_eq!(untrusted, Some("provider_degraded"));
 
         let manual = relay_provider_issue(
+            "chatgpt",
             true,
             true,
             "unknown",
@@ -1770,16 +1813,25 @@ mod relay_provider_issue_tests {
         );
         assert_eq!(manual, Some("manual_verification_required"));
 
-        let needs_login = relay_provider_issue(true, true, "needs_login", NeedsLogin, false, None);
+        let needs_login = relay_provider_issue(
+            "chatgpt",
+            true,
+            true,
+            "needs_login",
+            NeedsLogin,
+            false,
+            None,
+        );
         assert_eq!(needs_login, Some("needs_login"));
 
-        let verified = relay_provider_issue(true, true, "verified", Ready, false, None);
+        let verified = relay_provider_issue("chatgpt", true, true, "verified", Ready, false, None);
         assert_eq!(verified, None);
 
-        let unverified = relay_provider_issue(true, true, "unknown", Unknown, false, None);
+        let unverified =
+            relay_provider_issue("chatgpt", true, true, "unknown", Unknown, false, None);
         assert_eq!(unverified, Some("authentication_unverified"));
 
-        let missing = relay_provider_issue(false, true, "unknown", Unknown, false, None);
+        let missing = relay_provider_issue("chatgpt", false, true, "unknown", Unknown, false, None);
         assert_eq!(missing, Some("session_not_linked"));
     }
 }
@@ -1871,6 +1923,7 @@ pub async fn status(State(app): State<Arc<crate::AppState>>, headers: HeaderMap)
         let authentication =
             provider_authentication_status(observed, lifecycle, manual_verification_required);
         let issue = relay_provider_issue(
+            provider,
             session_present,
             enabled,
             authentication,
@@ -1891,6 +1944,8 @@ pub async fn status(State(app): State<Arc<crate::AppState>>, headers: HeaderMap)
             "activation_pending_age": activation_pending_age,
             "enabled": enabled,
             "authentication": authentication,
+            // Capability is independent of chat readiness or a login attempt.
+            "account_verification": (provider == "metaai").then_some("unsupported"),
             "availability": lifecycle.as_str(),
             "manual_verification_required": manual_verification_required,
             // Owner-scoped, bounded last failed request, never upstream text.
