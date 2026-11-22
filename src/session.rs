@@ -3675,9 +3675,14 @@ pub fn restore_cookies(browser: &Browser, file: &SessionFile, provider: &str) ->
     );
     let mut failed_writes = 0usize;
     let mut expected_restores = Vec::new();
-    // Report limitations for material actually selected for this replay,
-    // not expired or foreign cookies retained in the encrypted source.
-    let fidelity = replay_fidelity_limits(&cookies, dropped);
+    // Active-provider fidelity describes only the cookies selected for that
+    // provider. Preserve the historical full-source diagnostic for deferred
+    // providers, whose replay planning remains intentionally unchanged.
+    let fidelity = if matches!(provider, "chatgpt" | "metaai") {
+        replay_fidelity_limits(&cookies, dropped)
+    } else {
+        replay_fidelity_limits(&file.cookies, dropped)
+    };
     if dropped > 0 {
         // Counts only: cookie names, domains and values are credentials.
         tracing::info!(
