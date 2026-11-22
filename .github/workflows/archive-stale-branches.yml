@@ -80,7 +80,7 @@ jobs:
                 if(last!==before){row.reason="head changed after archive; tag retained";finish();continue;}
                 await github.rest.git.deleteRef({owner,repo,ref:"heads/"+b.name});
                 row.action="ARCHIVED";
-                row.reason="exact head preserved by immutable tag; NOT merged into main";
+                row.reason="exact head preserved by a SHA-verified tag; NOT merged into main";
                 archived++;
                 core.info("Archived branch "+b.name+" -> "+tag+" @ "+before);
               }catch(error){
@@ -96,7 +96,7 @@ jobs:
              "",
              "Repository: "+full+"; main starting SHA: "+context.sha,
              "",
-             "**Semantics:** a successful archival deletes a branch ref ONLY AFTER a replacement Git tag is created, read back, and verified at the exact same commit SHA. All code remains accessible by tag. Archived is NOT a claim of merge.",
+             "**Semantics:** a successful archival deletes a branch ref ONLY AFTER a replacement Git tag is created, read back, and verified at the exact same commit SHA. All code remains accessible by tag until an authorized writer moves or deletes that tag. Protect archive tags by repository policy. Archived is NOT a claim of merge.",
              "",
              "- Before: "+all.length+" total branches",
              "- Archived: "+archived,
