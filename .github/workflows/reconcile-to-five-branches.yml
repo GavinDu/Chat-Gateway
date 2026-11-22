@@ -120,10 +120,14 @@ jobs:
                 try{await github.rest.git.deleteRef({owner,repo,ref:"heads/"+b.name});}
                 catch(e){
                   if(e.status===404){
-                    try{
+                    let gone=false;
+                    try {
                       await github.rest.git.getRef({owner,repo,ref:"heads/"+b.name});
-                      throw e;
-                    }catch(e2){if(e2.status!==404)throw e2;}
+                    } catch(lookupError) {
+                      if(lookupError.status===404)gone=true;
+                      else throw lookupError;
+                    }
+                    if(!gone)throw e;
                     alreadyGone++;
                   }else throw e;
                 }
