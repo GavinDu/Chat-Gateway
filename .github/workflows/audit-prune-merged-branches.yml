@@ -45,8 +45,43 @@ jobs:
                 const prs=await github.paginate(github.rest.pulls.list,{owner,repo,head:owner+":"+name,state:"all",per_page:100});
                 row.prs=prs.map(p=>"#"+p.number+(p.merged_at?" merged":p.state==="open"?" open":" closed")).join(", ");
                 const exactMerged=prs.some(p=>p.merged_at&&p.base.ref==="main"&&p.head.ref===name&&p.head.sha===sha&&p.head.repo?.full_name===full);
+                // A closed, unmerged PR is eligible only when it explicitly
+                // cites a merged successor and the successor covers every
+                // changed file. Do not mistake a moved head for the reviewed SHA.
+                let supersededBy=null;
                 if(row.ahead!==0&&!exactMerged){
-                  row.reason="ahead of main, not confirmed merged (retain)";
+                  for(const oldPr of prs){
+                    if(oldPr.state!=="closed"||oldPr.merged_at||oldPr.head.ref!==name||
+                       oldPr.head.sha!==sha||oldPr.base.ref!=="main"||
+                       oldPr.head.repo?.full_name!==full)continue;
+                    const refs=[...(oldPr.body||"").matchAll(/(?:superseded\s+by|replaced\s+by|in\s+favor\s+of|duplicate\s+of)[^#\r\n]{0,80}#(\d+)/ig)];
+                    for(const match of refs){
+                      const number=Number(match[1]);
+                      if(!Number.isSafeInteger(number)||number===oldPr.number)continue;
+                      let successor;
+                      try{
+                        successor=(await github.rest.pulls.get({owner,repo,pull_number:number})).data;
+                      }catch(error){
+                        if(error.status===404)continue;
+                        throw error;
+                      }
+                      if(!successor.merged_at||successor.base.ref!=="main"||
+                         successor.head.repo?.full_name!==full)continue;
+                      const [before,after]=await Promise.all([
+                        github.paginate(github.rest.pulls.listFiles,{owner,repo,pull_number:oldPr.number,per_page:100}),
+                        github.paginate(github.rest.pulls.listFiles,{owner,repo,pull_number:number,per_page:100})
+                      ]);
+                      const covered=new Set(after.map(f=>f.filename));
+                      if(before.length>0&&before.every(f=>covered.has(f.filename))){
+                        supersededBy=number;
+                        break;
+                      }
+                    }
+                    if(supersededBy)break;
+                  }
+                }
+                if(row.ahead!==0&&!exactMerged&&!supersededBy){
+                  row.reason="ahead of main, not proven merged or superseded (retain)";
                   stats.retained++;
                   report.push(row);
                   continue;
@@ -75,7 +110,7 @@ jobs:
                   report.push(row);
                   continue;
                 }
-                row.reason=row.ahead===0?"entire branch reachable from main":"exact merged PR head";
+                row.reason=row.ahead===0?"entire branch reachable from main":exactMerged?"exact merged PR head":"closed PR explicitly superseded by merged #"+supersededBy+" (file coverage verified)";
                 // deleteRef has no atomic compare-and-delete. Re-check head immediately
                 // before deletion and require stable branch writers during this run.
                 await github.rest.git.deleteRef({owner,repo,ref:"heads/"+name});
@@ -96,7 +131,7 @@ jobs:
               "",
               "Repository: "+full+"; main SHA: "+context.sha,
               "",
-              "**Deletion rule:** only a branch with zero unique commits ahead of main, or an exact current head of a PR merged into main; never a protected ref or any open PR head/base. Every deletion rechecks the ref.",
+              "**Deletion rule:** only a zero-ahead branch, exact merged main PR head, or exact closed PR head citing a merged main successor with complete changed-file coverage; never protected refs or open PR heads/bases. Every deletion rechecks the ref.",
               "",
               "- Inventory: "+branches.length+" branches before this pass",
               "- Deleted: "+stats.deleted,
