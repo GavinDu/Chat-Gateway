@@ -20,7 +20,7 @@ jobs:
         with:
           script: |
             const {owner,repo}=context.repo, full=owner+"/"+repo;
-            const cutoff="2026-11-01T00:00:00Z";
+            const cutoff="2026-11-14T00:00:00Z";
             const tagRoot="archive/branches-20261121/";
             const minBehind=500;
             const all=await github.paginate(github.rest.repos.listBranches,{owner,repo,per_page:100});
