@@ -6,7 +6,7 @@ HEAD, preserving every commit and tree for later review or selective cherry-pick
 
 ## Protection
 - Exclude `main`, protected refs, all open PR heads and bases, and active `consolidate/` branches.
-- Archive only tips dated before 2026-11-01 UTC that are at least 500 commits behind `main`.
+- Archive only tips dated before 2026-11-14 UTC that are at least 500 commits behind `main`.
 - Create the tag and read back its immutable target before deleting a branch.
 - Re-read branch HEAD immediately before deletion and re-check open PR dependencies.
 - If the tag has a conflicting SHA, the branch changed, or any check is uncertain, retain the branch.
