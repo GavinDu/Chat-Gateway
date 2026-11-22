@@ -2,7 +2,7 @@
 The 2026-11-21 branch reconciliation distinguishes **merged** from **archived**.
 Archived branches are **not** declared integrated into `main`. A verified Git tag
 `archive/branches-20261121/<original-branch>` points at the exact deleted branch
-HEAD, preserving every commit and tree for later review or selective cherry-pick.
+HEAD, preserving every commit and tree for later review or selective cherry-pick. Archive tags are Git refs and remain mutable by users with sufficient permissions; repository policy should protect them from force-updates and deletion.
 
 ## Protection
 - Exclude `main`, protected refs, all open PR heads and bases, and active `consolidate/` branches.
