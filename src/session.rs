@@ -2409,16 +2409,30 @@ pub(crate) fn session_state_hash(file: &SessionFile) -> Result<String> {
     // produces the same fingerprint across snapshots.
     let local_storage: BTreeMap<&String, &String> = file.local_storage.iter().collect();
     let mut cookies = file.cookies.clone();
-    // Preserve order for ambiguous duplicate identity/value records: replay
-    // historically selects the first same-scope cookie. Until metadata
-    // conflicts are rejected, those snapshots are NOT equivalent.
+    // Equal name/domain/path/value cookies can still differ in security,
+    // expiry or SameSite metadata. Sort the full serialized cookie state so
+    // permutations cannot falsely signal changed credentials or vault writes.
     cookies.sort_by(|left, right| {
-        (&left.domain, &left.name, &left.path, &left.value).cmp(&(
-            &right.domain,
-            &right.name,
-            &right.path,
-            &right.value,
-        ))
+        (
+            &left.domain,
+            &left.name,
+            &left.path,
+            &left.value,
+            left.secure,
+            left.http_only,
+            left.expires.map(f64::to_bits),
+            &left.same_site,
+        )
+            .cmp(&(
+                &right.domain,
+                &right.name,
+                &right.path,
+                &right.value,
+                right.secure,
+                right.http_only,
+                right.expires.map(f64::to_bits),
+                &right.same_site,
+            ))
     });
     let serialized = Zeroizing::new(serde_json::to_vec(&(local_storage, cookies))?);
     let digest = Sha256::digest(&*serialized);
@@ -3062,6 +3076,47 @@ mod cookie_restore_result_tests {
     }
 
     #[test]
+    fn session_hash_is_permutation_invariant_when_cookie_metadata_differs() {
+        // These two synthetic same-identity cookies differ in all their
+        // security/expiry attributes. Hash ordering is not an admission rule:
+        // active-provider same-scope conflict validation occurs separately.
+        let mut first = SessionFile {
+            local_storage: std::collections::HashMap::new(),
+            cookies: vec![
+                Cookie {
+                    name: "same-name".into(),
+                    value: "synthetic-value".into(),
+                    domain: ".chatgpt.com".into(),
+                    path: "/".into(),
+                    secure: true,
+                    http_only: true,
+                    expires: Some(2_000_000_000.0),
+                    same_site: Some("Strict".into()),
+                },
+                Cookie {
+                    name: "same-name".into(),
+                    value: "synthetic-value".into(),
+                    domain: ".chatgpt.com".into(),
+                    path: "/".into(),
+                    secure: false,
+                    http_only: false,
+                    expires: None,
+                    same_site: Some("Lax".into()),
+                },
+            ],
+            ts: "old".into(),
+        };
+        let canonical = session_state_hash(&first).unwrap();
+        first.cookies.reverse();
+        first.ts = "changed".into();
+        assert_eq!(canonical, session_state_hash(&first).unwrap());
+
+        // Real metadata changes must still alter the digest.
+        first.cookies[0].same_site = Some("Strict".into());
+        assert_ne!(canonical, session_state_hash(&first).unwrap());
+    }
+
+    #[test]
     fn session_state_hash_changes_when_cookie_value_rotates() {
         let mut file = SessionFile {
             local_storage: std::collections::HashMap::new(),
@@ -3278,7 +3333,14 @@ fn planned_cookie_replay(
         .cookies
         .iter()
         .filter(|cookie| {
-            !expiry_aware || !cookie_domain_allowed(provider, &cookie.domain) || !expired(cookie)
+            // ChatGPT/Meta AI replay is provider-scoped. Do not copy unrelated
+            // credential values into the plan or count foreign scope twins as
+            // this provider's normalization. Deferred adapters retain legacy
+            // inclusion so their existing restore ordering stays unchanged.
+            if expiry_aware && !cookie_domain_allowed(provider, &cookie.domain) {
+                return false;
+            }
+            !expiry_aware || !expired(cookie)
         })
         .cloned()
         .collect();
@@ -3668,7 +3730,9 @@ pub fn restore_cookies(browser: &Browser, file: &SessionFile, provider: &str) ->
     );
     let mut failed_writes = 0usize;
     let mut expected_restores = Vec::new();
-    let fidelity = replay_fidelity_limits(&file.cookies, dropped);
+    // Report limitations for material actually selected for this replay,
+    // not expired or foreign cookies retained in the encrypted source.
+    let fidelity = replay_fidelity_limits(&cookies, dropped);
     if dropped > 0 {
         // Counts only: cookie names, domains and values are credentials.
         tracing::info!(
@@ -5730,6 +5794,81 @@ mod replay_material_coverage_tests {
         // historically been ignored by the later restore loop.
         let deferred = snapshot(vec![fixture("SID", "private", ".meta.ai")], &[]);
         assert!(planned_cookie_replay(&deferred, "claude", 1000.0).is_ok());
+    }
+
+    #[test]
+    fn active_replay_plan_does_not_normalize_or_copy_foreign_cookie_twins() {
+        for (provider, own_domain, foreign_domain) in [
+            ("chatgpt", ".chatgpt.com", ".meta.ai"),
+            ("metaai", ".meta.ai", ".chatgpt.com"),
+        ] {
+            let foreign = fixture("SID", "private-foreign", foreign_domain);
+            let mut foreign_host = foreign.clone();
+            foreign_host.domain = foreign_domain.trim_start_matches('.').to_owned();
+            let own = fixture("SID", "private-own", own_domain);
+
+            let source = snapshot(vec![foreign.clone(), foreign_host.clone()], &[]);
+            let (planned, dropped) = planned_cookie_replay(&source, provider, 1000.0).unwrap();
+            assert!(planned.is_empty());
+            assert_eq!(dropped, 0, "foreign twins cannot normalize this provider");
+
+            let source = snapshot(vec![foreign, own.clone(), foreign_host], &[]);
+            let (planned, dropped) = planned_cookie_replay(&source, provider, 1000.0).unwrap();
+            assert_eq!(planned.len(), 1);
+            assert_eq!(planned[0].value, "private-own");
+            assert_eq!(dropped, 0);
+
+            let mut own_host = own.clone();
+            own_host.domain = own_domain.trim_start_matches('.').to_owned();
+            let source = snapshot(vec![own, own_host], &[]);
+            let (planned, dropped) = planned_cookie_replay(&source, provider, 1000.0).unwrap();
+            assert_eq!(planned.len(), 1);
+            assert_eq!(dropped, 1, "actual provider scope twin must count");
+        }
+
+        // Deferred providers retain the historical all-cookie replay plan,
+        // even though the later restore loop ignores out-of-scope material.
+        let foreign = fixture("SID", "private-deferred", ".meta.ai");
+        let mut foreign_host = foreign.clone();
+        foreign_host.domain = "meta.ai".to_owned();
+        let source = snapshot(vec![foreign, foreign_host], &[]);
+        let (legacy, dropped) = planned_cookie_replay(&source, "claude", 1000.0).unwrap();
+        assert_eq!(legacy.len(), 1);
+        assert_eq!(dropped, 1);
+    }
+
+    #[test]
+    fn replay_fidelity_labels_follow_selected_provider_not_foreign_metadata() {
+        let mut foreign = fixture("SID", "foreign-private-value", ".meta.ai");
+        foreign.expires = Some(2_000_000_000.0);
+        foreign.same_site = Some("Strict".to_owned());
+        let own = fixture("SID", "selected-private-value", ".chatgpt.com");
+        let file = snapshot(vec![foreign, own], &[]);
+        let (planned, normalized) = planned_cookie_replay(&file, "chatgpt", 1000.0).unwrap();
+
+        assert_eq!(planned.len(), 1);
+        assert_eq!(normalized, 0);
+        let fidelity = replay_fidelity_limits(&planned, normalized);
+        assert_eq!(fidelity.expiry, "expiry_not_provided");
+        assert_eq!(fidelity.same_site, "same_site_not_provided");
+        // The old full-snapshot input would have mislabeled the selected
+        // provider as having cookie expiry and SameSite replay limitations.
+        let unrelated = replay_fidelity_limits(&file.cookies, normalized);
+        assert_eq!(unrelated.expiry, "expiry_unobservable_in_jar_readback");
+        assert_eq!(
+            unrelated.same_site,
+            "same_site_unobservable_in_jar_readback"
+        );
+
+        let redacted = format!("{fidelity:?}");
+        for private in [
+            "SID",
+            "foreign-private-value",
+            "selected-private-value",
+            "meta.ai",
+        ] {
+            assert!(!redacted.contains(private));
+        }
     }
 
     #[test]
