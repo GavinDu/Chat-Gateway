@@ -31,11 +31,12 @@ jobs:
               const name=branch.name;
               if(name==="main"||branch.protected){continue;}
               const sha=branch.commit.sha;
-              const row={name,sha,ahead:"?",behind:"?",prs:"",action:"RETAIN",reason:"unreviewed unique work"};
+              const row={name,sha,ahead:"?",behind:"?",files:"",prs:"",action:"RETAIN",reason:"unreviewed unique work"};
               try{
                 const cmp=(await github.rest.repos.compareCommits({owner,repo,base:"main",head:name,per_page:1})).data;
                 row.ahead=cmp.ahead_by;
                 row.behind=cmp.behind_by;
+                row.files=(cmp.files||[]).map(f=>f.filename).slice(0,8).join(", ")+(cmp.files?.length>8?" (+more)":"");
                 if(activeHeads.has(name)||activeBases.has(name)){
                   row.reason="open PR head/base";
                   stats.retained++;
@@ -138,9 +139,9 @@ jobs:
               "- Retained: "+stats.retained+" (excluding protected/default branches)",
               "- Errors: "+stats.errors,
               "",
-              "| Branch | Ahead | Behind | Related PRs | Action | Reason |",
-              "|---|---:|---:|---|---|---|",
-              ...report.map(r=>"| "+[r.name,r.ahead,r.behind,r.prs,r.action,r.reason].map(safe).join(" | ")+" |")
+              "| Branch | Ahead | Behind | Changed paths (first 8) | Related PRs | Action | Reason |",
+              "|---|---:|---:|---|---|---|---|",
+              ...report.map(r=>"| "+[r.name,r.ahead,r.behind,r.files,r.prs,r.action,r.reason].map(safe).join(" | ")+" |")
             ];
             await core.summary.addRaw(lines.join("\n")).write();
             core.info("Branch reconciliation: "+JSON.stringify(stats));
