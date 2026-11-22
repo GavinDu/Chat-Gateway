@@ -27,11 +27,20 @@ jobs:
             const active=await github.paginate(github.rest.pulls.list,{owner,repo,state:"open",per_page:100});
             const activeHead=new Set(active.filter(p=>p.head?.repo?.full_name===full).map(p=>p.head.ref));
             const activeBase=new Set(active.map(p=>p.base.ref));
+            // Historical PR lineage is context, not proof of integration.
+            const historical=await github.paginate(github.rest.pulls.list,{owner,repo,state:"all",per_page:100});
+            const prsByHead=new Map();
+            for(const p of historical){
+              if(p.head?.repo?.full_name!==full)continue;
+              const arr=prsByHead.get(p.head.ref)||[];
+              arr.push("#"+p.number+":"+(p.merged_at?"merged":p.state));
+              prsByHead.set(p.head.ref,arr);
+            }
             const results=[];
             let archived=0, skipped=0, failures=0;
             for(const b of all){
               if(b.name==="main"||b.protected||b.name.startsWith("consolidate/"))continue;
-              const row={branch:b.name,head:b.commit.sha,ahead:null,behind:null,commitDate:null,archiveTag:null,action:"RETAIN",reason:""};
+              const row={branch:b.name,head:b.commit.sha,ahead:null,behind:null,commitDate:null,archiveTag:null,changedPaths:"",relatedPRs:(prsByHead.get(b.name)||[]).join("; "),action:"RETAIN",reason:""};
               const finish=()=>{results.push(row);if(row.action!=="ARCHIVED")skipped++;};
               try {
                 if(activeHead.has(b.name)||activeBase.has(b.name)){
@@ -40,6 +49,7 @@ jobs:
                 }
                 const diff=(await github.rest.repos.compareCommits({owner,repo,base:"main",head:b.name,per_page:100})).data;
                 row.ahead=diff.ahead_by;row.behind=diff.behind_by;
+            row.changedPaths=(diff.files||[]).slice(0,30).map(f=>f.filename).join("; ")+(diff.files?.length>30?"; ...":"");
                 if(diff.behind_by<minBehind){row.reason="recent relative to main; retain for reconciliation";finish();continue;}
                 const commit=(await github.rest.repos.getCommit({owner,repo,ref:b.commit.sha})).data;
                 row.commitDate=commit.commit?.committer?.date || commit.commit?.author?.date || null;
@@ -94,16 +104,16 @@ jobs:
              "- API failures: "+failures,
              "- Cutoff: commit before "+cutoff+" and at least "+minBehind+" commits behind main",
              "",
-             "| Branch | Ahead | Behind | Tip date | Archive tag | Decision | Reason |",
-             "|---|---:|---:|---|---|---|---|",
-             ...results.map(r=>"| "+[r.branch,r.ahead,r.behind,r.commitDate,r.archiveTag,r.action,r.reason].map(esc).join(" | ")+" |"),
+             "| Branch | Ahead | Behind | Changed paths (first 30) | Related PRs | Tip date | Archive tag | Decision | Reason |",
+             "|---|---:|---:|---|---|---|---|---|",
+             ...results.map(r=>"| "+[r.branch,r.ahead,r.behind,r.changedPaths,r.relatedPRs,r.commitDate,r.archiveTag,r.action,r.reason].map(esc).join(" | ")+" |"),
             ];
             await core.summary.addRaw(markdown.join("\n")).write();
 
             const fs=require("node:fs");
             const metadata={repository:full,mainSha:context.sha,commitCutoff:cutoff,minBehind,archived,skipped,failures,inventory:all.length};
             fs.writeFileSync("/tmp/branch-archive-report.json",JSON.stringify({metadata,branches:results},null,2)+"\n",{mode:0o600});
-            const columns=["branch","head","ahead","behind","commitDate","archiveTag","action","reason"];
+            const columns=["branch","head","ahead","behind","changedPaths","relatedPRs","commitDate","archiveTag","action","reason"];
             const cell=v=>'"'+String(v??"").replace(/"/g,'""').replace(/\r?\n/g," ")+'"';
             fs.writeFileSync("/tmp/branch-archive-report.csv",
               [columns.join(","),...results.map(r=>columns.map(k=>cell(r[k])).join(","))].join("\n")+"\n",{mode:0o600});
