@@ -99,5 +99,23 @@ jobs:
              ...results.map(r=>"| "+[r.branch,r.ahead,r.behind,r.commitDate,r.archiveTag,r.action,r.reason].map(esc).join(" | ")+" |"),
             ];
             await core.summary.addRaw(markdown.join("\n")).write();
+
+            const fs=require("node:fs");
+            const metadata={repository:full,mainSha:context.sha,commitCutoff:cutoff,minBehind,archived,skipped,failures,inventory:all.length};
+            fs.writeFileSync("/tmp/branch-archive-report.json",JSON.stringify({metadata,branches:results},null,2)+"\n",{mode:0o600});
+            const columns=["branch","head","ahead","behind","commitDate","archiveTag","action","reason"];
+            const cell=v=>'"'+String(v??"").replace(/"/g,'""').replace(/\r?\n/g," ")+'"';
+            fs.writeFileSync("/tmp/branch-archive-report.csv",
+              [columns.join(","),...results.map(r=>columns.map(k=>cell(r[k])).join(","))].join("\n")+"\n",{mode:0o600});
             core.info("BRANCH_ARCHIVE_SUMMARY "+JSON.stringify({archived,skipped,failures,inventory:all.length}));
             core.info("BRANCH_ARCHIVE_JSON "+JSON.stringify(results));
+      - name: Upload complete branch-by-branch archive report
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: branch-archive-reconciliation-report
+          path: |
+            /tmp/branch-archive-report.json
+            /tmp/branch-archive-report.csv
+          if-no-files-found: warn
+          retention-days: 90
