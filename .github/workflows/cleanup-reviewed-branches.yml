@@ -427,6 +427,27 @@ jobs:
                 core.warning("Skip branch still in an open PR graph: " + candidate.name);
                 continue;
               }
+              // Narrow the time-of-check/time-of-use window: never delete
+              // a branch that changed while provenance and PR-stack checks ran.
+              // GitHub deleteRef lacks compare-and-delete, so concurrent
+              // writers must still be controlled by repository branch policy.
+              let verified;
+              try {
+                verified = await github.rest.git.getRef({
+                  owner, repo, ref: "heads/" + candidate.name,
+                });
+              } catch (error) {
+                if (error.status === 404) {
+                  core.info("Already deleted during review: " + candidate.name);
+                  continue;
+                }
+                throw error;
+              }
+              if (verified.data.object.sha !== current ||
+                  (candidate.sha && verified.data.object.sha !== candidate.sha)) {
+                core.warning("Skip candidate whose head moved during review: " + candidate.name);
+                continue;
+              }
               try {
                 await github.rest.git.deleteRef({
                   owner, repo, ref: "heads/" + candidate.name,
