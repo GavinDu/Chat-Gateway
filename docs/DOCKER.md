@@ -45,7 +45,9 @@ An error ending in `ld terminated with signal 9 [Killed]` is an OOM-killed
 release linker, not a cosmic-text warning. Use the current main Dockerfile's
 single-threaded LLD link and inspect the Docker VM's available RAM. Cargo's
 single build job alone does not reduce a single linker's peak memory. The
-ARM64 CI build is limited to 2 GiB with no swap; the VM also needs room for
+optional ARM64 low-memory workflow (Actions → Docker ARM64 Low Memory (Manual) →
+Run workflow) builds with 2 GiB and no swap; it does not run on ordinary PRs.
+The VM also needs room for
 Docker and any other running services. See `docs/CI_PERFORMANCE.md` for the
 exact regression gate and its limits.
 

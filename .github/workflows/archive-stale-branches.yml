@@ -1,0 +1,131 @@
+name: Archive and retire stale branch heads
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/archive-stale-branches.yml
+permissions:
+  contents: write
+concurrency:
+  group: branch-reconciliation
+  cancel-in-progress: false
+jobs:
+  archive:
+    if: github.repository == 'GavinDu/Chat-Gateway'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Preserve SHA-pinned tags, audit and retire stale branch refs
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const {owner,repo}=context.repo, full=owner+"/"+repo;
+            const cutoff="2026-11-14T00:00:00Z";
+            const tagRoot="archive/branches-20261121/";
+            const minBehind=500;
+            const all=await github.paginate(github.rest.repos.listBranches,{owner,repo,per_page:100});
+            const active=await github.paginate(github.rest.pulls.list,{owner,repo,state:"open",per_page:100});
+            const activeHead=new Set(active.filter(p=>p.head?.repo?.full_name===full).map(p=>p.head.ref));
+            const activeBase=new Set(active.map(p=>p.base.ref));
+            // Historical PR lineage is context, not proof of integration.
+            const historical=await github.paginate(github.rest.pulls.list,{owner,repo,state:"all",per_page:100});
+            const prsByHead=new Map();
+            for(const p of historical){
+              if(p.head?.repo?.full_name!==full)continue;
+              const arr=prsByHead.get(p.head.ref)||[];
+              arr.push("#"+p.number+":"+(p.merged_at?"merged":p.state));
+              prsByHead.set(p.head.ref,arr);
+            }
+            const results=[];
+            let archived=0, skipped=0, failures=0;
+            for(const b of all){
+              if(b.name==="main"||b.protected||b.name.startsWith("consolidate/"))continue;
+              const row={branch:b.name,head:b.commit.sha,ahead:null,behind:null,commitDate:null,archiveTag:null,changedPaths:"",relatedPRs:(prsByHead.get(b.name)||[]).join("; "),action:"RETAIN",reason:""};
+              const finish=()=>{results.push(row);if(row.action!=="ARCHIVED")skipped++;};
+              try {
+                if(activeHead.has(b.name)||activeBase.has(b.name)){
+                  row.reason="open PR head/base";
+                  finish();continue;
+                }
+                const diff=(await github.rest.repos.compareCommits({owner,repo,base:"main",head:b.name,per_page:100})).data;
+                row.ahead=diff.ahead_by;row.behind=diff.behind_by;
+            row.changedPaths=(diff.files||[]).slice(0,30).map(f=>f.filename).join("; ")+(diff.files?.length>30?"; ...":"");
+                if(diff.behind_by<minBehind){row.reason="recent relative to main; retain for reconciliation";finish();continue;}
+                const commit=(await github.rest.repos.getCommit({owner,repo,ref:b.commit.sha})).data;
+                row.commitDate=commit.commit?.committer?.date || commit.commit?.author?.date || null;
+                if(!row.commitDate||row.commitDate>=cutoff){row.reason="branch tip newer than archive cutoff";finish();continue;}
+                const tag=tagRoot+b.name;
+                row.archiveTag=tag;
+                let exists;
+                try{exists=(await github.rest.git.getRef({owner,repo,ref:"tags/"+tag})).data.object.sha;}
+                catch(error){if(error.status!==404)throw error;}
+                if(exists&&exists!==b.commit.sha){
+                  row.reason="archive tag already exists at different SHA";finish();continue;
+                }
+                // Capture exact original head BEFORE deleting any ref.
+                const before=(await github.rest.git.getRef({owner,repo,ref:"heads/"+b.name})).data.object.sha;
+                if(before!==b.commit.sha){row.reason="head changed before archive";finish();continue;}
+                if(!exists){
+                  await github.rest.git.createRef({owner,repo,ref:"refs/tags/"+tag,sha:before});
+                }
+                const durable=(await github.rest.git.getRef({owner,repo,ref:"tags/"+tag})).data.object.sha;
+                if(durable!==before){row.reason="archive tag could not be verified";finish();continue;}
+                // An open PR created after the inventory must block deletion.
+                const [headPr,basePr]=await Promise.all([
+                  github.rest.pulls.list({owner,repo,head:owner+":"+b.name,state:"open",per_page:100}),
+                  github.rest.pulls.list({owner,repo,base:b.name,state:"open",per_page:100}),
+                ]);
+                if(headPr.data.length||basePr.data.length){row.reason="new open PR dependency; tag retained";finish();continue;}
+                const last=(await github.rest.git.getRef({owner,repo,ref:"heads/"+b.name})).data.object.sha;
+                if(last!==before){row.reason="head changed after archive; tag retained";finish();continue;}
+                await github.rest.git.deleteRef({owner,repo,ref:"heads/"+b.name});
+                row.action="ARCHIVED";
+                row.reason="exact head preserved by a SHA-verified tag; NOT merged into main";
+                archived++;
+                core.info("Archived branch "+b.name+" -> "+tag+" @ "+before);
+              }catch(error){
+                failures++;
+                row.reason="API/deletion error; keep branch: "+String(error.message).slice(0,120);
+                core.warning("Retained "+b.name+": "+row.reason);
+              }
+              finish();
+            }
+            const esc=s=>String(s??"").replace(/\|/g,"\\|").replace(/[\r\n]/g," ");
+            const markdown=[
+             "# Historical branch archival — recoverable, not merged",
+             "",
+             "Repository: "+full+"; main starting SHA: "+context.sha,
+             "",
+             "**Semantics:** a successful archival deletes a branch ref ONLY AFTER a replacement Git tag is created, read back, and verified at the exact same commit SHA. All code remains accessible by tag until an authorized writer moves or deletes that tag. Protect archive tags by repository policy. Archived is NOT a claim of merge.",
+             "",
+             "- Before: "+all.length+" total branches",
+             "- Archived: "+archived,
+             "- Retained/non-eligible: "+skipped,
+             "- API failures: "+failures,
+             "- Cutoff: commit before "+cutoff+" and at least "+minBehind+" commits behind main",
+             "",
+             "| Branch | Ahead | Behind | Changed paths (first 30) | Related PRs | Tip date | Archive tag | Decision | Reason |",
+             "|---|---:|---:|---|---|---|---|---|",
+             ...results.map(r=>"| "+[r.branch,r.ahead,r.behind,r.changedPaths,r.relatedPRs,r.commitDate,r.archiveTag,r.action,r.reason].map(esc).join(" | ")+" |"),
+            ];
+            await core.summary.addRaw(markdown.join("\n")).write();
+
+            const fs=require("node:fs");
+            const metadata={repository:full,mainSha:context.sha,commitCutoff:cutoff,minBehind,archived,skipped,failures,inventory:all.length};
+            fs.writeFileSync("/tmp/branch-archive-report.json",JSON.stringify({metadata,branches:results},null,2)+"\n",{mode:0o600});
+            const columns=["branch","head","ahead","behind","changedPaths","relatedPRs","commitDate","archiveTag","action","reason"];
+            const cell=v=>'"'+String(v??"").replace(/"/g,'""').replace(/\r?\n/g," ")+'"';
+            fs.writeFileSync("/tmp/branch-archive-report.csv",
+              [columns.join(","),...results.map(r=>columns.map(k=>cell(r[k])).join(","))].join("\n")+"\n",{mode:0o600});
+            core.info("BRANCH_ARCHIVE_SUMMARY "+JSON.stringify({archived,skipped,failures,inventory:all.length}));
+            core.info("BRANCH_ARCHIVE_JSON "+JSON.stringify(results));
+      - name: Upload complete branch-by-branch archive report
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: branch-archive-reconciliation-report
+          path: |
+            /tmp/branch-archive-report.json
+            /tmp/branch-archive-report.csv
+          if-no-files-found: warn
+          retention-days: 90

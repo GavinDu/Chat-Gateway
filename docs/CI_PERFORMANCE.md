@@ -2,8 +2,10 @@
 
 ## Baseline (November 6, 2026)
 
-The full checks must remain required: `test`, `embedded-native`,
-`docker-build`, and `docker-arm64-low-memory`. Logs from the successful pre-optimization run
+Routine PR and `main` push checks remain required: `test`, `embedded-native`,
+and `docker-build`. The `docker-arm64-low-memory` job is now a **manual-only**
+GitHub Actions workflow, not a routine PR check. Run it explicitly for ARM64
+release deployment or changes affecting the constrained ARM64 build path. Logs from the successful pre-optimization run
 [42243205149](https://github.com/GavinDu/Chat-Gateway/actions/runs/42243205149)
 showed:
 
@@ -121,6 +123,13 @@ build-script link, so fixing only the final executable would have left that
 path exposed. LLD is installed before compiling dependencies; the linker
 change intentionally invalidates the old dependency cache once. This does not disable render,
 stealth, V8, BoringSSL/FIPS, audits, or any test.
+
+Use **Actions → Docker ARM64 Low Memory (Manual) → Run workflow**, select the
+branch to validate, then start the job. It has no `push`, `pull_request`, or
+schedule trigger. Record its branch, commit SHA, and result for ARM64-targeted
+releases and when modifying the Dockerfile, release linker, ARM64-specific
+build flags, or low-memory behavior. Fix failures before shipping an affected
+ARM64 release; do not block unrelated PRs.
 
 The native `ubuntu-24.04-arm` job bounds the entire BuildKit builder to **2 GiB
 RAM and no swap**, verifies those limits, invokes the actual
