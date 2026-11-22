@@ -238,38 +238,6 @@ jobs:
                 supersededPr: 350,
                 successorPr: 353,
               },
-              // Additional exact, same-repo PR heads already merged into main.
-              // Their original head SHA must still match at cleanup time.
-              {
-                name: "feat/browser-relay-pairing-extension",
-                sha: "af159db2536efddaf715c05432f6571b86975301",
-                mergedPr: 331,
-              },
-              {
-                name: "feat/provider-specific-completion-signals-20261028",
-                sha: "e19ec6c9626ab7bb0eed5f834ed8a4330a4d955e",
-                mergedPr: 465,
-              },
-              {
-                name: "fix/memory-offload-sse-persistence-issue-286",
-                sha: "d13bf2aec071030955053a00adc531c28b8ded3b",
-                mergedPr: 374,
-              },
-              {
-                name: "fix/p1-637-reject-duplicate-relay-credentials-20261107",
-                sha: "738b8cdf52f4ccf7d97bfea344fbfcff818d1f35",
-                mergedPr: 739,
-              },
-              {
-                name: "fix/127-zeroize-session-serialization-buffers-20261030",
-                sha: "0f8ffb2d4b2af8a6878b79503c6bc8c8db654118",
-                mergedPr: 565,
-              },
-              {
-                name: "perf/435-transcript-marker-rebased-20261029",
-                sha: "8884af6b9b9ec0e6bc3757ce78a6924c5f81f8e7",
-                mergedPr: 520,
-              },
               // Once this cleanup PR itself merges, remove its head too;
               // a missing or unmerged exact-head PR is never sufficient.
               {
