@@ -175,6 +175,68 @@ line two</div>
     }
 
     #[tokio::test]
+    async fn paste_focuses_unfocused_composer_and_rechecks_focus_mutations() {
+        let browser = Browser::builder().stealth(false).build().unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let body = r#"<main><section>
+            <div id="editor" contenteditable="true" role="textbox" data-lexical-editor="true"></div>
+            <button aria-label="Send">Send</button></section></main>"#;
+        let paste = script(
+            include_str!("metaai_paste.js"),
+            "https://www.meta.ai",
+            "line one\n你好 👋 \"quoted\"",
+        )
+        .replace("__SELECTOR__", "'#editor'");
+        fixture(&mut page, body).await;
+        page.evaluate(
+            r#"(() => {
+            globalThis.pastes = 0;
+            const editor = document.querySelector('#editor');
+            editor.addEventListener('paste', event => {
+                globalThis.pastes++;
+                editor.textContent = event.clipboardData.getData('text/plain');
+                event.preventDefault();
+            });
+            return true;
+        })()"#,
+        );
+        assert_ne!(page.evaluate("document.activeElement.id"), "editor");
+        assert_eq!(
+            page.evaluate(&paste),
+            true,
+            "an unfocused actionable editor must accept paste"
+        );
+        assert_eq!(page.evaluate("globalThis.pastes").as_f64(), Some(1.0));
+        assert_eq!(
+            page.evaluate("document.querySelector('#editor').textContent"),
+            "line one\n你好 👋 \"quoted\""
+        );
+
+        // Focus handlers can replace, disable or obscure the selected editor.
+        // Never dispatch to a stale node or a newly introduced editor.
+        for mutation in [
+            "editor.setAttribute('aria-disabled','true')",
+            "editor.removeAttribute('data-lexical-editor')",
+            "editor.replaceWith(editor.cloneNode(true))",
+            "document.body.insertAdjacentHTML('beforeend','<div aria-modal=\"true\">Modal</div>')",
+            "editor.blur()",
+            "editor.insertAdjacentHTML('afterend','<div id=\"editor\" contenteditable=\"true\" role=\"textbox\" data-lexical-editor=\"true\"></div>')",
+        ] {
+            fixture(&mut page, body).await;
+            let setup = format!(r#"(() => {{
+                globalThis.pastes = 0;
+                const editor = document.querySelector('#editor');
+                editor.addEventListener('paste', event => {{ globalThis.pastes++; event.preventDefault(); }});
+                editor.addEventListener('focus', () => {{ {mutation}; }});
+                return true;
+            }})()"#);
+            page.evaluate(&setup);
+            assert_eq!(page.evaluate(&paste), false, "focus mutation must reject paste");
+            assert_eq!(page.evaluate("globalThis.pastes").as_f64(), Some(0.0));
+        }
+    }
+
+    #[tokio::test]
     async fn focused_editor_helper_can_be_embedded_with_caller_named_el() {
         let browser = Browser::builder().stealth(false).build().unwrap();
         let mut page = browser.new_page().await.unwrap();
