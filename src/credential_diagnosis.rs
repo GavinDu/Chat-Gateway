@@ -517,8 +517,8 @@ pub(crate) fn diagnose_file(path: &Path) -> anyhow::Result<String> {
     }
     // Validate the descriptor's identity after the pathname lstat but before
     // reading any potentially private owner evidence.
-    let file = fs::File::open(path)
-        .map_err(|_| anyhow::anyhow!("credential evidence unavailable"))?;
+    let file =
+        fs::File::open(path).map_err(|_| anyhow::anyhow!("credential evidence unavailable"))?;
     let opened = file
         .metadata()
         .map_err(|_| anyhow::anyhow!("credential evidence unavailable"))?;
