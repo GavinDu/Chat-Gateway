@@ -1,0 +1,189 @@
+name: Reconcile to five total branches
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/reconcile-to-five-branches.yml
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+concurrency:
+  group: branch-reconciliation
+  cancel-in-progress: false
+jobs:
+  reconcile:
+    if: github.repository == 'GavinDu/Chat-Gateway'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Preserve exact branch SHAs, document unfinished PRs, and retire refs
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const fs=require("node:fs");
+            const {owner,repo}=context.repo;
+            const full=owner+"/"+repo;
+            const keep=new Map([["consolidate/replay-cookie-fidelity-20261121","Replay/cookie fidelity — PR #1573"],["fix/chatgpt-composer-investigation","ChatGPT composer and provider execution — PR #944"],["fix/native-provider-flow-20261118","Meta AI/native browser runtime — PR #1417"],["fix/fence-diagnosis-evidence-file-identity-1525","Credential diagnosis security — PR #1526"]]);
+            const prefix="archive/max5-20261121/";
+            const all=await github.paginate(github.rest.repos.listBranches,{owner,repo,per_page:100});
+            const prs=await github.paginate(github.rest.pulls.list,{owner,repo,state:"open",per_page:100});
+            const known=new Map(all.map(b=>[b.name,b.commit.sha]));
+            if(keep.size!==4||![...keep.keys()].every(n=>known.has(n))){
+              throw new Error("Expected four workstreams are not present. NO branch operations performed.");
+            }
+            if(!known.has("main"))throw new Error("main missing from branch inventory");
+            for(const branch of all){
+              if(branch.name!=="main"&&branch.protected&&!keep.has(branch.name)){
+                throw new Error("Unplanned protected branch "+branch.name+"; no branch operations performed");
+              }
+            }
+            const prTargets=prs.filter(p=>p.head?.repo?.full_name===full&&!keep.has(p.head.ref));
+            const unexpected=prTargets.filter(p=>!known.has(p.head.ref));
+            if(unexpected.length)throw new Error("PR heads not in branch snapshot: "+unexpected.map(p=>p.number).join(","));
+            const decisions=[];
+            let removed=0,retained=0,closedPrs=0,alreadyGone=0,errors=0;
+            for(const b of all){
+              if(b.name==="main"||keep.has(b.name))continue;
+              const row={branch:b.name,sha:b.commit.sha,commitDate:"",ahead:null,behind:null,changedPaths:"",prs:[],archiveTag:prefix+b.name,action:"RETAIN",reason:""};
+              const finish=()=>{if(row.action!=="ARCHIVED")retained++;decisions.push(row);};
+              try{
+                const openBases=await github.rest.pulls.list({owner,repo,base:b.name,state:"open",per_page:100});
+                if(openBases.data.length){row.reason="branch remains base of an open PR";finish();continue;}
+                const cmp=(await github.rest.repos.compareCommits({owner,repo,base:"main",head:b.name,per_page:100})).data;
+                row.ahead=cmp.ahead_by;row.behind=cmp.behind_by;
+                row.changedPaths=(cmp.files||[]).map(x=>x.filename).join("; ");
+                row.commitDate=(await github.rest.repos.getCommit({owner,repo,ref:b.commit.sha})).data.commit?.committer?.date||"";
+                let existing=null;
+                try{existing=(await github.rest.git.getRef({owner,repo,ref:"tags/"+row.archiveTag})).data.object.sha;}
+                catch(e){if(e.status!==404)throw e;}
+                if(existing&&existing!==b.commit.sha){row.reason="archive tag conflict; no deletion";finish();continue;}
+                const head=(await github.rest.git.getRef({owner,repo,ref:"heads/"+b.name})).data.object.sha;
+                if(head!==b.commit.sha){row.reason="branch tip changed; no deletion";finish();continue;}
+                if(!existing)await github.rest.git.createRef({owner,repo,ref:"refs/tags/"+row.archiveTag,sha:head});
+                const tag=(await github.rest.git.getRef({owner,repo,ref:"tags/"+row.archiveTag})).data.object;
+                if(tag.sha!==head||tag.type!=="commit"){row.reason="archive readback failed; no deletion";finish();continue;}
+                // An unfinished open PR must be preserved in the GitHub discussion, with its
+                // original source available via the exact-SHA archive tag.
+                const currentPrs=await github.rest.pulls.list({owner,repo,head:owner+":"+b.name,state:"open",per_page:100});
+                let stop=false;
+                for(const brief of currentPrs.data){
+                  const p=(await github.rest.pulls.get({owner,repo,pull_number:brief.number})).data;
+                  if(p.head.sha!==head||p.base.ref!=="main"||p.head.repo?.full_name!==full){
+                    row.reason="PR head/base changed during reconciliation; tag kept";
+                    stop=true;break;
+                  }
+                  row.prs.push(p.number);
+                  const stream=((name,num)=> {
+                  if(/replay|cookie|session-hash/.test(name))return "Replay / cookie fidelity (PR #1573)";
+                  if(/diagnos|failure-source|evidence|fence|nofollow|smoke/.test(name))return "Credential diagnosis (PR #1526)";
+                  if(/metaai|native|websocket|wss|send-enter|stop-pointer|probe-origin|cancel-under/.test(name))return "Meta AI / native provider runtime (PR #1417)";
+                  return "ChatGPT / extension (PR #944); related open issue remains source of truth";
+                })(b.name,p.number);
+                  const note=[
+                   "Branch-count reconciliation checkpoint — **archived, NOT merged, NOT implemented/closed as a feature**.",
+                   "",
+                   "The repository's explicitly requested limit is at most five TOTAL branches.",
+                   "This unfinished PR is being retired from the active branch list, without treating its code or E2E requirements as complete.",
+                   "",
+                   "- Exact original head: \`"+head+"\`",
+                   "- Recoverable Git tag: \`"+row.archiveTag+"\` (verified to resolve to this exact SHA before closure)",
+                   "- Continuing workstream: **"+stream+"**",
+                   "- Original PR discussion, diff, review, and linked issues remain available here; associated issues stay OPEN.",
+                   "- To resume: create a fresh branch from the archive tag, cherry-pick/rebuild only compatible changes onto current main, and open a NEW PR. Require all current-head CI plus local MCP sandbox E2E before merge.",
+                   "- This closure is administrative branch consolidation, NOT evidence that this change is present in main.",
+                  ].join("\n");
+                  await github.rest.issues.createComment({owner,repo,issue_number:p.number,body:note});
+                  const confirm=(await github.rest.pulls.get({owner,repo,pull_number:p.number})).data;
+                  if(confirm.state!=="open"||confirm.head.sha!==head){
+                    row.reason="PR changed after archive comment; no deletion";
+                    stop=true;break;
+                  }
+                  await github.rest.pulls.update({owner,repo,pull_number:p.number,state:"closed"});
+                  const closed=(await github.rest.pulls.get({owner,repo,pull_number:p.number})).data;
+                  if(closed.state!=="closed"){row.reason="could not verify PR closure";stop=true;break;}
+                  closedPrs++;
+                  core.info("Archived unfinished PR #"+p.number+" from "+b.name+" to "+row.archiveTag);
+                }
+                if(stop){finish();continue;}
+                // Check ALL newly open PRs to avoid silently breaking newly introduced
+                // dependency graph edges; preserve original head's ref until the last gate.
+                const fresh=await github.paginate(github.rest.pulls.list,{owner,repo,state:"open",per_page:100});
+                if(fresh.some(p=>p.base.ref===b.name||(p.head.repo?.full_name===full&&p.head.ref===b.name))){
+                  row.reason="open PR head/base dependency appeared after archival";finish();continue;
+                }
+                const head2=(await github.rest.git.getRef({owner,repo,ref:"heads/"+b.name})).data.object.sha;
+                const tag2=(await github.rest.git.getRef({owner,repo,ref:"tags/"+row.archiveTag})).data.object.sha;
+                if(head2!==head||tag2!==head){
+                  row.reason="ref changed before delete; no deletion";finish();continue;
+                }
+                try{await github.rest.git.deleteRef({owner,repo,ref:"heads/"+b.name});}
+                catch(e){
+                  if(e.status===404){
+                    let gone=false;
+                    try {
+                      await github.rest.git.getRef({owner,repo,ref:"heads/"+b.name});
+                    } catch(lookupError) {
+                      if(lookupError.status===404)gone=true;
+                      else throw lookupError;
+                    }
+                    if(!gone)throw e;
+                    alreadyGone++;
+                  }else throw e;
+                }
+                row.action="ARCHIVED";
+                row.reason="Full original commit preserved as verified Git tag; NOT merged";
+                removed++;
+                core.info("ARCHIVED "+b.name+" "+head+" -> "+row.archiveTag);
+              }catch(e){
+                errors++;
+                row.reason="Error: "+String(e.message).slice(0,220)+"; retain branch";
+                core.warning("RETAIN "+b.name+": "+row.reason);
+              }
+              finish();
+            }
+            const live=await github.paginate(github.rest.repos.listBranches,{owner,repo,per_page:100});
+            const finalNames=live.map(b=>b.name);
+            const status={initialBranches:all.length,finalBranches:live.length,archived:removed,retained,closedPrs,alreadyGone,errors,keep:["main",...keep.keys()],finalNames};
+            const lines=[
+             "# Five-branch final reconciliation",
+             "",
+             "**A deleted branch does not imply that its code has been merged.**",
+             "",
+             "- Repository: "+full,
+             "- Current main push: "+context.sha,
+             "- Before: "+all.length+" branches",
+             "- Archived and retired: "+removed,
+             "- Kept / failures: "+retained+" / "+errors,
+             "- Unfinished PRs documented and administratively closed: "+closedPrs,
+             "- Live branches after: "+live.length,
+             "",
+             "## Four retained feature workstreams",
+             ...[...keep].map(([name,desc])=>"- \`"+name+"\` — "+desc),
+             "",
+             "## Full archive report",
+             "",
+             "| Branch | Ahead | Behind | Changed paths | PRs administratively archived | Archive tag | Decision / reason |",
+             "|---|---:|---:|---|---|---|---|",
+             ...decisions.map(r=>"| "+[r.branch,r.ahead,r.behind,r.changedPaths,r.prs.map(n=>"#"+n).join(", "),r.archiveTag,r.action+" — "+r.reason].map(v=>String(v??"").replace(/\|/g,"\\|").replace(/[\r\n]/g," ")).join(" | ")+" |")
+            ];
+            await core.summary.addRaw(lines.join("\n")).write();
+            fs.writeFileSync("/tmp/max-five-branch-report.json",JSON.stringify({status,decisions},null,2)+"\n",{mode:0o600});
+            const cols=["branch","sha","commitDate","ahead","behind","changedPaths","prs","archiveTag","action","reason"];
+            const cell=v=>'"'+String(v??"").replace(/"/g,'""').replace(/[\r\n]/g," ")+'"';
+            fs.writeFileSync("/tmp/max-five-branch-report.csv",[cols.join(","),...decisions.map(r=>cols.map(k=>cell(Array.isArray(r[k])?r[k].join("; "):r[k])).join(","))].join("\n")+"\n",{mode:0o600});
+            core.info("MAX_FIVE_SUMMARY "+JSON.stringify(status));
+            core.info("MAX_FIVE_DECISIONS "+JSON.stringify(decisions));
+            if(live.length>5){
+              core.setFailed("Goal not met; "+live.length+" branches remain. Inspect retained reasons and rerun a SHA-pinned follow-up.");
+            }
+      - name: Export per-branch report
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: max-five-branches-reconciliation-report
+          path: |
+            /tmp/max-five-branch-report.csv
+            /tmp/max-five-branch-report.json
+          if-no-files-found: warn
+          retention-days: 90
