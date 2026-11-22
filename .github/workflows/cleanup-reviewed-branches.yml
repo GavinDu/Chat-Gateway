@@ -238,6 +238,81 @@ jobs:
                 supersededPr: 350,
                 successorPr: 353,
               },
+              // Additional reviewed October stale PR heads. Original PRs
+              // explicitly cite a merged-main replacement, with changed path
+              // coverage checked, and named ref SHAs pinned on 2026-11-21.
+              {
+                name: "fix/typed-provider-session-state-issue-130",
+                sha: "f7c86a9d6ccf6f9f722aec1561abb10e3db06a2d",
+                supersededPr: 336,
+                successorPr: 348,
+              },
+              {
+                name: "fix/sqlite-wal-mode-20261027",
+                sha: "862c94e5d097c542e1a58033f4b667b711285c41",
+                supersededPr: 325,
+                successorPr: 327,
+              },
+              {
+                name: "fix/remove-synthetic-tab-ids-rebased2-20261027",
+                sha: "e9eb4ca203e6f0c1d70604b9567ad963ee538371",
+                supersededPr: 324,
+                successorPr: 322,
+              },
+              {
+                name: "perf/avoid-duplicate-history-read-20261027",
+                sha: "79c705c38030fcd9ab25b17c0a46ac0844617dfa",
+                supersededPr: 319,
+                successorPr: 323,
+              },
+              {
+                name: "fix/remove-synthetic-tab-ids-20261027",
+                sha: "91085236fabc3f2e304be76955846dab0ef2fe98",
+                supersededPr: 313,
+                successorPr: 322,
+              },
+              {
+                name: "refactor/provider-adapter-catalog-20261027",
+                sha: "a9f6c91e9cdc7eaa40600133d21e1808904f8094",
+                supersededPr: 308,
+                successorPr: 312,
+              },
+              {
+                name: "fix/browser-worker-readiness-20261027",
+                sha: "82e3e3ab92ba3198c0a9073c2a5c6c609b51e25d",
+                supersededPr: 301,
+                successorPr: 302,
+              },
+              {
+                name: "fix/readiness-browser-worker-liveness-20261027",
+                sha: "71fcb8b2126c3c629a718956c647116f07308bf6",
+                supersededPr: 300,
+                successorPr: 302,
+              },
+              {
+                name: "feat/conversation-key-isolation-20261027",
+                sha: "ae44ab4816f87f4729c5a2ed9a48e7cb69a3e9fd",
+                supersededPr: 272,
+                successorPr: 292,
+              },
+              {
+                name: "feat-retention-ttl-current-20261027",
+                sha: "e28f41c13b05828ae3c5870ce70ada387ddb732c",
+                supersededPr: 271,
+                successorPr: 266,
+              },
+              {
+                name: "feat-provider-benchmark-current-20261027",
+                sha: "fe84898ab50577c9fdcee889b40ea3812262ad54",
+                supersededPr: 270,
+                successorPr: 265,
+              },
+              {
+                name: "feat/provider-thread-api-current-main-20261027",
+                sha: "9cdeed0fd7244951ad7266e8843aee800a5e2c87",
+                supersededPr: 257,
+                successorPr: 249,
+              },
               // Once this cleanup PR itself merges, remove its head too;
               // a missing or unmerged exact-head PR is never sufficient.
               {
