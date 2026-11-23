@@ -372,6 +372,14 @@ pub(crate) async fn prepare_candidate_attempt(
                 "provider thread state could not be read safely",
             ))));
         }
+        Err(CandidatePromptError::ThreadSyncClaimFailed) => {
+            return Err(CandidateAttemptError::Fatal(Box::new(api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                "memory_persistence_failed",
+                "provider thread synchronization could not be claimed safely",
+            ))));
+        }
         Err(CandidatePromptError::MemoryEgressDenied) => {
             return Err(CandidateAttemptError::Skip {
                 message: "provider memory egress policy denied request".to_owned(),
@@ -629,6 +637,7 @@ pub(crate) struct CandidatePromptRequest<'a> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CandidatePromptError {
     UnreadableThreadState,
+    ThreadSyncClaimFailed,
     MemoryEgressDenied,
 }
 
@@ -658,7 +667,7 @@ pub(crate) async fn prepare_candidate_prompt(
         request.model,
         request.stored_messages,
         request.incoming_messages,
-        saved_thread,
+        saved_thread.clone(),
         request.token_budget,
         request.replay_prompt,
     );
@@ -670,6 +679,22 @@ pub(crate) async fn prepare_candidate_prompt(
             request.personal_memory_items,
         )
         .map_err(|_| CandidatePromptError::MemoryEgressDenied)?;
+    // Do not trust this marker again once the remote thread may be mutated.
+    // The provider permit is still held. A successful local commit restores
+    // synchronization; cancellation, failure and restart leave it invalid.
+    if thread_url.is_some() {
+        let expected = saved_thread.ok_or(CandidatePromptError::ThreadSyncClaimFailed)?;
+        let claimed = request
+            .state
+            .memory
+            .clone()
+            .claim_provider_thread_sync_async(request.owner_key_id.to_owned(), expected)
+            .await
+            .map_err(|_| CandidatePromptError::ThreadSyncClaimFailed)?;
+        if !claimed {
+            return Err(CandidatePromptError::ThreadSyncClaimFailed);
+        }
+    }
     Ok((prompt, thread_url))
 }
 
