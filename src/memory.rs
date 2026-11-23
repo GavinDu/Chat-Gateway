@@ -1195,6 +1195,50 @@ impl UnifiedMemory {
         Ok(())
     }
 
+    /// Consume a verified synchronization marker before a remote Delta send.
+    /// An interrupted send may mutate the remote thread without committing a
+    /// local turn. Persisting the invalidation first makes retries and restarts
+    /// conservatively replay instead of trusting the old marker.
+    pub(crate) async fn claim_provider_thread_sync_async(
+        self: Arc<Self>,
+        owner_key_id: String,
+        expected: ProviderThread,
+    ) -> anyhow::Result<bool> {
+        tokio::task::spawn_blocking(move || {
+            self.claim_provider_thread_sync(&owner_key_id, &expected)
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("provider thread claim task failed"))?
+    }
+
+    fn claim_provider_thread_sync(
+        &self,
+        owner_key_id: &str,
+        expected: &ProviderThread,
+    ) -> anyhow::Result<bool> {
+        let Some(marker) = expected.synced_through_message_id.as_deref() else {
+            return Ok(false);
+        };
+        let connection = self.lock()?;
+        let updated = connection.execute(
+            "UPDATE provider_threads SET synced_through_message_id = NULL
+             WHERE conversation_id = ?1 AND provider = ?2
+               AND thread_url = ?3 AND synced_through_message_id = ?4
+               AND model IS ?5
+               AND EXISTS (SELECT 1 FROM conversations
+                           WHERE id = ?1 AND owner_key_id = ?6)",
+            rusqlite::params![
+                expected.conversation_id,
+                expected.provider,
+                expected.thread_url,
+                marker,
+                expected.model,
+                owner_key_id,
+            ],
+        )?;
+        Ok(updated == 1)
+    }
+
     /// Long-term memory is opt-in. Missing settings deliberately mean disabled.
     pub fn long_term_memory_enabled(&self, owner_key_id: &str) -> anyhow::Result<bool> {
         let connection = self.lock()?;
@@ -1913,6 +1957,71 @@ mod provider_thread_map_isolation_tests {
             synced_through_message_id: Some(marker.to_owned()),
             model: Some("test-model".to_owned()),
             updated_at: 1,
+        }
+    }
+
+    #[tokio::test]
+    async fn claiming_delta_consumes_only_exact_owned_thread_marker() {
+        let memory = std::sync::Arc::new(UnifiedMemory::new(8000));
+        persist_conversation(&memory, "conversation-a", "owner-a");
+        persist_conversation(&memory, "conversation-b", "owner-a");
+        let a = thread(
+            "conversation-a",
+            "chatgpt",
+            "https://chatgpt.com/c/a",
+            "marker-a",
+        );
+        let b = thread(
+            "conversation-b",
+            "chatgpt",
+            "https://chatgpt.com/c/b",
+            "marker-b",
+        );
+        let other = thread(
+            "conversation-a",
+            "claude",
+            "https://claude.ai/chat/a",
+            "marker-other",
+        );
+        for entry in [&a, &b, &other] {
+            memory
+                .upsert_provider_thread_for_owner("owner-a", entry)
+                .unwrap();
+        }
+        let mut stale = a.clone();
+        stale.synced_through_message_id = Some("stale".to_owned());
+        assert!(!memory
+            .claim_provider_thread_sync("owner-a", &stale)
+            .unwrap());
+        assert!(!memory
+            .claim_provider_thread_sync("owner-b", &a)
+            .unwrap());
+        assert!(memory
+            .clone()
+            .claim_provider_thread_sync_async("owner-a".to_owned(), a.clone())
+            .await
+            .unwrap());
+        assert!(!memory
+            .claim_provider_thread_sync("owner-a", &a)
+            .unwrap());
+        let invalidated = memory
+            .get_provider_thread_for_owner("owner-a", "conversation-a", "chatgpt")
+            .unwrap()
+            .unwrap();
+        assert_eq!(invalidated.thread_url, a.thread_url);
+        assert!(invalidated.synced_through_message_id.is_none());
+        for entry in [&b, &other] {
+            assert_eq!(
+                memory
+                    .get_provider_thread_for_owner(
+                        "owner-a",
+                        &entry.conversation_id,
+                        &entry.provider,
+                    )
+                    .unwrap()
+                    .as_ref(),
+                Some(entry)
+            );
         }
     }
 
