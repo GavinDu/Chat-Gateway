@@ -21,5 +21,5 @@
     canonical(visibleText(node))===canonical(expected));
   const leaves=matches.filter(node=>!matches.some(other=>other!==node && node.contains(other)));
   const editors=Array.from(document.querySelectorAll('div[contenteditable="true"][role="textbox"][data-lexical-editor="true"]'));
-  return {valid:true,count:Math.min(32,leaves.length),draft_empty:editors.length===1 && !(editors[0].innerText??editors[0].textContent??'').trim()};
+  return {valid:true,count:Math.min(32,leaves.length),draft_empty:editors.length===1 && (() => {const draft=(__COMPOSER_TEXT__)(editors[0]);return draft!==null && !draft.trim();})()};
 })()
