@@ -1993,17 +1993,13 @@ mod provider_thread_map_isolation_tests {
         assert!(!memory
             .claim_provider_thread_sync("owner-a", &stale)
             .unwrap());
-        assert!(!memory
-            .claim_provider_thread_sync("owner-b", &a)
-            .unwrap());
+        assert!(!memory.claim_provider_thread_sync("owner-b", &a).unwrap());
         assert!(memory
             .clone()
             .claim_provider_thread_sync_async("owner-a".to_owned(), a.clone())
             .await
             .unwrap());
-        assert!(!memory
-            .claim_provider_thread_sync("owner-a", &a)
-            .unwrap());
+        assert!(!memory.claim_provider_thread_sync("owner-a", &a).unwrap());
         let invalidated = memory
             .get_provider_thread_for_owner("owner-a", "conversation-a", "chatgpt")
             .unwrap()
