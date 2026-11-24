@@ -329,3 +329,15 @@ work. A deeper causal split requires native engine/JavaScript profiling, not
 invented CPU/network attribution from the wall-clock timer. Keep policy unchanged
 while measuring. Generic `browser_settle` / `browser_sleep` remain for other drive
 call sites; they no longer include these explicitly named children.
+
+Navigation now also has passive, page-scoped children: `navigation_before_request`,
+`navigation_fetch` (request callback to buffered response callback), and
+`navigation_after_response` (response callback to native load return). Match only
+the requested Document URL in memory; export no URLs, headers, status/body data or
+credentials. Redirect chains remain inside the matching native document fetch.
+Detach callbacks on return, error or cancellation. Missing callbacks produce
+`navigation_unobserved` instead of fabricated network timings. The earlier opaque
+navigation boundary is therefore partially opened: fetch remains opaque for
+DNS/TLS/transfer separation, while post-response work remains opaque for parsing,
+framework execution, frame/resource advancement and native load processing.
+These callbacks do not intercept or modify requests, and no extra fetch is sent.

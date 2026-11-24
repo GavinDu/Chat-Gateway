@@ -6,6 +6,10 @@ tokio::task_local! { static ACTIVE: MetricsRegistry; }
 
 #[derive(Clone, Copy)]
 pub(crate) enum Step {
+    NavigationBeforeRequest,
+    NavigationFetch,
+    NavigationAfterResponse,
+    NavigationUnobserved,
     RetentionSettle,
     RetentionSleep,
     RetentionProbe,
@@ -50,6 +54,10 @@ pub(crate) enum Step {
 impl Step {
     pub(crate) const fn label(self) -> &'static str {
         match self {
+            Self::NavigationBeforeRequest => "navigation_before_request",
+            Self::NavigationFetch => "navigation_fetch",
+            Self::NavigationAfterResponse => "navigation_after_response",
+            Self::NavigationUnobserved => "navigation_unobserved",
             Self::RetentionSettle => "retention_settle",
             Self::RetentionSleep => "retention_sleep",
             Self::RetentionProbe => "retention_probe",
@@ -217,5 +225,158 @@ mod composer_tests {
             )));
         }
         assert!(!text.contains("stage=\"browser_settle\""));
+    }
+}
+
+/// Passive, page-scoped navigation timestamps. Never read/store response content or headers.
+/// The guard detaches callbacks on normal return, error and cancellation.
+pub(crate) struct Navigation<'a> {
+    page: &'a mut obscura_core::Page,
+    observation: Option<NavigationObservation>,
+}
+#[derive(Default)]
+struct NavigationState {
+    request: Option<Instant>,
+    response: Option<Instant>,
+}
+fn matches_document(info: &obscura_core::RequestInfo, target: &str) -> bool {
+    info.resource_type == obscura_core::ResourceType::Document
+        && info
+            .url
+            .join(target)
+            .is_ok_and(|expected| info.url == expected)
+}
+struct NavigationObservation {
+    metrics: MetricsRegistry,
+    started: Instant,
+    state: std::sync::Arc<std::sync::Mutex<NavigationState>>,
+    ids: (u64, u64),
+}
+impl<'a> Navigation<'a> {
+    pub(crate) fn new(page: &'a mut obscura_core::Page, target: &str) -> Self {
+        let observation = ACTIVE.try_with(Clone::clone).ok().map(|metrics| {
+            let started = Instant::now();
+            let state = std::sync::Arc::new(std::sync::Mutex::new(NavigationState::default()));
+            let request_state = state.clone();
+            let expected = std::sync::Arc::<str>::from(target);
+            let request_target = expected.clone();
+            let request_id = page.on_request(std::sync::Arc::new(move |info| {
+                if matches_document(info, request_target.as_ref()) {
+                    if let Ok(mut state) = request_state.lock() {
+                        if state.request.is_none() {
+                            state.request = Some(Instant::now());
+                        }
+                    }
+                }
+            }));
+            let response_state = state.clone();
+            let response_id = page.on_response(std::sync::Arc::new(move |info, _response| {
+                if matches_document(info, expected.as_ref()) {
+                    if let Ok(mut state) = response_state.lock() {
+                        if state.request.is_some() && state.response.is_none() {
+                            state.response = Some(Instant::now());
+                        }
+                    }
+                }
+            }));
+            NavigationObservation {
+                metrics,
+                started,
+                state,
+                ids: (request_id, response_id),
+            }
+        });
+        Self { page, observation }
+    }
+    pub(crate) fn page(&mut self) -> &mut obscura_core::Page {
+        self.page
+    }
+}
+impl Drop for Navigation<'_> {
+    fn drop(&mut self) {
+        let Some(observation) = self.observation.take() else {
+            return;
+        };
+        self.page.off_request(observation.ids.0);
+        self.page.off_response(observation.ids.1);
+        let ended = Instant::now();
+        if let Ok(state) = observation.state.lock() {
+            let record = |step, duration: std::time::Duration| {
+                observation
+                    .metrics
+                    .record_metaai_step(step, duration.as_micros().min(u64::MAX as u128) as u64)
+            };
+            if let (Some(request), Some(response)) = (state.request, state.response) {
+                record(
+                    Step::NavigationBeforeRequest,
+                    request.duration_since(observation.started),
+                );
+                record(Step::NavigationFetch, response.duration_since(request));
+                record(
+                    Step::NavigationAfterResponse,
+                    ended.duration_since(response),
+                );
+            } else {
+                record(
+                    Step::NavigationUnobserved,
+                    ended.duration_since(observation.started),
+                );
+            }
+        };
+    }
+}
+
+#[cfg(test)]
+mod navigation_tests {
+    use super::*;
+    #[tokio::test]
+    async fn passive_navigation_observers_detach_even_without_a_network_response() {
+        let metrics = MetricsRegistry::default();
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        scope(metrics.clone(), async {
+            let mut observation =
+                Navigation::new(&mut page, "https://www.meta.ai/private-navigation-sentinel");
+            let ids = observation.observation.as_ref().unwrap().ids;
+            observation
+                .page()
+                .goto("data:text/html,<main>private navigation sentinel</main>")
+                .await
+                .unwrap();
+            drop(observation);
+            assert!(!page.off_request(ids.0));
+            assert!(!page.off_response(ids.1));
+        })
+        .await;
+        let text = metrics.render_with_provider_states(&[]);
+        assert!(text.contains(
+            "gateway_metaai_step_duration_seconds_count{stage=\"navigation_unobserved\"} 1"
+        ));
+        assert!(!text.contains("private navigation sentinel"));
+    }
+}
+
+#[cfg(test)]
+mod document_match_tests {
+    use super::*;
+    #[test]
+    fn normalizes_root_url_and_rejects_other_documents_or_resource_types() {
+        let mut info = obscura_core::RequestInfo {
+            url: "https://www.meta.ai/".parse().unwrap(),
+            method: "GET".into(),
+            headers: Default::default(),
+            resource_type: obscura_core::ResourceType::Document,
+        };
+        assert!(matches_document(&info, "https://www.meta.ai"));
+        assert!(!matches_document(
+            &info,
+            "https://www.meta.ai/prompt/private"
+        ));
+        assert!(!matches_document(&info, "https://foreign.invalid/"));
+        info.resource_type = obscura_core::ResourceType::Fetch;
+        assert!(!matches_document(&info, "https://www.meta.ai/"));
     }
 }
