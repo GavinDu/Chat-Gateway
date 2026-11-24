@@ -1443,6 +1443,22 @@ fn composer_draft_expression(element: &str) -> String {
     )
 }
 
+/// Preserve visible Meta AI text-node whitespace through paste verification.
+/// Read-only: hidden text and separate block paragraphs cannot authorize a send.
+pub(crate) fn metaai_composer_retains_prompt(
+    page: &Page,
+    selector: &str,
+    prompt: &str,
+) -> anyhow::Result<bool> {
+    let el = visible_input_query(&serde_json::to_string(selector)?);
+    let expected = serde_json::to_string(prompt)?;
+    let reader = include_str!("metaai_composer_text.js");
+    let retained = page.evaluate(&format!(
+        "(() => {{ const editor = {el}; const value = ({reader})(editor); return value !== null && value === {expected}; }})()"
+    ));
+    Ok(retained.as_bool() == Some(true))
+}
+
 /// Re-read the actionable composer after framework renders, not just after
 /// the initial typing event. Never log the prompt when the value changes.
 pub(crate) fn composer_retains_prompt(
@@ -2074,9 +2090,13 @@ pub async fn human_type(page: &Page, selectors: &[&str], text: &str) -> anyhow::
 
 pub(crate) async fn submit_metaai_focused(page: &mut Page, prompt: &str) -> anyhow::Result<()> {
     let expected = serde_json::to_string(prompt)?;
-    let read = include_str!("metaai_user_turn.js").replace("__PROMPT__", &expected);
+    let read = include_str!("metaai_user_turn.js")
+        .replace("__COMPOSER_TEXT__", include_str!("metaai_composer_text.js"))
+        .replace("__PROMPT__", &expected);
     let before = page.evaluate(&read)["count"].as_f64().unwrap_or(0.0);
-    let send = include_str!("metaai_keyboard_send.js").replace("__PROMPT__", &expected);
+    let send = include_str!("metaai_keyboard_send.js")
+        .replace("__COMPOSER_TEXT__", include_str!("metaai_composer_text.js"))
+        .replace("__PROMPT__", &expected);
     let status = page.evaluate(&send);
     if status.as_str() != Some("dispatched") {
         anyhow::bail!("Meta AI send unavailable, disabled, ambiguous or draft changed");
@@ -2119,7 +2139,7 @@ pub(crate) async fn type_provider_prompt(
         let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
         loop {
             drive_page(page, Duration::from_millis(50)).await;
-            if composer_retains_prompt(page, selector, text)? {
+            if metaai_composer_retains_prompt(page, selector, text)? {
                 return Ok(());
             }
             if tokio::time::Instant::now() >= deadline {
@@ -4855,7 +4875,12 @@ pub async fn send_prompt(
         .unwrap_or(inputs[0]);
     // The provider may re-render or clear the composer while the browser is
     // settling after typing. Never click Send with a missing or changed draft.
-    if !composer_retains_prompt(page, input_sel, prompt)? {
+    let retained = if provider == "metaai" {
+        metaai_composer_retains_prompt(page, input_sel, prompt)?
+    } else {
+        composer_retains_prompt(page, input_sel, prompt)?
+    };
+    if !retained {
         tracing::warn!(
             provider = provider,
             stage = "framework_render",

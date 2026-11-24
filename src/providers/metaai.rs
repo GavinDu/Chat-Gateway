@@ -86,6 +86,7 @@ impl SiteAdapter for MetaAIAdapter {
 
 #[cfg(test)]
 mod native_flow_regressions {
+    use crate::providers::common;
     use obscura_core::{Browser, Page};
 
     async fn fixture(page: &mut Page, body: &str) {
@@ -98,6 +99,7 @@ mod native_flow_regressions {
 
     fn script(source: &str, origin: &str, prompt: &str) -> String {
         source
+            .replace("__COMPOSER_TEXT__", include_str!("metaai_composer_text.js"))
             .replace("location.origin", &serde_json::to_string(origin).unwrap())
             .replace("__PROMPT__", &serde_json::to_string(prompt).unwrap())
     }
@@ -250,5 +252,48 @@ line two</div>
         assert_eq!(page.evaluate(&probe), true);
         page.evaluate("document.querySelector('#editor').setAttribute('aria-readonly','true')");
         assert_eq!(page.evaluate(&probe), false);
+    }
+    #[tokio::test]
+    async fn composer_preserves_opencode_formatting_and_rejects_hidden_or_changed_text() {
+        let browser = Browser::builder().stealth(false).build().unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        fixture(&mut page, r#"<main><section>
+            <div id="editor" contenteditable="true" role="textbox" data-lexical-editor="true" style="white-space:pre-wrap"><span></span></div>
+            <button aria-label="Send">Send</button>
+        </section></main>"#).await;
+        let expected = "line one\n    line two\n\tline three 👋";
+        let value = serde_json::to_string(expected).unwrap();
+        page.evaluate(&format!(
+            "document.querySelector('#editor span').textContent={value}"
+        ));
+        assert!(
+            !common::composer_retains_prompt(&page, "#editor", expected).unwrap(),
+            "fixture must reproduce rendered whitespace collapse"
+        );
+        assert!(common::metaai_composer_retains_prompt(&page, "#editor", expected).unwrap());
+        assert!(!common::metaai_composer_retains_prompt(
+            &page,
+            "#editor",
+            "line one line two line three 👋"
+        )
+        .unwrap());
+        page.evaluate(r#"(() => {const editor=document.querySelector('#editor');editor.focus();editor.addEventListener('keydown',event=>{if(event.key==='Enter')event.preventDefault();});return true;})()"#);
+        let send = script(
+            include_str!("metaai_keyboard_send.js"),
+            "https://www.meta.ai",
+            expected,
+        );
+        assert_eq!(page.evaluate(&send), "dispatched");
+        page.evaluate("document.querySelector('#editor span').style.display='none'");
+        assert!(!common::metaai_composer_retains_prompt(&page, "#editor", expected).unwrap());
+        assert_eq!(page.evaluate(&send), "draft_changed");
+        page.evaluate("document.querySelector('#editor').innerHTML='<span>line one</span><br><span>    line two</span><br><span>\\tline three 👋</span>'");
+        assert!(common::metaai_composer_retains_prompt(&page, "#editor", expected).unwrap());
+        page.evaluate(
+            "document.querySelector('#editor').innerHTML='<p>line one</p><p>line two</p>'",
+        );
+        assert!(
+            !common::metaai_composer_retains_prompt(&page, "#editor", "line oneline two").unwrap()
+        );
     }
 }
