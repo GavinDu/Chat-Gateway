@@ -6,6 +6,16 @@ tokio::task_local! { static ACTIVE: MetricsRegistry; }
 
 #[derive(Clone, Copy)]
 pub(crate) enum Step {
+    RetentionSettle,
+    RetentionSleep,
+    RetentionProbe,
+    InputSettleEngine,
+    InputSettleSleep,
+    AckSettle,
+    AckSleep,
+    ComposerSettle,
+    ComposerSleep,
+    ComposerProbe,
     CommandQueue,
     OperationGate,
     PageEnsure,
@@ -40,6 +50,16 @@ pub(crate) enum Step {
 impl Step {
     pub(crate) const fn label(self) -> &'static str {
         match self {
+            Self::RetentionSettle => "retention_settle",
+            Self::RetentionSleep => "retention_sleep",
+            Self::RetentionProbe => "retention_probe",
+            Self::InputSettleEngine => "input_settle_engine",
+            Self::InputSettleSleep => "input_settle_sleep",
+            Self::AckSettle => "ack_settle",
+            Self::AckSleep => "ack_sleep",
+            Self::ComposerSettle => "composer_settle",
+            Self::ComposerSleep => "composer_sleep",
+            Self::ComposerProbe => "composer_probe",
             Self::CommandQueue => "command_queue",
             Self::OperationGate => "operation_gate",
             Self::PageEnsure => "page_ensure",
@@ -168,5 +188,34 @@ mod browser_tests {
             )));
         }
         assert!(!text.contains("timing fixture"));
+    }
+}
+
+#[cfg(test)]
+mod composer_tests {
+    use super::*;
+    #[tokio::test]
+    async fn composer_wait_records_actual_drive_and_probe_children() {
+        let metrics = MetricsRegistry::default();
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        page.goto("data:text/html,<main></main>").await.unwrap();
+        page.evaluate("setTimeout(() => {const el=document.createElement('textarea');el.id='ready';document.body.appendChild(el);},20)");
+        scope(metrics.clone(), async {
+            crate::providers::common::wait_for_selector(&mut page, &["#ready"], 2000)
+                .await
+                .unwrap();
+        })
+        .await;
+        let text = metrics.render_with_provider_states(&[]);
+        for stage in ["composer_settle", "composer_sleep", "composer_probe"] {
+            assert!(text.contains(&format!(
+                "gateway_metaai_step_duration_seconds_count{{stage=\"{stage}\"}}"
+            )));
+        }
+        assert!(!text.contains("stage=\"browser_settle\""));
     }
 }
