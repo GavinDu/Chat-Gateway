@@ -1587,7 +1587,7 @@ pub(super) fn browser_thread(
                                 let _ = reply.send(res);
                             });
                         }
-                        Command::Send { provider, prompt, model, has_history, thread_url, timeout, completion_idle, provider_guard, chunks } => {
+                        Command::Send { queued_at, provider, prompt, model, has_history, thread_url, timeout, completion_idle, provider_guard, chunks } => {
                             // A request can be cancelled while waiting in the
                             // worker command queue. Never navigate a page for
                             // an abandoned sender after that admission timeout.
@@ -1607,14 +1607,22 @@ pub(super) fn browser_thread(
                             let poll_tick = gateway_poll_tick;
                             let request_metrics = metrics.clone();
                             let send_session_write_tracker = session_write_tracker.clone();
+                            let timing_metrics = request_metrics.clone();
                             tokio::task::spawn_local(async move {
+                                let work = async move {
+                                use crate::metaai_timing::{Step, Timer};
+                                if provider == Provider::MetaAI {
+                                    request_metrics.record_metaai_step(Step::CommandQueue, queued_at.elapsed().as_micros().min(u64::MAX as u128) as u64);
+                                }
                                 // Both operation admission and the provider page lock
                                 // consume one queue budget, rather than each waiting for
                                 // the full configured timeout independently.
                                 let queue_deadline =
                                     tokio::time::Instant::now() + operation_queue_timeout;
+                                let operation_timer = Timer::start(Step::OperationGate);
                                 let Some(operation) = send_unless_disconnected(&chunks,
                                     tokio::time::timeout_at(queue_deadline, operation_gate.lock())).await else { return; };
+                                drop(operation_timer);
                                 let _operation = match operation {
                                     Ok(guard) => guard,
                                     Err(_) => { let _ = chunks.send(Err(anyhow::Error::new(ProviderBusyError))).await; return; }
@@ -1640,8 +1648,10 @@ pub(super) fn browser_thread(
                                 // A queued request may have been cancelled
                                 // while another send owned the page lock.
                                 if chunks.is_closed() { return; }
+                                let ensure_timer = Timer::start(Step::PageEnsure);
                                 let Some(opened) = send_unless_disconnected(&chunks,
                                     ensure_provider_page(&browser_for_save, &pages, provider)).await else { return; };
+                                drop(ensure_timer);
                                 let just_opened = match opened {
                                     Ok(opened) => opened,
                                     Err(error) => { let _ = chunks.send(Err(error)).await; return; }
@@ -1673,6 +1683,7 @@ pub(super) fn browser_thread(
                                 if (!just_opened || thread_url.is_some()) && pool_policy::provider_send_requires_navigation(
                                     &page.url(), target_url, thread_url.is_some(),
                                 ) {
+                                    let _navigation_timer = Timer::start(Step::Navigation);
                                     page.clear_bootstrap_403_before_navigation();
                                     let Some(navigation) = send_unless_disconnected(&chunks,
                                         navigation::navigate_provider_document(&mut page, target_url, Duration::from_secs(30))).await else { return; };
@@ -1702,8 +1713,10 @@ pub(super) fn browser_thread(
                                         return;
                                     }
                                 }
+                                let composer_timer = Timer::start(Step::ComposerReady);
                                 let Some(composer) = send_unless_disconnected(&chunks,
                                     providers::common::wait_for_selector(&mut page, &adapter.effective_selectors().input_refs(), 15_000)).await else { return; };
+                                drop(composer_timer);
                                 if let Err(error) = composer {
                                     let classified = report_composer_preflight_failure(
                                         provider.name(),
@@ -1755,6 +1768,7 @@ pub(super) fn browser_thread(
                                 // Failure fails the attempt so the router
                                 // can try the next provider.
                                 if !has_history {
+                                    let _model_timer = Timer::start(Step::ModelSelection);
                                     let Some(model_selection) = send_unless_disconnected(
                                         &chunks,
                                         adapter.select_model(&mut page, &model),
@@ -1816,7 +1830,7 @@ pub(super) fn browser_thread(
                                         providers::ProviderSendPolicy {
                                             completion_idle,
                                             provider_guard,
-                                            metrics: request_metrics,
+                                            metrics: request_metrics.clone(),
                                         },
                                         save_tx,
                                     ) => false
@@ -1830,6 +1844,7 @@ pub(super) fn browser_thread(
                                 // this provider's page lock is still held. A cancelled send
                                 // returns above without persisting a partial session.
                                 if completion_rx.await.unwrap_or(false) {
+                                    let _snapshot_timer = Timer::start(Step::SessionSnapshot);
                                     // A promoted private Page must persist cookies from
                                     // its own Browser, not the legacy shared worker jar.
                                     // Legacy pages intentionally retain the old fallback.
@@ -1863,6 +1878,10 @@ pub(super) fn browser_thread(
                                         _ => {}
                                     }
                                 }
+                                };
+                                if provider == Provider::MetaAI {
+                                    crate::metaai_timing::scope(timing_metrics, work).await;
+                                } else { work.await; }
                             });
                         }
                         Command::CurrentUrl { provider, reply } => {

@@ -259,3 +259,50 @@ existing compatibility/local-title adapter and does not record content.
 Configure the **directory** in OpenCode's `plugins` array, preserving existing
 entries, for example `/absolute/path/Chat-Gateway/integrations/opencode/metaai-request-kind`.
 OpenCode 2.4 discovers a package directory through its `package.json` export.
+
+## Recursive breakdown of intervals above one second
+
+Meta AI browser sends additionally expose `gateway_metaai_step_duration_seconds{stage}`
+(histogram, microsecond storage) and `gateway_metaai_step_max_seconds{stage}`
+(process-lifetime maximum). Stages are a closed enum, scoped to a Meta AI Send task;
+other providers, background probes and raw page data cannot create stage labels.
+Intervals are observed on scope exit, including early error/cancellation. Counts
+are therefore observed work, not successful completions. Task-local context does
+not automatically propagate into spawned tasks; the forwarding task is not timed.
+
+Use parent/child relationships below. A parent above one second must have measured
+children, or be identified as an opaque boundary with its available evidence.
+Do not artificially split a 15-second timer into arbitrary one-second buckets.
+Repeated sub-second operations can legitimately total many seconds. Report both
+per-operation duration/count and aggregate time per request.
+
+| Parent interval | Finer measured stages | Boundary / remaining limitation |
+| --- | --- | --- |
+| Request TTFT / provider work | `command_queue`, `operation_gate`, existing page-lock wait, `page_ensure`, `navigation`, `composer_ready`, `model_selection`, `entry_guards`, `baseline_probe`, `submission`, pre-content polling | Existing server pacing/context timers remain outside/above this browser breakdown; some orchestration/forwarding time remains a residual |
+| `submission` | `composer_wait`, `input_fill`, `input_settle`, `draft_validation`, `send_dispatch`, `submission_ack` | Session/origin guards and small setup work remain residual |
+| `input_fill` | `paste_dispatch`, `input_retention` | Paste dispatch is one Obscura DOM bridge evaluation; retention also uses generic browser drive operations |
+| `submission_ack` | Repeated `browser_settle`, `browser_sleep`, `ack_probe` | Waits for a fresh user turn and empty draft; not an authoritative upstream model-start timestamp |
+| Before first content | Repeated `first_content_settle`, `first_content_sleep`, `first_content_probe`, `first_content_processing` | Remote network, server queue and model computation are not separately observable from the website adapter |
+| After content / completion tail | Repeated `after_content_settle`, `after_content_sleep`, `after_content_probe`, `after_content_processing`; `final_probe` | After-content intervals also include gaps between intermediate deltas. Only a single-delta cohort isolates the final tail directly |
+| Post-completion browser work | `session_snapshot` | May occur after the API terminal event; not automatically on the user-visible critical path |
+
+`browser_settle` and `browser_sleep` are generic drive operations during submission
+and preparation; pre/post-content polling uses its separate names instead. Settle
+advances Obscura browser/network tasks; sleep waits until the configured poll
+deadline, including scheduler delay. Neither is a pure CPU measure. The poll
+interval and completion grace remain unchanged.
+
+`first_content_processing` / `after_content_processing` include guard/delta/channel
+work after a probe. A final probe is nested inside processing, so report it as a
+child rather than adding it again. `navigation` and `page_ensure` call the native
+browser engine and remain opaque at that API boundary if slow; a deeper split
+requires engine/resource-timing instrumentation. A synchronous DOM evaluation is
+an atomic bridge boundary at this layer. Provider-side queue/network/inference
+remain an explicitly opaque external wait, not invented separate measurements.
+
+Inspect `_max` for individual operations above one second and the histogram's
+`le="1"` coverage; max is since process start, not a rolling percentile. Isolate
+workload/release snapshots and use sums/count deltas for per-cohort means. Trace
+nested intervals or compare per-request records before asserting that a residual
+is below one second. This layer does not yet provide a complete, reconciled
+client-turn critical-path trace or certify telemetry overhead.
