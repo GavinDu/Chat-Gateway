@@ -585,6 +585,118 @@ async fn real_router_client_drop_cancels_sse_and_releases_provider_permit() {
 }
 
 #[tokio::test]
+async fn real_router_dropped_delta_invalidates_sync_and_retries_with_replay() {
+    let (cancelled_tx, cancelled_rx) = tokio::sync::oneshot::channel();
+    let (app, state, backend) = fixture_with_backend(
+        &["chatgpt"],
+        vec![
+            ScriptedSend::PartialThenHold(
+                ChatEvent {
+                    content: "discarded remote partial".to_owned(),
+                    done: false,
+                },
+                cancelled_tx,
+            ),
+            response_events("recovered answer"),
+        ],
+        None,
+    );
+    let conversation = "router_delta_cancel_001";
+    let history = vec![
+        ChatMessage {
+            role: "user".to_owned(),
+            content: "SYNTHETIC_PRIOR_TURN".to_owned(),
+        },
+        ChatMessage {
+            role: "assistant".to_owned(),
+            content: "prior answer".to_owned(),
+        },
+    ];
+    state
+        .memory
+        .store_turn_for_owner_with_tab_id(
+            "local",
+            conversation.to_owned(),
+            vec![history[0].clone()],
+            history[1].clone(),
+            "chatgpt".to_owned(),
+            None,
+        )
+        .unwrap();
+    let url = "https://chatgpt.com/c/synthetic-delta-thread";
+    state
+        .memory
+        .upsert_provider_thread_for_owner(
+            "local",
+            &ProviderThread {
+                conversation_id: conversation.to_owned(),
+                provider: "chatgpt".to_owned(),
+                thread_url: url.to_owned(),
+                synced_through_message_id: Some(transcript_marker(&history)),
+                model: Some("chatgpt/fake-model".to_owned()),
+                updated_at: 1,
+            },
+        )
+        .unwrap();
+
+    let response = send_prompt(
+        app.clone(),
+        true,
+        "chatgpt/fake-model",
+        conversation,
+        "SYNTHETIC_INTERRUPTED_TURN",
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let requests = backend.observed_requests().await;
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].thread_url.as_deref(), Some(url));
+    assert!(!requests[0].prompt.contains("SYNTHETIC_PRIOR_TURN"));
+    assert!(state
+        .memory
+        .get_provider_thread_for_owner("local", conversation, "chatgpt")
+        .unwrap()
+        .unwrap()
+        .synced_through_message_id
+        .is_none());
+
+    drop(response);
+    tokio::time::timeout(std::time::Duration::from_secs(2), cancelled_rx)
+        .await
+        .expect("client drop should close backend receiver")
+        .expect("scripted backend should observe cancellation");
+    assert_eq!(
+        state
+            .memory
+            .conversation_messages_for_owner("local", conversation)
+            .unwrap(),
+        history
+    );
+
+    let recovered = send_prompt(
+        app,
+        false,
+        "chatgpt/fake-model",
+        conversation,
+        "SYNTHETIC_RECOVERY_TURN",
+    )
+    .await;
+    assert_eq!(recovered.status(), StatusCode::OK);
+    let requests = backend.observed_requests().await;
+    assert_eq!(requests.len(), 2);
+    assert!(requests[1].thread_url.is_none());
+    assert!(requests[1].prompt.contains("SYNTHETIC_PRIOR_TURN"));
+    assert!(!requests[1].prompt.contains("SYNTHETIC_INTERRUPTED_TURN"));
+    assert!(!requests[1].prompt.contains("discarded remote partial"));
+    let persisted = state
+        .memory
+        .conversation_messages_for_owner("local", conversation)
+        .unwrap();
+    assert_eq!(persisted.len(), 4);
+    assert_eq!(persisted[3].content, "recovered answer");
+}
+
+#[tokio::test]
 async fn real_router_interleaved_conversations_never_send_other_threads_context() {
     let (app, state, backend) = fixture_with_backend(
         &["chatgpt"],
