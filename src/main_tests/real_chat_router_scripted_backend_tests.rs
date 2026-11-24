@@ -755,7 +755,7 @@ async fn imported_thread_marker_cannot_rearm_consumed_delta() {
     let request = || {
         Request::builder()
             .method("PUT")
-            .uri(&uri)
+            .uri(uri.as_str())
             .header(header::CONTENT_TYPE, "application/json")
             .body(Body::from(serde_json::to_string(&thread).unwrap()))
             .unwrap()
