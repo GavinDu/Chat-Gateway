@@ -697,6 +697,120 @@ async fn real_router_dropped_delta_invalidates_sync_and_retries_with_replay() {
 }
 
 #[tokio::test]
+async fn imported_thread_marker_cannot_rearm_consumed_delta() {
+    let (app, state, backend) = fixture_with_backend(
+        &["chatgpt"],
+        vec![response_events("recovered answer")],
+        None,
+    );
+    let conversation = "router_imported_thread_001";
+    let history = vec![
+        ChatMessage {
+            role: "user".to_owned(),
+            content: "SYNTHETIC_CANONICAL_HISTORY".to_owned(),
+        },
+        ChatMessage {
+            role: "assistant".to_owned(),
+            content: "prior answer".to_owned(),
+        },
+    ];
+    state
+        .memory
+        .store_turn_for_owner_with_tab_id(
+            "local",
+            conversation.to_owned(),
+            vec![history[0].clone()],
+            history[1].clone(),
+            "chatgpt".to_owned(),
+            None,
+        )
+        .unwrap();
+    let mut thread = ProviderThread {
+        conversation_id: conversation.to_owned(),
+        provider: "chatgpt".to_owned(),
+        thread_url: "https://chatgpt.com/c/synthetic-original".to_owned(),
+        synced_through_message_id: Some(transcript_marker(&history)),
+        model: Some("chatgpt/fake-model".to_owned()),
+        updated_at: 1,
+    };
+    state
+        .memory
+        .upsert_provider_thread_for_owner("local", &thread)
+        .unwrap();
+    assert!(state
+        .memory
+        .clone()
+        .claim_provider_thread_sync_async("local".to_owned(), thread.clone())
+        .await
+        .unwrap());
+
+    let mapping_router = Router::new()
+        .route(
+            "/v1/conversations/:conversation_id/provider-threads/:provider",
+            get(get_provider_thread).put(upsert_provider_thread),
+        )
+        .with_state(state.clone());
+    thread.thread_url = "https://chatgpt.com/c/synthetic-unverified".to_owned();
+    let uri = format!("/v1/conversations/{conversation}/provider-threads/chatgpt");
+    let request = || {
+        Request::builder()
+            .method("PUT")
+            .uri(&uri)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(serde_json::to_string(&thread).unwrap()))
+            .unwrap()
+    };
+    let foreign_response = mapping_router
+        .clone()
+        .layer(Extension(AuthKeyContext {
+            key_id: "foreign-owner".to_owned(),
+            provider_allowlist: None,
+        }))
+        .oneshot(request())
+        .await
+        .unwrap();
+    assert!(!foreign_response.status().is_success());
+    let unchanged = state
+        .memory
+        .get_provider_thread_for_owner("local", conversation, "chatgpt")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        unchanged.thread_url,
+        "https://chatgpt.com/c/synthetic-original"
+    );
+    assert!(unchanged.synced_through_message_id.is_none());
+
+    let response = mapping_router.oneshot(request()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), 65_536).await.unwrap();
+    let imported: ProviderThread = serde_json::from_slice(&body).unwrap();
+    assert_eq!(imported.thread_url, thread.thread_url);
+    assert!(imported.synced_through_message_id.is_none());
+    let persisted = state
+        .memory
+        .get_provider_thread_for_owner("local", conversation, "chatgpt")
+        .unwrap()
+        .unwrap();
+    assert_eq!(persisted.thread_url, thread.thread_url);
+    assert!(persisted.synced_through_message_id.is_none());
+
+    let recovered = send_prompt(
+        app,
+        false,
+        "chatgpt/fake-model",
+        conversation,
+        "SYNTHETIC_NEW_TURN",
+    )
+    .await;
+    assert_eq!(recovered.status(), StatusCode::OK);
+    let requests = backend.observed_requests().await;
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].thread_url.is_none());
+    assert!(requests[0].prompt.contains("SYNTHETIC_CANONICAL_HISTORY"));
+}
+
+#[tokio::test]
 async fn real_router_interleaved_conversations_never_send_other_threads_context() {
     let (app, state, backend) = fixture_with_backend(
         &["chatgpt"],
