@@ -1897,10 +1897,20 @@ pub async fn wait_for_selector(
 ) -> anyhow::Result<()> {
     let start = std::time::Instant::now();
     while start.elapsed().as_millis() < timeout_ms as u128 {
-        if visible_composer_exists(page, selectors) {
+        let ready = {
+            let _timer = StepTimer::start(TimingStep::ComposerProbe);
+            visible_composer_exists(page, selectors)
+        };
+        if ready {
             return Ok(());
         }
-        drive_page(page, Duration::from_millis(150)).await;
+        drive_page_timed(
+            page,
+            Duration::from_millis(150),
+            TimingStep::ComposerSettle,
+            TimingStep::ComposerSleep,
+        )
+        .await;
     }
     anyhow::bail!("timeout waiting for actionable provider composer")
 }
@@ -2126,7 +2136,13 @@ pub(crate) async fn submit_metaai_focused(page: &mut Page, prompt: &str) -> anyh
     let _ack_timer = StepTimer::start(TimingStep::SubmissionAck);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
-        drive_page(page, Duration::from_millis(100)).await;
+        drive_page_timed(
+            page,
+            Duration::from_millis(100),
+            TimingStep::AckSettle,
+            TimingStep::AckSleep,
+        )
+        .await;
         let _probe_timer = StepTimer::start(TimingStep::AckProbe);
         require_page_provider_origin("metaai", page)?;
         let after = page.evaluate(&read);
@@ -2165,8 +2181,18 @@ pub(crate) async fn type_provider_prompt(
         let _retention_timer = StepTimer::start(TimingStep::InputRetention);
         let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
         loop {
-            drive_page(page, Duration::from_millis(50)).await;
-            if metaai_composer_retains_prompt(page, selector, text)? {
+            drive_page_timed(
+                page,
+                Duration::from_millis(50),
+                TimingStep::RetentionSettle,
+                TimingStep::RetentionSleep,
+            )
+            .await;
+            let retained = {
+                let _timer = StepTimer::start(TimingStep::RetentionProbe);
+                metaai_composer_retains_prompt(page, selector, text)?
+            };
+            if retained {
                 return Ok(());
             }
             if tokio::time::Instant::now() >= deadline {
@@ -4895,7 +4921,13 @@ pub async fn send_prompt(
     drop(fill_timer);
     {
         let _timer = StepTimer::start(TimingStep::InputSettle);
-        drive_page(page, Duration::from_millis(200)).await;
+        drive_page_timed(
+            page,
+            Duration::from_millis(200),
+            TimingStep::InputSettleEngine,
+            TimingStep::InputSettleSleep,
+        )
+        .await;
     }
     let validation_timer = StepTimer::start(TimingStep::DraftValidation);
     check_session(provider, page)?;

@@ -306,3 +306,38 @@ workload/release snapshots and use sums/count deltas for per-cohort means. Trace
 nested intervals or compare per-request records before asserting that a residual
 is below one second. This layer does not yet provide a complete, reconciled
 client-turn critical-path trace or certify telemetry overhead.
+
+### Input-stage follow-up from the actual OpenCode cohort
+
+A 12,299-character OpenCode input exposed individual native settles above one
+second despite a 50/200 ms requested budget. Short API canaries did not expose
+these overruns. Retain both workloads rather than applying one workload's
+sub-second maximum to another.
+
+Caller-specific children now remove ambiguity in the generic drive totals:
+
+- `input_retention`: `retention_settle`, `retention_sleep`, `retention_probe`.
+- `input_settle`: `input_settle_engine`, `input_settle_sleep`.
+- `submission_ack`: `ack_settle`, `ack_sleep`, `ack_probe`.
+- Composer readiness/wait: `composer_settle`, `composer_sleep`, `composer_probe`.
+
+All are observed intervals with microsecond storage. A settle budget is not a
+preemptive CPU deadline. If a native settle child itself exceeds one second,
+label it as an opaque event-loop/browser boundary. This interface does not
+separate a long synchronous framework callback, native layout, I/O or scheduler
+work. A deeper causal split requires native engine/JavaScript profiling, not
+invented CPU/network attribution from the wall-clock timer. Keep policy unchanged
+while measuring. Generic `browser_settle` / `browser_sleep` remain for other drive
+call sites; they no longer include these explicitly named children.
+
+Navigation now also has passive, page-scoped children: `navigation_before_request`,
+`navigation_fetch` (request callback to buffered response callback), and
+`navigation_after_response` (response callback to native load return). Match only
+the requested Document URL in memory; export no URLs, headers, status/body data or
+credentials. Redirect chains remain inside the matching native document fetch.
+Detach callbacks on return, error or cancellation. Missing callbacks produce
+`navigation_unobserved` instead of fabricated network timings. The earlier opaque
+navigation boundary is therefore partially opened: fetch remains opaque for
+DNS/TLS/transfer separation, while post-response work remains opaque for parsing,
+framework execution, frame/resource advancement and native load processing.
+These callbacks do not intercept or modify requests, and no extra fetch is sent.

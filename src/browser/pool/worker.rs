@@ -1685,8 +1685,10 @@ pub(super) fn browser_thread(
                                 ) {
                                     let _navigation_timer = Timer::start(Step::Navigation);
                                     page.clear_bootstrap_403_before_navigation();
+                                    let mut navigation_observer = crate::metaai_timing::Navigation::new(&mut page, target_url);
                                     let Some(navigation) = send_unless_disconnected(&chunks,
-                                        navigation::navigate_provider_document(&mut page, target_url, Duration::from_secs(30))).await else { return; };
+                                        navigation::navigate_provider_document(navigation_observer.page(), target_url, Duration::from_secs(30))).await else { return; };
+                                    drop(navigation_observer);
                                     if let Err(error) = navigation {
                                         let _ = chunks.send(Err(error)).await;
                                         return;
