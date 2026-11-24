@@ -1663,6 +1663,10 @@ async fn upsert_provider_thread(
             "thread_url must be an HTTPS URL on the expected provider domain",
         );
     }
+    // An imported mapping is not proof that the remote thread contains the
+    // canonical transcript. Only gateway-owned completion may set a marker.
+    // In particular, a PUT must never re-arm a marker consumed by a Delta.
+    thread.synced_through_message_id = None;
     thread.updated_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
