@@ -2406,6 +2406,12 @@ pub async fn run_send(
                                 return;
                             }
                         }
+                        metrics.record_completion_reason(
+                            adapter.name(),
+                            done_signal == DoneSignal::StopControlDisappeared
+                                && fresh_stop.saw_fresh_generation()
+                                && confirmed_post_answer_affordance,
+                        );
                         if let Some(last_delta_at) = last_delta_at {
                             metrics.record_provider_tail(
                                 adapter.name(),
@@ -2536,6 +2542,12 @@ pub async fn run_send(
                     stable_ticks = 0;
                     continue;
                 }
+                metrics.record_completion_reason(
+                    adapter.name(),
+                    done_signal == DoneSignal::StopControlDisappeared
+                        && fresh_stop.saw_fresh_generation()
+                        && confirmed_post_answer_affordance,
+                );
                 if let Some(last_delta_at) = last_delta_at {
                     metrics.record_provider_tail(
                         adapter.name(),

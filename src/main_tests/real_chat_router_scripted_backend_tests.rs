@@ -796,3 +796,47 @@ async fn real_router_busy_provider_returns_retry_after_and_no_commit() {
         .unwrap()
         .is_empty());
 }
+
+#[tokio::test]
+async fn real_router_telemetry_separates_request_purpose_waits_and_first_content() {
+    for (stream, reported_kind, expected_kind, transport) in [
+        (true, "primary", "primary", "sse"),
+        (false, "private-user-session-id", "unspecified", "json"),
+    ] {
+        let (app, state) = fixture(&["metaai"], vec![response_events("verified answer")], None);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header("x-chat-gateway-request-kind", reported_kind)
+                    .body(Body::from(
+                        serde_json::json!({
+                            "model":"metaai/fake-model", "stream":stream,
+                            "messages":[{"role":"user","content":"PRIVATE_PROMPT_SENTINEL"}]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let _ = to_bytes(response.into_body(), 65_536).await.unwrap();
+        let metrics = state.metrics.render_with_provider_states(&[]);
+        assert!(metrics.contains(&format!("gateway_chat_input_requests_total{{kind=\"{expected_kind}\",transport=\"{transport}\"}} 1")));
+        assert!(metrics.contains(&format!("gateway_request_ttft_ms_count{{provider=\"metaai\",kind=\"{expected_kind}\",transport=\"{transport}\"}} 1")));
+        for phase in [
+            "pacing",
+            "slot",
+            "provider_context",
+            "backend_admission",
+            "persistence",
+        ] {
+            assert!(metrics.contains(&format!("gateway_chat_phase_duration_ms_count{{provider=\"metaai\",phase=\"{phase}\"}} 1")), "missing phase {phase}");
+        }
+        assert!(!metrics.contains("PRIVATE_PROMPT_SENTINEL"));
+        assert!(!metrics.contains("private-user-session-id"));
+    }
+}
