@@ -36,6 +36,7 @@ mod login;
 mod memory;
 mod memory_api;
 mod memory_egress;
+mod metaai_timing;
 mod metrics;
 mod provider_guard;
 mod provider_state;

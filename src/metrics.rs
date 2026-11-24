@@ -59,8 +59,58 @@ impl Histogram {
     }
 }
 
+// Microsecond storage preserves sub-millisecond stages; exposition uses seconds.
+#[derive(Default)]
+struct FineHistogram {
+    buckets: [u64; BOUNDS.len() + 1],
+    count: u64,
+    sum_us: u128,
+    max_us: u64,
+}
+impl FineHistogram {
+    fn observe(&mut self, us: u64) {
+        let index = BOUNDS
+            .iter()
+            .position(|bound| us <= bound * 1000)
+            .unwrap_or(BOUNDS.len());
+        self.buckets[index] += 1;
+        self.count += 1;
+        self.sum_us += us as u128;
+        self.max_us = self.max_us.max(us);
+    }
+    fn render(&self, out: &mut String, stage: &str) {
+        let _ = writeln!(
+            out,
+            "gateway_metaai_step_max_seconds{{stage=\"{stage}\"}} {:.6}",
+            self.max_us as f64 / 1_000_000.0
+        );
+        let metric = "gateway_metaai_step_duration_seconds";
+        let mut cumulative = 0;
+        for (index, bound) in BOUNDS.iter().enumerate() {
+            cumulative += self.buckets[index];
+            let _ = writeln!(
+                out,
+                "{metric}_bucket{{stage=\"{stage}\",le=\"{}\"}} {cumulative}",
+                *bound as f64 / 1000.0
+            );
+        }
+        cumulative += self.buckets[BOUNDS.len()];
+        let _ = writeln!(
+            out,
+            "{metric}_bucket{{stage=\"{stage}\",le=\"+Inf\"}} {cumulative}"
+        );
+        let _ = writeln!(
+            out,
+            "{metric}_sum{{stage=\"{stage}\"}} {:.6}",
+            self.sum_us as f64 / 1_000_000.0
+        );
+        let _ = writeln!(out, "{metric}_count{{stage=\"{stage}\"}} {}", self.count);
+    }
+}
+
 #[derive(Default)]
 struct MetricData {
+    metaai_steps: BTreeMap<&'static str, FineHistogram>,
     requests: BTreeMap<(String, u16), u64>,
     chat_kinds: BTreeMap<(&'static str, &'static str), u64>,
     phase_ms: BTreeMap<(String, &'static str), Histogram>,
@@ -89,6 +139,15 @@ pub struct MetricsRegistry {
 }
 
 impl MetricsRegistry {
+    pub(crate) fn record_metaai_step(&self, step: crate::metaai_timing::Step, elapsed_us: u64) {
+        if let Ok(mut data) = self.data.lock() {
+            data.metaai_steps
+                .entry(step.label())
+                .or_default()
+                .observe(elapsed_us);
+        }
+    }
+
     /// Historical successful completions in this gateway process, independent
     /// of whether a page probe currently sees an input.
     pub fn has_successful_chat(&self, provider: &str) -> bool {
@@ -337,6 +396,11 @@ impl MetricsRegistry {
             return String::new();
         };
         let mut out = String::new();
+        let _ = writeln!(out, "# TYPE gateway_metaai_step_max_seconds gauge\n# TYPE gateway_metaai_step_duration_seconds histogram");
+        for (stage, histogram) in &data.metaai_steps {
+            histogram.render(&mut out, stage);
+        }
+
         let _ = writeln!(out, "# TYPE gateway_http_requests_total counter");
         for ((route, status), count) in &data.requests {
             let _ = writeln!(
@@ -604,6 +668,8 @@ mod tests {
         let actual =
             registry.render_with_provider_states(&[("chatgpt".to_owned(), "ready".to_owned())]);
         let expected = concat!(
+            "# TYPE gateway_metaai_step_max_seconds gauge\n",
+            "# TYPE gateway_metaai_step_duration_seconds histogram\n",
             "# TYPE gateway_http_requests_total counter\n",
             "# TYPE gateway_http_handler_duration_ms histogram\n",
             "# TYPE gateway_provider_queue_duration_ms histogram\n",
@@ -718,5 +784,24 @@ mod verified_chat_tests {
         metrics.record_provider_timings("grok", "success", 0, Some(1), 10, 10);
         assert!(metrics.has_successful_chat("grok"));
         assert!(!metrics.has_successful_chat("mistral"));
+    }
+}
+
+#[cfg(test)]
+mod fine_histogram_tests {
+    use super::*;
+    #[test]
+    fn preserves_microseconds_and_seconds_bucket_boundaries() {
+        let mut histogram = FineHistogram::default();
+        for value in [123, 5000, 5001, 1_200_000, 301_000_000] {
+            histogram.observe(value);
+        }
+        let mut text = String::new();
+        histogram.render(&mut text, "baseline_probe");
+        assert!(text.contains("le=\"0.005\"} 2"));
+        assert!(text.contains("le=\"0.01\"} 3"));
+        assert!(text.contains("le=\"+Inf\"} 5"));
+        assert!(text.contains("_sum{stage=\"baseline_probe\"} 302.210124"));
+        assert!(text.contains("_count{stage=\"baseline_probe\"} 5"));
     }
 }
