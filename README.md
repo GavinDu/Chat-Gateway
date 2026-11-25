@@ -525,7 +525,21 @@ Inspect the effective policy with `GET /v1/admin/memory-egress-policy`; when API
 
 Use only destinations you have deliberately authorized. An unset or empty variable denies personal long-term memory to every provider. Invalid provider IDs cause requests to fail with a generic policy error; logs do not include memory contents. Current-turn content and the conversation transcript are separate data classes and are not blocked by this personal-memory setting.
 
-The current chat request path does not yet retrieve or inject personal long-term memory. This guard establishes the default-deny boundary for future gateway-injected memory; it does not classify or redact sensitive text that a user explicitly includes in their current prompt or conversation history.
+Personal long-term memory retrieval is wired into the chat request path, but is **disabled by default for each owner**. Both the owner's explicit opt-in and an explicit allowlist entry for the selected provider are required. The gateway retrieves at most 20 eligible, non-expired owner-scoped items when any provider is allowlisted; the final provider prompt receives only policy-authorized items. The current selection reserves an estimated 512-token personal-memory budget within the estimated 8,000-token context budget. Selection uses the same renderer as provider injection, including escaped fields and framing, so the rendered memory suffix stays within the reserved estimate. This is not an exact provider tokenizer limit or a hard provider character limit. A status of `personal_memory_retrieval_wired: true` means the code path exists, not that an owner has opted in or a provider is allowed.
+
+Owner-scoped controls (require the `admin` scope when API-key authentication is configured):
+
+| Method and route | Purpose |
+| --- | --- |
+| `GET /v1/memory/settings` | Read the owner's opt-in setting. |
+| `PUT /v1/memory/settings` | Set `{"enabled": true}` or `{"enabled": false}`. |
+| `GET /v1/memory/items` | List saved items and the opt-in setting. |
+| `PUT /v1/memory/items` | Explicitly save or replace a memory key/value; requires opt-in. Optional provenance must refer to an owned conversation. |
+| `GET /v1/memory/export` | Export the owner's saved memory as JSON. |
+| `DELETE /v1/memory/items/:item_id` | Delete one owned memory item. |
+| `DELETE /v1/memory/items` | Delete all owned memory items with `{"confirm": true}`. |
+
+There is no automatic extraction of personal memory from chat transcripts. Disabling retrieval does not delete saved items; use the deletion controls to remove them. Changes affect subsequent retrieval, not data already sent to a provider, downloaded exports, backups, or necessarily an in-flight request that has already retrieved memory. This policy does not classify or redact sensitive text explicitly included in the current prompt or conversation history.
  
 ## Metrics and request timing
 
