@@ -1676,7 +1676,7 @@ async fn upsert_provider_thread(
     match state
         .memory
         .clone()
-        .import_provider_thread_async(owner_key_id.to_owned(), thread.clone())
+        .upsert_provider_thread_async(owner_key_id.to_owned(), thread.clone())
         .await
     {
         Ok(()) => Json(thread).into_response(),

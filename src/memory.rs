@@ -198,6 +198,7 @@ pub trait ConversationStore: Send + Sync {
         provider: String,
     ) -> anyhow::Result<Option<ProviderThread>>;
 
+    /// Import unverified mapping metadata; never grant synchronization evidence.
     async fn upsert_provider_thread_async(
         self: Arc<Self>,
         owner_key_id: String,
@@ -310,11 +311,7 @@ impl ConversationStore for UnifiedMemory {
         owner_key_id: String,
         thread: ProviderThread,
     ) -> anyhow::Result<()> {
-        tokio::task::spawn_blocking(move || {
-            self.upsert_provider_thread_for_owner(&owner_key_id, &thread)
-        })
-        .await
-        .map_err(|error| anyhow::anyhow!("provider thread persistence task failed: {error}"))?
+        self.import_provider_thread_async(owner_key_id, thread).await
     }
 }
 
@@ -1349,11 +1346,9 @@ impl UnifiedMemory {
         mut thread: ProviderThread,
     ) -> anyhow::Result<()> {
         thread.synced_through_message_id = None;
-        tokio::task::spawn_blocking(move || {
-            self.import_provider_thread(&owner_key_id, &thread)
-        })
-        .await
-        .map_err(|_| anyhow::anyhow!("provider thread import task failed"))?
+        tokio::task::spawn_blocking(move || self.import_provider_thread(&owner_key_id, &thread))
+            .await
+            .map_err(|_| anyhow::anyhow!("provider thread import task failed"))?
     }
 
     fn import_provider_thread(

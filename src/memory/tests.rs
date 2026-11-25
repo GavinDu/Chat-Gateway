@@ -3091,7 +3091,13 @@ async fn async_store_contract_covers_conversation_and_provider_thread_operations
         .await
         .expect("provider thread lookup should use the store contract")
         .expect("provider thread should be present");
-    assert_eq!(restored, thread);
+    assert_eq!(
+        restored,
+        ProviderThread {
+            synced_through_message_id: None,
+            ..thread
+        }
+    );
 
     assert!(store
         .clone()
@@ -3538,15 +3544,9 @@ async fn async_store_keeps_interleaved_conversation_thread_maps_isolated() {
         .expect("conversation B thread should exist");
 
     assert_eq!(thread_a.thread_url, "https://chatgpt.com/c/thread-a");
-    assert_eq!(
-        thread_a.synced_through_message_id.as_deref(),
-        Some("marker-a")
-    );
+    assert!(thread_a.synced_through_message_id.is_none());
     assert_eq!(thread_b.thread_url, "https://chatgpt.com/c/thread-b");
-    assert_eq!(
-        thread_b.synced_through_message_id.as_deref(),
-        Some("marker-b")
-    );
+    assert!(thread_b.synced_through_message_id.is_none());
 
     let (_, _, _, transcript_a) = store
         .clone()
