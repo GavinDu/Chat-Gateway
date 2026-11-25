@@ -41,6 +41,7 @@ struct StreamingAttempt {
 /// One non-streaming provider attempt. A failure before any content may be
 /// retried on another candidate; a partial response is never committed.
 struct JsonAttempt<'a> {
+    request_kind: &'static str,
     state: &'a AppState,
     owner_key_id: &'a str,
     windowed: &'a [ChatMessage],
@@ -176,6 +177,18 @@ pub(super) async fn run(
         Err(response) => return *response,
     };
 
+    let reported_kind = headers
+        .get("x-chat-gateway-request-kind")
+        .and_then(|value| value.to_str().ok());
+    let request_kind = crate::metrics::chat_request_kind(reported_kind);
+    state.metrics.record_chat_request(reported_kind, req.stream);
+    let input_bytes: usize = req
+        .messages
+        .iter()
+        .map(|message| message.content.len())
+        .sum();
+    tracing::info!(request_id = %request_id, request_kind, stream = req.stream, message_count = req.messages.len(), input_bytes, "chat request accepted");
+
     let chat_service::PreparedChatContext {
         memory_egress_policy,
         personal_memory_items,
@@ -263,7 +276,8 @@ pub(super) async fn run(
         };
 
         let provider_started = Instant::now();
-        let mut rx = match state
+        let backend_admission_started = Instant::now();
+        let backend_admission = state
             .chat_service
             .stream_with_timeout(
                 BackendRequest {
@@ -284,8 +298,16 @@ pub(super) async fn run(
                 },
                 provider_timeout,
             )
-            .await
-        {
+            .await;
+        state.metrics.record_chat_phase(
+            &provider_name,
+            "backend_admission",
+            backend_admission_started
+                .elapsed()
+                .as_millis()
+                .min(u64::MAX as u128) as u64,
+        );
+        let mut rx = match backend_admission {
             Ok(rx) => rx,
             Err(e) => {
                 chat_service::record_backend_admission_error(
@@ -339,6 +361,12 @@ pub(super) async fn run(
                     continue;
                 }
             };
+            state.metrics.record_request_first_content(
+                &provider_name,
+                request_kind,
+                true,
+                request_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+            );
             first_stream_chunk = Some(first);
         }
 
@@ -370,6 +398,7 @@ pub(super) async fn run(
         // Keep the exclusive provider permit until the JSON attempt has fully
         // finished. Only an error before the first content can use failover.
         let response = json_provider_response(JsonAttempt {
+            request_kind,
             state: &state,
             owner_key_id: &owner_key_id,
             windowed: &windowed,
