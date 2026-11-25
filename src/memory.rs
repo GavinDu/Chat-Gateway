@@ -1341,6 +1341,51 @@ impl UnifiedMemory {
         Self::write_provider_thread(&connection, thread)
     }
 
+    /// Import untrusted remote mapping metadata without granting synchronization.
+    /// Invalidate pending receipts and admission snapshots in the same transaction.
+    pub(crate) async fn import_provider_thread_async(
+        self: Arc<Self>,
+        owner_key_id: String,
+        mut thread: ProviderThread,
+    ) -> anyhow::Result<()> {
+        thread.synced_through_message_id = None;
+        tokio::task::spawn_blocking(move || {
+            self.import_provider_thread(&owner_key_id, &thread)
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("provider thread import task failed"))?
+    }
+
+    fn import_provider_thread(
+        &self,
+        owner_key_id: &str,
+        thread: &ProviderThread,
+    ) -> anyhow::Result<()> {
+        let mut connection = self.lock()?;
+        let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let owner: Option<String> = tx
+            .query_row(
+                "SELECT owner_key_id FROM conversations WHERE id = ?1",
+                [&thread.conversation_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if owner.as_deref() != Some(owner_key_id) {
+            anyhow::bail!("conversation is not owned by this API key");
+        }
+        let updated = tx.execute(
+            "UPDATE conversation_identities SET generation = generation + 1
+             WHERE conversation_id = ?1",
+            [&thread.conversation_id],
+        )?;
+        if updated != 1 {
+            anyhow::bail!("conversation durable identity missing during mapping import");
+        }
+        Self::write_provider_thread(&tx, thread)?;
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Publish only a receipt for the exact committed incarnation and generation.
     /// The indexed identity comparison and write share a SQLite transaction.
     pub(crate) async fn publish_provider_thread_if_current_async(
@@ -2492,6 +2537,96 @@ mod provider_thread_map_isolation_tests {
             .publish_provider_thread_if_current_async("owner-a".to_owned(), current, recreated)
             .await
             .unwrap());
+    }
+
+    #[tokio::test]
+    async fn external_mapping_import_invalidates_pending_snapshots_and_receipts() {
+        use super::{transcript_marker, SnapshotTurn};
+
+        for import_before_commit in [true, false] {
+            let memory = std::sync::Arc::new(UnifiedMemory::new(8000));
+            persist_conversation(&memory, "conversation-a", "owner-a");
+            let snapshot = memory
+                .clone()
+                .build_context_snapshot_async(
+                    "owner-a".to_owned(),
+                    Some("conversation-a".to_owned()),
+                    Vec::new(),
+                    8000,
+                )
+                .await
+                .unwrap();
+            let imported = thread(
+                "conversation-a",
+                "chatgpt",
+                "https://chatgpt.com/c/imported",
+                "untrusted-marker",
+            );
+            assert!(memory
+                .clone()
+                .import_provider_thread_async("owner-b".to_owned(), imported.clone())
+                .await
+                .is_err());
+            if import_before_commit {
+                memory
+                    .clone()
+                    .import_provider_thread_async("owner-a".to_owned(), imported.clone())
+                    .await
+                    .unwrap();
+            }
+            let receipt = memory
+                .clone()
+                .persist_turn_from_snapshot(SnapshotTurn {
+                    owner_key_id: "owner-a".to_owned(),
+                    conversation_id: "conversation-a".to_owned(),
+                    user_msgs: vec![ChatMessage {
+                        role: "user".to_owned(),
+                        content: "question after snapshot".to_owned(),
+                    }],
+                    assistant_msg: ChatMessage {
+                        role: "assistant".to_owned(),
+                        content: "canonical answer".to_owned(),
+                    },
+                    provider: "chatgpt".to_owned(),
+                    expected_marker: transcript_marker(&snapshot.context.3),
+                    expected_identity: snapshot.identity,
+                })
+                .await
+                .unwrap();
+            if import_before_commit {
+                assert!(receipt.is_none());
+            } else {
+                let receipt = receipt.unwrap();
+                memory
+                    .clone()
+                    .import_provider_thread_async("owner-a".to_owned(), imported.clone())
+                    .await
+                    .unwrap();
+                let stale = thread(
+                    "conversation-a",
+                    "chatgpt",
+                    "https://chatgpt.com/c/stale",
+                    receipt.marker(),
+                );
+                assert!(!memory
+                    .clone()
+                    .publish_provider_thread_if_current_async("owner-a".to_owned(), stale, receipt)
+                    .await
+                    .unwrap());
+            }
+            let stored = memory
+                .get_provider_thread_for_owner("owner-a", "conversation-a", "chatgpt")
+                .unwrap()
+                .unwrap();
+            assert_eq!(stored.thread_url, imported.thread_url);
+            assert!(stored.synced_through_message_id.is_none());
+            let history = memory
+                .conversation_messages_for_owner("owner-a", "conversation-a")
+                .unwrap();
+            assert_eq!(&history[..2], snapshot.context.3.as_slice());
+            assert_eq!(history.len(), 4);
+            assert_eq!(history[3].content, "canonical answer");
+        }
     }
 
     #[tokio::test]
