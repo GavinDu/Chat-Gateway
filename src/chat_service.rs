@@ -439,6 +439,7 @@ pub(crate) async fn acquire_candidate_permit(
 /// and SSE. Provider work time is captured before that write, so the two
 /// measurements remain distinct.
 pub(crate) struct AttemptTelemetry<'a> {
+    pub(crate) snapshot_marker: &'a str,
     pub(crate) request_id: &'a str,
     pub(crate) provider: &'a str,
     pub(crate) queue_ms: u64,
@@ -470,11 +471,17 @@ pub(crate) async fn finalize_provider_attempt(
         let persistence_started = Instant::now();
         let persisted = persist_completed_turn(
             state,
-            owner_key_id,
-            conversation_id,
-            user_messages.to_vec(),
-            assistant_content.to_owned(),
-            telemetry.provider,
+            crate::memory::SnapshotTurn {
+                owner_key_id: owner_key_id.to_owned(),
+                conversation_id: conversation_id.to_owned(),
+                user_msgs: user_messages.to_vec(),
+                assistant_msg: ChatMessage {
+                    role: "assistant".to_owned(),
+                    content: assistant_content.to_owned(),
+                },
+                provider: telemetry.provider.to_owned(),
+                expected_marker: telemetry.snapshot_marker.to_owned(),
+            },
             model,
         )
         .await;

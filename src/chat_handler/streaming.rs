@@ -6,6 +6,7 @@ pub(super) fn streamed_provider_response(attempt: StreamingAttempt) -> Response 
         state: state_c,
         owner_key_id: owner_key_id_c,
         windowed: windowed_c,
+        snapshot_marker: snapshot_marker_c,
         provider: provider_c,
         model: model_c,
         provider_model: provider_model_c,
@@ -91,6 +92,7 @@ pub(super) fn streamed_provider_response(attempt: StreamingAttempt) -> Response 
             &full,
             &model_c,
             chat_service::AttemptTelemetry {
+                snapshot_marker: &snapshot_marker_c,
                 request_id: &request_id_c,
                 provider: &provider_c,
                 queue_ms: queue_ms_c,

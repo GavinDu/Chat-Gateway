@@ -1741,37 +1741,24 @@ async fn persist_provider_thread(
 
 async fn persist_completed_turn(
     state: &AppState,
-    owner_key_id: &str,
-    conversation_id: &str,
-    user_messages: Vec<ChatMessage>,
-    assistant_content: String,
-    provider: &str,
+    turn: memory::SnapshotTurn,
     model: &str,
 ) -> anyhow::Result<()> {
-    let synced_marker = state
-        .memory
-        .clone()
-        .persist_turn(
-            owner_key_id.to_owned(),
-            conversation_id.to_owned(),
-            user_messages,
-            ChatMessage {
-                role: "assistant".to_owned(),
-                content: assistant_content,
-            },
-            provider.to_owned(),
-            None,
+    let owner_key_id = turn.owner_key_id.clone();
+    let conversation_id = turn.conversation_id.clone();
+    let provider = turn.provider.clone();
+    let synced_marker = state.memory.clone().persist_turn_from_snapshot(turn).await?;
+    if let Some(synced_marker) = synced_marker {
+        persist_provider_thread(
+            state,
+            &owner_key_id,
+            &conversation_id,
+            &provider,
+            model,
+            synced_marker,
         )
-        .await?;
-    persist_provider_thread(
-        state,
-        owner_key_id,
-        conversation_id,
-        provider,
-        model,
-        synced_marker,
-    )
-    .await;
+        .await;
+    }
     Ok(())
 }
 
