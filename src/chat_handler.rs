@@ -22,6 +22,8 @@ struct StreamingAttempt {
     state: Arc<AppState>,
     owner_key_id: String,
     windowed: Vec<ChatMessage>,
+    snapshot_marker: String,
+    snapshot_identity: Option<memory::ConversationIdentity>,
     provider: String,
     model: String,
     provider_model: String,
@@ -45,6 +47,8 @@ struct JsonAttempt<'a> {
     state: &'a AppState,
     owner_key_id: &'a str,
     windowed: &'a [ChatMessage],
+    snapshot_marker: &'a str,
+    snapshot_identity: &'a Option<memory::ConversationIdentity>,
     provider: &'a str,
     model: &'a str,
     provider_model: &'a str,
@@ -197,6 +201,7 @@ pub(super) async fn run(
         windowed,
         has_history,
         stored_messages,
+        snapshot_identity,
     } = match chat_service::prepare_chat_context(
         &state,
         &owner_key_id,
@@ -209,6 +214,7 @@ pub(super) async fn run(
         Err(response) => return *response,
     };
 
+    let snapshot_marker = transcript_marker(&stored_messages);
     let (candidates, provider_model) = match chat_service::resolve_chat_candidates(
         &state,
         &owner_key_id,
@@ -379,6 +385,8 @@ pub(super) async fn run(
                 state: state.clone(),
                 owner_key_id: owner_key_id.clone(),
                 windowed: windowed.clone(),
+                snapshot_marker: snapshot_marker.clone(),
+                snapshot_identity: snapshot_identity.clone(),
                 provider: provider_name.clone(),
                 model: req.model.clone(),
                 provider_model: provider_model.clone(),
@@ -402,6 +410,8 @@ pub(super) async fn run(
             state: &state,
             owner_key_id: &owner_key_id,
             windowed: &windowed,
+            snapshot_marker: &snapshot_marker,
+            snapshot_identity: &snapshot_identity,
             provider: &provider_name,
             model: &req.model,
             provider_model: &provider_model,

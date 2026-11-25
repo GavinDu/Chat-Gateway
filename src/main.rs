@@ -1664,6 +1664,10 @@ async fn upsert_provider_thread(
             "thread_url must be an HTTPS URL on the expected provider domain",
         );
     }
+    // An imported mapping is not proof that the remote thread contains the
+    // canonical transcript. Only gateway-owned completion may set a marker.
+    // In particular, a PUT must never re-arm a marker consumed by a Delta.
+    thread.synced_through_message_id = None;
     thread.updated_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -1701,7 +1705,7 @@ async fn persist_provider_thread(
     conversation_id: &str,
     provider: &str,
     model: &str,
-    synced_marker: String,
+    receipt: memory::CommitReceipt,
 ) {
     let thread_url = match state.pool.current_url(provider).await {
         Ok(url) if is_reopenable_provider_thread_url(provider, &url) => url,
@@ -1718,56 +1722,49 @@ async fn persist_provider_thread(
         conversation_id: conversation_id.to_owned(),
         provider: provider.to_owned(),
         thread_url,
-        synced_through_message_id: Some(synced_marker),
+        synced_through_message_id: Some(receipt.marker().to_owned()),
         model: Some(model.to_owned()),
         updated_at: chrono::Utc::now().timestamp(),
     };
-    if let Err(error) = state
+    match state
         .memory
         .clone()
-        .upsert_provider_thread_async(owner_key_id.to_owned(), thread)
+        .publish_provider_thread_if_current_async(owner_key_id.to_owned(), thread, receipt)
         .await
     {
-        tracing::warn!(
+        Ok(true) => {}
+        Ok(false) => tracing::debug!("provider thread synchronization claim is no longer current"),
+        Err(error) => tracing::warn!(
             failure_category = provider_thread_failure_log_category(&error),
             "provider thread mapping could not be persisted"
-        );
+        ),
     }
 }
 
 async fn persist_completed_turn(
     state: &AppState,
-    owner_key_id: &str,
-    conversation_id: &str,
-    user_messages: Vec<ChatMessage>,
-    assistant_content: String,
-    provider: &str,
+    turn: memory::SnapshotTurn,
     model: &str,
 ) -> anyhow::Result<()> {
-    let synced_marker = state
+    let owner_key_id = turn.owner_key_id.clone();
+    let conversation_id = turn.conversation_id.clone();
+    let provider = turn.provider.clone();
+    let receipt = state
         .memory
         .clone()
-        .persist_turn(
-            owner_key_id.to_owned(),
-            conversation_id.to_owned(),
-            user_messages,
-            ChatMessage {
-                role: "assistant".to_owned(),
-                content: assistant_content,
-            },
-            provider.to_owned(),
-            None,
-        )
+        .persist_turn_from_snapshot(turn)
         .await?;
-    persist_provider_thread(
-        state,
-        owner_key_id,
-        conversation_id,
-        provider,
-        model,
-        synced_marker,
-    )
-    .await;
+    if let Some(receipt) = receipt {
+        persist_provider_thread(
+            state,
+            &owner_key_id,
+            &conversation_id,
+            &provider,
+            model,
+            receipt,
+        )
+        .await;
+    }
     Ok(())
 }
 
@@ -2095,14 +2092,14 @@ fn read_conversation_context(
 }
 
 async fn read_conversation_context_with_transcript_for_owner(
-    memory: Arc<dyn memory::ConversationStore>,
+    memory: Arc<UnifiedMemory>,
     owner_key_id: String,
     conversation_id: Option<String>,
     messages: Vec<ChatMessage>,
     token_budget: usize,
-) -> anyhow::Result<(String, Vec<ChatMessage>, bool, Vec<ChatMessage>)> {
+) -> anyhow::Result<memory::ContextSnapshot> {
     memory
-        .build_context_with_transcript(owner_key_id, conversation_id, messages, token_budget)
+        .build_context_snapshot_async(owner_key_id, conversation_id, messages, token_budget)
         .await
 }
 
