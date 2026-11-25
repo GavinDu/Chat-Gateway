@@ -950,9 +950,10 @@ impl UnifiedMemory {
                 identity: read_identity(&tx, &conversation.id)?,
                 owner_key_id: owner_key_id.to_owned(),
                 conversation_id: conversation.id.clone(),
-                provider: conversation.provider.clone().ok_or_else(|| {
-                    anyhow::anyhow!("committed conversation provider missing")
-                })?,
+                provider: conversation
+                    .provider
+                    .clone()
+                    .ok_or_else(|| anyhow::anyhow!("committed conversation provider missing"))?,
                 marker: transcript_marker(&conversation.messages),
             })
         } else {
@@ -2471,15 +2472,17 @@ mod provider_thread_map_isolation_tests {
         assert_eq!(second.marker(), recreated.marker());
         assert_eq!(second.identity.generation, recreated.identity.generation);
         assert_ne!(second.identity.incarnation, recreated.identity.incarnation);
-        assert!(!memory
-            .clone()
-            .publish_provider_thread_if_current_async(
-                "owner-a".to_owned(),
-                current.clone(),
-                second,
-            )
-            .await
-            .unwrap());
+        assert!(
+            !memory
+                .clone()
+                .publish_provider_thread_if_current_async(
+                    "owner-a".to_owned(),
+                    current.clone(),
+                    second,
+                )
+                .await
+                .unwrap()
+        );
         assert!(memory
             .get_provider_thread_for_owner("owner-a", "conversation-a", "chatgpt")
             .unwrap()
