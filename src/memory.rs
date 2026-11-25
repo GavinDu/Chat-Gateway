@@ -311,7 +311,8 @@ impl ConversationStore for UnifiedMemory {
         owner_key_id: String,
         thread: ProviderThread,
     ) -> anyhow::Result<()> {
-        self.import_provider_thread_async(owner_key_id, thread).await
+        self.import_provider_thread_async(owner_key_id, thread)
+            .await
     }
 }
 
