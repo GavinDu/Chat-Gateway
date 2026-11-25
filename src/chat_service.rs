@@ -633,14 +633,14 @@ pub(crate) async fn prepare_chat_context(
     let context_token_budget = 8000usize.saturating_sub(memory_tokens);
 
     let snapshot = read_conversation_context_with_transcript_for_owner(
-            state.memory.clone(),
-            owner_key_id.to_owned(),
-            conversation_id.map(str::to_owned),
-            incoming_messages.to_vec(),
-            context_token_budget,
-        )
-        .await
-        .map_err(|_| Box::new(conversation_context_read_error(conversation_id)))?;
+        state.memory.clone(),
+        owner_key_id.to_owned(),
+        conversation_id.map(str::to_owned),
+        incoming_messages.to_vec(),
+        context_token_budget,
+    )
+    .await
+    .map_err(|_| Box::new(conversation_context_read_error(conversation_id)))?;
     let (prompt, windowed, has_history, stored_messages) = snapshot.context;
     if prompt.is_empty() {
         return Err(Box::new(api_error(

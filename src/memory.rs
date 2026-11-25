@@ -130,6 +130,7 @@ pub(crate) struct SnapshotTurn {
 pub trait ConversationStore: Send + Sync {
     /// Read the canonical transcript and rolling summary in one SQLite snapshot,
     /// then build provider context on Tokio's blocking pool.
+    #[allow(dead_code)] // Compatibility contract for callers not using the identity snapshot.
     async fn build_context_with_transcript(
         self: Arc<Self>,
         owner_key_id: String,
