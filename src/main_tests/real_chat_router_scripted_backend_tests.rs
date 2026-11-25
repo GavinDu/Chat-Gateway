@@ -811,6 +811,114 @@ async fn imported_thread_marker_cannot_rearm_consumed_delta() {
 }
 
 #[tokio::test]
+async fn real_router_stale_sse_cannot_resurrect_or_replace_deleted_conversation() {
+    for recreate in [false, true] {
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let (app, state, backend) = fixture_with_backend(
+            &["chatgpt", "claude"],
+            vec![
+                response_events("initial answer"),
+                ScriptedSend::PartialThenRelease(
+                    ChatEvent {
+                        content: "stale answer".to_owned(),
+                        done: false,
+                    },
+                    release_rx,
+                ),
+                response_events("initial answer"),
+            ],
+            None,
+        );
+        let app = app.merge(
+            Router::new()
+                .route(
+                    "/v1/conversations/:conversation_id",
+                    get(export_conversation).delete(delete_conversation),
+                )
+                .with_state(state.clone()),
+        );
+        let conversation = "router_incarnation_aba_001";
+        let initial = send_prompt(
+            app.clone(),
+            false,
+            "claude/fake-model",
+            conversation,
+            "INITIAL_CANONICAL_HISTORY",
+        )
+        .await;
+        assert_eq!(initial.status(), StatusCode::OK);
+        let original = state
+            .memory
+            .conversation_messages_for_owner("local", conversation)
+            .unwrap();
+        let stale = send_prompt(
+            app.clone(),
+            true,
+            "chatgpt/fake-model",
+            conversation,
+            "STALE_IN_FLIGHT_TURN",
+        )
+        .await;
+        assert_eq!(stale.status(), StatusCode::OK);
+        let deleted = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/v1/conversations/{conversation}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+        if recreate {
+            let response = send_prompt(
+                app.clone(),
+                false,
+                "claude/fake-model",
+                conversation,
+                "INITIAL_CANONICAL_HISTORY",
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+        let before = state
+            .memory
+            .conversation_messages_for_owner("local", conversation)
+            .unwrap();
+        if recreate {
+            assert_eq!(before, original);
+        } else {
+            assert!(before.is_empty());
+        }
+
+        release_tx.send(()).unwrap();
+        let body = to_bytes(stale.into_body(), 65_536).await.unwrap();
+        let content = String::from_utf8(body.to_vec()).unwrap();
+        assert!(content.contains("memory_persistence_failed"));
+        assert!(content.contains("data: [DONE]"));
+        assert!(!content.contains(r#""finish_reason":"stop""#));
+        assert_eq!(
+            state
+                .memory
+                .conversation_messages_for_owner("local", conversation)
+                .unwrap(),
+            before
+        );
+        assert!(state
+            .memory
+            .get_provider_thread_for_owner("local", conversation, "chatgpt")
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            backend.observed_requests().await.len(),
+            if recreate { 3 } else { 2 }
+        );
+    }
+}
+
+#[tokio::test]
 async fn real_router_stale_sse_completion_invalidates_mapping_after_json_handoff() {
     let (release_tx, release_rx) = tokio::sync::oneshot::channel();
     let (app, state, backend) = fixture_with_backend(
