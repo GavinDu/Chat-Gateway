@@ -191,7 +191,7 @@ fn json_import_clears_synthetic_tab_ids_but_preserves_real_thread_urls() {
         .unwrap()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 8);
+    assert_eq!(version, 9);
 }
 
 #[test]
@@ -528,7 +528,7 @@ fn schema_v5_migrates_to_v6_with_long_term_memory_disabled_by_default() {
         .unwrap()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 8);
+    assert_eq!(version, 9);
     assert!(!memory.long_term_memory_enabled("owner-a").unwrap());
     let item_count: i64 = memory
         .lock()
@@ -1241,7 +1241,7 @@ fn schema_v1_database_migrates_provider_thread_map_without_losing_conversations(
         .unwrap()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 8);
+    assert_eq!(version, 9);
     let memory_tables: i64 = memory
         .lock()
         .unwrap()
@@ -1660,7 +1660,7 @@ fn schema_v3_migration_assigns_existing_conversations_to_local_owner() {
         .unwrap()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 8);
+    assert_eq!(version, 9);
     let memory_tables: i64 = memory
         .lock()
         .unwrap()
@@ -1808,7 +1808,7 @@ fn schema_v4_migration_adds_summary_table_without_losing_tenant_data() {
         .unwrap()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 8);
+    assert_eq!(version, 9);
     let memory_tables: i64 = memory
         .lock()
         .unwrap()
@@ -2079,7 +2079,7 @@ fn schema_v6_migration_clears_synthetic_tabs_and_preserves_real_metadata_and_his
         .unwrap()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 8);
+    assert_eq!(version, 9);
 }
 
 #[test]
@@ -2319,7 +2319,7 @@ fn version_seven_migration_clears_synthetic_tab_id_and_preserves_history() {
         .unwrap()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 8);
+    assert_eq!(version, 9);
     let columns: Vec<String> = migrated
         .lock()
         .unwrap()
@@ -2498,6 +2498,62 @@ async fn async_conversation_store_concurrent_turns_are_transactionally_preserved
         history.windows(2).any(|window| window == first_pair)
             && history.windows(2).any(|window| window == second_pair),
         "concurrent turn writes must keep each user/assistant pair contiguous: {history:?}"
+    );
+}
+
+#[test]
+fn v8_upgrade_invalidates_legacy_sync_once_and_preserves_history() {
+    let fixture = Fixture::new();
+    let mut mapping = ProviderThread {
+        conversation_id: "migration-sync".into(),
+        provider: "chatgpt".into(),
+        thread_url: "https://chatgpt.com/c/migration-sync".into(),
+        synced_through_message_id: Some("legacy-unverified".into()),
+        model: Some("chatgpt/test".into()),
+        updated_at: 123,
+    };
+    let history = {
+        let memory = fixture.open();
+        store(&memory, "migration-sync", "preserve history");
+        memory.upsert_provider_thread(&mapping).unwrap();
+        memory
+            .lock()
+            .unwrap()
+            .pragma_update(None, "user_version", 8)
+            .unwrap();
+        memory
+            .conversation("migration-sync")
+            .unwrap()
+            .unwrap()
+            .messages
+    };
+    {
+        let memory = fixture.open();
+        let mut expected = mapping.clone();
+        expected.synced_through_message_id = None;
+        assert_eq!(
+            memory
+                .get_provider_thread("migration-sync", "chatgpt")
+                .unwrap(),
+            Some(expected)
+        );
+        assert_eq!(
+            memory
+                .conversation("migration-sync")
+                .unwrap()
+                .unwrap()
+                .messages,
+            history
+        );
+        mapping.synced_through_message_id = Some("new-gateway-marker".into());
+        memory.upsert_provider_thread(&mapping).unwrap();
+    }
+    let restored = fixture.open();
+    assert_eq!(
+        restored
+            .get_provider_thread("migration-sync", "chatgpt")
+            .unwrap(),
+        Some(mapping)
     );
 }
 

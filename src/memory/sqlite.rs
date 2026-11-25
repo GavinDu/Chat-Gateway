@@ -3,7 +3,7 @@ use anyhow::{bail, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use std::{collections::HashMap, fs, path::Path, time::Duration};
 
-const VERSION: i64 = 8;
+const VERSION: i64 = 9;
 const APPLICATION_ID: i64 = 0x4347574d; // CGWM
 const PROVIDER_THREADS_SCHEMA: &str = "
     CREATE TABLE provider_threads (
@@ -172,7 +172,7 @@ fn initialize(connection: &mut Connection, legacy: Option<&Path>) -> Result<()> 
     }
     let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let version: i64 = tx.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    let needs_synthetic_tab_cleanup = version > 0 && version < VERSION;
+    let needs_synthetic_tab_cleanup = (1..=7).contains(&version);
     let app: i64 = tx.query_row("PRAGMA application_id", [], |row| row.get(0))?;
     if version == 0 {
         let tables: i64 = tx.query_row(
@@ -224,6 +224,8 @@ fn initialize(connection: &mut Connection, legacy: Option<&Path>) -> Result<()> 
         tx.pragma_update(None, "user_version", VERSION)?;
     } else if version == 7 && app == APPLICATION_ID {
         // The v8 column removal is performed after legacy synthetic values are cleaned.
+    } else if version == 8 && app == APPLICATION_ID {
+        // Version 9 invalidates legacy markers without changing table definitions.
     } else if version != VERSION || app != APPLICATION_ID {
         bail!("unsupported conversation schema version {version} (expected {VERSION}) or application id {app}");
     }
@@ -237,9 +239,9 @@ fn initialize(connection: &mut Connection, legacy: Option<&Path>) -> Result<()> 
         )?;
     }
     // Remove the obsolete affinity column only after legacy synthetic values
-    // have been cleared. Versions 1–7 all contain this column; a new v8
+    // have been cleared. Versions 1–7 all contain this column; a new
     // database is created without it by SCHEMA.
-    if version > 0 && version < VERSION {
+    if needs_synthetic_tab_cleanup {
         tx.execute_batch("ALTER TABLE conversations DROP COLUMN tab_id;")?;
         // Version 7 does not run one of the earlier migration branches that
         // already advances user_version. Commit the schema and version together.
@@ -249,6 +251,13 @@ fn initialize(connection: &mut Connection, legacy: Option<&Path>) -> Result<()> 
         "CREATE INDEX IF NOT EXISTS conversations_owner_key_id_idx ON conversations(owner_key_id, id);",
     )?;
     validate_schema(&tx)?;
+    if (1..VERSION).contains(&version) {
+        // Older releases accepted client-supplied sync claims. There is no
+        // reliable provenance for existing markers, so preserve the mappings
+        // but require a fresh replay before any future Delta.
+        tx.execute("UPDATE provider_threads SET synced_through_message_id = NULL WHERE synced_through_message_id IS NOT NULL", [])?;
+        tx.pragma_update(None, "user_version", VERSION)?;
+    }
     let imported: Option<String> = tx
         .query_row(
             "SELECT value FROM metadata WHERE key='legacy_import_complete'",
@@ -312,7 +321,7 @@ fn initialize(connection: &mut Connection, legacy: Option<&Path>) -> Result<()> 
 }
 
 fn validate_schema(connection: &Connection) -> Result<()> {
-    // Version 8 is owned by this application. Fail closed if its definitions
+    // The current schema is owned by this application. Fail closed if its definitions
     // were changed, including constraints that SELECT alone cannot validate.
     let expected = Connection::open_in_memory()?;
     expected.execute_batch(SCHEMA)?;
