@@ -811,6 +811,103 @@ async fn imported_thread_marker_cannot_rearm_consumed_delta() {
 }
 
 #[tokio::test]
+async fn real_router_stale_sse_completion_invalidates_mapping_after_json_handoff() {
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let (app, state, backend) = fixture_with_backend(
+        &["chatgpt", "claude"],
+        vec![
+            response_events("initial answer"),
+            ScriptedSend::PartialThenRelease(
+                ChatEvent {
+                    content: "delayed SSE answer".to_owned(),
+                    done: false,
+                },
+                release_rx,
+            ),
+            response_events("earlier JSON answer"),
+        ],
+        None,
+    );
+    let conversation = "router_cross_provider_snapshot_001";
+    let initial = send_prompt(
+        app.clone(),
+        false,
+        "claude/fake-model",
+        conversation,
+        "INITIAL_CANONICAL_HISTORY",
+    )
+    .await;
+    assert_eq!(initial.status(), StatusCode::OK);
+    let stale = send_prompt(
+        app.clone(),
+        true,
+        "chatgpt/fake-model",
+        conversation,
+        "DELAYED_SSE_TURN",
+    )
+    .await;
+    assert_eq!(stale.status(), StatusCode::OK);
+
+    // The SSE response holds its provider permit and has captured history,
+    // but its terminal event has not been released. Complete another provider.
+    let earlier = send_prompt(
+        app,
+        false,
+        "claude/fake-model",
+        conversation,
+        "EARLIER_JSON_TURN",
+    )
+    .await;
+    assert_eq!(earlier.status(), StatusCode::OK);
+    let committed = state
+        .memory
+        .conversation_messages_for_owner("local", conversation)
+        .unwrap();
+    assert_eq!(committed.len(), 4);
+    let marker = transcript_marker(&committed);
+    let mapping = ProviderThread {
+        conversation_id: conversation.to_owned(),
+        provider: "chatgpt".to_owned(),
+        thread_url: "https://chatgpt.com/c/synthetic-concurrent".to_owned(),
+        synced_through_message_id: Some(marker),
+        model: Some("chatgpt/fake-model".to_owned()),
+        updated_at: 1,
+    };
+    state
+        .memory
+        .upsert_provider_thread_for_owner("local", &mapping)
+        .unwrap();
+
+    release_tx.send(()).unwrap();
+    let body = to_bytes(stale.into_body(), usize::MAX).await.unwrap();
+    let body = String::from_utf8(body.to_vec()).unwrap();
+    assert!(body.contains("delayed SSE answer"));
+    assert!(body.contains("[DONE]"));
+    assert!(!body.contains("memory_persistence_failed"));
+
+    let combined = state
+        .memory
+        .conversation_messages_for_owner("local", conversation)
+        .unwrap();
+    assert_eq!(combined.len(), 6);
+    assert_eq!(&combined[..4], committed.as_slice());
+    assert_eq!(combined[5].content, "delayed SSE answer");
+    let invalidated = state
+        .memory
+        .get_provider_thread_for_owner("local", conversation, "chatgpt")
+        .unwrap()
+        .unwrap();
+    assert_eq!(invalidated.thread_url, mapping.thread_url);
+    assert!(invalidated.synced_through_message_id.is_none());
+    let requests = backend.observed_requests().await;
+    assert_eq!(requests.len(), 3);
+    assert!(requests[1].prompt.contains("INITIAL_CANONICAL_HISTORY"));
+    assert!(!requests[1].prompt.contains("EARLIER_JSON_TURN"));
+    assert!(requests[2].prompt.contains("INITIAL_CANONICAL_HISTORY"));
+    assert!(!requests[2].prompt.contains("DELAYED_SSE_TURN"));
+}
+
+#[tokio::test]
 async fn real_router_interleaved_conversations_never_send_other_threads_context() {
     let (app, state, backend) = fixture_with_backend(
         &["chatgpt"],
