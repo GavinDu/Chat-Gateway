@@ -1705,7 +1705,7 @@ async fn persist_provider_thread(
     conversation_id: &str,
     provider: &str,
     model: &str,
-    synced_marker: String,
+    receipt: memory::CommitReceipt,
 ) {
     let thread_url = match state.pool.current_url(provider).await {
         Ok(url) if is_reopenable_provider_thread_url(provider, &url) => url,
@@ -1722,14 +1722,14 @@ async fn persist_provider_thread(
         conversation_id: conversation_id.to_owned(),
         provider: provider.to_owned(),
         thread_url,
-        synced_through_message_id: Some(synced_marker),
+        synced_through_message_id: Some(receipt.marker().to_owned()),
         model: Some(model.to_owned()),
         updated_at: chrono::Utc::now().timestamp(),
     };
     match state
         .memory
         .clone()
-        .publish_provider_thread_if_current_async(owner_key_id.to_owned(), thread)
+        .publish_provider_thread_if_current_async(owner_key_id.to_owned(), thread, receipt)
         .await
     {
         Ok(true) => {}
@@ -1749,19 +1749,19 @@ async fn persist_completed_turn(
     let owner_key_id = turn.owner_key_id.clone();
     let conversation_id = turn.conversation_id.clone();
     let provider = turn.provider.clone();
-    let synced_marker = state
+    let receipt = state
         .memory
         .clone()
         .persist_turn_from_snapshot(turn)
         .await?;
-    if let Some(synced_marker) = synced_marker {
+    if let Some(receipt) = receipt {
         persist_provider_thread(
             state,
             &owner_key_id,
             &conversation_id,
             &provider,
             model,
-            synced_marker,
+            receipt,
         )
         .await;
     }
