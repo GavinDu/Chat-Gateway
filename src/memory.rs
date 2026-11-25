@@ -1223,6 +1223,55 @@ impl UnifiedMemory {
         if owner.as_deref() != Some(owner_key_id) {
             anyhow::bail!("conversation is not owned by this API key");
         }
+        Self::write_provider_thread(&connection, thread)
+    }
+
+    /// Publish completion evidence only while its canonical transcript is
+    /// still current. The comparison and write share a SQLite transaction.
+    pub(crate) async fn publish_provider_thread_if_current_async(
+        self: Arc<Self>,
+        owner_key_id: String,
+        thread: ProviderThread,
+    ) -> anyhow::Result<bool> {
+        tokio::task::spawn_blocking(move || {
+            self.publish_provider_thread_if_current(&owner_key_id, &thread)
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("provider thread publication task failed"))?
+    }
+
+    fn publish_provider_thread_if_current(
+        &self,
+        owner_key_id: &str,
+        thread: &ProviderThread,
+    ) -> anyhow::Result<bool> {
+        let Some(expected) = thread.synced_through_message_id.as_deref() else {
+            return Ok(false);
+        };
+        let mut connection = self.lock()?;
+        let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let owner: Option<String> = tx
+            .query_row(
+                "SELECT owner_key_id FROM conversations WHERE id = ?1",
+                [&thread.conversation_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if owner.as_deref() != Some(owner_key_id) {
+            return Ok(false);
+        }
+        let Some(conversation) = sqlite::load(&tx, &thread.conversation_id)? else {
+            return Ok(false);
+        };
+        if transcript_marker(&conversation.messages) != expected {
+            return Ok(false);
+        }
+        Self::write_provider_thread(&tx, thread)?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    fn write_provider_thread(connection: &Connection, thread: &ProviderThread) -> anyhow::Result<()> {
         connection.execute(
             "INSERT INTO provider_threads(
                 conversation_id, provider, thread_url, synced_through_message_id, model, updated_at
@@ -2133,6 +2182,76 @@ mod provider_thread_map_isolation_tests {
             .unwrap();
         assert_eq!(invalidated.thread_url, old_mapping.thread_url);
         assert!(invalidated.synced_through_message_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn delayed_mapping_publication_cannot_overwrite_current_mapping() {
+        let memory = std::sync::Arc::new(UnifiedMemory::new(8000));
+        persist_conversation(&memory, "conversation-a", "owner-a");
+        let first = super::transcript_marker(
+            &memory
+                .conversation_messages_for_owner("owner-a", "conversation-a")
+                .unwrap(),
+        );
+        let old = thread(
+            "conversation-a",
+            "chatgpt",
+            "https://chatgpt.com/c/old",
+            &first,
+        );
+        assert!(memory
+            .clone()
+            .publish_provider_thread_if_current_async("owner-a".to_owned(), old.clone())
+            .await
+            .unwrap());
+        memory
+            .store_turn_for_owner_with_tab_id(
+                "owner-a",
+                "conversation-a".to_owned(),
+                vec![ChatMessage {
+                    role: "user".to_owned(),
+                    content: "next question".to_owned(),
+                }],
+                ChatMessage {
+                    role: "assistant".to_owned(),
+                    content: "next answer".to_owned(),
+                },
+                "claude".to_owned(),
+                None,
+            )
+            .unwrap();
+        let current_marker = super::transcript_marker(
+            &memory
+                .conversation_messages_for_owner("owner-a", "conversation-a")
+                .unwrap(),
+        );
+        let current = thread(
+            "conversation-a",
+            "chatgpt",
+            "https://chatgpt.com/c/current",
+            &current_marker,
+        );
+        assert!(memory
+            .clone()
+            .publish_provider_thread_if_current_async("owner-a".to_owned(), current.clone())
+            .await
+            .unwrap());
+        assert!(!memory
+            .clone()
+            .publish_provider_thread_if_current_async("owner-a".to_owned(), old)
+            .await
+            .unwrap());
+        assert!(!memory
+            .clone()
+            .publish_provider_thread_if_current_async("owner-b".to_owned(), current.clone())
+            .await
+            .unwrap());
+        assert_eq!(
+            memory
+                .get_provider_thread_for_owner("owner-a", "conversation-a", "chatgpt")
+                .unwrap(),
+            Some(current)
+        );
     }
 
     #[tokio::test]

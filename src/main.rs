@@ -1726,16 +1726,18 @@ async fn persist_provider_thread(
         model: Some(model.to_owned()),
         updated_at: chrono::Utc::now().timestamp(),
     };
-    if let Err(error) = state
+    match state
         .memory
         .clone()
-        .upsert_provider_thread_async(owner_key_id.to_owned(), thread)
+        .publish_provider_thread_if_current_async(owner_key_id.to_owned(), thread)
         .await
     {
-        tracing::warn!(
+        Ok(true) => {}
+        Ok(false) => tracing::debug!("provider thread synchronization claim is no longer current"),
+        Err(error) => tracing::warn!(
             failure_category = provider_thread_failure_log_category(&error),
             "provider thread mapping could not be persisted"
-        );
+        ),
     }
 }
 
