@@ -9,6 +9,8 @@ pub(super) async fn json_provider_response(
         state,
         owner_key_id,
         windowed,
+        snapshot_marker,
+        snapshot_identity,
         provider,
         model,
         provider_model,
@@ -81,6 +83,8 @@ pub(super) async fn json_provider_response(
         &full,
         model,
         chat_service::AttemptTelemetry {
+            snapshot_marker,
+            snapshot_identity,
             request_id,
             provider,
             queue_ms,
