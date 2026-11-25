@@ -1749,7 +1749,11 @@ async fn persist_completed_turn(
     let owner_key_id = turn.owner_key_id.clone();
     let conversation_id = turn.conversation_id.clone();
     let provider = turn.provider.clone();
-    let synced_marker = state.memory.clone().persist_turn_from_snapshot(turn).await?;
+    let synced_marker = state
+        .memory
+        .clone()
+        .persist_turn_from_snapshot(turn)
+        .await?;
     if let Some(synced_marker) = synced_marker {
         persist_provider_thread(
             state,

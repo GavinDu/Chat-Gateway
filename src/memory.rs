@@ -790,8 +790,9 @@ impl UnifiedMemory {
         let replay = !user_msgs.is_empty()
             && (conversation.messages.starts_with(&completed)
                 || conversation.messages.ends_with(&completed));
-        let sync_eligible = expected_marker
-            .is_none_or(|expected| !replay && transcript_marker(&conversation.messages) == expected);
+        let sync_eligible = expected_marker.is_none_or(|expected| {
+            !replay && transcript_marker(&conversation.messages) == expected
+        });
         if !sync_eligible {
             // Do not certify a prefix this attempt did not observe, or a
             // duplicate completion that was deduplicated locally.
@@ -1271,7 +1272,10 @@ impl UnifiedMemory {
         Ok(true)
     }
 
-    fn write_provider_thread(connection: &Connection, thread: &ProviderThread) -> anyhow::Result<()> {
+    fn write_provider_thread(
+        connection: &Connection,
+        thread: &ProviderThread,
+    ) -> anyhow::Result<()> {
         connection.execute(
             "INSERT INTO provider_threads(
                 conversation_id, provider, thread_url, synced_through_message_id, model, updated_at
