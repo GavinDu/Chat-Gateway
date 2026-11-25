@@ -348,7 +348,8 @@ pub(crate) async fn prepare_candidate_attempt(
     let queue_ms = permit.queue_ms.min(u64::MAX as u128) as u64;
 
     // Thread planning remains UNDER the permit, serializing same-provider sends.
-    let (prompt, thread_url) = match prepare_candidate_prompt(CandidatePromptRequest {
+    let context_started = Instant::now();
+    let prepared_prompt = prepare_candidate_prompt(CandidatePromptRequest {
         state,
         owner_key_id,
         conversation_id,
@@ -361,8 +362,13 @@ pub(crate) async fn prepare_candidate_attempt(
         policy,
         personal_memory_items,
     })
-    .await
-    {
+    .await;
+    state.metrics.record_chat_phase(
+        provider,
+        "provider_context",
+        context_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+    );
+    let (prompt, thread_url) = match prepared_prompt {
         Ok(prepared) => prepared,
         Err(CandidatePromptError::UnreadableThreadState) => {
             return Err(CandidateAttemptError::Fatal(Box::new(api_error(
@@ -404,15 +410,29 @@ pub(crate) async fn acquire_candidate_permit(
     provider: &str,
     config: &crate::config::ProviderConfig,
 ) -> anyhow::Result<crate::browser::pool::ObscuraPermit> {
-    state
+    let pacing_started = Instant::now();
+    let paced = state
         .provider_guard
         .wait_for_request_slot(
             provider,
             config.min_request_interval_ms,
             config.daily_request_cap,
         )
-        .await?;
-    state.pool.acquire(provider).await
+        .await;
+    state.metrics.record_chat_phase(
+        provider,
+        "pacing",
+        pacing_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+    );
+    paced?;
+    let slot_started = Instant::now();
+    let permit = state.pool.acquire(provider).await;
+    state.metrics.record_chat_phase(
+        provider,
+        "slot",
+        slot_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+    );
+    permit
 }
 
 /// The metrics timestamp is measured after the durable write for both JSON
@@ -447,7 +467,8 @@ pub(crate) async fn finalize_provider_attempt(
         // write. A storage failure must be counted as a gateway error without
         // incorrectly degrading a provider that returned valid completion.
         state.provider_sessions.record_success(telemetry.provider);
-        persist_completed_turn(
+        let persistence_started = Instant::now();
+        let persisted = persist_completed_turn(
             state,
             owner_key_id,
             conversation_id,
@@ -456,8 +477,22 @@ pub(crate) async fn finalize_provider_attempt(
             telemetry.provider,
             model,
         )
-        .await
-        .err()
+        .await;
+        let persistence_ms = persistence_started
+            .elapsed()
+            .as_millis()
+            .min(u64::MAX as u128) as u64;
+        state
+            .metrics
+            .record_chat_phase(telemetry.provider, "persistence", persistence_ms);
+        tracing::info!(
+            request_id = telemetry.request_id,
+            provider = telemetry.provider,
+            persistence_ms,
+            persistence_ok = persisted.is_ok(),
+            "chat persistence completed"
+        );
+        persisted.err()
     };
     let total_ms = telemetry
         .request_started
@@ -494,7 +529,7 @@ pub(crate) async fn resolve_chat_candidates(
         .resolve_for_owner_async(owner_key_id, model, conversation_id, state.memory.clone())
         .await
         .map_err(|_| {
-            tracing::error!(conversation_id = ?conversation_id, "provider affinity read failed");
+            tracing::error!("provider affinity read failed");
             Box::new(api_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "server_error",
@@ -521,7 +556,7 @@ pub(crate) async fn resolve_chat_candidates(
         .map(|(_, model)| model)
         .unwrap_or(model)
         .to_owned();
-    tracing::info!(model, ?candidates, conv = ?conversation_id, "routing request");
+    tracing::info!(model, ?candidates, "routing request");
     if candidates.is_empty() {
         return Err(Box::new(api_error(
             StatusCode::NOT_FOUND,

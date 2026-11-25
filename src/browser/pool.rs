@@ -356,6 +356,7 @@ enum Command {
         reply: oneshot::Sender<Result<Vec<String>>>,
     },
     Send {
+        queued_at: Instant,
         provider: Provider,
         prompt: String,
         model: String,
@@ -828,6 +829,7 @@ impl ObscuraPool {
             .read()
             .await
             .send(Command::Send {
+                queued_at: Instant::now(),
                 provider,
                 prompt,
                 model,
