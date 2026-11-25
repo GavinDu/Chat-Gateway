@@ -1991,6 +1991,8 @@ pub async fn run_send(
     policy: ProviderSendPolicy,
     chunks: mpsc::Sender<Result<ProviderChunk>>,
 ) {
+    use crate::metaai_timing::{Step, Timer};
+    let entry_timer = Timer::start(Step::EntryGuards);
     let ProviderSendPolicy {
         completion_idle,
         provider_guard,
@@ -2026,7 +2028,11 @@ pub async fn run_send(
     // started at 0); this fixes that stale-text bug while keeping
     // Rust v1's 350ms / stability / indicator completion.
     let done_signal = adapter.done_signal();
-    let baseline_probe = adapter.response_probe(page, true);
+    drop(entry_timer);
+    let baseline_probe = {
+        let _timer = Timer::start(Step::BaselineProbe);
+        adapter.response_probe(page, true)
+    };
     // The assistant baseline is part of the security-sensitive provenance
     // for this request. Verify the same-DOM-sample URL and the current page
     // before trusting prior reply text or handing the new prompt to an adapter.
@@ -2075,10 +2081,12 @@ pub async fn run_send(
     // The consumer may disconnect after Send was clicked but before the
     // framework reports an acknowledged submission. Drop the incomplete
     // mutable-page future before using the page for guarded Stop cleanup.
+    let submission_timer = Timer::start(Step::Submission);
     let submission = tokio::select! {
         result = tokio::time::timeout(timeout, adapter.send_prompt(page, &prompt)) => Some(result),
         _ = chunks.closed() => None,
     };
+    drop(submission_timer);
     let Some(submission) = submission else {
         // The framework may have been typing an editor when the consumer
         // disconnected, before any Send click. Do not cancel an inherited
@@ -2196,18 +2204,45 @@ pub async fn run_send(
             return;
         }
 
-        common::drive_page(page, poll_tick).await;
+        let after_content = last_delta_at.is_some();
+        common::drive_page_timed(
+            page,
+            poll_tick,
+            if after_content {
+                Step::AfterContentSettle
+            } else {
+                Step::FirstContentSettle
+            },
+            if after_content {
+                Step::AfterContentSleep
+            } else {
+                Step::FirstContentSleep
+            },
+        )
+        .await;
         let poll_started = Instant::now();
         poll_count = poll_count.saturating_add(1);
         // Body text extraction is expensive on large pages; keep URL checks on every
         // tick, but inspect challenge text every five polls (~1.75 seconds).
         let check_body_challenge = should_check_body_challenge(poll_count);
-        let probe = adapter.response_probe(page, check_body_challenge);
+        let probe = {
+            let _timer = Timer::start(if after_content {
+                Step::AfterContentProbe
+            } else {
+                Step::FirstContentProbe
+            });
+            adapter.response_probe(page, check_body_challenge)
+        };
         metrics.record_browser_poll(
             adapter.name(),
             1,
             poll_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
         );
+        let _processing_timer = Timer::start(if after_content {
+            Step::AfterContentProcessing
+        } else {
+            Step::FirstContentProcessing
+        });
         if probe_has_challenge(&probe) {
             if let Some(error) =
                 untrusted_challenge_probe_origin_error(adapter.name(), page, &probe.url)
@@ -2333,7 +2368,10 @@ pub async fn run_send(
                         // Sample the full body immediately before completion, even
                         // when this poll is not one of the periodic body checks.
                         let final_probe_started = Instant::now();
-                        let final_probe = adapter.response_probe(page, true);
+                        let final_probe = {
+                            let _timer = Timer::start(Step::FinalProbe);
+                            adapter.response_probe(page, true)
+                        };
                         metrics.record_browser_poll(
                             adapter.name(),
                             1,
@@ -2406,6 +2444,12 @@ pub async fn run_send(
                                 return;
                             }
                         }
+                        metrics.record_completion_reason(
+                            adapter.name(),
+                            done_signal == DoneSignal::StopControlDisappeared
+                                && fresh_stop.saw_fresh_generation()
+                                && confirmed_post_answer_affordance,
+                        );
                         if let Some(last_delta_at) = last_delta_at {
                             metrics.record_provider_tail(
                                 adapter.name(),
@@ -2485,7 +2529,10 @@ pub async fn run_send(
                 // A final full-body check closes the gap between periodic
                 // sampling and declaring the provider turn complete.
                 let final_probe_started = Instant::now();
-                let final_probe = adapter.response_probe(page, true);
+                let final_probe = {
+                    let _timer = Timer::start(Step::FinalProbe);
+                    adapter.response_probe(page, true)
+                };
                 metrics.record_browser_poll(
                     adapter.name(),
                     1,
@@ -2536,6 +2583,12 @@ pub async fn run_send(
                     stable_ticks = 0;
                     continue;
                 }
+                metrics.record_completion_reason(
+                    adapter.name(),
+                    done_signal == DoneSignal::StopControlDisappeared
+                        && fresh_stop.saw_fresh_generation()
+                        && confirmed_post_answer_affordance,
+                );
                 if let Some(last_delta_at) = last_delta_at {
                     metrics.record_provider_tail(
                         adapter.name(),

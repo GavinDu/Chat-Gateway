@@ -6,7 +6,7 @@
   if(Array.from(document.querySelectorAll('[aria-modal="true"],dialog[open]')).some(node=>node.getClientRects().length>0 && getComputedStyle(node).visibility!=='hidden' && !node.closest('[hidden],[inert],[aria-hidden="true"]')))return 'modal';
   const editors=Array.from(document.querySelectorAll('div[contenteditable="true"][role="textbox"][data-lexical-editor="true"]')).filter(visible);
   if(editors.length!==1 || document.activeElement!==editors[0])return 'editor_unavailable';
-  const editor=editors[0];if((editor.innerText??editor.textContent??'')!==expected)return 'draft_changed';
+  const editor=editors[0];if((__COMPOSER_TEXT__)(editor)!==expected)return 'draft_changed';
   const controls=Array.from(document.querySelectorAll('button,[role="button"]')).filter(button=>visible(button) && (button.getAttribute('aria-label')||button.innerText||'').trim().toLowerCase()==='send');
   if(controls.length!==1)return 'send_ambiguous_or_missing';
   const send=controls[0];if(send.disabled || send.matches(':disabled') || send.closest('fieldset[disabled]'))return 'send_disabled';

@@ -1,3 +1,4 @@
+use crate::metaai_timing::{Step as TimingStep, Timer as StepTimer};
 use obscura_core::Page;
 use std::time::Duration;
 
@@ -1443,6 +1444,22 @@ fn composer_draft_expression(element: &str) -> String {
     )
 }
 
+/// Preserve visible Meta AI text-node whitespace through paste verification.
+/// Read-only: hidden text and separate block paragraphs cannot authorize a send.
+pub(crate) fn metaai_composer_retains_prompt(
+    page: &Page,
+    selector: &str,
+    prompt: &str,
+) -> anyhow::Result<bool> {
+    let el = visible_input_query(&serde_json::to_string(selector)?);
+    let expected = serde_json::to_string(prompt)?;
+    let reader = include_str!("metaai_composer_text.js");
+    let retained = page.evaluate(&format!(
+        "(() => {{ const editor = {el}; const value = ({reader})(editor); return value !== null && value === {expected}; }})()"
+    ));
+    Ok(retained.as_bool() == Some(true))
+}
+
 /// Re-read the actionable composer after framework renders, not just after
 /// the initial typing event. Never log the prompt when the value changes.
 pub(crate) fn composer_retains_prompt(
@@ -1847,9 +1864,28 @@ mod response_probe_tests {
 /// interval. settle is a maximum budget and may return immediately when idle;
 /// counting those fast returns as elapsed ticks would truncate responses.
 pub async fn drive_page(page: &mut Page, duration: Duration) {
+    drive_page_timed(
+        page,
+        duration,
+        TimingStep::BrowserSettle,
+        TimingStep::BrowserSleep,
+    )
+    .await;
+}
+
+pub(crate) async fn drive_page_timed(
+    page: &mut Page,
+    duration: Duration,
+    settle: TimingStep,
+    sleep: TimingStep,
+) {
     let deadline = tokio::time::Instant::now() + duration;
-    page.settle(duration.as_millis().max(1).min(u64::MAX as u128) as u64)
-        .await;
+    {
+        let _timer = StepTimer::start(settle);
+        page.settle(duration.as_millis().max(1).min(u64::MAX as u128) as u64)
+            .await;
+    }
+    let _timer = StepTimer::start(sleep);
     tokio::time::sleep_until(deadline).await;
 }
 
@@ -1861,10 +1897,20 @@ pub async fn wait_for_selector(
 ) -> anyhow::Result<()> {
     let start = std::time::Instant::now();
     while start.elapsed().as_millis() < timeout_ms as u128 {
-        if visible_composer_exists(page, selectors) {
+        let ready = {
+            let _timer = StepTimer::start(TimingStep::ComposerProbe);
+            visible_composer_exists(page, selectors)
+        };
+        if ready {
             return Ok(());
         }
-        drive_page(page, Duration::from_millis(150)).await;
+        drive_page_timed(
+            page,
+            Duration::from_millis(150),
+            TimingStep::ComposerSettle,
+            TimingStep::ComposerSleep,
+        )
+        .await;
     }
     anyhow::bail!("timeout waiting for actionable provider composer")
 }
@@ -2074,16 +2120,30 @@ pub async fn human_type(page: &Page, selectors: &[&str], text: &str) -> anyhow::
 
 pub(crate) async fn submit_metaai_focused(page: &mut Page, prompt: &str) -> anyhow::Result<()> {
     let expected = serde_json::to_string(prompt)?;
-    let read = include_str!("metaai_user_turn.js").replace("__PROMPT__", &expected);
+    let read = include_str!("metaai_user_turn.js")
+        .replace("__COMPOSER_TEXT__", include_str!("metaai_composer_text.js"))
+        .replace("__PROMPT__", &expected);
+    let dispatch_timer = StepTimer::start(TimingStep::SendDispatch);
     let before = page.evaluate(&read)["count"].as_f64().unwrap_or(0.0);
-    let send = include_str!("metaai_keyboard_send.js").replace("__PROMPT__", &expected);
+    let send = include_str!("metaai_keyboard_send.js")
+        .replace("__COMPOSER_TEXT__", include_str!("metaai_composer_text.js"))
+        .replace("__PROMPT__", &expected);
     let status = page.evaluate(&send);
     if status.as_str() != Some("dispatched") {
         anyhow::bail!("Meta AI send unavailable, disabled, ambiguous or draft changed");
     }
+    drop(dispatch_timer);
+    let _ack_timer = StepTimer::start(TimingStep::SubmissionAck);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
-        drive_page(page, Duration::from_millis(100)).await;
+        drive_page_timed(
+            page,
+            Duration::from_millis(100),
+            TimingStep::AckSettle,
+            TimingStep::AckSleep,
+        )
+        .await;
+        let _probe_timer = StepTimer::start(TimingStep::AckProbe);
         require_page_provider_origin("metaai", page)?;
         let after = page.evaluate(&read);
         if after["valid"] == true
@@ -2105,6 +2165,7 @@ pub(crate) async fn type_provider_prompt(
     provider: Option<&str>,
 ) -> anyhow::Result<()> {
     if provider == Some("metaai") {
+        let paste_timer = StepTimer::start(TimingStep::PasteDispatch);
         let selector = selectors
             .iter()
             .copied()
@@ -2116,10 +2177,22 @@ pub(crate) async fn type_provider_prompt(
         if page.evaluate(&script).as_bool() != Some(true) {
             return Err(anyhow::Error::new(ProviderComposerInputRejectedError));
         }
+        drop(paste_timer);
+        let _retention_timer = StepTimer::start(TimingStep::InputRetention);
         let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
         loop {
-            drive_page(page, Duration::from_millis(50)).await;
-            if composer_retains_prompt(page, selector, text)? {
+            drive_page_timed(
+                page,
+                Duration::from_millis(50),
+                TimingStep::RetentionSettle,
+                TimingStep::RetentionSleep,
+            )
+            .await;
+            let retained = {
+                let _timer = StepTimer::start(TimingStep::RetentionProbe);
+                metaai_composer_retains_prompt(page, selector, text)?
+            };
+            if retained {
                 return Ok(());
             }
             if tokio::time::Instant::now() >= deadline {
@@ -4808,6 +4881,7 @@ pub async fn send_prompt(
     let verify_submission = requires_submission_acknowledgement(&initial_url);
     let expected_submission_provider = submission_provider_for_url(&initial_url);
     let inputs = set.input_refs();
+    let composer_timer = StepTimer::start(TimingStep::ComposerWait);
     wait_for_selector(page, &inputs, 15_000)
         .await
         .inspect_err(|_| {
@@ -4818,6 +4892,7 @@ pub async fn send_prompt(
                 "provider composer diagnostic"
             );
         })?;
+    drop(composer_timer);
     // Waiting can redirect into a *different recognized provider* that
     // exposes a similar editor. Never type the requested provider's prompt
     // into another provider's composer.
@@ -4833,6 +4908,7 @@ pub async fn send_prompt(
     if let Some(provider) = expected_submission_provider {
         require_submission_provider_route(provider, page)?;
     }
+    let fill_timer = StepTimer::start(TimingStep::InputFill);
     if let Err(error) = type_provider_prompt(page, &inputs, prompt, send_guard_provider).await {
         tracing::warn!(
             provider = provider,
@@ -4842,7 +4918,18 @@ pub async fn send_prompt(
         );
         return Err(error);
     }
-    drive_page(page, Duration::from_millis(200)).await;
+    drop(fill_timer);
+    {
+        let _timer = StepTimer::start(TimingStep::InputSettle);
+        drive_page_timed(
+            page,
+            Duration::from_millis(200),
+            TimingStep::InputSettleEngine,
+            TimingStep::InputSettleSleep,
+        )
+        .await;
+    }
+    let validation_timer = StepTimer::start(TimingStep::DraftValidation);
     check_session(provider, page)?;
     require_page_provider_origin(provider, page)?;
     if matches!(provider, "perplexity" | "manus") {
@@ -4855,7 +4942,12 @@ pub async fn send_prompt(
         .unwrap_or(inputs[0]);
     // The provider may re-render or clear the composer while the browser is
     // settling after typing. Never click Send with a missing or changed draft.
-    if !composer_retains_prompt(page, input_sel, prompt)? {
+    let retained = if provider == "metaai" {
+        metaai_composer_retains_prompt(page, input_sel, prompt)?
+    } else {
+        composer_retains_prompt(page, input_sel, prompt)?
+    };
+    if !retained {
         tracing::warn!(
             provider = provider,
             stage = "framework_render",
@@ -4872,6 +4964,7 @@ pub async fn send_prompt(
     if matches!(provider, "perplexity" | "manus") {
         require_unique_actionable_composer(page, &inputs)?;
     }
+    drop(validation_timer);
     if provider == "metaai" {
         return submit_metaai_focused(page, prompt).await;
     }

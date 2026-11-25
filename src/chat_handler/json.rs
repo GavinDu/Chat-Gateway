@@ -5,6 +5,7 @@ pub(super) async fn json_provider_response(
     attempt: JsonAttempt<'_>,
 ) -> std::result::Result<Response, String> {
     let JsonAttempt {
+        request_kind,
         state,
         owner_key_id,
         windowed,
@@ -24,6 +25,17 @@ pub(super) async fn json_provider_response(
         .chat_service
         .collect_with_timeout(receiver, provider_started, completion_timeout)
         .await;
+    if let Some(first_content) = collected.first_event_elapsed {
+        let request_ttft = provider_started
+            .saturating_duration_since(request_started)
+            .saturating_add(first_content);
+        state.metrics.record_request_first_content(
+            provider,
+            request_kind,
+            false,
+            request_ttft.as_millis().min(u64::MAX as u128) as u64,
+        );
+    }
     let full = collected.content;
     let failed = collected.error;
     let ttft_ms = collected
