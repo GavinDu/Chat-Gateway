@@ -440,6 +440,7 @@ pub(crate) async fn acquire_candidate_permit(
 /// measurements remain distinct.
 pub(crate) struct AttemptTelemetry<'a> {
     pub(crate) snapshot_marker: &'a str,
+    pub(crate) snapshot_identity: &'a Option<crate::memory::ConversationIdentity>,
     pub(crate) request_id: &'a str,
     pub(crate) provider: &'a str,
     pub(crate) queue_ms: u64,
@@ -481,6 +482,7 @@ pub(crate) async fn finalize_provider_attempt(
                 },
                 provider: telemetry.provider.to_owned(),
                 expected_marker: telemetry.snapshot_marker.to_owned(),
+                expected_identity: telemetry.snapshot_identity.clone(),
             },
             model,
         )
@@ -583,6 +585,7 @@ pub(crate) struct PreparedChatContext {
     pub(crate) windowed: Vec<ChatMessage>,
     pub(crate) has_history: bool,
     pub(crate) stored_messages: Vec<ChatMessage>,
+    pub(crate) snapshot_identity: Option<crate::memory::ConversationIdentity>,
 }
 
 /// Prepare one immutable, owner-scoped context snapshot before provider
@@ -629,8 +632,7 @@ pub(crate) async fn prepare_chat_context(
         budget_personal_memory_items(retrieved_memory, 512);
     let context_token_budget = 8000usize.saturating_sub(memory_tokens);
 
-    let (prompt, windowed, has_history, stored_messages) =
-        read_conversation_context_with_transcript_for_owner(
+    let snapshot = read_conversation_context_with_transcript_for_owner(
             state.memory.clone(),
             owner_key_id.to_owned(),
             conversation_id.map(str::to_owned),
@@ -639,6 +641,7 @@ pub(crate) async fn prepare_chat_context(
         )
         .await
         .map_err(|_| Box::new(conversation_context_read_error(conversation_id)))?;
+    let (prompt, windowed, has_history, stored_messages) = snapshot.context;
     if prompt.is_empty() {
         return Err(Box::new(api_error(
             StatusCode::BAD_REQUEST,
@@ -656,6 +659,7 @@ pub(crate) async fn prepare_chat_context(
         windowed,
         has_history,
         stored_messages,
+        snapshot_identity: snapshot.identity,
     })
 }
 

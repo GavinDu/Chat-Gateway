@@ -85,6 +85,32 @@ struct TurnWrite<'a> {
     tab_id: Option<String>,
     compute_marker: bool,
     expected_marker: Option<&'a str>,
+    expected_identity: Option<&'a Option<ConversationIdentity>>,
+}
+
+/// Internal durable identity of one conversation incarnation at a revision.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ConversationIdentity {
+    incarnation: String,
+    generation: i64,
+}
+
+pub(crate) struct ContextSnapshot {
+    pub(crate) context: (String, Vec<ChatMessage>, bool, Vec<ChatMessage>),
+    pub(crate) identity: Option<ConversationIdentity>,
+}
+
+fn read_identity(connection: &Connection, id: &str) -> anyhow::Result<ConversationIdentity> {
+    Ok(connection.query_row(
+        "SELECT incarnation, generation FROM conversation_identities WHERE conversation_id=?1",
+        [id],
+        |row| {
+            Ok(ConversationIdentity {
+                incarnation: row.get(0)?,
+                generation: row.get(1)?,
+            })
+        },
+    )?)
 }
 
 /// A completed provider turn tied to its admission transcript snapshot.
@@ -95,6 +121,7 @@ pub(crate) struct SnapshotTurn {
     pub(crate) assistant_msg: ChatMessage,
     pub(crate) provider: String,
     pub(crate) expected_marker: String,
+    pub(crate) expected_identity: Option<ConversationIdentity>,
 }
 
 /// Async contract for bounded conversation history access and atomic turn persistence.
@@ -507,7 +534,18 @@ impl UnifiedMemory {
         new_messages: &[ChatMessage],
         token_budget: usize,
     ) -> anyhow::Result<(String, Vec<ChatMessage>, bool, Vec<ChatMessage>)> {
-        let (history, saved_summary) = match conversation_id {
+        self.build_context_snapshot(owner_key_id, conversation_id, new_messages, token_budget)
+            .map(|snapshot| snapshot.context)
+    }
+
+    fn build_context_snapshot(
+        &self,
+        owner_key_id: &str,
+        conversation_id: Option<&str>,
+        new_messages: &[ChatMessage],
+        token_budget: usize,
+    ) -> anyhow::Result<ContextSnapshot> {
+        let (history, saved_summary, identity) = match conversation_id {
             Some(id) => {
                 // Read ownership, transcript, and summary in one SQLite snapshot.
                 // Separate reads could otherwise combine history from one commit
@@ -525,6 +563,11 @@ impl UnifiedMemory {
                     Some(owner) if owner == owner_key_id => sqlite::load(&tx, id)?,
                     Some(_) => anyhow::bail!("conversation belongs to another API key"),
                     None => None,
+                };
+                let identity = if conversation.is_some() {
+                    Some(read_identity(&tx, id)?)
+                } else {
+                    None
                 };
                 let summary = if conversation.is_some() {
                     tx.query_row(
@@ -548,9 +591,9 @@ impl UnifiedMemory {
                 tx.commit().map_err(|error| {
                     anyhow::anyhow!("completing context snapshot read: {error}")
                 })?;
-                (history, summary)
+                (history, summary, identity)
             }
-            None => (Vec::new(), None),
+            None => (Vec::new(), None, None),
         };
         let has_history = !history.is_empty();
         let summary_message = saved_summary.map(|(summary, _covered)| ChatMessage {
@@ -572,7 +615,29 @@ impl UnifiedMemory {
             context.insert(0, summary);
             prompt = crate::context::render_prompt(&context);
         }
-        Ok((prompt, context, has_history, history))
+        Ok(ContextSnapshot {
+            context: (prompt, context, has_history, history),
+            identity,
+        })
+    }
+
+    pub(crate) async fn build_context_snapshot_async(
+        self: Arc<Self>,
+        owner_key_id: String,
+        conversation_id: Option<String>,
+        new_messages: Vec<ChatMessage>,
+        token_budget: usize,
+    ) -> anyhow::Result<ContextSnapshot> {
+        tokio::task::spawn_blocking(move || {
+            self.build_context_snapshot(
+                &owner_key_id,
+                conversation_id.as_deref(),
+                &new_messages,
+                token_budget,
+            )
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("conversation snapshot task failed"))?
     }
 
     pub async fn build_context_for_owner_with_transcript_budget_blocking(
@@ -698,6 +763,7 @@ impl UnifiedMemory {
             tab_id,
             compute_marker: false,
             expected_marker: None,
+            expected_identity: None,
         })
         .map(|_| ())
     }
@@ -720,6 +786,7 @@ impl UnifiedMemory {
             tab_id,
             compute_marker: true,
             expected_marker: None,
+            expected_identity: None,
         })?
         .ok_or_else(|| anyhow::anyhow!("transcript marker was not computed"))
     }
@@ -740,6 +807,7 @@ impl UnifiedMemory {
                 tab_id: None,
                 compute_marker: true,
                 expected_marker: Some(&turn.expected_marker),
+                expected_identity: Some(&turn.expected_identity),
             })
         })
         .await
@@ -759,6 +827,7 @@ impl UnifiedMemory {
             tab_id,
             compute_marker,
             expected_marker,
+            expected_identity,
         } = write;
         let mut connection = self.lock()?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -775,6 +844,20 @@ impl UnifiedMemory {
         {
             anyhow::bail!("conversation belongs to another API key");
         }
+        let current_identity = if existing_owner.is_some() {
+            Some(read_identity(&tx, &conversation_id)?)
+        } else {
+            None
+        };
+        if let Some(expected) = expected_identity {
+            // An absent or replaced incarnation is not a concurrent append.
+            // Never resurrect a deleted conversation or append to its successor.
+            if expected.as_ref().map(|value| &value.incarnation)
+                != current_identity.as_ref().map(|value| &value.incarnation)
+            {
+                anyhow::bail!("conversation incarnation changed during provider request");
+            }
+        }
         let mut conversation =
             sqlite::load(&tx, &conversation_id)?.unwrap_or_else(|| Conversation {
                 id: conversation_id,
@@ -790,9 +873,10 @@ impl UnifiedMemory {
         let replay = !user_msgs.is_empty()
             && (conversation.messages.starts_with(&completed)
                 || conversation.messages.ends_with(&completed));
-        let sync_eligible = expected_marker.is_none_or(|expected| {
-            !replay && transcript_marker(&conversation.messages) == expected
-        });
+        let sync_eligible = expected_identity.is_none_or(|expected| expected == &current_identity)
+            && expected_marker.is_none_or(|expected| {
+                !replay && transcript_marker(&conversation.messages) == expected
+            });
         if !sync_eligible {
             // Do not certify a prefix this attempt did not observe, or a
             // duplicate completion that was deduplicated locally.
@@ -2133,6 +2217,17 @@ mod provider_thread_map_isolation_tests {
             .conversation_messages_for_owner("owner-a", "conversation-a")
             .unwrap();
         let snapshot = transcript_marker(&history);
+        let identity = memory
+            .clone()
+            .build_context_snapshot_async(
+                "owner-a".to_owned(),
+                Some("conversation-a".to_owned()),
+                Vec::new(),
+                8000,
+            )
+            .await
+            .unwrap()
+            .identity;
         let old_mapping = thread(
             "conversation-a",
             "claude",
@@ -2158,6 +2253,7 @@ mod provider_thread_map_isolation_tests {
             },
             provider: provider.to_owned(),
             expected_marker: snapshot.clone(),
+            expected_identity: identity.clone(),
         };
         let first = memory
             .clone()
@@ -2186,6 +2282,60 @@ mod provider_thread_map_isolation_tests {
             .unwrap();
         assert_eq!(invalidated.thread_url, old_mapping.thread_url);
         assert!(invalidated.synced_through_message_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn stale_incarnation_cannot_resurrect_or_modify_recreated_conversation() {
+        use super::{transcript_marker, SnapshotTurn};
+
+        for recreate in [false, true] {
+            let memory = std::sync::Arc::new(UnifiedMemory::new(8000));
+            persist_conversation(&memory, "conversation-a", "owner-a");
+            let snapshot = memory
+                .clone()
+                .build_context_snapshot_async(
+                    "owner-a".to_owned(),
+                    Some("conversation-a".to_owned()),
+                    Vec::new(),
+                    8000,
+                )
+                .await
+                .unwrap();
+            assert!(memory
+                .delete_conversation_for_owner("owner-a", "conversation-a")
+                .unwrap());
+            if recreate {
+                persist_conversation(&memory, "conversation-a", "owner-a");
+            }
+            let turn = SnapshotTurn {
+                owner_key_id: "owner-a".to_owned(),
+                conversation_id: "conversation-a".to_owned(),
+                user_msgs: vec![ChatMessage {
+                    role: "user".to_owned(),
+                    content: "stale request".to_owned(),
+                }],
+                assistant_msg: ChatMessage {
+                    role: "assistant".to_owned(),
+                    content: "stale answer".to_owned(),
+                },
+                provider: "chatgpt".to_owned(),
+                expected_marker: transcript_marker(&snapshot.context.3),
+                expected_identity: snapshot.identity,
+            };
+            assert!(memory
+                .clone()
+                .persist_turn_from_snapshot(turn)
+                .await
+                .is_err());
+            let history = memory
+                .conversation_messages_for_owner("owner-a", "conversation-a")
+                .unwrap();
+            if recreate {
+                assert_eq!(history, snapshot.context.3);
+            } else {
+                assert!(history.is_empty());
+            }
+        }
     }
 
     #[tokio::test]

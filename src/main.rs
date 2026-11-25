@@ -2092,14 +2092,14 @@ fn read_conversation_context(
 }
 
 async fn read_conversation_context_with_transcript_for_owner(
-    memory: Arc<dyn memory::ConversationStore>,
+    memory: Arc<UnifiedMemory>,
     owner_key_id: String,
     conversation_id: Option<String>,
     messages: Vec<ChatMessage>,
     token_budget: usize,
-) -> anyhow::Result<(String, Vec<ChatMessage>, bool, Vec<ChatMessage>)> {
+) -> anyhow::Result<memory::ContextSnapshot> {
     memory
-        .build_context_with_transcript(owner_key_id, conversation_id, messages, token_budget)
+        .build_context_snapshot_async(owner_key_id, conversation_id, messages, token_budget)
         .await
 }
 
