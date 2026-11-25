@@ -1977,7 +1977,7 @@ mod retrieval_ranking_tests {
 
 #[cfg(test)]
 mod provider_thread_map_isolation_tests {
-    use super::{transcript_marker, ChatMessage, ProviderThread, SnapshotTurn, UnifiedMemory};
+    use super::{ChatMessage, ProviderThread, UnifiedMemory};
 
     fn persist_conversation(memory: &UnifiedMemory, id: &str, owner: &str) {
         memory
@@ -2072,6 +2072,8 @@ mod provider_thread_map_isolation_tests {
 
     #[tokio::test]
     async fn stale_cross_provider_snapshot_cannot_certify_combined_history() {
+        use super::{transcript_marker, SnapshotTurn};
+
         let memory = std::sync::Arc::new(UnifiedMemory::new(8000));
         persist_conversation(&memory, "conversation-a", "owner-a");
         let history = memory
