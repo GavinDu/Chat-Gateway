@@ -2030,10 +2030,9 @@ mod provider_thread_map_isolation_tests {
             }
         }
 
-        let dir = TestDirectory(std::env::temp_dir().join(format!(
-            "gateway-delta-restart-{}",
-            uuid::Uuid::new_v4()
-        )));
+        let dir = TestDirectory(
+            std::env::temp_dir().join(format!("gateway-delta-restart-{}", uuid::Uuid::new_v4())),
+        );
         std::fs::create_dir(&dir.0).unwrap();
         let path = dir.0.join("memory.sqlite3");
         let memory =
