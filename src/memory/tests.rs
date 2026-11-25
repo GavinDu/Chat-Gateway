@@ -2566,6 +2566,7 @@ fn v9_upgrade_allocates_durable_identity_and_recreation_changes_it() {
         .delete_conversation_for_owner("other-owner", "identity-test")
         .unwrap());
     assert_eq!(identity(&second), (original.0.clone(), 1));
+    let before_delete = first.conversation("identity-test").unwrap().unwrap();
     assert!(first
         .delete_conversation_for_owner("local", "identity-test")
         .unwrap());
@@ -2578,9 +2579,53 @@ fn v9_upgrade_allocates_durable_identity_and_recreation_changes_it() {
         .unwrap();
     assert_eq!(remaining, 0);
     store(&second, "identity-test", "same content");
+    store(&second, "identity-test", "next content");
     let recreated = identity(&first);
     assert_ne!(recreated.0, original.0);
-    assert_eq!(recreated.1, 1);
+    assert_eq!(recreated.1, 2);
+    assert_eq!(
+        first.conversation("identity-test").unwrap(),
+        Some(before_delete)
+    );
+}
+
+#[test]
+fn missing_or_exhausted_generation_rolls_back_turn() {
+    for missing in [false, true] {
+        let fixture = Fixture::new();
+        let memory = fixture.open();
+        store(&memory, "identity-test", "initial");
+        let before = memory.conversation("identity-test").unwrap();
+        {
+            let connection = memory.lock().unwrap();
+            if missing {
+                connection
+                    .execute("DELETE FROM conversation_identities", [])
+                    .unwrap();
+            } else {
+                connection
+                    .execute(
+                        "UPDATE conversation_identities SET generation=?1",
+                        [i64::MAX],
+                    )
+                    .unwrap();
+            }
+        }
+        let result = memory.store_turn_for_owner_with_tab_id(
+            "local",
+            "identity-test".to_owned(),
+            vec![m("user", "must not commit")],
+            m("assistant", "must not commit"),
+            "chatgpt".to_owned(),
+            None,
+        );
+        assert!(result.is_err());
+        assert_eq!(memory.conversation("identity-test").unwrap(), before);
+        drop(memory);
+        if missing {
+            assert!(open(&fixture.db(), None).is_err());
+        }
+    }
 }
 
 #[test]
