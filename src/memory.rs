@@ -2021,6 +2021,59 @@ mod provider_thread_map_isolation_tests {
         }
     }
 
+    #[tokio::test]
+    async fn consumed_delta_marker_stays_invalidated_after_database_reopen() {
+        struct TestDirectory(std::path::PathBuf);
+        impl Drop for TestDirectory {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+
+        let dir = TestDirectory(std::env::temp_dir().join(format!(
+            "gateway-delta-restart-{}",
+            uuid::Uuid::new_v4()
+        )));
+        std::fs::create_dir(&dir.0).unwrap();
+        let path = dir.0.join("memory.sqlite3");
+        let memory =
+            std::sync::Arc::new(UnifiedMemory::open_path_for_test(&path, None, 8000).unwrap());
+        persist_conversation(&memory, "conversation-a", "owner-a");
+        let a = thread(
+            "conversation-a",
+            "chatgpt",
+            "https://chatgpt.com/c/a",
+            "marker-a",
+        );
+        memory
+            .upsert_provider_thread_for_owner("owner-a", &a)
+            .unwrap();
+        let history = memory
+            .conversation_messages_for_owner("owner-a", "conversation-a")
+            .unwrap();
+        assert!(memory
+            .clone()
+            .claim_provider_thread_sync_async("owner-a".to_owned(), a.clone())
+            .await
+            .unwrap());
+        drop(memory);
+
+        let restored = UnifiedMemory::open_path_for_test(&path, None, 8000).unwrap();
+        let mapping = restored
+            .get_provider_thread_for_owner("owner-a", "conversation-a", "chatgpt")
+            .unwrap()
+            .unwrap();
+        assert_eq!(mapping.thread_url, a.thread_url);
+        assert!(mapping.synced_through_message_id.is_none());
+        assert!(!restored.claim_provider_thread_sync("owner-a", &a).unwrap());
+        assert_eq!(
+            restored
+                .conversation_messages_for_owner("owner-a", "conversation-a")
+                .unwrap(),
+            history
+        );
+    }
+
     #[test]
     fn interleaved_conversations_and_provider_switch_keep_independent_thread_markers() {
         let memory = UnifiedMemory::new(8000);
