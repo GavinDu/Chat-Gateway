@@ -1901,9 +1901,10 @@ pub(super) fn browser_thread(
                                     let _ = completion_tx.send(terminal);
                                 });
                                 let cancel_adapter = adapter.clone();
+                                let mut terminal_url = None;
                                 let cancelled = tokio::select! {
                                     _ = cancel_send.notified() => true,
-                                    _ = providers::run_send(
+                                    _ = providers::run_send_with_terminal_url(
                                         adapter,
                                         &mut page,
                                         prompt,
@@ -1915,6 +1916,7 @@ pub(super) fn browser_thread(
                                             metrics: request_metrics.clone(),
                                         },
                                         save_tx,
+                                        &mut terminal_url,
                                     ) => false
                                 };
                                 if cancelled {
@@ -1929,9 +1931,15 @@ pub(super) fn browser_thread(
                                 if let Ok(Some(terminal)) = completion_rx.await {
                                     // Capture before the terminal event is visible to HTTP, while
                                     // the original attempt still owns the worker page lock.
-                                    if let Some(proof) = completed_thread_observation(
-                                        provider, thread_url.as_deref(), &initial_url, &page.url(),
-                                    ) {
+                                    let current_url = page.url();
+                                    if let Some(proof) = terminal_url.as_deref().and_then(|sample| {
+                                        if !pool_policy::provider_thread_navigation_matches(&current_url, sample) {
+                                            return None;
+                                        }
+                                        completed_thread_observation(
+                                            provider, thread_url.as_deref(), &initial_url, sample,
+                                        )
+                                    }) {
                                         let _ = thread_observation.send(proof);
                                     }
                                     if terminal_chunks.send(Ok(terminal)).await.is_err() {

@@ -296,6 +296,199 @@ async fn real_memory_api_owner_scoped_consent_crud_and_export() {
 }
 
 #[tokio::test]
+async fn authenticated_memory_routes_enforce_scope_and_owner_identity() {
+    let (_, state) = fixture(&["chatgpt"], Vec::new(), None);
+    let auth = config::AuthConfig {
+        keys: [
+            ("owner-a", "synthetic-admin-a", "admin"),
+            ("owner-b", "synthetic-admin-b", "admin"),
+            ("chat-only", "synthetic-chat", "chat"),
+        ]
+        .into_iter()
+        .map(|(name, secret, scope)| config::ApiKeyConfig {
+            name: name.to_owned(),
+            secret_hash: hash_api_key(secret),
+            scopes: vec![scope.to_owned()],
+            provider_allowlist: None,
+        })
+        .collect(),
+    };
+    let app = Router::new()
+        .route(
+            "/v1/memory/settings",
+            get(memory_api::get_long_term_memory_settings)
+                .put(memory_api::put_long_term_memory_settings),
+        )
+        .route(
+            "/v1/memory/items",
+            axum::routing::put(memory_api::save_long_term_memory_item),
+        )
+        .route(
+            "/v1/memory/items/:item_id",
+            axum::routing::delete(memory_api::delete_long_term_memory_item),
+        )
+        .route(
+            "/v1/memory/export",
+            get(memory_api::export_long_term_memory_items),
+        )
+        .with_state(state.clone())
+        .layer(middleware::from_fn_with_state(auth, authenticate_api_key));
+    async fn request(
+        app: &Router,
+        secret: Option<&str>,
+        method: &str,
+        uri: &str,
+        payload: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        let mut builder = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header(header::CONTENT_TYPE, "application/json")
+            .header("X-Owner-Key-Id", "key:owner-b");
+        if let Some(secret) = secret {
+            builder = builder.header(header::AUTHORIZATION, format!("Bearer {secret}"));
+        }
+        let response = app
+            .clone()
+            .oneshot(builder.body(Body::from(payload.to_string())).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), 65_536).await.unwrap();
+        let json = if bytes.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::from_slice(&bytes).unwrap()
+        };
+        (status, json)
+    }
+    let settings = "/v1/memory/settings";
+    let items = "/v1/memory/items";
+    let export = "/v1/memory/export";
+    for (secret, expected) in [
+        (None, StatusCode::UNAUTHORIZED),
+        (Some("invalid"), StatusCode::UNAUTHORIZED),
+        (Some("synthetic-chat"), StatusCode::FORBIDDEN),
+    ] {
+        for path in [settings, export] {
+            assert_eq!(
+                request(&app, secret, "GET", path, serde_json::Value::Null)
+                    .await
+                    .0,
+                expected
+            );
+        }
+        assert_eq!(
+            request(
+                &app,
+                secret,
+                "PUT",
+                settings,
+                serde_json::json!({"enabled":true})
+            )
+            .await
+            .0,
+            expected
+        );
+    }
+    for secret in ["synthetic-admin-a", "synthetic-admin-b"] {
+        assert_eq!(
+            request(
+                &app,
+                Some(secret),
+                "PUT",
+                settings,
+                serde_json::json!({"enabled":true}),
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+    }
+    let (status, own) = request(
+        &app,
+        Some("synthetic-admin-a"),
+        "PUT",
+        items,
+        serde_json::json!({"memory_key":"fact","value":"owner-a-value","expires_at":0}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, foreign) = request(
+        &app,
+        Some("synthetic-admin-b"),
+        "PUT",
+        items,
+        serde_json::json!({"memory_key":"fact","value":"owner-b-value"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_ne!(own["id"], foreign["id"]);
+    let id = own["id"].as_str().unwrap();
+    let item_uri = format!("{items}/{id}");
+    assert_eq!(
+        request(
+            &app,
+            Some("synthetic-admin-b"),
+            "DELETE",
+            &item_uri,
+            serde_json::Value::Null,
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    let (status, body) = request(
+        &app,
+        Some("synthetic-admin-a"),
+        "GET",
+        export,
+        serde_json::Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["data"].as_array().unwrap().len(), 1);
+    assert_eq!(body["data"][0]["id"], id);
+    assert_eq!(body["data"][0]["value"], "owner-a-value");
+    assert!(state
+        .memory
+        .retrieve_long_term_memory_items("key:owner-a", 20)
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        state
+            .memory
+            .retrieve_long_term_memory_items("key:owner-b", 20)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        request(
+            &app,
+            Some("synthetic-admin-a"),
+            "DELETE",
+            &item_uri,
+            serde_json::Value::Null,
+        )
+        .await
+        .0,
+        StatusCode::NO_CONTENT
+    );
+    let (status, body) = request(
+        &app,
+        Some("synthetic-admin-b"),
+        "GET",
+        export,
+        serde_json::Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["data"].as_array().unwrap().len(), 1);
+    assert_eq!(body["data"][0]["id"], foreign["id"]);
+}
+
+#[tokio::test]
 async fn real_router_completion_identity_is_unique_per_turn_for_active_providers() {
     for provider in ["metaai", "chatgpt"] {
         let (app, _) = fixture(
