@@ -2109,15 +2109,19 @@ fn budget_personal_memory_items(
 ) -> (Vec<memory_egress::PersonalMemoryItem>, usize) {
     let mut used = 0usize;
     let mut selected = Vec::new();
+    // Retrieval is capped at 20 items. Re-render the bounded candidate set
+    // so the estimator accounts for the exact envelope and escaped fields.
     for item in items {
-        let content = format!("{}: {}", item.memory_key, item.value);
-        let cost = context::estimate_message_tokens(&content).saturating_add(8);
-        if cost <= token_budget.saturating_sub(used) {
-            used = used.saturating_add(cost);
-            selected.push(memory_egress::PersonalMemoryItem {
-                id: item.id,
-                content,
-            });
+        selected.push(memory_egress::PersonalMemoryItem {
+            id: item.id,
+            content: format!("{}: {}", item.memory_key, item.value),
+        });
+        let rendered = memory_egress::render_personal_memory(&selected);
+        let cost = context::estimate_message_tokens(&rendered);
+        if cost <= token_budget {
+            used = cost;
+        } else {
+            selected.pop();
         }
     }
     (selected, used)
@@ -3474,6 +3478,62 @@ mod long_term_memory_export_tests {
 #[cfg(test)]
 mod personal_memory_budget_tests {
     use super::*;
+
+    fn item(id: &str, value: &str) -> memory::LongTermMemoryItem {
+        memory::LongTermMemoryItem {
+            id: id.into(),
+            memory_key: "key".into(),
+            value: value.into(),
+            source_conversation_id: None,
+            confidence: 1.0,
+            created_at: 1,
+            updated_at: 1,
+            expires_at: None,
+        }
+    }
+
+    #[test]
+    fn personal_memory_budget_matches_rendered_suffix_and_exact_boundaries() {
+        let items = vec![item("id<&\"", "&\"'<>世界"), item("second", "Unicode 🦀")];
+        let (all, cost) = budget_personal_memory_items(items.clone(), usize::MAX);
+        assert_eq!(all.len(), 2);
+        let suffix = memory_egress::render_personal_memory(&all);
+        assert_eq!(cost, context::estimate_message_tokens(&suffix));
+        assert!(suffix.contains("&amp;&quot;&apos;&lt;&gt;世界"));
+        assert!(suffix.contains("id&lt;&amp;&quot;"));
+        let (exact, used) = budget_personal_memory_items(items.clone(), cost);
+        assert_eq!(exact, all);
+        assert_eq!(used, cost);
+        let (smaller, used) = budget_personal_memory_items(items, cost - 1);
+        assert_eq!(smaller.len(), 1);
+        assert_eq!(
+            used,
+            context::estimate_message_tokens(&memory_egress::render_personal_memory(&smaller))
+        );
+        let policy = memory_egress::MemoryEgressPolicy::from_allowlist("chatgpt").unwrap();
+        let original = "latest user request";
+        let mut prompt = original.to_owned();
+        policy
+            .append_personal_memory_to_prompt("chatgpt", &mut prompt, &all)
+            .unwrap();
+        assert_eq!(prompt, format!("{original}{suffix}"));
+        let mut denied = original.to_owned();
+        policy
+            .append_personal_memory_to_prompt("claude", &mut denied, &all)
+            .unwrap();
+        assert_eq!(denied, original);
+    }
+
+    #[test]
+    fn escaping_expansion_and_framing_are_budgeted_before_selection() {
+        let escaped = item("id", &"&\"".repeat(200));
+        let (selected, used) = budget_personal_memory_items(vec![escaped], 512);
+        assert!(selected.is_empty());
+        assert_eq!(used, 0);
+        let (selected, used) = budget_personal_memory_items(vec![item("id", "x")], 1);
+        assert!(selected.is_empty());
+        assert_eq!(used, 0);
+    }
 
     #[test]
     fn personal_memory_selection_never_exceeds_its_reserved_token_budget() {
