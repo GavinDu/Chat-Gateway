@@ -1807,3 +1807,64 @@ test("410 expired approval still clears only the matched pending request", async
   await assert.rejects(f.sandbox.pollConnection(), /Connection approval unavailable/);
   assert.equal(state.pendingConnection, undefined);
 });
+
+test("extension reload forces every enabled linked provider, even when snapshot is saved",async()=>{
+  const f=loadBackground(["chatgpt","claude","chatgpt","gemini","grok","qwen"],[],true);
+  const synced=[];
+  f.sandbox.PROVIDERS={chatgpt:["chatgpt.com"],claude:["claude.ai"],gemini:["gemini.google.com"],grok:["grok.com"],qwen:["qwen.ai"],metaai:["meta.ai"]};
+  f.sandbox.syncProvider=async(provider,options)=>{synced.push([provider,options.force]);return "uploaded";};
+  f.sandbox.relayFetch=async()=>({ok:true,status:200,json:async()=>({providers:[
+    {provider:"chatgpt",enabled:true,linked:true},{provider:"claude",enabled:true,linked:false},
+    {provider:"gemini",enabled:false,linked:true},{provider:"grok",linked:true},
+    {provider:"metaai",enabled:true,linked:true}
+  ]})});
+  f.listeners.installed[0]({reason:"update"});
+  for(let i=0;i<10;i++)await flushAsyncWork();
+  assert.deepEqual(synced,[["chatgpt",true],["claude",true]]);
+});
+test("ordinary startup and periodic refresh keep saved snapshots digest-based",async()=>{
+  const f=loadBackground(["chatgpt","claude"],[],true);
+  const synced=[];
+  f.sandbox.syncProvider=async(provider,options)=>{synced.push([provider,options.force]);return "unchanged";};
+  f.sandbox.relayFetch=async()=>({ok:true,status:200,json:async()=>({providers:[
+    {provider:"chatgpt",enabled:true,linked:true},{provider:"claude",enabled:false,linked:true}
+  ]})});
+  f.listeners.startup[0]();
+  for(let i=0;i<10;i++)await flushAsyncWork();
+  f.listeners.alarm[0]({name:"relay-session-refresh"});
+  for(let i=0;i<10;i++)await flushAsyncWork();
+  assert.deepEqual(synced,[["chatgpt",false],["chatgpt",false]]);
+});
+test("reload intent upgrades overlapping startup probe, without duplicate imports",async()=>{
+  const f=loadBackground(["chatgpt"],[],true);
+  const synced=[];
+  f.sandbox.syncProvider=async(provider,options)=>{synced.push([provider,options.force]);return "uploaded";};
+  let release; const gate=new Promise(resolve=>{release=resolve;});
+  let probes=0;
+  f.sandbox.relayFetch=async()=>{probes++;await gate;return {ok:true,status:200,json:async()=>({providers:[{provider:"chatgpt",enabled:true,linked:true}]})};};
+  f.listeners.startup[0]();
+  await flushAsyncWork();
+  f.listeners.installed[0]({reason:"update"});
+  f.listeners.installed[0]({reason:"update"});
+  release();
+  for(let i=0;i<10;i++)await flushAsyncWork();
+  assert.equal(probes,1);
+  assert.deepEqual(synced,[["chatgpt",true]]);
+});
+test("reload resync retries after gateway outage on the next heartbeat",async()=>{
+  const f=loadBackground(["chatgpt"],[],true);
+  const synced=[];
+  let available=false;
+  f.sandbox.syncProvider=async(provider,options)=>{synced.push([provider,options.force]);return "uploaded";};
+  f.sandbox.relayFetch=async()=>{if(!available)throw new Error("gateway offline");return {ok:true,status:200,json:async()=>({providers:[{provider:"chatgpt",enabled:true,linked:true}]})};};
+  f.listeners.installed[0]({reason:"update"});
+  for(let i=0;i<10;i++)await flushAsyncWork();
+  assert.deepEqual(synced,[]);
+  available=true;
+  f.listeners.alarm[0]({name:"relay-session-refresh"});
+  for(let i=0;i<10;i++)await flushAsyncWork();
+  assert.deepEqual(synced,[["chatgpt",true]]);
+  f.listeners.alarm[0]({name:"relay-session-refresh"});
+  for(let i=0;i<10;i++)await flushAsyncWork();
+  assert.deepEqual(synced,[["chatgpt",true],["chatgpt",false]]);
+});

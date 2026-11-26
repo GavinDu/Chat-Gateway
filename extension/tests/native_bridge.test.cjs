@@ -7,12 +7,12 @@ const source = fs.readFileSync(path.join(__dirname,"../native_bridge.js"),"utf8"
 const tick = () => new Promise(resolve => setImmediate(resolve));
 function event() {
   const listeners = [];
-  return {addListener: fn => listeners.push(fn), fire: arg => listeners.forEach(fn => fn(arg))};
+  return {addListener: fn => listeners.push(fn), fire: (...args) => listeners.forEach(fn => fn(...args))};
 }
-async function fixture(granted = true, unavailableAttempts = 0) {
-  const removed = event(), added = event(), alarms = event();
+async function fixture(granted = true, unavailableAttempts = 0, initiallyDisabled = false) {
+  const removed = event(), added = event(), alarms = event(), storageChanged = event();
   let incoming, disconnect;
-  const sent = [], saved = {}, calls = {connect:0,reload:0};
+  const sent = [], saved = initiallyDisabled ? {nativeBridgeDisabled:true} : {}, calls = {connect:0,reload:0,clear:0};
   function newPort() {
     incoming=event(); disconnect=event();
     const close=disconnect;
@@ -26,8 +26,8 @@ async function fixture(granted = true, unavailableAttempts = 0) {
     chrome:{
       permissions:{contains:async()=>granted,onAdded:added,onRemoved:removed},
       runtime:{connectNative:()=>{calls.connect++;if(calls.connect <= unavailableAttempts) throw new Error("host missing");return newPort();},getManifest:()=>({version:"0.3.0"}),reload:()=>calls.reload++,onStartup:event(),onInstalled:event()},
-      storage:{local:{get:async()=>({...saved}),set:async obj=>Object.assign(saved,obj),remove:async key=>delete saved[key]}},
-      alarms:{create:async()=>{},clear:async()=>{},onAlarm:alarms}
+      storage:{onChanged:storageChanged,local:{get:async()=>({...saved}),set:async obj=>Object.assign(saved,obj),remove:async key=>delete saved[key]}},
+      alarms:{create:async()=>{},clear:async()=>{calls.clear++;},onAlarm:alarms}
     }
   };
   vm.runInNewContext(source,sandbox);
@@ -36,7 +36,7 @@ async function fixture(granted = true, unavailableAttempts = 0) {
     incoming.fire({v:1,id,command,...extra}); await tick();
     return sent.at(-1);
   }
-  return {send,sent,saved,calls,tasks,disable(){granted=false;removed.fire({permissions:["nativeMessaging"]});},alarm(){alarms.fire({name:"native-bridge-reconnect"});},reconnect(){disconnect?.fire();alarms.fire({name:"native-bridge-reconnect"});}};
+  return {send,sent,saved,calls,tasks,setPaused(value){const oldValue=saved.nativeBridgeDisabled;saved.nativeBridgeDisabled=value;storageChanged.fire({nativeBridgeDisabled:{oldValue,newValue:value}},"local");},foreignStorageChange(value){storageChanged.fire({nativeBridgeDisabled:{newValue:value}},"sync");},disable(){granted=false;removed.fire({permissions:["nativeMessaging"]});},alarm(){alarms.fire({name:"native-bridge-reconnect"});},reconnect(){disconnect?.fire();alarms.fire({name:"native-bridge-reconnect"});}};
 }
 test("permission absent: no host connect",async()=>{
   const f=await fixture(false); assert.equal(f.calls.connect,0);
@@ -91,4 +91,52 @@ test("host disconnect invalidates prepared reload and reconnects",async()=>{
   f.reconnect(); await tick(); assert.equal(f.calls.connect,2);
   assert.equal((await f.send("reload_commit")).error,"reload_not_prepared");
   assert.equal(f.calls.reload,0);
+});
+
+test("manifest grants native messaging at installation, not optional runtime",()=>{
+  const manifest=JSON.parse(fs.readFileSync(path.join(__dirname,"../manifest.json"),"utf8"));
+  assert.ok(manifest.permissions.includes("nativeMessaging"));
+  assert.ok(!manifest.optional_permissions?.includes("nativeMessaging"));
+  assert.ok(manifest.optional_host_permissions.includes("https://chatgpt.com/*"));
+});
+test("fresh installation starts automatically; persisted pause prevents startup and retry",async()=>{
+  const fresh=await fixture();
+  assert.equal(fresh.calls.connect,1);
+  assert.equal((await fresh.send("ping")).ok,true);
+  const paused=await fixture(true,0,true);
+  assert.equal(paused.calls.connect,0);
+  paused.alarm(); await tick(); assert.equal(paused.calls.connect,0);
+  paused.setPaused(false); await tick(); assert.equal(paused.calls.connect,1);
+});
+test("local bridge pause invalidates pending reload and clears alarm without removing Chrome permission",async()=>{
+  const f=await fixture();
+  assert.equal((await f.send("reload_extension")).result.stage,"accepted");
+  f.setPaused(true); await tick();
+  await f.send("reload_commit");
+  assert.equal(f.calls.reload,0);
+  assert.ok(f.calls.clear>0);
+  f.alarm(); await tick(); assert.equal(f.calls.connect,1);
+  f.setPaused(false); await tick(); assert.equal(f.calls.connect,2);
+  assert.equal((await f.send("reload_commit")).error,"reload_not_prepared");
+  assert.equal((await f.send("ping")).ok,true);
+});
+test("options uses storage preference instead of permission prompts",()=>{
+  const options=fs.readFileSync(path.join(__dirname,"../native_options.js"),"utf8");
+  assert.doesNotMatch(options,/permissions\.(request|remove)\(/);
+  assert.match(options,/nativeBridgeDisabled/);
+});
+
+test("storage event mock delivers Chrome's changes and areaName arguments",()=>{
+  const changed=event();
+  const args=[];
+  changed.addListener((changes,areaName)=>args.push([changes,areaName]));
+  changed.fire({nativeBridgeDisabled:{newValue:true}},"local");
+  assert.deepEqual(args,[[{nativeBridgeDisabled:{newValue:true}},"local"]]);
+});
+test("storage changes outside the local area do not pause the bridge",async()=>{
+  const f=await fixture();
+  f.foreignStorageChange(true); await tick();
+  assert.equal(f.calls.clear,0);
+  assert.equal(f.calls.connect,1);
+  assert.equal((await f.send("ping")).ok,true);
 });

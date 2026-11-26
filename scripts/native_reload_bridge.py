@@ -232,13 +232,13 @@ def main():
             return 0
         if args.command == "install":
             install(args.extension_id)
-            print("Native host registered. Enable the bridge in extension options.")
+            print("Native host registered. Extension 0.3.1+ connects automatically unless the local bridge is disabled. Older versions require manual enablement.")
             return 0
         if args.command == "uninstall":
             if sys.platform != "darwin":
                 raise ValueError("macOS only")
             MANIFEST.unlink(missing_ok=True)
-            print("Registration removed. Revoke native messaging permission to stop a live bridge.")
+            print("Registration removed. Disable the local bridge in Extension options to stop a live connection.")
             return 0
         reply = reload_verified() if args.command == "reload_extension" else call(args.command)
         print(json.dumps(reply, indent=2))
