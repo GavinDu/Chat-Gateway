@@ -1086,8 +1086,8 @@ chrome.alarms?.onAlarm?.addListener?.(alarm => {
   if (alarm.name === "relay-session-refresh") refreshLinkedProviders();
 });
 
-// Native messaging is an optional Chrome developer feature; other runtimes
-// and existing relay tests without the native API retain the original path.
+// Native messaging is enabled by default in Chrome; the bridge checks its
+// persistent opt-out. Runtimes without the native API retain the relay path.
 if (typeof chrome.runtime.connectNative === "function" && chrome.permissions?.onAdded && chrome.permissions?.onRemoved) {
   importScripts("native_bridge.js");
 }
