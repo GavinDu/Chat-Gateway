@@ -54,3 +54,10 @@ are counted; `limited` marks a truncated observation. These are metadata counts,
 not authenticated-account evidence. Values, names, domains and partition URLs
 stay inside Chrome. Counts are permission/consent scoped and rejected snapshots
 still fail before upload; no partition scope is dropped or flattened.
+
+Extension 0.3.3 applies the existing host-only root-cookie exclusion before
+partition validation and diagnostic counting. Such cookies were already
+excluded from ordinary snapshots because they cannot authenticate the provider
+login host. This order avoids rejecting unusable scopes; all remaining
+partitioned cookies still reject the complete upload. It does not add native
+partition replay or silently omit an otherwise eligible credential.

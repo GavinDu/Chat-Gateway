@@ -248,20 +248,31 @@ async function providerCookieSnapshot(provider, afterPermissionCheck = null) {
   if (!await chrome.permissions.contains({origins:requiredOrigins})) {
     throw new Error("Provider host permissions were revoked during cookie collection.");
   }
+  const loginHost = new URL(PROVIDER_LOGIN_URLS[provider]).hostname.toLowerCase();
   // Measurement only: partitioned snapshots still fail before any upload.
   // Raw scope keys exist only in this Chrome realm, never in diagnostics.
   const partitionCounts = provider === "chatgpt" ? chatgptPartitionDiagnostics(
     domainCookies.flat().filter(cookie => {
       const host = cookie.domain.replace(/^\./, "").toLowerCase();
-      return domains.some(root => host === root || host.endsWith("." + root));
+      const hostOnly = !cookie.domain.startsWith(".");
+      return domains.some(root => host === root || host.endsWith("." + root)) &&
+        !(hostOnly && host !== loginHost && domains.includes(host));
     })
   ) : null;
-  const loginHost = new URL(PROVIDER_LOGIN_URLS[provider]).hostname.toLowerCase();
   const all = [];
   for (const cookies of domainCookies) {
     for (const cookie of cookies) {
       const normalized = cookie.domain.replace(/^\./, "").toLowerCase();
       if (domains.some(root => normalized === root || normalized.endsWith("." + root))) {
+        // A host-only cookie is only sent to its exact host. A host-only copy on
+        // a provider root (for example `google.com`) therefore cannot
+        // authenticate the provider origin (`gemini.google.com`), and uploading
+        // it next to the domain-scoped twin forces the gateway to discard one.
+        // Drop the unusable host-only root copy and keep the domain scope.
+        const hostOnly = !cookie.domain.startsWith(".");
+        if (hostOnly && normalized !== loginHost && domains.includes(normalized)) continue;
+        // Apply the existing scope exclusion before validating attributes of
+        // cookies that will never enter this provider's snapshot.
         // Partitioned cookies have an additional top-level-site scope.
         // Neither the relay snapshot schema nor the pinned Obscura jar can
         // restore that scope. Never flatten it into an ordinary cookie or
@@ -271,13 +282,6 @@ async function providerCookieSnapshot(provider, afterPermissionCheck = null) {
           if (partitionCounts) error.partitionCounts = partitionCounts;
           throw error;
         }
-        // A host-only cookie is only sent to its exact host. A host-only copy on
-        // a provider root (for example `google.com`) therefore cannot
-        // authenticate the provider origin (`gemini.google.com`), and uploading
-        // it next to the domain-scoped twin forces the gateway to discard one.
-        // Drop the unusable host-only root copy and keep the domain scope.
-        const hostOnly = !cookie.domain.startsWith(".");
-        if (hostOnly && normalized !== loginHost && domains.includes(normalized)) continue;
         // Preserve browser cookie policy rather than silently replacing
         // SameSite=None/Strict with a default and persistent cookies with
         // session-only cookies on gateway restoration.
