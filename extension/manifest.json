@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "minimum_chrome_version": "119",
   "name": "Chat Gateway Browser Relay",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Sync explicitly chosen provider sessions to a local-only Chat Gateway without pairing. Provider passwords are never captured.",
   "permissions": [
     "cookies",
@@ -63,5 +63,12 @@
   },
   "background": {
     "service_worker": "background.js"
+  },
+  "optional_permissions": [
+    "nativeMessaging"
+  ],
+  "options_ui": {
+    "page": "native_options.html",
+    "open_in_tab": true
   }
 }

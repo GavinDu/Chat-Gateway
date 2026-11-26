@@ -276,9 +276,13 @@ function queueProviderTask(provider, work) {
 // map are serialized through this single worker-owned queue. The per-provider
 // task queue separately orders logout after a pending cookie upload.
 let lastConsentMutation = Promise.resolve();
+let pendingConsentMutations = 0;
 function queueConsentMutation(work) {
+  pendingConsentMutations += 1;
   const next = lastConsentMutation.catch(() => {}).then(work);
   lastConsentMutation = next.catch(() => {});
+  const release = () => { pendingConsentMutations -= 1; };
+  void next.then(release, release);
   return next;
 }
 function sameRelayIdentity(expected, actual) {
@@ -1081,3 +1085,9 @@ chrome.alarms?.onAlarm?.addListener?.(alarm => {
   if (alarm.name === "relay-connection") pollConnection().catch(() => {});
   if (alarm.name === "relay-session-refresh") refreshLinkedProviders();
 });
+
+// Native messaging is an optional Chrome developer feature; other runtimes
+// and existing relay tests without the native API retain the original path.
+if (typeof chrome.runtime.connectNative === "function" && chrome.permissions?.onAdded && chrome.permissions?.onRemoved) {
+  importScripts("native_bridge.js");
+}
