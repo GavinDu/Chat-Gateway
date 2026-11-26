@@ -347,9 +347,11 @@ These callbacks do not intercept or modify requests, and no extra fetch is sent.
 
 ChatGPT emits one bounded `ChatGPT browser attempt observation (content-free)`
 JSON record when each browser work future returns or is dropped. It records a
-process-local sequence, command-queue duration, last stage, stage/step interval
+runtime-owned sequence, command-queue duration, last stage, stage/step interval
 counts and microsecond sums/maxima, a bounded baseline projection and the last
-eight poll projections. Shared browser timers feed this ChatGPT-only observer;
+eight poll projections. Poll-only maxima and aggregate signal flags survive
+ring eviction; the separate baseline is not counted as a post-submit poll.
+Shared browser timers feed this ChatGPT-only observer;
 they do not add ChatGPT samples to Meta AI's metrics. Counts/bytes/durations are
 capped. Phase and step intervals may overlap: never add child steps to parent
 phases or interpret lifetime counts as successful operations.
@@ -369,7 +371,9 @@ observer limits or reentrant borrow conflicts. If observation state is borrowed
 when the reporter drops, a fixed `state_borrowed` incomplete record is emitted
 instead of disappearing. A diagnostic is never authentication or successful
 chat proof. No text, URL, selector, credential, account/thread identifier or raw
-provider error is retained in these records. The sequence is not an HTTP request
+provider error is retained in these records. The sequence is allocated by the runtime-owned metrics registry, shared by
+clones but isolated between gateways, and resets with that runtime. Counter
+allocation failure is explicit incomplete evidence. It is not an HTTP request
 ID; correlate using runtime identity, timestamps and an explicitly controlled
 single-request test window until direct request-ID plumbing is implemented.
 

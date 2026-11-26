@@ -7,12 +7,10 @@ use std::{
     collections::{BTreeMap, VecDeque},
     future::Future,
     rc::Rc,
-    sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant},
 };
 
 tokio::task_local! { static ACTIVE: Rc<Context>; }
-static NEXT_ATTEMPT: AtomicU64 = AtomicU64::new(1);
 const MAX_US: u64 = 1_800_000_000;
 const MAX_COUNT: u64 = 1_000_000;
 fn elapsed(start: Instant) -> u64 {
@@ -66,7 +64,7 @@ impl Timing {
     }
 }
 struct Observation {
-    sequence: u64,
+    sequence: Option<u64>,
     command_queue_us: u64,
     consumer_cancelled: bool,
     content_evidence: &'static str,
@@ -80,15 +78,20 @@ struct Observation {
     baseline: Option<Sample>,
     recent: VecDeque<Sample>,
     polls: u64,
+    poll_streaming_seen: bool,
+    poll_affordance_seen: bool,
+    poll_nonbaseline_text_seen: bool,
+    max_poll_response_count: usize,
+    max_poll_populated_count: usize,
     first_content_seen: bool,
     terminal_attempted: bool,
     submission_returned: bool,
 }
 impl Observation {
-    fn new() -> Self {
+    fn new(sequence: Option<u64>) -> Self {
         let now = Instant::now();
         Self {
-            sequence: NEXT_ATTEMPT.fetch_add(1, Ordering::Relaxed),
+            sequence,
             command_queue_us: 0,
             consumer_cancelled: false,
             content_evidence: "none",
@@ -102,6 +105,11 @@ impl Observation {
             baseline: None,
             recent: VecDeque::new(),
             polls: 0,
+            poll_streaming_seen: false,
+            poll_affordance_seen: false,
+            poll_nonbaseline_text_seen: false,
+            max_poll_response_count: 0,
+            max_poll_populated_count: 0,
             first_content_seen: false,
             terminal_attempted: false,
             submission_returned: false,
@@ -128,22 +136,24 @@ impl Observation {
         for (label, start) in self.pending.values() {
             steps.entry(label).or_default().add(elapsed(*start));
         }
-        serde_json::json!({"provider":"chatgpt","sequence":self.sequence,"command_queue_us":self.command_queue_us,"consumer_cancelled":self.consumer_cancelled,"scope":"browser_attempt","future_returned":returned,
+        serde_json::json!({"schema_version":1,"provider":"chatgpt","sequence":self.sequence,"sequence_available":self.sequence.is_some(),"command_queue_us":self.command_queue_us,"consumer_cancelled":self.consumer_cancelled,"scope":"browser_attempt","future_returned":returned,
             "last_stage":self.stage.label(),"elapsed_us":elapsed(self.started),"phases":phases,"steps":steps,
             "baseline":self.baseline,"recent_samples":self.recent,"polls":self.polls,
+            "poll_streaming_seen":self.poll_streaming_seen,"poll_affordance_seen":self.poll_affordance_seen,
+            "poll_nonbaseline_text_seen":self.poll_nonbaseline_text_seen,"max_poll_response_count":self.max_poll_response_count,"max_poll_populated_count":self.max_poll_populated_count,
             "submission_returned":self.submission_returned,"first_content_seen":self.first_content_seen,
             "terminal_attempted":self.terminal_attempted,"content_evidence":self.content_evidence,"timing_semantics":"scope_lifetime_including_cancellation"})
     }
 }
 struct Context {
     state: RefCell<Observation>,
-    sequence: u64,
+    sequence: Option<u64>,
     dropped_steps: Cell<u64>,
     dropped_updates: Cell<u64>,
 }
 impl Context {
-    fn new() -> Self {
-        let state = Observation::new();
+    fn new(sequence: Option<u64>) -> Self {
+        let state = Observation::new(sequence);
         let sequence = state.sequence;
         Self {
             state: RefCell::new(state),
@@ -183,7 +193,13 @@ pub(crate) fn poll(probe: &ResponseProbe, baseline: Option<&str>) {
         if s.recent.len() == 8 {
             s.recent.pop_front();
         }
-        s.recent.push_back(sample(probe, baseline));
+        let point = sample(probe, baseline);
+        s.poll_streaming_seen |= point.streaming;
+        s.poll_affordance_seen |= point.post_answer_affordance;
+        s.poll_nonbaseline_text_seen |= point.text_present && !point.matches_baseline;
+        s.max_poll_response_count = s.max_poll_response_count.max(point.count);
+        s.max_poll_populated_count = s.max_poll_populated_count.max(point.populated_count);
+        s.recent.push_back(point);
     });
 }
 pub(crate) fn first_content() {
@@ -258,11 +274,13 @@ struct Reporter {
 }
 impl Drop for Reporter {
     fn drop(&mut self) {
-        let incomplete = self.state.dropped_steps.get() > 0 || self.state.dropped_updates.get() > 0;
+        let incomplete = self.state.sequence.is_none()
+            || self.state.dropped_steps.get() > 0
+            || self.state.dropped_updates.get() > 0;
         let mut report = match self.state.state.try_borrow() {
             Ok(s) => s.report(self.returned),
             Err(_) => {
-                serde_json::json!({"provider":"chatgpt","scope":"browser_attempt","sequence":self.state.sequence,
+                serde_json::json!({"schema_version":1,"provider":"chatgpt","scope":"browser_attempt","sequence":self.state.sequence,"sequence_available":self.state.sequence.is_some(),
                 "future_returned":self.returned,"observation_incomplete":true,"reporting_error":"state_borrowed"})
             }
         };
@@ -274,8 +292,12 @@ impl Drop for Reporter {
         (self.sink)(report);
     }
 }
-async fn with_sink<F: Future>(future: F, sink: Rc<dyn Fn(serde_json::Value)>) -> F::Output {
-    let state = Rc::new(Context::new());
+async fn with_sequence<F: Future>(
+    sequence: Option<u64>,
+    future: F,
+    sink: Rc<dyn Fn(serde_json::Value)>,
+) -> F::Output {
+    let state = Rc::new(Context::new(sequence));
     let mut reporter = Reporter {
         state: state.clone(),
         returned: false,
@@ -285,8 +307,15 @@ async fn with_sink<F: Future>(future: F, sink: Rc<dyn Fn(serde_json::Value)>) ->
     reporter.returned = true;
     output
 }
-pub(crate) async fn scope<F: Future>(future: F) -> F::Output {
-    with_sink(future,Rc::new(|report| {
+#[cfg(test)]
+async fn with_sink<F: Future>(future: F, sink: Rc<dyn Fn(serde_json::Value)>) -> F::Output {
+    with_sequence(Some(1), future, sink).await
+}
+pub(crate) async fn scope<F: Future>(
+    metrics: crate::metrics::MetricsRegistry,
+    future: F,
+) -> F::Output {
+    with_sequence(metrics.next_chatgpt_attempt_sequence(),future,Rc::new(|report| {
         tracing::info!(observation=%report,"ChatGPT browser attempt observation (content-free)");
     })).await
 }
@@ -459,7 +488,7 @@ mod tests {
     }
     #[test]
     fn sample_and_all_timing_values_are_bounded() {
-        let mut s = Observation::new();
+        let mut s = Observation::new(Some(1));
         s.steps.entry("submission").or_default().add(u64::MAX);
         // Snapshot caps durations even for hostile test-supplied measurements.
         assert_eq!(s.steps["submission"].sum_us, MAX_US);
@@ -503,7 +532,7 @@ mod tests {
     }
     #[test]
     fn bounded_and_borrow_conflicts_are_reported_without_panics() {
-        let state = Rc::new(Context::new());
+        let state = Rc::new(Context::new(Some(1)));
         let reports = Rc::new(RefCell::new(Vec::new()));
         let sink = reports.clone();
         let reporter = Reporter {
@@ -592,5 +621,50 @@ mod tests {
         assert_eq!(r["first_content_seen"], false);
         assert_eq!(r["last_stage"], "first_content");
         assert_eq!(r["steps"]["first_content_settle"]["count"], 1);
+    }
+    #[tokio::test]
+    async fn unavailable_runtime_sequence_is_explicitly_incomplete() {
+        let reports = Rc::new(RefCell::new(Vec::new()));
+        let sink = reports.clone();
+        with_sequence(None, async {}, Rc::new(move |r| sink.borrow_mut().push(r))).await;
+        let reports = reports.borrow();
+        let r = &reports[0];
+        assert!(r["sequence"].is_null());
+        assert_eq!(r["sequence_available"], false);
+        assert_eq!(r["observation_incomplete"], true);
+    }
+    #[tokio::test]
+    async fn poll_aggregates_survive_ring_eviction_without_retaining_text() {
+        let reports = Rc::new(RefCell::new(Vec::new()));
+        let sink = reports.clone();
+        with_sink(
+            async {
+                poll(
+                    &ResponseProbe {
+                        text: Some("synthetic-private".to_owned()),
+                        count: 4000,
+                        populated_count: 3000,
+                        streaming: true,
+                        post_answer_affordance: true,
+                        ..Default::default()
+                    },
+                    None,
+                );
+                for _ in 0..10 {
+                    poll(&ResponseProbe::default(), None);
+                }
+            },
+            Rc::new(move |r| sink.borrow_mut().push(r)),
+        )
+        .await;
+        let reports = reports.borrow();
+        let r = &reports[0];
+        assert_eq!(r["recent_samples"][0]["text_present"], false);
+        assert_eq!(r["max_poll_response_count"], 4000);
+        assert_eq!(r["max_poll_populated_count"], 3000);
+        assert_eq!(r["poll_streaming_seen"], true);
+        assert_eq!(r["poll_affordance_seen"], true);
+        assert_eq!(r["poll_nonbaseline_text_seen"], true);
+        assert!(!r.to_string().contains("synthetic-private"));
     }
 }

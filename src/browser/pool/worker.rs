@@ -1893,7 +1893,7 @@ pub(super) fn browser_thread(
                                 if provider == Provider::MetaAI {
                                     crate::metaai_timing::scope(timing_metrics, work).await;
                                 } else if provider == Provider::ChatGPT {
-                                    providers::chatgpt::attempt_diagnostics::scope(work).await;
+                                    providers::chatgpt::attempt_diagnostics::scope(timing_metrics,work).await;
                                 } else { work.await; }
                             });
                         }
