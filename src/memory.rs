@@ -894,8 +894,7 @@ impl UnifiedMemory {
                 expected == current
             }
             Some(AdmissionIdentity::Absent(epoch)) => {
-                if current_identity.is_some()
-                    || read_deletion_epoch(&tx, &conversation_id)? != *epoch
+                if current_identity.is_some() || read_deletion_epoch(&tx, &conversation_id)? != *epoch
                 {
                     anyhow::bail!("conversation absence changed during provider request");
                 }

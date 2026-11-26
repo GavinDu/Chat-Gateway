@@ -2597,6 +2597,94 @@ fn v9_upgrade_allocates_durable_identity_and_recreation_changes_it() {
     );
 }
 
+#[test]
+fn v10_upgrade_preserves_identities_and_allocates_bounded_epochs() {
+    let fixture = Fixture::new();
+    let memory = fixture.open();
+    store(&memory, "migration-a", "preserve");
+    let identity = read_identity(&memory.lock().unwrap(), "migration-a").unwrap();
+    let history = memory.conversation("migration-a").unwrap();
+    memory
+        .lock()
+        .unwrap()
+        .execute_batch(
+            "DROP TRIGGER conversation_epoch_on_delete;
+             DROP TABLE conversation_deletion_epochs;
+             PRAGMA user_version=10;",
+        )
+        .unwrap();
+    drop(memory);
+    let memory = fixture.open();
+    assert_eq!(
+        read_identity(&memory.lock().unwrap(), "migration-a").unwrap(),
+        identity
+    );
+    assert_eq!(memory.conversation("migration-a").unwrap(), history);
+    assert_eq!(
+        read_deletion_epoch(&memory.lock().unwrap(), "migration-a").unwrap(),
+        0
+    );
+    assert!(memory
+        .delete_conversation_for_owner("local", "migration-a")
+        .unwrap());
+    assert_eq!(
+        read_deletion_epoch(&memory.lock().unwrap(), "migration-a").unwrap(),
+        1
+    );
+    assert_eq!(
+        read_deletion_epoch(&memory.lock().unwrap(), "unrelated-b").unwrap(),
+        0
+    );
+    drop(memory);
+    let reopened = fixture.open();
+    assert_eq!(
+        read_deletion_epoch(&reopened.lock().unwrap(), "migration-a").unwrap(),
+        1
+    );
+    assert_eq!(
+        reopened
+            .lock()
+            .unwrap()
+            .query_row("SELECT count(*) FROM conversation_deletion_epochs", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+        64
+    );
+}
+
+#[test]
+fn missing_or_exhausted_deletion_epoch_rolls_back_delete() {
+    for missing in [true, false] {
+        let fixture = Fixture::new();
+        let memory = fixture.open();
+        store(&memory, "epoch-a", "must survive");
+        let history = memory.conversation("epoch-a").unwrap();
+        {
+            let connection = memory.lock().unwrap();
+            if missing {
+                connection
+                    .execute(
+                        "DELETE FROM conversation_deletion_epochs WHERE bucket=33",
+                        [],
+                    )
+                    .unwrap();
+            } else {
+                connection
+                    .execute(
+                        "UPDATE conversation_deletion_epochs SET epoch=?1 WHERE bucket=33",
+                        [i64::MAX],
+                    )
+                    .unwrap();
+            }
+        }
+        assert!(memory
+            .delete_conversation_for_owner("local", "epoch-a")
+            .is_err());
+        assert_eq!(memory.conversation("epoch-a").unwrap(), history);
+    }
+}
+
 #[tokio::test]
 async fn absent_admission_cannot_resurrect_after_create_delete_or_purge() {
     for purge in [false, true] {
@@ -2633,7 +2721,11 @@ async fn absent_admission_cannot_resurrect_after_create_delete_or_purge() {
             expected_marker: transcript_marker(&snapshot.context.3),
             expected_identity: snapshot.identity,
         };
-        assert!(reopened.clone().persist_turn_from_snapshot(turn).await.is_err());
+        assert!(reopened
+            .clone()
+            .persist_turn_from_snapshot(turn)
+            .await
+            .is_err());
         assert!(reopened.conversation("absent-target-a").unwrap().is_none());
     }
 }
