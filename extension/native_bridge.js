@@ -14,6 +14,13 @@
   const states = ["syncing","uploaded","saved_activation_pending","unchanged","no_cookies","skipped","failed","not_attempted"];
   const issues = ["partition_scope_unsupported","gateway_cancelled","gateway_timeout","permission_or_consent","activation_timeout","gateway_unauthorized","relay_unavailable","activation_pending","not_connected","gateway_connection_changed","gateway_request_failed"];
   const flag = value => typeof value === "boolean" ? value : null;
+  function redactedPartitionCounts(value) {
+    const fields = ["unpartitioned", "current_site", "current_cross_site_ancestor", "current_ancestor_unspecified", "foreign_site", "unknown"];
+    if (!value || typeof value !== "object" || Array.isArray(value) ||
+        fields.some(key => !Number.isInteger(value[key]) || value[key] < 0 || value[key] > 512) ||
+        fields.reduce((total, key) => total + value[key], 0) > 512) return null;
+    return {...Object.fromEntries(fields.map(key => [key, value[key]])), limited: value.limited === true};
+  }
   function project(snapshot) {
     const e = snapshot?.extension;
     const rows = Array.isArray(snapshot?.gateway?.providers) ? snapshot.gateway.providers : [];
@@ -35,6 +42,7 @@
           activation: pick(row?.activation, ["pending","ready","failed","cancelled","not_attempted"]),
           successful_chat_observed: flag(row?.successful_chat_observed),
           sync_state: pick(sync?.state, states), sync_issue: sync?.issue == null ? null : pick(sync.issue, issues),
+          partition_counts: provider === "chatgpt" ? redactedPartitionCounts(sync?.partition_counts) : null,
           stale: sync?.stale !== false
         };
       })

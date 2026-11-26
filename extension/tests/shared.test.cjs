@@ -51,7 +51,7 @@ function loadShared(cookieFixtures = [], hasAllPermissions = true, storageValues
   };
   vm.createContext(context);
   const source = fs.readFileSync(require.resolve("../shared.js"), "utf8");
-  vm.runInContext(source + "\nglobalThis.__testApi = { normalizeGateway, providerCookieSnapshot, relayFetch, syncProvider, PROVIDERS };", context);
+  vm.runInContext(source + "\nglobalThis.__testApi = { normalizeGateway, providerCookieSnapshot, relayFetch, syncProvider, PROVIDERS, classifyChatgptPartitionKey };", context);
   return { ...context.__testApi, getCookieReads: () => cookieReads,
     getCookieQueries: () => cookieQueries, fetchCalls };
 }
@@ -1127,4 +1127,53 @@ test("untyped or status-mismatched activation responses cannot claim persisted c
     assert.equal(storage.relaySnapshotVersions,undefined);
     assert.equal(api.fetchCalls.length,1);
   }
+});
+
+test("ChatGPT partition metadata classifier returns fixed categories only", () => {
+  const api=loadShared();
+  for (const [key, expected] of [
+    [undefined,"unpartitioned"], [null,"unpartitioned"],
+    [{topLevelSite:"https://chatgpt.com",hasCrossSiteAncestor:false},"current_site"],
+    [{topLevelSite:"https://chatgpt.com",hasCrossSiteAncestor:true},"current_cross_site_ancestor"],
+    [{topLevelSite:"https://chatgpt.com"},"current_ancestor_unspecified"],
+    [{topLevelSite:"https://unrelated.example",hasCrossSiteAncestor:false},"foreign_site"],
+    [{},"unknown"], ["https://private.invalid","unknown"], [[],"unknown"],
+    [{topLevelSite:"https://sub.chatgpt.com",hasCrossSiteAncestor:false},"unknown"],
+    [{topLevelSite:"http://chatgpt.com",hasCrossSiteAncestor:false},"unknown"],
+    [{topLevelSite:"https://chatgpt.com:8443",hasCrossSiteAncestor:false},"unknown"],
+    [{topLevelSite:"https://chatgpt.com/",hasCrossSiteAncestor:false},"unknown"],
+    [{topLevelSite:"https://chatgpt.com/private?token=secret",hasCrossSiteAncestor:false},"unknown"],
+    [{topLevelSite:"https://user:secret@chatgpt.com",hasCrossSiteAncestor:false},"unknown"],
+    [{topLevelSite:"data:text/html,secret",hasCrossSiteAncestor:false},"unknown"],
+    [{topLevelSite:"https://chatgpt.com",hasCrossSiteAncestor:"secret"},"unknown"],
+    [{topLevelSite:"https://chatgpt.com",futureScope:"secret"},"unknown"],
+  ]) assert.equal(api.classifyChatgptPartitionKey(key),expected);
+});
+test("partition rejection reports deduplicated bounded counts while upload remains blocked", async () => {
+  const keys=[undefined,{topLevelSite:"https://chatgpt.com",hasCrossSiteAncestor:false},
+    {topLevelSite:"https://chatgpt.com",hasCrossSiteAncestor:true},
+    {topLevelSite:"https://chatgpt.com"},{topLevelSite:"https://unrelated.example"},{}];
+  const cookies=keys.map((partitionKey,i)=>({name:"private-name-"+i,value:"private-value",domain:".chatgpt.com",path:"/",secure:true,partitionKey}));
+  const storage={gateway:"http://127.0.0.1:8080",connectionMode:"local",linkedProviders:["chatgpt"],relaySnapshotVersions:{chatgpt:"prior"}};
+  const api=loadShared(cookies,true,storage);
+  await assert.rejects(()=>api.syncProvider("chatgpt",{force:true}),error=>{
+    assert.equal(error.message,"Unsupported browser cookie partition scope; existing gateway session was preserved.");
+    assert.deepEqual(JSON.parse(JSON.stringify(error.partitionCounts)),{unpartitioned:1,current_site:1,current_cross_site_ancestor:1,current_ancestor_unspecified:1,foreign_site:1,unknown:1,limited:false});
+    assert.doesNotMatch(JSON.stringify(error.partitionCounts),/private|unrelated|chatgpt.com/);
+    return true;
+  });
+  assert.equal(api.fetchCalls.length,0);
+  assert.equal(storage.relaySnapshotVersions.chatgpt,"prior");
+});
+test("partition diagnostics bound large captures and are unavailable after permission revocation", async () => {
+  const cookies=Array.from({length:513},(_,i)=>({name:"private-"+i,value:"private-value",domain:".chatgpt.com",path:"/",secure:true,partitionKey:{topLevelSite:"https://unrelated.example"}}));
+  const limited=loadShared(cookies);
+  await assert.rejects(()=>limited.providerCookieSnapshot("chatgpt"),error=>{
+    assert.equal(error.partitionCounts.foreign_site,512);assert.equal(error.partitionCounts.limited,true);return true;
+  });
+  let allowed=true;
+  const revoked=loadShared(cookies,true,{}, {hasPermissions:()=>allowed,onCookieRead:()=>{allowed=false;}});
+  await assert.rejects(()=>revoked.providerCookieSnapshot("chatgpt"),error=>{
+    assert.match(error.message,/revoked/);assert.equal(error.partitionCounts,undefined);return true;
+  });
 });

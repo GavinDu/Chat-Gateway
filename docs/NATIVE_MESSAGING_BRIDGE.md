@@ -43,3 +43,14 @@ python3 -m unittest discover -s scripts -p test_native_reload_bridge.py
 ```
 
 Existing Rust CI discovers both suites. Actual Chrome acceptance on the owner Mac is tracked by #1610. Validate ping, persistent local opt-out, missing host, restart, reload while busy, and provider diagnostics against ChatGPT and Meta AI. Provider account login and permissions remain explicit user actions.
+
+### ChatGPT partition capture diagnostics
+
+Extension 0.3.2 adds only bounded numeric `partition_counts` to the current
+ChatGPT sync attempt. They distinguish unpartitioned cookies, the current
+ChatGPT site with/without a cross-site ancestor, unspecified ancestor scope,
+foreign-site partitions and unknown metadata. At most 512 unique cookie scopes
+are counted; `limited` marks a truncated observation. These are metadata counts,
+not authenticated-account evidence. Values, names, domains and partition URLs
+stay inside Chrome. Counts are permission/consent scoped and rejected snapshots
+still fail before upload; no partition scope is dropped or flattened.

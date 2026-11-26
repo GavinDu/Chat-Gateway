@@ -116,6 +116,15 @@ async function hasOriginPermissions(origins) {
   try { return Boolean(await chrome.permissions.contains({origins})); }
   catch { return false; }
 }
+
+function redactedPartitionCounts(value) {
+  const fields = ["unpartitioned", "current_site", "current_cross_site_ancestor", "current_ancestor_unspecified", "foreign_site", "unknown"];
+  if (!value || typeof value !== "object" || Array.isArray(value) ||
+      fields.some(key => !Number.isInteger(value[key]) || value[key] < 0 || value[key] > 512) ||
+      fields.reduce((total, key) => total + value[key], 0) > 512) return null;
+  return {...Object.fromEntries(fields.map(key => [key, value[key]])), limited: value.limited === true};
+}
+
 function recordProviderDiagnostic(provider, state, errorCode = null, attempt = null, telemetry = null) {
   // A provider sync attempt is NOT authenticated-login verification.
   // Store only stable local result codes, never raw upstream responses.
@@ -125,7 +134,8 @@ function recordProviderDiagnostic(provider, state, errorCode = null, attempt = n
     state: safeState, issue: errorCode, updated_at: new Date().toISOString(),
     phase: safeState === "syncing" && IMPORT_PHASES.includes(telemetry?.phase)
       ? telemetry.phase : null,
-    durations_ms: redactedImportTimings(telemetry?.durations_ms)
+    durations_ms: redactedImportTimings(telemetry?.durations_ms),
+    partition_counts: provider === "chatgpt" ? redactedPartitionCounts(telemetry?.partition_counts) : null
   };
   providerDiagnostics.set(provider, entry);
   if (attempt) providerDiagnosticEpochs.set(provider, attempt.providerLinkEpochs?.[provider]);
@@ -150,6 +160,7 @@ function finalizeRelayDiagnostics(result, requestedGeneration, requestedEpochs) 
         updated_at: previous?.updated_at || null,
         phase: previous?.phase || null,
         durations_ms: redactedImportTimings(previous?.durations_ms),
+        partition_counts: provider === "chatgpt" ? redactedPartitionCounts(previous?.partition_counts) : null,
         stale: !result.ok,
       }];
     })
@@ -678,7 +689,10 @@ function queueProviderSync(provider, force = false) {
       return result;
     } catch (error) {
       if (await providerDiagnosticScopeCurrent(provider, attempt)) {
-        recordProviderDiagnostic(provider, "failed", classifyRelayFailure(error), attempt, inProgress);
+        recordProviderDiagnostic(provider, "failed", classifyRelayFailure(error), attempt, {
+          ...inProgress,
+          partition_counts: classifyRelayFailure(error) === "partition_scope_unsupported" ? error?.partitionCounts : null
+        });
       } else {
         clearStaleProgress();
       }
