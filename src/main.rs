@@ -1818,7 +1818,7 @@ mod attempt_thread_publication_tests {
             assert_eq!(
                 state
                     .memory
-                    .conversation(id)
+                    .export_conversation_for_owner("local", id)
                     .unwrap()
                     .unwrap()
                     .messages

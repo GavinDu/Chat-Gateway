@@ -454,7 +454,7 @@ impl ChatBackend for crate::browser::pool::ObscuraPool {
         &self,
         request: ChatRequest,
     ) -> std::result::Result<mpsc::Receiver<Result<ChatEvent, GatewayError>>, GatewayError> {
-        self.send_stream_with_thread_observation(request)
+        <Self as ChatBackend>::send_stream_with_thread_observation(self, request)
             .await
             .map(|stream| stream.events)
     }
