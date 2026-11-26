@@ -98,6 +98,70 @@ fn safe_hostname(host: &str) -> &str {
     }
 }
 
+fn chatgpt_endpoint_kind(url: &reqwest::Url) -> &'static str {
+    if url.scheme() != "https" {
+        return "other";
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return "other";
+    }
+    if url.port_or_known_default() != Some(443) {
+        return "other";
+    }
+    match url.host_str() {
+        Some("chatgpt.com") | Some("www.chatgpt.com") => {}
+        _ => return "other",
+    }
+    let path = url.path();
+    match path {
+        "/api/auth/session" => "auth_session",
+        "/backend-api/me" => "account",
+        "/backend-api/conversation" | "/backend-api/f/conversation" => "conversation_submit",
+        "/backend-api/conversation/prepare" | "/backend-api/f/conversation/prepare" => {
+            "conversation_prepare"
+        }
+        "/backend-api/conversation/resume" | "/backend-api/f/conversation/resume" => {
+            "conversation_resume"
+        }
+        "/.well-known/chat-gateway-websocket" => "websocket_bridge",
+        _ => {
+            if path.ends_with(".js") || path.ends_with(".mjs") {
+                "static_asset"
+            } else {
+                "first_party_other"
+            }
+        }
+    }
+}
+
+fn method_kind(method: &str) -> &'static str {
+    match method {
+        "GET" => "get",
+        "POST" => "post",
+        _ => "other",
+    }
+}
+
+fn content_type_kind(value: Option<&str>) -> &'static str {
+    let Some(value) = value else {
+        return "absent";
+    };
+    let mime = value.split(';').next().unwrap_or_default().trim();
+    if mime.eq_ignore_ascii_case("text/event-stream") {
+        "event_stream"
+    } else if mime.eq_ignore_ascii_case("application/json") {
+        "json"
+    } else if mime.eq_ignore_ascii_case("text/html") {
+        "html"
+    } else if mime.eq_ignore_ascii_case("text/javascript")
+        || mime.eq_ignore_ascii_case("application/javascript")
+    {
+        "javascript"
+    } else {
+        "other"
+    }
+}
+
 fn provider_network_tap_reported_bytes(body_len: usize) -> usize {
     body_len.min(MAX_PROVIDER_NETWORK_TAP_REPORTED_BYTES)
 }
@@ -120,6 +184,36 @@ pub(super) fn attach_provider_network_tap(
         return None;
     }
 
+    // Dispatch events are bounded per page. Endpoint labels are a closed
+    // vocabulary: paths/queries/IDs and header values never leave the callback.
+    // These events cannot pair concurrent requests or prove remote delivery.
+    if verbose_enabled && provider == Provider::ChatGPT {
+        let dispatched = Arc::new(AtomicUsize::new(0));
+        page.on_request(Arc::new(move |info| {
+            if !matches!(
+                info.resource_type,
+                obscura_core::ResourceType::Fetch | obscura_core::ResourceType::Xhr
+            ) {
+                return;
+            }
+            let Ok(previous) =
+                dispatched.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+                    (count < 256).then_some(count.saturating_add(1))
+                })
+            else {
+                return;
+            };
+            tracing::debug!(
+                provider = "chatgpt",
+                scope = "page_request",
+                observation_sequence = previous + 1,
+                observation_limit = 256,
+                endpoint_kind = chatgpt_endpoint_kind(&info.url),
+                method_kind = method_kind(&info.method),
+                "ChatGPT request dispatched (fixed metadata only)"
+            );
+        }));
+    }
     let provider_name = provider.name();
     let script_errors_seen = Arc::new(AtomicUsize::new(0));
     let metaai_documents_seen = Arc::new(AtomicUsize::new(0));
@@ -216,6 +310,11 @@ pub(super) fn attach_provider_network_tap(
             status = response.status,
             response_bytes_observed = provider_network_tap_reported_bytes(response.body.len()),
             response_bytes_truncated = response.body.len() > MAX_PROVIDER_NETWORK_TAP_REPORTED_BYTES,
+            scope = "page_response",
+            request_endpoint_kind = if provider == Provider::ChatGPT { chatgpt_endpoint_kind(&info.url) } else { "not_applicable" },
+            response_endpoint_kind = if provider == Provider::ChatGPT { chatgpt_endpoint_kind(&response.url) } else { "not_applicable" },
+            method_kind = method_kind(&info.method),
+            content_type_kind = content_type_kind(response.content_type()),
             "provider network response observed (metadata only)"
         );
     }));
@@ -421,5 +520,80 @@ mod tests {
         assert!(provider_network_tap_provider_supported(Provider::ChatGPT));
         assert!(provider_network_tap_provider_supported(Provider::Claude));
         assert!(!provider_network_tap_provider_supported(Provider::Gemini));
+    }
+}
+
+#[cfg(test)]
+mod chatgpt_network_metadata_tests {
+    use super::*;
+    #[test]
+    fn diagnostics_classify_protocol_roles_without_exporting_secrets() {
+        for (path, expected) in [
+            ("/api/auth/session", "auth_session"),
+            ("/backend-api/me", "account"),
+            ("/backend-api/conversation", "conversation_submit"),
+            ("/backend-api/f/conversation", "conversation_submit"),
+            ("/backend-api/conversation/prepare", "conversation_prepare"),
+            (
+                "/backend-api/f/conversation/prepare",
+                "conversation_prepare",
+            ),
+            ("/backend-api/conversation/resume", "conversation_resume"),
+            ("/backend-api/f/conversation/resume", "conversation_resume"),
+            ("/.well-known/chat-gateway-websocket", "websocket_bridge"),
+            ("/assets/fixture.js", "static_asset"),
+            ("/assets/fixture.mjs", "static_asset"),
+            ("/c/synthetic-private-thread", "first_party_other"),
+            (
+                "/backend-api/conversation/synthetic-private-thread",
+                "first_party_other",
+            ),
+            ("/backend-api/me/extra", "first_party_other"),
+        ] {
+            for origin in ["https://chatgpt.com", "https://www.chatgpt.com:443"] {
+                let url =
+                    reqwest::Url::parse(&format!("{origin}{path}?token=synthetic-private#private"))
+                        .unwrap();
+                assert_eq!(chatgpt_endpoint_kind(&url), expected);
+                assert!(!chatgpt_endpoint_kind(&url).contains("private"));
+            }
+        }
+    }
+    #[test]
+    fn foreign_insecure_credentialed_and_lookalike_urls_are_other() {
+        for value in [
+            "http://chatgpt.com/backend-api/me",
+            "https://chatgpt.com:8443/backend-api/me",
+            "https://chatgpt.com.evil.invalid/backend-api/me",
+            "https://other.invalid/backend-api/me",
+            "https://chatgpt.com@evil.invalid/backend-api/me",
+            "https://synthetic:private@chatgpt.com/backend-api/me",
+            "https://ws.chatgpt.com/backend-api/me",
+            "https://meta.ai/backend-api/me",
+            "data:text/plain,synthetic-private",
+            "https://127.0.0.1/backend-api/me",
+        ] {
+            let url = reqwest::Url::parse(value).unwrap();
+            assert_eq!(chatgpt_endpoint_kind(&url), "other");
+        }
+    }
+    #[test]
+    fn arbitrary_header_values_and_methods_never_become_diagnostic_labels() {
+        for (value, expected) in [
+            (None, "absent"),
+            (Some(" Text/Event-Stream; charset=utf-8"), "event_stream"),
+            (Some("application/json; private=synthetic"), "json"),
+            (Some("text/html"), "html"),
+            (Some("application/javascript"), "javascript"),
+            (Some("text/javascript"), "javascript"),
+            (Some("synthetic-private"), "other"),
+            (Some("application/json-synthetic"), "other"),
+            (Some(""), "other"),
+        ] {
+            assert_eq!(content_type_kind(value), expected);
+        }
+        assert_eq!(method_kind("GET"), "get");
+        assert_eq!(method_kind("POST"), "post");
+        assert_eq!(method_kind("SYNTHETIC-PRIVATE"), "other");
     }
 }
