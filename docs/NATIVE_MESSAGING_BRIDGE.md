@@ -1,13 +1,13 @@
 # Local native messaging development bridge (macOS)
 
-Epic #1605. This is optional and does not change the loopback gateway, provider permissions, session vault or Obscura runtime. Do not enable on an untrusted user account. Local processes running as your macOS user can reach the private socket; this is not isolation from same-user malware. Only one Chrome profile can own the bridge at a time.
+Epic #1605. The local bridge is enabled by default from extension version 0.3.1 and does not change the loopback gateway, provider permissions, session vault or Obscura runtime. Disable the bridge or do not register its host on an untrusted user account. Chrome may require acceptance of its standard install/update permission warning. Local processes running as your macOS user can reach the private socket; this is not isolation from same-user malware. Only one Chrome profile can own the bridge at a time.
 
 ## Install
 
 1. Load the repository's existing `extension/` directory at chrome://extensions (Developer mode).
 2. Copy its exact 32-character extension ID (letters a–p).
 3. From the repository root run `python3 scripts/native_reload_bridge.py install YOUR_EXTENSION_ID`. Requires Python 3.8+; install uses the absolute interpreter path. Do not use sudo.
-4. Open the extension's **Extension options** and select **Enable native messaging**. If Chrome cannot discover the newly registered host, quit and reopen Chrome. The worker retries on a one-minute alarm if the host disconnects.
+4. Native messaging starts automatically; no Extension options click is required. If Chrome cannot discover the newly registered host, quit and reopen Chrome or allow the worker to retry on its one-minute reconnect alarm. An explicitly disabled bridge remains disabled until re-enabled from Extension options.
 5. Run these commands:
 
 ```bash
@@ -27,7 +27,7 @@ Reload is refused while provider sync, consent mutation or scheduled refresh is 
 
 ## Remove
 
-Disable native messaging from Extension options first. Then run `python3 scripts/native_reload_bridge.py uninstall`. This removes only host registration; the private host directory remains for explicit cleanup after Chrome stops the host.
+Select **Disable local bridge** from Extension options first. This persists across reloads and closes the active port; it does not revoke Chrome's required nativeMessaging permission. Then run `python3 scripts/native_reload_bridge.py uninstall`. This removes only host registration; the private host directory remains for explicit cleanup after Chrome stops the host.
 
 ## Verification
 
@@ -36,4 +36,4 @@ node --test extension/tests/native_bridge.test.cjs
 python3 -m unittest discover -s scripts -p test_native_reload_bridge.py
 ```
 
-Existing Rust CI discovers both suites. Actual Chrome acceptance on the owner Mac is tracked by #1610. Validate ping, permission revocation, missing host, restart, reload while busy, and provider diagnostics against ChatGPT and Meta AI. Provider account login and permissions remain explicit user actions.
+Existing Rust CI discovers both suites. Actual Chrome acceptance on the owner Mac is tracked by #1610. Validate ping, persistent local opt-out, missing host, restart, reload while busy, and provider diagnostics against ChatGPT and Meta AI. Provider account login and permissions remain explicit user actions.
