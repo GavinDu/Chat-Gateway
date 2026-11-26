@@ -176,6 +176,46 @@ async function relayFetch(path, options = {}, expectedConnection = null) {
   }
 }
 
+// Return categories only. Keep every source key and URL inside Chrome.
+function classifyChatgptPartitionKey(p) {
+  if (p === null || p === undefined) return "unpartitioned";
+  if (typeof p !== "object" || Array.isArray(p)) return "unknown";
+  for (const key of Object.keys(p)) {
+    if (key !== "topLevelSite" && key !== "hasCrossSiteAncestor") return "unknown";
+  }
+  if (!Object.hasOwn(p, "topLevelSite") || typeof p.topLevelSite !== "string") return "unknown";
+  const ancestorPresent = Object.hasOwn(p, "hasCrossSiteAncestor");
+  if (ancestorPresent && typeof p.hasCrossSiteAncestor !== "boolean") return "unknown";
+  let u;
+  try { u = new URL(p.topLevelSite); } catch (_) { return "unknown"; }
+  if ((u.protocol !== "http:" && u.protocol !== "https:") ||
+      u.username || u.password || u.port || u.search || u.hash || u.pathname !== "/" ||
+      u.origin !== p.topLevelSite || u.href !== u.origin + "/" ||
+      !u.hostname || u.hostname !== u.hostname.toLowerCase()) return "unknown";
+  if (u.origin === "https://chatgpt.com" && u.hostname === "chatgpt.com") {
+    if (!ancestorPresent) return "current_ancestor_unspecified";
+    return p.hasCrossSiteAncestor ? "current_cross_site_ancestor" : "current_site";
+  }
+  // A noncanonical ChatGPT scheme/subdomain is unknown, not safely foreign.
+  if (u.hostname === "chatgpt.com" || u.hostname.endsWith(".chatgpt.com")) return "unknown";
+  return "foreign_site";
+}
+
+const PARTITION_COUNT_FIELDS = ["unpartitioned", "current_site", "current_cross_site_ancestor", "current_ancestor_unspecified", "foreign_site", "unknown"];
+function chatgptPartitionDiagnostics(cookies) {
+  const counts = Object.fromEntries(PARTITION_COUNT_FIELDS.map(key => [key, 0]));
+  const seen = new Set();
+  counts.limited = false;
+  for (const cookie of cookies) {
+    const scope = JSON.stringify([cookie.domain, cookie.path, cookie.name, cookie.partitionKey ?? null]);
+    if (seen.has(scope)) continue;
+    if (seen.size >= 512) { counts.limited = true; break; }
+    seen.add(scope);
+    counts[classifyChatgptPartitionKey(cookie.partitionKey)]++;
+  }
+  return counts;
+}
+
 async function providerCookieSnapshot(provider, afterPermissionCheck = null) {
   // Never authorize an inherited Object.prototype name as a provider.
   if (typeof provider !== "string" || !Object.hasOwn(PROVIDERS, provider)) {
@@ -203,6 +243,19 @@ async function providerCookieSnapshot(provider, afterPermissionCheck = null) {
   const domainCookies = await Promise.all(domains.map(domain =>
     chrome.cookies.getAll({domain, partitionKey:{}})
   ));
+  // Chrome permissions may be revoked while asynchronous cookie reads are
+  // pending. Never return collected session material after consent changes.
+  if (!await chrome.permissions.contains({origins:requiredOrigins})) {
+    throw new Error("Provider host permissions were revoked during cookie collection.");
+  }
+  // Measurement only: partitioned snapshots still fail before any upload.
+  // Raw scope keys exist only in this Chrome realm, never in diagnostics.
+  const partitionCounts = provider === "chatgpt" ? chatgptPartitionDiagnostics(
+    domainCookies.flat().filter(cookie => {
+      const host = cookie.domain.replace(/^\./, "").toLowerCase();
+      return domains.some(root => host === root || host.endsWith("." + root));
+    })
+  ) : null;
   const loginHost = new URL(PROVIDER_LOGIN_URLS[provider]).hostname.toLowerCase();
   const all = [];
   for (const cookies of domainCookies) {
@@ -214,7 +267,9 @@ async function providerCookieSnapshot(provider, afterPermissionCheck = null) {
         // restore that scope. Never flatten it into an ordinary cookie or
         // publish a partial provider snapshot. Do not reflect partitionKey.
         if (cookie.partitionKey != null) {
-          throw new Error("Unsupported browser cookie partition scope; existing gateway session was preserved.");
+          const error = new Error("Unsupported browser cookie partition scope; existing gateway session was preserved.");
+          if (partitionCounts) error.partitionCounts = partitionCounts;
+          throw error;
         }
         // A host-only cookie is only sent to its exact host. A host-only copy on
         // a provider root (for example `google.com`) therefore cannot
@@ -246,11 +301,6 @@ async function providerCookieSnapshot(provider, afterPermissionCheck = null) {
         });
       }
     }
-  }
-  // Chrome permissions may be revoked while asynchronous cookie reads are
-  // pending. Never return collected session material after consent changes.
-  if (!await chrome.permissions.contains({origins:requiredOrigins})) {
-    throw new Error("Provider host permissions were revoked during cookie collection.");
   }
   const deduped = new Map(all.map(cookie => [cookie.domain + "\n" + cookie.path + "\n" + cookie.name, cookie]));
   return {cookies:Array.from(deduped.values()), local_storage:{}, ts:new Date().toISOString()};

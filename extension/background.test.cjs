@@ -1868,3 +1868,16 @@ test("reload resync retries after gateway outage on the next heartbeat",async()=
   for(let i=0;i<10;i++)await flushAsyncWork();
   assert.deepEqual(synced,[["chatgpt",true],["chatgpt",false]]);
 });
+
+test("partition count status is closed, bounded and isolated to ChatGPT",()=>{
+  const f=loadBackground(["chatgpt"]);
+  const counts={unpartitioned:2,current_site:1,current_cross_site_ancestor:0,current_ancestor_unspecified:0,foreign_site:0,unknown:0,limited:false,cookie:"SECRET",url:"https://private.invalid"};
+  const entry=f.sandbox.recordProviderDiagnostic("chatgpt","failed","partition_scope_unsupported",null,{partition_counts:counts});
+  assert.equal(entry.partition_counts.current_site,1);
+  const stale=f.sandbox.finalizeRelayDiagnostics({ok:true,extension:{linked_providers:["chatgpt"]}},0,{chatgpt:"new-consent"});
+  assert.equal(stale.extension.provider_sync.chatgpt.partition_counts,null);
+  assert.equal(Object.keys(entry.partition_counts).length,7);
+  assert.doesNotMatch(JSON.stringify(entry),/SECRET|private.invalid/);
+  assert.equal(f.sandbox.recordProviderDiagnostic("claude","failed",null,null,{partition_counts:counts}).partition_counts,null);
+  assert.equal(f.sandbox.recordProviderDiagnostic("chatgpt","failed",null,null,{partition_counts:{...counts,current_site:Infinity}}).partition_counts,null);
+});

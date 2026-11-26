@@ -21,7 +21,7 @@ The CLI uses a private directory (~/.chat-gateway-native, mode 0700), a Unix dom
 
 ## Contract
 
-Version 1 commands: ping, diagnostics, reload_extension. No arbitrary shell, eval, provider navigation, cookie exports or provider login automation. Diagnostics project only fixed provider names, booleans and category enums from the existing read-only relay diagnostics API. A saved session is not verified authentication or successful chat. No raw gateway response, account identifier, cookie, token or URL is returned.
+Version 1 commands: ping, diagnostics, reload_extension. No arbitrary shell, eval, provider navigation, cookie exports or provider login automation. Diagnostics project only fixed provider names, booleans, category enums and bounded ChatGPT cookie-context counts. Gateway status comes from the existing read-only relay diagnostics API; counts come from the authorized Chrome capture attempt. A saved session is not verified authentication or successful chat. No raw gateway response, account identifier, cookie, token or URL is returned.
 
 Reload is refused while provider sync, consent mutation or scheduled refresh is active. A successful preparation is not proof of completion. Host forwards the accepted response to the CLI before sending a matching internal reload_commit. The worker records the request receipt before calling runtime.reload. CLI waits up to 75 seconds for a different worker instance with the same receipt. This provides correlated restart evidence, not proof that a new source version was installed; compare reported version and use actual Chrome acceptance to verify source changes. No automatic retry of the reload command. Failure may be indeterminate; inspect ping before manually retrying. Pending browser debounce timers may be lost on reload; existing startup and periodic resync remain responsible for restoration.
 
@@ -43,3 +43,14 @@ python3 -m unittest discover -s scripts -p test_native_reload_bridge.py
 ```
 
 Existing Rust CI discovers both suites. Actual Chrome acceptance on the owner Mac is tracked by #1610. Validate ping, persistent local opt-out, missing host, restart, reload while busy, and provider diagnostics against ChatGPT and Meta AI. Provider account login and permissions remain explicit user actions.
+
+### ChatGPT partition capture diagnostics
+
+Extension 0.3.2 adds only bounded numeric `partition_counts` to the current
+ChatGPT sync attempt. They distinguish unpartitioned cookies, the current
+ChatGPT site with/without a cross-site ancestor, unspecified ancestor scope,
+foreign-site partitions and unknown metadata. At most 512 unique cookie scopes
+are counted; `limited` marks a truncated observation. These are metadata counts,
+not authenticated-account evidence. Values, names, domains and partition URLs
+stay inside Chrome. Counts are permission/consent scoped and rejected snapshots
+still fail before upload; no partition scope is dropped or flattened.
