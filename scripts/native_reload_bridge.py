@@ -100,7 +100,7 @@ def error_reply(req, code):
 
 
 def serve(extension_id, origin):
-    if not EXT_ID.fullmatch(extension_id) or origin != "chrome-extension://" + extension_id + "/":
+    if not EXT_ID.fullmatch(extension_id) or origin not in {"chrome-extension://" + extension_id, "chrome-extension://" + extension_id + "/"}:
         raise PermissionError("wrong extension origin")
     private_root()
     os.umask(0o077)
@@ -222,7 +222,7 @@ def main():
     native = sub.add_parser("host")
     native.add_argument("extension_id")
     native.add_argument("origin")
-    native.add_argument("chrome_args", nargs="*")
+    native.add_argument("chrome_args", nargs=argparse.REMAINDER)
     for command in sorted(COMMANDS):
         sub.add_parser(command)
     args = parser.parse_args()
