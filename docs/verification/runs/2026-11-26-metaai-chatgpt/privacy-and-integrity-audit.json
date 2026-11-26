@@ -1,0 +1,9 @@
+{
+  "status": "passed",
+  "json_documents_checked": 105,
+  "private_key_names_or_paths_detected": false,
+  "archive_crc_valid": true,
+  "local_handoff_links_exist": true,
+  "archive_sha256": "992287cfd7501bcc9af7ed36098fc2ce4c6d5c1219f13f520ba647c6681144b1",
+  "provider_requests_sent": 0
+}

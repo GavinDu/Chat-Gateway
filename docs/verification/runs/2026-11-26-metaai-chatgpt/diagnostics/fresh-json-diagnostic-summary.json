@@ -1,0 +1,404 @@
+{
+  "records": [
+    {
+      "schema_version": 1,
+      "provider": "chatgpt",
+      "scope": "browser_attempt",
+      "sequence": 1,
+      "sequence_available": true,
+      "future_returned": true,
+      "observation_incomplete": false,
+      "dropped_steps": 0,
+      "dropped_updates": 0,
+      "consumer_cancelled": true,
+      "submission_returned": true,
+      "first_content_seen": false,
+      "terminal_attempted": false,
+      "poll_streaming_seen": true,
+      "poll_affordance_seen": false,
+      "poll_nonbaseline_text_seen": false,
+      "elapsed_us": 120122937,
+      "command_queue_us": 707,
+      "polls": 259,
+      "max_poll_response_count": 0,
+      "max_poll_populated_count": 0,
+      "last_stage": "first_content",
+      "content_evidence": "none",
+      "timing_semantics": "scope_lifetime_including_cancellation",
+      "phases": {
+        "account_readiness": {
+          "count": 1,
+          "sum_us": 1626475,
+          "max_us": 1626475
+        },
+        "baseline": {
+          "count": 1,
+          "sum_us": 5552,
+          "max_us": 5552
+        },
+        "composer_ready": {
+          "count": 1,
+          "sum_us": 175647,
+          "max_us": 175647
+        },
+        "entry_guards": {
+          "count": 1,
+          "sum_us": 1718,
+          "max_us": 1718
+        },
+        "first_content": {
+          "count": 1,
+          "sum_us": 110658721,
+          "max_us": 110658721
+        },
+        "model_selection": {
+          "count": 1,
+          "sum_us": 17,
+          "max_us": 17
+        },
+        "navigation": {
+          "count": 1,
+          "sum_us": 2457872,
+          "max_us": 2457872
+        },
+        "operation_admission": {
+          "count": 1,
+          "sum_us": 148,
+          "max_us": 148
+        },
+        "page_restore": {
+          "count": 1,
+          "sum_us": 69,
+          "max_us": 69
+        },
+        "submission": {
+          "count": 1,
+          "sum_us": 5196672,
+          "max_us": 5196672
+        }
+      },
+      "steps": {
+        "baseline_probe": {
+          "count": 1,
+          "sum_us": 5551,
+          "max_us": 5551
+        },
+        "browser_settle": {
+          "count": 15,
+          "sum_us": 5427031,
+          "max_us": 1549756
+        },
+        "browser_sleep": {
+          "count": 15,
+          "sum_us": 14841,
+          "max_us": 2114
+        },
+        "composer_probe": {
+          "count": 2,
+          "sum_us": 176060,
+          "max_us": 175252
+        },
+        "composer_ready": {
+          "count": 1,
+          "sum_us": 175266,
+          "max_us": 175266
+        },
+        "composer_wait": {
+          "count": 1,
+          "sum_us": 815,
+          "max_us": 815
+        },
+        "draft_validation": {
+          "count": 1,
+          "sum_us": 192160,
+          "max_us": 192160
+        },
+        "entry_guards": {
+          "count": 1,
+          "sum_us": 1717,
+          "max_us": 1717
+        },
+        "first_content_probe": {
+          "count": 259,
+          "sum_us": 7916252,
+          "max_us": 270410
+        },
+        "first_content_processing": {
+          "count": 259,
+          "sum_us": 1795,
+          "max_us": 36
+        },
+        "first_content_settle": {
+          "count": 260,
+          "sum_us": 102614586,
+          "max_us": 6047334
+        },
+        "first_content_sleep": {
+          "count": 259,
+          "sum_us": 6736,
+          "max_us": 2500
+        },
+        "input_fill": {
+          "count": 1,
+          "sum_us": 506813,
+          "max_us": 506813
+        },
+        "input_settle": {
+          "count": 1,
+          "sum_us": 457698,
+          "max_us": 457698
+        },
+        "input_settle_engine": {
+          "count": 1,
+          "sum_us": 457131,
+          "max_us": 457131
+        },
+        "input_settle_sleep": {
+          "count": 1,
+          "sum_us": 566,
+          "max_us": 566
+        },
+        "model_selection": {
+          "count": 1,
+          "sum_us": 5,
+          "max_us": 5
+        },
+        "navigation": {
+          "count": 1,
+          "sum_us": 2402098,
+          "max_us": 2402098
+        },
+        "operation_gate": {
+          "count": 1,
+          "sum_us": 35,
+          "max_us": 35
+        },
+        "page_ensure": {
+          "count": 1,
+          "sum_us": 20,
+          "max_us": 20
+        },
+        "submission": {
+          "count": 1,
+          "sum_us": 5196672,
+          "max_us": 5196672
+        }
+      },
+      "baseline": {
+        "count": 0,
+        "populated_count": 0,
+        "text_bytes": 0,
+        "text_present": false,
+        "matches_baseline": false,
+        "streaming": false,
+        "post_answer_affordance": false,
+        "challenge": false
+      },
+      "recent_samples": [
+        {
+          "count": 0,
+          "populated_count": 0,
+          "text_bytes": 0,
+          "text_present": false,
+          "matches_baseline": false,
+          "streaming": false,
+          "post_answer_affordance": false,
+          "challenge": false
+        },
+        {
+          "count": 0,
+          "populated_count": 0,
+          "text_bytes": 0,
+          "text_present": false,
+          "matches_baseline": false,
+          "streaming": false,
+          "post_answer_affordance": false,
+          "challenge": false
+        },
+        {
+          "count": 0,
+          "populated_count": 0,
+          "text_bytes": 0,
+          "text_present": false,
+          "matches_baseline": false,
+          "streaming": false,
+          "post_answer_affordance": false,
+          "challenge": false
+        },
+        {
+          "count": 0,
+          "populated_count": 0,
+          "text_bytes": 0,
+          "text_present": false,
+          "matches_baseline": false,
+          "streaming": false,
+          "post_answer_affordance": false,
+          "challenge": false
+        },
+        {
+          "count": 0,
+          "populated_count": 0,
+          "text_bytes": 0,
+          "text_present": false,
+          "matches_baseline": false,
+          "streaming": false,
+          "post_answer_affordance": false,
+          "challenge": false
+        },
+        {
+          "count": 0,
+          "populated_count": 0,
+          "text_bytes": 0,
+          "text_present": false,
+          "matches_baseline": false,
+          "streaming": false,
+          "post_answer_affordance": false,
+          "challenge": false
+        },
+        {
+          "count": 0,
+          "populated_count": 0,
+          "text_bytes": 0,
+          "text_present": false,
+          "matches_baseline": false,
+          "streaming": false,
+          "post_answer_affordance": false,
+          "challenge": false
+        },
+        {
+          "count": 0,
+          "populated_count": 0,
+          "text_bytes": 0,
+          "text_present": false,
+          "matches_baseline": false,
+          "streaming": false,
+          "post_answer_affordance": false,
+          "challenge": false
+        }
+      ],
+      "observed_at_utc": "2026-11-26T14:02:15.540035Z"
+    }
+  ],
+  "dispatch_counts": [
+    {
+      "endpoint_kind": "auth_session",
+      "method_kind": "get",
+      "count": 2
+    },
+    {
+      "endpoint_kind": "first_party_other",
+      "method_kind": "get",
+      "count": 47
+    },
+    {
+      "endpoint_kind": "first_party_other",
+      "method_kind": "post",
+      "count": 17
+    },
+    {
+      "endpoint_kind": "account",
+      "method_kind": "get",
+      "count": 1
+    },
+    {
+      "endpoint_kind": "other",
+      "method_kind": "post",
+      "count": 1
+    },
+    {
+      "endpoint_kind": "conversation_prepare",
+      "method_kind": "post",
+      "count": 1
+    },
+    {
+      "endpoint_kind": "conversation_submit",
+      "method_kind": "post",
+      "count": 1
+    }
+  ],
+  "response_counts": [
+    {
+      "request_endpoint_kind": "auth_session",
+      "response_endpoint_kind": "auth_session",
+      "method_kind": "get",
+      "content_type_kind": "json",
+      "status": 200,
+      "count": 2
+    },
+    {
+      "request_endpoint_kind": "first_party_other",
+      "response_endpoint_kind": "first_party_other",
+      "method_kind": "get",
+      "content_type_kind": "json",
+      "status": 200,
+      "count": 47
+    },
+    {
+      "request_endpoint_kind": "account",
+      "response_endpoint_kind": "account",
+      "method_kind": "get",
+      "content_type_kind": "json",
+      "status": 200,
+      "count": 1
+    },
+    {
+      "request_endpoint_kind": "first_party_other",
+      "response_endpoint_kind": "first_party_other",
+      "method_kind": "post",
+      "content_type_kind": "json",
+      "status": 200,
+      "count": 10
+    },
+    {
+      "request_endpoint_kind": "conversation_prepare",
+      "response_endpoint_kind": "conversation_prepare",
+      "method_kind": "post",
+      "content_type_kind": "json",
+      "status": 200,
+      "count": 1
+    },
+    {
+      "request_endpoint_kind": "first_party_other",
+      "response_endpoint_kind": "first_party_other",
+      "method_kind": "post",
+      "content_type_kind": "json",
+      "status": 202,
+      "count": 5
+    },
+    {
+      "request_endpoint_kind": "other",
+      "response_endpoint_kind": "other",
+      "method_kind": "post",
+      "content_type_kind": "json",
+      "status": 200,
+      "count": 1
+    },
+    {
+      "request_endpoint_kind": "conversation_submit",
+      "response_endpoint_kind": "conversation_submit",
+      "method_kind": "post",
+      "content_type_kind": "event_stream",
+      "status": 200,
+      "count": 1
+    }
+  ],
+  "ws_fixed_event_counts": {
+    "ChatGPT WebSocket received text": 24,
+    "ChatGPT WebSocket sending frame": 18,
+    "ChatGPT WebSocket received binary": 0,
+    "websocket_connect_failed": 0,
+    "websocket_receive_stalled": 0
+  },
+  "rejected": {
+    "rejected_observations": 0,
+    "rejected_network_metadata": 0,
+    "rejected_dispatch_metadata": 0,
+    "input_truncated": false
+  },
+  "ws_text_metadata": {
+    "observations": 24,
+    "json_error_flags": 0,
+    "min_bytes": 102,
+    "max_bytes": 2807
+  }
+}

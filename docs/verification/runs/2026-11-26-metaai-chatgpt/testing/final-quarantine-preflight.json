@@ -1,0 +1,8 @@
+{
+  "status": "passed",
+  "canonical_turns": 2,
+  "failed_memory_prompt_locally_committed": false,
+  "remote_outcome": "unknown; do not resend",
+  "requests_used": 8,
+  "selected_total_cap": 12
+}

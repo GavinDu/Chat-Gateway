@@ -1,0 +1,900 @@
+{
+  "schema_version": 1,
+  "records": [
+    {
+      "schema_version": 1,
+      "provider": "chatgpt",
+      "scope": "browser_attempt",
+      "sequence": 2,
+      "sequence_available": true,
+      "future_returned": true,
+      "observation_incomplete": false,
+      "dropped_steps": 0,
+      "dropped_updates": 0,
+      "consumer_cancelled": true,
+      "submission_returned": true,
+      "first_content_seen": false,
+      "terminal_attempted": false,
+      "poll_streaming_seen": true,
+      "poll_affordance_seen": false,
+      "poll_nonbaseline_text_seen": false,
+      "elapsed_us": 120117260,
+      "command_queue_us": 1397,
+      "polls": 251,
+      "max_poll_response_count": 0,
+      "max_poll_populated_count": 0,
+      "last_stage": "first_content",
+      "content_evidence": "none",
+      "timing_semantics": "scope_lifetime_including_cancellation",
+      "phases": {
+        "account_readiness": {
+          "count": 1,
+          "sum_us": 1854488,
+          "max_us": 1854488
+        },
+        "baseline": {
+          "count": 1,
+          "sum_us": 11968,
+          "max_us": 11968
+        },
+        "composer_ready": {
+          "count": 1,
+          "sum_us": 217659,
+          "max_us": 217659
+        },
+        "entry_guards": {
+          "count": 1,
+          "sum_us": 2457,
+          "max_us": 2457
+        },
+        "first_content": {
+          "count": 1,
+          "sum_us": 109878624,
+          "max_us": 109878624
+        },
+        "model_selection": {
+          "count": 1,
+          "sum_us": 23,
+          "max_us": 23
+        },
+        "navigation": {
+          "count": 1,
+          "sum_us": 2448865,
+          "max_us": 2448865
+        },
+        "operation_admission": {
+          "count": 1,
+          "sum_us": 194,
+          "max_us": 194
+        },
+        "page_restore": {
+          "count": 1,
+          "sum_us": 169,
+          "max_us": 169
+        },
+        "submission": {
+          "count": 1,
+          "sum_us": 5702781,
+          "max_us": 5702781
+        }
+      },
+      "steps": {
+        "baseline_probe": {
+          "count": 1,
+          "sum_us": 11965,
+          "max_us": 11965
+        },
+        "browser_settle": {
+          "count": 15,
+          "sum_us": 6152541,
+          "max_us": 1625607
+        },
+        "browser_sleep": {
+          "count": 15,
+          "sum_us": 16431,
+          "max_us": 4110
+        },
+        "composer_probe": {
+          "count": 2,
+          "sum_us": 217542,
+          "max_us": 216455
+        },
+        "composer_ready": {
+          "count": 1,
+          "sum_us": 216533,
+          "max_us": 216533
+        },
+        "composer_wait": {
+          "count": 1,
+          "sum_us": 1087,
+          "max_us": 1087
+        },
+        "draft_validation": {
+          "count": 1,
+          "sum_us": 200958,
+          "max_us": 200958
+        },
+        "entry_guards": {
+          "count": 1,
+          "sum_us": 2456,
+          "max_us": 2456
+        },
+        "first_content_probe": {
+          "count": 251,
+          "sum_us": 7306002,
+          "max_us": 366617
+        },
+        "first_content_processing": {
+          "count": 251,
+          "sum_us": 1252,
+          "max_us": 26
+        },
+        "first_content_settle": {
+          "count": 252,
+          "sum_us": 102449881,
+          "max_us": 6022013
+        },
+        "first_content_sleep": {
+          "count": 251,
+          "sum_us": 6873,
+          "max_us": 2294
+        },
+        "input_fill": {
+          "count": 1,
+          "sum_us": 396538,
+          "max_us": 396538
+        },
+        "input_settle": {
+          "count": 1,
+          "sum_us": 574085,
+          "max_us": 574085
+        },
+        "input_settle_engine": {
+          "count": 1,
+          "sum_us": 573617,
+          "max_us": 573617
+        },
+        "input_settle_sleep": {
+          "count": 1,
+          "sum_us": 462,
+          "max_us": 462
+        },
+        "model_selection": {
+          "count": 1,
+          "sum_us": 5,
+          "max_us": 5
+        },
+        "navigation": {
+          "count": 1,
+          "sum_us": 2385394,
+          "max_us": 2385394
+        },
+        "operation_gate": {
+          "count": 1,
+          "sum_us": 96,
+          "max_us": 96
+        },
+        "page_ensure": {
+          "count": 1,
+          "sum_us": 78,
+          "max_us": 78
+        },
+        "submission": {
+          "count": 1,
+          "sum_us": 5702779,
+          "max_us": 5702779
+        }
+      },
+      "baseline": {
+        "count": 0,
+        "populated_count": 0,
+        "text_bytes": 0,
+        "text_present": false,
+        "matches_baseline": false,
+        "streaming": false,
+        "post_answer_affordance": false,
+        "challenge": false
+      },
+      "recent_samples": [
+        {
+          "count": 0,
+          "populated_count": 0,
+          "text_bytes": 0,
+          "text_present": false,
+          "matches_baseline": false,
+          "streaming": false,
+          "post_answer_affordance": false,
+          "challenge": false
+        },
+        {
+          "count": 0,
+          "populated_count": 0,
+          "text_bytes": 0,
+          "text_present": false,
+          "matches_baseline": false,
+          "streaming": false,
+          "post_answer_affordance": false,
+          "challenge": false
+        },
+        {
+          "count": 0,
+          "populated_count": 0,
+          "text_bytes": 0,
+          "text_present": false,
+          "matches_baseline": false,
+          "streaming": false,
+          "post_answer_affordance": false,
+          "challenge": false
+        },
+        {
+          "count": 0,
+          "populated_count": 0,
+          "text_bytes": 0,
+          "text_present": false,
+          "matches_baseline": false,
+          "streaming": false,
+          "post_answer_affordance": false,
+          "challenge": false
+        },
+        {
+          "count": 0,
+          "populated_count": 0,
+          "text_bytes": 0,
+          "text_present": false,
+          "matches_baseline": false,
+          "streaming": false,
+          "post_answer_affordance": false,
+          "challenge": false
+        },
+        {
+          "count": 0,
+          "populated_count": 0,
+          "text_bytes": 0,
+          "text_present": false,
+          "matches_baseline": false,
+          "streaming": false,
+          "post_answer_affordance": false,
+          "challenge": false
+        },
+        {
+          "count": 0,
+          "populated_count": 0,
+          "text_bytes": 0,
+          "text_present": false,
+          "matches_baseline": false,
+          "streaming": false,
+          "post_answer_affordance": false,
+          "challenge": false
+        },
+        {
+          "count": 0,
+          "populated_count": 0,
+          "text_bytes": 0,
+          "text_present": false,
+          "matches_baseline": false,
+          "streaming": false,
+          "post_answer_affordance": false,
+          "challenge": false
+        }
+      ],
+      "observed_at_utc": "2026-11-26T13:19:05.001437Z"
+    }
+  ],
+  "network": [
+    {
+      "provider": "chatgpt",
+      "resource_type": "fetch",
+      "host_kind": "first_party",
+      "status": 200,
+      "response_bytes_observed": 37474,
+      "response_bytes_truncated": false,
+      "observed_at_utc": "2026-11-26T13:17:07.817353Z"
+    },
+    {
+      "provider": "chatgpt",
+      "resource_type": "fetch",
+      "host_kind": "first_party",
+      "status": 200,
+      "response_bytes_observed": 4,
+      "response_bytes_truncated": false,
+      "observed_at_utc": "2026-11-26T13:17:09.566567Z"
+    },
+    {
+      "provider": "chatgpt",
+      "resource_type": "fetch",
+      "host_kind": "first_party",
+      "status": 200,
+      "response_bytes_observed": 53,
+      "response_bytes_truncated": false,
+      "observed_at_utc": "2026-11-26T13:17:09.567014Z"
+    },
+    {
+      "provider": "chatgpt",
+      "resource_type": "fetch",
+      "host_kind": "first_party",
+      "status": 200,
+      "response_bytes_observed": 373,
+      "response_bytes_truncated": false,
+      "observed_at_utc": "2026-11-26T13:17:09.567057Z"
+    },
+    {
+      "provider": "chatgpt",
+      "resource_type": "fetch",
+      "host_kind": "first_party",
+      "status": 200,
+      "response_bytes_observed": 95151,
+      "response_bytes_truncated": false,
+      "observed_at_utc": "2026-11-26T13:17:09.567355Z"
+    },
+    {
+      "provider": "chatgpt",
+      "resource_type": "fetch",
+      "host_kind": "first_party",
+      "status": 200,
+      "response_bytes_observed": 1694,
+      "response_bytes_truncated": false,
+      "observed_at_utc": "2026-11-26T13:17:09.567427Z"
+    },
+    {
+      "provider": "chatgpt",
+      "resource_type": "fetch",
+      "host_kind": "first_party",
+      "status": 200,
+      "response_bytes_observed": 1101,
+      "response_bytes_truncated": false,
+      "observed_at_utc": "2026-11-26T13:17:09.567462Z"
+    },
+    {
+      "provider": "chatgpt",
+      "resource_type": "fetch",
+      "host_kind": "first_party",
+      "status": 200,
+      "response_bytes_observed": 11342,
+      "response_bytes_truncated": false,
+      "observed_at_utc": "2026-11-26T13:17:09.567559Z"
+    },
+    {
+      "provider": "chatgpt",
+      "resource_type": "fetch",
+      "host_kind": "first_party",
+      "status": 200,
+      "response_bytes_observed": 74300,
+      "response_bytes_truncated": false,
+      "observed_at_utc": "2026-11-26T13:17:09.567647Z"
+    },
+    {
+      "provider": "chatgpt",
+      "resource_type": "fetch",
+      "host_kind": "first_party",
+      "status": 200,
+      "response_bytes_observed": 11860,
+      "response_bytes_truncated": false,
+      "observed_at_utc": "2026-11-26T13:17:09.567727Z"
+    },
+    {
+      "provider": "chatgpt",
+      "resource_type": "fetch",
+      "host_kind": "first_party",
+      "status": 200,
+      "response_bytes_observed": 165,
+      "response_bytes_truncated": false,
+      "observed_at_utc": "2026-11-26T13:17:09.568042Z"
+    },
+    {
+      "provider": "chatgpt",
+      "resource_type": "fetch",
+      "host_kind": "first_party",
+      "status": 200,
+      "response_bytes_observed": 142,
+      "response_bytes_truncated": false,
+      "observed_at_utc": "2026-11-26T13:17:10.404129Z"
+    },
+    {
+      "provider": "chatgpt",
+      "resource_type": "fetch",
+      "host_kind": "first_party",
+      "status": 200,
+      "response_bytes_observed": 21,
+      "response_bytes_truncated": false,
+      "observed_at_utc": "2026-11-26T13:17:10.404236Z"
+    },
+    {
+      "provider": "chatgpt",
+      "resource_type": "fetch",
+      "host_kind": "first_party",
+      "status": 200,
+      "response_bytes_observed": 161,
+      "response_bytes_truncated": false,
+      "observed_at_utc": "2026-11-26T13:17:10.404280Z"
+    },
+    {
+      "provider": "chatgpt",
+      "resource_type": "fetch",
+      "host_kind": "first_party",
+      "status": 200,
+      "response_bytes_observed": 19,
+      "response_bytes_truncated": false,
+      "observed_at_utc": "2026-11-26T13:17:10.404308Z"
+    },
+    {
+      "provider": "chatgpt",
+      "resource_type": "fetch",
+      "host_kind": "first_party",
+      "status": 200,
+      "response_bytes_observed": 304,
+      "response_bytes_truncated": false,
+      "observed_at_utc": "2026-11-26T13:17:10.404342Z"
+    },
+    {
+      "provider": "chatgpt",
+      "resource_type": "fetch",
+      "host_kind": "first_party",
+      "status": 200,
+      "response_bytes_observed": 13856,
+      "response_bytes_truncated": false,
+      "observed_at_utc": "2026-11-26T13:17:10.404439Z"
+    },
+    {
+      "provider": "chatgpt",
+      "resource_type": "fetch",
+      "host_kind": "first_party",
+      "status": 200,
+      "response_bytes_observed": 67382,
+      "response_bytes_truncated": false,
+      "observed_at_utc": "2026-11-26T13:17:10.404597Z"
+    },
+    {
+      "provider": "chatgpt",
+      "resource_type": "fetch",
+      "host_kind": "first_party",
+      "status": 200,
+      "response_bytes_observed": 2,
+      "response_bytes_truncated": false,
+      "observed_at_utc": "2026-11-26T13:17:10.404648Z"
+    },
+    {
+      "provider": "chatgpt",
+      "resource_type": "fetch",
+      "host_kind": "first_party",
+      "status": 200,
+      "response_bytes_observed": 2,
+      "response_bytes_truncated": false,
+      "observed_at_utc": "2026-11-26T13:17:10.404670Z"
+    },
+    {
+      "provider": "chatgpt",
+      "resource_type": "fetch",
+      "host_kind": "first_party",
+      "status": 200,
+      "response_bytes_observed": 26,
+      "response_bytes_truncated": false,
+      "observed_at_utc": "2026-11-26T13:17:10.404699Z"
+    },
+    {
+      "provider": "chatgpt",
+      "resource_type": "fetch",
+      "host_kind": "first_party",
+      "status": 200,
+      "response_bytes_observed": 2,
+      "response_bytes_truncated": false,
+      "observed_at_utc": "2026-11-26T13:17:10.404722Z"
+    },
+    {
+      "provider": "chatgpt",
+      "resource_type": "fetch",
+      "host_kind": "first_party",
+      "status": 200,
+      "response_bytes_observed": 59,
+      "response_bytes_truncated": false,
+      "observed_at_utc": "2026-11-26T13:17:10.404761Z"
+    },
+    {
+      "provider": "chatgpt",
+      "resource_type": "fetch",
+      "host_kind": "first_party",
+      "status": 200,
+      "response_bytes_observed": 2,
+      "response_bytes_truncated": false,
+      "observed_at_utc": "2026-11-26T13:17:10.404786Z"
+    },
+    {
+      "provider": "chatgpt",
+      "resource_type": "fetch",
+      "host_kind": "first_party",
+      "status": 200,
+      "response_bytes_observed": 2252,
+      "response_bytes_truncated": false,
+      "observed_at_utc": "2026-11-26T13:17:10.404821Z"
+    },
+    {
+      "provider": "chatgpt",
+      "resource_type": "fetch",
+      "host_kind": "first_party",
+      "status": 200,
+      "response_bytes_observed": 161,
+      "response_bytes_truncated": false,
+      "observed_at_utc": "2026-11-26T13:17:10.404847Z"
+    },
+    {
+      "provider": "chatgpt",
+      "resource_type": "fetch",
+      "host_kind": "first_party",
+      "status": 200,
+      "response_bytes_observed": 628,
+      "response_bytes_truncated": false,
+      "observed_at_utc": "2026-11-26T13:17:10.404880Z"
+    },
+    {
+      "provider": "chatgpt",
+      "resource_type": "fetch",
+      "host_kind": "first_party",
+      "status": 200,
+      "response_bytes_observed": 3639,
+      "response_bytes_truncated": false,
+      "observed_at_utc": "2026-11-26T13:17:10.404917Z"
+    },
+    {
+      "provider": "chatgpt",
+      "resource_type": "fetch",
+      "host_kind": "first_party",
+      "status": 200,
+      "response_bytes_observed": 141578,
+      "response_bytes_truncated": false,
+      "observed_at_utc": "2026-11-26T13:17:10.405045Z"
+    },
+    {
+      "provider": "chatgpt",
+      "resource_type": "fetch",
+      "host_kind": "first_party",
+      "status": 200,
+      "response_bytes_observed": 37474,
+      "response_bytes_truncated": false,
+      "observed_at_utc": "2026-11-26T13:17:10.681367Z"
+    },
+    {
+      "provider": "chatgpt",
+      "resource_type": "fetch",
+      "host_kind": "first_party",
+      "status": 200,
+      "response_bytes_observed": 2995,
+      "response_bytes_truncated": false,
+      "observed_at_utc": "2026-11-26T13:17:10.681880Z"
+    },
+    {
+      "provider": "chatgpt",
+      "resource_type": "fetch",
+      "host_kind": "first_party",
+      "status": 200,
+      "response_bytes_observed": 19,
+      "response_bytes_truncated": false,
+      "observed_at_utc": "2026-11-26T13:17:10.681994Z"
+    },
+    {
+      "provider": "chatgpt",
+      "resource_type": "fetch",
+      "host_kind": "first_party",
+      "status": 200,
+      "response_bytes_observed": 231,
+      "response_bytes_truncated": false,
+      "observed_at_utc": "2026-11-26T13:17:10.682046Z"
+    },
+    {
+      "provider": "chatgpt",
+      "resource_type": "fetch",
+      "host_kind": "first_party",
+      "status": 200,
+      "response_bytes_observed": 149,
+      "response_bytes_truncated": false,
+      "observed_at_utc": "2026-11-26T13:17:10.682087Z"
+    },
+    {
+      "provider": "chatgpt",
+      "resource_type": "fetch",
+      "host_kind": "first_party",
+      "status": 200,
+      "response_bytes_observed": 86666,
+      "response_bytes_truncated": false,
+      "observed_at_utc": "2026-11-26T13:17:10.682187Z"
+    },
+    {
+      "provider": "chatgpt",
+      "resource_type": "fetch",
+      "host_kind": "first_party",
+      "status": 200,
+      "response_bytes_observed": 59,
+      "response_bytes_truncated": false,
+      "observed_at_utc": "2026-11-26T13:17:10.682250Z"
+    },
+    {
+      "provider": "chatgpt",
+      "resource_type": "fetch",
+      "host_kind": "first_party",
+      "status": 200,
+      "response_bytes_observed": 16982,
+      "response_bytes_truncated": false,
+      "observed_at_utc": "2026-11-26T13:17:11.897796Z"
+    },
+    {
+      "provider": "chatgpt",
+      "resource_type": "fetch",
+      "host_kind": "first_party",
+      "status": 200,
+      "response_bytes_observed": 11573,
+      "response_bytes_truncated": false,
+      "observed_at_utc": "2026-11-26T13:17:11.898013Z"
+    },
+    {
+      "provider": "chatgpt",
+      "resource_type": "fetch",
+      "host_kind": "first_party",
+      "status": 202,
+      "response_bytes_observed": 16,
+      "response_bytes_truncated": false,
+      "observed_at_utc": "2026-11-26T13:17:11.898070Z"
+    },
+    {
+      "provider": "chatgpt",
+      "resource_type": "fetch",
+      "host_kind": "first_party",
+      "status": 200,
+      "response_bytes_observed": 385,
+      "response_bytes_truncated": false,
+      "observed_at_utc": "2026-11-26T13:17:12.684662Z"
+    },
+    {
+      "provider": "chatgpt",
+      "resource_type": "fetch",
+      "host_kind": "first_party",
+      "status": 200,
+      "response_bytes_observed": 1048576,
+      "response_bytes_truncated": true,
+      "observed_at_utc": "2026-11-26T13:17:13.232701Z"
+    },
+    {
+      "provider": "chatgpt",
+      "resource_type": "fetch",
+      "host_kind": "first_party",
+      "status": 200,
+      "response_bytes_observed": 139,
+      "response_bytes_truncated": false,
+      "observed_at_utc": "2026-11-26T13:17:14.684664Z"
+    },
+    {
+      "provider": "chatgpt",
+      "resource_type": "fetch",
+      "host_kind": "first_party",
+      "status": 200,
+      "response_bytes_observed": 153,
+      "response_bytes_truncated": false,
+      "observed_at_utc": "2026-11-26T13:17:18.177443Z"
+    },
+    {
+      "provider": "chatgpt",
+      "resource_type": "fetch",
+      "host_kind": "first_party",
+      "status": 200,
+      "response_bytes_observed": 2,
+      "response_bytes_truncated": false,
+      "observed_at_utc": "2026-11-26T13:17:18.177470Z"
+    },
+    {
+      "provider": "chatgpt",
+      "resource_type": "fetch",
+      "host_kind": "first_party",
+      "status": 200,
+      "response_bytes_observed": 17749,
+      "response_bytes_truncated": false,
+      "observed_at_utc": "2026-11-26T13:17:18.177495Z"
+    },
+    {
+      "provider": "chatgpt",
+      "resource_type": "fetch",
+      "host_kind": "first_party",
+      "status": 200,
+      "response_bytes_observed": 2782,
+      "response_bytes_truncated": false,
+      "observed_at_utc": "2026-11-26T13:17:18.177513Z"
+    },
+    {
+      "provider": "chatgpt",
+      "resource_type": "fetch",
+      "host_kind": "first_party",
+      "status": 200,
+      "response_bytes_observed": 35,
+      "response_bytes_truncated": false,
+      "observed_at_utc": "2026-11-26T13:17:18.177533Z"
+    },
+    {
+      "provider": "chatgpt",
+      "resource_type": "fetch",
+      "host_kind": "first_party",
+      "status": 200,
+      "response_bytes_observed": 157,
+      "response_bytes_truncated": false,
+      "observed_at_utc": "2026-11-26T13:17:18.177538Z"
+    },
+    {
+      "provider": "chatgpt",
+      "resource_type": "fetch",
+      "host_kind": "first_party",
+      "status": 200,
+      "response_bytes_observed": 91411,
+      "response_bytes_truncated": false,
+      "observed_at_utc": "2026-11-26T13:17:18.177562Z"
+    },
+    {
+      "provider": "chatgpt",
+      "resource_type": "fetch",
+      "host_kind": "first_party",
+      "status": 202,
+      "response_bytes_observed": 16,
+      "response_bytes_truncated": false,
+      "observed_at_utc": "2026-11-26T13:17:18.972257Z"
+    },
+    {
+      "provider": "chatgpt",
+      "resource_type": "fetch",
+      "host_kind": "first_party",
+      "status": 200,
+      "response_bytes_observed": 2188,
+      "response_bytes_truncated": false,
+      "observed_at_utc": "2026-11-26T13:17:18.972323Z"
+    },
+    {
+      "provider": "chatgpt",
+      "resource_type": "fetch",
+      "host_kind": "first_party",
+      "status": 202,
+      "response_bytes_observed": 16,
+      "response_bytes_truncated": false,
+      "observed_at_utc": "2026-11-26T13:17:23.872988Z"
+    },
+    {
+      "provider": "chatgpt",
+      "resource_type": "fetch",
+      "host_kind": "first_party",
+      "status": 200,
+      "response_bytes_observed": 2887,
+      "response_bytes_truncated": false,
+      "observed_at_utc": "2026-11-26T13:17:23.873239Z"
+    },
+    {
+      "provider": "chatgpt",
+      "resource_type": "fetch",
+      "host_kind": "first_party",
+      "status": 200,
+      "response_bytes_observed": 20592,
+      "response_bytes_truncated": false,
+      "observed_at_utc": "2026-11-26T13:17:24.592495Z"
+    },
+    {
+      "provider": "chatgpt",
+      "resource_type": "fetch",
+      "host_kind": "first_party",
+      "status": 200,
+      "response_bytes_observed": 1738,
+      "response_bytes_truncated": false,
+      "observed_at_utc": "2026-11-26T13:17:24.617506Z"
+    },
+    {
+      "provider": "chatgpt",
+      "resource_type": "fetch",
+      "host_kind": "first_party",
+      "status": 200,
+      "response_bytes_observed": 984,
+      "response_bytes_truncated": false,
+      "observed_at_utc": "2026-11-26T13:17:24.617657Z"
+    },
+    {
+      "provider": "chatgpt",
+      "resource_type": "fetch",
+      "host_kind": "first_party",
+      "status": 200,
+      "response_bytes_observed": 17657,
+      "response_bytes_truncated": false,
+      "observed_at_utc": "2026-11-26T13:17:30.835750Z"
+    },
+    {
+      "provider": "chatgpt",
+      "resource_type": "fetch",
+      "host_kind": "first_party",
+      "status": 200,
+      "response_bytes_observed": 7327,
+      "response_bytes_truncated": false,
+      "observed_at_utc": "2026-11-26T13:17:31.226272Z"
+    },
+    {
+      "provider": "chatgpt",
+      "resource_type": "fetch",
+      "host_kind": "first_party",
+      "status": 200,
+      "response_bytes_observed": 2782,
+      "response_bytes_truncated": false,
+      "observed_at_utc": "2026-11-26T13:17:31.523308Z"
+    },
+    {
+      "provider": "chatgpt",
+      "resource_type": "fetch",
+      "host_kind": "first_party",
+      "status": 200,
+      "response_bytes_observed": 21,
+      "response_bytes_truncated": false,
+      "observed_at_utc": "2026-11-26T13:17:31.929297Z"
+    },
+    {
+      "provider": "chatgpt",
+      "resource_type": "fetch",
+      "host_kind": "first_party",
+      "status": 200,
+      "response_bytes_observed": 35,
+      "response_bytes_truncated": false,
+      "observed_at_utc": "2026-11-26T13:17:31.929353Z"
+    },
+    {
+      "provider": "chatgpt",
+      "resource_type": "fetch",
+      "host_kind": "first_party",
+      "status": 202,
+      "response_bytes_observed": 16,
+      "response_bytes_truncated": false,
+      "observed_at_utc": "2026-11-26T13:17:32.067559Z"
+    },
+    {
+      "provider": "chatgpt",
+      "resource_type": "fetch",
+      "host_kind": "first_party",
+      "status": 200,
+      "response_bytes_observed": 11860,
+      "response_bytes_truncated": false,
+      "observed_at_utc": "2026-11-26T13:17:32.255833Z"
+    },
+    {
+      "provider": "chatgpt",
+      "resource_type": "fetch",
+      "host_kind": "first_party",
+      "status": 200,
+      "response_bytes_observed": 716,
+      "response_bytes_truncated": false,
+      "observed_at_utc": "2026-11-26T13:17:32.861390Z"
+    },
+    {
+      "provider": "chatgpt",
+      "resource_type": "fetch",
+      "host_kind": "first_party",
+      "status": 200,
+      "response_bytes_observed": 59,
+      "response_bytes_truncated": false,
+      "observed_at_utc": "2026-11-26T13:17:33.033351Z"
+    },
+    {
+      "provider": "chatgpt",
+      "resource_type": "fetch",
+      "host_kind": "first_party",
+      "status": 200,
+      "response_bytes_observed": 16,
+      "response_bytes_truncated": false,
+      "observed_at_utc": "2026-11-26T13:17:50.861825Z"
+    },
+    {
+      "provider": "chatgpt",
+      "resource_type": "fetch",
+      "host_kind": "first_party",
+      "status": 202,
+      "response_bytes_observed": 16,
+      "response_bytes_truncated": false,
+      "observed_at_utc": "2026-11-26T13:18:19.179742Z"
+    },
+    {
+      "provider": "chatgpt",
+      "resource_type": "fetch",
+      "host_kind": "first_party",
+      "status": 200,
+      "response_bytes_observed": 16,
+      "response_bytes_truncated": false,
+      "observed_at_utc": "2026-11-26T13:18:30.146489Z"
+    }
+  ],
+  "rejected_observations": 0,
+  "rejected_network_metadata": 0,
+  "input_truncated": false
+}

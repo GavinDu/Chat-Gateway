@@ -1,0 +1,18 @@
+{
+  "scenario": "fresh_json",
+  "source_sha": "52e35250a621872dfdb2e4dfc9bd8334c8704324",
+  "attempt_number": 9,
+  "request_cap": 12,
+  "stream": false,
+  "status": "failed",
+  "success": false,
+  "started_utc": "2026-11-26T14:00:15.330210+00:00",
+  "canonical_history_before": 0,
+  "prior_failed_prompts_resent": false,
+  "purpose": "selected new-memory diagnostic round; not a causal-fix claim",
+  "http_status": 502,
+  "request_id": "30896b4e-eb6e-423d-8dab-503d7d6c8821",
+  "failure_category": "gateway_http_error",
+  "total_seconds": 120.104,
+  "requests_used": 9
+}

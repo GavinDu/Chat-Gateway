@@ -1,0 +1,37 @@
+{
+  "workspace": "/workspace/cg-native-readiness-20261126",
+  "tested_commit": "4c51ccb1804cc8cb445ddf6651be1858c68c748e",
+  "live_requests_sent": 0,
+  "python_suite": {
+    "exit_code": 0,
+    "duration_ms": 5020
+  },
+  "native_bridge": {
+    "exit_code": 0,
+    "duration_ms": 1061
+  },
+  "benchmark_parser": {
+    "exit_code": 0,
+    "duration_ms": 176
+  },
+  "client_hook": {
+    "exit_code": 0,
+    "duration_ms": 21
+  },
+  "extension": {
+    "exit_code": 0,
+    "duration_ms": 1289
+  },
+  "fmt": {
+    "exit_code": 0,
+    "duration_ms": 495
+  },
+  "rust_all": {
+    "exit_code": 0,
+    "duration_ms": 107045
+  },
+  "clippy": {
+    "exit_code": 0,
+    "duration_ms": 12931
+  }
+}

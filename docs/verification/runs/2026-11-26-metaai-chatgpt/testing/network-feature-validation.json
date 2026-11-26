@@ -1,0 +1,37 @@
+{
+  "workspace": "/workspace/cg-chatgpt-network-20261126",
+  "tested_commit": "3ca15e996e7b1a6520cf221fb93e22d07657b921",
+  "live_requests_sent": 0,
+  "python_suite": {
+    "exit_code": 0,
+    "duration_ms": 4942
+  },
+  "native_bridge": {
+    "exit_code": 0,
+    "duration_ms": 1010
+  },
+  "benchmark_parser": {
+    "exit_code": 0,
+    "duration_ms": 171
+  },
+  "client_hook": {
+    "exit_code": 0,
+    "duration_ms": 31
+  },
+  "extension": {
+    "exit_code": 0,
+    "duration_ms": 1331
+  },
+  "fmt": {
+    "exit_code": 0,
+    "duration_ms": 310
+  },
+  "rust_all": {
+    "exit_code": 0,
+    "duration_ms": 81533
+  },
+  "clippy": {
+    "exit_code": 0,
+    "duration_ms": 7938
+  }
+}
