@@ -9,9 +9,13 @@ use std::{
     path::Path,
     time::{SystemTime, UNIX_EPOCH},
 };
+use zeroize::Zeroizing;
 
 const MAX_FILE: u64 = 16 * 1024;
 const MAX_AGE_MS: u64 = 5 * 60 * 1000;
+// The observed gateway wall clock may exceed its 120s request deadline by a
+// bounded scheduling/serialization tail; elapsed time is not failure-phase proof.
+const MAX_GATEWAY_FAILURE_DURATION_MS: u64 = 180_000;
 const CLOCK_SKEW_MS: u64 = 30 * 1000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -58,6 +62,10 @@ enum Outcome {
 struct AccountEvidence {
     verdict: Auth,
     observed_at_ms: u64,
+    /// Optional opaque snapshot generation supplied by the source that
+    /// performed the Chrome account check. A provider-name/timestamp-only
+    /// positive verdict cannot prove the same credentials were replayed.
+    generation: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -245,6 +253,7 @@ fn classify(e: &Evidence, now: u64) -> Diagnosis {
 
     // A cross-generation report is never evidence about the same credentials.
     let ids = [
+        e.chrome.as_ref().and_then(|x| x.generation.as_deref()),
         e.snapshot.as_ref().and_then(|x| x.generation.as_deref()),
         e.obscura.as_ref().map(|x| x.generation.as_str()),
         e.attempt.as_ref().map(|x| x.generation.as_str()),
@@ -259,7 +268,7 @@ fn classify(e: &Evidence, now: u64) -> Diagnosis {
     }
     if let Some(failure) = e.gateway_failure.as_ref() {
         if gateway_failure_timestamp(failure).is_none()
-            || failure.duration_ms > 120_000
+            || failure.duration_ms > MAX_GATEWAY_FAILURE_DURATION_MS
             || !fixed_gateway_stage(&failure.stage)
             || !fixed_gateway_reason(&failure.reason)
         {
@@ -280,17 +289,37 @@ fn classify(e: &Evidence, now: u64) -> Diagnosis {
         if attempt.outcome != Outcome::Failed {
             return inconclusive(provider, "contradictory_gateway_failure_evidence");
         }
-        // A failure at candidate/backend admission cannot certify a later
-        // response/stream phase of the *same provider attempt*. This can
-        // happen when owner evidence incorrectly joins fallback attempts.
+        // Owner status is observed after the failed request, never before it.
+        // A matching UUID alone cannot make contradictory clock order causal.
+        if gateway_failure_timestamp(failure)
+            .is_some_and(|observed_at| observed_at < attempt.observed_at_ms)
+        {
+            return inconclusive(provider, "gateway_failure_precedes_attempt");
+        }
+        // Candidate/backend admission failed before provider work started.
+        // It cannot establish an adapter, composer, Send, or response-phase
+        // failure on this *same* request. Joining fallback attempt evidence
+        // by a shared request UUID must fail closed instead of assigning blame.
         if matches!(
             failure.stage.as_str(),
             "candidate_admission" | "backend_admission"
-        ) && matches!(
-            attempt.stage,
-            Stage::Response | Stage::Stream | Stage::Completed
-        ) {
+        ) && attempt.stage != Stage::Unknown
+        {
             return inconclusive(provider, "conflicting_gateway_failure_stage");
+        }
+        // Preserve the producer's stage/reason relationship. These pairs
+        // cannot be emitted by chat_handler; accepting them as independent
+        // fixed labels would let contradictory offline evidence blame a
+        // different request phase. Existing admission/attempt conflict wins
+        // above, so this additional check cannot mask that stronger evidence.
+        if (failure.stage == "candidate_admission"
+            && !matches!(
+                failure.reason.as_str(),
+                "provider_busy" | "candidate_skipped"
+            ))
+            || (failure.stage != "candidate_admission" && failure.reason == "candidate_skipped")
+        {
+            return inconclusive(provider, "inconsistent_gateway_stage_reason");
         }
     }
     if (e.snapshot.is_none() && (e.obscura.is_some() || e.attempt.is_some()))
@@ -342,6 +371,23 @@ fn classify(e: &Evidence, now: u64) -> Diagnosis {
         return inconclusive(provider, "metaai_account_verifier_not_established");
     }
 
+    // A first-party account observation collected before the supplied applied
+    // snapshot checkpoint does not prove account state *on that checkpoint*.
+    // These are observation times, not an engine-owned application timestamp;
+    // fail conservatively rather than claim credential replay or downstream
+    // adapter/transport attribution from a potentially earlier page state.
+    if let (Some(snapshot), Some(obscura)) = (&e.snapshot, &e.obscura) {
+        if snapshot.state == SnapshotState::Applied
+            && matches!(obscura.verdict, Auth::Verified | Auth::Unauthenticated)
+            && obscura.observed_at_ms < snapshot.observed_at_ms
+        {
+            return inconclusive(
+                provider,
+                "account_proof_predates_applied_snapshot_observation",
+            );
+        }
+    }
+
     if chrome == Some(Auth::Unauthenticated) && obscura == Some(Auth::Verified) {
         return inconclusive(provider, "contradictory_account_observations");
     }
@@ -375,7 +421,32 @@ fn classify(e: &Evidence, now: u64) -> Diagnosis {
     if snapshot != Some(SnapshotState::Applied) {
         return inconclusive(provider, "applied_snapshot_unproven");
     }
+    // A correlated gateway failure is later than the account observations.
+    // Expiry/challenge supersedes a previously verified Obscura account OR an
+    // apparent Chrome-positive / Obscura-negative mismatch; it cannot prove
+    // replay blame. Do not upgrade missing/unknown account evidence to a
+    // specific login-state diagnosis. UUID, clock and stage were checked above.
+    let prior_account_evidence = obscura == Some(Auth::Verified)
+        || (chrome == Some(Auth::Verified) && obscura == Some(Auth::Unauthenticated));
+    if prior_account_evidence
+        && e.gateway_failure.as_ref().is_some_and(|failure| {
+            matches!(failure.reason.as_str(), "session_expired" | "challenge")
+        })
+    {
+        return inconclusive(provider, "account_or_challenge_state_changed");
+    }
     if chrome == Some(Auth::Verified) && obscura == Some(Auth::Unauthenticated) {
+        // A browser check from another session can be fresh and valid yet
+        // unrelated to this imported snapshot. Never blame replay/binding
+        // unless Chrome explicitly claims the same canonical generation;
+        // the global generation check above rejects mismatches.
+        if e.chrome
+            .as_ref()
+            .and_then(|x| x.generation.as_deref())
+            .is_none()
+        {
+            return inconclusive(provider, "chrome_snapshot_correlation_missing");
+        }
         return verdict(
             provider,
             "replay_or_binding",
@@ -385,15 +456,6 @@ fn classify(e: &Evidence, now: u64) -> Diagnosis {
     }
     if obscura != Some(Auth::Verified) {
         return inconclusive(provider, "authoritative_obscura_account_verifier_missing");
-    }
-    if e.gateway_failure
-        .as_ref()
-        .is_some_and(|failure| matches!(failure.reason.as_str(), "session_expired" | "challenge"))
-    {
-        // A former first-party positive observation can be superseded by an
-        // explicit new login/challenge signal. Recheck current session state
-        // rather than mislabel the later failure as a transport defect.
-        return inconclusive(provider, "account_or_challenge_state_changed");
     }
     match e.attempt.as_ref().map(|a| (a.stage, a.outcome)) {
         Some((Stage::Composer | Stage::Send, Outcome::Failed)) => verdict(
@@ -415,6 +477,36 @@ fn classify(e: &Evidence, now: u64) -> Diagnosis {
     }
 }
 
+/// The caller's lstat and its subsequent open are separate operations.
+/// Validate the opened descriptor before reading any potentially private
+/// evidence. On Unix the object identity, not just file type/length, must
+/// match the one inspected before open (including same-size replacements).
+fn checked_evidence_file_identity(
+    inspected: &fs::Metadata,
+    opened: &fs::Metadata,
+) -> anyhow::Result<()> {
+    if !inspected.is_file()
+        || inspected.file_type().is_symlink()
+        || inspected.len() > MAX_FILE
+        || !opened.is_file()
+        || opened.len() > MAX_FILE
+    {
+        anyhow::bail!("credential evidence unavailable");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if inspected.dev() != opened.dev() || inspected.ino() != opened.ino() {
+            anyhow::bail!("credential evidence unavailable");
+        }
+    }
+    // Without a portable object-ID contract, do not treat a file opened
+    // after lstat as the same checked object.
+    #[cfg(not(unix))]
+    anyhow::bail!("credential evidence unavailable");
+    Ok(())
+}
+
 pub(crate) fn diagnose_file(path: &Path) -> anyhow::Result<String> {
     // Read-only local operator input. Reject symlinks and oversized files;
     // do not reflect filesystem or parser errors with credential-bearing data.
@@ -423,12 +515,22 @@ pub(crate) fn diagnose_file(path: &Path) -> anyhow::Result<String> {
     if !info.is_file() || info.file_type().is_symlink() || info.len() > MAX_FILE {
         anyhow::bail!("credential evidence unavailable");
     }
-    // Bound reads even when an operator-managed file changes after lstat.
-    // Never allocate or parse an unbounded credential-bearing JSON document.
-    let mut reader = fs::File::open(path)
-        .map_err(|_| anyhow::anyhow!("credential evidence unavailable"))?
-        .take(MAX_FILE + 1);
-    let mut bytes = Vec::new();
+    // Validate the descriptor's identity after the pathname lstat but before
+    // reading any potentially private owner evidence.
+    let file =
+        fs::File::open(path).map_err(|_| anyhow::anyhow!("credential evidence unavailable"))?;
+    let opened = file
+        .metadata()
+        .map_err(|_| anyhow::anyhow!("credential evidence unavailable"))?;
+    checked_evidence_file_identity(&info, &opened)?;
+    // Bound reads after descriptor verification, while retaining zeroization
+    // of the entire input buffer on every success or error path.
+    let mut reader = file.take(MAX_FILE + 1);
+    // Owner-supplied evidence can accidentally contain secrets even when the
+    // accepted schema forbids them. Reserve the entire bounded input once to
+    // avoid leaving old secret-bearing allocations behind during Vec growth.
+    // Wipe the owned raw bytes on success and on every rejected JSON path.
+    let mut bytes = Zeroizing::new(Vec::with_capacity((MAX_FILE + 1) as usize));
     reader
         .read_to_end(&mut bytes)
         .map_err(|_| anyhow::anyhow!("credential evidence unavailable"))?;
@@ -446,6 +548,105 @@ pub(crate) fn diagnose_file(path: &Path) -> anyhow::Result<String> {
         .map_err(|_| anyhow::anyhow!("credential diagnosis unavailable"))
 }
 
+#[cfg(all(test, unix))]
+mod evidence_file_identity_tests {
+    use super::*;
+    use std::os::unix::fs::symlink;
+
+    #[test]
+    fn checked_file_and_replaced_symlink_have_different_file_ids_before_read() {
+        let root = std::env::temp_dir().join(format!(
+            "chat-gateway-evidence-identity-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir(&root).unwrap();
+        let checked = root.join("owner-evidence.json");
+        let alternate = root.join("different-evidence.json");
+        let original = root.join("original-evidence.json");
+        // Equal lengths prove a size-only comparison is insufficient.
+        fs::write(&checked, b"safe0").unwrap();
+        fs::write(&alternate, b"other").unwrap();
+        let before = fs::symlink_metadata(&checked).unwrap();
+
+        let stable = fs::File::open(&checked).unwrap();
+        checked_evidence_file_identity(&before, &stable.metadata().unwrap()).unwrap();
+
+        // Simulate the deterministic state at a race boundary, without a
+        // flaky thread: the pathname is now a symlink to a *different* file
+        // even though the same-size old check passed.
+        fs::rename(&checked, &original).unwrap();
+        symlink(&alternate, &checked).unwrap();
+        let swapped = fs::File::open(&checked).unwrap();
+        let error =
+            checked_evidence_file_identity(&before, &swapped.metadata().unwrap()).unwrap_err();
+        assert_eq!(error.to_string(), "credential evidence unavailable");
+        assert!(!error.to_string().contains("different-evidence"));
+        assert!(!error.to_string().contains("other"));
+
+        // A swapped plain file (no symlink involved) must also fail closed.
+        fs::remove_file(&checked).unwrap();
+        fs::write(&checked, b"other").unwrap();
+        let plain = fs::File::open(&checked).unwrap();
+        assert_eq!(
+            checked_evidence_file_identity(&before, &plain.metadata().unwrap())
+                .unwrap_err()
+                .to_string(),
+            "credential evidence unavailable"
+        );
+
+        let link = root.join("explicit-symlink.json");
+        symlink(&alternate, &link).unwrap();
+        assert_eq!(
+            diagnose_file(&link).unwrap_err().to_string(),
+            "credential evidence unavailable"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn stable_evidence_is_read_but_oversized_and_nonregular_descriptors_are_denied() {
+        let root = std::env::temp_dir().join(format!(
+            "chat-gateway-evidence-regular-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir(&root).unwrap();
+        let file = root.join("synthetic-evidence.json");
+        fs::write(&file, br#"{"provider":"chatgpt"}"#).unwrap();
+        let diagnosis = diagnose_file(&file).unwrap();
+        let report: serde_json::Value = serde_json::from_str(&diagnosis).unwrap();
+        assert_eq!(report["provider"], "chatgpt");
+        assert_eq!(report["category"], "inconclusive");
+        assert_eq!(report["live_proof"], false);
+        assert!(!diagnosis.contains("cookie"));
+        assert!(!diagnosis.contains("vault"));
+
+        fs::write(&file, vec![b'X'; MAX_FILE as usize + 1]).unwrap();
+        assert_eq!(
+            diagnose_file(&file).unwrap_err().to_string(),
+            "credential evidence unavailable"
+        );
+        let before = fs::symlink_metadata(&file).unwrap();
+        let opened = fs::File::open(&file).unwrap();
+        assert_eq!(
+            checked_evidence_file_identity(&before, &opened.metadata().unwrap())
+                .unwrap_err()
+                .to_string(),
+            "credential evidence unavailable"
+        );
+        // A directory cannot be smuggled through an otherwise valid size
+        // check just because File::open on Unix supports directory handles.
+        let checked = fs::symlink_metadata(&root).unwrap();
+        let opened = fs::File::open(&root).unwrap();
+        assert_eq!(
+            checked_evidence_file_identity(&checked, &opened.metadata().unwrap())
+                .unwrap_err()
+                .to_string(),
+            "credential evidence unavailable"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -458,7 +659,7 @@ mod tests {
     fn base() -> Value {
         json!({
             "provider":"chatgpt",
-            "chrome":{"verdict":"verified","observed_at_ms":NOW},
+            "chrome":{"verdict":"verified","observed_at_ms":NOW,"generation":ID},
             "snapshot":{"state":"applied","observed_at_ms":NOW,"generation":ID},
             "obscura":{"verdict":"verified","observed_at_ms":NOW,"generation":ID},
             "attempt":{"stage":"response","outcome":"failed","observed_at_ms":NOW,"generation":ID}
@@ -492,6 +693,47 @@ mod tests {
             "observed_at_ms": NOW
         });
         v
+    }
+
+    #[test]
+    fn gateway_candidate_stage_reason_pairs_must_match_the_source_emitter() {
+        let mut v = with_gateway_failure();
+        v["attempt"]["stage"] = json!("unknown");
+        v["gateway_failure"]["stage"] = json!("candidate_admission");
+        for valid in ["provider_busy", "candidate_skipped"] {
+            v["gateway_failure"]["reason"] = json!(valid);
+            let result = checked(v.clone());
+            assert_eq!(result.reason, "request_phase_or_terminal_evidence_missing");
+            assert!(!result.live_proof);
+        }
+        for invalid in ["backend_unavailable", "session_expired", "unclassified"] {
+            v["gateway_failure"]["reason"] = json!(invalid);
+            let result = checked(v.clone());
+            assert_eq!(result.reason, "inconsistent_gateway_stage_reason");
+            assert!(!result.live_proof);
+        }
+
+        v["attempt"]["stage"] = json!("response");
+        for stage in ["backend_admission", "first_stream_event", "json_completion"] {
+            v["gateway_failure"]["stage"] = json!(stage);
+            v["gateway_failure"]["reason"] = json!("candidate_skipped");
+            let result = checked(v.clone());
+            let expected = if stage == "backend_admission" {
+                "conflicting_gateway_failure_stage"
+            } else {
+                "inconsistent_gateway_stage_reason"
+            };
+            assert_eq!(result.reason, expected);
+            let serialized = serde_json::to_string(&result).unwrap();
+            assert!(!serialized.contains(ID));
+            assert!(!serialized.contains("candidate_skipped"));
+            assert!(!result.live_proof);
+        }
+
+        // Legacy synthetic JSON completion fixtures retain their existing behavior.
+        let normal = checked(with_gateway_failure());
+        assert_eq!(normal.category, "transport_or_extraction");
+        assert!(!normal.live_proof);
     }
 
     #[test]
@@ -577,6 +819,70 @@ mod tests {
     }
 
     #[test]
+    fn gateway_last_failure_must_follow_the_failed_attempt() {
+        let mut evidence = with_gateway_failure();
+        evidence["attempt"]["observed_at_ms"] = json!(NOW);
+        evidence["gateway_failure"]["observed_at_ms"] = json!(NOW - 1);
+        let early = checked(evidence.clone());
+        assert_eq!(early.category, "inconclusive");
+        assert_eq!(early.reason, "gateway_failure_precedes_attempt");
+        assert!(!early.live_proof);
+        let safe = serde_json::to_string(&early).unwrap();
+        assert!(!safe.contains(ID));
+        assert!(!safe.contains("token"));
+        assert!(!safe.contains("cookie"));
+
+        evidence["gateway_failure"]["observed_at_ms"] = json!(NOW);
+        assert_eq!(
+            checked(evidence.clone()).category,
+            "transport_or_extraction"
+        );
+        evidence["gateway_failure"]["observed_at_ms"] = json!(NOW + 1_000);
+        assert_eq!(
+            checked(evidence.clone()).category,
+            "transport_or_extraction"
+        );
+
+        evidence["provider"] = json!("metaai");
+        evidence["chrome"]["verdict"] = json!("unsupported");
+        evidence["obscura"]["verdict"] = json!("unknown");
+        assert_eq!(
+            checked(evidence.clone()).reason,
+            "authoritative_obscura_account_verifier_missing"
+        );
+
+        // The UTC-only owner-status timestamp has identical ordering rules.
+        evidence["provider"] = json!("chatgpt");
+        evidence["chrome"]["verdict"] = json!("verified");
+        evidence["obscura"]["verdict"] = json!("verified");
+        evidence["gateway_failure"]
+            .as_object_mut()
+            .unwrap()
+            .remove("observed_at_ms");
+        let prior_utc =
+            chrono::DateTime::<chrono::Utc>::from_timestamp_millis((NOW - 1_000) as i64)
+                .unwrap()
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        evidence["gateway_failure"]["observed_at_utc"] = json!(prior_utc);
+        assert_eq!(
+            checked(evidence.clone()).reason,
+            "gateway_failure_precedes_attempt"
+        );
+        let current_utc = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(NOW as i64)
+            .unwrap()
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        evidence["gateway_failure"]["observed_at_utc"] = json!(current_utc);
+        assert_eq!(
+            checked(evidence.clone()).category,
+            "transport_or_extraction"
+        );
+
+        // Request identity remains a mandatory separate source fence.
+        evidence["gateway_failure"]["request_id"] = json!(OTHER_ID);
+        assert_eq!(checked(evidence).reason, "gateway_request_id_mismatch");
+    }
+
+    #[test]
     fn gateway_failure_requires_matching_canonical_id_and_failed_attempt() {
         let mut v = with_gateway_failure();
         v["gateway_failure"]["request_id"] = json!(OTHER_ID);
@@ -617,6 +923,45 @@ mod tests {
     }
 
     #[test]
+    fn real_120_second_timeout_tail_is_valid_evidence_not_account_proof() {
+        // Meta AI's observed 120.030s installed failure is just above the
+        // upstream 120s deadline; this cannot alone imply expired credentials.
+        let mut v = with_gateway_failure();
+        v["gateway_failure"]["duration_ms"] = json!(120_030);
+        assert_eq!(checked(v.clone()).category, "transport_or_extraction");
+        assert!(!checked(v.clone()).live_proof);
+
+        v["provider"] = json!("metaai");
+        v["chrome"]["verdict"] = json!("unsupported");
+        v["obscura"]["verdict"] = json!("unknown");
+        let no_account_proof = checked(v.clone());
+        assert_eq!(no_account_proof.category, "inconclusive");
+        assert_eq!(
+            no_account_proof.reason,
+            "authoritative_obscura_account_verifier_missing"
+        );
+        assert!(!no_account_proof.live_proof);
+
+        v["gateway_failure"]["request_id"] = json!(OTHER_ID);
+        assert_eq!(checked(v.clone()).reason, "gateway_request_id_mismatch");
+        v["gateway_failure"]["request_id"] = json!(ID);
+        v["snapshot"]["generation"] = json!(OTHER_ID);
+        assert_eq!(checked(v.clone()).reason, "snapshot_generation_mismatch");
+        v["snapshot"]["generation"] = json!(ID);
+        v["gateway_failure"]["duration_ms"] = json!(MAX_GATEWAY_FAILURE_DURATION_MS + 1);
+        assert_eq!(
+            checked(v.clone()).reason,
+            "invalid_gateway_failure_evidence"
+        );
+
+        let safe = serde_json::to_string(&checked(v)).unwrap();
+        assert!(!safe.contains(ID));
+        assert!(!safe.contains(OTHER_ID));
+        assert!(!safe.contains("token"));
+        assert!(!safe.contains("cookie"));
+    }
+
+    #[test]
     fn gateway_failure_stage_reason_duration_and_freshness_are_strict() {
         let mut v = with_gateway_failure();
         v["gateway_failure"]["stage"] = json!("https://private.example/?token=secret");
@@ -631,7 +976,7 @@ mod tests {
             "invalid_gateway_failure_evidence"
         );
         v["gateway_failure"]["reason"] = json!("timeout");
-        v["gateway_failure"]["duration_ms"] = json!(120_001);
+        v["gateway_failure"]["duration_ms"] = json!(MAX_GATEWAY_FAILURE_DURATION_MS + 1);
         assert_eq!(
             checked(v.clone()).reason,
             "invalid_gateway_failure_evidence"
@@ -662,6 +1007,119 @@ mod tests {
         );
         v["gateway_failure"]["reason"] = json!("challenge");
         assert_eq!(checked(v).reason, "account_or_challenge_state_changed");
+    }
+
+    #[test]
+    fn correlated_auth_state_change_supersedes_apparent_replay_mismatch() {
+        let mut evidence = with_gateway_failure();
+        evidence["obscura"]["verdict"] = json!("unauthenticated");
+        // A non-auth gateway failure does not override the regular mismatch.
+        assert_eq!(checked(evidence.clone()).category, "replay_or_binding");
+
+        for signal in ["session_expired", "challenge"] {
+            evidence["gateway_failure"]["reason"] = json!(signal);
+            let changed = checked(evidence.clone());
+            assert_eq!(changed.category, "inconclusive");
+            assert_eq!(changed.reason, "account_or_challenge_state_changed");
+            assert!(!changed.live_proof);
+            let safe = serde_json::to_string(&changed).unwrap();
+            for private in [ID, OTHER_ID, "private", "cookie", "token"] {
+                assert!(!safe.contains(private));
+            }
+
+            // A different or noncanonical request cannot assert supersession.
+            evidence["gateway_failure"]["request_id"] = json!(OTHER_ID);
+            assert_eq!(
+                checked(evidence.clone()).reason,
+                "gateway_request_id_mismatch"
+            );
+            evidence["gateway_failure"]["request_id"] = json!(ID.to_uppercase());
+            assert_eq!(
+                checked(evidence.clone()).reason,
+                "missing_gateway_request_correlation"
+            );
+            evidence["gateway_failure"]["request_id"] = json!(ID);
+            evidence["gateway_failure"]["observed_at_ms"] = json!(NOW - MAX_AGE_MS - 1);
+            assert_eq!(checked(evidence.clone()).reason, "stale_or_future_evidence");
+            evidence["gateway_failure"]["observed_at_ms"] = json!(NOW);
+            evidence["gateway_failure"]["stage"] = json!("backend_admission");
+            assert_eq!(
+                checked(evidence.clone()).reason,
+                "conflicting_gateway_failure_stage"
+            );
+            evidence["gateway_failure"]["stage"] = json!("json_completion");
+        }
+
+        // A later gateway signal without supporting account observations
+        // does not convert unknown login into a specific expiry diagnosis.
+        evidence["obscura"]["verdict"] = json!("unknown");
+        evidence["chrome"]["verdict"] = json!("unknown");
+        evidence["gateway_failure"]["reason"] = json!("challenge");
+        assert_eq!(
+            checked(evidence.clone()).reason,
+            "authoritative_obscura_account_verifier_missing"
+        );
+
+        evidence["chrome"]["verdict"] = json!("verified");
+        evidence["obscura"]["verdict"] = json!("unauthenticated");
+        evidence.as_object_mut().unwrap().remove("gateway_failure");
+        assert_eq!(checked(evidence).category, "replay_or_binding");
+    }
+
+    #[test]
+    fn coarse_gateway_admission_never_certifies_later_provider_attempt_phase() {
+        let mut evidence = with_gateway_failure();
+        for gateway_stage in ["candidate_admission", "backend_admission"] {
+            evidence["gateway_failure"]["stage"] = json!(gateway_stage);
+            // Match the live producer's distinct admission reason vocabulary:
+            // candidate admission cannot emit backend_unavailable.
+            evidence["gateway_failure"]["reason"] =
+                json!(if gateway_stage == "candidate_admission" {
+                    "candidate_skipped"
+                } else {
+                    "backend_unavailable"
+                });
+            for attempted_phase in [
+                "bootstrap",
+                "composer",
+                "send",
+                "response",
+                "stream",
+                "completed",
+            ] {
+                evidence["attempt"]["stage"] = json!(attempted_phase);
+                let decision = checked(evidence.clone());
+                assert_eq!(
+                    decision.category, "inconclusive",
+                    "{gateway_stage}/{attempted_phase}"
+                );
+                assert_eq!(
+                    decision.reason, "conflicting_gateway_failure_stage",
+                    "{gateway_stage}/{attempted_phase}"
+                );
+                assert!(!decision.live_proof);
+                let safe = serde_json::to_string(&decision).unwrap();
+                for secret in [ID, "private", "cookie", "token"] {
+                    assert!(!safe.contains(secret), "{gateway_stage}/{attempted_phase}");
+                }
+            }
+            evidence["attempt"]["stage"] = json!("unknown");
+            assert_eq!(
+                checked(evidence.clone()).reason,
+                "request_phase_or_terminal_evidence_missing"
+            );
+        }
+        // The later gateway reporting checkpoints are not proof that a
+        // provider response actually started. Preserve their existing
+        // redacted adapter-input verdict on a source-verified failed attempt.
+        for gateway_stage in ["first_stream_event", "json_completion"] {
+            evidence["gateway_failure"]["stage"] = json!(gateway_stage);
+            evidence["attempt"]["stage"] = json!("composer");
+            assert_eq!(checked(evidence.clone()).category, "adapter_input");
+        }
+        // Canonical request identity is still a separate mandatory fence.
+        evidence["gateway_failure"]["request_id"] = json!(OTHER_ID);
+        assert_eq!(checked(evidence).reason, "gateway_request_id_mismatch");
     }
 
     #[test]
@@ -716,6 +1174,61 @@ mod tests {
     }
 
     #[test]
+    fn account_proof_predating_applied_snapshot_observation_cannot_assign_runtime_blame() {
+        let mut evidence = base();
+        evidence["obscura"]["observed_at_ms"] = json!(NOW - 1_000);
+        let decision = checked(evidence.clone());
+        assert_eq!(decision.category, "inconclusive");
+        assert_eq!(
+            decision.reason,
+            "account_proof_predates_applied_snapshot_observation"
+        );
+        assert!(!decision.live_proof);
+        assert!(!serde_json::to_string(&decision).unwrap().contains(ID));
+
+        // Negative account evidence observed before the applied checkpoint
+        // likewise cannot establish a replay/binding mismatch.
+        evidence["obscura"]["verdict"] = json!("unauthenticated");
+        assert_eq!(
+            checked(evidence.clone()).reason,
+            "account_proof_predates_applied_snapshot_observation"
+        );
+        // Meta AI has no authoritative account verifier at all; that
+        // unsupported verdict must remain the stronger diagnosis regardless
+        // of how owner-supplied observation times are ordered.
+        let mut meta = base();
+        meta["provider"] = json!("metaai");
+        meta["obscura"]["observed_at_ms"] = json!(NOW - 1_000);
+        assert_eq!(
+            checked(meta).reason,
+            "metaai_account_verifier_not_established"
+        );
+
+        // Equal-time checkpoints remain eligible for existing typed logic.
+        evidence["obscura"]["observed_at_ms"] = json!(NOW);
+        assert_eq!(checked(evidence).category, "replay_or_binding");
+    }
+
+    #[test]
+    fn account_proof_checkpoint_order_must_hold_with_correlated_gateway_failure() {
+        let mut evidence = with_gateway_failure();
+        evidence["obscura"]["observed_at_ms"] = json!(NOW - 1_000);
+        assert_eq!(
+            checked(evidence.clone()).reason,
+            "account_proof_predates_applied_snapshot_observation"
+        );
+        // A properly ordered, same-generation earlier snapshot can support
+        // source-attributed diagnosis; the gateway UUID remains mandatory.
+        evidence["snapshot"]["observed_at_ms"] = json!(NOW - 2_000);
+        assert_eq!(
+            checked(evidence.clone()).category,
+            "transport_or_extraction"
+        );
+        evidence["attempt"]["request_id"] = json!(OTHER_ID);
+        assert_eq!(checked(evidence).reason, "gateway_request_id_mismatch");
+    }
+
+    #[test]
     fn request_diagnosis_keeps_prior_proof_and_later_correlated_status_distinct() {
         let mut evidence = base();
         evidence["chrome"]["observed_at_ms"] = json!(NOW - 10_000);
@@ -731,6 +1244,48 @@ mod tests {
         let serialized = serde_json::to_string(&decision).unwrap();
         assert!(!serialized.contains(ID));
         assert!(!serialized.contains("token=private"));
+    }
+
+    #[test]
+    fn replay_mismatch_requires_chrome_proof_bound_to_exact_snapshot_generation() {
+        let mut v = base();
+        v["obscura"]["verdict"] = json!("unauthenticated");
+        assert_eq!(checked(v.clone()).category, "replay_or_binding");
+
+        v["chrome"].as_object_mut().unwrap().remove("generation");
+        let no_capture_lineage = checked(v.clone());
+        assert_eq!(no_capture_lineage.category, "inconclusive");
+        assert_eq!(
+            no_capture_lineage.reason,
+            "chrome_snapshot_correlation_missing"
+        );
+        assert!(!no_capture_lineage.live_proof);
+
+        for invalid in [
+            OTHER_ID.to_owned(),
+            ID.to_uppercase(),
+            "00000000-0000-0000-0000-000000000000".to_owned(),
+            "https://private.example/?cookie=secret".to_owned(),
+        ] {
+            v["chrome"]["generation"] = json!(invalid);
+            let mismatch = checked(v.clone());
+            assert_eq!(mismatch.category, "inconclusive");
+            assert_eq!(mismatch.reason, "snapshot_generation_mismatch");
+            let safe = serde_json::to_string(&mismatch).unwrap();
+            assert!(!safe.contains(ID));
+            assert!(!safe.contains(OTHER_ID));
+            assert!(!safe.contains("private.example"));
+            assert!(!safe.contains("cookie"));
+        }
+
+        v["chrome"]["generation"] = json!(ID);
+        v["chrome"]["observed_at_ms"] = json!(NOW - MAX_AGE_MS - 1);
+        assert_eq!(checked(v.clone()).reason, "stale_or_future_evidence");
+        v["chrome"]["observed_at_ms"] = json!(NOW + CLOCK_SKEW_MS + 1);
+        assert_eq!(checked(v.clone()).reason, "stale_or_future_evidence");
+
+        v["chrome"]["observed_at_ms"] = json!(NOW);
+        assert_eq!(checked(v).category, "replay_or_binding");
     }
 
     #[test]
@@ -862,6 +1417,37 @@ mod tests {
         let result = checked(value);
         assert_eq!(result.category, "inconclusive");
         assert_eq!(result.reason, "missing_snapshot_correlation");
+    }
+
+    #[test]
+    fn owner_supplied_secret_shaped_json_is_never_reflected_in_diagnosis() {
+        let path = std::env::temp_dir().join(format!(
+            "chat-gateway-evidence-zeroize-{}.json",
+            uuid::Uuid::new_v4()
+        ));
+        // Malformed input may contain a copied credential-shaped value. It is
+        // rejected with a fixed error while the raw input buffer is zeroized.
+        std::fs::write(
+            &path,
+            br#"{"provider":"chatgpt","upstream_token":"synthetic-secret-cookie","bad":]"#,
+        )
+        .unwrap();
+        let error = match diagnose_file(&path) {
+            Err(error) => error.to_string(),
+            Ok(_) => panic!("malformed owner evidence must not be accepted"),
+        };
+        assert_eq!(error, "credential evidence invalid");
+        assert!(!error.contains("synthetic-secret-cookie"));
+
+        // The valid, read-only source contract is unchanged.
+        std::fs::write(&path, br#"{"provider":"chatgpt"}"#).unwrap();
+        let report = diagnose_file(&path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&report).unwrap();
+        assert_eq!(parsed["provider"], "chatgpt");
+        assert_eq!(parsed["category"], "inconclusive");
+        assert_eq!(parsed["live_proof"], false);
+        assert!(!report.contains("synthetic-secret-cookie"));
+        std::fs::remove_file(&path).unwrap();
     }
 
     #[test]

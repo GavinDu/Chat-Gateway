@@ -37,3 +37,18 @@ the upstream complete native suite or live provider acceptance.
 
 No provider hostname exceptions, challenge solver, Chromium runtime, or
 saved-account data are included in these crates.
+
+## Preserved main cookie-scope correction
+
+The cookie jar internally records host-only scope, but its public export
+previously discarded that distinction. The gateway then saved Domain cookies
+as host-only cookies, breaking saved-session recovery on provider subdomains.
+Exported domain-scoped cookies now retain their leading dot; host-only cookies
+remain unprefixed. The export reads the actual jar scope and never guesses from
+an older snapshot, cookie name, or credential value.
+
+`tests/native_cookie_snapshot.rs` checks two export/replay generations: Domain
+cookies continue to reach a subdomain, while host-only cookies never do. No
+provider accounts or network requests are used. Expiry and SameSite visibility
+in the gateway wrapper remain separate limitations; this change makes no claim
+of verified provider login.

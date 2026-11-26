@@ -91,6 +91,30 @@ test("only supported explicit rejection is unauthenticated; failures are unknown
   }
 });
 
+test("ambiguous nonempty 200 account schemas cannot force re-login or leak provider errors",async()=>{
+  const cases=[
+    {user:null,error:"private:temporary-provider-error"},
+    {user:null,accessToken:null,expires:"unknown"},
+    {user:null,accountStatus:"unknown"},
+    {user:null,challenge:"private-cookie-reason"},
+    {user:undefined,accessToken:"",expires:new Date(Date.now()+60_000).toISOString()}
+  ];
+  for(const session of cases){
+    const {value,calls}=await probe({session});
+    assert.equal(calls,1);
+    assert.equal(value.authentication,"unknown");
+    assert.equal(value.reason,"incomplete_or_expired_session_evidence");
+    assert.equal(value.http_status,200);
+    const serialized=JSON.stringify(value);
+    for(const secret of ["private", "accountStatus", "challenge", "accessToken"]) {
+      assert(!serialized.includes(secret));
+    }
+  }
+  assert.equal((await probe({session:{user:null}})).value.authentication,"unauthenticated");
+  assert.equal((await probe({session:{}})).value.authentication,"unauthenticated");
+  assert.equal((await probe({status:401})).value.authentication,"unauthenticated");
+});
+
 test("first-party proof is discarded when same tab navigates across either awaited boundary",async()=>{
   const session = {
     user:{email:"private@example.test"},accessToken:"bearer-private-secret",

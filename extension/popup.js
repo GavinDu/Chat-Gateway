@@ -56,7 +56,9 @@ async function verifyChatgptActiveTab() {
     if (attempt === chatgptCheckGeneration) message(text);
   };
   const action = $("verify-chatgpt");
+  const pairedAction = $("verify-chatgpt-gateway");
   action.disabled = true;
+  pairedAction.disabled = true;
   report("Checking the active ChatGPT tab without syncing credentials.");
   try {
     if (typeof chrome.tabs?.query !== "function" ||
@@ -72,6 +74,10 @@ async function verifyChatgptActiveTab() {
       return;
     }
     const tabId = tabs[0].id;
+    // A first-party SPA/account route may change *after* the injected probe
+    // resolves but before the popup queries the active tab again. Keep this
+    // potentially private URL in memory only; compare it, never display it.
+    const initialTabUrl = tabs[0].url;
     // Explicit user gesture + activeTab grants exactly this tab, not arbitrary
     // browser pages. No credential-bearing body leaves the page function.
     const runs = await chrome.scripting.executeScript({
@@ -83,6 +89,7 @@ async function verifyChatgptActiveTab() {
     const current = await chrome.tabs.query({active:true, currentWindow:true});
     if (attempt !== chatgptCheckGeneration ||
         current?.length !== 1 || current[0]?.id !== tabId ||
+        current[0]?.url !== initialTabUrl ||
         !firstPartyChatgptTab(current[0].url)) {
       report("Tab changed during verification. Result discarded.");
       return;
@@ -113,7 +120,248 @@ async function verifyChatgptActiveTab() {
     // Browser permission failures can include internal tab URLs or other data.
     report("Chrome account verification unavailable. No session was changed.");
   } finally {
-    if (attempt === chatgptCheckGeneration) action.disabled = false;
+    if (attempt === chatgptCheckGeneration) {
+      action.disabled = false;
+      pairedAction.disabled = false;
+    }
+  }
+}
+
+const CHATGPT_COMPARISON_KEYS = [
+  "gateway", "token", "connectionMode", "relayConnectionEpoch",
+  "linkedProviders", "providerLinkEpochs", "providerLinkPendingAttempts"
+];
+const ACCOUNT_RECORD_KEYS = new Set([
+  "schema_version", "provider", "context", "authentication", "reason",
+  "checked_at_utc", "attempt_id", "worker_generation",
+  "exported_snapshot_verified", "applied_snapshot_verified"
+]);
+const WARM_ACCOUNT_REASONS = Object.freeze({
+  verified: new Set(["first_party_session_confirmed"]),
+  unauthenticated: new Set(["provider_rejected_session"]),
+  unknown: new Set([
+    "first_party_check_inconclusive", "provider_disabled", "relay_unavailable",
+    "session_mutation_busy", "worker_unavailable", "worker_generation_changed",
+    "first_party_check_timeout"
+  ]),
+  unsupported: new Set(["account_verifier_not_established"])
+});
+const CHATGPT_COMPARISON_DEADLINE_MS = 20_000;
+
+// Whitelist only the fixed account observation fields from our source-owned
+// gateway API. Never render or propagate an untrusted response body or error.
+function safeWarmChatgptAccountRecord(record) {
+  if (!record || typeof record !== "object" || Array.isArray(record) ||
+      Object.keys(record).length !== ACCOUNT_RECORD_KEYS.size ||
+      !Object.keys(record).every(key => ACCOUNT_RECORD_KEYS.has(key)) ||
+      record.schema_version !== 1 || record.provider !== "chatgpt" ||
+      record.context !== "obscura_warm_page" ||
+      record.exported_snapshot_verified !== false ||
+      record.applied_snapshot_verified !== false ||
+      typeof record.authentication !== "string" ||
+      !Object.hasOwn(WARM_ACCOUNT_REASONS, record.authentication) ||
+      !WARM_ACCOUNT_REASONS[record.authentication].has(record.reason) ||
+      (record.worker_generation !== null &&
+        (!Number.isSafeInteger(record.worker_generation) || record.worker_generation < 0)) ||
+      (["verified","unauthenticated"].includes(record.authentication) &&
+        record.worker_generation === null) ||
+      typeof record.attempt_id !== "string" ||
+      !/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(record.attempt_id) ||
+      typeof record.checked_at_utc !== "string" ||
+      !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(record.checked_at_utc)) return null;
+  const checked = Date.parse(record.checked_at_utc);
+  if (!Number.isFinite(checked) ||
+      new Date(checked).toISOString().replace(".000Z","Z") !== record.checked_at_utc ||
+      Math.abs(Date.now() - checked) > 30_000) return null;
+  return record.authentication;
+}
+
+function safeChromeComparisonResult(record) {
+  if (!record || record.provider !== "chatgpt" ||
+      record.context !== "chrome_active_tab" ||
+      record.exported_snapshot_verified !== false ||
+      !["verified","unauthenticated","unknown"].includes(record.authentication) ||
+      !CHATGPT_VERIFIER_REASONS.has(record.reason) ||
+      typeof record.checked_at !== "string" ||
+      !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(record.checked_at) ||
+      !Number.isFinite(Date.parse(record.checked_at)) ||
+      Math.abs(Date.now() - Date.parse(record.checked_at)) > 30_000) return null;
+  if (record.authentication === "verified" &&
+      (record.reason !== "first_party_session_confirmed" ||
+        record.http_status !== 200)) return null;
+  if (record.authentication === "unauthenticated" &&
+      !((record.reason === "provider_rejected_session" && record.http_status === 401) ||
+        (record.reason === "provider_reports_no_session" && record.http_status === 200))) return null;
+  if (record.authentication === "unknown" &&
+      ["first_party_session_confirmed", "provider_rejected_session",
+       "provider_reports_no_session"].includes(record.reason)) return null;
+  return record.authentication;
+}
+
+// Chrome storage and test doubles may return references to nested objects.
+// Capture primitive connection/link-epoch values before the first await so a
+// mutable shared object can never silently update the original comparison.
+function immutableChatgptConnection(state) {
+  return {
+    gateway:state.gateway,token:state.token,
+    connectionMode:state.connectionMode,
+    relayConnectionEpoch:state.relayConnectionEpoch,
+    providerLinkEpochs:{chatgpt:state.providerLinkEpochs?.chatgpt},
+    providerLinkPendingAttempts:{chatgpt:state.providerLinkPendingAttempts?.chatgpt},
+    linkedProviders:Array.isArray(state.linkedProviders)
+      ? [...state.linkedProviders] : []
+  };
+}
+
+function sameLinkedChatgptConnection(before, after) {
+  return before && after && before.gateway === after.gateway &&
+    before.token === after.token &&
+    before.connectionMode === after.connectionMode &&
+    before.relayConnectionEpoch === after.relayConnectionEpoch &&
+    typeof before.providerLinkEpochs?.chatgpt === "string" &&
+    before.providerLinkEpochs.chatgpt.length > 0 &&
+    before.providerLinkEpochs.chatgpt === after.providerLinkEpochs?.chatgpt &&
+    !before.providerLinkPendingAttempts?.chatgpt &&
+    !after.providerLinkPendingAttempts?.chatgpt &&
+    Array.isArray(after.linkedProviders) &&
+    after.linkedProviders.includes("chatgpt");
+}
+
+async function compareChatgptBrowserAndGateway() {
+  const attempt = ++chatgptCheckGeneration;
+  const action = $("verify-chatgpt-gateway");
+  const chromeOnlyAction = $("verify-chatgpt");
+  action.disabled = true;
+  chromeOnlyAction.disabled = true;
+  const report = text => {
+    if (attempt === chatgptCheckGeneration) message(text);
+  };
+  report("Checking Chrome and gateway accounts separately, without syncing sessions.");
+  try {
+    const read = await chrome.storage.local.get(CHATGPT_COMPARISON_KEYS);
+    if (attempt !== chatgptCheckGeneration) return;
+    const before = immutableChatgptConnection(read);
+    if (!hasRelayConnection(before) ||
+        !Array.isArray(before.linkedProviders) ||
+        !before.linkedProviders.includes("chatgpt") ||
+        !sameLinkedChatgptConnection(before, before)) {
+      report("Connect and link ChatGPT to the gateway before a read-only comparison.");
+      return;
+    }
+    if (typeof chrome.tabs?.query !== "function" ||
+        typeof chrome.scripting?.executeScript !== "function") {
+      report("Chrome active-tab account verification is unavailable in this extension.");
+      return;
+    }
+    const tabs = await chrome.tabs.query({active:true,currentWindow:true});
+    if (attempt !== chatgptCheckGeneration) return;
+    if (!Array.isArray(tabs) || tabs.length !== 1 ||
+        !Number.isSafeInteger(tabs[0]?.id) || !firstPartyChatgptTab(tabs[0].url)) {
+      report("Open an existing chatgpt.com tab to compare both account checks.");
+      return;
+    }
+    const initialUrl = tabs[0].url;
+    const tabId = tabs[0].id;
+    const runs = await chrome.scripting.executeScript({
+      target:{tabId,allFrames:false},world:"MAIN",func:probeActiveChatgptAccount
+    });
+    if (attempt !== chatgptCheckGeneration) return;
+    const chromeEvidence =
+      Array.isArray(runs) && runs.length === 1 ? runs[0]?.result : null;
+    const chromeAuth = safeChromeComparisonResult(chromeEvidence);
+    if (!chromeAuth) {
+      report("Chrome account verification returned unsupported evidence. No sessions changed.");
+      return;
+    }
+    const midway = await chrome.tabs.query({active:true,currentWindow:true});
+    const beforeRelay = await chrome.storage.local.get(CHATGPT_COMPARISON_KEYS);
+    if (attempt !== chatgptCheckGeneration) return;
+    if (midway?.length !== 1 || midway[0]?.id !== tabId ||
+        midway[0]?.url !== initialUrl ||
+        !firstPartyChatgptTab(midway[0].url)) {
+      report("Tab changed during verification. Result discarded.");
+      return;
+    }
+    if (!sameLinkedChatgptConnection(before,beforeRelay)) {
+      report("Gateway connection or ChatGPT link changed. Result discarded.");
+      return;
+    }
+    const expectedConnection = {
+      gateway:before.gateway,token:before.token,connectionMode:before.connectionMode,
+      provider:"chatgpt",linkEpoch:before.providerLinkEpochs.chatgpt
+    };
+    const controller = new AbortController();
+    let deadline;
+    let gatewayRecord;
+    try {
+      // Bound both the credential-free POST and JSON body parsing. A stale
+      // response cannot certify a later connected install or tab.
+      const expired = new Promise((_,reject) => {
+        deadline = setTimeout(() => {
+          controller.abort();
+          reject(new Error("read_only_probe_deadline"));
+        },CHATGPT_COMPARISON_DEADLINE_MS);
+      });
+      gatewayRecord = await Promise.race([
+        (async () => {
+          const response = await relayFetch(
+            "/relay/v1/account-verification/chatgpt",
+            {method:"POST",body:"{}",signal:controller.signal},expectedConnection
+          );
+          if (!response.ok) throw new Error("read_only_probe_failed");
+          return response.json();
+        })(),
+        expired
+      ]);
+    } finally {
+      clearTimeout(deadline);
+    }
+    if (attempt !== chatgptCheckGeneration) return;
+    const gatewayAuth = safeWarmChatgptAccountRecord(gatewayRecord);
+    if (!gatewayAuth) {
+      report("Gateway account verification returned unsupported evidence. No sessions changed.");
+      return;
+    }
+    const finalTab = await chrome.tabs.query({active:true,currentWindow:true});
+    const after = await chrome.storage.local.get(CHATGPT_COMPARISON_KEYS);
+    if (attempt !== chatgptCheckGeneration) return;
+    if (finalTab?.length !== 1 || finalTab[0]?.id !== tabId ||
+        finalTab[0]?.url !== initialUrl ||
+        !firstPartyChatgptTab(finalTab[0].url)) {
+      report("Tab changed during verification. Result discarded.");
+      return;
+    }
+    if (!sameLinkedChatgptConnection(before,after)) {
+      report("Gateway connection or ChatGPT link changed. Result discarded.");
+      return;
+    }
+    // Both proofs were checked at different await boundaries. A 20-second
+    // gateway request followed by final tab/storage reads can age the earlier
+    // Chrome check out of the 30-second window, even if its tab is unchanged.
+    // Revalidate both source-owned reports immediately before comparison, and
+    // require their observations to describe one bounded time window.
+    if (safeChromeComparisonResult(chromeEvidence) !== chromeAuth ||
+        safeWarmChatgptAccountRecord(gatewayRecord) !== gatewayAuth ||
+        Math.abs(Date.parse(chromeEvidence.checked_at) -
+          Date.parse(gatewayRecord.checked_at_utc)) > 30_000) {
+      report("Paired account observations expired or differ in time. Retry without syncing.");
+      return;
+    }
+    const label = Object.freeze({
+      verified:"verified",unauthenticated:"not signed in",
+      unknown:"unknown",unsupported:"unsupported"
+    });
+    report("Chrome tab: " + label[chromeAuth] +
+      ". Obscura warm page: " + label[gatewayAuth] +
+      ". Export, encrypted vault and applied-snapshot match NOT verified.");
+  } catch (_) {
+    // Never copy network, browser or source error text to the operator.
+    report("Paired account checks unavailable. No sessions changed or resynced.");
+  } finally {
+    if (attempt === chatgptCheckGeneration) {
+      action.disabled = false;
+      chromeOnlyAction.disabled = false;
+    }
   }
 }
 
@@ -248,6 +496,28 @@ function safeProviderIssueLabel(value, allowed) {
     ? value.replaceAll("_", " ") : "unverified status";
 }
 
+// Relay activation is independent of authenticated account readiness. Only
+// source-owned fixed error codes may become human-readable text. Pending HTTP
+// timeout means the worker might still finish; it is not a failed login.
+const GATEWAY_ACTIVATION_ISSUES = new Set([
+  "wait_expired", "browser_worker_unavailable", "refresh_failed",
+  "provider_assets_blocked", "provider_document_denied",
+  "manual_verification_required", "provider_session_expired",
+  "provider_session_no_applicable_material"
+]);
+function safeActivationIssueDetail(item) {
+  if (item.enabled !== true || item.linked !== true ||
+      (item.activation !== "pending" && item.activation !== "failed")) return null;
+  const label = safeProviderIssueLabel(item.activation_issue, GATEWAY_ACTIVATION_ISSUES);
+  if (label === null) return null;
+  // A terminal issue on a still-pending attempt, or a wait timeout reported
+  // as terminal, is contradictory status evidence. Never infer account state.
+  if ((item.activation === "pending") !== (item.activation_issue === "wait_expired")) {
+    return "Activation detail: unverified status";
+  }
+  return "Activation detail: " + label;
+}
+
 // Worker diagnostics timestamps originate from new Date().toISOString().
 // Date.parse alone also accepts browser-dependent, noncanonical human strings;
 // never echo those raw values (which can be poisoned by a stale worker).
@@ -290,6 +560,17 @@ function safeLastFailedRequest(provider, record) {
   return "Last gateway failure: " + record.stage.replaceAll("_", " ") +
     " / " + record.reason.replaceAll("_", " ") +
     " · request " + record.request_id + " · " + record.duration_ms + " ms";
+}
+
+// Meta AI has no reviewed first-party account verifier. Readiness describes
+// the current chat runtime, never an authenticated-account verdict.
+function metaAiChatReady(item) {
+  return item.provider === "metaai" && item.enabled === true && item.linked === true &&
+    item.availability === "ready" && [undefined, "unknown"].includes(item.authentication) &&
+    [undefined, false].includes(item.manual_verification_required) &&
+    [undefined, null].includes(item.activation_issue) &&
+    [undefined, null, "not_attempted", "ready"].includes(item.activation) &&
+    [undefined, null, "authentication_unverified"].includes(item.issue);
 }
 
 async function refreshStatus(force = false) {
@@ -397,9 +678,14 @@ async function refreshStatus(force = false) {
     } catch {
       browser = "Browser cookie check unavailable";
     }
+    const metaReady = metaAiChatReady(item);
+    const chat = item.provider === "metaai" && providerEnabled && hasSavedSession
+      ? metaReady ? "Chat ready" : item.availability === "degraded" ? "Chat unavailable" : "Chat not checked"
+      : null;
     const auth = item.enabled === false ? "Account check deferred (provider disabled)"
-      : item.authentication === "verified" ? "Login verified"
       : item.authentication === "needs_login" ? "Login needed"
+      : item.provider === "metaai" ? "Account verification unavailable"
+      : item.authentication === "verified" ? "Login verified"
       : "Login unverified";
     // Browser activation is not proof of login. Keep the independent
     // authenticated-provider observation visible beside this fixed category.
@@ -408,8 +694,9 @@ async function refreshStatus(force = false) {
       : item.activation === "ready" ? "Browser activation completed"
       : item.activation === "failed" ? "Browser activation failed"
       : item.activation === "cancelled" ? "Browser activation cancelled"
-      : item.activation === "not_attempted" ? "Browser activation not attempted"
+      : item.activation === "not_attempted" && !metaReady ? "Browser activation not attempted"
       : null;
+    const activationDetail = safeActivationIssueDetail(item);
     // A deliberately disabled provider is policy, not a gateway outage.
     // Preserve session/consent display, but do not present stale runtime
     // errors or a manual account action for a provider not being routed.
@@ -428,8 +715,9 @@ async function refreshStatus(force = false) {
     const staleSync = sync?.stale === true ? "Extension sync status stale (gateway check failed)" : null;
     const lastFailedRequest = item.enabled === false ? null
       : safeLastFailedRequest(item.provider, item.last_failed_request);
-    status.textContent = [enabled, linked, browser, auth,
+    status.textContent = [enabled, linked, browser, ...(chat ? [chat] : []), auth,
       ...(activation ? [activation] : []),
+      ...(activationDetail ? [activationDetail] : []),
       ...(blocker ? [blocker] : []),
       ...(runtimeIssue ? [runtimeIssue] : []),
       ...(extensionIssue ? ["Extension sync: " + extensionIssue] : []),
@@ -782,6 +1070,7 @@ async function logoutProvider(provider) {
 }
 
 $("verify-chatgpt").addEventListener("click", verifyChatgptActiveTab);
+$("verify-chatgpt-gateway").addEventListener("click", compareChatgptBrowserAndGateway);
 
 $("refresh").addEventListener("click", async () => {
   try { await refreshStatus(true); message("Status refreshed."); } catch (error) { message(safeStatusErrorMessage(error)); }

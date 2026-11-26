@@ -4,7 +4,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
 
-function loadPopup({failCookieDomain = null, includeSecondProvider = false, manualVerification = false, localRelay = false, activation = null, diagnosticsSync = null, diagnosticsFailure = null, pairedDisconnectReject = false, pairedConnectReject = false, remotePairToken = "b".repeat(64), syncStatus = undefined} = {}) {
+function loadPopup({failCookieDomain = null, includeSecondProvider = false, manualVerification = false, localRelay = false, activation = null, activationIssue = null, diagnosticsSync = null, diagnosticsFailure = null, pairedDisconnectReject = false, pairedConnectReject = false, remotePairToken = "b".repeat(64), syncStatus = undefined} = {}) {
   const elements = new Map();
   const chromeCalls = [];
   const intervals = [];
@@ -206,7 +206,7 @@ function loadPopup({failCookieDomain = null, includeSecondProvider = false, manu
     relayFetch:async()=>{chromeCalls.push("http:relay-status");return {ok:true,status:200,json:async()=>({
       providers:[
         {provider:"metaai",enabled:true,linked:server.linked,authentication:server.linked?"unknown":"needs_login",
-          availability:manualVerification?"degraded":"unknown",manual_verification_required:manualVerification,activation},
+          availability:manualVerification?"degraded":"unknown",manual_verification_required:manualVerification,activation,activation_issue:activationIssue},
         ...(includeSecondProvider ? [{provider:"claude",enabled:true,linked:false,authentication:"needs_login",availability:"unknown"}] : []),
       ],
       vault_mode:true,
@@ -237,9 +237,68 @@ function loadPopup({failCookieDomain = null, includeSecondProvider = false, manu
   vm.createContext(context);
   vm.runInContext(fs.readFileSync(path.join(__dirname,"..","credential_probe.js"),"utf8"),context);
   vm.runInContext(fs.readFileSync(path.join(__dirname,"..","popup.js"),"utf8")+
-    "\nglobalThis.testControls={refreshStatus,connectProvider,logoutProvider,initialize,connectLocalGateway,popupConnectionJson,safeStatusErrorMessage,safeProviderActionError,safeGatewayActionError,verifyChatgptActiveTab,safeLastFailedRequest};",context);
+    "\nglobalThis.testControls={refreshStatus,connectProvider,logoutProvider,initialize,connectLocalGateway,popupConnectionJson,safeStatusErrorMessage,safeProviderActionError,safeGatewayActionError,verifyChatgptActiveTab,compareChatgptBrowserAndGateway,safeWarmChatgptAccountRecord,safeLastFailedRequest};",context);
   return {values,server,elements,byId,chromeCalls,intervals,connectDeadlines,clearedConnectDeadlines,controls:context.testControls,context};
 }
+
+test("ChatGPT active-tab first-party proof rejects empty user shape without leaking session", async () => {
+  // Isolate the explicit script: the popup itself has unrelated async polling
+  // that must never count as first-party account-verifier network traffic.
+  const context = {
+    Date, Promise, AbortController, setTimeout, clearTimeout,
+    location:{protocol:"https:",hostname:"chatgpt.com",port:"",href:"https://chatgpt.com/"}
+  };
+  vm.createContext(context);
+  vm.runInContext(fs.readFileSync(path.join(__dirname,"..","credential_probe.js"),"utf8"),context);
+  const future = () => new Date(Date.now() + 60_000).toISOString();
+  const session = user => ({user,accessToken:"private-fixture-token",expires:future()});
+  for(const [payload,status,authentication,reason] of [
+    [session({}),200,"unknown","incomplete_or_expired_session_evidence"],
+    [session({fixture:true}),200,"verified","first_party_session_confirmed"],
+    [{},200,"unauthenticated","provider_reports_no_session"],
+    [{user:null},200,"unauthenticated","provider_reports_no_session"],
+    [session({fixture:true}),401,"unauthenticated","provider_rejected_session"],
+    [session({fixture:true}),403,"unknown","provider_or_network_blocked"],
+  ]) {
+    let fetchCount = 0;
+    context.fetch = async (url,options) => {
+      ++fetchCount;
+      assert.equal(url,"/api/auth/session");
+      assert.equal(options.credentials,"include");
+      assert.equal(options.redirect,"error");
+      return {status,json:async()=>payload};
+    };
+    const result = await vm.runInContext("probeActiveChatgptAccount()",context);
+    assert.equal(result.authentication,authentication);
+    assert.equal(result.reason,reason);
+    assert.equal(result.exported_snapshot_verified,false);
+    assert.equal(fetchCount,1);
+    const safe = JSON.stringify(result);
+    assert(!safe.includes("private-fixture-token"));
+    assert(!safe.includes("fixture:true"));
+  }
+});
+
+test("standalone ChatGPT probe agrees that an empty user cannot verify credentials", async () => {
+  const code = fs.readFileSync(path.join(__dirname,"..","..","scripts","provider_credential_probe.js"),"utf8");
+  const ctx = {
+    location:{protocol:"https:",hostname:"chatgpt.com",port:"",href:"https://chatgpt.com/"},
+    Date,AbortController,Promise,setTimeout,clearTimeout,
+    fetch:async()=>({status:200,json:async()=>({
+      user:{},accessToken:"private-fixture-token",expires:new Date(Date.now()+60000).toISOString()
+    })})
+  };
+  const partial = await vm.runInNewContext(code,ctx);
+  assert.equal(partial.authentication,"unknown");
+  assert.equal(partial.reason,"incomplete_or_expired_session_evidence");
+  assert(!JSON.stringify(partial).includes("private-fixture-token"));
+  ctx.fetch = async()=>({status:200,json:async()=>({
+    user:{fixture:true},accessToken:"private-fixture-token",expires:new Date(Date.now()+60000).toISOString()
+  })});
+  const positive = await vm.runInNewContext(code,ctx);
+  assert.equal(positive.authentication,"verified");
+  assert.equal(positive.exported_snapshot_verified,false);
+});
 
 test("popup status refresh and local startup reject raw credential-bearing exceptions", async () => {
   const popup = loadPopup();
@@ -476,9 +535,73 @@ test("browser activation statuses stay distinct from login verification", async 
     await popup.controls.refreshStatus();
     const row = popup.elements.get("status").children[0];
     const status = row.children.find(child => child.className==="provider-detail").textContent;
-    assert.match(status, /Login unverified/, "session activation cannot imply authentication");
+    assert.match(status, /Account verification unavailable/, "session activation cannot imply authentication");
     assert.ok(status.includes(expected), "show only fixed activation categories");
     assert.doesNotMatch(status, /Login verified/);
+  }
+});
+
+test("dashboard separates typed pending and failed activation reasons from login verification", async () => {
+  for (const [phase, reason, detail] of [
+    ["pending", "wait_expired", "Activation detail: wait expired"],
+    ["failed", "browser_worker_unavailable", "Activation detail: browser worker unavailable"],
+    ["failed", "refresh_failed", "Activation detail: refresh failed"],
+    ["failed", "provider_session_expired", "Activation detail: provider session expired"],
+    ["failed", "provider_session_no_applicable_material",
+      "Activation detail: provider session no applicable material"],
+    ["failed", "manual_verification_required", "Activation detail: manual verification required"]
+  ]) {
+    const popup=loadPopup({activation:phase, activationIssue:reason});
+    popup.server.linked=true;
+    await popup.controls.refreshStatus();
+    const detailText=popup.byId("status").children[0].children
+      .find(child=>child.className==="provider-detail").textContent;
+    assert.ok(detailText.includes(detail));
+    assert.ok(detailText.includes("Account verification unavailable"), "activation cannot verify credentials");
+    assert.ok(!detailText.includes("Login needed"), "activation cannot demand re-login");
+    assert.equal(popup.chromeCalls.filter(call=>call==="sync-provider:metaai").length,0);
+  }
+});
+
+test("activation diagnostics fail closed for contradictory or untrusted status", async () => {
+  const secret="https://private.invalid/?token=secret&poll_secret=private";
+  for (const [phase, reason, expected] of [
+    ["failed", "wait_expired", "Activation detail: unverified status"],
+    ["pending", "provider_session_expired", "Activation detail: unverified status"],
+    ["pending", "refresh_failed", "Activation detail: unverified status"],
+    ["failed", "refresh_failed "+secret, "Activation detail: unverified status"],
+    ["failed", {error:secret}, "Activation detail: unverified status"],
+    ["failed", 42, "Activation detail: unverified status"],
+    ["ready", "provider_session_expired", null],
+    ["cancelled", "refresh_failed", null],
+    ["not_attempted", "refresh_failed", null]
+  ]) {
+    const popup=loadPopup({activation:phase,activationIssue:reason});
+    popup.server.linked=true;
+    await popup.controls.refreshStatus();
+    const detailText=popup.byId("status").children[0].children
+      .find(child=>child.className==="provider-detail").textContent;
+    if(expected===null) assert.ok(!detailText.includes("Activation detail:"));
+    else assert.ok(detailText.includes(expected));
+    for(const token of ["private.invalid", "poll_secret", "token=secret"]) {
+      assert.ok(!detailText.includes(token), "never echo raw activation errors");
+    }
+    assert.ok(detailText.includes("Account verification unavailable"));
+  }
+  for (const linked of [false, true]) {
+    const popup=loadPopup({activation:"failed",activationIssue:"refresh_failed"});
+    popup.server.linked=linked;
+    if(linked) {
+      popup.context.relayFetch=async()=>({ok:true,status:200,json:async()=>({
+        providers:[{provider:"metaai",enabled:false,linked:true,authentication:"unknown",
+          activation:"failed",activation_issue:"refresh_failed"}],vault_mode:true
+      })});
+    }
+    await popup.controls.refreshStatus();
+    const detail=popup.byId("status").children[0].children
+      .find(child=>child.className==="provider-detail").textContent;
+    assert.ok(!detail.includes("Activation detail:"),
+      "unlinked or disabled providers cannot display stale activation errors");
   }
 });
 
@@ -491,7 +614,7 @@ test("popup displays last extension sync and stale status independently of auth"
   await popup.controls.refreshStatus();
   const row = popup.elements.get("status").children[0];
   const status = row.children.find(child => child.className==="provider-detail").textContent;
-  assert.match(status,/Login unverified/);
+  assert.match(status,/Account verification unavailable/);
   assert.ok(status.includes("Last extension sync attempt: "+last));
   assert.match(status,/Extension sync status stale/);
   assert.match(status,/Extension sync: gateway request failed/);
@@ -571,7 +694,7 @@ test("provider dashboard renders only exact known issue codes from gateway and w
   const known=await view("provider_document_denied","gateway_timeout");
   assert.match(known,/Gateway issue: provider document denied/);
   assert.match(known,/Extension sync: gateway timeout/);
-  assert.match(known,/Login unverified/,
+  assert.match(known,/Account verification unavailable/,
     "issue codes do not establish authenticated login");
 
   const leaked="token=private https://private.invalid/relay?poll_secret=secret";
@@ -1221,6 +1344,272 @@ test("user-initiated ChatGPT verification is tab-scoped, read-only and does not 
   assert.deepEqual(popup.chromeCalls,priorCalls,"verification must not sync or modify gateway link");
 });
 
+
+function pairChatgptFixture(popup) {
+  popup.values.connectionMode="local";
+  popup.values.gateway="http://127.0.0.1:8080";
+  popup.values.linkedProviders=["chatgpt"];
+  popup.values.providerLinkEpochs={chatgpt:"paired-link-epoch"};
+  popup.values.relayConnectionEpoch="paired-relay-epoch";
+  popup.context.chrome.tabs.query=async()=>[{id:42,url:"https://chatgpt.com/c/private-chat-id"}];
+  popup.context.chrome.scripting={executeScript:async options=>{
+    assert.equal(options.target.tabId,42);
+    assert.equal(options.target.allFrames,false);
+    assert.equal(options.world,"MAIN");
+    return [{result:{
+      provider:"chatgpt",context:"chrome_active_tab",
+      authentication:"verified",reason:"first_party_session_confirmed",
+      http_status:200,checked_at:new Date().toISOString(),
+      exported_snapshot_verified:false
+    }}];
+  }};
+}
+function warmChatgptFixture(overrides={}) {
+  return {
+    schema_version:1,provider:"chatgpt",context:"obscura_warm_page",
+    authentication:"verified",reason:"first_party_session_confirmed",
+    checked_at_utc:new Date().toISOString().replace(".000Z","Z")
+      .replace(/\.\d{3}Z$/,"Z"),
+    attempt_id:"123e4567-e89b-42d3-a456-426614174000",
+    worker_generation:3,
+    exported_snapshot_verified:false,applied_snapshot_verified:false,
+    ...overrides
+  };
+}
+
+test("explicit paired account comparison uses no automatic probe, upload or parity claim",async()=>{
+  const popup=loadPopup();
+  for(let i=0;i<5;i++) await new Promise(resolve=>setImmediate(resolve));
+  pairChatgptFixture(popup);
+  const requests=[];
+  popup.context.relayFetch=async (path,options,expected)=>{
+    requests.push({path,options,expected});
+    return {ok:true,status:200,json:async()=>warmChatgptFixture()};
+  };
+  assert.equal(requests.length,0);
+  const priorCalls=[...popup.chromeCalls];
+  await popup.controls.compareChatgptBrowserAndGateway();
+  assert.equal(requests.length,1);
+  assert.equal(requests[0].path,"/relay/v1/account-verification/chatgpt");
+  assert.equal(requests[0].options.method,"POST");
+  assert.equal(requests[0].options.body,"{}");
+  assert.equal(requests[0].expected.provider,"chatgpt");
+  assert.equal(requests[0].expected.linkEpoch,"paired-link-epoch");
+  assert.equal(requests[0].expected.gateway,popup.values.gateway);
+  assert.match(popup.byId("message").textContent,/Chrome tab: verified/);
+  assert.match(popup.byId("message").textContent,/Obscura warm page: verified/);
+  assert.match(popup.byId("message").textContent,/applied-snapshot match NOT verified/);
+  assert.doesNotMatch(popup.byId("message").textContent,/same account|snapshot restored|private-chat-id|123e4567/);
+  assert.equal(popup.byId("verify-chatgpt-gateway").disabled,false);
+  assert.equal(popup.byId("verify-chatgpt").disabled,false);
+  assert.deepEqual(popup.chromeCalls,priorCalls,"no mutation/sync worker call");
+  // The ordinary connected heartbeat uses status only and must never call
+  // the account-verification endpoint without a direct user click.
+  requests.length=0;
+  await popup.intervals.find(x=>x.ms===30_000).fn();
+  assert(!requests.some(req=>req.path.includes("account-verification")));
+});
+
+test("paired comparison discards Chrome proof that expires while gateway call is pending",async()=>{
+  const popup=loadPopup();
+  for(let i=0;i<5;i++) await new Promise(resolve=>setImmediate(resolve));
+  pairChatgptFixture(popup);
+  const started=Date.now();
+  let now=started;
+  // This clock belongs only to the VM. Never change process-wide Date.now.
+  popup.context.Date=class extends Date {static now(){return now;}};
+  popup.context.chrome.scripting={executeScript:async()=>[{result:{
+    provider:"chatgpt",context:"chrome_active_tab",authentication:"verified",
+    reason:"first_party_session_confirmed",http_status:200,
+    checked_at:new Date(started-25_000).toISOString(),
+    exported_snapshot_verified:false
+  }}]};
+  let fetched=0;
+  popup.context.relayFetch=async()=>{
+    ++fetched;
+    // Chrome was fresh on entry, but becomes stale before the final result.
+    now+=10_000;
+    return {ok:true,json:async()=>warmChatgptFixture({
+      checked_at_utc:new Date(now).toISOString().slice(0,19)+"Z"
+    })};
+  };
+  const calls=[...popup.chromeCalls];
+  await popup.controls.compareChatgptBrowserAndGateway();
+  assert.equal(fetched,1);
+  const shown=popup.byId("message").textContent;
+  assert.match(shown,/observations expired or differ in time/);
+  assert.doesNotMatch(shown,/Chrome tab: verified|Obscura warm page: verified/);
+  assert.deepEqual(popup.chromeCalls,calls,"must not resync or mutate credentials");
+});
+
+test("paired comparison rejects divergent source clocks even when each record is fresh",async()=>{
+  const popup=loadPopup();
+  for(let i=0;i<5;i++) await new Promise(resolve=>setImmediate(resolve));
+  pairChatgptFixture(popup);
+  const now=Date.now();
+  popup.context.Date=class extends Date {static now(){return now;}};
+  popup.context.chrome.scripting={executeScript:async()=>[{result:{
+    provider:"chatgpt",context:"chrome_active_tab",authentication:"verified",
+    reason:"first_party_session_confirmed",http_status:200,
+    checked_at:new Date(now+25_000).toISOString(),
+    exported_snapshot_verified:false
+  }}]};
+  popup.context.relayFetch=async()=>({ok:true,json:async()=>warmChatgptFixture({
+    checked_at_utc:new Date(now-25_000).toISOString().slice(0,19)+"Z"
+  })});
+  const calls=[...popup.chromeCalls];
+  await popup.controls.compareChatgptBrowserAndGateway();
+  const shown=popup.byId("message").textContent;
+  assert.match(shown,/observations expired or differ in time/);
+  assert.doesNotMatch(shown,/Chrome tab: verified|Obscura warm page: verified/);
+  assert.deepEqual(popup.chromeCalls,calls,"no automatic retry or resync");
+});
+
+test("paired comparison refuses unlinked or pending account consent before probing either side",async()=>{
+  for(const state of [
+    {},
+    {connectionMode:"local"},
+    {connectionMode:"local",linkedProviders:["chatgpt"]},
+    {connectionMode:"local",linkedProviders:["chatgpt"],
+      providerLinkEpochs:{chatgpt:"epoch"},providerLinkPendingAttempts:{chatgpt:"pending"}}
+  ]){
+    const popup=loadPopup();
+    for(let i=0;i<5;i++) await new Promise(resolve=>setImmediate(resolve));
+    pairChatgptFixture(popup);
+    for(const key of ["connectionMode","linkedProviders","providerLinkEpochs","providerLinkPendingAttempts"]){
+      delete popup.values[key];
+    }
+    Object.assign(popup.values,state);
+    let fetched=0,injected=0;
+    popup.context.relayFetch=async()=>{fetched++;throw Error("private fetch");};
+    popup.context.chrome.scripting={executeScript:async()=>{injected++;return [];}};
+    await popup.controls.compareChatgptBrowserAndGateway();
+    assert.equal(fetched,0);
+    assert.equal(injected,0);
+    assert.match(popup.byId("message").textContent,/Connect and link ChatGPT/);
+  }
+});
+
+test("paired comparison rejects changed link epoch and same-origin tab navigation after async work",async()=>{
+  for(const mode of ["link_epoch","tab_route"]){
+    const popup=loadPopup();
+    for(let i=0;i<5;i++) await new Promise(resolve=>setImmediate(resolve));
+    pairChatgptFixture(popup);
+    let count=0;
+    const base=popup.context.chrome.tabs.query;
+    popup.context.chrome.tabs.query=async()=>{
+      const tabs=await base();
+      count++;
+      return mode==="tab_route" && count>=3
+        ? [{id:42,url:"https://chatgpt.com/c/private-other-account"}] : tabs;
+    };
+    popup.context.relayFetch=async()=>{
+      if(mode==="link_epoch")popup.values.providerLinkEpochs.chatgpt="new-login-epoch";
+      return {ok:true,json:async()=>warmChatgptFixture()};
+    };
+    await popup.controls.compareChatgptBrowserAndGateway();
+    const shown=popup.byId("message").textContent;
+    assert.match(shown,/Result discarded/);
+    assert.doesNotMatch(shown,/Chrome tab: verified|Obscura warm page: verified|private-other-account/);
+  }
+});
+
+test("paired comparison quarantines untrusted gateway proof, leaks no URL or token",async()=>{
+  const invalids=[
+    {exported_snapshot_verified:true},
+    {applied_snapshot_verified:true},
+    {account_id:"private account"},
+    {worker_generation:-1},
+    {checked_at_utc:"1999-01-01T00:00:00Z"},
+    {authentication:"verified",reason:"first_party_check_inconclusive"},
+    {reason:"token=private upstream body"}
+  ];
+  for(const invalid of invalids){
+    const popup=loadPopup();
+    for(let i=0;i<5;i++) await new Promise(resolve=>setImmediate(resolve));
+    pairChatgptFixture(popup);
+    popup.context.relayFetch=async()=>({ok:true,json:async()=>warmChatgptFixture(invalid)});
+    await popup.controls.compareChatgptBrowserAndGateway();
+    const shown=popup.byId("message").textContent;
+    assert.match(shown,/Gateway account verification returned unsupported evidence/);
+    assert.doesNotMatch(shown,/private|token=|account_id|snapshot restored|Chrome tab: verified/);
+  }
+  const popup=loadPopup();
+  for(let i=0;i<5;i++) await new Promise(resolve=>setImmediate(resolve));
+  pairChatgptFixture(popup);
+  popup.context.relayFetch=async()=>{throw Error("token=private https://private.invalid/");};
+  await popup.controls.compareChatgptBrowserAndGateway();
+  assert.equal(popup.byId("message").textContent,
+    "Paired account checks unavailable. No sessions changed or resynced.");
+});
+
+test("paired comparison displays independent negative and unknown account verdicts",async()=>{
+  for(const [gateway,reason,label] of [
+    ["unauthenticated","provider_rejected_session","not signed in"],
+    ["unknown","first_party_check_inconclusive","unknown"],
+    ["unsupported","account_verifier_not_established","unsupported"]
+  ]){
+    const popup=loadPopup();
+    for(let i=0;i<5;i++) await new Promise(resolve=>setImmediate(resolve));
+    pairChatgptFixture(popup);
+    popup.context.relayFetch=async()=>({ok:true,json:async()=>warmChatgptFixture({
+      authentication:gateway,reason
+    })});
+    await popup.controls.compareChatgptBrowserAndGateway();
+    assert.match(popup.byId("message").textContent,
+      new RegExp("Obscura warm page: " + label));
+    assert.match(popup.byId("message").textContent,/match NOT verified/);
+    assert.doesNotMatch(popup.byId("message").textContent,/same account/);
+  }
+});
+
+test("same-origin tab route drift after injected probe invalidates account verdict without URL disclosure", async () => {
+  const initial = "https://chatgpt.com/c/private-initial";
+  const destinations = [
+    "https://chatgpt.com/c/private-next",
+    "https://chatgpt.com/c/private-initial?account=private-other",
+    "https://chatgpt.com/c/private-initial#private-other"
+  ];
+  for (const authentication of ["verified", "unauthenticated"]) {
+    for (const currentUrl of destinations) {
+      const popup=loadPopup();
+      for (let i=0; i<5; i++) await new Promise(resolve=>setImmediate(resolve));
+      let requests=0, scriptInvocations=0;
+      popup.context.chrome.tabs.query = async () => [{
+        id:42,url:++requests===1 ? initial : currentUrl
+      }];
+      popup.context.chrome.scripting={async executeScript(options) {
+        assert.equal(options.target.tabId,42);
+        scriptInvocations++;
+        return [{result:{
+          provider:"chatgpt",context:"chrome_active_tab",authentication,
+          reason:authentication==="verified" ? "first_party_session_confirmed" : "provider_rejected_session",
+          checked_at:new Date().toISOString(), exported_snapshot_verified:false
+        }}];
+      }};
+      const priorCalls=[...popup.chromeCalls];
+      await popup.controls.verifyChatgptActiveTab();
+      assert.equal(scriptInvocations,1);
+      assert.match(popup.byId("message").textContent,/Tab changed during verification/);
+      assert.doesNotMatch(popup.byId("message").textContent,/verified in this Chrome tab|no active account/);
+      assert.doesNotMatch(popup.byId("message").textContent,/private-initial|private-next|private-other/);
+      assert.deepEqual(popup.chromeCalls,priorCalls,"stale read-only check must not sync credentials");
+    }
+  }
+
+  const unchanged=loadPopup();
+  for (let i=0; i<5; i++) await new Promise(resolve=>setImmediate(resolve));
+  unchanged.context.chrome.tabs.query=async()=>[{id:42,url:initial}];
+  unchanged.context.chrome.scripting={executeScript:async()=>[{result:{
+    provider:"chatgpt",context:"chrome_active_tab",authentication:"verified",
+    reason:"first_party_session_confirmed",checked_at:new Date().toISOString(),
+    exported_snapshot_verified:false
+  }}]};
+  await unchanged.controls.verifyChatgptActiveTab();
+  assert.match(unchanged.byId("message").textContent,/account verified in this Chrome tab/);
+  assert.doesNotMatch(unchanged.byId("message").textContent,/private-initial/);
+});
+
 test("active-tab verification refuses foreign origins and stale tab changes", async () => {
   const popup = loadPopup();
   for(let i=0;i<5;i++) await new Promise(resolve=>setImmediate(resolve));
@@ -1338,7 +1727,7 @@ test("provider status names and disabled account checks are distinct from verifi
     row.children.find(child => child.className === "provider-detail").textContent
   ]));
   assert.match(cards.ChatGPT,/Login verified/);
-  assert.match(cards["Meta AI"],/Login unverified/);
+  assert.match(cards["Meta AI"],/Account verification unavailable/);
   assert.match(cards.claude,/Disabled in gateway config/);
   assert.match(cards.claude,/Account check deferred \(provider disabled\)/);
   assert.doesNotMatch(cards.claude,/Login verified|Login needed|Login unverified/);
@@ -1387,4 +1776,33 @@ test("disabled provider policy does not masquerade as a gateway outage", async (
   // Unknown enablement is not permission to suppress real warning evidence.
   assert.match(detail(rows.manus),/Gateway enablement unverified/);
   assert.match(detail(rows.manus),/Gateway issue: provider degraded/);
+});
+
+
+test("Meta AI ready status separates chat from unsupported account verification", async () => {
+  const popup=loadPopup();
+  await new Promise(resolve=>setImmediate(resolve));
+  const ready={provider:"metaai",enabled:true,linked:true,authentication:"unknown",
+    availability:"ready",activation:"not_attempted",manual_verification_required:false,issue:null};
+  async function view(overrides={}) {
+    popup.context.relayFetch=async()=>({ok:true,status:200,json:async()=>({vault_mode:true,
+      providers:[{...ready,...overrides}]})});
+    await popup.controls.refreshStatus(true);
+    return popup.byId("status").children[0].children.find(n=>n.className==="provider-detail").textContent;
+  }
+  const healthy=await view();
+  assert.match(healthy,/Chat ready/);
+  assert.match(healthy,/Account verification unavailable/);
+  assert.doesNotMatch(healthy,/Login verified|Login unverified|Browser activation not attempted|Gateway issue:/);
+  assert.match(await view({issue:"authentication_unverified"}),/Chat ready/,"older gateway compatibility");
+  for(const overrides of [
+    {enabled:false}, {linked:false}, {availability:"unknown"}, {availability:"degraded",issue:"provider_degraded"},
+    {authentication:"needs_login"}, {manual_verification_required:true},
+    {activation_issue:"refresh_failed"}, {authentication:"unexpected"}, {manual_verification_required:"true"},
+    {activation:"pending"}, {activation:"failed"}, {activation:"cancelled"}, {activation:"unexpected"},
+    {issue:"provider_document_denied"}, {issue:"unrecognized"}
+  ]) assert.doesNotMatch(await view(overrides),/Chat ready/);
+  assert.match(await view({authentication:"needs_login"}),/Login needed/);
+  assert.match(await view({availability:"degraded",issue:"provider_degraded"}),/Chat unavailable/);
+  assert.match(await view({activation:"failed"}),/Browser activation failed/);
 });

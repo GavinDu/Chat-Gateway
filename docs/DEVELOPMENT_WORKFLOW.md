@@ -11,7 +11,8 @@ This is the required path from a code change to a local installation. The order 
 ## 2. Pass feature-branch checks
 
 - Run the relevant unit tests, formatting, lint, dependency and security checks locally.
-- Wait for every required GitHub Actions check on the current PR head commit to pass. A check on an earlier commit does not count after the branch changes.
+- Wait for all three routine GitHub Actions jobs (`test`, `embedded-native`, and `docker-build`) on the current PR head commit to pass. A check on an earlier commit does not count after the branch changes.
+- The bounded ARM64 Docker release job is **manual-only**, not part of routine PR/push CI. Run **Actions → Docker ARM64 Low Memory (Manual) → Run workflow**, selecting the tested ref when the change affects ARM64 builds, release linking, Docker packaging, or deployment to constrained ARM64 hosts. Record the tested ref/SHA and result before an applicable ARM64 release; do not treat an unrun optional ARM64 job as passing evidence.
 - Fix failures on the same feature branch, push the fix, and wait for the checks on the new head to pass.
 
 ## 3. Run feature E2E in the local MCP sandbox

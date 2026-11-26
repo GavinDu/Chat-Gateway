@@ -460,6 +460,12 @@ pub(crate) mod test_support {
         Hold(oneshot::Sender<()>),
         /// Emit first content then hold the stream; notify on client drop.
         PartialThenHold(ChatEvent, oneshot::Sender<()>),
+        /// Emit first content, then wait for an explicit test release.
+        PartialThenRelease(
+            ChatEvent,
+            oneshot::Receiver<()>,
+            Option<oneshot::Sender<()>>,
+        ),
     }
 
     pub(crate) struct ScriptedBackend {
@@ -545,6 +551,29 @@ pub(crate) mod test_support {
                     tokio::spawn(async move {
                         tx.closed().await;
                         let _ = cancelled.send(());
+                    });
+                    Ok(rx)
+                }
+                ScriptedSend::PartialThenRelease(first, release, started) => {
+                    let (tx, rx) = mpsc::channel(1);
+                    tokio::spawn(async move {
+                        if tx.send(Ok(first)).await.is_err() {
+                            return;
+                        }
+                        if let Some(started) = started {
+                            let _ = started.send(());
+                        }
+                        tokio::select! {
+                            _ = tx.closed() => {}
+                            released = release => {
+                                if released.is_ok() {
+                                    let _ = tx.send(Ok(ChatEvent {
+                                        content: String::new(),
+                                        done: true,
+                                    })).await;
+                                }
+                            }
+                        }
                     });
                     Ok(rx)
                 }

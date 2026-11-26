@@ -89,6 +89,98 @@ where
         .context("provider session navigation timed out")?
 }
 
+/// A failed cookie restore is not a source-backed account rejection.
+/// ChatGPT/Meta AI must not navigate a new candidate Page with malformed or
+/// partially replayed cookies. Deferred providers retain their historical
+/// order because their failed-restore cleanup still needs an origin page.
+/// This does NOT roll back cookie writes that occurred before an error.
+async fn navigate_after_cookie_restore<F, Fut>(
+    provider: Provider,
+    cookie_restore: Result<()>,
+    navigate: F,
+) -> Result<()>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<()>>,
+{
+    if matches!(provider, Provider::ChatGPT | Provider::MetaAI) {
+        cookie_restore?;
+        navigate().await
+    } else {
+        navigate().await?;
+        cookie_restore
+    }
+}
+
+/// Only the active recovery providers require first-party replay storage
+/// enforcement; deferred adapters retain their established legacy behavior.
+/// The actual URL is intentionally never incorporated into an error, because
+/// a redirect query can contain private access tokens or account metadata.
+fn checked_storage_replay_origin(provider: Provider, actual_url: &str) -> Result<Option<String>> {
+    if !matches!(provider, Provider::ChatGPT | Provider::MetaAI) {
+        return Ok(None);
+    }
+    if !super::pool_policy::provider_thread_url_is_same_origin(actual_url, provider.login_url()) {
+        anyhow::bail!("provider_storage_origin_mismatch");
+    }
+    let origin = super::pool_policy::provider_storage_origin(provider.login_url())
+        .ok_or_else(|| anyhow::anyhow!("provider_storage_origin_mismatch"))?;
+    Ok(Some(origin))
+}
+
+#[cfg(test)]
+mod storage_replay_origin_guard_tests {
+    use super::*;
+
+    #[test]
+    fn first_party_current_url_can_write_storage_but_never_certifies_login() {
+        assert_eq!(
+            checked_storage_replay_origin(Provider::ChatGPT, "https://chatgpt.com/")
+                .unwrap()
+                .as_deref(),
+            Some("https://chatgpt.com")
+        );
+        assert_eq!(
+            checked_storage_replay_origin(
+                Provider::MetaAI,
+                "https://www.meta.ai/chat/?private=synthetic"
+            )
+            .unwrap()
+            .as_deref(),
+            Some("https://www.meta.ai")
+        );
+        // Deferred providers remain on the same legacy replay path.
+        assert_eq!(
+            checked_storage_replay_origin(Provider::Claude, "https://login.example/").unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn off_origin_redirect_is_rejected_without_leaking_page_url_or_storage() {
+        for (provider, redirect) in [
+            (
+                Provider::ChatGPT,
+                "https://accounts.google.com/login?token=private",
+            ),
+            (Provider::ChatGPT, "https://chatgpt.com.evil.example/"),
+            (Provider::ChatGPT, "https://chatgpt.com@evil.example/"),
+            (Provider::ChatGPT, "http://chatgpt.com/"),
+            (Provider::MetaAI, "https://meta.ai/"),
+            (Provider::MetaAI, "https://www.meta.ai.evil.example/"),
+            (
+                Provider::MetaAI,
+                "https://www.facebook.com/login/?account=private",
+            ),
+        ] {
+            let error = checked_storage_replay_origin(provider, redirect).unwrap_err();
+            assert_eq!(error.to_string(), "provider_storage_origin_mismatch");
+            assert!(!error.to_string().contains("private"));
+            assert!(!error.to_string().contains("evil"));
+        }
+    }
+}
+
 pub(super) struct PageSession;
 
 impl PageSession {
@@ -111,14 +203,28 @@ impl PageSession {
         bounded_warmup(SESSION_WARMUP_TIMEOUT, async {
             let cookie_restore = session_file
                 .map(|file| session::restore_cookies(browser, file, provider.name()))
-                .transpose();
-            // Navigate even when cookie import failed so the caller's fail-closed
-            // cleanup can clear origin-scoped localStorage on the provider origin.
-            page.goto(provider.login_url()).await?;
-            cookie_restore?;
+                .transpose()
+                .map(|_| ());
+            // Active providers fail before navigation on an import error:
+            // a partially applied cookie jar is not a reason to load provider
+            // scripts or a login route. Deferred providers keep their legacy
+            // navigation-before-error order for origin cleanup.
+            navigate_after_cookie_restore(provider, cookie_restore, || async {
+                page.goto(provider.login_url()).await?;
+                Ok(())
+            })
+            .await?;
             if let Some(file) = session_file {
                 if !file.local_storage.is_empty() {
-                    session::restore_local_storage(page, file)?;
+                    // Navigation may have redirected to a foreign login/SSO
+                    // origin. Check actual URL before serializing secrets and
+                    // check JS location.origin again inside every setItem.
+                    match checked_storage_replay_origin(provider, &page.url())? {
+                        Some(origin) => {
+                            session::restore_local_storage_for_origin(page, file, &origin)?
+                        }
+                        None => session::restore_local_storage(page, file)?,
+                    }
                     page.goto(provider.login_url()).await?;
                 }
             }
@@ -149,6 +255,98 @@ where
     Ok(true)
 }
 
+/// A manual LoginComplete must not revoke the known-applied snapshot digest
+/// until the replacement credential snapshot was actually persisted. A failed
+/// save or cancelled future preserves the old marker so a later relay import
+/// cannot mistake a failed save for a successfully rotated credential set.
+/// No RefCell borrow survives the awaited persistence operation.
+pub(super) async fn invalidate_applied_after_login_save<F, T>(
+    applied: &std::cell::RefCell<std::collections::HashMap<Provider, String>>,
+    provider: Provider,
+    persist: F,
+) -> Result<T>
+where
+    F: std::future::Future<Output = Result<T>>,
+{
+    // Persistence errors may include private vault paths or storage details.
+    // This command boundary reports only a fixed diagnostic category.
+    let outcome = persist
+        .await
+        .map_err(|_| anyhow::anyhow!("login_session_snapshot_save_failed"))?;
+    applied.borrow_mut().remove(&provider);
+    Ok(outcome)
+}
+
+#[cfg(test)]
+mod login_save_marker_commit_tests {
+    use super::*;
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+
+    #[tokio::test]
+    async fn failed_save_leaves_old_applied_marker_and_other_provider_unchanged() {
+        let markers = RefCell::new(HashMap::from([
+            (Provider::ChatGPT, "old-chatgpt-generation".to_owned()),
+            (Provider::MetaAI, "other-metaai-generation".to_owned()),
+        ]));
+        let error = invalidate_applied_after_login_save(&markers, Provider::ChatGPT, async {
+            Err::<(), _>(anyhow::anyhow!("private-failing-save-path"))
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(error.to_string(), "login_session_snapshot_save_failed");
+        assert_eq!(
+            markers.borrow().get(&Provider::ChatGPT).map(String::as_str),
+            Some("old-chatgpt-generation")
+        );
+        assert_eq!(
+            markers.borrow().get(&Provider::MetaAI).map(String::as_str),
+            Some("other-metaai-generation")
+        );
+    }
+
+    #[tokio::test]
+    async fn successful_save_invalidates_only_committed_provider() {
+        let markers = RefCell::new(HashMap::from([
+            (Provider::ChatGPT, "old-chatgpt-generation".to_owned()),
+            (Provider::MetaAI, "other-metaai-generation".to_owned()),
+        ]));
+        let confirmed = invalidate_applied_after_login_save(&markers, Provider::ChatGPT, async {
+            Ok::<_, anyhow::Error>(true)
+        })
+        .await
+        .unwrap();
+        assert!(confirmed);
+        assert!(!markers.borrow().contains_key(&Provider::ChatGPT));
+        assert_eq!(
+            markers.borrow().get(&Provider::MetaAI).map(String::as_str),
+            Some("other-metaai-generation")
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_save_cannot_revoke_live_applied_marker() {
+        let markers = RefCell::new(HashMap::from([(
+            Provider::ChatGPT,
+            "old-chatgpt-generation".to_owned(),
+        )]));
+        let cancelled = tokio::time::timeout(
+            Duration::from_millis(10),
+            invalidate_applied_after_login_save(
+                &markers,
+                Provider::ChatGPT,
+                std::future::pending::<Result<()>>(),
+            ),
+        )
+        .await;
+        assert!(cancelled.is_err());
+        assert_eq!(
+            markers.borrow().get(&Provider::ChatGPT).map(String::as_str),
+            Some("old-chatgpt-generation")
+        );
+    }
+}
+
 /// Build the replacement completely before mutating the warm-page cache.
 /// A failed cookie restore, navigation, or storage replay must not drop the
 /// existing page; the import fingerprint remains retryable as well.
@@ -161,6 +359,80 @@ where
     let replacement = build().await?;
     insert(replacement);
     Ok(())
+}
+
+#[cfg(test)]
+mod cookie_restore_navigation_safety_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn active_cookie_restore_errors_abort_before_any_navigation() {
+        for provider in [Provider::ChatGPT, Provider::MetaAI] {
+            let navigations = std::cell::Cell::new(0_u8);
+            let error = navigate_after_cookie_restore(
+                provider,
+                Err(anyhow::anyhow!("private-token-in-invalid-cookie")),
+                || async {
+                    navigations.set(navigations.get() + 1);
+                    Ok(())
+                },
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(
+                navigations.get(),
+                0,
+                "failed active replay must not navigate"
+            );
+            // The source error is preserved for a typed/redacted outer
+            // worker, but this helper never formats or logs its Display.
+            assert!(error.to_string().contains("private-token"));
+        }
+    }
+
+    #[tokio::test]
+    async fn successful_cookie_restore_preserves_one_navigation_and_error_order() {
+        for provider in [Provider::ChatGPT, Provider::MetaAI, Provider::Grok] {
+            let navigations = std::cell::Cell::new(0_u8);
+            navigate_after_cookie_restore(provider, Ok(()), || async {
+                navigations.set(navigations.get() + 1);
+                Ok(())
+            })
+            .await
+            .unwrap();
+            assert_eq!(navigations.get(), 1);
+        }
+        // Deferred providers' old origin-localStorage cleanup flow still
+        // navigates once before returning their cookie restore error.
+        for provider in [Provider::Grok, Provider::Claude] {
+            let navigations = std::cell::Cell::new(0_u8);
+            let error = navigate_after_cookie_restore(
+                provider,
+                Err(anyhow::anyhow!("synthetic-invalid-cookie")),
+                || async {
+                    navigations.set(navigations.get() + 1);
+                    Ok(())
+                },
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(navigations.get(), 1);
+            assert!(error.to_string().contains("synthetic-invalid-cookie"));
+        }
+    }
+
+    #[tokio::test]
+    async fn navigation_error_is_not_suppressed_after_successful_restore() {
+        let navigations = std::cell::Cell::new(0_u8);
+        let err = navigate_after_cookie_restore(Provider::ChatGPT, Ok(()), || async {
+            navigations.set(navigations.get() + 1);
+            Err(anyhow::anyhow!("synthetic-navigation-failed"))
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(navigations.get(), 1);
+        assert_eq!(err.to_string(), "synthetic-navigation-failed");
+    }
 }
 
 #[cfg(test)]
@@ -260,6 +532,54 @@ mod live_replay_guard_tests {
             "fresh-candidate",
             true,
             reg.has_prior_positive_account_observation("chatgpt"),
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn failed_recheck_cannot_reenable_destructive_markerless_replay() {
+        let registry = crate::provider_state::ProviderSessionRegistry::default();
+        let first = registry.begin_credential_verification("chatgpt").unwrap();
+        assert!(registry.record_credentials_verified("chatgpt", first));
+
+        // A new request rotates public account proof, not the evidence that
+        // the same live cookie jar must survive a transient failed recheck.
+        let second = registry.begin_credential_verification("chatgpt").unwrap();
+        assert!(!registry.credentials_verified("chatgpt"));
+        assert!(!registry.record_credentials_verified("chatgpt", first));
+        let safety = registry.has_prior_positive_account_observation("chatgpt");
+        assert!(safety);
+        let mut destructive_write = false;
+        let verdict = guard_verified_live_replay(
+            Provider::ChatGPT,
+            None,
+            "candidate-private-fingerprint",
+            true,
+            safety,
+        );
+        if verdict.is_ok() {
+            destructive_write = true;
+        }
+        assert!(verdict
+            .unwrap_err()
+            .downcast_ref::<ReplayRequiresIsolatedContext>()
+            .is_some());
+        assert!(
+            !destructive_write,
+            "recheck did not authorize shared-jar writes"
+        );
+
+        // Current proof must be established from the *new* epoch only.
+        assert!(registry.record_credentials_verified("chatgpt", second));
+        assert!(registry.credentials_verified("chatgpt"));
+        registry.record_needs_login("chatgpt");
+        assert!(!registry.has_prior_positive_account_observation("chatgpt"));
+        assert!(guard_verified_live_replay(
+            Provider::ChatGPT,
+            None,
+            "candidate",
+            true,
+            registry.has_prior_positive_account_observation("chatgpt"),
         )
         .is_ok());
     }
@@ -514,7 +834,7 @@ mod chatgpt_stream_preload_tests {
         page.add_preload_script(include_str!("chatgpt_streams.js"));
         page.goto(&encoded_data_page(
             r#"<html><body><script>
-            globalThis.__wasPatched = ReadableStream.__chatGatewayPullCompat === true;
+            globalThis.__wasPatched = ReadableStream.__chatGatewayPullCompat === true || ReadableStream.__obscuraPullCompat === true;
             </script></body></html>"#,
         ))
         .await

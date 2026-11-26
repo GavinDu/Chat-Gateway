@@ -59,8 +59,13 @@ class SmokeFailure(Exception):
 
 
 def _request_id(headers) -> str | None:
-    raw = headers.get("X-Request-Id")
-    if not isinstance(raw, str):
+    # Even an HTTP error's response headers are untrusted. Never parse or
+    # echo an unbounded header or an exception raised by an invalid wrapper.
+    try:
+        raw = headers.get("X-Request-Id")
+    except (AttributeError, TypeError, ValueError):
+        return None
+    if not isinstance(raw, str) or len(raw) != 36:
         return None
     try:
         parsed = uuid.UUID(raw)
@@ -98,6 +103,22 @@ def _safe_error(error: Exception) -> str:
     if isinstance(error, (urllib.error.URLError, TimeoutError, OSError)):
         return "gateway_unreachable"
     return "invalid_response"
+
+
+def _failed_http_attempt(error: Exception) -> dict:
+    """Redacted failure with gateway correlation only when source headers prove it.
+
+    urllib raises HTTPError on 4xx/5xx before _call can inspect the ordinary
+    response headers. Those headers may still contain a genuine gateway UUID,
+    which is needed to join a 502 with owner-safe server diagnostics. Neither
+    error bodies nor raw URLs/headers are consumed or reflected.
+    """
+    result = {"status": "failed", "category": _safe_error(error)}
+    if isinstance(error, urllib.error.HTTPError):
+        request_id = _request_id(error.headers)
+        if request_id is not None:
+            result["request_id"] = request_id
+    return result
 
 
 def _identity(health: dict) -> dict:
@@ -278,18 +299,18 @@ def run_matrix(
             try:
                 item["json"] = sender(provider, model, False)
             except Exception as error:
-                item["json"] = {"status": "failed", "category": _safe_error(error)}
+                item["json"] = _failed_http_attempt(error)
             if item["json"]["status"] == "passed":
                 try:
                     item["sse"] = sender(provider, model, True)
                 except Exception as error:
-                    item["sse"] = {"status": "failed", "category": _safe_error(error)}
+                    item["sse"] = _failed_http_attempt(error)
             if (repeat_sender is not None and item["json"]["status"] == "passed"
                     and item["sse"]["status"] == "passed"):
                 try:
                     item["repeat"] = repeat_sender(provider, model)
                 except Exception as error:
-                    item["repeat"] = {"status": "failed", "category": _safe_error(error)}
+                    item["repeat"] = _failed_http_attempt(error)
         results.append(item)
     return results
 

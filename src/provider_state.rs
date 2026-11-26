@@ -100,6 +100,10 @@ fn safe_failure_reason(reason: &str) -> &'static str {
 struct CredentialProof {
     epoch: uuid::Uuid,
     first_party_verified_at: Option<Instant>,
+    // A safety-only latch for the still-live browser context. A fresh account
+    // check clears the public verdict, but must not authorize destructive
+    // shared-jar replay merely because an earlier source proof aged out.
+    historical_positive_for_replay: bool,
 }
 
 #[derive(Debug, Default)]
@@ -204,16 +208,24 @@ impl ProviderSessionRegistry {
         }
     }
 
-    /// Invalidate a prior positive result before a new imported-session check.
+    /// Invalidate the public positive verdict before a new read-only check.
+    /// Retain only the non-public replay safety latch for the same live worker
+    /// context. Explicit logout/rejection or worker restart removes the latch;
+    /// a retry reset does not authorize replacing the old shared cookie jar.
     /// Only matching epochs may publish a later source-verified verdict.
     pub fn begin_credential_verification(&self, provider: &str) -> Option<uuid::Uuid> {
         let mut proofs = self.credential_proofs.lock().ok()?;
+        let protected_live_context = proofs
+            .by_provider
+            .get(provider)
+            .is_some_and(|proof| proof.historical_positive_for_replay);
         let epoch = uuid::Uuid::new_v4();
         proofs.by_provider.insert(
             provider.to_owned(),
             CredentialProof {
                 epoch,
                 first_party_verified_at: None,
+                historical_positive_for_replay: protected_live_context,
             },
         );
         Some(epoch)
@@ -230,6 +242,7 @@ impl ProviderSessionRegistry {
             return false;
         }
         current.first_party_verified_at = Some(Instant::now());
+        current.historical_positive_for_replay = true;
         true
     }
 
@@ -262,12 +275,24 @@ impl ProviderSessionRegistry {
                 proofs
                     .by_provider
                     .get(provider)
-                    .is_some_and(|entry| entry.first_party_verified_at.is_some())
+                    .is_some_and(|entry| entry.historical_positive_for_replay)
             })
             // Distinguish a readable, absent proof (false) from a poisoned
             // mutex (unknown). Only the latter blocks replay conservatively.
             // Neither outcome is published as an authentication verdict.
             .unwrap_or(true)
+    }
+
+    /// Challenges hide current authentication, but cannot prove the old
+    /// browser context's cookies are safe to overwrite. Rotate the epoch to
+    /// fence late responses while preserving only the replay safety latch.
+    fn invalidate_current_verdict_for_challenge(&self, provider: &str) {
+        if let Ok(mut proofs) = self.credential_proofs.lock() {
+            if let Some(current) = proofs.by_provider.get_mut(provider) {
+                current.epoch = uuid::Uuid::new_v4();
+                current.first_party_verified_at = None;
+            }
+        }
     }
 
     pub fn invalidate_credentials(&self, provider: &str) {
@@ -276,11 +301,16 @@ impl ProviderSessionRegistry {
         }
     }
 
-    /// Worker reinitialization must reject a late result from the old worker.
-    /// Reuse of an old UUID across new epochs is not permitted.
+    /// Worker reinitialization must reject late account and request failures
+    /// from the disposed browser context. The request diagnostic is scoped to
+    /// that worker's generation, even if its five-minute TTL has not elapsed.
+    /// Do not change persisted sessions or separate provider readiness here.
     pub fn invalidate_all_credentials(&self) {
         if let Ok(mut proofs) = self.credential_proofs.lock() {
             proofs.by_provider.clear();
+        }
+        if let Ok(mut attempts) = self.last_request_attempts.lock() {
+            attempts.clear();
         }
     }
 
@@ -341,7 +371,10 @@ impl ProviderSessionRegistry {
             .lock()
             .map_err(|_| anyhow::anyhow!("provider state unavailable"))?
             .remove(provider);
-        self.invalidate_credentials(provider);
+        // A retry reset revokes current account proof, not the former live
+        // context's replay safety. Only explicit logout/known auth rejection
+        // or worker disposal may release this fail-closed latch.
+        self.invalidate_current_verdict_for_challenge(provider);
         self.clear_last_request(provider);
         Ok(())
     }
@@ -421,7 +454,7 @@ impl ProviderSessionRegistry {
     /// credentials expired. Fail closed without a scheduled half-open retry.
     /// New relay cookie imports cannot silently clear this manual blocker.
     fn record_manual_challenge(&self, provider: &str) {
-        self.invalidate_credentials(provider);
+        self.invalidate_current_verdict_for_challenge(provider);
         if let Ok(mut map) = self.states.lock() {
             map.insert(
                 provider.to_owned(),
@@ -877,10 +910,13 @@ mod credential_evidence_lifecycle_tests {
         assert!(reg.has_prior_positive_account_observation("chatgpt"));
         assert!(!reg.has_prior_positive_account_observation("metaai"));
 
-        // Starting a new epoch can no longer borrow an old positive.
+        // Starting a new epoch must revoke public authentication, not the
+        // safety latch protecting the unchanged live BrowserContext.
         let next = reg.begin_credential_verification("chatgpt").unwrap();
-        assert!(!reg.has_prior_positive_account_observation("chatgpt"));
+        assert!(!reg.credentials_verified("chatgpt"));
+        assert!(reg.has_prior_positive_account_observation("chatgpt"));
         assert!(!reg.record_credentials_verified("chatgpt", chat));
+        assert!(!reg.credentials_verified("chatgpt"));
         assert!(reg.record_credentials_verified("chatgpt", next));
 
         reg.record_needs_login("chatgpt");
@@ -894,6 +930,44 @@ mod credential_evidence_lifecycle_tests {
         assert!(reg.record_credentials_verified("chatgpt", before_restart));
         reg.invalidate_all_credentials();
         assert!(!reg.has_prior_positive_account_observation("chatgpt"));
+    }
+
+    #[test]
+    fn transient_recheck_and_challenge_keep_only_live_context_replay_barrier() {
+        let registry = ProviderSessionRegistry::default();
+        let first = registry.begin_credential_verification("chatgpt").unwrap();
+        assert!(registry.record_credentials_verified("chatgpt", first));
+        assert!(registry.credentials_verified("chatgpt"));
+
+        // A new same-context read-only check has not established fresh auth;
+        // its later timeout cannot make the old shared jar disposable.
+        let pending = registry.begin_credential_verification("chatgpt").unwrap();
+        assert!(!registry.credentials_verified("chatgpt"));
+        assert!(registry.has_prior_positive_account_observation("chatgpt"));
+        assert!(!registry.record_credentials_verified("chatgpt", first));
+
+        // A managed challenge requires manual attention, not an assertion
+        // that previously seen first-party cookie material may be cleared.
+        registry.record_manual_challenge("chatgpt");
+        assert!(registry.manual_challenge_required("chatgpt"));
+        assert!(!registry.credentials_verified("chatgpt"));
+        assert!(registry.has_prior_positive_account_observation("chatgpt"));
+        assert!(!registry.record_credentials_verified("chatgpt", pending));
+
+        registry.reset_for_retry("chatgpt").unwrap();
+        assert!(registry.has_prior_positive_account_observation("chatgpt"));
+        assert!(!registry.credentials_verified("chatgpt"));
+        let again = registry.begin_credential_verification("chatgpt").unwrap();
+        assert!(registry.record_credentials_verified("chatgpt", again));
+        registry.record_needs_login("chatgpt");
+        assert!(!registry.has_prior_positive_account_observation("chatgpt"));
+        assert!(!registry.credentials_verified("chatgpt"));
+
+        let meta = registry.begin_credential_verification("metaai").unwrap();
+        assert!(!registry.has_prior_positive_account_observation("metaai"));
+        assert!(!registry.credentials_verified("metaai"));
+        registry.invalidate_all_credentials();
+        assert!(!registry.record_credentials_verified("metaai", meta));
     }
 
     #[test]
@@ -984,6 +1058,76 @@ mod bounded_request_diagnostic_tests {
         assert_eq!(latest.stage, "first_stream_event");
         assert_eq!(latest.reason, "backend_unavailable");
         assert_eq!(latest.duration_ms, 123);
+    }
+
+    #[test]
+    fn worker_restart_revokes_prior_failure_slots_and_late_callbacks() {
+        let registry = ProviderSessionRegistry::default();
+        let old_worker = registry.clone();
+        let post_restart = "4b66c0ab-cf23-4cea-8fcf-4bf73a4c1b80";
+
+        // A failed request ID is valid only for the browser worker that
+        // began that attempt. Both providers are independently tracked.
+        registry.begin_request_attempt("chatgpt", FIRST);
+        registry.record_request_failure(
+            "chatgpt",
+            FIRST,
+            "first_stream_event",
+            "backend_unavailable",
+            17_500,
+        );
+        registry.begin_request_attempt("metaai", SECOND);
+        registry.record_request_failure("metaai", SECOND, "backend_admission", "timeout", 120_000);
+        registry.record_success("metaai");
+        let meta_state_before = registry.status("metaai");
+
+        let account_epoch = registry.begin_credential_verification("chatgpt").unwrap();
+        assert!(registry.record_credentials_verified("chatgpt", account_epoch));
+        assert!(registry.last_failed_request("chatgpt").is_some());
+        assert!(registry.last_failed_request("metaai").is_some());
+
+        // This is exactly the lifecycle boundary invoked by browser_thread
+        // when a replacement Obscura worker starts. No vault or sessions are
+        // touched. Old status cannot be mistaken for a new worker attempt.
+        registry.invalidate_all_credentials();
+        assert!(!registry.credentials_verified("chatgpt"));
+        assert!(!registry.record_credentials_verified("chatgpt", account_epoch));
+        assert!(registry.last_failed_request("chatgpt").is_none());
+        assert!(registry.last_failed_request("metaai").is_none());
+        assert_eq!(registry.last_request_attempts.lock().unwrap().len(), 0);
+        assert_eq!(registry.status("metaai"), meta_state_before);
+
+        // A late old-worker callback cannot resurrect an old failure.
+        old_worker.record_request_failure("chatgpt", FIRST, "json_completion", "timeout", 120_000);
+        old_worker.record_request_failure("metaai", SECOND, "json_completion", "timeout", 120_000);
+        assert!(registry.last_failed_request("chatgpt").is_none());
+        assert!(registry.last_failed_request("metaai").is_none());
+
+        // A post-restart request gets its own slot and can publish only its
+        // own typed, redacted failure. A late old callback cannot replace it.
+        registry.begin_request_attempt("chatgpt", post_restart);
+        old_worker.record_request_failure(
+            "chatgpt",
+            FIRST,
+            "first_stream_event",
+            "session_expired",
+            120_000,
+        );
+        assert!(registry.last_failed_request("chatgpt").is_none());
+        registry.record_request_failure(
+            "chatgpt",
+            post_restart,
+            "first_stream_event",
+            "timeout",
+            250,
+        );
+        let current = registry.last_failed_request("chatgpt").unwrap();
+        assert_eq!(current.request_id, post_restart);
+        assert_eq!(current.stage, "first_stream_event");
+        assert_eq!(current.reason, "timeout");
+        assert_eq!(current.duration_ms, 250);
+        assert!(registry.last_failed_request("metaai").is_none());
+        assert_eq!(registry.last_request_attempts.lock().unwrap().len(), 1);
     }
 
     #[test]

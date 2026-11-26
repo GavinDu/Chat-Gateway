@@ -93,6 +93,7 @@ async fn wait_on_origin(page: &mut Page, origin: &str, timeout: Duration) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
     async fn page_with_fetch(source: &str) -> Page {
         let browser = obscura_core::Browser::builder()
             .stealth(false)
@@ -123,6 +124,48 @@ mod tests {
             Some("undefined")
         );
     }
+
+    #[tokio::test]
+    async fn failed_refresh_and_expired_access_token_cannot_verify_a_future_session() {
+        let future = (chrono::Utc::now() + chrono::Duration::minutes(1)).to_rfc3339();
+        let jwt = |expiry| {
+            format!(
+                "e30.{}.synthetic-signature",
+                URL_SAFE_NO_PAD.encode(serde_json::json!({"exp": expiry}).to_string())
+            )
+        };
+        for (token, error, verified) in [
+            (
+                "synthetic-opaque".to_owned(),
+                Some("RefreshAccessTokenError"),
+                false,
+            ),
+            (jwt(1), None, false),
+            (jwt(chrono::Utc::now().timestamp() + 60), None, true),
+        ] {
+            let mut session = serde_json::json!({
+                "user": {"fixture": true}, "accessToken": token, "expires": future
+            });
+            if let Some(error) = error {
+                session["error"] = serde_json::json!(error);
+            }
+            let body = serde_json::to_string(&session).unwrap();
+            let mut page = page_with_fetch(&format!(
+                "globalThis.fetch=async()=>new Response({});",
+                serde_json::to_string(&body).unwrap()
+            ))
+            .await;
+            let result = wait_on_origin(&mut page, "null", Duration::from_secs(1)).await;
+            assert_eq!(result.is_ok(), verified);
+            if let Err(error) = result {
+                assert!(error
+                    .downcast_ref::<crate::browser::pool::ProviderSessionExpiredError>()
+                    .is_none());
+                assert!(!error.to_string().contains("RefreshAccessTokenError"));
+                assert!(!error.to_string().contains("synthetic-signature"));
+            }
+        }
+    }
     #[tokio::test]
     async fn only_explicit_unauthenticated_results_require_login() {
         for source in [
@@ -149,6 +192,32 @@ mod tests {
             assert!(!error.to_string().contains("private fixture"));
         }
     }
+    #[tokio::test]
+    async fn empty_user_object_with_token_and_future_expiry_is_not_account_proof() {
+        // A fake token and expiry alongside an empty user object must never
+        // make Obscura report an authenticated account. Do not infer logout.
+        let mut partial = page_with_fetch(
+            r#"(() => {globalThis.fetch=async()=>new Response(JSON.stringify({
+                user:{}, accessToken:'private-test-token',
+                expires:new Date(Date.now()+60000).toISOString()
+            }),{status:200});})()"#,
+        )
+        .await;
+        let failure = wait_on_origin(&mut partial, "null", Duration::from_secs(1))
+            .await
+            .unwrap_err();
+        assert!(failure
+            .downcast_ref::<crate::browser::pool::ProviderSessionExpiredError>()
+            .is_none());
+        assert!(!failure.to_string().contains("private-test-token"));
+        assert_eq!(
+            partial
+                .evaluate("typeof globalThis.__chatGatewayChatgptSessionReadiness")
+                .as_str(),
+            Some("undefined")
+        );
+    }
+
     #[tokio::test]
     async fn timeout_aborts_own_fetch_and_foreign_origins_are_not_contacted() {
         let mut page=page_with_fetch(r#"(() => {globalThis.aborted=false;globalThis.fetchCalls=0;globalThis.fetch=(url,options)=>{

@@ -84,6 +84,60 @@ struct TurnWrite<'a> {
     provider: String,
     tab_id: Option<String>,
     compute_marker: bool,
+    expected_marker: Option<&'a str>,
+    expected_identity: Option<&'a Option<ConversationIdentity>>,
+}
+
+/// Internal durable identity of one conversation incarnation at a revision.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ConversationIdentity {
+    incarnation: String,
+    generation: i64,
+}
+
+/// Gateway-owned evidence emitted only by a successful canonical commit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CommitReceipt {
+    identity: ConversationIdentity,
+    owner_key_id: String,
+    conversation_id: String,
+    provider: String,
+    marker: String,
+}
+
+impl CommitReceipt {
+    pub(crate) fn marker(&self) -> &str {
+        &self.marker
+    }
+}
+
+pub(crate) struct ContextSnapshot {
+    pub(crate) context: (String, Vec<ChatMessage>, bool, Vec<ChatMessage>),
+    pub(crate) identity: Option<ConversationIdentity>,
+}
+
+fn read_identity(connection: &Connection, id: &str) -> anyhow::Result<ConversationIdentity> {
+    Ok(connection.query_row(
+        "SELECT incarnation, generation FROM conversation_identities WHERE conversation_id=?1",
+        [id],
+        |row| {
+            Ok(ConversationIdentity {
+                incarnation: row.get(0)?,
+                generation: row.get(1)?,
+            })
+        },
+    )?)
+}
+
+/// A completed provider turn tied to its admission transcript snapshot.
+pub(crate) struct SnapshotTurn {
+    pub(crate) owner_key_id: String,
+    pub(crate) conversation_id: String,
+    pub(crate) user_msgs: Vec<ChatMessage>,
+    pub(crate) assistant_msg: ChatMessage,
+    pub(crate) provider: String,
+    pub(crate) expected_marker: String,
+    pub(crate) expected_identity: Option<ConversationIdentity>,
 }
 
 /// Async contract for bounded conversation history access and atomic turn persistence.
@@ -92,6 +146,7 @@ struct TurnWrite<'a> {
 pub trait ConversationStore: Send + Sync {
     /// Read the canonical transcript and rolling summary in one SQLite snapshot,
     /// then build provider context on Tokio's blocking pool.
+    #[allow(dead_code)] // Compatibility contract for callers not using the identity snapshot.
     async fn build_context_with_transcript(
         self: Arc<Self>,
         owner_key_id: String,
@@ -100,6 +155,7 @@ pub trait ConversationStore: Send + Sync {
         token_budget: usize,
     ) -> anyhow::Result<(String, Vec<ChatMessage>, bool, Vec<ChatMessage>)>;
 
+    #[allow(dead_code)] // Compatibility contract for callers without a provider snapshot.
     async fn persist_turn(
         self: Arc<Self>,
         owner_key_id: String,
@@ -142,6 +198,7 @@ pub trait ConversationStore: Send + Sync {
         provider: String,
     ) -> anyhow::Result<Option<ProviderThread>>;
 
+    /// Import unverified mapping metadata; never grant synchronization evidence.
     async fn upsert_provider_thread_async(
         self: Arc<Self>,
         owner_key_id: String,
@@ -254,11 +311,8 @@ impl ConversationStore for UnifiedMemory {
         owner_key_id: String,
         thread: ProviderThread,
     ) -> anyhow::Result<()> {
-        tokio::task::spawn_blocking(move || {
-            self.upsert_provider_thread_for_owner(&owner_key_id, &thread)
-        })
-        .await
-        .map_err(|error| anyhow::anyhow!("provider thread persistence task failed: {error}"))?
+        self.import_provider_thread_async(owner_key_id, thread)
+            .await
     }
 }
 
@@ -495,7 +549,18 @@ impl UnifiedMemory {
         new_messages: &[ChatMessage],
         token_budget: usize,
     ) -> anyhow::Result<(String, Vec<ChatMessage>, bool, Vec<ChatMessage>)> {
-        let (history, saved_summary) = match conversation_id {
+        self.build_context_snapshot(owner_key_id, conversation_id, new_messages, token_budget)
+            .map(|snapshot| snapshot.context)
+    }
+
+    fn build_context_snapshot(
+        &self,
+        owner_key_id: &str,
+        conversation_id: Option<&str>,
+        new_messages: &[ChatMessage],
+        token_budget: usize,
+    ) -> anyhow::Result<ContextSnapshot> {
+        let (history, saved_summary, identity) = match conversation_id {
             Some(id) => {
                 // Read ownership, transcript, and summary in one SQLite snapshot.
                 // Separate reads could otherwise combine history from one commit
@@ -513,6 +578,11 @@ impl UnifiedMemory {
                     Some(owner) if owner == owner_key_id => sqlite::load(&tx, id)?,
                     Some(_) => anyhow::bail!("conversation belongs to another API key"),
                     None => None,
+                };
+                let identity = if conversation.is_some() {
+                    Some(read_identity(&tx, id)?)
+                } else {
+                    None
                 };
                 let summary = if conversation.is_some() {
                     tx.query_row(
@@ -536,9 +606,9 @@ impl UnifiedMemory {
                 tx.commit().map_err(|error| {
                     anyhow::anyhow!("completing context snapshot read: {error}")
                 })?;
-                (history, summary)
+                (history, summary, identity)
             }
-            None => (Vec::new(), None),
+            None => (Vec::new(), None, None),
         };
         let has_history = !history.is_empty();
         let summary_message = saved_summary.map(|(summary, _covered)| ChatMessage {
@@ -560,7 +630,29 @@ impl UnifiedMemory {
             context.insert(0, summary);
             prompt = crate::context::render_prompt(&context);
         }
-        Ok((prompt, context, has_history, history))
+        Ok(ContextSnapshot {
+            context: (prompt, context, has_history, history),
+            identity,
+        })
+    }
+
+    pub(crate) async fn build_context_snapshot_async(
+        self: Arc<Self>,
+        owner_key_id: String,
+        conversation_id: Option<String>,
+        new_messages: Vec<ChatMessage>,
+        token_budget: usize,
+    ) -> anyhow::Result<ContextSnapshot> {
+        tokio::task::spawn_blocking(move || {
+            self.build_context_snapshot(
+                &owner_key_id,
+                conversation_id.as_deref(),
+                &new_messages,
+                token_budget,
+            )
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("conversation snapshot task failed"))?
     }
 
     pub async fn build_context_for_owner_with_transcript_budget_blocking(
@@ -685,6 +777,8 @@ impl UnifiedMemory {
             provider,
             tab_id,
             compute_marker: false,
+            expected_marker: None,
+            expected_identity: None,
         })
         .map(|_| ())
     }
@@ -706,14 +800,40 @@ impl UnifiedMemory {
             provider,
             tab_id,
             compute_marker: true,
+            expected_marker: None,
+            expected_identity: None,
         })?
+        .map(|receipt| receipt.marker)
         .ok_or_else(|| anyhow::anyhow!("transcript marker was not computed"))
+    }
+
+    /// Preserve the local turn but withhold synchronization evidence when
+    /// another request has advanced the transcript since admission.
+    pub(crate) async fn persist_turn_from_snapshot(
+        self: Arc<Self>,
+        turn: SnapshotTurn,
+    ) -> anyhow::Result<Option<CommitReceipt>> {
+        tokio::task::spawn_blocking(move || {
+            self.store_turn_for_owner_with_tab_id_internal(TurnWrite {
+                owner_key_id: &turn.owner_key_id,
+                conversation_id: turn.conversation_id,
+                user_msgs: turn.user_msgs,
+                assistant_msg: turn.assistant_msg,
+                provider: turn.provider,
+                tab_id: None,
+                compute_marker: true,
+                expected_marker: Some(&turn.expected_marker),
+                expected_identity: Some(&turn.expected_identity),
+            })
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("conversation persistence task failed"))?
     }
 
     fn store_turn_for_owner_with_tab_id_internal(
         &self,
         write: TurnWrite<'_>,
-    ) -> anyhow::Result<Option<String>> {
+    ) -> anyhow::Result<Option<CommitReceipt>> {
         let TurnWrite {
             owner_key_id,
             conversation_id,
@@ -722,6 +842,8 @@ impl UnifiedMemory {
             provider,
             tab_id,
             compute_marker,
+            expected_marker,
+            expected_identity,
         } = write;
         let mut connection = self.lock()?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -738,6 +860,20 @@ impl UnifiedMemory {
         {
             anyhow::bail!("conversation belongs to another API key");
         }
+        let current_identity = if existing_owner.is_some() {
+            Some(read_identity(&tx, &conversation_id)?)
+        } else {
+            None
+        };
+        if let Some(expected) = expected_identity {
+            // An absent or replaced incarnation is not a concurrent append.
+            // Never resurrect a deleted conversation or append to its successor.
+            if expected.as_ref().map(|value| &value.incarnation)
+                != current_identity.as_ref().map(|value| &value.incarnation)
+            {
+                anyhow::bail!("conversation incarnation changed during provider request");
+            }
+        }
         let mut conversation =
             sqlite::load(&tx, &conversation_id)?.unwrap_or_else(|| Conversation {
                 id: conversation_id,
@@ -753,6 +889,19 @@ impl UnifiedMemory {
         let replay = !user_msgs.is_empty()
             && (conversation.messages.starts_with(&completed)
                 || conversation.messages.ends_with(&completed));
+        let sync_eligible = expected_identity.is_none_or(|expected| expected == &current_identity)
+            && expected_marker.is_none_or(|expected| {
+                !replay && transcript_marker(&conversation.messages) == expected
+            });
+        if !sync_eligible {
+            // Do not certify a prefix this attempt did not observe, or a
+            // duplicate completion that was deduplicated locally.
+            tx.execute(
+                "UPDATE provider_threads SET synced_through_message_id = NULL
+                 WHERE conversation_id = ?1 AND provider = ?2",
+                rusqlite::params![conversation.id, provider],
+            )?;
+        }
         let unseen = messages_after_overlap(&conversation.messages, &user_msgs);
         let first = conversation.messages.len();
         if !replay {
@@ -794,10 +943,23 @@ impl UnifiedMemory {
                 )?;
             }
         }
-        let marker = compute_marker.then(|| transcript_marker(&conversation.messages));
+        let receipt = if compute_marker && sync_eligible {
+            Some(CommitReceipt {
+                identity: read_identity(&tx, &conversation.id)?,
+                owner_key_id: owner_key_id.to_owned(),
+                conversation_id: conversation.id.clone(),
+                provider: conversation
+                    .provider
+                    .clone()
+                    .ok_or_else(|| anyhow::anyhow!("committed conversation provider missing"))?,
+                marker: transcript_marker(&conversation.messages),
+            })
+        } else {
+            None
+        };
         tx.commit()
             .map_err(|error| anyhow::anyhow!("committing conversation turn: {error}"))?;
-        Ok(marker)
+        Ok(receipt)
     }
 
     /// Export one complete conversation without exposing database internals.
@@ -1174,6 +1336,104 @@ impl UnifiedMemory {
         if owner.as_deref() != Some(owner_key_id) {
             anyhow::bail!("conversation is not owned by this API key");
         }
+        Self::write_provider_thread(&connection, thread)
+    }
+
+    /// Import untrusted remote mapping metadata without granting synchronization.
+    /// Invalidate pending receipts and admission snapshots in the same transaction.
+    pub(crate) async fn import_provider_thread_async(
+        self: Arc<Self>,
+        owner_key_id: String,
+        mut thread: ProviderThread,
+    ) -> anyhow::Result<()> {
+        thread.synced_through_message_id = None;
+        tokio::task::spawn_blocking(move || self.import_provider_thread(&owner_key_id, &thread))
+            .await
+            .map_err(|_| anyhow::anyhow!("provider thread import task failed"))?
+    }
+
+    fn import_provider_thread(
+        &self,
+        owner_key_id: &str,
+        thread: &ProviderThread,
+    ) -> anyhow::Result<()> {
+        let mut connection = self.lock()?;
+        let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let owner: Option<String> = tx
+            .query_row(
+                "SELECT owner_key_id FROM conversations WHERE id = ?1",
+                [&thread.conversation_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if owner.as_deref() != Some(owner_key_id) {
+            anyhow::bail!("conversation is not owned by this API key");
+        }
+        let updated = tx.execute(
+            "UPDATE conversation_identities SET generation = generation + 1
+             WHERE conversation_id = ?1",
+            [&thread.conversation_id],
+        )?;
+        if updated != 1 {
+            anyhow::bail!("conversation durable identity missing during mapping import");
+        }
+        Self::write_provider_thread(&tx, thread)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Publish only a receipt for the exact committed incarnation and generation.
+    /// The indexed identity comparison and write share a SQLite transaction.
+    pub(crate) async fn publish_provider_thread_if_current_async(
+        self: Arc<Self>,
+        owner_key_id: String,
+        thread: ProviderThread,
+        receipt: CommitReceipt,
+    ) -> anyhow::Result<bool> {
+        tokio::task::spawn_blocking(move || {
+            self.publish_provider_thread_if_current(&owner_key_id, &thread, &receipt)
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("provider thread publication task failed"))?
+    }
+
+    fn publish_provider_thread_if_current(
+        &self,
+        owner_key_id: &str,
+        thread: &ProviderThread,
+        receipt: &CommitReceipt,
+    ) -> anyhow::Result<bool> {
+        if receipt.owner_key_id != owner_key_id
+            || receipt.conversation_id != thread.conversation_id
+            || receipt.provider != thread.provider
+            || thread.synced_through_message_id.as_deref() != Some(receipt.marker())
+        {
+            return Ok(false);
+        }
+        let mut connection = self.lock()?;
+        let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let owner: Option<String> = tx
+            .query_row(
+                "SELECT owner_key_id FROM conversations WHERE id = ?1",
+                [&thread.conversation_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if owner.as_deref() != Some(owner_key_id) {
+            return Ok(false);
+        }
+        if read_identity(&tx, &thread.conversation_id)? != receipt.identity {
+            return Ok(false);
+        }
+        Self::write_provider_thread(&tx, thread)?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    fn write_provider_thread(
+        connection: &Connection,
+        thread: &ProviderThread,
+    ) -> anyhow::Result<()> {
         connection.execute(
             "INSERT INTO provider_threads(
                 conversation_id, provider, thread_url, synced_through_message_id, model, updated_at
@@ -1193,6 +1453,50 @@ impl UnifiedMemory {
             ],
         )?;
         Ok(())
+    }
+
+    /// Consume a verified synchronization marker before a remote Delta send.
+    /// An interrupted send may mutate the remote thread without committing a
+    /// local turn. Persisting the invalidation first makes retries and restarts
+    /// conservatively replay instead of trusting the old marker.
+    pub(crate) async fn claim_provider_thread_sync_async(
+        self: Arc<Self>,
+        owner_key_id: String,
+        expected: ProviderThread,
+    ) -> anyhow::Result<bool> {
+        tokio::task::spawn_blocking(move || {
+            self.claim_provider_thread_sync(&owner_key_id, &expected)
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("provider thread claim task failed"))?
+    }
+
+    fn claim_provider_thread_sync(
+        &self,
+        owner_key_id: &str,
+        expected: &ProviderThread,
+    ) -> anyhow::Result<bool> {
+        let Some(marker) = expected.synced_through_message_id.as_deref() else {
+            return Ok(false);
+        };
+        let connection = self.lock()?;
+        let updated = connection.execute(
+            "UPDATE provider_threads SET synced_through_message_id = NULL
+             WHERE conversation_id = ?1 AND provider = ?2
+               AND thread_url = ?3 AND synced_through_message_id = ?4
+               AND model IS ?5
+               AND EXISTS (SELECT 1 FROM conversations
+                           WHERE id = ?1 AND owner_key_id = ?6)",
+            rusqlite::params![
+                expected.conversation_id,
+                expected.provider,
+                expected.thread_url,
+                marker,
+                expected.model,
+                owner_key_id,
+            ],
+        )?;
+        Ok(updated == 1)
     }
 
     /// Long-term memory is opt-in. Missing settings deliberately mean disabled.
@@ -1914,6 +2218,463 @@ mod provider_thread_map_isolation_tests {
             model: Some("test-model".to_owned()),
             updated_at: 1,
         }
+    }
+
+    #[tokio::test]
+    async fn claiming_delta_consumes_only_exact_owned_thread_marker() {
+        let memory = std::sync::Arc::new(UnifiedMemory::new(8000));
+        persist_conversation(&memory, "conversation-a", "owner-a");
+        persist_conversation(&memory, "conversation-b", "owner-a");
+        let a = thread(
+            "conversation-a",
+            "chatgpt",
+            "https://chatgpt.com/c/a",
+            "marker-a",
+        );
+        let b = thread(
+            "conversation-b",
+            "chatgpt",
+            "https://chatgpt.com/c/b",
+            "marker-b",
+        );
+        let other = thread(
+            "conversation-a",
+            "claude",
+            "https://claude.ai/chat/a",
+            "marker-other",
+        );
+        for entry in [&a, &b, &other] {
+            memory
+                .upsert_provider_thread_for_owner("owner-a", entry)
+                .unwrap();
+        }
+        let mut stale = a.clone();
+        stale.synced_through_message_id = Some("stale".to_owned());
+        assert!(!memory
+            .claim_provider_thread_sync("owner-a", &stale)
+            .unwrap());
+        assert!(!memory.claim_provider_thread_sync("owner-b", &a).unwrap());
+        assert!(memory
+            .clone()
+            .claim_provider_thread_sync_async("owner-a".to_owned(), a.clone())
+            .await
+            .unwrap());
+        assert!(!memory.claim_provider_thread_sync("owner-a", &a).unwrap());
+        let invalidated = memory
+            .get_provider_thread_for_owner("owner-a", "conversation-a", "chatgpt")
+            .unwrap()
+            .unwrap();
+        assert_eq!(invalidated.thread_url, a.thread_url);
+        assert!(invalidated.synced_through_message_id.is_none());
+        for entry in [&b, &other] {
+            assert_eq!(
+                memory
+                    .get_provider_thread_for_owner(
+                        "owner-a",
+                        &entry.conversation_id,
+                        &entry.provider,
+                    )
+                    .unwrap()
+                    .as_ref(),
+                Some(entry)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn stale_cross_provider_snapshot_cannot_certify_combined_history() {
+        use super::{transcript_marker, SnapshotTurn};
+
+        let memory = std::sync::Arc::new(UnifiedMemory::new(8000));
+        persist_conversation(&memory, "conversation-a", "owner-a");
+        let history = memory
+            .conversation_messages_for_owner("owner-a", "conversation-a")
+            .unwrap();
+        let snapshot = transcript_marker(&history);
+        let identity = memory
+            .clone()
+            .build_context_snapshot_async(
+                "owner-a".to_owned(),
+                Some("conversation-a".to_owned()),
+                Vec::new(),
+                8000,
+            )
+            .await
+            .unwrap()
+            .identity;
+        let old_mapping = thread(
+            "conversation-a",
+            "claude",
+            "https://claude.ai/chat/a",
+            &snapshot,
+        );
+        memory
+            .upsert_provider_thread_for_owner("owner-a", &old_mapping)
+            .unwrap();
+
+        // Both attempts took the same snapshot; force completion order
+        // without timing-dependent sleeps or real provider calls.
+        let turn = |provider: &str, label: &str| SnapshotTurn {
+            owner_key_id: "owner-a".to_owned(),
+            conversation_id: "conversation-a".to_owned(),
+            user_msgs: vec![ChatMessage {
+                role: "user".to_owned(),
+                content: format!("question {label}"),
+            }],
+            assistant_msg: ChatMessage {
+                role: "assistant".to_owned(),
+                content: format!("answer {label}"),
+            },
+            provider: provider.to_owned(),
+            expected_marker: snapshot.clone(),
+            expected_identity: identity.clone(),
+        };
+        let first = memory
+            .clone()
+            .persist_turn_from_snapshot(turn("chatgpt", "A"))
+            .await
+            .unwrap();
+        let after_first = memory
+            .conversation_messages_for_owner("owner-a", "conversation-a")
+            .unwrap();
+        assert_eq!(first.unwrap().marker(), transcript_marker(&after_first));
+        let second = memory
+            .clone()
+            .persist_turn_from_snapshot(turn("claude", "B"))
+            .await
+            .unwrap();
+        assert!(second.is_none());
+        let combined = memory
+            .conversation_messages_for_owner("owner-a", "conversation-a")
+            .unwrap();
+        assert_eq!(combined.len(), 6);
+        assert_eq!(&combined[..4], after_first.as_slice());
+        assert_eq!(combined[5].content, "answer B");
+        let invalidated = memory
+            .get_provider_thread_for_owner("owner-a", "conversation-a", "claude")
+            .unwrap()
+            .unwrap();
+        assert_eq!(invalidated.thread_url, old_mapping.thread_url);
+        assert!(invalidated.synced_through_message_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn stale_incarnation_cannot_resurrect_or_modify_recreated_conversation() {
+        use super::{transcript_marker, SnapshotTurn};
+
+        for recreate in [false, true] {
+            let memory = std::sync::Arc::new(UnifiedMemory::new(8000));
+            persist_conversation(&memory, "conversation-a", "owner-a");
+            let snapshot = memory
+                .clone()
+                .build_context_snapshot_async(
+                    "owner-a".to_owned(),
+                    Some("conversation-a".to_owned()),
+                    Vec::new(),
+                    8000,
+                )
+                .await
+                .unwrap();
+            assert!(memory
+                .delete_conversation_for_owner("owner-a", "conversation-a")
+                .unwrap());
+            if recreate {
+                persist_conversation(&memory, "conversation-a", "owner-a");
+            }
+            let turn = SnapshotTurn {
+                owner_key_id: "owner-a".to_owned(),
+                conversation_id: "conversation-a".to_owned(),
+                user_msgs: vec![ChatMessage {
+                    role: "user".to_owned(),
+                    content: "stale request".to_owned(),
+                }],
+                assistant_msg: ChatMessage {
+                    role: "assistant".to_owned(),
+                    content: "stale answer".to_owned(),
+                },
+                provider: "chatgpt".to_owned(),
+                expected_marker: transcript_marker(&snapshot.context.3),
+                expected_identity: snapshot.identity,
+            };
+            assert!(memory
+                .clone()
+                .persist_turn_from_snapshot(turn)
+                .await
+                .is_err());
+            let history = memory
+                .conversation_messages_for_owner("owner-a", "conversation-a")
+                .unwrap();
+            if recreate {
+                assert_eq!(history, snapshot.context.3);
+            } else {
+                assert!(history.is_empty());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn delayed_mapping_publication_cannot_overwrite_current_mapping() {
+        use super::{transcript_marker, SnapshotTurn};
+
+        let memory = std::sync::Arc::new(UnifiedMemory::new(8000));
+        let commit = |label: &'static str| {
+            let memory = memory.clone();
+            async move {
+                let snapshot = memory
+                    .clone()
+                    .build_context_snapshot_async(
+                        "owner-a".to_owned(),
+                        Some("conversation-a".to_owned()),
+                        Vec::new(),
+                        8000,
+                    )
+                    .await
+                    .unwrap();
+                memory
+                    .persist_turn_from_snapshot(SnapshotTurn {
+                        owner_key_id: "owner-a".to_owned(),
+                        conversation_id: "conversation-a".to_owned(),
+                        user_msgs: vec![ChatMessage {
+                            role: "user".to_owned(),
+                            content: format!("question {label}"),
+                        }],
+                        assistant_msg: ChatMessage {
+                            role: "assistant".to_owned(),
+                            content: format!("answer {label}"),
+                        },
+                        provider: "chatgpt".to_owned(),
+                        expected_marker: transcript_marker(&snapshot.context.3),
+                        expected_identity: snapshot.identity,
+                    })
+                    .await
+                    .unwrap()
+                    .unwrap()
+            }
+        };
+        let first = commit("A").await;
+        let old = thread(
+            "conversation-a",
+            "chatgpt",
+            "https://chatgpt.com/c/old",
+            first.marker(),
+        );
+        assert!(memory
+            .clone()
+            .publish_provider_thread_if_current_async(
+                "owner-a".to_owned(),
+                old.clone(),
+                first.clone(),
+            )
+            .await
+            .unwrap());
+        let second = commit("B").await;
+        let current = thread(
+            "conversation-a",
+            "chatgpt",
+            "https://chatgpt.com/c/current",
+            second.marker(),
+        );
+        assert!(memory
+            .clone()
+            .publish_provider_thread_if_current_async(
+                "owner-a".to_owned(),
+                current.clone(),
+                second.clone(),
+            )
+            .await
+            .unwrap());
+        assert!(!memory
+            .clone()
+            .publish_provider_thread_if_current_async("owner-a".to_owned(), old, first)
+            .await
+            .unwrap());
+        assert!(!memory
+            .clone()
+            .publish_provider_thread_if_current_async(
+                "owner-b".to_owned(),
+                current.clone(),
+                second.clone(),
+            )
+            .await
+            .unwrap());
+        assert_eq!(
+            memory
+                .get_provider_thread_for_owner("owner-a", "conversation-a", "chatgpt")
+                .unwrap(),
+            Some(current.clone())
+        );
+
+        // Recreate identical content and generation; only incarnation differs.
+        assert!(memory
+            .delete_conversation_for_owner("owner-a", "conversation-a")
+            .unwrap());
+        commit("A").await;
+        let recreated = commit("B").await;
+        assert_eq!(second.marker(), recreated.marker());
+        assert_eq!(second.identity.generation, recreated.identity.generation);
+        assert_ne!(second.identity.incarnation, recreated.identity.incarnation);
+        assert!(
+            !memory
+                .clone()
+                .publish_provider_thread_if_current_async(
+                    "owner-a".to_owned(),
+                    current.clone(),
+                    second,
+                )
+                .await
+                .unwrap()
+        );
+        assert!(memory
+            .get_provider_thread_for_owner("owner-a", "conversation-a", "chatgpt")
+            .unwrap()
+            .is_none());
+        assert!(memory
+            .clone()
+            .publish_provider_thread_if_current_async("owner-a".to_owned(), current, recreated)
+            .await
+            .unwrap());
+    }
+
+    #[tokio::test]
+    async fn external_mapping_import_invalidates_pending_snapshots_and_receipts() {
+        use super::{transcript_marker, SnapshotTurn};
+
+        for import_before_commit in [true, false] {
+            let memory = std::sync::Arc::new(UnifiedMemory::new(8000));
+            persist_conversation(&memory, "conversation-a", "owner-a");
+            let snapshot = memory
+                .clone()
+                .build_context_snapshot_async(
+                    "owner-a".to_owned(),
+                    Some("conversation-a".to_owned()),
+                    Vec::new(),
+                    8000,
+                )
+                .await
+                .unwrap();
+            let imported = thread(
+                "conversation-a",
+                "chatgpt",
+                "https://chatgpt.com/c/imported",
+                "untrusted-marker",
+            );
+            assert!(memory
+                .clone()
+                .import_provider_thread_async("owner-b".to_owned(), imported.clone())
+                .await
+                .is_err());
+            if import_before_commit {
+                memory
+                    .clone()
+                    .import_provider_thread_async("owner-a".to_owned(), imported.clone())
+                    .await
+                    .unwrap();
+            }
+            let receipt = memory
+                .clone()
+                .persist_turn_from_snapshot(SnapshotTurn {
+                    owner_key_id: "owner-a".to_owned(),
+                    conversation_id: "conversation-a".to_owned(),
+                    user_msgs: vec![ChatMessage {
+                        role: "user".to_owned(),
+                        content: "question after snapshot".to_owned(),
+                    }],
+                    assistant_msg: ChatMessage {
+                        role: "assistant".to_owned(),
+                        content: "canonical answer".to_owned(),
+                    },
+                    provider: "chatgpt".to_owned(),
+                    expected_marker: transcript_marker(&snapshot.context.3),
+                    expected_identity: snapshot.identity,
+                })
+                .await
+                .unwrap();
+            if import_before_commit {
+                assert!(receipt.is_none());
+            } else {
+                let receipt = receipt.unwrap();
+                memory
+                    .clone()
+                    .import_provider_thread_async("owner-a".to_owned(), imported.clone())
+                    .await
+                    .unwrap();
+                let stale = thread(
+                    "conversation-a",
+                    "chatgpt",
+                    "https://chatgpt.com/c/stale",
+                    receipt.marker(),
+                );
+                assert!(!memory
+                    .clone()
+                    .publish_provider_thread_if_current_async("owner-a".to_owned(), stale, receipt)
+                    .await
+                    .unwrap());
+            }
+            let stored = memory
+                .get_provider_thread_for_owner("owner-a", "conversation-a", "chatgpt")
+                .unwrap()
+                .unwrap();
+            assert_eq!(stored.thread_url, imported.thread_url);
+            assert!(stored.synced_through_message_id.is_none());
+            let history = memory
+                .conversation_messages_for_owner("owner-a", "conversation-a")
+                .unwrap();
+            assert_eq!(&history[..2], snapshot.context.3.as_slice());
+            assert_eq!(history.len(), 4);
+            assert_eq!(history[3].content, "canonical answer");
+        }
+    }
+
+    #[tokio::test]
+    async fn consumed_delta_marker_stays_invalidated_after_database_reopen() {
+        struct TestDirectory(std::path::PathBuf);
+        impl Drop for TestDirectory {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+
+        let dir = TestDirectory(
+            std::env::temp_dir().join(format!("gateway-delta-restart-{}", uuid::Uuid::new_v4())),
+        );
+        std::fs::create_dir(&dir.0).unwrap();
+        let path = dir.0.join("memory.sqlite3");
+        let memory =
+            std::sync::Arc::new(UnifiedMemory::open_path_for_test(&path, None, 8000).unwrap());
+        persist_conversation(&memory, "conversation-a", "owner-a");
+        let a = thread(
+            "conversation-a",
+            "chatgpt",
+            "https://chatgpt.com/c/a",
+            "marker-a",
+        );
+        memory
+            .upsert_provider_thread_for_owner("owner-a", &a)
+            .unwrap();
+        let history = memory
+            .conversation_messages_for_owner("owner-a", "conversation-a")
+            .unwrap();
+        assert!(memory
+            .clone()
+            .claim_provider_thread_sync_async("owner-a".to_owned(), a.clone())
+            .await
+            .unwrap());
+        drop(memory);
+
+        let restored = UnifiedMemory::open_path_for_test(&path, None, 8000).unwrap();
+        let mapping = restored
+            .get_provider_thread_for_owner("owner-a", "conversation-a", "chatgpt")
+            .unwrap()
+            .unwrap();
+        assert_eq!(mapping.thread_url, a.thread_url);
+        assert!(mapping.synced_through_message_id.is_none());
+        assert!(!restored.claim_provider_thread_sync("owner-a", &a).unwrap());
+        assert_eq!(
+            restored
+                .conversation_messages_for_owner("owner-a", "conversation-a")
+                .unwrap(),
+            history
+        );
     }
 
     #[test]

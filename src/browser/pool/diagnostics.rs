@@ -16,6 +16,30 @@ impl std::fmt::Display for ProviderSessionExpiredError {
 
 impl std::error::Error for ProviderSessionExpiredError {}
 
+/// Neither a startup login-looking URL nor a failed navigation/import is
+/// an authoritative account rejection. Active recovery must not intentionally
+/// erase the original encrypted snapshot or the shared browser's prior jar.
+/// This guard does not roll back partial cookie writes by PageSession::open;
+/// that still requires isolated Browser+Page staging (#1385).
+/// Deferred providers keep their prior policy until separately audited.
+pub(super) fn startup_ambiguous_failure_must_preserve_snapshot(provider: Provider) -> bool {
+    matches!(provider, Provider::ChatGPT | Provider::MetaAI)
+}
+
+/// Execute legacy startup cleanup only for providers outside the active
+/// recovery scope. The caller owns the browser/page; no credentials, cookie
+/// values or raw upstream errors are copied into this admission decision.
+pub(super) fn cleanup_failed_startup_restore<F>(provider: Provider, cleanup: F) -> Result<bool>
+where
+    F: FnOnce() -> Result<()>,
+{
+    if startup_ambiguous_failure_must_preserve_snapshot(provider) {
+        return Ok(false);
+    }
+    cleanup()?;
+    Ok(true)
+}
+
 /// A page with a visible textarea is not proof of provider readiness when
 /// redirects or unrelated tabs have moved it away from the provider origin.
 /// Keep this origin check separate from authentication proof: a matching origin
@@ -190,6 +214,67 @@ mod inconclusive_session_probe_tests {
             .downcast_ref::<ProviderSessionExpiredError>()
             .is_some());
     }
+    #[test]
+    fn active_login_route_does_not_authorize_destructive_snapshot_invalidation() {
+        use crate::providers::Provider;
+        // The same typed error can originate from URL/composer shape alone:
+        // it is not a source-backed /api/auth/session 401.
+        let url_only = classify_session_probe(true, false).unwrap_err();
+        assert!(url_only
+            .downcast_ref::<ProviderSessionExpiredError>()
+            .is_some());
+        for provider in [Provider::ChatGPT, Provider::MetaAI] {
+            assert!(
+                super::startup_ambiguous_failure_must_preserve_snapshot(provider),
+                "active startup DOM probe must never authorize vault deletion"
+            );
+            // The exact startup cleanup adapter must not invoke destructive
+            // cookie/localStorage work for an active failed replay.
+            let mut cleared = false;
+            let outcome = super::cleanup_failed_startup_restore(provider, || {
+                cleared = true;
+                Ok(())
+            })
+            .unwrap();
+            assert!(!outcome);
+            assert!(!cleared, "failed active replay must not clear old jar");
+        }
+        for provider in [
+            Provider::Claude,
+            Provider::Grok,
+            Provider::Qwen,
+            Provider::Gemini,
+            Provider::Mistral,
+            Provider::Perplexity,
+            Provider::Manus,
+        ] {
+            assert!(
+                !super::startup_ambiguous_failure_must_preserve_snapshot(provider),
+                "deferred provider startup behavior is outside this P0 slice"
+            );
+            let mut cleared = false;
+            let outcome = super::cleanup_failed_startup_restore(provider, || {
+                cleared = true;
+                Ok(())
+            })
+            .unwrap();
+            assert!(outcome);
+            assert!(cleared, "deferred cleanup semantics must not change");
+        }
+    }
+
+    #[test]
+    fn deferred_startup_cleanup_error_propagates_without_untrusted_details() {
+        use crate::providers::Provider;
+        let error = super::cleanup_failed_startup_restore(Provider::Claude, || {
+            anyhow::bail!("private-token-in-upstream-error")
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("private-token"));
+        // Runtime worker must only use session_worker_failure_category(&error)
+        // in its log; the cleanup helper does not serialize errors itself.
+    }
+
     #[test]
     fn login_complete_requires_proven_composer_readiness() {
         assert!(require_login_completion_ready(Ok(true)).is_ok());

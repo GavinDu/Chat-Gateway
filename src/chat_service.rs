@@ -348,7 +348,8 @@ pub(crate) async fn prepare_candidate_attempt(
     let queue_ms = permit.queue_ms.min(u64::MAX as u128) as u64;
 
     // Thread planning remains UNDER the permit, serializing same-provider sends.
-    let (prompt, thread_url) = match prepare_candidate_prompt(CandidatePromptRequest {
+    let context_started = Instant::now();
+    let prepared_prompt = prepare_candidate_prompt(CandidatePromptRequest {
         state,
         owner_key_id,
         conversation_id,
@@ -361,8 +362,13 @@ pub(crate) async fn prepare_candidate_attempt(
         policy,
         personal_memory_items,
     })
-    .await
-    {
+    .await;
+    state.metrics.record_chat_phase(
+        provider,
+        "provider_context",
+        context_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+    );
+    let (prompt, thread_url) = match prepared_prompt {
         Ok(prepared) => prepared,
         Err(CandidatePromptError::UnreadableThreadState) => {
             return Err(CandidateAttemptError::Fatal(Box::new(api_error(
@@ -370,6 +376,14 @@ pub(crate) async fn prepare_candidate_attempt(
                 "server_error",
                 "memory_read_failed",
                 "provider thread state could not be read safely",
+            ))));
+        }
+        Err(CandidatePromptError::ThreadSyncClaimFailed) => {
+            return Err(CandidateAttemptError::Fatal(Box::new(api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                "memory_persistence_failed",
+                "provider thread synchronization could not be claimed safely",
             ))));
         }
         Err(CandidatePromptError::MemoryEgressDenied) => {
@@ -396,21 +410,37 @@ pub(crate) async fn acquire_candidate_permit(
     provider: &str,
     config: &crate::config::ProviderConfig,
 ) -> anyhow::Result<crate::browser::pool::ObscuraPermit> {
-    state
+    let pacing_started = Instant::now();
+    let paced = state
         .provider_guard
         .wait_for_request_slot(
             provider,
             config.min_request_interval_ms,
             config.daily_request_cap,
         )
-        .await?;
-    state.pool.acquire(provider).await
+        .await;
+    state.metrics.record_chat_phase(
+        provider,
+        "pacing",
+        pacing_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+    );
+    paced?;
+    let slot_started = Instant::now();
+    let permit = state.pool.acquire(provider).await;
+    state.metrics.record_chat_phase(
+        provider,
+        "slot",
+        slot_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+    );
+    permit
 }
 
 /// The metrics timestamp is measured after the durable write for both JSON
 /// and SSE. Provider work time is captured before that write, so the two
 /// measurements remain distinct.
 pub(crate) struct AttemptTelemetry<'a> {
+    pub(crate) snapshot_marker: &'a str,
+    pub(crate) snapshot_identity: &'a Option<crate::memory::ConversationIdentity>,
     pub(crate) request_id: &'a str,
     pub(crate) provider: &'a str,
     pub(crate) queue_ms: u64,
@@ -439,17 +469,39 @@ pub(crate) async fn finalize_provider_attempt(
         // write. A storage failure must be counted as a gateway error without
         // incorrectly degrading a provider that returned valid completion.
         state.provider_sessions.record_success(telemetry.provider);
-        persist_completed_turn(
+        let persistence_started = Instant::now();
+        let persisted = persist_completed_turn(
             state,
-            owner_key_id,
-            conversation_id,
-            user_messages.to_vec(),
-            assistant_content.to_owned(),
-            telemetry.provider,
+            crate::memory::SnapshotTurn {
+                owner_key_id: owner_key_id.to_owned(),
+                conversation_id: conversation_id.to_owned(),
+                user_msgs: user_messages.to_vec(),
+                assistant_msg: ChatMessage {
+                    role: "assistant".to_owned(),
+                    content: assistant_content.to_owned(),
+                },
+                provider: telemetry.provider.to_owned(),
+                expected_marker: telemetry.snapshot_marker.to_owned(),
+                expected_identity: telemetry.snapshot_identity.clone(),
+            },
             model,
         )
-        .await
-        .err()
+        .await;
+        let persistence_ms = persistence_started
+            .elapsed()
+            .as_millis()
+            .min(u64::MAX as u128) as u64;
+        state
+            .metrics
+            .record_chat_phase(telemetry.provider, "persistence", persistence_ms);
+        tracing::info!(
+            request_id = telemetry.request_id,
+            provider = telemetry.provider,
+            persistence_ms,
+            persistence_ok = persisted.is_ok(),
+            "chat persistence completed"
+        );
+        persisted.err()
     };
     let total_ms = telemetry
         .request_started
@@ -486,7 +538,7 @@ pub(crate) async fn resolve_chat_candidates(
         .resolve_for_owner_async(owner_key_id, model, conversation_id, state.memory.clone())
         .await
         .map_err(|_| {
-            tracing::error!(conversation_id = ?conversation_id, "provider affinity read failed");
+            tracing::error!("provider affinity read failed");
             Box::new(api_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "server_error",
@@ -513,7 +565,7 @@ pub(crate) async fn resolve_chat_candidates(
         .map(|(_, model)| model)
         .unwrap_or(model)
         .to_owned();
-    tracing::info!(model, ?candidates, conv = ?conversation_id, "routing request");
+    tracing::info!(model, ?candidates, "routing request");
     if candidates.is_empty() {
         return Err(Box::new(api_error(
             StatusCode::NOT_FOUND,
@@ -533,6 +585,7 @@ pub(crate) struct PreparedChatContext {
     pub(crate) windowed: Vec<ChatMessage>,
     pub(crate) has_history: bool,
     pub(crate) stored_messages: Vec<ChatMessage>,
+    pub(crate) snapshot_identity: Option<crate::memory::ConversationIdentity>,
 }
 
 /// Prepare one immutable, owner-scoped context snapshot before provider
@@ -579,16 +632,16 @@ pub(crate) async fn prepare_chat_context(
         budget_personal_memory_items(retrieved_memory, 512);
     let context_token_budget = 8000usize.saturating_sub(memory_tokens);
 
-    let (prompt, windowed, has_history, stored_messages) =
-        read_conversation_context_with_transcript_for_owner(
-            state.memory.clone(),
-            owner_key_id.to_owned(),
-            conversation_id.map(str::to_owned),
-            incoming_messages.to_vec(),
-            context_token_budget,
-        )
-        .await
-        .map_err(|_| Box::new(conversation_context_read_error(conversation_id)))?;
+    let snapshot = read_conversation_context_with_transcript_for_owner(
+        state.memory.clone(),
+        owner_key_id.to_owned(),
+        conversation_id.map(str::to_owned),
+        incoming_messages.to_vec(),
+        context_token_budget,
+    )
+    .await
+    .map_err(|_| Box::new(conversation_context_read_error(conversation_id)))?;
+    let (prompt, windowed, has_history, stored_messages) = snapshot.context;
     if prompt.is_empty() {
         return Err(Box::new(api_error(
             StatusCode::BAD_REQUEST,
@@ -606,6 +659,7 @@ pub(crate) async fn prepare_chat_context(
         windowed,
         has_history,
         stored_messages,
+        snapshot_identity: snapshot.identity,
     })
 }
 
@@ -629,6 +683,7 @@ pub(crate) struct CandidatePromptRequest<'a> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CandidatePromptError {
     UnreadableThreadState,
+    ThreadSyncClaimFailed,
     MemoryEgressDenied,
 }
 
@@ -658,7 +713,7 @@ pub(crate) async fn prepare_candidate_prompt(
         request.model,
         request.stored_messages,
         request.incoming_messages,
-        saved_thread,
+        saved_thread.clone(),
         request.token_budget,
         request.replay_prompt,
     );
@@ -670,6 +725,22 @@ pub(crate) async fn prepare_candidate_prompt(
             request.personal_memory_items,
         )
         .map_err(|_| CandidatePromptError::MemoryEgressDenied)?;
+    // Do not trust this marker again once the remote thread may be mutated.
+    // The provider permit is still held. A successful local commit restores
+    // synchronization; cancellation, failure and restart leave it invalid.
+    if thread_url.is_some() {
+        let expected = saved_thread.ok_or(CandidatePromptError::ThreadSyncClaimFailed)?;
+        let claimed = request
+            .state
+            .memory
+            .clone()
+            .claim_provider_thread_sync_async(request.owner_key_id.to_owned(), expected)
+            .await
+            .map_err(|_| CandidatePromptError::ThreadSyncClaimFailed)?;
+        if !claimed {
+            return Err(CandidatePromptError::ThreadSyncClaimFailed);
+        }
+    }
     Ok((prompt, thread_url))
 }
 

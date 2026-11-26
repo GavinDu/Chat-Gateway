@@ -9,7 +9,8 @@ from contextlib import redirect_stdout
 from unittest.mock import patch
 
 from installed_provider_smoke import (
-    PROVIDERS, FOCUS_PROVIDERS, SmokeFailure, _identity, _safe_error, execute, main,
+    PROVIDERS, FOCUS_PROVIDERS, SmokeFailure, _identity, _safe_error,
+    _failed_http_attempt, execute, main,
     model_inventory, parse_selected_providers, run_matrix, validate_json, validate_sse,
 )
 from live_provider_canary import consume_sse
@@ -304,6 +305,104 @@ class ExecutionContractTests(unittest.TestCase):
         self.assertNotIn("model-", serialized)
         self.assertNotIn("secret", serialized)
         self.assertNotIn("conversation_id", serialized)
+
+    def test_error_response_correlates_only_canonical_gateway_uuid(self):
+        request_id = str(uuid.uuid4())
+
+        class RefuseBodyRead:
+            def read(self, *_args):
+                raise AssertionError("HTTP error body must not be read")
+
+        def failure(header):
+            return urllib.error.HTTPError(
+                "https://private.invalid/?token=secret", 502,
+                "Authorization: bearer hidden", Headers({
+                    "X-Request-Id": header,
+                    "X-Private-Cookie": "secret-cookie-value",
+                }), RefuseBodyRead(),
+            )
+
+        result = _failed_http_attempt(failure(request_id))
+        self.assertEqual(result, {
+            "status": "failed", "category": "http_502",
+            "request_id": request_id,
+        })
+        for secret in ("secret", "Authorization", "hidden",
+                       "private.invalid", "cookie", "bearer"):
+            self.assertNotIn(secret, json.dumps(result))
+
+        for bad in (
+            request_id.upper(),
+            "00000000-0000-0000-0000-000000000000",
+            "{"+request_id+"}", "token=secret", request_id+" hidden",
+            "x"*40000, None, 42,
+        ):
+            with self.subTest(invalid_header=str(bad)[:50]):
+                safe = _failed_http_attempt(failure(bad))
+                self.assertEqual(safe, {"status": "failed", "category": "http_502"})
+                self.assertNotIn("secret", json.dumps(safe))
+
+        self.assertEqual(_failed_http_attempt(
+            urllib.error.URLError("token=secret upstream address")
+        ), {"status": "failed", "category": "gateway_unreachable"})
+        self.assertEqual(_failed_http_attempt(
+            TimeoutError("private account id")
+        ), {"status": "failed", "category": "gateway_unreachable"})
+
+    def test_http_error_ids_are_scoped_to_the_failed_json_sse_or_repeat_attempt(self):
+        json_id, sse_id, repeat_id = [str(uuid.uuid4()) for _ in range(3)]
+
+        def fail(code, request_id):
+            return urllib.error.HTTPError(
+                "https://private.invalid/path?token=secret", code,
+                "secret error", Headers({"X-Request-Id": request_id}), None
+            )
+
+        calls = []
+        def json_fails(provider, _model, stream):
+            calls.append((provider, stream))
+            raise fail(502, json_id)
+
+        rows = run_matrix({"chatgpt": "opaque-model"}, json_fails,
+                          selected_providers=("chatgpt",))
+        focused = rows[0]
+        self.assertEqual(focused["json"], {
+            "status": "failed", "category": "http_502",
+            "request_id": json_id,
+        })
+        self.assertEqual(focused["sse"],
+                         {"status": "skipped", "reason": "json_not_passed"})
+        self.assertEqual(calls, [("chatgpt", False)])
+        self.assertTrue(all(row["json"]["reason"] == "owner_deferred"
+                            for row in rows[1:]))
+
+        def sse_fails(_provider, _model, stream):
+            if stream:
+                raise fail(504, sse_id)
+            return {"status": "passed", "request_id": str(uuid.uuid4())}
+
+        rows = run_matrix({"chatgpt": "opaque-model"}, sse_fails,
+                          selected_providers=("chatgpt",),
+                          repeat_sender=lambda *_: (_ for _ in ()).throw(
+                              AssertionError("repeat must be skipped when SSE fails")))
+        self.assertEqual(rows[0]["sse"], {
+            "status": "failed", "category": "http_504",
+            "request_id": sse_id,
+        })
+        self.assertEqual(rows[0]["repeat"],
+                         {"status": "skipped", "reason": "prerequisite_not_passed"})
+
+        rows = run_matrix({"chatgpt": "opaque-model"},
+                          lambda *_: {"status": "passed", "request_id": str(uuid.uuid4())},
+                          selected_providers=("chatgpt",),
+                          repeat_sender=lambda *_: (_ for _ in ()).throw(
+                              fail(503, repeat_id)))
+        self.assertEqual(rows[0]["repeat"], {
+            "status": "failed", "category": "http_503",
+            "request_id": repeat_id,
+        })
+        self.assertEqual(rows[0]["sse"]["status"], "passed")
+        self.assertNotIn("secret", json.dumps(rows))
 
     def test_failed_json_isolated_and_sse_skipped_for_that_provider(self):
         calls = []

@@ -46,6 +46,12 @@ pub(super) fn join_finished_worker(worker: &mut Option<std::thread::JoinHandle<(
     true
 }
 
+/// A JoinError may carry panic details. Logging a fixed category prevents
+/// accidental disclosure of user/session data in browser lifecycle diagnostics.
+fn browser_worker_join_failure_log_category(_error: &tokio::task::JoinError) -> &'static str {
+    "browser_worker_join_failed"
+}
+
 pub(super) async fn join_worker_on_shutdown(worker: Option<std::thread::JoinHandle<()>>) {
     let Some(worker) = worker else {
         return;
@@ -53,7 +59,10 @@ pub(super) async fn join_worker_on_shutdown(worker: Option<std::thread::JoinHand
     match tokio::task::spawn_blocking(move || worker.join()).await {
         Ok(Ok(())) => {}
         Ok(Err(_)) => tracing::debug!("browser worker joined after panic during shutdown"),
-        Err(error) => tracing::warn!(%error, "browser worker join task failed during shutdown"),
+        Err(error) => tracing::warn!(
+            failure_category = browser_worker_join_failure_log_category(&error),
+            "browser worker join task failed during shutdown"
+        ),
     }
 }
 
@@ -113,6 +122,21 @@ mod worker_supervisor_tests {
         assert!(
             exited.load(Ordering::Acquire),
             "shutdown must join the worker before returning"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_join_error_is_never_serialized_to_supervisor_log_category() {
+        let task = tokio::spawn(async {
+            std::future::pending::<()>().await;
+        });
+        task.abort();
+        let error = task
+            .await
+            .expect_err("aborted task should return JoinError");
+        assert_eq!(
+            super::browser_worker_join_failure_log_category(&error),
+            "browser_worker_join_failed"
         );
     }
 

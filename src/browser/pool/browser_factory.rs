@@ -1,6 +1,7 @@
 //! Embedded browser construction with existing storage and stealth defaults.
-use crate::config::AppConfig;
-use anyhow::Result;
+use crate::{config::AppConfig, session};
+use anyhow::{anyhow, bail, Result};
+use std::{rc::Rc, time::Duration};
 
 pub(super) fn build_browser(cfg: &AppConfig) -> Result<obscura_core::Browser> {
     build_browser_with_storage(cfg, true)
@@ -60,7 +61,7 @@ fn build_browser_with_storage(cfg: &AppConfig, persistent: bool) -> Result<obscu
 #[allow(dead_code)] // Production admission/atomic promotion is tracked in #1385.
 pub(super) struct DisposableProviderStage {
     page: obscura_core::Page,
-    browser: obscura_core::Browser,
+    browser: Rc<obscura_core::Browser>,
 }
 
 #[allow(dead_code)] // Only future gated RefreshSession can use these borrows.
@@ -72,6 +73,12 @@ impl DisposableProviderStage {
     pub(super) fn page_mut(&mut self) -> &mut obscura_core::Page {
         &mut self.page
     }
+
+    /// Transfer ownership of the verified candidate as a single unit only
+    /// after the production generation/consent gate in #1463 succeeds.
+    pub(super) fn into_owned_parts(self) -> (obscura_core::Page, Rc<obscura_core::Browser>) {
+        (self.page, self.browser)
+    }
 }
 
 /// Allocate a new provider page only after the independent, nonpersistent
@@ -82,9 +89,72 @@ pub(super) async fn new_disposable_provider_stage(
     cfg: &AppConfig,
     provider: crate::providers::Provider,
 ) -> Result<DisposableProviderStage> {
-    let browser = build_disposable_browser(cfg)?;
+    let browser = Rc::new(build_disposable_browser(cfg)?);
     let page = new_provider_page(&browser, provider).await?;
     Ok(DisposableProviderStage { page, browser })
+}
+
+/// Prepare a saved snapshot **only in a private, no-disk Browser**. This has
+/// no reference to the live Browser, cached Page, auth registry or vault writer,
+/// so a failed cookie setter, page navigation or cancellation cannot mutate
+/// live credentials. Returned Page/browser is an unverified candidate, NEVER
+/// a verified account or an authorization to promote it into production.
+#[allow(dead_code)] // The generation-fenced RefreshSession caller is #1463.
+pub(super) async fn stage_provider_saved_snapshot(
+    cfg: &AppConfig,
+    provider: crate::providers::Provider,
+    snapshot: &session::SessionFile,
+) -> Result<DisposableProviderStage> {
+    if !matches!(
+        provider,
+        crate::providers::Provider::ChatGPT | crate::providers::Provider::MetaAI
+    ) {
+        bail!("candidate_provider_not_in_recovery_scope");
+    }
+    // An entirely empty snapshot has nothing to replay into a fresh Browser.
+    // Do not misinterpret a subsequent anonymous page load as credential reuse.
+    // Storage-only candidate material remains allowed but never proves login.
+    if snapshot.cookies.is_empty() && snapshot.local_storage.is_empty() {
+        bail!("candidate_snapshot_no_material");
+    }
+    // Keep source-owned validation before *any* Page allocation or navigation.
+    // Discard untrusted error Display; this boundary never logs cookie metadata.
+    session::preflight_cookie_restore(snapshot, provider.name()).map_err(|error| {
+        if error
+            .downcast_ref::<session::ProviderSnapshotNoApplicableMaterialError>()
+            .is_some()
+        {
+            // The direct replay fence must not collapse the established
+            // staged-candidate no-material verdict into malformed metadata.
+            anyhow!("candidate_snapshot_no_applicable_provider_material")
+        } else {
+            anyhow!("candidate_cookie_preflight_rejected")
+        }
+    })?;
+    // A cookie list containing only other providers' domains is not usable
+    // material for this Page. Reject before allocating a private Browser or
+    // navigating an anonymous site; storage-only candidates remain unverified.
+    if !session::replay_candidate_has_applicable_material(snapshot, provider.name()) {
+        bail!("candidate_snapshot_no_applicable_provider_material");
+    }
+    let mut staged = tokio::time::timeout(
+        Duration::from_secs(10),
+        new_disposable_provider_stage(cfg, provider),
+    )
+    .await
+    .map_err(|_| anyhow!("candidate_browser_creation_timeout"))?
+    .map_err(|_| anyhow!("candidate_browser_creation_failed"))?;
+    // Same canonical cookie → navigate → origin storage → reload path as the
+    // live worker, but the Browser is the isolated candidate, never shared.
+    super::PageSession::open(
+        staged.browser.as_ref(),
+        &mut staged.page,
+        provider,
+        Some(snapshot),
+    )
+    .await
+    .map_err(|_| anyhow!("candidate_warmup_failed"))?;
+    Ok(staged)
 }
 
 /// Apply page-level compatibility before any provider script executes.
@@ -318,6 +388,201 @@ mod disposable_context_tests {
             !root.exists(),
             "disposable context must not leave a profile"
         );
+    }
+}
+
+#[cfg(test)]
+mod staged_snapshot_preflight_tests {
+    use super::*;
+    use crate::providers::Provider;
+    use serde_json::json;
+
+    fn config() -> AppConfig {
+        serde_yaml::from_str("obscura:\n  stealth: false\nproviders: []\n").unwrap()
+    }
+
+    fn cookie_with_invalid_same_site() -> session::SessionFile {
+        serde_json::from_value(json!({
+            "ts": "fixture",
+            "local_storage": {},
+            "cookies": [{
+                "name": "SID",
+                "value": "private-stage-fixture-do-not-log",
+                "domain": ".chatgpt.com",
+                "path": "/",
+                "secure": true,
+                "http_only": true,
+                "same_site": "Invalid"
+            }]
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn malformed_snapshot_rejected_before_new_context_or_live_jar_mutation() {
+        let cfg = config();
+        let live = build_browser(&cfg).unwrap();
+        live.cookies()
+            .set("SID=live-value; Secure; Path=/", "https://chatgpt.com/")
+            .unwrap();
+        let snapshot = cookie_with_invalid_same_site();
+        let error = match stage_provider_saved_snapshot(&cfg, Provider::ChatGPT, &snapshot).await {
+            Ok(_) => panic!("invalid cookie must not stage"),
+            Err(error) => error,
+        };
+        assert_eq!(error.to_string(), "candidate_cookie_preflight_rejected");
+        assert!(!error.to_string().contains("private-stage-fixture"));
+        let actual = live.cookies().get_all();
+        assert_eq!(actual.len(), 1);
+        assert_eq!(actual[0].value, "live-value");
+    }
+
+    #[tokio::test]
+    async fn foreign_only_cookie_snapshots_do_not_launch_provider_navigation() {
+        let cfg = config();
+        let live = build_browser(&cfg).unwrap();
+        live.cookies()
+            .set("SID=existing-live; Secure; Path=/", "https://chatgpt.com/")
+            .unwrap();
+        for (provider, foreign_domain) in [
+            (Provider::ChatGPT, ".meta.ai"),
+            (Provider::MetaAI, ".chatgpt.com"),
+            (Provider::ChatGPT, ".example.org"),
+        ] {
+            let snapshot: session::SessionFile = serde_json::from_value(json!({
+                "ts": "synthetic",
+                "local_storage": {},
+                "cookies": [{
+                    "name": "SID",
+                    "value": "private-foreign-bearer-never-log",
+                    "domain": foreign_domain,
+                    "path": "/",
+                    "secure": true,
+                    "http_only": true
+                }]
+            }))
+            .unwrap();
+            let error = match stage_provider_saved_snapshot(&cfg, provider, &snapshot).await {
+                Ok(_) => panic!("foreign cookie material must not be staged"),
+                Err(error) => error,
+            };
+            assert_eq!(
+                error.to_string(),
+                "candidate_snapshot_no_applicable_provider_material"
+            );
+            assert!(!error.to_string().contains("private-foreign"));
+        }
+        assert_eq!(live.cookies().get_all().len(), 1);
+        assert_eq!(live.cookies().get_all()[0].value, "existing-live");
+    }
+
+    #[test]
+    fn supported_cookie_or_storage_presence_is_candidate_only_not_account_proof() {
+        let live: session::SessionFile = serde_json::from_value(json!({
+            "ts": "synthetic",
+            "local_storage": {},
+            "cookies": [{
+                "name": "SID",
+                "value": "private-valid-never-log",
+                "domain": ".chatgpt.com",
+                "path": "/",
+                "secure": true,
+                "http_only": true
+            }]
+        }))
+        .unwrap();
+        assert!(session::replay_candidate_has_applicable_material(
+            &live, "chatgpt"
+        ));
+        assert!(!session::replay_candidate_has_applicable_material(
+            &live, "metaai"
+        ));
+        let storage_only: session::SessionFile = serde_json::from_value(json!({
+            "ts": "synthetic",
+            "local_storage": {"synthetic-key": "private-storage-never-log"},
+            "cookies": []
+        }))
+        .unwrap();
+        assert!(session::replay_candidate_has_applicable_material(
+            &storage_only,
+            "chatgpt"
+        ));
+        assert!(session::replay_candidate_has_applicable_material(
+            &storage_only,
+            "metaai"
+        ));
+        // A genuinely expired cookie alone is not active session material.
+        let expired: session::SessionFile = serde_json::from_value(json!({
+            "ts": "synthetic",
+            "local_storage": {},
+            "cookies": [{
+                "name": "SID",
+                "value": "private-expired-never-log",
+                "domain": ".chatgpt.com",
+                "path": "/",
+                "secure": true,
+                "http_only": true,
+                "expires": 100.0
+            }]
+        }))
+        .unwrap();
+        assert!(!session::replay_candidate_has_applicable_material(
+            &expired, "chatgpt"
+        ));
+    }
+
+    #[tokio::test]
+    async fn empty_saved_snapshot_is_not_a_credential_candidate() {
+        let cfg = config();
+        let empty: session::SessionFile = serde_json::from_value(json!({
+            "ts": "fixture", "local_storage": {}, "cookies": []
+        }))
+        .unwrap();
+        for provider in [Provider::ChatGPT, Provider::MetaAI] {
+            let error = match stage_provider_saved_snapshot(&cfg, provider, &empty).await {
+                Ok(_) => panic!("empty candidate must not navigate"),
+                Err(error) => error,
+            };
+            assert_eq!(error.to_string(), "candidate_snapshot_no_material");
+        }
+    }
+
+    #[tokio::test]
+    async fn deferred_provider_rejected_without_creating_or_loading_browser_context() {
+        let cfg = config();
+        let snapshot = cookie_with_invalid_same_site();
+        for provider in [Provider::Grok, Provider::Gemini, Provider::Manus] {
+            let error = match stage_provider_saved_snapshot(&cfg, provider, &snapshot).await {
+                Ok(_) => panic!("deferred provider must not stage"),
+                Err(error) => error,
+            };
+            assert_eq!(
+                error.to_string(),
+                "candidate_provider_not_in_recovery_scope"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn private_stage_transfer_preserves_same_browser_owner_as_page() {
+        let cfg = config();
+        let stage = new_disposable_provider_stage(&cfg, Provider::MetaAI)
+            .await
+            .unwrap();
+        let (mut page, browser) = stage.into_owned_parts();
+        browser
+            .cookies()
+            .set("SID=candidate-only; Secure; Path=/", "https://meta.ai/")
+            .unwrap();
+        page.goto("data:text/html,<body>staged</body>")
+            .await
+            .unwrap();
+        assert_eq!(page.evaluate("document.body.textContent"), json!("staged"));
+        assert_eq!(browser.cookies().get_all().len(), 1);
+        let weak = Rc::downgrade(&browser);
+        drop(page);
+        drop(browser);
+        assert!(weak.upgrade().is_none(), "candidate owner must be released");
     }
 }
 

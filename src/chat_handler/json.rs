@@ -5,9 +5,12 @@ pub(super) async fn json_provider_response(
     attempt: JsonAttempt<'_>,
 ) -> std::result::Result<Response, String> {
     let JsonAttempt {
+        request_kind,
         state,
         owner_key_id,
         windowed,
+        snapshot_marker,
+        snapshot_identity,
         provider,
         model,
         provider_model,
@@ -24,6 +27,17 @@ pub(super) async fn json_provider_response(
         .chat_service
         .collect_with_timeout(receiver, provider_started, completion_timeout)
         .await;
+    if let Some(first_content) = collected.first_event_elapsed {
+        let request_ttft = provider_started
+            .saturating_duration_since(request_started)
+            .saturating_add(first_content);
+        state.metrics.record_request_first_content(
+            provider,
+            request_kind,
+            false,
+            request_ttft.as_millis().min(u64::MAX as u128) as u64,
+        );
+    }
     let full = collected.content;
     let failed = collected.error;
     let ttft_ms = collected
@@ -69,6 +83,8 @@ pub(super) async fn json_provider_response(
         &full,
         model,
         chat_service::AttemptTelemetry {
+            snapshot_marker,
+            snapshot_identity,
             request_id,
             provider,
             queue_ms,
@@ -80,7 +96,12 @@ pub(super) async fn json_provider_response(
     )
     .await;
     if let Some(error) = persist_error {
-        tracing::error!(conversation_id = %conversation_id, %error, "conversation persistence failed");
+        tracing::error!(
+            request_id,
+            provider,
+            failure_category = persistence_failure_log_category(&error),
+            "conversation persistence failed"
+        );
         return Ok(api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "server_error",
@@ -89,7 +110,13 @@ pub(super) async fn json_provider_response(
         ));
     }
 
-    let body = json_completion_body(conversation_id, model, &full, prompt_tokens);
+    let body = json_completion_body(
+        &CompletionIdentity::new(),
+        conversation_id,
+        model,
+        &full,
+        prompt_tokens,
+    );
     let headers = completion_response_headers(conversation_id, provider, provider_model, false);
     Ok((headers, Json(body)).into_response())
 }

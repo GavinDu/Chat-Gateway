@@ -1,0 +1,180 @@
+name: Audit and prune proven merged branches
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/audit-prune-merged-branches.yml
+permissions:
+  contents: write
+concurrency:
+  group: branch-reconciliation
+  cancel-in-progress: false
+jobs:
+  audit-prune:
+    if: github.repository == 'GavinDu/Chat-Gateway'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Compare every branch, report, and delete only proven redundant refs
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const {owner,repo}=context.repo;
+            const full=owner+"/"+repo;
+            const branches=await github.paginate(github.rest.repos.listBranches,{owner,repo,per_page:100});
+            const open=await github.paginate(github.rest.pulls.list,{owner,repo,state:"open",per_page:100});
+            const activeHeads=new Set(open.filter(p=>p.head?.repo?.full_name===full).map(p=>p.head.ref));
+            const activeBases=new Set(open.map(p=>p.base.ref));
+            const report=[];
+            const stats={deleted:0,retained:0,errors:0};
+            for(const branch of branches){
+              const name=branch.name;
+              if(name==="main"||branch.protected){continue;}
+              const sha=branch.commit.sha;
+              const row={name,sha,ahead:"?",behind:"?",files:"",prs:"",action:"RETAIN",reason:"unreviewed unique work"};
+              try{
+                const cmp=(await github.rest.repos.compareCommits({owner,repo,base:"main",head:name,per_page:1})).data;
+                row.ahead=cmp.ahead_by;
+                row.behind=cmp.behind_by;
+                row.files=(cmp.files||[]).map(f=>f.filename).slice(0,8).join(", ")+(cmp.files?.length>8?" (+more)":"");
+                if(activeHeads.has(name)||activeBases.has(name)){
+                  row.reason="open PR head/base";
+                  stats.retained++;
+                  report.push(row);
+                  continue;
+                }
+                const prs=await github.paginate(github.rest.pulls.list,{owner,repo,head:owner+":"+name,state:"all",per_page:100});
+                row.prs=prs.map(p=>"#"+p.number+(p.merged_at?" merged":p.state==="open"?" open":" closed")).join(", ");
+                const exactMerged=prs.some(p=>p.merged_at&&p.base.ref==="main"&&p.head.ref===name&&p.head.sha===sha&&p.head.repo?.full_name===full);
+                // A closed, unmerged PR is eligible only when it explicitly
+                // cites a merged successor and the successor covers every
+                // changed file. Do not mistake a moved head for the reviewed SHA.
+                let supersededBy=null;
+                if(row.ahead!==0&&!exactMerged){
+                  for(const oldPr of prs){
+                    if(oldPr.state!=="closed"||oldPr.merged_at||oldPr.head.ref!==name||
+                       oldPr.head.sha!==sha||oldPr.base.ref!=="main"||
+                       oldPr.head.repo?.full_name!==full)continue;
+                    const refs=[...(oldPr.body||"").matchAll(/(?:superseded\s+by|replaced\s+by|in\s+favor\s+of|duplicate\s+of)[^#\r\n]{0,80}#(\d+)/ig)];
+                    for(const match of refs){
+                      const number=Number(match[1]);
+                      if(!Number.isSafeInteger(number)||number===oldPr.number)continue;
+                      let successor;
+                      try{
+                        successor=(await github.rest.pulls.get({owner,repo,pull_number:number})).data;
+                      }catch(error){
+                        if(error.status===404)continue;
+                        throw error;
+                      }
+                      if(!successor.merged_at||successor.base.ref!=="main"||
+                         successor.head.repo?.full_name!==full)continue;
+                      const [before,after]=await Promise.all([
+                        github.paginate(github.rest.pulls.listFiles,{owner,repo,pull_number:oldPr.number,per_page:100}),
+                        github.paginate(github.rest.pulls.listFiles,{owner,repo,pull_number:number,per_page:100})
+                      ]);
+                      const covered=new Set(after.map(f=>f.filename));
+                      if(before.length>0&&before.every(f=>covered.has(f.filename))){
+                        supersededBy=number;
+                        break;
+                      }
+                    }
+                    if(supersededBy)break;
+                  }
+                }
+                // Stronger equivalence proof: compare blob SHA *and Git mode*
+                // in complete recursive trees. Avoid content-only equality that
+                // could overlook executable-bit, symlink, or submodule changes.
+                // Skip truncated compare/file trees or uncertain rename sets.
+                let byteIdentical=false;
+                if(row.ahead!==0&&!exactMerged&&!supersededBy&&
+                   Array.isArray(cmp.files)&&cmp.files.length>0&&cmp.files.length<300&&
+                   cmp.files.every(f=>["added","modified","removed","deleted"].includes(f.status))){
+                  const treeFor=async commitSha=>{
+                    const commit=(await github.rest.git.getCommit({owner,repo,commit_sha:commitSha})).data;
+                    const tree=(await github.rest.git.getTree({
+                      owner,repo,tree_sha:commit.tree.sha,recursive:"1"
+                    })).data;
+                    return tree.truncated||!Array.isArray(tree.tree)?null:
+                      new Map(tree.tree.map(item=>[item.path,item]));
+                  };
+                  const [mainTree,branchTree]=await Promise.all([
+                    treeFor(context.sha),treeFor(sha)
+                  ]);
+                  if(mainTree&&branchTree){
+                    byteIdentical=cmp.files.every(file=>{
+                      const saved=branchTree.get(file.filename);
+                      const current=mainTree.get(file.filename);
+                      if(file.status==="removed"||file.status==="deleted"){
+                        return !saved&&!current;
+                      }
+                      return saved?.type==="blob"&&current?.type==="blob"&&
+                        saved.sha===current.sha&&saved.mode===current.mode&&
+                        saved.sha===file.sha;
+                    });
+                  }
+                }
+                if(row.ahead!==0&&!exactMerged&&!supersededBy&&!byteIdentical){
+                  row.reason="ahead of main, no merged/superseded or complete byte-identical proof (retain)";
+                  stats.retained++;
+                  report.push(row);
+                  continue;
+                }
+                const first=(await github.rest.git.getRef({owner,repo,ref:"heads/"+name})).data.object.sha;
+                if(first!==sha){
+                  row.reason="branch head moved before deletion";
+                  stats.retained++;
+                  report.push(row);
+                  continue;
+                }
+                const [liveHeads,liveBases]=await Promise.all([
+                  github.rest.pulls.list({owner,repo,head:owner+":"+name,state:"open",per_page:100}),
+                  github.rest.pulls.list({owner,repo,base:name,state:"open",per_page:100})
+                ]);
+                if(liveHeads.data.length||liveBases.data.length){
+                  row.reason="new open PR head/base dependency";
+                  stats.retained++;
+                  report.push(row);
+                  continue;
+                }
+                const second=(await github.rest.git.getRef({owner,repo,ref:"heads/"+name})).data.object.sha;
+                if(second!==sha){
+                  row.reason="branch changed during review";
+                  stats.retained++;
+                  report.push(row);
+                  continue;
+                }
+                row.reason=row.ahead===0?"entire branch reachable from main":exactMerged?"exact merged PR head":supersededBy?"closed PR explicitly superseded by merged #"+supersededBy+" (file coverage verified)":"all branch-changed file blobs and Git modes match main exactly";
+                // deleteRef has no atomic compare-and-delete. Re-check head immediately
+                // before deletion and require stable branch writers during this run.
+                await github.rest.git.deleteRef({owner,repo,ref:"heads/"+name});
+                row.action="DELETED";
+                stats.deleted++;
+                core.info("Deleted proven redundant branch: "+name+" ("+row.reason+")");
+              }catch(e){
+                row.reason="API or deletion error: "+String(e.message).slice(0,160);
+                stats.retained++;
+                stats.errors++;
+                core.warning("Retained "+name+": "+row.reason);
+              }
+              report.push(row);
+            }
+            const safe=s=>String(s).replace(/\|/g,"\\|").replace(/[\r\n]/g," ");
+            const lines=[
+              "# Branch reconciliation audit",
+              "",
+              "Repository: "+full+"; main SHA: "+context.sha,
+              "",
+              "**Deletion rule:** zero-ahead ancestry, exact merged main PR head, closed PR with explicit merged-successor and complete file-path coverage, or complete changed-file blob SHA plus Git mode identity with main (no partial/truncated file sets). Never protected refs or open PR heads/bases. Every deletion rechecks the ref.",
+              "",
+              "- Inventory: "+branches.length+" branches before this pass",
+              "- Deleted: "+stats.deleted,
+              "- Retained: "+stats.retained+" (excluding protected/default branches)",
+              "- Errors: "+stats.errors,
+              "",
+              "| Branch | Ahead | Behind | Changed paths (first 8) | Related PRs | Action | Reason |",
+              "|---|---:|---:|---|---|---|---|",
+              ...report.map(r=>"| "+[r.name,r.ahead,r.behind,r.files,r.prs,r.action,r.reason].map(safe).join(" | ")+" |")
+            ];
+            await core.summary.addRaw(lines.join("\n")).write();
+            core.info("Branch reconciliation: "+JSON.stringify(stats));
+            core.info("Branch report JSON: "+JSON.stringify(report));

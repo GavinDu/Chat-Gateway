@@ -36,6 +36,32 @@ impl SessionWriteTracker {
 }
 const SESSION_WRITE_INTERVAL: Duration = Duration::from_secs(60);
 
+/// Exact durability result of a post-send snapshot check. A changed snapshot
+/// skipped by the write throttle is not on disk and is not a successful save.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionSaveOutcome {
+    Unchanged,
+    DeferredRateLimited,
+    Persisted,
+}
+
+/// Decide whether a snapshot requires no immediate disk write. Throttling a
+/// missing prior snapshot would silently leave zero durable credentials even
+/// though the caller observed an Ok result. Never suppress that first write.
+fn nonpersisted_session_save_outcome(
+    previous_hash: Option<&str>,
+    current_hash: &str,
+    rate_limited: bool,
+) -> Option<SessionSaveOutcome> {
+    if previous_hash == Some(current_hash) {
+        Some(SessionSaveOutcome::Unchanged)
+    } else if previous_hash.is_some() && rate_limited {
+        Some(SessionSaveOutcome::DeferredRateLimited)
+    } else {
+        None
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct SessionFile {
     pub local_storage: std::collections::HashMap<String, String>,
@@ -84,6 +110,135 @@ mod vault_key_file_tests {
         assert!(read_vault_key_file(&path).is_ok());
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
         assert!(read_vault_key_file(&path).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn vault_key_file_rejects_changed_inode_and_permissions_before_read() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!(
+            "chat-gateway-key-file-swap-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("checked.key");
+        let original = root.join("original.key");
+        write_key(&path);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let inspected = std::fs::symlink_metadata(&path).unwrap();
+        let good = open_vault_key_file_no_follow(&path).unwrap();
+        checked_vault_key_file_identity(&inspected, &good.metadata().unwrap()).unwrap();
+
+        // Same-size replacement must fail even with identical content/mode.
+        std::fs::rename(&path, &original).unwrap();
+        write_key(&path);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let replacement = open_vault_key_file_no_follow(&path).unwrap();
+        assert_eq!(
+            checked_vault_key_file_identity(&inspected, &replacement.metadata().unwrap())
+                .unwrap_err()
+                .to_string(),
+            "CHAT_GATEWAY_VAULT_KEY_FILE changed during validation"
+        );
+
+        // A permission change between check and open must be verified from
+        // the *opened* descriptor rather than the stale pathname metadata.
+        let fresh = std::fs::symlink_metadata(&path).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let permissive = open_vault_key_file_no_follow(&path).unwrap();
+        assert_eq!(
+            checked_vault_key_file_identity(&fresh, &permissive.metadata().unwrap())
+                .unwrap_err()
+                .to_string(),
+            "CHAT_GATEWAY_VAULT_KEY_FILE must not be accessible by group or other users"
+        );
+        assert!(read_vault_key_file(&path).is_err());
+
+        // Preserve the original precheck semantics too: a file that was
+        // group-readable at inspection cannot be accepted by chmod'ing it
+        // private just before open.
+        let inspected_permissive = std::fs::symlink_metadata(&path).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let later_private = open_vault_key_file_no_follow(&path).unwrap();
+        assert_eq!(
+            checked_vault_key_file_identity(
+                &inspected_permissive,
+                &later_private.metadata().unwrap(),
+            )
+            .unwrap_err()
+            .to_string(),
+            "CHAT_GATEWAY_VAULT_KEY_FILE must not be accessible by group or other users"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn vault_key_file_nofollow_and_nonblock_deny_fifo_or_symlink_swap() {
+        use std::ffi::CString;
+        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::{ffi::OsStrExt, fs::symlink};
+        let root = std::env::temp_dir().join(format!(
+            "chat-gateway-key-file-nonblock-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("checked.key");
+        let original = root.join("original.key");
+        write_key(&path);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let inspected = std::fs::symlink_metadata(&path).unwrap();
+        std::fs::rename(&path, &original).unwrap();
+
+        // SAFETY: CString retains a valid NUL-terminated path pointer for
+        // the duration of mkfifo. The unique test directory is private.
+        let name = CString::new(path.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        let opened = open_vault_key_file_no_follow(&path).unwrap();
+        assert_eq!(
+            checked_vault_key_file_identity(&inspected, &opened.metadata().unwrap())
+                .unwrap_err()
+                .to_string(),
+            "CHAT_GATEWAY_VAULT_KEY_FILE must be a bounded regular file"
+        );
+        std::fs::remove_file(&path).unwrap();
+        // A symlink pointing to the *same* previous inode must still fail
+        // O_NOFOLLOW even if a dev/inode equality check would allow it.
+        symlink(&original, &path).unwrap();
+        assert!(open_vault_key_file_no_follow(&path).is_err());
+        assert!(read_vault_key_file(&path).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn vault_key_file_bounded_read_and_utf8_error_never_include_secret() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!(
+            "chat-gateway-key-file-bound-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("bounded.key");
+        std::fs::write(&path, vec![b'1'; MAX_VAULT_KEY_FILE_BYTES as usize + 1]).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let oversize = match read_vault_key_file(&path) {
+            Ok(_) => panic!("oversized key must be rejected"),
+            Err(error) => error.to_string(),
+        };
+        assert_eq!(
+            oversize,
+            "CHAT_GATEWAY_VAULT_KEY_FILE must be a bounded regular file"
+        );
+        std::fs::write(&path, vec![0xff; 64]).unwrap();
+        let malformed = match read_vault_key_file(&path) {
+            Ok(_) => panic!("malformed key must be rejected"),
+            Err(error) => error.to_string(),
+        };
+        assert_eq!(malformed, "CHAT_GATEWAY_VAULT_KEY_FILE is not UTF-8");
+        assert!(!oversize.contains("bounded.key"));
+        assert!(!malformed.contains("bounded.key"));
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -415,7 +570,7 @@ pub trait SessionStore {
         page: &Page,
         provider: &str,
         tracker: &SessionWriteTracker,
-    ) -> Result<()>;
+    ) -> Result<SessionSaveOutcome>;
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -434,7 +589,7 @@ impl SessionStore for FileSessionStore {
         page: &Page,
         provider: &str,
         tracker: &SessionWriteTracker,
-    ) -> Result<()> {
+    ) -> Result<SessionSaveOutcome> {
         save_session_if_changed_file(browser, page, provider, tracker).await
     }
 }
@@ -466,7 +621,7 @@ impl SessionStore for VaultSessionStore {
         page: &Page,
         provider: &str,
         tracker: &SessionWriteTracker,
-    ) -> Result<()> {
+    ) -> Result<SessionSaveOutcome> {
         let file = capture_session(browser, page, provider).await?;
         self.save_file_if_changed(file, provider, tracker).await
     }
@@ -563,7 +718,7 @@ impl VaultSessionStore {
         mut file: SessionFile,
         provider: &str,
         tracker: &SessionWriteTracker,
-    ) -> Result<()> {
+    ) -> Result<SessionSaveOutcome> {
         let key = vault_key_from_env()?;
         let destination = session_vault_path(provider)?;
         let previous = match std::fs::read(&destination) {
@@ -577,16 +732,24 @@ impl VaultSessionStore {
         let current_hash = session_state_hash(&file)?;
         let previous_hash = previous.as_ref().map(session_state_hash).transpose()?;
 
-        if previous_hash.as_deref() == Some(current_hash.as_str()) {
-            remove_legacy_session_snapshot(provider)?;
-            return Ok(());
-        }
-        if tracker.is_rate_limited(provider, Instant::now()) {
-            tracing::debug!(
-                provider,
-                "encrypted session changed but snapshot write is rate-limited"
-            );
-            return Ok(());
+        if let Some(outcome) = nonpersisted_session_save_outcome(
+            previous_hash.as_deref(),
+            &current_hash,
+            tracker.is_rate_limited(provider, Instant::now()),
+        ) {
+            match outcome {
+                SessionSaveOutcome::Unchanged => remove_legacy_session_snapshot(provider)?,
+                SessionSaveOutcome::DeferredRateLimited => {
+                    tracing::debug!(
+                        provider,
+                        "encrypted session changed but snapshot write is rate-limited"
+                    );
+                }
+                SessionSaveOutcome::Persisted => {
+                    unreachable!("a skipped write cannot be persisted")
+                }
+            }
+            return Ok(outcome);
         }
         ensure_private_session_dir(Path::new("sessions")).await?;
         let encrypted = encrypt_session_snapshot(&file, provider, &key)?;
@@ -599,7 +762,56 @@ impl VaultSessionStore {
             cookies = file.cookies.len(),
             "encrypted session saved"
         );
-        Ok(())
+        Ok(SessionSaveOutcome::Persisted)
+    }
+}
+
+#[cfg(test)]
+mod session_save_outcome_tests {
+    use super::*;
+
+    #[test]
+    fn only_existing_changed_snapshots_can_be_deferred_by_throttle() {
+        use SessionSaveOutcome::{DeferredRateLimited, Unchanged};
+        assert_eq!(
+            nonpersisted_session_save_outcome(Some("same"), "same", true),
+            Some(Unchanged)
+        );
+        assert_eq!(
+            nonpersisted_session_save_outcome(Some("same"), "same", false),
+            Some(Unchanged)
+        );
+        assert_eq!(
+            nonpersisted_session_save_outcome(Some("old"), "rotated", true),
+            Some(DeferredRateLimited)
+        );
+        assert_eq!(
+            nonpersisted_session_save_outcome(Some("old"), "rotated", false),
+            None
+        );
+        assert_eq!(
+            nonpersisted_session_save_outcome(None, "first-snapshot", true),
+            None,
+            "a missing session must still be persisted while the tracker is rate limited"
+        );
+        assert_eq!(
+            nonpersisted_session_save_outcome(None, "first-snapshot", false),
+            None
+        );
+    }
+
+    #[test]
+    fn corrupt_existing_file_is_not_a_missing_snapshot() {
+        let path = std::env::temp_dir().join(format!(
+            "chat-gateway-existing-snapshot-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(&path, b"{ invalid session fixture").unwrap();
+        assert!(
+            load_session_file_from_path(&path).is_err(),
+            "malformed owner state must not authorize a first-save overwrite"
+        );
+        std::fs::remove_file(&path).unwrap();
     }
 }
 
@@ -858,8 +1070,218 @@ mod relay_import_noop_tests {
         file.cookies[0].same_site = Some("Strict".into());
         assert!(!relay_vault_snapshot_unchanged("chatgpt", &file, &key, &target).unwrap());
         std::fs::write(&target, b"corrupt-envelope").unwrap();
-        assert!(!relay_vault_snapshot_unchanged("chatgpt", &file, &key, &target).unwrap());
+        let error = relay_vault_snapshot_unchanged("chatgpt", &file, &key, &target).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "existing provider session vault cannot be authenticated"
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), b"corrupt-envelope");
         std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn active_relay_preserves_existing_unreadable_vault_for_key_recovery() {
+        let root = std::env::temp_dir().join(format!(
+            "chat-gateway-relay-vault-preservation-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let key = [17_u8; 32];
+        let previous_key = [19_u8; 32];
+        for (provider, domain) in [("chatgpt", ".chatgpt.com"), ("metaai", ".meta.ai")] {
+            let incoming = SessionFile {
+                local_storage: HashMap::new(),
+                cookies: vec![Cookie {
+                    name: "synthetic".into(),
+                    value: "private-credential-fixture".into(),
+                    domain: domain.into(),
+                    path: "/".into(),
+                    secure: true,
+                    http_only: true,
+                    expires: None,
+                    same_site: None,
+                }],
+                ts: "fixture".into(),
+            };
+            let target = root.join(format!("{provider}.vault"));
+            assert!(
+                !relay_vault_snapshot_unchanged(provider, &incoming, &key, &target).unwrap(),
+                "first link with no vault must remain allowed"
+            );
+            let valid = encrypt_session_snapshot(&incoming, provider, &key).unwrap();
+            std::fs::write(&target, &valid).unwrap();
+            assert!(relay_vault_snapshot_unchanged(provider, &incoming, &key, &target).unwrap());
+
+            let different = SessionFile {
+                local_storage: HashMap::new(),
+                cookies: vec![],
+                ts: "different".into(),
+            };
+            assert!(
+                !relay_vault_snapshot_unchanged(provider, &different, &key, &target).unwrap(),
+                "authenticated different snapshot must permit a normal update"
+            );
+
+            for invalid_bytes in [
+                b"corrupt-envelope".to_vec(),
+                encrypt_session_snapshot(&incoming, provider, &previous_key).unwrap(),
+                encrypt_session_snapshot(
+                    &incoming,
+                    if provider == "chatgpt" {
+                        "metaai"
+                    } else {
+                        "chatgpt"
+                    },
+                    &key,
+                )
+                .unwrap(),
+            ] {
+                std::fs::write(&target, &invalid_bytes).unwrap();
+                let error =
+                    relay_vault_snapshot_unchanged(provider, &incoming, &key, &target).unwrap_err();
+                assert_eq!(
+                    error.to_string(),
+                    "existing provider session vault cannot be authenticated"
+                );
+                assert!(error
+                    .downcast_ref::<RelayVaultAuthenticationError>()
+                    .is_some());
+                assert_eq!(
+                    std::fs::read(&target).unwrap(),
+                    invalid_bytes,
+                    "failure must leave the exact prior vault bytes intact"
+                );
+                for private in [
+                    "private-credential",
+                    domain,
+                    "key",
+                    "chat-gateway-relay-vault",
+                ] {
+                    assert!(!error.to_string().contains(private));
+                }
+            }
+            // Deferred provider behavior is unchanged; the fail-closed gate
+            // applies only to the two signed-in account-recovery providers.
+            std::fs::remove_file(&target).unwrap();
+        }
+        let deferred = root.join("gemini.vault");
+        std::fs::write(&deferred, b"corrupt-deferred-record").unwrap();
+        let empty = SessionFile {
+            local_storage: HashMap::new(),
+            cookies: Vec::new(),
+            ts: "fixture".into(),
+        };
+        assert!(!relay_vault_snapshot_unchanged("gemini", &empty, &key, &deferred).unwrap());
+        assert_eq!(
+            std::fs::read(&deferred).unwrap(),
+            b"corrupt-deferred-record"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod relay_vault_precommit_tests {
+    use super::*;
+
+    fn synthetic(domain: &str, value: &str) -> SessionFile {
+        SessionFile {
+            local_storage: HashMap::new(),
+            cookies: vec![Cookie {
+                name: "synthetic".into(),
+                value: value.into(),
+                domain: domain.into(),
+                path: "/".into(),
+                secure: true,
+                http_only: true,
+                expires: None,
+                same_site: None,
+            }],
+            ts: "synthetic-only".into(),
+        }
+    }
+
+    #[test]
+    fn staged_encrypted_vault_must_verify_before_replacing_last_valid_snapshot() {
+        let root = std::env::temp_dir().join(format!(
+            "chat-gateway-precommit-vault-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let key = [42_u8; 32];
+        let wrong_key = [41_u8; 32];
+
+        for (provider, domain, foreign) in [
+            ("chatgpt", ".chatgpt.com", "metaai"),
+            ("metaai", ".meta.ai", "chatgpt"),
+        ] {
+            let destination = root.join(format!("{provider}.vault"));
+            let old = synthetic(domain, "old-synthetic-session");
+            let new = synthetic(domain, "new-synthetic-session");
+            let original_ciphertext = encrypt_session_snapshot(&old, provider, &key).unwrap();
+            let updated_ciphertext = encrypt_session_snapshot(&new, provider, &key).unwrap();
+            write_session_file_atomically(&destination, &original_ciphertext).unwrap();
+
+            for failure in 0..5 {
+                let failed = write_session_file_atomically_checked(
+                    &destination,
+                    if failure == 4 {
+                        b"damaged-stage".as_slice()
+                    } else {
+                        updated_ciphertext.as_slice()
+                    },
+                    |staged| match failure {
+                        0 => Err(anyhow::Error::new(RelayVaultPrecommitVerificationError)),
+                        1 => verify_relay_vault_staging(staged, provider, &new, &wrong_key),
+                        2 => verify_relay_vault_staging(staged, foreign, &new, &key),
+                        3 => verify_relay_vault_staging(staged, provider, &old, &key),
+                        _ => verify_relay_vault_staging(staged, provider, &new, &key),
+                    },
+                )
+                .unwrap_err();
+                assert!(failed
+                    .downcast_ref::<RelayVaultPrecommitVerificationError>()
+                    .is_some());
+                assert_eq!(
+                    failed.to_string(),
+                    "session-vault precommit verification failed"
+                );
+                assert_eq!(std::fs::read(&destination).unwrap(), original_ciphertext);
+                let entries = std::fs::read_dir(&root).unwrap().count();
+                // One provider destination per iteration, never an orphaned
+                // .tmp file after injected verification failure.
+                assert_eq!(entries, 1);
+            }
+
+            write_session_file_atomically_checked(&destination, &updated_ciphertext, |staged| {
+                verify_relay_vault_staging(staged, provider, &new, &key)
+            })
+            .unwrap();
+            assert_eq!(std::fs::read(&destination).unwrap(), updated_ciphertext);
+            let opened =
+                decrypt_session_snapshot(&std::fs::read(&destination).unwrap(), provider, &key)
+                    .unwrap();
+            assert!(
+                session_state_hash(&opened).unwrap() == session_state_hash(&new).unwrap(),
+                "verified new vault must match the expected synthetic snapshot"
+            );
+            std::fs::remove_file(&destination).unwrap();
+        }
+
+        let fresh = root.join("fresh.vault");
+        let err =
+            write_session_file_atomically_checked(&fresh, b"synthetic-not-a-session", |_staged| {
+                Err(anyhow::Error::new(RelayVaultPrecommitVerificationError))
+            })
+            .unwrap_err();
+        assert!(err
+            .downcast_ref::<RelayVaultPrecommitVerificationError>()
+            .is_some());
+        assert!(
+            !fresh.exists(),
+            "failed first-link verification must not publish a vault"
+        );
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
 
@@ -947,10 +1369,25 @@ fn migrate_legacy_snapshot_with_remover(
     Ok(verified)
 }
 
+/// A corrupt or old-key local vault is not evidence that the provider's
+/// browser login expired. Preserve this fixed typed reason for owner-facing
+/// diagnosis without exposing crypto internals or session material.
+#[derive(Debug)]
+pub struct RelayVaultAuthenticationError;
+
+impl std::fmt::Display for RelayVaultAuthenticationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("existing provider session vault cannot be authenticated")
+    }
+}
+
+impl std::error::Error for RelayVaultAuthenticationError {}
+
 /// A periodic extension refresh often sends an identical cookie snapshot.
 /// Decrypting and comparing the existing vault avoids an unnecessary nonce,
-/// rewrite, fsync and read-back on every refresh. Corrupt/old-key records are
-/// not treated as matches, preserving the existing explicit re-link recovery.
+/// rewrite, fsync and read-back on every refresh. For the two active recovery
+/// providers, an existing but unreadable vault must stop the refresh before
+/// any overwrite: it may be recoverable with the previous key or backup.
 fn relay_vault_snapshot_unchanged(
     provider: &str,
     incoming: &SessionFile,
@@ -964,9 +1401,47 @@ fn relay_vault_snapshot_unchanged(
     };
     let existing = match decrypt_session_snapshot(&ciphertext, provider, key) {
         Ok(file) => file,
+        Err(_) if matches!(provider, "chatgpt" | "metaai") => {
+            // Existing ciphertext may belong to an earlier key or be damaged.
+            // "Changed snapshot" would authorize write_session_file_atomically
+            // to replace it with a periodic relay capture. Preserve the bytes
+            // and keep the failure category independent of account validity.
+            return Err(anyhow::Error::new(RelayVaultAuthenticationError));
+        }
         Err(_) => return Ok(false),
     };
     Ok(session_state_hash(&existing)? == session_state_hash(incoming)?)
+}
+
+/// Fixed, source-neutral error for a staged relay-vault verification
+/// failure. Neither filesystem paths nor decryption details may escape.
+#[derive(Debug)]
+pub struct RelayVaultPrecommitVerificationError;
+
+impl std::fmt::Display for RelayVaultPrecommitVerificationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("session-vault precommit verification failed")
+    }
+}
+
+impl std::error::Error for RelayVaultPrecommitVerificationError {}
+
+fn verify_relay_vault_staging(
+    staged: &Path,
+    provider: &str,
+    expected: &SessionFile,
+    key: &[u8; 32],
+) -> Result<()> {
+    let verified = (|| -> Result<()> {
+        let written = Zeroizing::new(std::fs::read(staged)?);
+        let restored = decrypt_session_snapshot(&written, provider, key)?;
+        anyhow::ensure!(
+            session_state_hash(&restored)? == session_state_hash(expected)?,
+            "private staged session mismatch"
+        );
+        Ok(())
+    })();
+    verified.map_err(|_| anyhow::Error::new(RelayVaultPrecommitVerificationError))
 }
 
 /// A credential-free capture cannot establish a linked browser session.
@@ -1047,19 +1522,12 @@ pub fn import_relay_session(provider: &str, file: &SessionFile) -> Result<()> {
         return Ok(());
     }
     let encrypted = encrypt_session_snapshot(&file, provider, &key)?;
-    write_session_file_atomically(Path::new(&destination), &encrypted)?;
-    let verified = (|| -> Result<()> {
-        let written = std::fs::read(&destination)?;
-        let restored = decrypt_session_snapshot(&written, provider, &key)?;
-        if session_state_hash(&restored)? != session_state_hash(&file)? {
-            anyhow::bail!("session-vault read-back validation failed");
-        }
-        Ok(())
-    })();
-    if let Err(error) = verified {
-        let _ = std::fs::remove_file(&destination);
-        return Err(error);
-    }
+    // Verify the complete encrypted staging file BEFORE its atomic rename.
+    // On failure, the writer removes only its owned temporary file; it must
+    // never delete a previously valid destination to signal readback failure.
+    write_session_file_atomically_checked(Path::new(&destination), &encrypted, |staged| {
+        verify_relay_vault_staging(staged, provider, &file, &key)
+    })?;
     remove_legacy_session_snapshot(provider)?;
 
     tracing::info!(
@@ -1203,6 +1671,13 @@ mod provider_cookie_count_tests {
     }
 }
 
+/// Wipe the bearer while preserving only the scope needed for an expiry
+/// header. Keep this explicit: String::clear would defeat Cookie::drop's
+/// effective initialized-byte zeroization.
+fn wipe_cookie_for_revocation(cookie: &mut Cookie) {
+    cookie.value.zeroize();
+}
+
 /// Remove cookies for one provider from Obscura's shared browser jar.
 /// Every deletion is verified; failure aborts unlink before persistent records
 /// are deleted, preventing a false success response for live credentials.
@@ -1212,9 +1687,11 @@ pub fn clear_provider_cookies(browser: &Browser, provider: &str) -> Result<usize
     let mut cleared = 0;
     for browser_cookie in cookies {
         let mut cookie = Cookie::from(browser_cookie);
-        // The old value is never written back; ignore it when validating the
-        // deletion tuple so unusual but valid values do not leave stale cookies.
-        cookie.value.clear();
+        // The old value is never written back. Explicitly wipe the owned
+        // bearer before constructing a revocation header: String::clear
+        // merely reduces length, leaving its previous allocation unwiped
+        // when Cookie::drop subsequently zeroizes an empty string.
+        wipe_cookie_for_revocation(&mut cookie);
         if !cookie_domain_allowed(provider, &cookie.domain) {
             continue;
         }
@@ -1246,6 +1723,31 @@ pub fn clear_provider_cookies(browser: &Browser, provider: &str) -> Result<usize
 #[cfg(test)]
 mod cookie_revocation_scope_tests {
     use super::same_revocation_cookie_scope;
+
+    #[test]
+    fn unlink_cookie_value_is_wiped_before_revocation_header_formatting() {
+        use super::{cookie_expiration_header, wipe_cookie_for_revocation, Cookie};
+
+        let mut cookie = Cookie {
+            name: "synthetic-sid".into(),
+            value: "synthetic-private-bearer".into(),
+            domain: ".chatgpt.com".into(),
+            path: "/".into(),
+            secure: true,
+            http_only: true,
+            expires: None,
+            same_site: None,
+        };
+        // Exercise the exact helper used by the production unlink loop.
+        wipe_cookie_for_revocation(&mut cookie);
+        assert!(cookie.value.is_empty());
+        let expired = cookie_expiration_header(&cookie).unwrap();
+        assert!(expired.starts_with("synthetic-sid=; Max-Age=0; Path=/"));
+        assert!(expired.contains("Domain=.chatgpt.com"));
+        assert!(expired.contains("; Secure"));
+        assert!(expired.contains("; HttpOnly"));
+        assert!(!expired.contains("synthetic-private-bearer"));
+    }
 
     #[test]
     fn host_only_and_domain_scoped_cookies_are_distinct_revocation_targets() {
@@ -1609,24 +2111,82 @@ pub fn parse_vault_key(encoded: &str) -> Result<Zeroizing<[u8; 32]>> {
     Ok(Zeroizing::new(key))
 }
 
-fn read_vault_key_file(path: &Path) -> Result<Zeroizing<String>> {
-    let metadata = std::fs::symlink_metadata(path)
-        .map_err(|error| anyhow::anyhow!("cannot inspect CHAT_GATEWAY_VAULT_KEY_FILE: {error}"))?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        anyhow::bail!("CHAT_GATEWAY_VAULT_KEY_FILE must be a regular, non-symlink file");
+const MAX_VAULT_KEY_FILE_BYTES: u64 = 4096;
+
+/// Never trust a second pathname lookup as the file that passed lstat. The
+/// opened descriptor must be the same regular, private object, not a symlink,
+/// FIFO or same-length replacement. No key bytes are read before this gate.
+fn checked_vault_key_file_identity(
+    inspected: &std::fs::Metadata,
+    opened: &std::fs::Metadata,
+) -> Result<()> {
+    if !inspected.is_file()
+        || inspected.file_type().is_symlink()
+        || inspected.len() > MAX_VAULT_KEY_FILE_BYTES
+        || !opened.is_file()
+        || opened.len() > MAX_VAULT_KEY_FILE_BYTES
+    {
+        anyhow::bail!("CHAT_GATEWAY_VAULT_KEY_FILE must be a bounded regular file");
     }
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        if metadata.permissions().mode() & 0o077 != 0 {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        if inspected.dev() != opened.dev() || inspected.ino() != opened.ino() {
+            anyhow::bail!("CHAT_GATEWAY_VAULT_KEY_FILE changed during validation");
+        }
+        if inspected.permissions().mode() & 0o077 != 0 || opened.permissions().mode() & 0o077 != 0 {
             anyhow::bail!(
                 "CHAT_GATEWAY_VAULT_KEY_FILE must not be accessible by group or other users"
             );
         }
     }
-    Ok(Zeroizing::new(std::fs::read_to_string(path).map_err(
-        |error| anyhow::anyhow!("cannot read CHAT_GATEWAY_VAULT_KEY_FILE: {error}"),
-    )?))
+    #[cfg(not(unix))]
+    anyhow::bail!("CHAT_GATEWAY_VAULT_KEY_FILE platform validation unavailable");
+    Ok(())
+}
+
+fn open_vault_key_file_no_follow(path: &Path) -> Result<std::fs::File> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(path)
+            .map_err(|_| anyhow::anyhow!("cannot read CHAT_GATEWAY_VAULT_KEY_FILE"))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        anyhow::bail!("CHAT_GATEWAY_VAULT_KEY_FILE platform validation unavailable");
+    }
+}
+
+fn read_vault_key_file(path: &Path) -> Result<Zeroizing<String>> {
+    use std::io::Read;
+    let inspected = std::fs::symlink_metadata(path)
+        .map_err(|_| anyhow::anyhow!("cannot inspect CHAT_GATEWAY_VAULT_KEY_FILE"))?;
+    if inspected.file_type().is_symlink() || !inspected.is_file() {
+        anyhow::bail!("CHAT_GATEWAY_VAULT_KEY_FILE must be a regular, non-symlink file");
+    }
+    let file = open_vault_key_file_no_follow(path)?;
+    let opened = file
+        .metadata()
+        .map_err(|_| anyhow::anyhow!("cannot inspect CHAT_GATEWAY_VAULT_KEY_FILE"))?;
+    checked_vault_key_file_identity(&inspected, &opened)?;
+
+    // Bounded, zeroized bytes: a file can grow between metadata and read.
+    // Never keep an unbounded String or reflect OS/UTF-8 errors with key data.
+    let mut key_bytes = Zeroizing::new(Vec::with_capacity(opened.len() as usize + 1));
+    file.take(MAX_VAULT_KEY_FILE_BYTES + 1)
+        .read_to_end(&mut key_bytes)
+        .map_err(|_| anyhow::anyhow!("cannot read CHAT_GATEWAY_VAULT_KEY_FILE"))?;
+    if key_bytes.len() as u64 > MAX_VAULT_KEY_FILE_BYTES {
+        anyhow::bail!("CHAT_GATEWAY_VAULT_KEY_FILE exceeds the size limit");
+    }
+    let utf8 = std::str::from_utf8(&key_bytes)
+        .map_err(|_| anyhow::anyhow!("CHAT_GATEWAY_VAULT_KEY_FILE is not UTF-8"))?;
+    Ok(Zeroizing::new(utf8.to_owned()))
 }
 
 pub fn validate_encrypted_store_configuration() -> Result<()> {
@@ -1826,8 +2386,10 @@ fn restored_cookie_fields_safe(cookie: &Cookie) -> bool {
 fn parse_local_storage_snapshot(
     value: serde_json::Value,
 ) -> Result<std::collections::HashMap<String, String>> {
+    // localStorage may hold reusable authentication material. Never include
+    // untrusted Serde diagnostics in logs or caller-visible error chains.
     serde_json::from_value(value)
-        .map_err(|error| anyhow::anyhow!("decoding provider localStorage snapshot: {error}"))
+        .map_err(|_| anyhow::anyhow!("provider_local_storage_snapshot_invalid"))
 }
 
 /// Ensure the directory holding reusable provider credentials is private.
@@ -1847,6 +2409,9 @@ pub(crate) fn session_state_hash(file: &SessionFile) -> Result<String> {
     // produces the same fingerprint across snapshots.
     let local_storage: BTreeMap<&String, &String> = file.local_storage.iter().collect();
     let mut cookies = file.cookies.clone();
+    // Preserve order for ambiguous duplicate identity/value records: replay
+    // historically selects the first same-scope cookie. Until metadata
+    // conflicts are rejected, those snapshots are NOT equivalent.
     cookies.sort_by(|left, right| {
         (&left.domain, &left.name, &left.path, &left.value).cmp(&(
             &right.domain,
@@ -1860,9 +2425,262 @@ pub(crate) fn session_state_hash(file: &SessionFile) -> Result<String> {
     Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
+/// Capturing storage from a redirected SSO/challenge document would save a
+/// different security principal's data as ChatGPT/Meta AI credentials. Use the
+/// same strict source-owned HTTPS policy as replay; never trust the observed
+/// URL to determine the expected origin or include it in any error.
+fn expected_active_capture_origin(provider: &str, current_url: &str) -> Result<Option<String>> {
+    if !matches!(provider, "chatgpt" | "metaai") {
+        return Ok(None);
+    }
+    let home = crate::providers::Provider::from_name(provider)
+        .ok_or_else(|| anyhow::anyhow!("provider_session_capture_origin_mismatch"))?
+        .login_url();
+    if !crate::browser::pool_policy::provider_thread_url_is_same_origin(current_url, home) {
+        anyhow::bail!("provider_session_capture_origin_mismatch");
+    }
+    let expected = crate::browser::pool_policy::provider_storage_origin(home)
+        .ok_or_else(|| anyhow::anyhow!("provider_session_capture_origin_mismatch"))?;
+    Ok(Some(expected))
+}
+
+/// A synchronous in-page check before any storage enumeration prevents a
+/// navigation race between host Page.url() and Page.evaluate(). The script
+/// contains only a source-owned public origin, never credential material.
+/// Enumerate into own data-properties, not normal assignment into a
+/// dictionary inheriting Object.prototype. The string `__proto__` is a valid
+/// localStorage key: `o[k] = value` on a regular object can invoke the special
+/// prototype setter and silently omit that key from the saved snapshot.
+/// Using defineProperty also avoids null-prototype object serialization
+/// differences in the pinned JS-to-JSON bridge.
+fn storage_capture_script(expected_origin: Option<&str>) -> Result<Zeroizing<String>> {
+    let guard = if let Some(origin) = expected_origin {
+        let literal = serde_json::to_string(origin)
+            .map_err(|_| anyhow::anyhow!("provider_session_capture_origin_mismatch"))?;
+        format!("if (location.origin !== {literal}) return null; ")
+    } else {
+        String::new()
+    };
+    Ok(Zeroizing::new(format!(
+        "(function(){{ {guard}const o = {{}}; for (let i = 0; i < localStorage.length; i++) {{ const k = localStorage.key(i); Object.defineProperty(o, k, {{ value: localStorage.getItem(k), enumerable: true, writable: true, configurable: true }}); }} return o; }})()"
+    )))
+}
+
+fn active_storage_capture_script(expected_origin: &str) -> Result<Zeroizing<String>> {
+    storage_capture_script(Some(expected_origin))
+}
+
+#[cfg(test)]
+mod prototype_storage_capture_fidelity_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn literal_prototype_property_keys_round_trip_through_pinned_obscura_json() {
+        let browser = Browser::builder().stealth(false).build().unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        page.goto("data:text/html,<body>synthetic-storage-fidelity</body>")
+            .await
+            .unwrap();
+        let keys = [
+            "__proto__",
+            "constructor",
+            "toString",
+            "key\\\"with\\backslash\\nand-newline",
+        ];
+        let values = [
+            "value-proto",
+            "value-constructor",
+            "value-tostring",
+            "synthetic-escaped\\\"();throw new Error('no execution')//",
+        ];
+        let keys_json = serde_json::to_string(&keys).unwrap();
+        let values_json = serde_json::to_string(&values).unwrap();
+
+        // An ordinary Object's "__proto__" assignment can invoke its
+        // setter rather than creating the desired own string property.
+        // Both the strict ChatGPT capture and the deferred/legacy capture
+        // must instead retain *every* exact storage key and value.
+        for expected_origin in [Some("https://chatgpt.com"), None] {
+            let script = storage_capture_script(expected_origin).unwrap();
+            assert!(script.contains("Object.defineProperty(o, k,"));
+            let evaluation = format!(
+                "(() => {{ const location = {{ origin: 'https://chatgpt.com' }}; const keys = {keys_json}; const values = {values_json}; const localStorage = {{ length: keys.length, key: i => keys[i], getItem: key => values[keys.indexOf(key)] }}; return {}; }})()",
+                script.as_str()
+            );
+            let output = page.evaluate(&evaluation);
+            let captured = parse_local_storage_snapshot(output).unwrap();
+            assert_eq!(captured.len(), keys.len());
+            for (key, value) in keys.iter().zip(values.iter()) {
+                assert_eq!(captured.get(*key).map(String::as_str), Some(*value));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn guarded_capture_rejects_foreign_origin_before_reading_special_keys() {
+        let browser = Browser::builder().stealth(false).build().unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        page.goto("data:text/html,<body>foreign-source</body>")
+            .await
+            .unwrap();
+        let script = active_storage_capture_script("https://chatgpt.com").unwrap();
+        let evaluation = format!(
+            "(() => {{ const location = {{ origin: 'https://evil.example' }}; let reads = 0; const localStorage = {{ get length() {{ reads++; return 1; }}, key: () => '__proto__', getItem: () => 'private-value' }}; const result = {}; return {{ result, reads }}; }})()",
+            script.as_str()
+        );
+        let denial = page.evaluate(&evaluation);
+        assert!(denial.get("result").is_some_and(serde_json::Value::is_null));
+        assert_eq!(
+            denial.get("reads").and_then(serde_json::Value::as_u64),
+            Some(0)
+        );
+        assert!(
+            script.find("location.origin !==").unwrap()
+                < script.find("localStorage.length").unwrap()
+        );
+    }
+}
+
+#[cfg(test)]
+mod active_storage_capture_tests {
+    use super::*;
+
+    #[test]
+    fn active_provider_capture_requires_exact_source_owned_https_origin() {
+        for (provider, actual, expected) in [
+            (
+                "chatgpt",
+                "https://chatgpt.com/c/thread?private=fixture",
+                "https://chatgpt.com",
+            ),
+            ("metaai", "https://www.meta.ai/chat/", "https://www.meta.ai"),
+        ] {
+            assert_eq!(
+                expected_active_capture_origin(provider, actual)
+                    .unwrap()
+                    .as_deref(),
+                Some(expected)
+            );
+        }
+        // Only active providers enforce this new capture fence. Do not
+        // silently broaden auth classifications for deferred adapters.
+        assert_eq!(
+            expected_active_capture_origin("claude", "data:text/html,legacy").unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn foreign_redirects_and_ambiguous_authorities_are_fixed_redacted_failures() {
+        for (provider, url) in [
+            (
+                "chatgpt",
+                "https://accounts.google.com/login?token=private-fixture",
+            ),
+            ("chatgpt", "https://chatgpt.com.evil.example/c/thread"),
+            ("chatgpt", "https://chatgpt.com@evil.example/"),
+            ("chatgpt", "http://chatgpt.com/"),
+            ("chatgpt", "data:text/html,foreign"),
+            ("metaai", "https://meta.ai/"),
+            ("metaai", "https://www.meta.ai.evil.example/"),
+            (
+                "metaai",
+                "https://www.facebook.com/login?account=private-fixture",
+            ),
+            ("metaai", "https://www.meta.ai%2eattacker.example/"),
+        ] {
+            let err = expected_active_capture_origin(provider, url).unwrap_err();
+            assert_eq!(err.to_string(), "provider_session_capture_origin_mismatch");
+            assert!(!err.to_string().contains("private"));
+            assert!(!err.to_string().contains("evil"));
+        }
+    }
+
+    #[tokio::test]
+    async fn in_page_origin_guard_runs_before_any_local_storage_enumeration() {
+        let browser = Browser::builder().stealth(false).build().unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        page.goto("data:text/html,<body>capture-source-only-fixture</body>")
+            .await
+            .unwrap();
+        let script = active_storage_capture_script("https://chatgpt.com").unwrap();
+
+        // These synthetic lexical bindings simulate the first-party document.
+        // This is intentionally NOT a live HTTP/Chrome account proof.
+        let valid = format!(
+            "(() => {{ const location = {{ origin: 'https://chatgpt.com' }}; const localStorage = {{ length: 1, key: () => 'fixture-key', getItem: () => 'synthetic-value' }}; return {}; }})()",
+            script.as_str()
+        );
+        let positive = page.evaluate(&valid);
+        assert_eq!(
+            positive
+                .get("fixture-key")
+                .and_then(serde_json::Value::as_str),
+            Some("synthetic-value")
+        );
+
+        let foreign = format!(
+            "(() => {{ let reads = 0; const location = {{ origin: 'https://evil.example' }}; const localStorage = {{ get length() {{ reads++; return 1; }}, key: () => 'secret-key', getItem: () => 'private-secret' }}; const result = {}; return {{ result, reads }}; }})()",
+            script.as_str()
+        );
+        let denial = page.evaluate(&foreign);
+        assert_eq!(
+            denial.get("reads").and_then(serde_json::Value::as_u64),
+            Some(0)
+        );
+        assert!(denial.get("result").is_some_and(serde_json::Value::is_null));
+        assert!(
+            script.find("location.origin !==").unwrap()
+                < script.find("localStorage.length").unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn off_provider_page_cannot_capture_or_persist_active_session_material() {
+        let browser = Browser::builder().stealth(false).build().unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        page.goto("data:text/html,<body>wrong-origin-page</body>")
+            .await
+            .unwrap();
+        for provider in ["chatgpt", "metaai"] {
+            let error = match capture_session(&browser, &page, provider).await {
+                Ok(_) => panic!("off-origin storage cannot be captured"),
+                Err(error) => error,
+            };
+            assert_eq!(
+                error.to_string(),
+                "provider_session_capture_origin_mismatch"
+            );
+            assert!(!error.to_string().contains("wrong-origin"));
+        }
+    }
+}
+
 async fn capture_session(browser: &Browser, page: &Page, provider: &str) -> Result<SessionFile> {
-    let ls_value = page.evaluate("(function(){ const o = {}; for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); o[k] = localStorage.getItem(k); } return o; })()");
-    let local_storage = parse_local_storage_snapshot(ls_value)?;
+    let expected_origin = expected_active_capture_origin(provider, &page.url())?;
+    let script = match expected_origin.as_deref() {
+        Some(origin) => active_storage_capture_script(origin)?,
+        // Deferred adapters retain their original origin policy; use the same
+        // lossless dictionary enumeration to preserve arbitrary string keys.
+        None => storage_capture_script(None)?,
+    };
+    let ls_value = page.evaluate(&script);
+    if expected_origin.is_some() {
+        // A null result means the in-page origin fence refused the read or
+        // script evaluation was unavailable. Never persist empty evidence.
+        if ls_value.is_null()
+            || expected_active_capture_origin(provider, &page.url())? != expected_origin
+        {
+            anyhow::bail!("provider_session_capture_origin_mismatch");
+        }
+    }
+    let local_storage = parse_local_storage_snapshot(ls_value).map_err(|error| {
+        if expected_origin.is_some() {
+            anyhow::anyhow!("provider_session_capture_storage_unavailable")
+        } else {
+            error
+        }
+    })?;
     // Obscura's cookie store is browser-wide. Persist only cookies in the
     // provider's known domain family; otherwise saving one provider can copy
     // unrelated logged-in sessions into every other provider's session file.
@@ -1909,7 +2727,7 @@ pub async fn save_session_if_changed(
     page: &Page,
     provider: &str,
     tracker: &SessionWriteTracker,
-) -> Result<()> {
+) -> Result<SessionSaveOutcome> {
     if matches!(
         std::env::var("CHAT_GATEWAY_SESSION_STORE").as_deref(),
         Ok("vault")
@@ -1929,27 +2747,34 @@ async fn save_session_if_changed_file(
     page: &Page,
     provider: &str,
     tracker: &SessionWriteTracker,
-) -> Result<()> {
+) -> Result<SessionSaveOutcome> {
     let file = capture_session(browser, page, provider).await?;
     let current_hash = session_state_hash(&file)?;
     let destination = session_path(provider)?;
-    let previous_hash = std::fs::read(&destination)
-        .ok()
-        .map(Zeroizing::new)
-        .and_then(|bytes| serde_json::from_slice::<SessionFile>(&bytes).ok())
-        .and_then(|previous| session_state_hash(&previous).ok());
+    // A malformed or unreadable existing snapshot is NOT a missing one.
+    // Preserve it and fail closed rather than overwriting owner state under
+    // the first-write throttle exception. The shared loader distinguishes
+    // genuine NotFound from I/O and parsing errors without logging secrets.
+    let previous_hash = load_session_file_from_path(Path::new(&destination))?
+        .as_ref()
+        .map(session_state_hash)
+        .transpose()?;
 
-    if previous_hash.as_deref() == Some(current_hash.as_str()) {
-        return Ok(());
+    if let Some(outcome) = nonpersisted_session_save_outcome(
+        previous_hash.as_deref(),
+        &current_hash,
+        tracker.is_rate_limited(provider, Instant::now()),
+    ) {
+        if outcome == SessionSaveOutcome::DeferredRateLimited {
+            tracing::debug!(
+                provider,
+                "session changed but snapshot write is rate-limited"
+            );
+        }
+        return Ok(outcome);
     }
-    if tracker.is_rate_limited(provider, Instant::now()) {
-        tracing::debug!(
-            provider,
-            "session changed but snapshot write is rate-limited"
-        );
-        return Ok(());
-    }
-    write_session_snapshot(file, provider, tracker).await
+    write_session_snapshot(file, provider, tracker).await?;
+    Ok(SessionSaveOutcome::Persisted)
 }
 
 async fn write_session_snapshot(
@@ -1974,6 +2799,16 @@ async fn write_session_snapshot(
 }
 
 fn write_session_file_atomically(destination: &Path, serialized: &[u8]) -> Result<()> {
+    write_session_file_atomically_checked(destination, serialized, |_| Ok(()))
+}
+
+/// Commit a fully synced, uniquely owned staging file only after its verifier
+/// accepts it. This never replaces the last good vault on verify failure.
+fn write_session_file_atomically_checked(
+    destination: &Path,
+    serialized: &[u8],
+    verify_staged: impl FnOnce(&Path) -> Result<()>,
+) -> Result<()> {
     let temp_path = format!(
         "{}.tmp-{}-{}",
         destination.display(),
@@ -1998,6 +2833,10 @@ fn write_session_file_atomically(destination: &Path, serialized: &[u8]) -> Resul
     drop(output);
 
     if let Err(error) = write_result {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(error);
+    }
+    if let Err(error) = verify_staged(Path::new(&temp_path)) {
         let _ = std::fs::remove_file(&temp_path);
         return Err(error);
     }
@@ -2026,7 +2865,8 @@ fn write_session_file_atomically(destination: &Path, serialized: &[u8]) -> Resul
 /// before import writes or browser-jar mutation; the diagnostic never reveals
 /// cookie names, domains or values.
 fn ensure_unambiguous_same_scope_cookie_values(cookies: &[Cookie], provider: &str) -> Result<()> {
-    let mut seen: HashMap<(String, String, String, bool), &str> = HashMap::new();
+    let mut seen: HashMap<(String, String, String, bool), &Cookie> = HashMap::new();
+    let strict_metadata = matches!(provider, "chatgpt" | "metaai");
     for cookie in cookies {
         if !cookie_domain_allowed(provider, &cookie.domain) {
             continue;
@@ -2037,9 +2877,21 @@ fn ensure_unambiguous_same_scope_cookie_values(cookies: &[Cookie], provider: &st
             cookie.path.clone(),
             cookie.domain.starts_with('.'),
         );
-        if let Some(existing) = seen.insert(identity, cookie.value.as_str()) {
-            if existing != cookie.value {
+        if let Some(existing) = seen.insert(identity, cookie) {
+            if existing.value != cookie.value {
                 anyhow::bail!("conflicting credential values in one provider cookie scope");
+            }
+            // The legacy duplicate normalizer chooses the first copy for
+            // an exact scope. With identical values but different policy or
+            // expiry, a change in ordering changes the replayed credential
+            // metadata. Reject before import or jar mutation, not as a no-op.
+            if strict_metadata
+                && (existing.secure != cookie.secure
+                    || existing.http_only != cookie.http_only
+                    || existing.expires.map(f64::to_bits) != cookie.expires.map(f64::to_bits)
+                    || existing.same_site != cookie.same_site)
+            {
+                anyhow::bail!("conflicting provider cookie metadata in one scope");
             }
         }
     }
@@ -2122,6 +2974,91 @@ mod cookie_restore_result_tests {
         first.ts = "new".into();
         first.cookies.reverse();
         assert_eq!(first_hash, session_state_hash(&first).unwrap());
+    }
+
+    #[test]
+    fn active_replay_rejects_conflicting_same_scope_cookie_metadata() {
+        for (provider, domain) in [("chatgpt", ".chatgpt.com"), ("metaai", ".meta.ai")] {
+            let primary = Cookie {
+                name: "synthetic".into(),
+                value: "not-a-real-session".into(),
+                domain: domain.into(),
+                path: "/".into(),
+                secure: true,
+                http_only: true,
+                expires: Some(2_000_000_000.0),
+                same_site: Some("Strict".into()),
+            };
+            let mutations: [fn(&mut Cookie); 4] = [
+                |c| c.secure = false,
+                |c| c.http_only = false,
+                |c| c.expires = Some(2_000_000_001.0),
+                |c| c.same_site = Some("Lax".into()),
+            ];
+            for mutate in mutations {
+                let mut conflict = primary.clone();
+                mutate(&mut conflict);
+                for cookies in [
+                    vec![primary.clone(), conflict.clone()],
+                    vec![conflict.clone(), primary.clone()],
+                ] {
+                    let file = SessionFile {
+                        local_storage: HashMap::new(),
+                        cookies,
+                        ts: "synthetic-only".into(),
+                    };
+                    let preflight = preflight_cookie_restore(&file, provider).unwrap_err();
+                    assert_eq!(
+                        preflight.to_string(),
+                        "conflicting provider cookie metadata in one scope"
+                    );
+                    let import = import_relay_session(provider, &file).unwrap_err();
+                    assert_eq!(import.to_string(), preflight.to_string());
+                    for secret in ["not-a-real-session", domain, "synthetic"] {
+                        assert!(!import.to_string().contains(secret));
+                    }
+                }
+                let original = SessionFile {
+                    local_storage: HashMap::new(),
+                    cookies: vec![primary.clone(), conflict.clone()],
+                    ts: "older".into(),
+                };
+                let reversed = SessionFile {
+                    local_storage: HashMap::new(),
+                    cookies: vec![conflict, primary.clone()],
+                    ts: "newer".into(),
+                };
+                // Until preflight rejects an ambiguity, replay's first-wins
+                // policy makes order meaningful; never hash both as a no-op.
+                assert!(
+                    session_state_hash(&original).unwrap()
+                        != session_state_hash(&reversed).unwrap(),
+                    "ambiguous replay selection must not be hidden by a no-op digest"
+                );
+            }
+
+            // Exact same-policy copies remain a safe no-op; distinct
+            // host-only vs domain scopes retain their prior preference.
+            let identical = SessionFile {
+                local_storage: HashMap::new(),
+                cookies: vec![primary.clone(), primary.clone()],
+                ts: "safe-duplicate".into(),
+            };
+            assert!(preflight_cookie_restore(&identical, provider).is_ok());
+            let (normalized, count) = resolve_cookie_scope_duplicates(&identical.cookies);
+            assert_eq!(count, 1);
+            assert_eq!(normalized.len(), 1);
+
+            let mut host_only = primary.clone();
+            host_only.domain = domain.trim_start_matches('.').into();
+            host_only.same_site = Some("Lax".into());
+            let separate_scopes = SessionFile {
+                local_storage: HashMap::new(),
+                cookies: vec![primary.clone(), host_only],
+                ts: "host-domain".into(),
+            };
+            assert!(preflight_cookie_restore(&separate_scopes, provider).is_ok());
+        }
     }
 
     #[test]
@@ -2223,16 +3160,40 @@ pub(crate) fn provider_replay_material_coverage(
     provider: &str,
     now_epoch: f64,
 ) -> ReplayMaterialCoverage {
-    // Normalize in exactly the same way as restoration. The values in
-    // these records remain private; only bounded counts are returned.
-    let (cookies, normalized) = resolve_cookie_scope_duplicates(&file.cookies);
-    let mut eligible = 0usize;
+    // Active-provider restoration filters expired cookies before duplicate
+    // scope resolution; evidence must use the same candidate ordering.
+    // Count expired rows separately as invalid, never as eligible account
+    // proof, and do not reveal any cookie identity or contents.
+    let expiry_aware = matches!(provider, "chatgpt" | "metaai");
+    let mut expired_provider_rows = 0usize;
     let mut excluded = 0usize;
-    let mut invalid = 0usize;
+    // The browser may have unrelated providers' cookies in a legacy import.
+    // Count those excluded rows, but never let foreign scope twins contribute
+    // to the selected provider's normalization or eligible-material evidence.
+    let candidates: Vec<Cookie> = file
+        .cookies
+        .iter()
+        .filter(|cookie| {
+            if !cookie_domain_allowed(provider, &cookie.domain) {
+                excluded += 1;
+                return false;
+            }
+            let expired = expiry_aware
+                && cookie
+                    .expires
+                    .is_some_and(|expiry| expiry >= 0.0 && expiry <= now_epoch);
+            if expired {
+                expired_provider_rows += 1;
+            }
+            !expired
+        })
+        .cloned()
+        .collect();
+    let (cookies, normalized) = resolve_cookie_scope_duplicates(&candidates);
+    let mut eligible = 0usize;
+    let mut invalid = expired_provider_rows;
     for cookie in cookies {
-        if !cookie_domain_allowed(provider, &cookie.domain) {
-            excluded += 1;
-        } else if !restored_cookie_fields_safe(&cookie)
+        if !restored_cookie_fields_safe(&cookie)
             || cookie.validate_browser_metadata().is_err()
             || cookie
                 .expires
@@ -2254,6 +3215,34 @@ pub(crate) fn provider_replay_material_coverage(
     }
 }
 
+/// A nonempty saved snapshot might contain *only foreign-provider cookies*.
+/// In that case there is nothing eligible to apply to this provider's page.
+/// The same bounded, expiry-aware coverage calculation used by the canonical
+/// restore path supplies this conservative admission policy. Origin storage
+/// is observed-only material, never authenticated account proof.
+pub(crate) fn replay_candidate_has_applicable_material(file: &SessionFile, provider: &str) -> bool {
+    let now_epoch = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64();
+    let coverage = provider_replay_material_coverage(file, provider, now_epoch);
+    coverage.eligible_cookies > 0 || coverage.observed_storage_entries > 0
+}
+
+/// A saved session was present, but contains no credentials applicable to
+/// the selected recovery provider. This is not proof of a rejected account
+/// and must not be reclassified as a generic Obscura refresh failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ProviderSnapshotNoApplicableMaterialError;
+
+impl std::fmt::Display for ProviderSnapshotNoApplicableMaterialError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("provider_session_no_applicable_material")
+    }
+}
+
+impl std::error::Error for ProviderSnapshotNoApplicableMaterialError {}
+
 /// Plan replay without mutating saved credentials or the shared cookie jar.
 /// Expired cookies are not credentials to restore. Only the two recovery
 /// providers opt into expiry-aware replay; malformed metadata still fails closed.
@@ -2263,26 +3252,40 @@ fn planned_cookie_replay(
     now_epoch: f64,
 ) -> Result<(Vec<Cookie>, usize)> {
     let expiry_aware = matches!(provider, "chatgpt" | "metaai");
-    let invalid = file
-        .cookies
-        .iter()
-        .filter(|cookie| {
-            cookie_domain_allowed(provider, &cookie.domain)
-                && (!restored_cookie_fields_safe(cookie)
-                    || cookie.validate_browser_metadata().is_err())
-        })
-        .count();
-    ensure_cookie_restore_complete(invalid)?;
+    // A genuinely expired ancillary cookie is never reintroduced to the
+    // active provider jar. Discard it before validating the fields that
+    // would only matter when constructing a Set-Cookie header. Otherwise
+    // an obsolete malformed entry could block usable nonexpired sessions.
+    // NaN/nonfinite/negative expiry is NOT a genuine expired cookie and
+    // still fails through validate_browser_metadata below.
     let expired = |cookie: &Cookie| {
         cookie
             .expires
             .is_some_and(|expiry| expiry >= 0.0 && expiry <= now_epoch)
     };
+    let invalid = file
+        .cookies
+        .iter()
+        .filter(|cookie| {
+            cookie_domain_allowed(provider, &cookie.domain)
+                && !(expiry_aware && expired(cookie))
+                && (!restored_cookie_fields_safe(cookie)
+                    || cookie.validate_browser_metadata().is_err())
+        })
+        .count();
+    ensure_cookie_restore_complete(invalid)?;
     let candidates: Vec<Cookie> = file
         .cookies
         .iter()
         .filter(|cookie| {
-            !expiry_aware || !cookie_domain_allowed(provider, &cookie.domain) || !expired(cookie)
+            // ChatGPT/Meta AI replay is provider-scoped. Do not copy unrelated
+            // credential values into the plan or count foreign scope twins as
+            // this provider's normalization. Deferred adapters retain legacy
+            // inclusion so their existing restore ordering stays unchanged.
+            if expiry_aware && !cookie_domain_allowed(provider, &cookie.domain) {
+                return false;
+            }
+            !expiry_aware || !expired(cookie)
         })
         .cloned()
         .collect();
@@ -2294,10 +3297,20 @@ fn planned_cookie_replay(
         let has_live = candidates
             .iter()
             .any(|cookie| cookie_domain_allowed(provider, &cookie.domain));
+        // A previously captured first-party origin-storage snapshot may
+        // still be replayable even when its ancillary cookies expired. This
+        // is only candidate material, never authentication proof.
         anyhow::ensure!(
-            !had_expired || has_live,
+            !had_expired || has_live || !file.local_storage.is_empty(),
             "no live provider cookies remain in saved session"
         );
+        // Isolated staging already rejects an inapplicable candidate, but the
+        // startup/lazy/refresh callers can invoke direct cookie restore. A
+        // saved snapshot containing no applicable material must not yield a
+        // vacuous "restored" result and activate an anonymous provider page.
+        if !has_live && file.local_storage.is_empty() {
+            return Err(ProviderSnapshotNoApplicableMaterialError.into());
+        }
     }
     ensure_unambiguous_same_scope_cookie_values(&candidates, provider)?;
     let (cookies, dropped) = resolve_cookie_scope_duplicates(&candidates);
@@ -2471,6 +3484,7 @@ mod restored_cookie_attribute_tests {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ReplayFidelityLimits {
     scope: &'static str,
+    scope_readback: &'static str,
     expiry: &'static str,
     same_site: &'static str,
 }
@@ -2482,6 +3496,13 @@ fn replay_fidelity_limits(source: &[Cookie], normalized_count: usize) -> ReplayF
         } else {
             "no_scope_normalization_observed"
         },
+        // Pinned Obscura get_all() normalizes the leading-dot Domain marker:
+        // a successful readback cannot certify host-only vs Domain delivery.
+        scope_readback: if source.is_empty() {
+            "no_cookie_scope_to_compare"
+        } else {
+            "host_only_domain_scope_unobservable_in_jar_readback"
+        },
         expiry: if source.iter().any(|cookie| cookie.expires.is_some()) {
             "expiry_unobservable_in_jar_readback"
         } else {
@@ -2492,6 +3513,141 @@ fn replay_fidelity_limits(source: &[Cookie], normalized_count: usize) -> ReplayF
         } else {
             "same_site_not_provided"
         },
+    }
+}
+
+/// Only verifies six-field *material presence* in the pinned Obscura jar.
+/// Domain-scoped and host-only cookies are indistinguishable on its get_all()
+/// readback, so normalizing DNS here is a compatibility check, NEVER proof
+/// that the browser restored the original delivery scope.
+fn restored_cookie_material_matches(expected: &Cookie, actual: &Cookie) -> bool {
+    expected.name == actual.name
+        && expected.value == actual.value
+        && expected
+            .domain
+            .trim_start_matches('.')
+            .eq_ignore_ascii_case(actual.domain.trim_start_matches('.'))
+        && expected.path == actual.path
+        && expected.secure == actual.secure
+        && expected.http_only == actual.http_only
+}
+
+#[cfg(test)]
+mod restored_cookie_readback_scope_tests {
+    use super::*;
+
+    fn cookie(domain: &str) -> Cookie {
+        Cookie {
+            name: "synthetic-session".into(),
+            value: "synthetic-secret-bearer".into(),
+            domain: domain.into(),
+            path: "/".into(),
+            secure: true,
+            http_only: true,
+            expires: None,
+            same_site: None,
+        }
+    }
+
+    #[test]
+    fn readback_material_match_does_not_certify_host_only_vs_domain_scope() {
+        let host = cookie("chatgpt.com");
+        let scoped = cookie(".chatgpt.com");
+        assert!(restored_cookie_material_matches(&host, &host));
+        assert!(restored_cookie_material_matches(&scoped, &scoped));
+        assert!(restored_cookie_material_matches(&host, &scoped));
+        assert!(restored_cookie_material_matches(&scoped, &host));
+
+        let same_host_different_case = cookie("CHATGPT.COM");
+        assert!(restored_cookie_material_matches(
+            &host,
+            &same_host_different_case
+        ));
+        assert_eq!(
+            replay_fidelity_limits(&[host, scoped], 0).scope_readback,
+            "host_only_domain_scope_unobservable_in_jar_readback"
+        );
+        assert_eq!(
+            replay_fidelity_limits(&[], 0).scope_readback,
+            "no_cookie_scope_to_compare"
+        );
+    }
+
+    #[test]
+    fn pinned_obscura_cookie_jar_readback_does_not_prove_original_scope() {
+        // Separate disposable browsers avoid the pinned jar's normalized
+        // name/domain/path collision, and require no provider login/network.
+        let host = Browser::builder().stealth(false).build().unwrap();
+        let domain = Browser::builder().stealth(false).build().unwrap();
+        host.cookies()
+            .set(
+                "synthetic-session=synthetic-secret-bearer; Path=/; Secure; HttpOnly",
+                "https://chatgpt.com/",
+            )
+            .unwrap();
+        domain
+            .cookies()
+            .set(
+                "synthetic-session=synthetic-secret-bearer; Domain=.chatgpt.com; Path=/; Secure; HttpOnly",
+                "https://chatgpt.com/",
+            )
+            .unwrap();
+        let host_readback: Vec<Cookie> = host
+            .cookies()
+            .get_all()
+            .into_iter()
+            .map(Cookie::from)
+            .collect();
+        let domain_readback: Vec<Cookie> = domain
+            .cookies()
+            .get_all()
+            .into_iter()
+            .map(Cookie::from)
+            .collect();
+        assert_eq!(host_readback.len(), 1);
+        assert_eq!(domain_readback.len(), 1);
+        // The pinned jar's readback of a Domain cookie can retain or omit
+        // the leading dot depending on its internal storage path. Domain
+        // spelling is not evidence that the original host-only/Domain scope
+        // was preserved. Check only the comparable normalized host, while
+        // reporting the original delivery scope as unobservable.
+        assert_eq!(
+            host_readback[0].domain.trim_start_matches('.'),
+            domain_readback[0].domain.trim_start_matches('.')
+        );
+        assert!(restored_cookie_material_matches(
+            &cookie("chatgpt.com"),
+            &host_readback[0]
+        ));
+        assert!(restored_cookie_material_matches(
+            &cookie(".chatgpt.com"),
+            &domain_readback[0]
+        ));
+        assert_eq!(
+            replay_fidelity_limits(&[cookie(".chatgpt.com")], 0).scope_readback,
+            "host_only_domain_scope_unobservable_in_jar_readback"
+        );
+    }
+
+    #[test]
+    fn readback_requires_exact_name_path_value_and_security_flags() {
+        let expected = cookie(".chatgpt.com");
+        let mut actual = expected.clone();
+        actual.name = "different-name".into();
+        assert!(!restored_cookie_material_matches(&expected, &actual));
+        actual = expected.clone();
+        actual.path = "/other".into();
+        assert!(!restored_cookie_material_matches(&expected, &actual));
+        actual = expected.clone();
+        actual.value = "other-synthetic-secret".into();
+        assert!(!restored_cookie_material_matches(&expected, &actual));
+        actual = expected.clone();
+        actual.secure = false;
+        assert!(!restored_cookie_material_matches(&expected, &actual));
+        actual = expected.clone();
+        actual.http_only = false;
+        assert!(!restored_cookie_material_matches(&expected, &actual));
+        assert!(restored_cookie_material_matches(&expected, &expected));
     }
 }
 
@@ -2519,7 +3675,14 @@ pub fn restore_cookies(browser: &Browser, file: &SessionFile, provider: &str) ->
     );
     let mut failed_writes = 0usize;
     let mut expected_restores = Vec::new();
-    let fidelity = replay_fidelity_limits(&file.cookies, dropped);
+    // Active-provider fidelity describes only the cookies selected for that
+    // provider. Preserve the historical full-source diagnostic for deferred
+    // providers, whose replay planning remains intentionally unchanged.
+    let fidelity = if matches!(provider, "chatgpt" | "metaai") {
+        replay_fidelity_limits(&cookies, dropped)
+    } else {
+        replay_fidelity_limits(&file.cookies, dropped)
+    };
     if dropped > 0 {
         // Counts only: cookie names, domains and values are credentials.
         tracing::info!(
@@ -2528,15 +3691,13 @@ pub fn restore_cookies(browser: &Browser, file: &SessionFile, provider: &str) ->
             "resolved duplicate provider cookie scopes before restore"
         );
     }
-    if dropped > 0
-        || fidelity.expiry == "expiry_unobservable_in_jar_readback"
-        || fidelity.same_site == "same_site_unobservable_in_jar_readback"
-    {
+    if !file.cookies.is_empty() {
         // Fixed labels only. Never log cookie names, domains, expiry times,
         // values or stable hashes. This cannot establish valid account login.
         tracing::debug!(
             provider,
             scope = fidelity.scope,
+            scope_readback = fidelity.scope_readback,
             expiry = fidelity.expiry,
             same_site = fidelity.same_site,
             "provider cookie replay fidelity is partially unobservable"
@@ -2592,21 +3753,15 @@ pub fn restore_cookies(browser: &Browser, file: &SessionFile, provider: &str) ->
         }
     }
     // set() only validates the URL; jar policy can silently discard a cookie.
-    // Verify exact persisted fields before claiming that a snapshot is active.
+    // Verify material presence before reporting jar application. The pinned
+    // jar does NOT expose host-only/Domain scope parity, expiry or SameSite.
     // Our Cookie wrapper zeroizes the temporary readback values on drop.
     let restored: Vec<Cookie> = store.get_all().into_iter().map(Cookie::from).collect();
     for cookie in expected_restores {
-        if !restored.iter().any(|actual| {
-            actual.name == cookie.name
-                && actual.value == cookie.value
-                && actual
-                    .domain
-                    .trim_start_matches('.')
-                    .eq_ignore_ascii_case(cookie.domain.trim_start_matches('.'))
-                && actual.path == cookie.path
-                && actual.secure == cookie.secure
-                && actual.http_only == cookie.http_only
-        }) {
+        if !restored
+            .iter()
+            .any(|actual| restored_cookie_material_matches(cookie, actual))
+        {
             failed_writes += 1;
         }
     }
@@ -2616,20 +3771,48 @@ pub fn restore_cookies(browser: &Browser, file: &SessionFile, provider: &str) ->
 /// Restore step 2 (AFTER goto): localStorage is origin-scoped, so it can
 /// only be injected once the page sits on the provider origin.
 fn local_storage_restore_script(key: &str, value: &str) -> Option<Zeroizing<String>> {
+    local_storage_restore_script_with_origin(key, value, None)
+}
+
+/// The active-provider variant checks the actual page JS origin *inside the
+/// same evaluation* as setItem. A page-level URL check alone can race with a
+/// redirect between the host's navigation observation and this evaluation.
+fn local_storage_restore_script_with_origin(
+    key: &str,
+    value: &str,
+    expected_origin: Option<&str>,
+) -> Option<Zeroizing<String>> {
     // Serialized localStorage values may contain access tokens. Zeroize both
     // intermediate JSON literals and the final script after page evaluation.
     let key = Zeroizing::new(serde_json::to_string(key).ok()?);
     let value = Zeroizing::new(serde_json::to_string(value).ok()?);
+    let guard = if let Some(origin) = expected_origin {
+        let expected = serde_json::to_string(origin).ok()?;
+        format!("if (location.origin !== {expected}) return false; ")
+    } else {
+        String::new()
+    };
+    // A setter which does not throw can still silently drop or alter the
+    // value. Read it back within the same JS evaluation and return only an
+    // equality boolean, never a key or credential-bearing value.
     Some(Zeroizing::new(format!(
-        "(() => {{ try {{ localStorage.setItem({}, {}); return true; }} catch (_error) {{ return false; }} }})()",
+        "(() => {{ try {{ {guard}const key = {}; const value = {}; localStorage.setItem(key, value); return localStorage.getItem(key) === value; }} catch (_error) {{ return false; }} }})()",
         key.as_str(),
         value.as_str()
     )))
 }
 
-pub fn restore_local_storage(page: &Page, file: &SessionFile) -> Result<()> {
+fn restore_local_storage_inner(
+    page: &Page,
+    file: &SessionFile,
+    expected_origin: Option<&str>,
+) -> Result<()> {
     for (k, v) in &file.local_storage {
-        let script = local_storage_restore_script(k, v).ok_or_else(|| {
+        let script = match expected_origin {
+            Some(origin) => local_storage_restore_script_with_origin(k, v, Some(origin)),
+            None => local_storage_restore_script(k, v),
+        }
+        .ok_or_else(|| {
             anyhow::anyhow!("failed to serialize provider localStorage restore script")
         })?;
         let restored = page.evaluate(&script);
@@ -2640,6 +3823,26 @@ pub fn restore_local_storage(page: &Page, file: &SessionFile) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Active-provider replay must never write credential-bearing storage to a
+/// redirected/foreign document. The caller additionally validates the host
+/// Page URL before this call; each in-page script independently validates the
+/// *current* origin just before writing. No origin or storage values appear
+/// in error output.
+pub fn restore_local_storage_for_origin(
+    page: &Page,
+    file: &SessionFile,
+    expected_origin: &str,
+) -> Result<()> {
+    if !expected_origin.starts_with("https://") {
+        anyhow::bail!("provider_storage_origin_mismatch");
+    }
+    restore_local_storage_inner(page, file, Some(expected_origin))
+}
+
+pub fn restore_local_storage(page: &Page, file: &SessionFile) -> Result<()> {
+    restore_local_storage_inner(page, file, None)
 }
 
 #[cfg(test)]
@@ -2656,8 +3859,45 @@ mod local_storage_snapshot_tests {
 
     #[test]
     fn rejects_invalid_local_storage_snapshot_instead_of_silently_emptying_it() {
-        assert!(parse_local_storage_snapshot(serde_json::json!(["unexpected"])).is_err());
-        assert!(parse_local_storage_snapshot(serde_json::json!({"theme": 42})).is_err());
+        for invalid in [
+            serde_json::json!(["unexpected"]),
+            serde_json::json!({"theme": 42}),
+            serde_json::json!({"access_token": 1234567890123456_u64}),
+            serde_json::json!({"secret-key": {"bearer":"synthetic-private-secret"}}),
+        ] {
+            let err = parse_local_storage_snapshot(invalid).unwrap_err();
+            assert_eq!(err.to_string(), "provider_local_storage_snapshot_invalid");
+            let diagnostic = format!("{err:#}");
+            for sensitive in [
+                "access_token",
+                "1234567890123456",
+                "secret-key",
+                "synthetic-private-secret",
+                "bearer",
+                "unexpected",
+            ] {
+                assert!(!diagnostic.contains(sensitive));
+            }
+        }
+    }
+
+    #[test]
+    fn reserved_keys_keep_their_exact_values_in_valid_local_storage() {
+        let valid = serde_json::json!({
+            "__proto__":"synthetic-private-value",
+            "constructor":"synthetic-other-value",
+            "prototype":"kept",
+        });
+        let parsed = parse_local_storage_snapshot(valid).unwrap();
+        assert_eq!(
+            parsed.get("__proto__").map(String::as_str),
+            Some("synthetic-private-value")
+        );
+        assert_eq!(
+            parsed.get("constructor").map(String::as_str),
+            Some("synthetic-other-value")
+        );
+        assert_eq!(parsed.get("prototype").map(String::as_str), Some("kept"));
     }
 }
 
@@ -2693,6 +3933,159 @@ mod session_file_read_tests {
 }
 
 #[cfg(test)]
+mod replay_storage_origin_tests {
+    use super::*;
+
+    fn snapshot() -> SessionFile {
+        serde_json::from_value(serde_json::json!({
+            "ts": "synthetic",
+            "local_storage": {"secret-key": "private-storage-bearer-never-output"},
+            "cookies": []
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn origin_check_precedes_storage_write_in_secret_bearing_script() {
+        let script = local_storage_restore_script_with_origin(
+            "token\\nquoted",
+            "private-storage-bearer-never-output\\\" );fetch('https://evil.example')",
+            Some("https://chatgpt.com"),
+        )
+        .unwrap();
+        let guard = script.find("location.origin !==").unwrap();
+        let write = script.find("localStorage.setItem(").unwrap();
+        assert!(guard < write);
+        assert!(script.contains("https://chatgpt.com"));
+        assert!(script.contains(&serde_json::to_string("token\\nquoted").unwrap()));
+        assert!(script.contains("return false"));
+    }
+
+    #[tokio::test]
+    async fn foreign_or_opaque_page_never_receives_replayed_storage_values() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        page.goto("data:text/html,<body>foreign-opaque-fixture</body>")
+            .await
+            .unwrap();
+        let error = restore_local_storage_for_origin(&page, &snapshot(), "https://chatgpt.com")
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "failed to restore provider localStorage entry"
+        );
+        assert!(!error.to_string().contains("private-storage"));
+        let invalid = restore_local_storage_for_origin(&page, &snapshot(), "null").unwrap_err();
+        assert_eq!(invalid.to_string(), "provider_storage_origin_mismatch");
+    }
+}
+
+#[cfg(test)]
+mod replay_storage_readback_tests {
+    use super::*;
+    use serde_json::{json, Value};
+
+    fn synthetic_snapshot() -> SessionFile {
+        serde_json::from_value(json!({
+            "ts": "synthetic",
+            "local_storage": {
+                "fixture-token": "private-storage-value-do-not-log"
+            },
+            "cookies": []
+        }))
+        .unwrap()
+    }
+
+    async fn mock_storage_page() -> (obscura_core::Browser, Page) {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        page.goto("data:text/html,<body>storage-fixture</body>")
+            .await
+            .unwrap();
+        (browser, page)
+    }
+
+    fn install_storage_shim(page: &Page, implementation: &str) {
+        let script = format!(
+            "(() => {{ Object.defineProperty(globalThis, 'localStorage', {{ configurable: true, value: {{ {implementation} }} }}); return typeof localStorage.getItem === 'function'; }})()"
+        );
+        assert_eq!(page.evaluate(&script), Value::Bool(true));
+    }
+
+    #[tokio::test]
+    async fn readback_accepts_a_real_same_document_string_roundtrip() {
+        let (_owner, page) = mock_storage_page().await;
+        install_storage_shim(
+            &page,
+            "setItem(k,v) { this.saved = {k:String(k),v:String(v)}; }, getItem(k) { return this.saved?.k === String(k) ? this.saved.v : null; }",
+        );
+        restore_local_storage(&page, &synthetic_snapshot()).unwrap();
+        assert_eq!(
+            page.evaluate("localStorage.getItem('fixture-token')"),
+            json!("private-storage-value-do-not-log")
+        );
+    }
+
+    #[tokio::test]
+    async fn noop_corrupted_and_throwing_readbacks_fail_with_fixed_error() {
+        for implementation in [
+            "setItem(_k,_v) {}, getItem(_k) { return null; }",
+            "setItem(k,v) { this.saved = String(v)+'-tampered'; }, getItem(_k) { return this.saved; }",
+            "setItem(k,v) { this.saved = String(v); }, getItem(_k) { throw new Error('private-js-message'); }",
+        ] {
+            let (_owner, page) = mock_storage_page().await;
+            install_storage_shim(&page, implementation);
+            let error = restore_local_storage(&page, &synthetic_snapshot()).unwrap_err();
+            assert_eq!(error.to_string(), "failed to restore provider localStorage entry");
+            assert!(!error.to_string().contains("private"));
+            assert!(!error.to_string().contains("fixture-token"));
+        }
+    }
+
+    #[tokio::test]
+    async fn wrong_origin_rejects_before_even_a_mocked_storage_setter_runs() {
+        let (_owner, page) = mock_storage_page().await;
+        install_storage_shim(
+            &page,
+            "setItem(k,v) { globalThis.__writes = (globalThis.__writes || 0) + 1; }, getItem(_k) { return 'untrusted'; }",
+        );
+        let error =
+            restore_local_storage_for_origin(&page, &synthetic_snapshot(), "https://chatgpt.com")
+                .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "failed to restore provider localStorage entry"
+        );
+        assert_eq!(
+            page.evaluate("globalThis.__writes || 0").as_f64(),
+            Some(0.0)
+        );
+    }
+
+    #[test]
+    fn guard_before_both_set_and_get_with_json_literal_escaped_credentials() {
+        let key = "key\\\";globalThis.__pwned=true;//";
+        let value = "private\\nsecret\\\";fetch('https://bad.example')//";
+        let script =
+            local_storage_restore_script_with_origin(key, value, Some("https://chatgpt.com"))
+                .unwrap();
+        let guard = script.find("location.origin !==").unwrap();
+        let setter = script.find("localStorage.setItem").unwrap();
+        let getter = script.find("localStorage.getItem").unwrap();
+        assert!(guard < setter && setter < getter);
+        assert!(script.contains(&serde_json::to_string(key).unwrap()));
+        assert!(script.contains(&serde_json::to_string(value).unwrap()));
+        assert!(script.contains("=== value"));
+    }
+}
+
+#[cfg(test)]
 mod local_storage_script_tests {
     use super::*;
 
@@ -2705,7 +4098,7 @@ mod local_storage_script_tests {
         assert!(script.contains(&serde_json::to_string(key).unwrap()));
         assert!(script.contains(&serde_json::to_string(value).unwrap()));
         assert!(script.contains("localStorage.setItem("));
-        assert!(script.contains("return true"));
+        assert!(script.contains("return localStorage.getItem(key) === value"));
         assert!(script.contains("return false"));
         assert!(script.contains("catch"));
         assert!(script.ends_with(")"));
@@ -3054,7 +4447,9 @@ mod cookie_scope_tests {
                 let mut live = cookie("live", "private-fixture", "/");
                 live.domain = "chatgpt.com".into();
                 cookies.push(live);
-                cookies[0].path = "/bad;inject".into();
+                // Only a malformed *nonexpired* cookie must reject the full
+                // plan; expired ancillary fields are never replayed.
+                cookies[1].path = "/bad;inject".into();
             }
             let file = SessionFile {
                 cookies,
@@ -3069,6 +4464,173 @@ mod cookie_scope_tests {
             assert_eq!(remaining.len(), 1);
             assert_eq!(remaining[0].name, "preserved");
         }
+    }
+
+    #[tokio::test]
+    async fn expired_provider_cookies_do_not_block_storage_only_candidate_replay() {
+        for (provider, domain) in [("chatgpt", "chatgpt.com"), ("metaai", "www.meta.ai")] {
+            let browser = Browser::builder().stealth(false).build().unwrap();
+            let mut old = cookie("ancillary", "sensitive-stale-fixture", "/");
+            old.domain = domain.into();
+            old.expires = Some(1.0);
+            let file = SessionFile {
+                cookies: vec![old],
+                local_storage: HashMap::from([(
+                    "provider-storage".to_owned(),
+                    "sensitive-storage-fixture".to_owned(),
+                )]),
+                ts: "fixture".into(),
+            };
+            preflight_cookie_restore(&file, provider).unwrap();
+            restore_cookies(&browser, &file, provider).unwrap();
+            assert!(browser.cookies().get_all().is_empty());
+            assert_eq!(
+                file.cookies.len(),
+                1,
+                "encrypted source must not be rewritten"
+            );
+            assert_eq!(file.local_storage.len(), 1);
+            assert_eq!(
+                provider_replay_material_coverage(&file, provider, 1000.0).category(),
+                "storage_only_presence_unverified",
+                "candidate material is never account verification"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn genuinely_expired_malformed_ancillary_is_discarded_before_jar_writes() {
+        for (provider, domain) in [("chatgpt", "chatgpt.com"), ("metaai", "meta.ai")] {
+            let browser = Browser::builder().stealth(false).build().unwrap();
+            browser
+                .cookies()
+                .set(
+                    "preserved=dummy; Secure; Path=/",
+                    &format!("https://{domain}/"),
+                )
+                .unwrap();
+            let mut old = cookie("ancillary", "secret-stale-fixture", "/");
+            old.domain = domain.into();
+            old.path = "/bad;inject".into();
+            old.same_site = Some("Unknown".into());
+            old.expires = Some(1.0);
+            let mut live = cookie("live-session", "synthetic-live", "/");
+            live.domain = domain.into();
+            let file = SessionFile {
+                cookies: vec![old.clone(), live],
+                local_storage: HashMap::new(),
+                ts: "fixture".into(),
+            };
+            preflight_cookie_restore(&file, provider).unwrap();
+            let (planned, _) = planned_cookie_replay(&file, provider, 1000.0).unwrap();
+            assert_eq!(planned.len(), 1);
+            assert_eq!(planned[0].name, "live-session");
+            restore_cookies(&browser, &file, provider).unwrap();
+            assert_eq!(browser.cookies().get_all().len(), 2);
+            assert!(browser
+                .cookies()
+                .get_all()
+                .iter()
+                .all(|item| item.name != "ancillary"));
+
+            // A malformed nonexpired credential still rejects the complete
+            // plan before any new jar writes; no implicit login inference.
+            old.expires = None;
+            let invalid_file = SessionFile {
+                cookies: vec![old],
+                local_storage: HashMap::new(),
+                ts: "fixture".into(),
+            };
+            let error = preflight_cookie_restore(&invalid_file, provider).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "failed to restore 1 provider session cookie(s)"
+            );
+        }
+    }
+
+    #[test]
+    fn storage_only_snapshot_without_cookies_remains_eligible_but_unverified() {
+        let file = SessionFile {
+            cookies: Vec::new(),
+            local_storage: HashMap::from([("key".to_owned(), "value".to_owned())]),
+            ts: "fixture".into(),
+        };
+        for provider in ["chatgpt", "metaai"] {
+            let (planned, _) = planned_cookie_replay(&file, provider, 1000.0).unwrap();
+            assert!(planned.is_empty());
+            assert_eq!(
+                provider_replay_material_coverage(&file, provider, 1000.0).category(),
+                "storage_only_presence_unverified"
+            );
+        }
+    }
+
+    #[test]
+    fn expired_malformed_cookie_filter_never_accepts_invalid_expiry_or_empty_replay() {
+        for (provider, domain) in [("chatgpt", "chatgpt.com"), ("metaai", "meta.ai")] {
+            let mut expired = cookie("old-invalid", "do-not-emit", "/bad;inject");
+            expired.domain = domain.into();
+            expired.expires = Some(1.0);
+            let file = SessionFile {
+                cookies: vec![expired.clone()],
+                local_storage: HashMap::new(),
+                ts: "fixture".into(),
+            };
+            assert_eq!(
+                planned_cookie_replay(&file, provider, 1000.0)
+                    .err()
+                    .expect("all expired without storage must fail")
+                    .to_string(),
+                "no live provider cookies remain in saved session"
+            );
+            // SessionFile owns zeroizing credential fields and implements
+            // Drop but deliberately is not Clone. Moving the *whole* file
+            // preserves its single owner and zeroizing Drop implementation.
+            let mut with_storage = file;
+            with_storage
+                .local_storage
+                .insert("key".into(), "private-test-storage".into());
+            let (planned, _) = planned_cookie_replay(&with_storage, provider, 1000.0).unwrap();
+            assert!(
+                planned.is_empty(),
+                "storage-only candidate is not authenticated proof"
+            );
+
+            for bad_expiry in [f64::NAN, f64::INFINITY, -2.0] {
+                expired.expires = Some(bad_expiry);
+                let malformed = SessionFile {
+                    cookies: vec![expired.clone()],
+                    local_storage: HashMap::new(),
+                    ts: "fixture".into(),
+                };
+                let err = planned_cookie_replay(&malformed, provider, 1000.0)
+                    .err()
+                    .expect("malformed active expiry must be rejected");
+                assert_eq!(
+                    err.to_string(),
+                    "failed to restore 1 provider session cookie(s)"
+                );
+                assert!(!err.to_string().contains("do-not-emit"));
+            }
+        }
+        // Expiry-aware omission is a scoped recovery policy, not permission
+        // for the seven deferred provider parsers to ignore invalid metadata.
+        let mut deferred = cookie("old-invalid", "private-deferred", "/bad;inject");
+        deferred.domain = "claude.ai".into();
+        deferred.expires = Some(1.0);
+        let file = SessionFile {
+            cookies: vec![deferred],
+            local_storage: HashMap::new(),
+            ts: "fixture".into(),
+        };
+        assert_eq!(
+            planned_cookie_replay(&file, "claude", 1000.0)
+                .err()
+                .expect("deferred malformed cookie must remain rejected")
+                .to_string(),
+            "failed to restore 1 provider session cookie(s)"
+        );
     }
 
     #[test]
@@ -4040,6 +5602,51 @@ mod replay_material_coverage_tests {
     }
 
     #[test]
+    fn unrelated_cookie_scope_twins_do_not_inflate_provider_normalization() {
+        let foreign_domain = fixture("SID", "foreign-private-value", ".meta.ai");
+        let mut foreign_host = foreign_domain.clone();
+        foreign_host.domain = "meta.ai".to_owned();
+        let chatgpt = fixture("SID", "chatgpt-private-value", ".chatgpt.com");
+
+        let foreign_only = provider_replay_material_coverage(
+            &snapshot(vec![foreign_domain.clone(), foreign_host.clone()], &[]),
+            "chatgpt",
+            1000.0,
+        );
+        assert_eq!(foreign_only.eligible_cookies, 0);
+        assert_eq!(foreign_only.excluded_cookies, 2);
+        assert_eq!(foreign_only.normalized_scopes, 0);
+        assert_eq!(foreign_only.category(), "no_applicable_provider_material");
+
+        let mixed = provider_replay_material_coverage(
+            &snapshot(vec![foreign_domain, chatgpt.clone(), foreign_host], &[]),
+            "chatgpt",
+            1000.0,
+        );
+        assert_eq!(mixed.eligible_cookies, 1);
+        assert_eq!(mixed.excluded_cookies, 2);
+        assert_eq!(mixed.normalized_scopes, 0);
+        assert_eq!(mixed.category(), "eligible_cookie_material_unverified");
+
+        let mut chatgpt_host = chatgpt.clone();
+        chatgpt_host.domain = "chatgpt.com".to_owned();
+        let with_provider_twin = provider_replay_material_coverage(
+            &snapshot(vec![chatgpt, chatgpt_host], &[]),
+            "chatgpt",
+            1000.0,
+        );
+        assert_eq!(with_provider_twin.eligible_cookies, 1);
+        assert_eq!(with_provider_twin.normalized_scopes, 1);
+        for result in [foreign_only, mixed, with_provider_twin] {
+            let safe = format!("{result:?}");
+            assert!(!safe.contains("private"));
+            assert!(!safe.contains("meta.ai"));
+            assert!(!safe.contains("chatgpt.com"));
+            assert!(!safe.contains("SID"));
+        }
+    }
+
+    #[test]
     fn storage_only_and_expired_cookie_evidence_remain_unverified() {
         let storage_only = provider_replay_material_coverage(
             &snapshot(vec![], &[("bearer", "secret-access-token")]),
@@ -4072,6 +5679,197 @@ mod replay_material_coverage_tests {
         assert_eq!(coverage.eligible_cookies, 1);
         assert_eq!(coverage.normalized_scopes, 1);
         assert_eq!(coverage.category(), "eligible_cookie_material_unverified");
+    }
+
+    #[tokio::test]
+    async fn direct_active_restore_rejects_foreign_or_empty_material_before_cookie_writes() {
+        for (provider, own_host, foreign_domain) in [
+            ("chatgpt", "chatgpt.com", ".meta.ai"),
+            ("metaai", "www.meta.ai", ".chatgpt.com"),
+        ] {
+            let foreign = fixture("SID", "foreign-private-value", foreign_domain);
+            let mut foreign_host = foreign.clone();
+            foreign_host.domain = foreign_domain.trim_start_matches('.').to_owned();
+            for cookies in [
+                vec![],
+                vec![foreign.clone()],
+                vec![foreign.clone(), foreign_host.clone()],
+            ] {
+                let file = snapshot(cookies, &[]);
+                let error = planned_cookie_replay(&file, provider, 1000.0)
+                    .err()
+                    .expect("an inapplicable saved session must fail");
+                assert!(error
+                    .downcast_ref::<ProviderSnapshotNoApplicableMaterialError>()
+                    .is_some());
+                assert_eq!(error.to_string(), "provider_session_no_applicable_material");
+                assert_eq!(
+                    preflight_cookie_restore(&file, provider)
+                        .unwrap_err()
+                        .to_string(),
+                    "provider_session_no_applicable_material"
+                );
+
+                let browser = Browser::builder().stealth(false).build().unwrap();
+                browser
+                    .cookies()
+                    .set(
+                        "preserved=unchanged; Secure; Path=/",
+                        &format!("https://{own_host}/"),
+                    )
+                    .unwrap();
+                let error = restore_cookies(&browser, &file, provider).unwrap_err();
+                assert_eq!(error.to_string(), "provider_session_no_applicable_material");
+                let retained = browser.cookies().get_all();
+                assert_eq!(retained.len(), 1);
+                assert_eq!(retained[0].name, "preserved");
+                assert_eq!(retained[0].value, "unchanged");
+                assert!(!error.to_string().contains("foreign-private-value"));
+            }
+
+            let own = fixture("OWN", "own-private-value", own_host);
+            let mixed = snapshot(vec![foreign.clone(), own], &[]);
+            preflight_cookie_restore(&mixed, provider).unwrap();
+            let with_storage = snapshot(
+                vec![foreign.clone()],
+                &[("provider-store", "fake-storage-secret")],
+            );
+            // Origin storage only is eligible for application, never a
+            // source-backed authenticated account verdict.
+            assert!(planned_cookie_replay(&with_storage, provider, 1000.0).is_ok());
+            preflight_cookie_restore(&with_storage, provider).unwrap();
+        }
+
+        // Preserve legacy deferred-provider behavior: unrelated cookies have
+        // historically been ignored by the later restore loop.
+        let deferred = snapshot(vec![fixture("SID", "private", ".meta.ai")], &[]);
+        assert!(planned_cookie_replay(&deferred, "claude", 1000.0).is_ok());
+    }
+
+    #[test]
+    fn active_replay_plan_does_not_normalize_or_copy_foreign_cookie_twins() {
+        for (provider, own_domain, foreign_domain) in [
+            ("chatgpt", ".chatgpt.com", ".meta.ai"),
+            ("metaai", ".meta.ai", ".chatgpt.com"),
+        ] {
+            let foreign = fixture("SID", "private-foreign", foreign_domain);
+            let mut foreign_host = foreign.clone();
+            foreign_host.domain = foreign_domain.trim_start_matches('.').to_owned();
+            let own = fixture("SID", "private-own", own_domain);
+
+            // Current main rejects foreign-only material before attempting any
+            // cookie replay; this must remain fail-closed, not a vacuous success.
+            let source = snapshot(vec![foreign.clone(), foreign_host.clone()], &[]);
+            assert!(planned_cookie_replay(&source, provider, 1000.0).is_err());
+
+            // Applicable origin storage permits a scoped zero-cookie plan;
+            // foreign twins must still not be copied or counted as drops.
+            let source = snapshot(
+                vec![foreign.clone(), foreign_host.clone()],
+                &[("synthetic-preference", "not-a-credential")],
+            );
+            let (planned, dropped) = planned_cookie_replay(&source, provider, 1000.0).unwrap();
+            assert!(planned.is_empty());
+            assert_eq!(dropped, 0, "foreign twins cannot normalize this provider");
+
+            let source = snapshot(vec![foreign, own.clone(), foreign_host], &[]);
+            let (planned, dropped) = planned_cookie_replay(&source, provider, 1000.0).unwrap();
+            assert_eq!(planned.len(), 1);
+            assert_eq!(planned[0].value, "private-own");
+            assert_eq!(dropped, 0);
+
+            let mut own_host = own.clone();
+            own_host.domain = own_domain.trim_start_matches('.').to_owned();
+            let source = snapshot(vec![own, own_host], &[]);
+            let (planned, dropped) = planned_cookie_replay(&source, provider, 1000.0).unwrap();
+            assert_eq!(planned.len(), 1);
+            assert_eq!(dropped, 1, "actual provider scope twin must count");
+        }
+
+        // Deferred providers retain the historical all-cookie replay plan,
+        // even though the later restore loop ignores out-of-scope material.
+        let foreign = fixture("SID", "private-deferred", ".meta.ai");
+        let mut foreign_host = foreign.clone();
+        foreign_host.domain = "meta.ai".to_owned();
+        let source = snapshot(vec![foreign, foreign_host], &[]);
+        let (legacy, dropped) = planned_cookie_replay(&source, "claude", 1000.0).unwrap();
+        assert_eq!(legacy.len(), 1);
+        assert_eq!(dropped, 1);
+    }
+
+    #[test]
+    fn replay_fidelity_labels_follow_selected_provider_not_foreign_metadata() {
+        let mut foreign = fixture("SID", "foreign-private-value", ".meta.ai");
+        foreign.expires = Some(2_000_000_000.0);
+        foreign.same_site = Some("Strict".to_owned());
+        let own = fixture("SID", "selected-private-value", ".chatgpt.com");
+        let file = snapshot(vec![foreign, own], &[]);
+        let (planned, normalized) = planned_cookie_replay(&file, "chatgpt", 1000.0).unwrap();
+
+        assert_eq!(planned.len(), 1);
+        assert_eq!(normalized, 0);
+        let fidelity = replay_fidelity_limits(&planned, normalized);
+        assert_eq!(fidelity.expiry, "expiry_not_provided");
+        assert_eq!(fidelity.same_site, "same_site_not_provided");
+        // The old full-snapshot input would have mislabeled the selected
+        // provider as having cookie expiry and SameSite replay limitations.
+        let unrelated = replay_fidelity_limits(&file.cookies, normalized);
+        assert_eq!(unrelated.expiry, "expiry_unobservable_in_jar_readback");
+        assert_eq!(
+            unrelated.same_site,
+            "same_site_unobservable_in_jar_readback"
+        );
+
+        let redacted = format!("{fidelity:?}");
+        for private in [
+            "SID",
+            "foreign-private-value",
+            "selected-private-value",
+            "meta.ai",
+        ] {
+            assert!(!redacted.contains(private));
+        }
+    }
+
+    #[test]
+    fn expiry_first_coverage_matches_actual_live_scope_replay() {
+        for (provider, root) in [("chatgpt", "chatgpt.com"), ("metaai", "meta.ai")] {
+            let mut expired_preferred = fixture("SID", "expired-private", &format!(".{root}"));
+            expired_preferred.expires = Some(50.0);
+            let live = fixture("SID", "live-private", root);
+            for cookies in [
+                vec![expired_preferred.clone(), live.clone()],
+                vec![live.clone(), expired_preferred.clone()],
+            ] {
+                let file = snapshot(cookies, &[]);
+                let coverage = provider_replay_material_coverage(&file, provider, 1000.0);
+                let (planned, normalized) = planned_cookie_replay(&file, provider, 1000.0).unwrap();
+                assert_eq!(coverage.eligible_cookies, 1);
+                assert_eq!(coverage.invalid_provider_cookies, 1);
+                assert_eq!(coverage.normalized_scopes, normalized as u16);
+                assert_eq!(coverage.normalized_scopes, 0);
+                assert_eq!(coverage.category(), "eligible_cookie_material_unverified");
+                assert_eq!(planned.len(), 1);
+                assert_eq!(planned[0].value, "live-private");
+                assert!(!format!("{coverage:?}").contains("private"));
+                assert!(!format!("{coverage:?}").contains(root));
+            }
+        }
+    }
+
+    #[test]
+    fn deferred_provider_coverage_retains_legacy_scope_order() {
+        let mut expired_preferred = fixture("SID", "expired-private", ".claude.ai");
+        expired_preferred.expires = Some(50.0);
+        let live = fixture("SID", "live-private", "claude.ai");
+        let coverage = provider_replay_material_coverage(
+            &snapshot(vec![live, expired_preferred], &[]),
+            "claude",
+            1000.0,
+        );
+        assert_eq!(coverage.eligible_cookies, 0);
+        assert_eq!(coverage.invalid_provider_cookies, 1);
+        assert_eq!(coverage.normalized_scopes, 1);
     }
 
     #[test]

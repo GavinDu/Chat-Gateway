@@ -48,6 +48,96 @@ use supervisor::{
 };
 use worker::browser_thread;
 
+/// Classify restart warm-up failures without copying provider/engine error strings.
+/// Type-owned evidence can indicate a challenge or first-party denial, but this
+/// diagnostic alone never establishes whether a saved credential is valid.
+fn browser_worker_restart_failure_category(error: &anyhow::Error) -> &'static str {
+    if error
+        .downcast_ref::<BrowserWorkerUnavailableError>()
+        .is_some()
+    {
+        "browser_worker_unavailable"
+    } else if error
+        .downcast_ref::<providers::ProviderChallengeError>()
+        .is_some()
+    {
+        "manual_verification_required"
+    } else if error
+        .downcast_ref::<providers::metaai::MetaAiDocumentDeniedError>()
+        .is_some()
+    {
+        "provider_document_denied"
+    } else if error
+        .downcast_ref::<ProviderSessionExpiredError>()
+        .is_some()
+    {
+        "provider_session_expired"
+    } else {
+        "browser_worker_warmup_failed"
+    }
+}
+
+#[cfg(test)]
+mod worker_restart_failure_redaction_tests {
+    use super::{
+        browser_worker_restart_failure_category, providers, BrowserWorkerUnavailableError,
+        ProviderSessionExpiredError,
+    };
+
+    #[test]
+    fn known_rust_source_types_are_distinct_without_error_text() {
+        assert_eq!(
+            browser_worker_restart_failure_category(&anyhow::Error::new(
+                BrowserWorkerUnavailableError
+            )),
+            "browser_worker_unavailable"
+        );
+        assert_eq!(
+            browser_worker_restart_failure_category(&anyhow::Error::new(
+                providers::ProviderChallengeError::new("chatgpt")
+            )),
+            "manual_verification_required"
+        );
+        assert_eq!(
+            browser_worker_restart_failure_category(&anyhow::Error::new(
+                providers::metaai::MetaAiDocumentDeniedError
+            )),
+            "provider_document_denied"
+        );
+        assert_eq!(
+            browser_worker_restart_failure_category(&anyhow::Error::new(
+                ProviderSessionExpiredError
+            )),
+            "provider_session_expired"
+        );
+    }
+
+    #[test]
+    fn wrapped_source_type_survives_untrusted_context() {
+        let error = anyhow::Error::new(providers::metaai::MetaAiDocumentDeniedError)
+            .context("cookie=secret https://gateway.meta.ai/?token=private");
+        assert_eq!(
+            browser_worker_restart_failure_category(&error),
+            "provider_document_denied"
+        );
+    }
+
+    #[test]
+    fn raw_errors_cannot_inject_credentials_or_fake_expiry() {
+        for raw in [
+            "HTTP 403 provider_session_expired cookie=secret",
+            "https://example.invalid/?token=private",
+            "SQL INSERT /Users/owner/private/vault",
+        ] {
+            let error = anyhow::anyhow!("{raw}").context("wrapped secret data");
+            assert_eq!(
+                browser_worker_restart_failure_category(&error),
+                "browser_worker_warmup_failed"
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod queue_capacity_tests {
     use super::effective_session_pool_size;
@@ -237,12 +327,36 @@ pub struct ObscuraPool {
     session_writes: SessionWriteTracker,
 }
 
+/// A read-only source-backed account check on the *current* warmed page.
+/// This is deliberately distinct from the legacy URL/composer readiness probe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // Operator-facing paired proof UI is tracked in #1328.
+pub enum FirstPartyAccountVerdict {
+    Verified,
+    ExplicitUnauthenticated,
+    Unknown,
+    Unsupported,
+}
+
+#[allow(dead_code)] // Kept fixed and redacted for future extension status.
+impl FirstPartyAccountVerdict {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Verified => "verified",
+            Self::ExplicitUnauthenticated => "unauthenticated",
+            Self::Unknown => "unknown",
+            Self::Unsupported => "unsupported",
+        }
+    }
+}
+
 enum Command {
     Discover {
         provider: Provider,
         reply: oneshot::Sender<Result<Vec<String>>>,
     },
     Send {
+        queued_at: Instant,
         provider: Provider,
         prompt: String,
         model: String,
@@ -260,6 +374,10 @@ enum Command {
     VerifySession {
         provider: Provider,
         reply: oneshot::Sender<Result<bool>>,
+    },
+    VerifyFirstPartyAccount {
+        provider: Provider,
+        reply: oneshot::Sender<Result<FirstPartyAccountVerdict>>,
     },
     TestAdapter {
         provider: Provider,
@@ -404,8 +522,10 @@ pub struct TestAdapterReport {
     pub send_controls: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub input_controls: Vec<String>,
-    /// Sanitized page origin/path and restored cookie count help classify
-    /// logged-out or challenge pages without exposing query data or values.
+    /// Only fixed origin-status categories; never serialize page URL paths.
+    /// The legacy-named cookie count is current *provider-scoped* jar
+    /// presence after attempted replay, not proof of restored credentials,
+    /// account login or Chrome/Obscura snapshot parity.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub page: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -561,7 +681,10 @@ impl ObscuraPool {
                         backoff = Duration::from_secs(1);
                     }
                     Ok(Ok(Err(error))) => {
-                        tracing::warn!(error = %error, "browser worker restart failed during warm-up");
+                        tracing::warn!(
+                            failure_category = browser_worker_restart_failure_category(&error),
+                            "browser worker restart failed during warm-up"
+                        );
                         // Force the next supervisor pass to retry. The failed
                         // worker may still own its receiver, so merely dropping
                         // this sender would not make the channel appear closed.
@@ -706,6 +829,7 @@ impl ObscuraPool {
             .read()
             .await
             .send(Command::Send {
+                queued_at: Instant::now(),
                 provider,
                 prompt,
                 model,
@@ -739,8 +863,9 @@ impl ObscuraPool {
             .map_err(|_| anyhow::anyhow!("browser thread dropped current URL reply"))?
     }
 
-    /// Read-only authentication probe on the warmed page. The browser worker
-    /// serializes it with sends through the provider's page lock.
+    /// Legacy read-only URL/composer readiness probe on the warmed page,
+    /// NOT first-party account authentication. Use the separate source-backed
+    /// verify_first_party_account command when account proof is required.
     pub async fn verify_session(&self, name: &str) -> Result<bool> {
         let provider =
             Provider::from_name(name).ok_or_else(|| anyhow::anyhow!("unknown provider {name}"))?;
@@ -749,6 +874,28 @@ impl ObscuraPool {
             .read()
             .await
             .send(Command::VerifySession {
+                provider,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| browser_worker_unavailable())?;
+        rx.await.map_err(|_| browser_worker_unavailable())?
+    }
+
+    /// Operator-triggered first-party verification of the *existing* warm
+    /// Obscura page. This never refreshes a snapshot, navigates, sends chat,
+    /// or changes the owner vault. Unverified/unavailable stays Unknown and
+    /// only source-supported ChatGPT can produce Verified/Unauthenticated.
+    /// Pairing, context generation and source/image proof are separate #1328.
+    #[allow(dead_code)] // Paired relay/extension action is a later gated child.
+    pub async fn verify_first_party_account(&self, name: &str) -> Result<FirstPartyAccountVerdict> {
+        let provider =
+            Provider::from_name(name).ok_or_else(|| anyhow::anyhow!("unknown provider"))?;
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .read()
+            .await
+            .send(Command::VerifyFirstPartyAccount {
                 provider,
                 reply: tx,
             })

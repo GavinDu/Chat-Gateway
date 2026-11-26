@@ -5,15 +5,236 @@
 //! command delivery remain in the parent pool module.
 use super::*;
 
+/// A diagnostic replay must not overwrite the live cookie jar or owner vault.
+/// Keep deferred providers unchanged until their separate owner acceptance
+/// cycle; ChatGPT/Meta AI are the only active recovery providers.
+fn test_adapter_uses_disposable_browser(provider: Provider) -> bool {
+    matches!(provider, Provider::ChatGPT | Provider::MetaAI)
+}
+
+fn test_adapter_browser(
+    config: &AppConfig,
+    live: &Rc<obscura_core::Browser>,
+    provider: Provider,
+) -> Result<Rc<obscura_core::Browser>> {
+    if test_adapter_uses_disposable_browser(provider) {
+        Ok(Rc::new(super::browser_factory::build_disposable_browser(
+            config,
+        )?))
+    } else {
+        Ok(live.clone())
+    }
+}
+
+#[cfg(test)]
+mod test_adapter_isolated_browser_tests {
+    use super::*;
+
+    #[test]
+    fn only_active_chatgpt_metaai_probe_uses_disposable_context_no_vault_save() {
+        assert!(test_adapter_uses_disposable_browser(Provider::ChatGPT));
+        assert!(test_adapter_uses_disposable_browser(Provider::MetaAI));
+        for provider in [
+            Provider::Claude,
+            Provider::Grok,
+            Provider::Qwen,
+            Provider::Gemini,
+            Provider::Perplexity,
+            Provider::Mistral,
+            Provider::Manus,
+        ] {
+            assert!(!test_adapter_uses_disposable_browser(provider));
+        }
+    }
+
+    #[test]
+    fn active_diagnostic_cookie_restore_owner_is_not_live_browser() {
+        let cfg: AppConfig =
+            serde_yaml::from_str("obscura:\n  stealth: false\nproviders: []\n").unwrap();
+        let live = Rc::new(super::browser_factory::build_browser(&cfg).unwrap());
+        live.cookies()
+            .set("SID=live-synthetic; Secure; Path=/", "https://chatgpt.com/")
+            .unwrap();
+        for provider in [Provider::ChatGPT, Provider::MetaAI] {
+            let candidate = test_adapter_browser(&cfg, &live, provider).unwrap();
+            assert!(candidate.cookies().get_all().is_empty());
+            candidate
+                .cookies()
+                .set(
+                    "SID=candidate-synthetic; Secure; Path=/",
+                    "https://chatgpt.com/",
+                )
+                .unwrap();
+            assert_eq!(candidate.cookies().get_all().len(), 1);
+            assert_eq!(live.cookies().get_all().len(), 1);
+            assert_eq!(live.cookies().get_all()[0].value, "live-synthetic");
+            drop(candidate);
+            assert_eq!(live.cookies().get_all()[0].value, "live-synthetic");
+        }
+    }
+}
+
+/// Only the source-backed ChatGPT first-party session check may assert
+/// account readiness. A visible editor or Meta AI anonymous response cannot.
+/// Never emit the upstream error or mutate cached session/account status here.
+fn first_party_account_result(result: Result<()>) -> FirstPartyAccountVerdict {
+    match result {
+        Ok(()) => FirstPartyAccountVerdict::Verified,
+        Err(error)
+            if error
+                .downcast_ref::<ProviderSessionExpiredError>()
+                .is_some() =>
+        {
+            FirstPartyAccountVerdict::ExplicitUnauthenticated
+        }
+        Err(_) => FirstPartyAccountVerdict::Unknown,
+    }
+}
+
+async fn verify_existing_first_party_page(
+    provider: Provider,
+    page: &mut obscura_core::Page,
+) -> FirstPartyAccountVerdict {
+    if provider != Provider::ChatGPT {
+        return FirstPartyAccountVerdict::Unsupported;
+    }
+    first_party_account_result(providers::chatgpt::verify_credentials(page).await)
+}
+
+#[cfg(test)]
+mod first_party_account_probe_tests {
+    use super::*;
+
+    async fn page_with_auth_fixture(source: &str) -> obscura_core::Page {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        page.goto(
+            "data:text/html,<html data-chat-gateway-test-fixture><body>read only session</body></html>",
+        )
+        .await
+        .unwrap();
+        page.evaluate(source);
+        page
+    }
+
+    #[tokio::test]
+    async fn source_backed_warm_page_account_probe_is_distinct_from_composer() {
+        let mut valid = page_with_auth_fixture(
+            r#"globalThis.fetch = async (url, options) => {
+                if (url !== '/api/auth/session' || options.credentials !== 'include') {
+                    throw new Error('private invalid route');
+                }
+                return new Response(JSON.stringify({
+                    user:{fixture:true}, accessToken:'synthetic-not-a-real-token',
+                    expires:new Date(Date.now()+60000).toISOString()
+                }));
+            };"#,
+        )
+        .await;
+        assert_eq!(
+            verify_existing_first_party_page(Provider::ChatGPT, &mut valid).await,
+            FirstPartyAccountVerdict::Verified
+        );
+
+        let mut rejected = page_with_auth_fixture(
+            "globalThis.fetch = async () => new Response('{}', {status:401});",
+        )
+        .await;
+        assert_eq!(
+            verify_existing_first_party_page(Provider::ChatGPT, &mut rejected).await,
+            FirstPartyAccountVerdict::ExplicitUnauthenticated
+        );
+
+        let mut challenged = page_with_auth_fixture(
+            "globalThis.fetch = async () => new Response('{}', {status:403});",
+        )
+        .await;
+        assert_eq!(
+            verify_existing_first_party_page(Provider::ChatGPT, &mut challenged).await,
+            FirstPartyAccountVerdict::Unknown
+        );
+        let mut missing = page_with_auth_fixture(
+            "globalThis.fetch = async () => new Response(JSON.stringify({user:{fixture:true},accessToken:' ',expires:new Date(Date.now()+60000).toISOString()}));",
+        )
+        .await;
+        assert_eq!(
+            verify_existing_first_party_page(Provider::ChatGPT, &mut missing).await,
+            FirstPartyAccountVerdict::Unknown
+        );
+        assert_eq!(FirstPartyAccountVerdict::Verified.as_str(), "verified");
+        assert_eq!(
+            FirstPartyAccountVerdict::ExplicitUnauthenticated.as_str(),
+            "unauthenticated"
+        );
+    }
+
+    #[tokio::test]
+    async fn unsupported_metaai_does_not_issue_account_fetch_or_claim_auth() {
+        let mut page = page_with_auth_fixture(
+            r#"(() => {
+                globalThis.calls = 0;
+                globalThis.fetch = async () => {
+                    globalThis.calls++;
+                    throw new Error('private account');
+                };
+            })()"#,
+        )
+        .await;
+        // A multi-statement page script must execute as an expression in
+        // pinned Obscura. Verify the sentinel exists *before* the probe;
+        // otherwise a missing counter would not prove the no-fetch contract.
+        assert_eq!(page.evaluate("globalThis.calls").as_f64(), Some(0.0));
+        assert_eq!(
+            verify_existing_first_party_page(Provider::MetaAI, &mut page).await,
+            FirstPartyAccountVerdict::Unsupported
+        );
+        assert_eq!(page.evaluate("globalThis.calls").as_f64(), Some(0.0));
+        assert_eq!(FirstPartyAccountVerdict::Unknown.as_str(), "unknown");
+        assert_eq!(
+            FirstPartyAccountVerdict::Unsupported.as_str(),
+            "unsupported"
+        );
+    }
+
+    #[test]
+    fn unknown_account_error_never_includes_raw_upstream_error_in_verdict() {
+        let error = anyhow::anyhow!("private account cookie and URL");
+        let verdict = first_party_account_result(Err(error));
+        assert_eq!(verdict, FirstPartyAccountVerdict::Unknown);
+        assert!(!verdict.as_str().contains("private"));
+    }
+}
+
 /// Session restore/save failures may contain upstream URLs, vault paths, or
 /// credential-bearing text. Only stable categories cross the log boundary;
 /// the surrounding fixed log message identifies the failing operation.
 fn session_worker_failure_category(error: &anyhow::Error) -> &'static str {
+    // Only classify typed, source-owned failures. Provider/engine Display may
+    // contain account URLs, credential-bearing query strings or vault paths.
+    // A generic HTTP 403 is not an authenticated provider account rejection.
     if error
         .downcast_ref::<BrowserWorkerUnavailableError>()
         .is_some()
     {
         "browser_worker_unavailable"
+    } else if error
+        .downcast_ref::<providers::ProviderChallengeError>()
+        .is_some()
+    {
+        "manual_verification_required"
+    } else if error
+        .downcast_ref::<providers::metaai::MetaAiDocumentDeniedError>()
+        .is_some()
+    {
+        "provider_document_denied"
+    } else if error
+        .downcast_ref::<super::diagnostics::ProviderSessionExpiredError>()
+        .is_some()
+    {
+        "provider_session_expired"
     } else {
         "session_operation_failed"
     }
@@ -35,7 +256,46 @@ mod session_worker_error_redaction_tests {
             session_worker_failure_category(&worker),
             "browser_worker_unavailable"
         );
+        assert_eq!(
+            session_worker_failure_category(&anyhow::Error::new(
+                providers::ProviderChallengeError::new("chatgpt")
+            )),
+            "manual_verification_required"
+        );
+        assert_eq!(
+            session_worker_failure_category(&anyhow::Error::new(
+                providers::metaai::MetaAiDocumentDeniedError
+            )),
+            "provider_document_denied"
+        );
+        assert_eq!(
+            session_worker_failure_category(&anyhow::Error::new(
+                super::super::diagnostics::ProviderSessionExpiredError
+            )),
+            "provider_session_expired"
+        );
+        let wrapped = anyhow::Error::new(providers::metaai::MetaAiDocumentDeniedError)
+            .context("https://private.invalid/?token=secret&cookie=private");
+        assert_eq!(
+            session_worker_failure_category(&wrapped),
+            "provider_document_denied",
+            "source type survives untrusted context without printing it"
+        );
         assert!(!session_worker_failure_category(&secret).contains("secret"));
+        // Engine navigation/cleanup/worker-start errors may embed owner
+        // filesystem paths or bearer-bearing first-party URLs. Log only a
+        // fixed status category; never interpolate the original Display.
+        for source in [
+            "https://chatgpt.com/c/private-thread?token=private",
+            "/Users/private/Library/Chat-Gateway/vault-key-file",
+            "provider cleanup rejected cookie=value-private",
+        ] {
+            let error = anyhow::anyhow!("{source}");
+            let category = session_worker_failure_category(&error);
+            assert_eq!(category, "session_operation_failed");
+            assert!(!category.contains("private"));
+            assert!(!category.contains("token"));
+        }
     }
 }
 
@@ -143,20 +403,21 @@ fn metaai_document_denied_before_composer(
     observed_document_403 && !evidence.login_url && !evidence.challenge_visible
 }
 
-// A challenge can replace the page while the composer wait drives hydration.
-// Only a verified origin of an active recovery provider may trip its circuit.
-fn focused_provider_preflight_challenge(
-    provider: &str,
-    evidence: &ComposerPreflightEvidence,
-) -> bool {
-    matches!(provider, "chatgpt" | "metaai")
-        && evidence.provider_origin
-        && evidence.challenge_visible
-}
-
 /// The browser worker waits for a composer *before* invoking the provider
 /// adapter. A timeout here otherwise bypasses adapter-level diagnostics.
 /// Never record the selector, URL, prompt, page text or upstream error string.
+/// A challenge that appeared while waiting for a composer must be typed,
+/// not downgraded to a selector failure or an account-credential error.
+fn chatgpt_challenge_after_composer_wait(
+    provider: &str,
+    evidence: &ComposerPreflightEvidence,
+) -> bool {
+    provider == "chatgpt"
+        && evidence.provider_origin
+        && !evidence.login_url
+        && evidence.challenge_visible
+}
+
 fn report_composer_preflight_failure(
     provider: &str,
     page: &obscura_core::Page,
@@ -189,7 +450,7 @@ fn report_composer_preflight_failure(
             iframe_element_count = ?evidence.iframe_element_count,
             "provider composer readiness evidence"
         );
-        if focused_provider_preflight_challenge(provider, &evidence) {
+        if chatgpt_challenge_after_composer_wait(provider, &evidence) {
             return anyhow::Error::new(providers::ProviderChallengeError::new(provider));
         }
         if provider == "metaai"
@@ -295,6 +556,33 @@ mod composer_preflight_diagnostic_tests {
         assert_eq!(evidence.category(), "challenge_visible");
         evidence.provider_origin = false;
         assert_eq!(evidence.category(), "unexpected_origin");
+    }
+
+    #[test]
+    fn post_wait_challenge_is_typed_only_for_expected_chatgpt_first_party() {
+        let mut evidence = ComposerPreflightEvidence {
+            document_ready: "complete",
+            provider_origin: true,
+            login_url: false,
+            challenge_visible: true,
+            configured_input_present: false,
+            generic_editor_present: false,
+            generic_editor_actionable: false,
+            body_element_count: Some(0),
+            script_element_count: Some(1),
+            external_script_count: Some(1),
+            iframe_element_count: Some(0),
+        };
+        assert!(chatgpt_challenge_after_composer_wait("chatgpt", &evidence));
+        assert!(!chatgpt_challenge_after_composer_wait("metaai", &evidence));
+        evidence.provider_origin = false;
+        assert!(!chatgpt_challenge_after_composer_wait("chatgpt", &evidence));
+        evidence.provider_origin = true;
+        evidence.login_url = true;
+        assert!(!chatgpt_challenge_after_composer_wait("chatgpt", &evidence));
+        evidence.login_url = false;
+        evidence.challenge_visible = false;
+        assert!(!chatgpt_challenge_after_composer_wait("chatgpt", &evidence));
     }
 
     #[tokio::test]
@@ -544,10 +832,11 @@ async fn acquire_page_lock<'a>(
         .map_err(|_| anyhow::Error::new(ProviderBusyError))
 }
 
-/// Abandoned refreshes must not wait behind a send and mutate its session later.
-/// Once activation starts, finish it atomically with respect to this lock.
-async fn session_refresh_permit<'a>(
-    reply: &mut oneshot::Sender<Result<()>>,
+/// A disconnected refresh or interactive LoginComplete must never acquire a
+/// shared Browser-driving gate later and mutate its saved credentials. This
+/// cancellation-aware permit preserves the global gate -> provider lock order.
+async fn session_mutation_permit<'a, T>(
+    reply: &mut oneshot::Sender<Result<T>>,
     lock: &'a tokio::sync::Mutex<()>,
 ) -> Option<tokio::sync::MutexGuard<'a, ()>> {
     tokio::select! {
@@ -555,6 +844,24 @@ async fn session_refresh_permit<'a>(
         _ = reply.closed() => None,
         guard = lock.lock() => Some(guard),
     }
+}
+
+/// An explicit owner Cancel is a real cleanup operation, not a passive
+/// status response. It must not remove login UI state while LoginComplete is
+/// saving credentials or while LoginStart/UnlinkSession is driving the shared
+/// Browser. Unlike abandoned LoginComplete requests, Cancel still commits
+/// cleanup if its response receiver disconnects while queued.
+async fn cancel_pending_login_after_browser_operations(
+    operation_gate: &tokio::sync::Mutex<()>,
+    login_pages: &Rc<RefCell<HashMap<Provider, Rc<obscura_core::Page>>>>,
+    login_meta: &Rc<RefCell<HashMap<Provider, LoginMeta>>>,
+    provider: Provider,
+) {
+    let _operation = operation_gate.lock().await;
+    // No RefCell borrow survives any await; removing a pending login page
+    // here does not remove an already committed warm provider session.
+    login_pages.borrow_mut().remove(&provider);
+    login_meta.borrow_mut().remove(&provider);
 }
 
 /// Adapter diagnostics must use the same actionable input as the send path:
@@ -874,20 +1181,146 @@ fn diagnostic_input_controls(page: &obscura_core::Page) -> Vec<String> {
     .collect()
 }
 
-async fn ensure_provider_page(
+/// This lazy page warm-up path must use the *same* no-destructive-cleanup
+/// rule as worker startup. Do not clear an active session on 403/challenge,
+/// transport timeout or partial cookie restoration. This does not roll back
+/// any partial shared-jar writes; that requires #1385 isolated staging.
+fn cleanup_failed_lazy_page_restore(
+    browser: &obscura_core::Browser,
+    provider: Provider,
+) -> Result<bool> {
+    super::diagnostics::cleanup_failed_startup_restore(provider, || {
+        session::clear_provider_cookies(browser, provider.name())?;
+        Ok(())
+    })
+}
+
+#[cfg(test)]
+mod failed_lazy_page_restore_tests {
+    use super::*;
+
+    #[test]
+    fn active_recovery_provider_lazy_errors_never_revoke_existing_cookies() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        for (provider, origin) in [
+            (Provider::ChatGPT, "https://chatgpt.com/"),
+            (Provider::MetaAI, "https://meta.ai/"),
+        ] {
+            browser
+                .cookies()
+                .set("SID=synthetic; Secure; Path=/", origin)
+                .unwrap();
+            assert!(!cleanup_failed_lazy_page_restore(&browser, provider).unwrap());
+            assert!(browser.cookies().get_all().iter().any(|cookie| {
+                cookie.value == "synthetic"
+                    && cookie.domain == origin.trim_start_matches("https://").trim_end_matches('/')
+            }));
+        }
+    }
+
+    #[test]
+    fn deferred_lazy_cleanup_remains_provider_scoped() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        browser
+            .cookies()
+            .set("SID=keep; Secure; Path=/", "https://chatgpt.com/")
+            .unwrap();
+        browser
+            .cookies()
+            .set("SID=discard; Secure; Path=/", "https://claude.ai/")
+            .unwrap();
+        assert!(cleanup_failed_lazy_page_restore(&browser, Provider::Claude).unwrap());
+        let cookies = browser.cookies().get_all();
+        assert_eq!(cookies.len(), 1);
+        assert_eq!(cookies[0].value, "keep");
+    }
+}
+
+/// Interactive legacy LoginStart/LoginComplete use the shared worker Browser.
+/// A provider that ever owned a private context cannot safely re-enter that
+/// path until a generation-fenced transition is implemented in #1471/#1463.
+fn require_global_login_safe(pages: &SharedPages, provider: Provider) -> Result<()> {
+    pages.borrow().require_legacy_shared_replay_safe(provider)
+}
+
+#[cfg(test)]
+mod isolated_interactive_login_guard_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn isolated_owner_blocks_legacy_login_even_after_eviction() {
+        let shared = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        shared
+            .cookies()
+            .set(
+                "SID=shared-unchanged; Secure; Path=/",
+                "https://chatgpt.com/",
+            )
+            .unwrap();
+        let pages = Rc::new(RefCell::new(ProviderPageCache::new(1)));
+        for provider in [Provider::ChatGPT, Provider::MetaAI] {
+            let private = Rc::new(
+                obscura_core::Browser::builder()
+                    .stealth(false)
+                    .build()
+                    .unwrap(),
+            );
+            let page = private.new_page().await.unwrap();
+            pages
+                .borrow_mut()
+                .insert_owned(provider, page, private, None);
+            assert_eq!(
+                require_global_login_safe(&pages, provider)
+                    .unwrap_err()
+                    .to_string(),
+                "isolated_context_rehydration_required"
+            );
+        }
+        assert!(!pages.borrow().contains_key(&Provider::ChatGPT));
+        assert!(require_global_login_safe(&pages, Provider::ChatGPT).is_err());
+        assert_eq!(shared.cookies().get_all()[0].value, "shared-unchanged");
+        assert!(require_global_login_safe(&pages, Provider::Claude).is_ok());
+        let cold = Rc::new(RefCell::new(ProviderPageCache::new(1)));
+        assert!(require_global_login_safe(&cold, Provider::ChatGPT).is_ok());
+    }
+}
+
+pub(super) async fn ensure_provider_page(
     browser: &obscura_core::Browser,
     pages: &SharedPages,
     provider: Provider,
 ) -> Result<bool> {
-    if pages.borrow().contains_key(&provider) {
-        return Ok(false);
+    {
+        let cache = pages.borrow();
+        // Even a non-cold page is unsafe if a legacy fallback accidentally
+        // replaced the previously isolated Browser owner. An early cached
+        // return must not bypass the private-context requirement.
+        cache.require_cached_context_safe(provider)?;
+        if cache.contains_key(&provider) {
+            return Ok(false);
+        }
+        // An evicted private context must never be silently recreated on
+        // the shared Browser; fail before opening a Page or reading cookies.
+        cache.require_legacy_shared_replay_safe(provider)?;
     }
     let mut page = browser_factory::new_provider_page(browser, provider).await?;
     let network_bootstrap_403 =
         crate::browser::network_tap::attach_provider_network_tap(&mut page, provider);
     let snapshot = session::load_session_file(provider.name())?;
     if let Err(error) = PageSession::open(browser, &mut page, provider, snapshot.as_ref()).await {
-        session::clear_provider_cookies(browser, provider.name())?;
+        // An ambiguous warmup, navigation or cookie-readback failure is not
+        // evidence that an already saved active-provider login expired.
+        // The startup worker uses the same source-owned preservation policy.
+        cleanup_failed_lazy_page_restore(browser, provider)?;
         return Err(error);
     }
     pages
@@ -995,36 +1428,54 @@ pub(super) fn browser_thread(
                                 }
                             };
                             if restore_failed {
-                                // Do not publish a partially restored page. Clear runtime
-                                // state, retaining the encrypted snapshot: a load/transport
-                                // failure does not establish expired credentials.
-                                let cleanup = (|| -> Result<()> {
-                                    session::clear_provider_cookies(&browser, provider.name())?;
-                                    let cleared = page.evaluate(
-                                        "(() => { try { localStorage.clear(); return true; } catch (_) { return false; } })()"
-                                    );
-                                    if cleared != serde_json::Value::Bool(true) {
-                                        anyhow::bail!("provider localStorage cleanup failed");
+                                // Failed navigation/import is not account rejection. The
+                                // cleanup admission function never executes destructive
+                                // shared-jar writes for the two active providers; a future
+                                // isolated stage must handle possible partial candidate
+                                // writes that preceded this failure.
+                                let cleanup = super::diagnostics::cleanup_failed_startup_restore(
+                                    provider,
+                                    || -> Result<()> {
+                                        session::clear_provider_cookies(&browser, provider.name())?;
+                                        let cleared = page.evaluate(
+                                            "(() => { try { localStorage.clear(); return true; } catch (_) { return false; } })()"
+                                        );
+                                        if cleared != serde_json::Value::Bool(true) {
+                                            anyhow::bail!("provider localStorage cleanup failed");
+                                        }
+                                        Ok(())
+                                    },
+                                );
+                                match cleanup {
+                                    Ok(false) => {
+                                        provider_sessions.record_probe_failure(provider.name());
+                                        tracing::warn!(
+                                            provider = %pcfg.name,
+                                            reason = "startup_replay_failed_unverified",
+                                            "provider warm-up inconclusive; saved snapshot and browser jar retained"
+                                        );
+                                        continue;
                                     }
-                                    Ok(())
-                                })();
-                                if let Err(error) = cleanup {
-                                    provider_sessions.record_probe_failure(provider.name());
-                                    tracing::error!(
-                                        provider = %pcfg.name,
-                                        category = session_worker_failure_category(&error),
-                                        "could not clear a partially restored provider session; page withheld"
-                                    );
-                                    continue;
+                                    Err(error) => {
+                                        provider_sessions.record_probe_failure(provider.name());
+                                        tracing::error!(
+                                            provider = %pcfg.name,
+                                            category = session_worker_failure_category(&error),
+                                            "could not clear a partially restored provider session; page withheld"
+                                        );
+                                        continue;
+                                    }
+                                    Ok(true) => {}
                                 }
                                 provider_sessions.record_probe_failure(provider.name());
                                 tracing::warn!(provider = %pcfg.name,
                                     "provider warm-up failed; page withheld and saved session retained");
                                 continue;
                             } else {
-                                // Verify the restored session before publishing this page as
-                                // usable. Expired credentials are revoked from disk and from
-                                // the embedded browser before interactive login is requested.
+                                // This URL/composer startup probe is NOT authoritative
+                                // first-party account verification. Active ChatGPT/Meta AI
+                                // snapshots must survive ambiguous login-page redirects;
+                                // legacy deferred providers are separately tracked.
                                 let verification = match registry.get(&provider) {
                                     Some(adapter) => verify_session_page(provider, &page, adapter.as_ref()),
                                     None => Err(anyhow::anyhow!("provider adapter is not registered")),
@@ -1033,6 +1484,20 @@ pub(super) fn browser_thread(
                                     Ok(true) => provider_sessions.record_success(provider.name()),
                                     // No chat input is inconclusive, not evidence of expiry.
                                     Ok(false) => {}
+                                    Err(error) if error.downcast_ref::<ProviderSessionExpiredError>().is_some()
+                                        && super::diagnostics::startup_ambiguous_failure_must_preserve_snapshot(provider) => {
+                                        // A login-looking URL can be a challenge, blocked
+                                        // bootstrap or route redesign, not expired owner
+                                        // credentials. Never erase the encrypted snapshot
+                                        // or clear this Browser's shared cookie/storage jar
+                                        // from an unverified DOM observation.
+                                        provider_sessions.record_probe_failure(provider.name());
+                                        tracing::warn!(
+                                            provider = %pcfg.name,
+                                            reason = "startup_login_url_unverified",
+                                            "startup login page is inconclusive; saved session retained"
+                                        );
+                                    }
                                     Err(error) if error.downcast_ref::<ProviderSessionExpiredError>().is_some() => {
                                         let cleanup = (|| -> Result<()> {
                                             session::clear_provider_cookies(&browser, provider.name())?;
@@ -1049,16 +1514,19 @@ pub(super) fn browser_thread(
                                             provider_sessions.record_probe_failure(provider.name());
                                             tracing::error!(
                                                 provider = %pcfg.name,
-                                                %cleanup_error,
+                                                category = session_worker_failure_category(&cleanup_error),
                                                 "expired provider session cleanup failed; page withheld"
                                             );
                                             continue;
                                         }
-                                        if let Err(navigation_error) = page.goto(provider.login_url()).await {
+                                        if let Err(_navigation_error) = page.goto(provider.login_url()).await {
                                             provider_sessions.record_probe_failure(provider.name());
                                             tracing::error!(
                                                 provider = %pcfg.name,
-                                                %navigation_error,
+                                                // Obscura's native error is not anyhow::Error.
+                                                // This navigation path has only a fixed redacted
+                                                // session-operation failure label.
+                                                category = "session_operation_failed",
                                                 "provider navigation after expired-session cleanup failed; page withheld"
                                             );
                                             continue;
@@ -1083,7 +1551,11 @@ pub(super) fn browser_thread(
                             locks.borrow_mut().insert(provider, Rc::new(tokio::sync::Mutex::new(())));
                             tracing::info!(provider = %pcfg.name, url = provider.login_url(), "page warmed");
                         }
-                        Err(e) => tracing::warn!(provider = %pcfg.name, "warm failed: {e}"),
+                        Err(e) => tracing::warn!(
+                            provider = %pcfg.name,
+                            category = session_worker_failure_category(&e),
+                            "provider page could not be created during warm-up"
+                        ),
                     }
                 }
                 tracing::info!("ObscuraPool warmed: {} pages", pages.borrow().len());
@@ -1115,7 +1587,7 @@ pub(super) fn browser_thread(
                                 let _ = reply.send(res);
                             });
                         }
-                        Command::Send { provider, prompt, model, has_history, thread_url, timeout, completion_idle, provider_guard, chunks } => {
+                        Command::Send { queued_at, provider, prompt, model, has_history, thread_url, timeout, completion_idle, provider_guard, chunks } => {
                             // A request can be cancelled while waiting in the
                             // worker command queue. Never navigate a page for
                             // an abandoned sender after that admission timeout.
@@ -1135,14 +1607,22 @@ pub(super) fn browser_thread(
                             let poll_tick = gateway_poll_tick;
                             let request_metrics = metrics.clone();
                             let send_session_write_tracker = session_write_tracker.clone();
+                            let timing_metrics = request_metrics.clone();
                             tokio::task::spawn_local(async move {
+                                let work = async move {
+                                use crate::metaai_timing::{Step, Timer};
+                                if provider == Provider::MetaAI {
+                                    request_metrics.record_metaai_step(Step::CommandQueue, queued_at.elapsed().as_micros().min(u64::MAX as u128) as u64);
+                                }
                                 // Both operation admission and the provider page lock
                                 // consume one queue budget, rather than each waiting for
                                 // the full configured timeout independently.
                                 let queue_deadline =
                                     tokio::time::Instant::now() + operation_queue_timeout;
+                                let operation_timer = Timer::start(Step::OperationGate);
                                 let Some(operation) = send_unless_disconnected(&chunks,
                                     tokio::time::timeout_at(queue_deadline, operation_gate.lock())).await else { return; };
+                                drop(operation_timer);
                                 let _operation = match operation {
                                     Ok(guard) => guard,
                                     Err(_) => { let _ = chunks.send(Err(anyhow::Error::new(ProviderBusyError))).await; return; }
@@ -1168,8 +1648,10 @@ pub(super) fn browser_thread(
                                 // A queued request may have been cancelled
                                 // while another send owned the page lock.
                                 if chunks.is_closed() { return; }
+                                let ensure_timer = Timer::start(Step::PageEnsure);
                                 let Some(opened) = send_unless_disconnected(&chunks,
                                     ensure_provider_page(&browser_for_save, &pages, provider)).await else { return; };
+                                drop(ensure_timer);
                                 let just_opened = match opened {
                                     Ok(opened) => opened,
                                     Err(error) => { let _ = chunks.send(Err(error)).await; return; }
@@ -1201,9 +1683,12 @@ pub(super) fn browser_thread(
                                 if (!just_opened || thread_url.is_some()) && pool_policy::provider_send_requires_navigation(
                                     &page.url(), target_url, thread_url.is_some(),
                                 ) {
+                                    let _navigation_timer = Timer::start(Step::Navigation);
                                     page.clear_bootstrap_403_before_navigation();
+                                    let mut navigation_observer = crate::metaai_timing::Navigation::new(&mut page, target_url);
                                     let Some(navigation) = send_unless_disconnected(&chunks,
-                                        navigation::navigate_provider_document(&mut page, target_url, Duration::from_secs(30))).await else { return; };
+                                        navigation::navigate_provider_document(navigation_observer.page(), target_url, Duration::from_secs(30))).await else { return; };
+                                    drop(navigation_observer);
                                     if let Err(error) = navigation {
                                         let _ = chunks.send(Err(error)).await;
                                         return;
@@ -1218,8 +1703,22 @@ pub(super) fn browser_thread(
                                     let _ = chunks.send(Err(anyhow::Error::new(providers::ProviderChallengeError::new(provider.name())))).await;
                                     return;
                                 }
+                                // A stale session may render a sign-in form on the
+                                // provider's landing URL. Check account evidence
+                                // before waiting for a composer, so a failed token
+                                // refresh is not misdiagnosed as selector drift.
+                                if provider == Provider::ChatGPT {
+                                    let Some(account) = send_unless_disconnected(&chunks,
+                                        providers::chatgpt::verify_credentials(&mut page)).await else { return; };
+                                    if let Err(error) = account {
+                                        let _ = chunks.send(Err(error)).await;
+                                        return;
+                                    }
+                                }
+                                let composer_timer = Timer::start(Step::ComposerReady);
                                 let Some(composer) = send_unless_disconnected(&chunks,
                                     providers::common::wait_for_selector(&mut page, &adapter.effective_selectors().input_refs(), 15_000)).await else { return; };
+                                drop(composer_timer);
                                 if let Err(error) = composer {
                                     let classified = report_composer_preflight_failure(
                                         provider.name(),
@@ -1228,8 +1727,14 @@ pub(super) fn browser_thread(
                                         &adapter.effective_selectors().input_refs(),
                                         error,
                                     );
-                                    if classified.is::<providers::ProviderChallengeError>() {
-                                        provider_guard.disable_provider(provider.name(), "challenge page detected; manual review required");
+                                    if classified
+                                        .downcast_ref::<providers::ProviderChallengeError>()
+                                        .is_some()
+                                    {
+                                        provider_guard.disable_provider(
+                                            provider.name(),
+                                            "challenge page detected; manual review required",
+                                        );
                                     }
                                     let _ = chunks.send(Err(classified)).await;
                                     return;
@@ -1265,6 +1770,7 @@ pub(super) fn browser_thread(
                                 // Failure fails the attempt so the router
                                 // can try the next provider.
                                 if !has_history {
+                                    let _model_timer = Timer::start(Step::ModelSelection);
                                     let Some(model_selection) = send_unless_disconnected(
                                         &chunks,
                                         adapter.select_model(&mut page, &model),
@@ -1326,7 +1832,7 @@ pub(super) fn browser_thread(
                                         providers::ProviderSendPolicy {
                                             completion_idle,
                                             provider_guard,
-                                            metrics: request_metrics,
+                                            metrics: request_metrics.clone(),
                                         },
                                         save_tx,
                                     ) => false
@@ -1340,15 +1846,44 @@ pub(super) fn browser_thread(
                                 // this provider's page lock is still held. A cancelled send
                                 // returns above without persisting a partial session.
                                 if completion_rx.await.unwrap_or(false) {
-                                    if let Err(error) = session::save_session_if_changed(
-                                        &browser_for_save,
+                                    let _snapshot_timer = Timer::start(Step::SessionSnapshot);
+                                    // A promoted private Page must persist cookies from
+                                    // its own Browser, not the legacy shared worker jar.
+                                    // Legacy pages intentionally retain the old fallback.
+                                    let session_browser =
+                                        page.browser_for_session_save(&browser_for_save);
+                                    match session::save_session_if_changed(
+                                        &session_browser,
                                         &page,
                                         &provider_name,
                                         &send_session_write_tracker,
                                     ).await {
-                                        tracing::warn!(provider = %provider_name, category = session_worker_failure_category(&error), "rotated session snapshot failed");
+                                        Ok(session::SessionSaveOutcome::DeferredRateLimited)
+                                            if matches!(provider_name.as_str(), "chatgpt" | "metaai") =>
+                                        {
+                                            // The reply completed, but a rotated
+                                            // credential snapshot is not durable.
+                                            // Never log the cookie or fingerprint.
+                                            tracing::warn!(
+                                                provider = %provider_name,
+                                                category = "session_snapshot_changed_write_deferred",
+                                                "rotated session snapshot is not yet durable"
+                                            );
+                                        }
+                                        Err(error) => {
+                                            tracing::warn!(
+                                                provider = %provider_name,
+                                                category = session_worker_failure_category(&error),
+                                                "rotated session snapshot failed"
+                                            );
+                                        }
+                                        _ => {}
                                     }
                                 }
+                                };
+                                if provider == Provider::MetaAI {
+                                    crate::metaai_timing::scope(timing_metrics, work).await;
+                                } else { work.await; }
                             });
                         }
                         Command::CurrentUrl { provider, reply } => {
@@ -1384,8 +1919,47 @@ pub(super) fn browser_thread(
                                 let _ = reply.send(result);
                             });
                         }
+                        Command::VerifyFirstPartyAccount { provider, reply } => {
+                            let pages = pages.clone();
+                            let locks = locks.clone();
+                            let operation_gate = operation_gate.clone();
+                            tokio::task::spawn_local(async move {
+                                if reply.is_closed() { return; }
+                                let result: Result<FirstPartyAccountVerdict> = async {
+                                    // No reviewed account contract for Meta AI or deferred
+                                    // providers: do not navigate, create a page, or fetch.
+                                    if provider != Provider::ChatGPT {
+                                        return Ok(FirstPartyAccountVerdict::Unsupported);
+                                    }
+                                    // Preserve the existing send/refresh lock order:
+                                    // global browser-driving gate, then provider page lock.
+                                    let _operation = operation_gate.lock().await;
+                                    if reply.is_closed() {
+                                        return Ok(FirstPartyAccountVerdict::Unknown);
+                                    }
+                                    let Some(lock) = locks.borrow().get(&provider).cloned() else {
+                                        return Ok(FirstPartyAccountVerdict::Unknown);
+                                    };
+                                    let _guard = lock.lock().await;
+                                    if reply.is_closed() || !pages.borrow().contains_key(&provider) {
+                                        return Ok(FirstPartyAccountVerdict::Unknown);
+                                    }
+                                    // PageLease takes ownership of the *actual* warm page
+                                    // and restores it on success, error or cancellation.
+                                    // No RefCell borrow crosses an await, and the probe
+                                    // cannot mutate vault, applied fingerprint, or state.
+                                    let mut page = match PageLease::take(&pages, provider) {
+                                        Ok(page) => page,
+                                        Err(_) => return Ok(FirstPartyAccountVerdict::Unknown),
+                                    };
+                                    Ok(verify_existing_first_party_page(provider, &mut page).await)
+                                }.await;
+                                let _ = reply.send(result);
+                            });
+                        }
                         Command::TestAdapter { provider, reply } => {
                             let browser = browser.clone();
+                            let cfg = cfg.clone();
                             let registry = registry.clone();
                             let adapter_session_write_tracker = session_write_tracker.clone();
                             let operation_gate = operation_gate.clone();
@@ -1400,9 +1974,39 @@ pub(super) fn browser_thread(
                                     finish(report);
                                     return;
                                 };
-                                // Fresh page with the saved session applied
-                                // (same warm-up ordering: cookies before
-                                // goto, localStorage after, then re-goto).
+                                let isolated = test_adapter_uses_disposable_browser(provider);
+                                // Fail closed on missing/unreadable saved credentials
+                                // BEFORE opening a candidate page, bridge or network.
+                                // Deferred provider behavior remains unchanged.
+                                let session_file = match session::load_session_file(provider.name()) {
+                                    Ok(file) => file,
+                                    Err(error) => {
+                                        record_test_adapter_error(&mut report, TestAdapterErrorPhase::SessionFileLoad, &error);
+                                        if isolated {
+                                            finish(report);
+                                            return;
+                                        }
+                                        None
+                                    }
+                                };
+                                if isolated && session_file.is_none() {
+                                    report.errors.push("session_snapshot_missing".to_owned());
+                                    finish(report);
+                                    return;
+                                }
+                                // A new Page on a shared Browser is NOT an isolated
+                                // context in the pinned Obscura engine. For the
+                                // active providers, stage the test on a separate
+                                // nonpersistent Browser, and keep both owners in
+                                // this worker-local task through the entire probe.
+                                let browser = match test_adapter_browser(&cfg, &browser, provider) {
+                                    Ok(candidate) => candidate,
+                                    Err(error) => {
+                                        record_test_adapter_error(&mut report, TestAdapterErrorPhase::OpenPage, &error);
+                                        finish(report);
+                                        return;
+                                    }
+                                };
                                 let mut page = match super::browser_factory::new_provider_page(&browser, provider).await {
                                     Ok(p) => p,
                                     Err(error) => {
@@ -1411,16 +2015,7 @@ pub(super) fn browser_thread(
                                         return;
                                     }
                                 };
-                                // Test-adapter navigation uses an independent page, so attach
-                                // the same sanitized network diagnostics before its first load.
                                 crate::browser::network_tap::attach_provider_network_tap(&mut page, provider);
-                                let session_file = match session::load_session_file(provider.name()) {
-                                    Ok(file) => file,
-                                    Err(error) => {
-                                        record_test_adapter_error(&mut report, TestAdapterErrorPhase::SessionFileLoad, &error);
-                                        None
-                                    }
-                                };
                                 if !record_test_adapter_restore_result(
                                     &mut report,
                                     "session restore failed",
@@ -1478,7 +2073,7 @@ pub(super) fn browser_thread(
                                 // Phase 2 — dummy prompt (Go RunAdapterTest).
                                 const DUMMY: &str = "chat-gateway selector test — please reply with the word OK";
                                 let input_result =
-                                    providers::common::type_provider_prompt(&mut page, &[input_sel], DUMMY, Some(provider.name())).await;
+                                    providers::common::human_type_with_provider(&page, &[input_sel], DUMMY, Some(provider.name())).await;
                                 if let Err(error) = input_result {
                                     record_test_adapter_error(&mut report, TestAdapterErrorPhase::InputType, &error);
                                     finish(report);
@@ -1509,12 +2104,7 @@ pub(super) fn browser_thread(
                                 }
                                 let baseline = adapter.response_text(&page).filter(|t| !t.is_empty());
                                 // Phase 3 — send button or Enter (5s).
-                                let submitted = if provider == Provider::MetaAI {
-                                    providers::common::submit_metaai_focused(&mut page, DUMMY).await.map(|_| false)
-                                } else {
-                                    providers::common::click_send_or_enter(&mut page, sets[1].1, input_sel, 5000).await
-                                };
-                                match submitted {
+                                match providers::common::click_send_or_enter(&mut page, sets[1].1, input_sel, 5000).await {
                                     Ok(clicked) => report.send_clicked = clicked,
                                     Err(error) => {
                                         record_test_adapter_error(&mut report, TestAdapterErrorPhase::Send, &error);
@@ -1541,11 +2131,16 @@ pub(super) fn browser_thread(
                                 }
                                 if !report.response_token {
                                     report.errors.push("response: no token within 45s".to_string());
-                                } else if let Err(error) =
-                                    session::save_session_if_changed(&browser, &page, provider.name(), &adapter_session_write_tracker).await
-                                {
-                                    tracing::warn!(provider = provider.name(), category = session_worker_failure_category(&error), "probe session snapshot failed");
+                                } else if !isolated {
+                                    // Legacy/deferred provider behavior unchanged.
+                                    if let Err(error) =
+                                        session::save_session_if_changed(&browser, &page, provider.name(), &adapter_session_write_tracker).await
+                                    {
+                                        tracing::warn!(provider = provider.name(), category = session_worker_failure_category(&error), "probe session snapshot failed");
+                                    }
                                 }
+                                // An active-provider synthetic diagnostic must
+                                // never rewrite the encrypted owner's snapshot.
                                 finish(report);
                             });
                         }
@@ -1559,13 +2154,17 @@ pub(super) fn browser_thread(
                             let locks = locks.clone();
                             tokio::task::spawn_local(async move {
                                 let res: Result<()> = async {
-                                    let Some(_operation) = session_refresh_permit(&mut reply, &operation_gate).await else { return Ok(()); };
+                                    let Some(_operation) = session_mutation_permit(&mut reply, &operation_gate).await else { return Ok(()); };
                                     let lock = locks.borrow().get(&provider).cloned()
                                         .ok_or_else(|| anyhow::anyhow!("provider page lock missing"))?;
-                                    let Some(_guard) = session_refresh_permit(&mut reply, &lock).await else {
+                                    let Some(_guard) = session_mutation_permit(&mut reply, &lock).await else {
                                         return Ok(());
                                     };
                                     if reply.is_closed() { return Ok(()); }
+                                    // RefreshSession still mutates the legacy global Browser.
+                                    // A prior isolated owner may have been evicted by the
+                                    // one-Page LRU; never treat cold as permission to downgrade.
+                                    pages.borrow().require_legacy_shared_replay_safe(provider)?;
                                     let file = session::load_session_file(provider.name())?
                                         .ok_or_else(|| anyhow::anyhow!("imported provider session is missing"))?;
                                     // Reject malformed metadata before touching live state.
@@ -1690,7 +2289,6 @@ pub(super) fn browser_thread(
                                     let lock = locks.borrow().get(&provider).cloned()
                                         .unwrap_or_else(|| Rc::new(tokio::sync::Mutex::new(())));
                                     let _guard = lock.lock().await;
-                                    applied_imports.borrow_mut().remove(&provider);
                                     let mut page = super::browser_factory::new_provider_page(&browser, provider).await?;
                                     let network_bootstrap_403 = crate::browser::network_tap::attach_provider_network_tap(&mut page, provider);
                                     page.goto(provider.login_url()).await?;
@@ -1703,7 +2301,12 @@ pub(super) fn browser_thread(
                                     session::clear_provider_cookies(&browser, provider.name())?;
                                     page.goto(provider.login_url()).await?;
                                     let removed = session::delete_session_snapshot(provider.name())?;
-                                    pages.borrow_mut().insert_with_bootstrap_status(
+                                    // Commit only after deletion succeeds. If this provider
+                                    // ever owned a private context, drop both the prior
+                                    // context and this global cleanup Page rather than
+                                    // caching a shared Page that bypasses the cold fence.
+                                    applied_imports.borrow_mut().remove(&provider);
+                                    pages.borrow_mut().finish_unlink(
                                         provider,
                                         Rc::new(page),
                                         network_bootstrap_403,
@@ -1717,11 +2320,17 @@ pub(super) fn browser_thread(
                         }
                         Command::LoginStart { provider, reply } => {
                             let browser = browser.clone();
+                            let pages = pages.clone();
                             let login_pages = login_pages.clone();
                             let login_meta = login_meta.clone();
                             let operation_gate = operation_gate.clone();
                             tokio::task::spawn_local(async move {
                                 let _operation = operation_gate.lock().await;
+                                // Check before any legacy global page navigation or cookie mutation.
+                                if let Err(error) = require_global_login_safe(&pages, provider) {
+                                    let _ = reply.send(Err(error));
+                                    return;
+                                }
                                 sweep_login_pages(&login_pages, &login_meta);
                                 // A fresh login page per start (Go used an
                                 // isolated temp profile for the same
@@ -1744,11 +2353,22 @@ pub(super) fn browser_thread(
                             });
                         }
                         Command::LoginCancel { provider, reply } => {
-                            login_pages.borrow_mut().remove(&provider);
-                            login_meta.borrow_mut().remove(&provider);
-                            let _ = reply.send(Ok(()));
+                            let operation_gate = operation_gate.clone();
+                            let login_pages = login_pages.clone();
+                            let login_meta = login_meta.clone();
+                            tokio::task::spawn_local(async move {
+                                cancel_pending_login_after_browser_operations(
+                                    &operation_gate,
+                                    &login_pages,
+                                    &login_meta,
+                                    provider,
+                                )
+                                .await;
+                                let _ = reply.send(Ok(()));
+                            });
                         }
-                        Command::LoginComplete { provider, reply } => {
+                        Command::LoginComplete { provider, mut reply } => {
+                            let operation_gate = operation_gate.clone();
                             let browser = browser.clone();
                             let registry = registry.clone();
                             let pages = pages.clone();
@@ -1758,6 +2378,16 @@ pub(super) fn browser_thread(
                             let login_session_write_tracker = session_write_tracker.clone();
                             let applied_imports = applied_imports.clone();
                             tokio::task::spawn_local(async move {
+                                // Serialize manual login snapshot writes + Page swaps
+                                // with sends, refresh, unlink and subsequent LoginStart.
+                                let Some(_operation) =
+                                    session_mutation_permit(&mut reply, &operation_gate).await
+                                else {
+                                    return;
+                                };
+                                if reply.is_closed() {
+                                    return;
+                                }
                                 sweep_login_pages(&login_pages, &login_meta);
                                 let res: Result<LoginCompleted> = async {
                                     let Some(login_page) = login_pages.borrow().get(&provider).cloned() else {
@@ -1772,7 +2402,14 @@ pub(super) fn browser_thread(
                                     // the swapped page.
                                     let lock = locks.borrow().get(&provider).cloned()
                                         .unwrap_or_else(|| Rc::new(tokio::sync::Mutex::new(())));
-                                    let _guard = lock.lock().await;
+                                    let Some(_guard) =
+                                        session_mutation_permit(&mut reply, &lock).await
+                                    else {
+                                        return Err(anyhow::anyhow!("login_completion_abandoned"));
+                                    };
+                                    // A private owner might have been admitted after
+                                    // LoginStart; no old global snapshot may overwrite it.
+                                    require_global_login_safe(&pages, provider)?;
                                     if crate::provider_guard::is_challenge_page(&login_page) {
                                         anyhow::bail!("provider challenge requires manual completion before saving a session");
                                     }
@@ -1781,13 +2418,18 @@ pub(super) fn browser_thread(
                                     super::diagnostics::require_login_completion_ready(
                                         verify_session_page(provider, &login_page, adapter.as_ref())
                                     )?;
-                                    applied_imports.borrow_mut().remove(&provider);
-                                    // Same format/path as every other save:
-                                    // sessions/<provider>.json via
-                                    // session::save_session (cookies from
-                                    // the browser-wide CookieStore +
-                                    // localStorage from this page).
-                                    session::save_session(&browser, &login_page, provider.name(), &login_session_write_tracker).await?;
+                                    // A failed/aborted save must not revoke the applied
+                                    // generation for the existing warm session.
+                                    page_session::invalidate_applied_after_login_save(
+                                        &applied_imports,
+                                        provider,
+                                        session::save_session(
+                                            &browser,
+                                            &login_page,
+                                            provider.name(),
+                                            &login_session_write_tracker,
+                                        ),
+                                    ).await?;
                                     pages.borrow_mut().insert(provider, login_page);
                                     login_pages.borrow_mut().remove(&provider);
                                     login_meta.borrow_mut().remove(&provider);
@@ -1996,6 +2638,114 @@ mod queued_send_cancellation_tests {
 }
 
 #[cfg(test)]
+mod login_cancel_gate_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn cancel_waits_for_inflight_save_and_preserves_another_providers_login_page() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        browser
+            .cookies()
+            .set("SID=global-fixture; Secure; Path=/", "https://chatgpt.com/")
+            .unwrap();
+        let chat_page = Rc::new(browser.new_page().await.unwrap());
+        let weak = Rc::downgrade(&chat_page);
+        let meta_page = Rc::new(browser.new_page().await.unwrap());
+        let login_pages = Rc::new(RefCell::new(HashMap::from([
+            (Provider::ChatGPT, chat_page),
+            (Provider::MetaAI, meta_page),
+        ])));
+        let login_meta = Rc::new(RefCell::new(HashMap::from([
+            (
+                Provider::ChatGPT,
+                LoginMeta {
+                    last_seen: Instant::now(),
+                },
+            ),
+            (
+                Provider::MetaAI,
+                LoginMeta {
+                    last_seen: Instant::now(),
+                },
+            ),
+        ])));
+        let gate = tokio::sync::Mutex::new(());
+        let completing_save = gate.lock().await;
+        let cancel = cancel_pending_login_after_browser_operations(
+            &gate,
+            &login_pages,
+            &login_meta,
+            Provider::ChatGPT,
+        );
+        tokio::pin!(cancel);
+        assert!(tokio::time::timeout(Duration::from_millis(10), &mut cancel)
+            .await
+            .is_err());
+        assert!(login_pages.borrow().contains_key(&Provider::ChatGPT));
+        assert!(login_meta.borrow().contains_key(&Provider::ChatGPT));
+        drop(completing_save);
+        tokio::time::timeout(Duration::from_secs(1), cancel)
+            .await
+            .unwrap();
+        assert!(weak.upgrade().is_none(), "abandoned Page owner must drop");
+        assert!(!login_pages.borrow().contains_key(&Provider::ChatGPT));
+        assert!(!login_meta.borrow().contains_key(&Provider::ChatGPT));
+        assert!(login_pages.borrow().contains_key(&Provider::MetaAI));
+        assert!(login_meta.borrow().contains_key(&Provider::MetaAI));
+        assert_eq!(browser.cookies().get_all()[0].value, "global-fixture");
+    }
+
+    #[tokio::test]
+    async fn explicit_cancel_cleanup_still_commits_after_response_disconnects() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let login_page = Rc::new(browser.new_page().await.unwrap());
+        let login_pages = Rc::new(RefCell::new(HashMap::from([(
+            Provider::ChatGPT,
+            login_page,
+        )])));
+        let login_meta = Rc::new(RefCell::new(HashMap::from([(
+            Provider::ChatGPT,
+            LoginMeta {
+                last_seen: Instant::now(),
+            },
+        )])));
+        let gate = tokio::sync::Mutex::new(());
+        let active_login_complete = gate.lock().await;
+        let (reply, receiver) = oneshot::channel::<Result<()>>();
+        drop(receiver);
+        // Cancellation is an explicit owner cleanup operation, unlike an
+        // abandoned LoginComplete request. It is still committed after gate.
+        let cancel = async {
+            cancel_pending_login_after_browser_operations(
+                &gate,
+                &login_pages,
+                &login_meta,
+                Provider::ChatGPT,
+            )
+            .await;
+            let _ = reply.send(Ok(()));
+        };
+        tokio::pin!(cancel);
+        assert!(tokio::time::timeout(Duration::from_millis(10), &mut cancel)
+            .await
+            .is_err());
+        assert!(login_pages.borrow().contains_key(&Provider::ChatGPT));
+        drop(active_login_complete);
+        tokio::time::timeout(Duration::from_secs(1), cancel)
+            .await
+            .unwrap();
+        assert!(!login_pages.borrow().contains_key(&Provider::ChatGPT));
+        assert!(!login_meta.borrow().contains_key(&Provider::ChatGPT));
+    }
+}
+
+#[cfg(test)]
 mod refresh_cancellation_tests {
     use super::*;
 
@@ -2004,7 +2754,7 @@ mod refresh_cancellation_tests {
         let (mut tx, rx) = oneshot::channel::<Result<()>>();
         drop(rx);
         let lock = tokio::sync::Mutex::new(());
-        assert!(session_refresh_permit(&mut tx, &lock).await.is_none());
+        assert!(session_mutation_permit(&mut tx, &lock).await.is_none());
     }
 
     #[tokio::test]
@@ -2012,7 +2762,7 @@ mod refresh_cancellation_tests {
         let lock = Rc::new(tokio::sync::Mutex::new(()));
         let held = lock.lock().await;
         let (mut tx, rx) = oneshot::channel::<Result<()>>();
-        let waiting = session_refresh_permit(&mut tx, &lock);
+        let waiting = session_mutation_permit(&mut tx, &lock);
         tokio::pin!(waiting);
         assert!(
             tokio::time::timeout(Duration::from_millis(10), &mut waiting)
@@ -2033,7 +2783,7 @@ mod refresh_cancellation_tests {
         let lock = tokio::sync::Mutex::new(());
         let held = lock.lock().await;
         let (mut tx, _rx) = oneshot::channel::<Result<()>>();
-        let waiting = session_refresh_permit(&mut tx, &lock);
+        let waiting = session_mutation_permit(&mut tx, &lock);
         tokio::pin!(waiting);
         assert!(
             tokio::time::timeout(Duration::from_millis(10), &mut waiting)
@@ -2043,38 +2793,80 @@ mod refresh_cancellation_tests {
         drop(held);
         assert!(waiting.await.is_some());
     }
-}
 
-#[cfg(test)]
-mod late_challenge_regressions {
-    use super::*;
-
-    #[test]
-    fn post_wait_challenge_requires_active_provider_and_verified_origin() {
-        let mut evidence = ComposerPreflightEvidence {
-            document_ready: "complete",
-            provider_origin: true,
-            login_url: false,
-            challenge_visible: false,
-            configured_input_present: false,
-            generic_editor_present: false,
-            generic_editor_actionable: false,
-            body_element_count: Some(24),
-            script_element_count: Some(3),
-            external_script_count: Some(2),
-            iframe_element_count: Some(1),
+    #[tokio::test]
+    async fn login_complete_waits_for_shared_global_gate_before_provider_lock() {
+        let operation_gate = tokio::sync::Mutex::new(());
+        let provider_lock = tokio::sync::Mutex::new(());
+        // Models a refresh/unlink with exclusive rights over the shared jar.
+        let active_refresh = operation_gate.lock().await;
+        let (mut reply, _rx) = oneshot::channel::<Result<LoginCompleted>>();
+        let complete = async {
+            let _operation = session_mutation_permit(&mut reply, &operation_gate)
+                .await
+                .expect("receiver is connected");
+            let _provider = provider_lock.lock().await;
+            true
         };
-        assert!(!focused_provider_preflight_challenge("chatgpt", &evidence));
-        evidence.challenge_visible = true;
-        assert!(focused_provider_preflight_challenge("chatgpt", &evidence));
-        assert!(focused_provider_preflight_challenge("metaai", &evidence));
-        assert!(!focused_provider_preflight_challenge("claude", &evidence));
-        assert!(!focused_provider_preflight_challenge(
-            "untrusted",
-            &evidence
-        ));
-        evidence.provider_origin = false;
-        assert!(!focused_provider_preflight_challenge("chatgpt", &evidence));
-        assert!(!focused_provider_preflight_challenge("metaai", &evidence));
+        tokio::pin!(complete);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), &mut complete)
+                .await
+                .is_err()
+        );
+        // Cannot prematurely claim the provider lock while waiting for the
+        // global Browser gate, preserving global -> provider lock ordering.
+        assert!(provider_lock.try_lock().is_ok());
+        drop(active_refresh);
+        assert!(tokio::time::timeout(Duration::from_secs(1), complete)
+            .await
+            .unwrap());
+    }
+
+    #[tokio::test]
+    async fn abandoned_login_complete_cannot_reopen_snapshot_after_unlink() {
+        let operation_gate = tokio::sync::Mutex::new(());
+        let active_unlink = operation_gate.lock().await;
+        let (mut reply, rx) = oneshot::channel::<Result<LoginCompleted>>();
+        let waiting = session_mutation_permit(&mut reply, &operation_gate);
+        tokio::pin!(waiting);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), &mut waiting)
+                .await
+                .is_err()
+        );
+        // The caller went away before a prior unlink finished. The pending
+        // completion cannot acquire the gate after that unlink has committed.
+        drop(rx);
+        assert!(tokio::time::timeout(Duration::from_secs(1), waiting)
+            .await
+            .unwrap()
+            .is_none());
+        drop(active_unlink);
+        assert!(operation_gate.try_lock().is_ok());
+    }
+
+    #[tokio::test]
+    async fn shared_gate_serializes_cross_provider_login_and_refresh() {
+        let global = tokio::sync::Mutex::new(());
+        let provider_a = tokio::sync::Mutex::new(());
+        let provider_b = tokio::sync::Mutex::new(());
+        let held_a = provider_a.lock().await;
+        let (mut complete_reply, _receiver) = oneshot::channel::<Result<LoginCompleted>>();
+        let complete = async {
+            let _operation = session_mutation_permit(&mut complete_reply, &global)
+                .await
+                .unwrap();
+            let _guard = provider_b.lock().await;
+            true
+        };
+        tokio::pin!(complete);
+        // A provider-A lock alone must not prevent provider B's commit:
+        // only the global gate covers both providers' shared cookie jar.
+        assert!(tokio::time::timeout(Duration::from_secs(1), complete)
+            .await
+            .unwrap());
+        drop(held_a);
+        assert!(global.try_lock().is_ok());
     }
 }

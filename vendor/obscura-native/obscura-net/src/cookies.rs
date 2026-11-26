@@ -269,7 +269,13 @@ impl CookieJar {
                 result.push(CookieInfo {
                     name: entry.name.clone(),
                     value: entry.value.clone(),
-                    domain: entry.domain.clone(),
+                    // Preserve the authoritative jar scope across export and
+                    // replay; host-only cookies must never be widened.
+                    domain: if entry.host_only {
+                        entry.domain.clone()
+                    } else {
+                        format!(".{}", entry.domain)
+                    },
                     path: entry.path.clone(),
                     secure: entry.secure,
                     http_only: entry.http_only,
@@ -1318,7 +1324,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cdp_stored_domain_field_carries_no_dot() {
+    fn test_cdp_internal_domain_is_canonical_and_export_preserves_scope() {
         // The dotted spelling comes LAST. That is why an implementation which only
         // canonicalizes the map key and leaves `entry.domain` raw also fails here.
         let jar = CookieJar::new();
@@ -1327,7 +1333,9 @@ mod tests {
 
         let all = marker(&jar);
         assert_eq!(all.len(), 1, "both spellings collapse, got: {all:?}");
-        assert_eq!(all[0].domain, "example.com", "entry.domain is canonical, got: {:?}", all[0].domain);
+        assert!(jar.read_jar().get("example.com").unwrap().values()
+            .all(|entry| entry.domain == "example.com"), "internal entry.domain must remain canonical");
+        assert_eq!(all[0].domain, ".example.com", "export must retain Domain scope");
         assert_eq!(all[0].value, "two", "newer value must win");
     }
 

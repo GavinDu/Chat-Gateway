@@ -151,6 +151,32 @@ mod imported_chatgpt_session_tests {
     }
 
     #[tokio::test]
+    async fn malformed_whitespace_only_session_token_does_not_verify_imported_page() {
+        let mut page = page_with_first_party_fixture(
+            r#"globalThis.fetch = async (url, options) => {
+                if (url !== '/api/auth/session' || options.credentials !== 'include') {
+                    throw new Error('invalid synthetic account request');
+                }
+                return new Response(JSON.stringify({
+                    user: {fixture: true}, accessToken: '   ',
+                    expires: new Date(Date.now() + 60000).toISOString()
+                }));
+            };"#,
+        )
+        .await;
+        let error = verify_credentials(&mut page).await.unwrap_err();
+        assert!(
+            error
+                .downcast_ref::<crate::browser::pool::ProviderSessionExpiredError>()
+                .is_none(),
+            "malformed account response is not proven logout"
+        );
+        assert!(error.to_string().contains("unavailable"));
+        assert!(!error.to_string().contains("accessToken"));
+        assert!(!error.to_string().contains("fixture"));
+    }
+
+    #[tokio::test]
     async fn explicit_session_rejection_and_403_remain_distinct() {
         for (status, expected_login) in [(401, true), (403, false)] {
             let mut page = page_with_first_party_fixture(&format!(
