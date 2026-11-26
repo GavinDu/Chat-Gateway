@@ -1706,17 +1706,13 @@ async fn persist_provider_thread(
     provider: &str,
     model: &str,
     receipt: memory::CommitReceipt,
+    observation: chat_backend::RemoteThreadObservation,
 ) {
-    let thread_url = match state.pool.current_url(provider).await {
-        Ok(url) if is_reopenable_provider_thread_url(provider, &url) => url,
-        Ok(_) => return,
-        Err(error) => {
-            tracing::debug!(
-                failure_category = provider_thread_failure_log_category(&error),
-                "provider thread URL unavailable after successful send"
-            );
-            return;
-        }
+    let Some(thread_url) = observation
+        .into_url_for(provider)
+        .filter(|url| is_reopenable_provider_thread_url(provider, url))
+    else {
+        return;
     };
     let thread = ProviderThread {
         conversation_id: conversation_id.to_owned(),
@@ -1745,6 +1741,7 @@ async fn persist_completed_turn(
     state: &AppState,
     turn: memory::SnapshotTurn,
     model: &str,
+    observation: Option<chat_backend::RemoteThreadObservation>,
 ) -> anyhow::Result<()> {
     let owner_key_id = turn.owner_key_id.clone();
     let conversation_id = turn.conversation_id.clone();
@@ -1754,7 +1751,7 @@ async fn persist_completed_turn(
         .clone()
         .persist_turn_from_snapshot(turn)
         .await?;
-    if let Some(receipt) = receipt {
+    if let (Some(receipt), Some(observation)) = (receipt, observation) {
         persist_provider_thread(
             state,
             &owner_key_id,
@@ -1762,6 +1759,7 @@ async fn persist_completed_turn(
             &provider,
             model,
             receipt,
+            observation,
         )
         .await;
     }

@@ -22,6 +22,7 @@ pub(super) async fn json_provider_response(
         queue_ms,
         prompt_tokens,
         receiver,
+        thread_observation,
     } = attempt;
     let collected = state
         .chat_service
@@ -92,6 +93,7 @@ pub(super) async fn json_provider_response(
             provider_work_ms,
             request_started,
             stream_failed: false,
+            thread_observation: thread_observation.and_then(|mut rx| rx.try_recv().ok()),
         },
     )
     .await;

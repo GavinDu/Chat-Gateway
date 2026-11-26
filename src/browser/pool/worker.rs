@@ -5,6 +5,74 @@
 //! command delivery remain in the parent pool module.
 use super::*;
 
+/// A terminal response is not by itself proof that a reusable thread was
+/// opened. Reject unexpected redirects, ambiguous URLs and replay-only adapters.
+fn completed_thread_observation(
+    provider: Provider,
+    reopened: Option<&str>,
+    initial: &str,
+    final_url: &str,
+) -> Option<crate::chat_backend::RemoteThreadObservation> {
+    if !crate::is_reopenable_provider_thread_url(provider.name(), final_url)
+        || !pool_policy::provider_thread_url_is_same_origin(final_url, provider.login_url())
+        || !pool_policy::provider_thread_navigation_matches(final_url, final_url)
+        || !pool_policy::provider_thread_url_is_same_origin(initial, provider.login_url())
+    {
+        return None;
+    }
+    let valid_transition = match reopened {
+        Some(expected) => {
+            pool_policy::provider_thread_navigation_matches(initial, expected)
+                && pool_policy::provider_thread_navigation_matches(final_url, expected)
+        }
+        None => pool_policy::landing_is_not_previous_thread(provider.name(), initial),
+    };
+    valid_transition.then(|| {
+        crate::chat_backend::RemoteThreadObservation::new(
+            provider.name().to_owned(),
+            final_url.to_owned(),
+        )
+    })
+}
+
+#[cfg(test)]
+mod completed_thread_observation_tests {
+    use super::*;
+
+    #[test]
+    fn completed_observation_requires_fresh_or_exact_reopened_thread() {
+        let home = "https://chatgpt.com/";
+        let thread = "https://chatgpt.com/c/thread-a";
+        assert!(completed_thread_observation(Provider::ChatGPT, None, home, thread).is_some());
+        assert!(completed_thread_observation(
+            Provider::ChatGPT,
+            Some(thread),
+            thread,
+            "https://chatgpt.com/c/thread-a/?utm_source=test",
+        )
+        .is_some());
+        for (expected, initial, final_url) in [
+            (None, thread, thread),
+            (Some(thread), thread, "https://chatgpt.com/c/thread-b"),
+            (Some(thread), home, thread),
+            (None, home, "https://chatgpt.com/c/thread-a?conversation=foreign"),
+            (None, home, "https://chatgpt.com/c/"),
+            (None, home, "https://evil.example/c/thread-a"),
+            (None, "https://evil.example/", thread),
+        ] {
+            assert!(completed_thread_observation(Provider::ChatGPT, expected, initial, final_url)
+                .is_none());
+        }
+        assert!(completed_thread_observation(
+            Provider::MetaAI,
+            None,
+            "https://www.meta.ai/",
+            "https://www.meta.ai/c/thread-a",
+        )
+        .is_none());
+    }
+}
+
 /// A diagnostic replay must not overwrite the live cookie jar or owner vault.
 /// Keep deferred providers unchanged until their separate owner acceptance
 /// cycle; ChatGPT/Meta AI are the only active recovery providers.
@@ -1587,7 +1655,7 @@ pub(super) fn browser_thread(
                                 let _ = reply.send(res);
                             });
                         }
-                        Command::Send { queued_at, provider, prompt, model, has_history, thread_url, timeout, completion_idle, provider_guard, chunks } => {
+                        Command::Send { queued_at, provider, prompt, model, has_history, thread_url, timeout, completion_idle, provider_guard, chunks, thread_observation } => {
                             // A request can be cancelled while waiting in the
                             // worker command queue. Never navigate a page for
                             // an abandoned sender after that admission timeout.
@@ -1796,6 +1864,8 @@ pub(super) fn browser_thread(
                                 // Observe completion while forwarding chunks. Only a
                                 // successful done chunk triggers a session snapshot;
                                 // expired/failed sends must never persist stale state.
+                                let initial_url = page.url();
+                                let terminal_chunks = chunks.clone();
                                 let (save_tx, mut save_rx) = mpsc::channel::<Result<ProviderChunk>>(32);
                                 let (completion_tx, completion_rx) = oneshot::channel();
                                 // Keep cancellation separate from the provider result channel: a
@@ -1803,7 +1873,7 @@ pub(super) fn browser_thread(
                                 let cancel_send = Arc::new(Notify::new());
                                 let cancel_forwarder = cancel_send.clone();
                                 tokio::task::spawn_local(async move {
-                                    let mut completed = false;
+                                    let mut terminal = None;
                                     loop {
                                         tokio::select! {
                                             // Detect disconnect immediately, even if the provider
@@ -1816,7 +1886,8 @@ pub(super) fn browser_thread(
                                             chunk = save_rx.recv() => {
                                                 let Some(chunk) = chunk else { break };
                                                 if matches!(&chunk, Ok(chunk) if chunk.done) {
-                                                    completed = true;
+                                                    terminal = chunk.ok();
+                                                    break;
                                                 }
                                                 if chunks.send(chunk).await.is_err() {
                                                     cancel_forwarder.notify_one();
@@ -1825,7 +1896,7 @@ pub(super) fn browser_thread(
                                             }
                                         }
                                     }
-                                    let _ = completion_tx.send(completed);
+                                    let _ = completion_tx.send(terminal);
                                 });
                                 let cancel_adapter = adapter.clone();
                                 let cancelled = tokio::select! {
@@ -1853,7 +1924,17 @@ pub(super) fn browser_thread(
                                 // Save only after the send loop has finished and while
                                 // this provider's page lock is still held. A cancelled send
                                 // returns above without persisting a partial session.
-                                if completion_rx.await.unwrap_or(false) {
+                                if let Ok(Some(terminal)) = completion_rx.await {
+                                    // Capture before the terminal event is visible to HTTP, while
+                                    // the original attempt still owns the worker page lock.
+                                    if let Some(proof) = completed_thread_observation(
+                                        provider, thread_url.as_deref(), &initial_url, &page.url(),
+                                    ) {
+                                        let _ = thread_observation.send(proof);
+                                    }
+                                    if terminal_chunks.send(Ok(terminal)).await.is_err() {
+                                        return;
+                                    }
                                     observation::stage(Stage::SessionSnapshot);
                                     let _snapshot_timer = Timer::start(Step::SessionSnapshot);
                                     // A promoted private Page must persist cookies from

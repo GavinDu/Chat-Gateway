@@ -10,7 +10,7 @@ use crate::{
 };
 use anyhow::Result;
 use std::{error::Error, fmt};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChatRequest {
@@ -109,6 +109,28 @@ pub struct BackendCapabilities {
 pub struct ChatEvent {
     pub content: String,
     pub done: bool,
+}
+
+/// Internal evidence from the same backend attempt, not an active-page lookup.
+/// Do not serialize or log the raw remote URL.
+pub struct RemoteThreadObservation {
+    provider: String,
+    url: String,
+}
+
+impl RemoteThreadObservation {
+    pub(crate) fn new(provider: String, url: String) -> Self {
+        Self { provider, url }
+    }
+
+    pub(crate) fn into_url_for(self, provider: &str) -> Option<String> {
+        (self.provider == provider).then_some(self.url)
+    }
+}
+
+pub struct ObservedChatStream {
+    pub(crate) events: mpsc::Receiver<Result<ChatEvent, GatewayError>>,
+    pub(crate) thread_observation: Option<oneshot::Receiver<RemoteThreadObservation>>,
 }
 
 impl From<ProviderChunk> for ChatEvent {
@@ -307,6 +329,18 @@ pub trait ChatBackend: Send + Sync {
         request: ChatRequest,
     ) -> std::result::Result<mpsc::Receiver<Result<ChatEvent, GatewayError>>, GatewayError>;
 
+    /// Backends without attempt-bound evidence may still complete canonical
+    /// turns, but cannot certify a remote provider-thread mapping.
+    async fn send_stream_with_thread_observation(
+        &self,
+        request: ChatRequest,
+    ) -> std::result::Result<ObservedChatStream, GatewayError> {
+        Ok(ObservedChatStream {
+            events: self.send_stream(request).await?,
+            thread_observation: None,
+        })
+    }
+
     /// Discover models through the selected provider adapter.
     async fn models(&self, provider: ProviderId) -> std::result::Result<Vec<String>, GatewayError>;
 }
@@ -420,7 +454,17 @@ impl ChatBackend for crate::browser::pool::ObscuraPool {
         &self,
         request: ChatRequest,
     ) -> std::result::Result<mpsc::Receiver<Result<ChatEvent, GatewayError>>, GatewayError> {
-        let source = crate::browser::pool::ObscuraPool::send_stream(
+        self.send_stream_with_thread_observation(request)
+            .await
+            .map(|stream| stream.events)
+    }
+
+    async fn send_stream_with_thread_observation(
+        &self,
+        request: ChatRequest,
+    ) -> std::result::Result<ObservedChatStream, GatewayError> {
+        let (source, observation) =
+            crate::browser::pool::ObscuraPool::send_stream_with_thread_observation(
             self,
             request.provider.as_str(),
             request.prompt,
@@ -432,7 +476,10 @@ impl ChatBackend for crate::browser::pool::ObscuraPool {
         .map_err(map_backend_error)?;
         let (tx, rx) = mpsc::channel(32);
         forward_provider_stream(source, tx);
-        Ok(rx)
+        Ok(ObservedChatStream {
+            events: rx,
+            thread_observation: Some(observation),
+        })
     }
 }
 

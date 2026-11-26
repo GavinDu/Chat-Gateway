@@ -2,7 +2,9 @@
 //!
 //! The service owns backend dispatch and common event-stream consumption so
 //! streaming and non-streaming handlers share the same provider event contract.
-use crate::chat_backend::{BackendRequest, ChatBackend, ChatEvent, GatewayError};
+use crate::chat_backend::{
+    BackendRequest, ChatBackend, ChatEvent, GatewayError, ObservedChatStream, RemoteThreadObservation,
+};
 use crate::{
     api::api_error,
     app_state::{AppState, AuthKeyContext},
@@ -448,6 +450,7 @@ pub(crate) struct AttemptTelemetry<'a> {
     pub(crate) provider_work_ms: u64,
     pub(crate) request_started: Instant,
     pub(crate) stream_failed: bool,
+    pub(crate) thread_observation: Option<RemoteThreadObservation>,
 }
 
 /// One completion boundary for both transports: never record a successful
@@ -485,6 +488,7 @@ pub(crate) async fn finalize_provider_attempt(
                 expected_identity: telemetry.snapshot_identity.clone(),
             },
             model,
+            telemetry.thread_observation,
         )
         .await;
         let persistence_ms = persistence_started
@@ -795,6 +799,7 @@ impl ChatService {
         Self { backend }
     }
 
+    #[cfg(test)]
     pub async fn stream(
         &self,
         request: BackendRequest,
@@ -815,12 +820,39 @@ impl ChatService {
     /// A backend may stall *before* it returns a stream receiver (for example
     /// while its command queue is saturated). Bound admission as well as event
     /// collection; dropping the pending future cancels the admission attempt.
+    #[cfg(test)]
     pub async fn stream_with_timeout(
         &self,
         request: BackendRequest,
         max_wait: Duration,
     ) -> std::result::Result<mpsc::Receiver<Result<ChatEvent, GatewayError>>, GatewayError> {
         match tokio::time::timeout(max_wait, self.stream(request)).await {
+            Ok(result) => result,
+            Err(_) => Err(GatewayError::timeout("provider submission timed out")),
+        }
+    }
+
+    pub(crate) async fn observed_stream_with_timeout(
+        &self,
+        request: BackendRequest,
+        max_wait: Duration,
+    ) -> std::result::Result<ObservedChatStream, GatewayError> {
+        let backend_id = self.backend.id();
+        let capabilities = self.backend.capabilities();
+        tracing::debug!(
+            backend = backend_id.as_str(),
+            streaming = capabilities.streaming,
+            model_selection = capabilities.model_selection,
+            system_role = capabilities.system_role,
+            addressable_threads = capabilities.addressable_threads,
+            "executing request through chat backend"
+        );
+        match tokio::time::timeout(
+            max_wait,
+            self.backend.send_stream_with_thread_observation(request),
+        )
+        .await
+        {
             Ok(result) => result,
             Err(_) => Err(GatewayError::timeout("provider submission timed out")),
         }
