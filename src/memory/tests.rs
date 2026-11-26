@@ -2732,6 +2732,92 @@ async fn absent_admission_cannot_resurrect_after_create_delete_or_purge() {
     }
 }
 
+#[tokio::test]
+async fn absent_admission_first_write_and_bucket_conflicts_are_conservative() {
+    let fixture = Fixture::new();
+    let memory = Arc::new(fixture.open());
+    let other = Arc::new(fixture.open());
+    let snapshot = |id: &'static str| {
+        let memory = memory.clone();
+        async move {
+            memory
+                .build_context_snapshot_async(
+                    "local".to_owned(),
+                    Some(id.to_owned()),
+                    Vec::new(),
+                    8000,
+                )
+                .await
+                .unwrap()
+        }
+    };
+    let turn = |id: &str, admission: ContextSnapshot, answer: &str| SnapshotTurn {
+        owner_key_id: "local".to_owned(),
+        conversation_id: id.to_owned(),
+        user_msgs: vec![m("user", "question")],
+        assistant_msg: m("assistant", answer),
+        provider: "chatgpt".to_owned(),
+        expected_marker: transcript_marker(&admission.context.3),
+        expected_identity: admission.identity,
+    };
+    let first = snapshot("first-a").await;
+    let second = snapshot("first-a").await;
+    let winner = other
+        .clone()
+        .persist_turn_from_snapshot(turn("first-a", first, "winner"))
+        .await
+        .unwrap();
+    assert!(winner.is_some());
+    assert!(memory
+        .clone()
+        .persist_turn_from_snapshot(turn("first-a", second, "loser"))
+        .await
+        .is_err());
+    assert_eq!(
+        memory.conversation("first-a").unwrap().unwrap().messages,
+        vec![m("user", "question"), m("assistant", "winner")]
+    );
+
+    let same_bucket = snapshot("pending-a").await;
+    let different_bucket = snapshot("pending-b").await;
+    other
+        .store_turn_for_owner_with_tab_id(
+            "other-owner",
+            "foreign-a".to_owned(),
+            vec![m("user", "foreign question")],
+            m("assistant", "foreign answer"),
+            "chatgpt".to_owned(),
+            None,
+        )
+        .unwrap();
+    assert!(!other
+        .delete_conversation_for_owner("local", "foreign-a")
+        .unwrap());
+    assert_eq!(snapshot("pending-a").await.identity, same_bucket.identity);
+    assert!(other
+        .delete_conversation_for_owner("other-owner", "foreign-a")
+        .unwrap());
+    assert!(memory
+        .clone()
+        .persist_turn_from_snapshot(turn("pending-a", same_bucket, "stale"))
+        .await
+        .is_err());
+    assert!(memory.conversation("pending-a").unwrap().is_none());
+    assert!(memory
+        .clone()
+        .persist_turn_from_snapshot(turn("pending-b", different_bucket, "valid"))
+        .await
+        .unwrap()
+        .is_some());
+    let retry = snapshot("pending-a").await;
+    assert!(memory
+        .clone()
+        .persist_turn_from_snapshot(turn("pending-a", retry, "fresh"))
+        .await
+        .unwrap()
+        .is_some());
+}
+
 #[test]
 fn missing_or_exhausted_generation_rolls_back_turn() {
     for missing in [false, true] {
