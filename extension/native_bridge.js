@@ -3,6 +3,11 @@
   const HOST = "com.chat_gateway.reload_bridge";
   const ALARM = "native-bridge-reconnect";
   const permission = {permissions:["nativeMessaging"]};
+  const DISABLED = "nativeBridgeDisabled";
+  async function allowed() {
+    const state = await chrome.storage.local.get(DISABLED);
+    return state[DISABLED] !== true && await chrome.permissions.contains(permission);
+  }
   const instance = randomHex(16);
   const validId = id => typeof id === "string" && /^[a-f0-9]{32}$/.test(id);
   const pick = (value, allowed) => allowed.includes(value) ? value : "unknown";
@@ -49,10 +54,13 @@
     opening = true;
     const epoch = generation;
     try {
-      if (!await chrome.permissions.contains(permission) || epoch !== generation) return;
+      if (!await allowed() || epoch !== generation) {
+        if (epoch === generation) await chrome.alarms.clear(ALARM);
+        return;
+      }
       // Native ports keep the worker alive; the alarm only reconnects after a failure.
       await chrome.alarms.create(ALARM, {periodInMinutes:1});
-      if (epoch !== generation || !await chrome.permissions.contains(permission) || epoch !== generation) {
+      if (epoch !== generation || !await allowed() || epoch !== generation) {
         await chrome.alarms.clear(ALARM);
         return;
       }
@@ -77,17 +85,21 @@
     if (working) { reply(false,"busy"); return; }
     working = true;
     try {
-      if (!await chrome.permissions.contains(permission) || source !== port) return;
+      if (!await allowed() || source !== port) return;
       switch (request.command) {
         case "ping": {
           const {nativeBridgeReloadReceipt: receipt} = await chrome.storage.local.get("nativeBridgeReloadReceipt");
+          if (!await allowed() || source !== port) return;
           reply(true,{instance,version:chrome.runtime.getManifest().version,
             reload_receipt: validId(receipt) ? receipt : null});
           break;
         }
-        case "diagnostics":
-          reply(true,project(await relayDiagnostics(false)));
+        case "diagnostics": {
+          const snapshot = await relayDiagnostics(false);
+          if (!await allowed() || source !== port) return;
+          reply(true,project(snapshot));
           break;
+        }
         case "reload_extension":
           if (busy() || (prepared && prepared.until > Date.now())) { reply(false,"busy"); break; }
           prepared = {id:request.id,until:Date.now()+10000};
@@ -99,7 +111,7 @@
           }
           prepared = null;
           await chrome.storage.local.set({nativeBridgeReloadReceipt:request.id});
-          if (source !== port || busy() || !await chrome.permissions.contains(permission) || source !== port || busy()) {
+          if (source !== port || busy() || !await allowed() || source !== port || busy()) {
             await chrome.storage.local.remove("nativeBridgeReloadReceipt");
             reply(false,"busy"); break;
           }
@@ -118,6 +130,14 @@
     if (change.permissions?.includes("nativeMessaging")) {
       stop(); void chrome.alarms.clear(ALARM);
     }
+  });
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== "local" || !Object.hasOwn(changes, DISABLED)) return;
+    // An explicit disable immediately fences the current port and prepared reload.
+    // A subsequent enable opens a fresh port; provider consent is untouched.
+    if (changes[DISABLED].newValue === true) {
+      stop(); void chrome.alarms.clear(ALARM).catch(() => {});
+    } else { void open(); }
   });
   chrome.alarms.onAlarm.addListener(alarm => { if (alarm.name === ALARM) void open(); });
   chrome.runtime.onStartup.addListener(() => { void open(); });
