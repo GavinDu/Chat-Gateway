@@ -2661,6 +2661,40 @@ async fn v10_upgrade_preserves_identities_and_admissions_expire() {
     assert!(reopened.conversation("pending-a").unwrap().is_none());
 }
 
+#[test]
+fn absent_admission_capacity_is_owner_scoped_and_read_only_context_does_not_reserve() {
+    let fixture = Fixture::new();
+    let memory = fixture.open();
+    let read_only = memory
+        .build_context_for_owner_with_transcript_budget("local", Some("read-only-id"), &[], 8000)
+        .unwrap();
+    assert!(read_only.3.is_empty());
+    let connection = memory.lock().unwrap();
+    let count = || {
+        connection
+            .query_row("SELECT count(*) FROM conversation_admissions", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap()
+    };
+    assert_eq!(count(), 0);
+    for index in 0..128 {
+        reserve_absent_admission(&connection, "local", &format!("reserved-{index}")).unwrap();
+    }
+    assert_eq!(count(), 128);
+    assert!(reserve_absent_admission(&connection, "local", "overflow-id").is_err());
+    assert!(reserve_absent_admission(&connection, "other", "overflow-id").is_ok());
+    assert_eq!(count(), 129);
+    connection
+        .execute(
+            "UPDATE conversation_admissions SET expires_at=0 WHERE owner_key_id='local'",
+            [],
+        )
+        .unwrap();
+    assert!(reserve_absent_admission(&connection, "local", "overflow-id").is_ok());
+    assert_eq!(count(), 2);
+}
+
 #[tokio::test]
 async fn absent_admission_cannot_resurrect_after_create_delete_or_purge() {
     for purge in [false, true] {
