@@ -31,6 +31,8 @@ class NativeBridgeTests(unittest.TestCase):
 
     def test_command_allowlist(self):
         base = {"v": 1, "id": "a" * 32, "command": "ping"}
+        self.assertTrue(bridge.request_valid(dict(base, command="chatgpt_account")))
+        self.assertFalse(bridge.request_valid(dict(base, command="chatgpt_account", args=["private"])))
         for change in ({"command": "reload_commit"}, {"command": "shell"},
                        {"v": True}, {"id": "../bad"}, {"args": ["secret"]}):
             self.assertFalse(bridge.request_valid(dict(base, **change)))

@@ -1,4 +1,4 @@
-importScripts("shared.js");
+importScripts("shared.js", "credential_probe.js", "native_account_diagnostics.js");
 
 const debounceTimers = new Map();
 // Internal API snapshots contain only fixed health categories and timestamps.
@@ -125,6 +125,15 @@ function redactedPartitionCounts(value) {
   return {...Object.fromEntries(fields.map(key => [key, value[key]])), limited: value.limited === true};
 }
 
+function redactedPartitionDetails(value) {
+  const fields = ["app_partitioned", "auxiliary_partitioned", "shape", "extra_fields", "ancestor_type", "missing_site", "opaque_site", "extension_site", "non_web_scheme", "invalid_url", "noncanonical_site", "chatgpt_alias", "other"];
+  if (!value || typeof value !== "object" || Array.isArray(value) ||
+      fields.some(key=>!Number.isInteger(value[key]) || value[key] < 0 || value[key] > 512) ||
+      value.app_partitioned + value.auxiliary_partitioned > 512 ||
+      fields.slice(2).reduce((sum,key)=>sum+value[key],0) > value.app_partitioned + value.auxiliary_partitioned) return null;
+  return Object.fromEntries(fields.map(key=>[key,value[key]]));
+}
+
 function recordProviderDiagnostic(provider, state, errorCode = null, attempt = null, telemetry = null) {
   // A provider sync attempt is NOT authenticated-login verification.
   // Store only stable local result codes, never raw upstream responses.
@@ -135,7 +144,8 @@ function recordProviderDiagnostic(provider, state, errorCode = null, attempt = n
     phase: safeState === "syncing" && IMPORT_PHASES.includes(telemetry?.phase)
       ? telemetry.phase : null,
     durations_ms: redactedImportTimings(telemetry?.durations_ms),
-    partition_counts: provider === "chatgpt" ? redactedPartitionCounts(telemetry?.partition_counts) : null
+    partition_counts: provider === "chatgpt" ? redactedPartitionCounts(telemetry?.partition_counts) : null,
+    partition_details: provider === "chatgpt" ? redactedPartitionDetails(telemetry?.partition_details) : null
   };
   providerDiagnostics.set(provider, entry);
   if (attempt) providerDiagnosticEpochs.set(provider, attempt.providerLinkEpochs?.[provider]);
@@ -162,6 +172,8 @@ function finalizeRelayDiagnostics(result, requestedGeneration, requestedEpochs) 
         durations_ms: redactedImportTimings(previous?.durations_ms),
         partition_counts: provider === "chatgpt" && extension.permissions?.providers?.[provider] === true
           ? redactedPartitionCounts(previous?.partition_counts) : null,
+        partition_details: provider === "chatgpt" && extension.permissions?.providers?.[provider] === true
+          ? redactedPartitionDetails(previous?.partition_details) : null,
         stale: !result.ok,
       }];
     })
@@ -692,7 +704,8 @@ function queueProviderSync(provider, force = false) {
       if (await providerDiagnosticScopeCurrent(provider, attempt)) {
         recordProviderDiagnostic(provider, "failed", classifyRelayFailure(error), attempt, {
           ...inProgress,
-          partition_counts: classifyRelayFailure(error) === "partition_scope_unsupported" ? error?.partitionCounts : null
+          partition_counts: classifyRelayFailure(error) === "partition_scope_unsupported" ? error?.partitionCounts : null,
+          partition_details: classifyRelayFailure(error) === "partition_scope_unsupported" ? error?.partitionDetails : null
         });
       } else {
         clearStaleProgress();

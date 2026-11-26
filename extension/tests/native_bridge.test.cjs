@@ -30,6 +30,8 @@ async function fixture(granted = true, unavailableAttempts = 0, initiallyDisable
       alarms:{create:async()=>{},clear:async()=>{calls.clear++;},onAlarm:alarms}
     }
   };
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname,"../native_account_diagnostics.js"),"utf8"),sandbox);
+  sandbox.nativeChatgptAccountDiagnostic=async lease=>{calls.account=(calls.account||0)+1;return await lease()?{provider:"chatgpt",context:"chrome_native_diagnostic",authentication:"verified",reason:"bearer_account_confirmed",http_status:200,auth_mode:"bearer",checked_at:new Date().toISOString(),exported_snapshot_verified:false,token:"SECRET"}:null;};
   vm.runInNewContext(source,sandbox);
   await tick();
   async function send(command,id="b".repeat(32),extra={}) {
@@ -159,4 +161,10 @@ test("native partition counts are hidden after provider permission is revoked",a
   const counts={unpartitioned:1,current_site:0,current_cross_site_ancestor:0,current_ancestor_unspecified:0,foreign_site:1,unknown:0,limited:false};
   const f=await fixture(true,0,false,counts,false);
   assert.equal((await f.send("diagnostics")).result.providers[0].partition_counts,null);
+});
+
+test("fixed native account command projects evidence, rejects arguments and refuses busy work",async()=>{
+  const f=await fixture();const r=await f.send("chatgpt_account");assert.equal(r.ok,true);assert.equal(r.result.reason,"bearer_account_confirmed");assert.equal(r.result.auth_mode,"bearer");assert.doesNotMatch(JSON.stringify(r),/SECRET|checked_at/);
+  assert.equal(f.calls.account,1);f.tasks.set("chatgpt",true);assert.equal((await f.send("chatgpt_account")).error,"busy");assert.equal(f.calls.account,1);
+  const count=f.sent.length;await f.send("chatgpt_account","b".repeat(32),{args:["private"]});assert.equal(f.sent.length,count);
 });
