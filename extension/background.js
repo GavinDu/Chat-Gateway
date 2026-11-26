@@ -160,7 +160,8 @@ function finalizeRelayDiagnostics(result, requestedGeneration, requestedEpochs) 
         updated_at: previous?.updated_at || null,
         phase: previous?.phase || null,
         durations_ms: redactedImportTimings(previous?.durations_ms),
-        partition_counts: provider === "chatgpt" ? redactedPartitionCounts(previous?.partition_counts) : null,
+        partition_counts: provider === "chatgpt" && extension.permissions?.providers?.[provider] === true
+          ? redactedPartitionCounts(previous?.partition_counts) : null,
         stale: !result.ok,
       }];
     })

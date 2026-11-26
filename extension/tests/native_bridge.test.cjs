@@ -9,7 +9,7 @@ function event() {
   const listeners = [];
   return {addListener: fn => listeners.push(fn), fire: (...args) => listeners.forEach(fn => fn(...args))};
 }
-async function fixture(granted = true, unavailableAttempts = 0, initiallyDisabled = false, partitionCounts = null) {
+async function fixture(granted = true, unavailableAttempts = 0, initiallyDisabled = false, partitionCounts = null, providerPermission = true) {
   const removed = event(), added = event(), alarms = event(), storageChanged = event();
   let incoming, disconnect;
   const sent = [], saved = initiallyDisabled ? {nativeBridgeDisabled:true} : {}, calls = {connect:0,reload:0,clear:0};
@@ -22,7 +22,7 @@ async function fixture(granted = true, unavailableAttempts = 0, initiallyDisable
   const sandbox = {
     randomHex: () => "a".repeat(32), PROVIDERS:{chatgpt:[],metaai:[]},
     providerTasks:tasks,pendingConsentMutations:0,scheduledProviderRefresh:null,connectionPoll:null,
-    relayDiagnostics:async()=>({ok:true, extension:{connected:true,connection_mode:"local",linked_providers:["chatgpt"],provider_sync:{chatgpt:{state:"uploaded",issue:"secret-token",stale:false,partition_counts:partitionCounts}},permissions:{providers:{chatgpt:true}}},gateway:{providers:[{provider:"chatgpt",enabled:true,linked:true,authentication:"verified",availability:"ready",token:"SECRET",url:"https://private.invalid"}]}}),
+    relayDiagnostics:async()=>({ok:true, extension:{connected:true,connection_mode:"local",linked_providers:["chatgpt"],provider_sync:{chatgpt:{state:"uploaded",issue:"secret-token",stale:false,partition_counts:partitionCounts}},permissions:{providers:{chatgpt:providerPermission}}},gateway:{providers:[{provider:"chatgpt",enabled:true,linked:true,authentication:"verified",availability:"ready",token:"SECRET",url:"https://private.invalid"}]}}),
     chrome:{
       permissions:{contains:async()=>granted,onAdded:added,onRemoved:removed},
       runtime:{connectNative:()=>{calls.connect++;if(calls.connect <= unavailableAttempts) throw new Error("host missing");return newPort();},getManifest:()=>({version:"0.3.0"}),reload:()=>calls.reload++,onStartup:event(),onInstalled:event()},
@@ -153,4 +153,10 @@ test("native diagnostics project only bounded ChatGPT partition counts",async()=
     const invalid=await fixture(true,0,false,bad);
     assert.equal((await invalid.send("diagnostics")).result.providers[0].partition_counts,null);
   }
+});
+
+test("native partition counts are hidden after provider permission is revoked",async()=>{
+  const counts={unpartitioned:1,current_site:0,current_cross_site_ancestor:0,current_ancestor_unspecified:0,foreign_site:1,unknown:0,limited:false};
+  const f=await fixture(true,0,false,counts,false);
+  assert.equal((await f.send("diagnostics")).result.providers[0].partition_counts,null);
 });
