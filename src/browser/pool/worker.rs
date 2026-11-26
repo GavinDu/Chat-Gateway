@@ -1611,6 +1611,8 @@ pub(super) fn browser_thread(
                             tokio::task::spawn_local(async move {
                                 let work = async move {
                                 use crate::metaai_timing::{Step, Timer};
+                                use providers::chatgpt::attempt_diagnostics::{self as observation,Stage};
+                                observation::command_queue(queued_at.elapsed());
                                 if provider == Provider::MetaAI {
                                     request_metrics.record_metaai_step(Step::CommandQueue, queued_at.elapsed().as_micros().min(u64::MAX as u128) as u64);
                                 }
@@ -1648,6 +1650,7 @@ pub(super) fn browser_thread(
                                 // A queued request may have been cancelled
                                 // while another send owned the page lock.
                                 if chunks.is_closed() { return; }
+                                observation::stage(Stage::PageRestore);
                                 let ensure_timer = Timer::start(Step::PageEnsure);
                                 let Some(opened) = send_unless_disconnected(&chunks,
                                     ensure_provider_page(&browser_for_save, &pages, provider)).await else { return; };
@@ -1683,6 +1686,7 @@ pub(super) fn browser_thread(
                                 if (!just_opened || thread_url.is_some()) && pool_policy::provider_send_requires_navigation(
                                     &page.url(), target_url, thread_url.is_some(),
                                 ) {
+                                    observation::stage(Stage::Navigation);
                                     let _navigation_timer = Timer::start(Step::Navigation);
                                     page.clear_bootstrap_403_before_navigation();
                                     let mut navigation_observer = crate::metaai_timing::Navigation::new(&mut page, target_url);
@@ -1708,6 +1712,7 @@ pub(super) fn browser_thread(
                                 // before waiting for a composer, so a failed token
                                 // refresh is not misdiagnosed as selector drift.
                                 if provider == Provider::ChatGPT {
+                                    observation::stage(Stage::AccountReadiness);
                                     let Some(account) = send_unless_disconnected(&chunks,
                                         providers::chatgpt::verify_credentials(&mut page)).await else { return; };
                                     if let Err(error) = account {
@@ -1715,6 +1720,7 @@ pub(super) fn browser_thread(
                                         return;
                                     }
                                 }
+                                observation::stage(Stage::ComposerReady);
                                 let composer_timer = Timer::start(Step::ComposerReady);
                                 let Some(composer) = send_unless_disconnected(&chunks,
                                     providers::common::wait_for_selector(&mut page, &adapter.effective_selectors().input_refs(), 15_000)).await else { return; };
@@ -1770,6 +1776,7 @@ pub(super) fn browser_thread(
                                 // Failure fails the attempt so the router
                                 // can try the next provider.
                                 if !has_history {
+                                    observation::stage(Stage::ModelSelection);
                                     let _model_timer = Timer::start(Step::ModelSelection);
                                     let Some(model_selection) = send_unless_disconnected(
                                         &chunks,
@@ -1838,6 +1845,7 @@ pub(super) fn browser_thread(
                                     ) => false
                                 };
                                 if cancelled {
+                                    observation::consumer_cancelled();
                                     cancel_adapter.cancel_generation(&page);
                                     providers::common::drive_page(&mut page, Duration::from_millis(100)).await;
                                     return;
@@ -1846,6 +1854,7 @@ pub(super) fn browser_thread(
                                 // this provider's page lock is still held. A cancelled send
                                 // returns above without persisting a partial session.
                                 if completion_rx.await.unwrap_or(false) {
+                                    observation::stage(Stage::SessionSnapshot);
                                     let _snapshot_timer = Timer::start(Step::SessionSnapshot);
                                     // A promoted private Page must persist cookies from
                                     // its own Browser, not the legacy shared worker jar.
@@ -1883,6 +1892,8 @@ pub(super) fn browser_thread(
                                 };
                                 if provider == Provider::MetaAI {
                                     crate::metaai_timing::scope(timing_metrics, work).await;
+                                } else if provider == Provider::ChatGPT {
+                                    providers::chatgpt::attempt_diagnostics::scope(timing_metrics,work).await;
                                 } else { work.await; }
                             });
                         }

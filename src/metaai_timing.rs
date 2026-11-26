@@ -108,19 +108,23 @@ pub(crate) async fn scope<F: Future>(metrics: MetricsRegistry, future: F) -> F::
 
 /// Measures scope lifetime, including early error return or cancellation. Not a success counter.
 /// Child intervals may nest; do not add them to their parent.
-pub(crate) struct Timer(Option<(MetricsRegistry, Step, Instant)>);
+pub(crate) struct Timer {
+    metaai: Option<(MetricsRegistry, Step, Instant)>,
+    _chatgpt: Option<crate::providers::chatgpt::attempt_diagnostics::StepGuard>,
+}
 impl Timer {
     pub(crate) fn start(step: Step) -> Self {
-        Self(
-            ACTIVE
+        Self {
+            metaai: ACTIVE
                 .try_with(|metrics| (metrics.clone(), step, Instant::now()))
                 .ok(),
-        )
+            _chatgpt: crate::providers::chatgpt::attempt_diagnostics::start_step(step),
+        }
     }
 }
 impl Drop for Timer {
     fn drop(&mut self) {
-        if let Some((metrics, step, start)) = self.0.take() {
+        if let Some((metrics, step, start)) = self.metaai.take() {
             metrics.record_metaai_step(
                 step,
                 start.elapsed().as_micros().min(u64::MAX as u128) as u64,

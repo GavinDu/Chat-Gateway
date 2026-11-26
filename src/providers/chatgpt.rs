@@ -5,6 +5,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use obscura_core::Page;
 
+pub(crate) mod attempt_diagnostics;
 mod session_readiness;
 
 /// Read-only first-party account verification on an *actual* Obscura page.
