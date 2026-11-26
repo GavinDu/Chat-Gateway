@@ -1177,3 +1177,42 @@ test("partition diagnostics bound large captures and are unavailable after permi
     assert.match(error.message,/revoked/);assert.equal(error.partitionCounts,undefined);return true;
   });
 });
+
+test('host only openai cookies are filtered before partition check', async () => {
+const storage = {gateway:'http://127.0.0.1:8080', connectionMode:'local', linkedProviders:['chatgpt']};
+const fixtures = [{name:'primary', value:'primary-value', domain:'.chatgpt.com', path:'/', secure:true}, {name:'skipped-current', value:'skipped-current-value', domain:'openai.com', path:'/', secure:true, partitionKey:{topLevelSite:'https://chatgpt.com', hasCrossSiteAncestor:false}}, {name:'skipped-foreign', value:'skipped-foreign-value', domain:'openai.com', path:'/', secure:true, partitionKey:{topLevelSite:'https://unrelated.example', hasCrossSiteAncestor:false}}, {name:'skipped-malformed', value:'skipped-malformed-value', domain:'openai.com', path:'/', secure:true, partitionKey:{}}];
+const shared = loadShared(fixtures, true, storage, {});
+assert.equal(await shared.syncProvider('chatgpt', {force:true}), 'uploaded');
+assert.equal(shared.fetchCalls.length, 1);
+const parsed = JSON.parse(shared.fetchCalls[0].options.body);
+assert.deepEqual(parsed.cookies.map((cookie) => cookie.name), ['primary']);
+assert.equal(JSON.stringify(parsed).includes('skipped'), false);
+assert.equal(JSON.stringify(parsed).includes('partitionKey'), false);
+const snapshot = await shared.providerCookieSnapshot('chatgpt');
+assert.deepEqual(Array.from(snapshot.cookies, (cookie) => cookie.name), ['primary']);
+});
+test('partitioned eligible cookies still reject and retain prior snapshot version', async () => {
+for (const domain of ['chatgpt.com', '.chatgpt.com', '.openai.com', 'auth.openai.com']) {
+const storage = {gateway:'http://127.0.0.1:8080', connectionMode:'local', linkedProviders:['chatgpt'], relaySnapshotVersions:{chatgpt:'prior'}};
+const shared = loadShared([{name:'blocked', value:'blocked-value', domain:domain, path:'/', secure:true, partitionKey:{topLevelSite:'https://unrelated.example', hasCrossSiteAncestor:true}}], true, storage, {});
+await assert.rejects(() => shared.syncProvider('chatgpt', {force:true}), /partition/);
+assert.equal(shared.fetchCalls.length, 0);
+assert.equal(storage.relaySnapshotVersions.chatgpt, 'prior');
+}
+});
+
+test("partition diagnostic counts exclude the same unusable host-only roots as capture", async () => {
+  const api=loadShared([
+    {name:"plain",value:"fixture",domain:".chatgpt.com",path:"/",secure:true},
+    {name:"excluded",value:"private-excluded",domain:"openai.com",path:"/",secure:true,partitionKey:{topLevelSite:"https://chatgpt.com",hasCrossSiteAncestor:false}},
+    {name:"eligible",value:"private-kept",domain:".chatgpt.com",path:"/",secure:true,partitionKey:{topLevelSite:"https://unrelated.example"}}
+  ]);
+  await assert.rejects(()=>api.providerCookieSnapshot("chatgpt"),error=>{
+    assert.equal(error.partitionCounts.unpartitioned,1);
+    assert.equal(error.partitionCounts.current_site,0);
+    assert.equal(error.partitionCounts.foreign_site,1);
+    assert.equal(error.partitionCounts.unknown,0);
+    assert.doesNotMatch(JSON.stringify(error.partitionCounts),/private|excluded|unrelated/);
+    return true;
+  });
+});
