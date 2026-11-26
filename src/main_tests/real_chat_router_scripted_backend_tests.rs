@@ -811,6 +811,201 @@ async fn imported_thread_marker_cannot_rearm_consumed_delta() {
 }
 
 #[tokio::test]
+async fn real_router_stale_json_cannot_resurrect_or_replace_deleted_conversation() {
+    for recreate in [false, true] {
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (app, state, _) = fixture_with_backend(
+            &["chatgpt", "claude"],
+            vec![
+                response_events("initial answer"),
+                ScriptedSend::PartialThenRelease(
+                    ChatEvent {
+                        content: "stale JSON answer".to_owned(),
+                        done: false,
+                    },
+                    release_rx,
+                    Some(started_tx),
+                ),
+                response_events("initial answer"),
+            ],
+            None,
+        );
+        let app = app.merge(
+            Router::new()
+                .route(
+                    "/v1/conversations/:conversation_id",
+                    get(export_conversation).delete(delete_conversation),
+                )
+                .with_state(state.clone()),
+        );
+        let conversation = "router_json_incarnation_001";
+        let initial = send_prompt(
+            app.clone(),
+            false,
+            "claude/fake-model",
+            conversation,
+            "INITIAL_CANONICAL_HISTORY",
+        )
+        .await;
+        assert_eq!(initial.status(), StatusCode::OK);
+        let original = state
+            .memory
+            .conversation_messages_for_owner("local", conversation)
+            .unwrap();
+        let stale = send_prompt(
+            app.clone(),
+            false,
+            "chatgpt/fake-model",
+            conversation,
+            "STALE_JSON_TURN",
+        );
+        tokio::pin!(stale);
+        // Poll the actual JSON handler until the backend acknowledges admission.
+        // The terminal event stays held until after the deletion/recreation.
+        tokio::select! {
+            _ = &mut stale => panic!("JSON request completed before release"),
+            started = started_rx => started.unwrap(),
+        }
+        let deleted = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/v1/conversations/{conversation}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+        if recreate {
+            let response = send_prompt(
+                app,
+                false,
+                "claude/fake-model",
+                conversation,
+                "INITIAL_CANONICAL_HISTORY",
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+        release_tx.send(()).unwrap();
+        let response = stale.await;
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = to_bytes(response.into_body(), 65_536).await.unwrap();
+        let content = String::from_utf8(body.to_vec()).unwrap();
+        assert!(content.contains("memory_persistence_failed"));
+        assert!(!content.contains("stale JSON answer"));
+        let history = state
+            .memory
+            .conversation_messages_for_owner("local", conversation)
+            .unwrap();
+        if recreate {
+            assert_eq!(history, original);
+        } else {
+            assert!(history.is_empty());
+        }
+        assert!(state
+            .memory
+            .get_provider_thread_for_owner("local", conversation, "chatgpt")
+            .unwrap()
+            .is_none());
+    }
+}
+
+#[tokio::test]
+async fn real_router_external_import_during_sse_keeps_mapping_unverified() {
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let (app, state, _) = fixture_with_backend(
+        &["chatgpt", "claude"],
+        vec![
+            response_events("initial answer"),
+            ScriptedSend::PartialThenRelease(
+                ChatEvent {
+                    content: "completed answer".to_owned(),
+                    done: false,
+                },
+                release_rx,
+                None,
+            ),
+        ],
+        None,
+    );
+    let app = app.merge(
+        Router::new()
+            .route(
+                "/v1/conversations/:conversation_id/provider-threads/:provider",
+                get(get_provider_thread).put(upsert_provider_thread),
+            )
+            .with_state(state.clone()),
+    );
+    let conversation = "router_pending_import_001";
+    let initial = send_prompt(
+        app.clone(),
+        false,
+        "claude/fake-model",
+        conversation,
+        "INITIAL_CANONICAL_HISTORY",
+    )
+    .await;
+    assert_eq!(initial.status(), StatusCode::OK);
+    let pending = send_prompt(
+        app.clone(),
+        true,
+        "chatgpt/fake-model",
+        conversation,
+        "PENDING_IMPORT_TURN",
+    )
+    .await;
+    assert_eq!(pending.status(), StatusCode::OK);
+    let thread = ProviderThread {
+        conversation_id: conversation.to_owned(),
+        provider: "chatgpt".to_owned(),
+        thread_url: "https://chatgpt.com/c/imported-pending".to_owned(),
+        synced_through_message_id: Some("forged-marker".to_owned()),
+        model: Some("chatgpt/fake-model".to_owned()),
+        updated_at: 1,
+    };
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!(
+                    "/v1/conversations/{conversation}/provider-threads/chatgpt"
+                ))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::to_string(&thread).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), 65_536).await.unwrap();
+    let imported: ProviderThread = serde_json::from_slice(&body).unwrap();
+    assert!(imported.synced_through_message_id.is_none());
+
+    release_tx.send(()).unwrap();
+    let body = to_bytes(pending.into_body(), 65_536).await.unwrap();
+    let content = String::from_utf8(body.to_vec()).unwrap();
+    assert!(content.contains("completed answer"));
+    assert!(!content.contains("memory_persistence_failed"));
+    assert!(content.contains(r#""finish_reason":"stop""#));
+    let stored = state
+        .memory
+        .get_provider_thread_for_owner("local", conversation, "chatgpt")
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored, imported);
+    let history = state
+        .memory
+        .conversation_messages_for_owner("local", conversation)
+        .unwrap();
+    assert_eq!(history.len(), 4);
+    assert_eq!(history[3].content, "completed answer");
+}
+
+#[tokio::test]
 async fn real_router_stale_sse_cannot_resurrect_or_replace_deleted_conversation() {
     for recreate in [false, true] {
         let (release_tx, release_rx) = tokio::sync::oneshot::channel();
@@ -824,6 +1019,7 @@ async fn real_router_stale_sse_cannot_resurrect_or_replace_deleted_conversation(
                         done: false,
                     },
                     release_rx,
+                    None,
                 ),
                 response_events("initial answer"),
             ],
@@ -931,6 +1127,7 @@ async fn real_router_stale_sse_completion_invalidates_mapping_after_json_handoff
                     done: false,
                 },
                 release_rx,
+                None,
             ),
             response_events("earlier JSON answer"),
         ],
