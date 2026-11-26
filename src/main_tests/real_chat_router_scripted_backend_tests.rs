@@ -139,6 +139,162 @@ async fn send_prompt(
     .unwrap()
 }
 
+async fn memory_request(
+    app: &Router,
+    owner: &str,
+    method: &str,
+    uri: &str,
+    payload: serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
+    let response = app
+        .clone()
+        .layer(Extension(AuthKeyContext {
+            key_id: owner.to_owned(),
+            provider_allowlist: None,
+        }))
+        .oneshot(
+            Request::builder()
+                .method(method)
+                .uri(uri)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(payload.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = to_bytes(response.into_body(), 65_536).await.unwrap();
+    let json = if body.is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::from_slice(&body).unwrap()
+    };
+    (status, json)
+}
+
+#[tokio::test]
+async fn real_memory_api_owner_scoped_consent_crud_and_export() {
+    let (_, state) = fixture(&["chatgpt"], Vec::new(), None);
+    let app = Router::new()
+        .route(
+            "/v1/memory/settings",
+            get(memory_api::get_long_term_memory_settings)
+                .put(memory_api::put_long_term_memory_settings),
+        )
+        .route(
+            "/v1/memory/items",
+            get(memory_api::list_long_term_memory_items)
+                .put(memory_api::save_long_term_memory_item)
+                .delete(memory_api::delete_all_long_term_memory_items),
+        )
+        .route(
+            "/v1/memory/items/:item_id",
+            axum::routing::delete(memory_api::delete_long_term_memory_item),
+        )
+        .route(
+            "/v1/memory/export",
+            get(memory_api::export_long_term_memory_items),
+        )
+        .with_state(state.clone());
+    let settings = "/v1/memory/settings";
+    let items = "/v1/memory/items";
+    let export = "/v1/memory/export";
+    let initial = serde_json::json!({"memory_key":"timezone","value":"UTC"});
+    let (status, body) =
+        memory_request(&app, "owner-a", "GET", settings, serde_json::Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["enabled"], false);
+    let (status, _) = memory_request(&app, "owner-a", "PUT", items, initial.clone()).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+
+    for owner in ["owner-a", "owner-b"] {
+        let (status, _) = memory_request(
+            &app,
+            owner,
+            "PUT",
+            settings,
+            serde_json::json!({"enabled":true}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+    }
+    let (status, first) = memory_request(&app, "owner-a", "PUT", items, initial.clone()).await;
+    assert_eq!(status, StatusCode::OK);
+    let id = first["id"].as_str().unwrap();
+    let (status, updated) = memory_request(
+        &app,
+        "owner-a",
+        "PUT",
+        items,
+        serde_json::json!({"memory_key":"timezone","value":"America/New_York"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(updated["id"], id);
+    let (status, foreign) = memory_request(&app, "owner-b", "PUT", items, initial).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_ne!(foreign["id"], id);
+
+    let item_uri = format!("{items}/{id}");
+    let (status, _) = memory_request(
+        &app,
+        "owner-b",
+        "DELETE",
+        &item_uri,
+        serde_json::Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, body) =
+        memory_request(&app, "owner-a", "GET", export, serde_json::Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["data"].as_array().unwrap().len(), 1);
+    assert_eq!(body["data"][0]["id"], id);
+    assert_eq!(body["data"][0]["value"], "America/New_York");
+
+    let (status, _) = memory_request(
+        &app,
+        "owner-a",
+        "PUT",
+        settings,
+        serde_json::json!({"enabled":false}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(state
+        .memory
+        .retrieve_long_term_memory_items("owner-a", 20)
+        .unwrap()
+        .is_empty());
+    let (status, body) =
+        memory_request(&app, "owner-a", "GET", items, serde_json::Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["enabled"], false);
+    assert_eq!(body["data"].as_array().unwrap().len(), 1);
+    let (status, _) = memory_request(
+        &app,
+        "owner-a",
+        "DELETE",
+        items,
+        serde_json::json!({"confirm":false}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, body) = memory_request(
+        &app,
+        "owner-a",
+        "DELETE",
+        items,
+        serde_json::json!({"confirm":true}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["deleted"], 1);
+    let (_, body) = memory_request(&app, "owner-b", "GET", export, serde_json::Value::Null).await;
+    assert_eq!(body["data"].as_array().unwrap().len(), 1);
+    assert_eq!(body["data"][0]["id"], foreign["id"]);
+}
+
 #[tokio::test]
 async fn real_router_completion_identity_is_unique_per_turn_for_active_providers() {
     for provider in ["metaai", "chatgpt"] {
