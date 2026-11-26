@@ -36,7 +36,7 @@
     };
   }
   let port = null, opening = false, generation = 0, working = false, prepared = null;
-  const busy = () => providerTasks.size > 0 || Boolean(scheduledProviderRefresh) || Boolean(connectionPoll);
+  const busy = () => providerTasks.size > 0 || pendingConsentMutations > 0 || Boolean(scheduledProviderRefresh) || Boolean(connectionPoll);
   function stop() {
     generation++;
     prepared = null;
@@ -52,7 +52,10 @@
       if (!await chrome.permissions.contains(permission) || epoch !== generation) return;
       // Native ports keep the worker alive; the alarm only reconnects after a failure.
       await chrome.alarms.create(ALARM, {periodInMinutes:1});
-      if (epoch !== generation || !await chrome.permissions.contains(permission) || epoch !== generation) return;
+      if (epoch !== generation || !await chrome.permissions.contains(permission) || epoch !== generation) {
+        await chrome.alarms.clear(ALARM);
+        return;
+      }
       const connected = chrome.runtime.connectNative(HOST);
       port = connected;
       connected.onDisconnect.addListener(() => {
@@ -100,7 +103,8 @@
             await chrome.storage.local.remove("nativeBridgeReloadReceipt");
             reply(false,"busy"); break;
           }
-          chrome.runtime.reload();
+          try { chrome.runtime.reload(); }
+          catch (_) { await chrome.storage.local.remove("nativeBridgeReloadReceipt"); throw _; }
           break;
         default: reply(false,"unsupported_command");
       }
