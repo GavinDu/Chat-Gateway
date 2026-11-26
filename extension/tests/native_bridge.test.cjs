@@ -10,9 +10,14 @@ function event() {
   return {addListener: fn => listeners.push(fn), fire: arg => listeners.forEach(fn => fn(arg))};
 }
 async function fixture(granted = true, unavailableAttempts = 0) {
-  const incoming = event(), disconnect = event(), removed = event(), added = event(), alarms = event();
+  const removed = event(), added = event(), alarms = event();
+  let incoming, disconnect;
   const sent = [], saved = {}, calls = {connect:0,reload:0};
-  const port = {onMessage:incoming,onDisconnect:disconnect,postMessage:value=>sent.push(JSON.parse(JSON.stringify(value))),disconnect:()=>disconnect.fire()};
+  function newPort() {
+    incoming=event(); disconnect=event();
+    const close=disconnect;
+    return {onMessage:incoming,onDisconnect:close,postMessage:value=>sent.push(JSON.parse(JSON.stringify(value))),disconnect:()=>close.fire()};
+  }
   const tasks = new Map();
   const sandbox = {
     randomHex: () => "a".repeat(32), PROVIDERS:{chatgpt:[],metaai:[]},
@@ -20,7 +25,7 @@ async function fixture(granted = true, unavailableAttempts = 0) {
     relayDiagnostics:async()=>({ok:true, extension:{connected:true,connection_mode:"local",linked_providers:["chatgpt"],provider_sync:{chatgpt:{state:"uploaded",issue:"secret-token",stale:false}},permissions:{providers:{chatgpt:true}}},gateway:{providers:[{provider:"chatgpt",enabled:true,linked:true,authentication:"verified",availability:"ready",token:"SECRET",url:"https://private.invalid"}]}}),
     chrome:{
       permissions:{contains:async()=>granted,onAdded:added,onRemoved:removed},
-      runtime:{connectNative:()=>{calls.connect++;if(calls.connect <= unavailableAttempts) throw new Error("host missing");return port;},getManifest:()=>({version:"0.3.0"}),reload:()=>calls.reload++,onStartup:event(),onInstalled:event()},
+      runtime:{connectNative:()=>{calls.connect++;if(calls.connect <= unavailableAttempts) throw new Error("host missing");return newPort();},getManifest:()=>({version:"0.3.0"}),reload:()=>calls.reload++,onStartup:event(),onInstalled:event()},
       storage:{local:{get:async()=>({...saved}),set:async obj=>Object.assign(saved,obj),remove:async key=>delete saved[key]}},
       alarms:{create:async()=>{},clear:async()=>{},onAlarm:alarms}
     }
@@ -31,7 +36,7 @@ async function fixture(granted = true, unavailableAttempts = 0) {
     incoming.fire({v:1,id,command,...extra}); await tick();
     return sent.at(-1);
   }
-  return {send,sent,saved,calls,tasks,disable(){granted=false;removed.fire({permissions:["nativeMessaging"]});},alarm(){alarms.fire({name:"native-bridge-reconnect"});},reconnect(){disconnect.fire();alarms.fire({name:"native-bridge-reconnect"});}};
+  return {send,sent,saved,calls,tasks,disable(){granted=false;removed.fire({permissions:["nativeMessaging"]});},alarm(){alarms.fire({name:"native-bridge-reconnect"});},reconnect(){disconnect?.fire();alarms.fire({name:"native-bridge-reconnect"});}};
 }
 test("permission absent: no host connect",async()=>{
   const f=await fixture(false); assert.equal(f.calls.connect,0);
