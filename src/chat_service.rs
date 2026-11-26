@@ -440,7 +440,7 @@ pub(crate) async fn acquire_candidate_permit(
 /// measurements remain distinct.
 pub(crate) struct AttemptTelemetry<'a> {
     pub(crate) snapshot_marker: &'a str,
-    pub(crate) snapshot_identity: &'a Option<crate::memory::ConversationIdentity>,
+    pub(crate) snapshot_identity: &'a crate::memory::AdmissionIdentity,
     pub(crate) request_id: &'a str,
     pub(crate) provider: &'a str,
     pub(crate) queue_ms: u64,
@@ -585,7 +585,7 @@ pub(crate) struct PreparedChatContext {
     pub(crate) windowed: Vec<ChatMessage>,
     pub(crate) has_history: bool,
     pub(crate) stored_messages: Vec<ChatMessage>,
-    pub(crate) snapshot_identity: Option<crate::memory::ConversationIdentity>,
+    pub(crate) snapshot_identity: crate::memory::AdmissionIdentity,
 }
 
 /// Prepare one immutable, owner-scoped context snapshot before provider

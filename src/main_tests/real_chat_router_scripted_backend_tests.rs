@@ -967,6 +967,171 @@ async fn imported_thread_marker_cannot_rearm_consumed_delta() {
 }
 
 #[tokio::test]
+async fn real_router_cancelled_absent_admission_allows_explicit_retry() {
+    let (cancelled_tx, cancelled_rx) = tokio::sync::oneshot::channel();
+    let (app, state, _) = fixture_with_backend(
+        &["chatgpt"],
+        vec![
+            ScriptedSend::PartialThenHold(
+                ChatEvent {
+                    content: "discarded first answer".to_owned(),
+                    done: false,
+                },
+                cancelled_tx,
+            ),
+            response_events("fresh answer"),
+        ],
+        None,
+    );
+    let conversation = "router_absent_cancel_001";
+    let response = send_prompt(
+        app.clone(),
+        true,
+        "chatgpt/fake-model",
+        conversation,
+        "INTERRUPTED_FIRST_TURN",
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    drop(response);
+    tokio::time::timeout(std::time::Duration::from_secs(2), cancelled_rx)
+        .await
+        .expect("client drop should close backend receiver")
+        .expect("scripted backend should observe cancellation");
+    assert!(state
+        .memory
+        .conversation_messages_for_owner("local", conversation)
+        .unwrap()
+        .is_empty());
+    assert!(state
+        .memory
+        .get_provider_thread_for_owner("local", conversation, "chatgpt")
+        .unwrap()
+        .is_none());
+
+    let retry = send_prompt(
+        app,
+        false,
+        "chatgpt/fake-model",
+        conversation,
+        "EXPLICIT_RETRY_TURN",
+    )
+    .await;
+    assert_eq!(retry.status(), StatusCode::OK);
+    assert_eq!(
+        state
+            .memory
+            .conversation_messages_for_owner("local", conversation)
+            .unwrap(),
+        vec![
+            ChatMessage {
+                role: "user".to_owned(),
+                content: "EXPLICIT_RETRY_TURN".to_owned(),
+            },
+            ChatMessage {
+                role: "assistant".to_owned(),
+                content: "fresh answer".to_owned(),
+            },
+        ]
+    );
+}
+
+#[tokio::test]
+async fn real_router_absent_admission_cannot_resurrect_deleted_conversation() {
+    for stream in [false, true] {
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (app, state, _) = fixture_with_backend(
+            &["chatgpt", "claude"],
+            vec![
+                ScriptedSend::PartialThenRelease(
+                    ChatEvent {
+                        content: "stale first answer".to_owned(),
+                        done: false,
+                    },
+                    release_rx,
+                    Some(started_tx),
+                ),
+                response_events("intervening answer"),
+            ],
+            None,
+        );
+        let app = app.merge(
+            Router::new()
+                .route(
+                    "/v1/conversations/:conversation_id",
+                    get(export_conversation).delete(delete_conversation),
+                )
+                .with_state(state.clone()),
+        );
+        let conversation = "router_initially_absent_001";
+        let pending = send_prompt(
+            app.clone(),
+            stream,
+            "chatgpt/fake-model",
+            conversation,
+            "STALE_FIRST_TURN",
+        );
+        tokio::pin!(pending);
+        let mut early_response = None;
+        tokio::select! {
+            response = &mut pending => {
+                assert!(stream);
+                early_response = Some(response);
+            }
+            started = started_rx => started.unwrap(),
+        }
+        let created = send_prompt(
+            app.clone(),
+            false,
+            "claude/fake-model",
+            conversation,
+            "INTERVENING_FIRST_TURN",
+        )
+        .await;
+        assert_eq!(created.status(), StatusCode::OK);
+        let deleted = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/v1/conversations/{conversation}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+        release_tx.send(()).unwrap();
+        let response = match early_response {
+            Some(response) => response,
+            None => pending.await,
+        };
+        assert_eq!(
+            response.status(),
+            if stream {
+                StatusCode::OK
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
+        );
+        let body = to_bytes(response.into_body(), 65_536).await.unwrap();
+        let content = String::from_utf8(body.to_vec()).unwrap();
+        assert!(content.contains("memory_persistence_failed"));
+        assert!(!content.contains(r#""finish_reason":"stop""#));
+        assert!(state
+            .memory
+            .conversation_messages_for_owner("local", conversation)
+            .unwrap()
+            .is_empty());
+        assert!(state
+            .memory
+            .get_provider_thread_for_owner("local", conversation, "chatgpt")
+            .unwrap()
+            .is_none());
+    }
+}
+
+#[tokio::test]
 async fn real_router_stale_json_cannot_resurrect_or_replace_deleted_conversation() {
     for recreate in [false, true] {
         let (release_tx, release_rx) = tokio::sync::oneshot::channel();

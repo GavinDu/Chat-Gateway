@@ -85,7 +85,7 @@ struct TurnWrite<'a> {
     tab_id: Option<String>,
     compute_marker: bool,
     expected_marker: Option<&'a str>,
-    expected_identity: Option<&'a Option<ConversationIdentity>>,
+    expected_identity: Option<&'a AdmissionIdentity>,
 }
 
 /// Internal durable identity of one conversation incarnation at a revision.
@@ -111,9 +111,66 @@ impl CommitReceipt {
     }
 }
 
+/// Distinguish an existing incarnation, an explicitly absent client ID,
+/// and a server-generated ID that is not exposed before completion.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum AdmissionIdentity {
+    Existing(ConversationIdentity),
+    Absent(String),
+    Generated,
+    ReadOnly,
+}
+
+// Reuse an unexpired owner/ID lease without extending it. A committed creation
+// revokes all leases for that exact globally unique conversation ID.
+fn reserve_absent_admission(
+    connection: &Connection,
+    owner: &str,
+    id: &str,
+) -> anyhow::Result<String> {
+    connection.execute(
+        "DELETE FROM conversation_admissions WHERE expires_at <= unixepoch()",
+        [],
+    )?;
+    let existing = connection
+        .query_row(
+            "SELECT token FROM conversation_admissions
+             WHERE owner_key_id=?1 AND conversation_id=?2",
+            rusqlite::params![owner, id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    if let Some(token) = existing {
+        return Ok(token);
+    }
+    let count: i64 = connection.query_row(
+        "SELECT count(*) FROM conversation_admissions WHERE owner_key_id=?1",
+        [owner],
+        |row| row.get(0),
+    )?;
+    let total: i64 =
+        connection.query_row("SELECT count(*) FROM conversation_admissions", [], |row| {
+            row.get(0)
+        })?;
+    if count >= 128 || total >= 8192 {
+        anyhow::bail!("conversation admission capacity exhausted");
+    }
+    connection.execute(
+        "INSERT INTO conversation_admissions(owner_key_id,conversation_id,expires_at)
+         VALUES(?1,?2,unixepoch()+3600)",
+        rusqlite::params![owner, id],
+    )?;
+    Ok(connection.query_row(
+        "SELECT token FROM conversation_admissions
+         WHERE owner_key_id=?1 AND conversation_id=?2",
+        rusqlite::params![owner, id],
+        |row| row.get(0),
+    )?)
+}
+
 pub(crate) struct ContextSnapshot {
     pub(crate) context: (String, Vec<ChatMessage>, bool, Vec<ChatMessage>),
-    pub(crate) identity: Option<ConversationIdentity>,
+    pub(crate) identity: AdmissionIdentity,
 }
 
 fn read_identity(connection: &Connection, id: &str) -> anyhow::Result<ConversationIdentity> {
@@ -137,7 +194,7 @@ pub(crate) struct SnapshotTurn {
     pub(crate) assistant_msg: ChatMessage,
     pub(crate) provider: String,
     pub(crate) expected_marker: String,
-    pub(crate) expected_identity: Option<ConversationIdentity>,
+    pub(crate) expected_identity: AdmissionIdentity,
 }
 
 /// Async contract for bounded conversation history access and atomic turn persistence.
@@ -549,8 +606,14 @@ impl UnifiedMemory {
         new_messages: &[ChatMessage],
         token_budget: usize,
     ) -> anyhow::Result<(String, Vec<ChatMessage>, bool, Vec<ChatMessage>)> {
-        self.build_context_snapshot(owner_key_id, conversation_id, new_messages, token_budget)
-            .map(|snapshot| snapshot.context)
+        self.build_context_snapshot(
+            owner_key_id,
+            conversation_id,
+            new_messages,
+            token_budget,
+            false,
+        )
+        .map(|snapshot| snapshot.context)
     }
 
     fn build_context_snapshot(
@@ -559,6 +622,7 @@ impl UnifiedMemory {
         conversation_id: Option<&str>,
         new_messages: &[ChatMessage],
         token_budget: usize,
+        reserve: bool,
     ) -> anyhow::Result<ContextSnapshot> {
         let (history, saved_summary, identity) = match conversation_id {
             Some(id) => {
@@ -566,7 +630,11 @@ impl UnifiedMemory {
                 // Separate reads could otherwise combine history from one commit
                 // with a summary written by a concurrent request.
                 let mut connection = self.lock()?;
-                let tx = connection.transaction()?;
+                let tx = if reserve {
+                    connection.transaction_with_behavior(TransactionBehavior::Immediate)?
+                } else {
+                    connection.transaction()?
+                };
                 let owner: Option<String> = tx
                     .query_row(
                         "SELECT owner_key_id FROM conversations WHERE id = ?1",
@@ -580,9 +648,11 @@ impl UnifiedMemory {
                     None => None,
                 };
                 let identity = if conversation.is_some() {
-                    Some(read_identity(&tx, id)?)
+                    AdmissionIdentity::Existing(read_identity(&tx, id)?)
+                } else if reserve {
+                    AdmissionIdentity::Absent(reserve_absent_admission(&tx, owner_key_id, id)?)
                 } else {
-                    None
+                    AdmissionIdentity::ReadOnly
                 };
                 let summary = if conversation.is_some() {
                     tx.query_row(
@@ -608,7 +678,7 @@ impl UnifiedMemory {
                 })?;
                 (history, summary, identity)
             }
-            None => (Vec::new(), None, None),
+            None => (Vec::new(), None, AdmissionIdentity::Generated),
         };
         let has_history = !history.is_empty();
         let summary_message = saved_summary.map(|(summary, _covered)| ChatMessage {
@@ -649,6 +719,7 @@ impl UnifiedMemory {
                 conversation_id.as_deref(),
                 &new_messages,
                 token_budget,
+                true,
             )
         })
         .await
@@ -865,15 +936,40 @@ impl UnifiedMemory {
         } else {
             None
         };
-        if let Some(expected) = expected_identity {
-            // An absent or replaced incarnation is not a concurrent append.
-            // Never resurrect a deleted conversation or append to its successor.
-            if expected.as_ref().map(|value| &value.incarnation)
-                != current_identity.as_ref().map(|value| &value.incarnation)
-            {
-                anyhow::bail!("conversation incarnation changed during provider request");
+        let identity_current = match expected_identity {
+            Some(AdmissionIdentity::Existing(expected)) => {
+                let Some(current) = current_identity.as_ref() else {
+                    anyhow::bail!("conversation incarnation changed during provider request");
+                };
+                if expected.incarnation != current.incarnation {
+                    anyhow::bail!("conversation incarnation changed during provider request");
+                }
+                expected == current
             }
-        }
+            Some(AdmissionIdentity::Absent(token)) => {
+                let valid: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM conversation_admissions
+                     WHERE owner_key_id=?1 AND conversation_id=?2 AND token=?3
+                     AND expires_at > unixepoch())",
+                    rusqlite::params![owner_key_id, conversation_id, token],
+                    |row| row.get(0),
+                )?;
+                if current_identity.is_some() || !valid {
+                    anyhow::bail!("conversation absence changed during provider request");
+                }
+                true
+            }
+            Some(AdmissionIdentity::ReadOnly) => {
+                anyhow::bail!("read-only conversation snapshot cannot commit");
+            }
+            Some(AdmissionIdentity::Generated) => {
+                if current_identity.is_some() {
+                    anyhow::bail!("generated conversation ID already exists");
+                }
+                true
+            }
+            None => true,
+        };
         let mut conversation =
             sqlite::load(&tx, &conversation_id)?.unwrap_or_else(|| Conversation {
                 id: conversation_id,
@@ -889,7 +985,7 @@ impl UnifiedMemory {
         let replay = !user_msgs.is_empty()
             && (conversation.messages.starts_with(&completed)
                 || conversation.messages.ends_with(&completed));
-        let sync_eligible = expected_identity.is_none_or(|expected| expected == &current_identity)
+        let sync_eligible = identity_current
             && expected_marker.is_none_or(|expected| {
                 !replay && transcript_marker(&conversation.messages) == expected
             });
