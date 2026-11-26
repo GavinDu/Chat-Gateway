@@ -384,3 +384,25 @@ It reports Fetch/XHR host/status/size metadata, never paths, headers or bodies.
 Keep raw runtime logs private and export only reviewed fixed-category records.
 This does not increase timeouts or authorize a retry, prompt, new account, load
 cohort or production change. Respect the selected provider/run inputs and budget.
+
+
+### ChatGPT fixed network roles (opt-in)
+
+The existing metadata-only `CHAT_GATEWAY_PROVIDER_NETWORK_TAP` observer adds
+closed `request_endpoint_kind`, `response_endpoint_kind`, `method_kind`, and
+`content_type_kind` fields. Endpoint roles distinguish the exact public account,
+conversation submit/prepare/resume and in-process WebSocket bridge routes, static
+assets and unknown first-party/other traffic. Unknown routes remain unknown;
+paths, query values, thread/account IDs and header values are never exported.
+Request and response roles are classified separately to retain redirect evidence.
+A submit role identifies an endpoint, not successful generation or delivery.
+
+ChatGPT additionally emits at most 256 Fetch/XHR dispatch observations per page,
+with bounded sequence/limit, fixed method and endpoint labels. The counter is
+page-owned and saturates at the cap. Dispatch means the native request callback
+ran; it does not attest provider receipt. Responses are buffered by the pinned
+engine before the response callback, so these events do not expose incremental
+SSE, DNS/TLS/TTFB or model queue timing. Page callback timestamps cannot pair
+concurrent requests or be assumed to share one chat attempt, especially after
+cancellation. Keep these gaps explicit and retain the independent client,
+attempt-phase and durable-history checks.
