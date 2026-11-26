@@ -248,6 +248,11 @@ function chatgptPartitionDetails(cookies) {
   return details;
 }
 
+function providerCookieQuery(provider, domain) {
+ if (provider === "chatgpt") return {domain};
+ return {domain, partitionKey: {}};
+}
+
 async function providerCookieSnapshot(provider, afterPermissionCheck = null) {
   // Never authorize an inherited Object.prototype name as a provider.
   if (typeof provider !== "string" || !Object.hasOwn(PROVIDERS, provider)) {
@@ -268,12 +273,13 @@ async function providerCookieSnapshot(provider, afterPermissionCheck = null) {
   // Independent domain reads run concurrently instead of serializing each
   // browser API round-trip. Promise.all preserves configured domain order for
   // deterministic deduplication; any failed read rejects the whole snapshot.
-  // Chrome's default getAll() sees only UNPARTITIONED cookies. Since the
-  // relay has no partition-key representation, enumerate all cookie scopes
-  // (Chrome 119+) and fail closed if any eligible partition is present.
-  // Otherwise an apparently complete snapshot could omit live credentials.
+  // ChatGPT uses the declared unpartitioned credential profile supported by
+  // the relay and Obscura jar. Chrome selects this profile when partitionKey
+  // is omitted. Other providers retain their prior all-scope queries.
+  // Never filter a returned partitioned cookie: validation below still rejects
+  // the entire snapshot if the browser returns an unsupported context.
   const domainCookies = await Promise.all(domains.map(domain =>
-    chrome.cookies.getAll({domain, partitionKey:{}})
+    chrome.cookies.getAll(providerCookieQuery(provider, domain))
   ));
   // Chrome permissions may be revoked while asynchronous cookie reads are
   // pending. Never return collected session material after consent changes.
@@ -433,7 +439,8 @@ async function syncProvider(provider, {
   }
   // Scope the stored snapshot digest to the consent generation. The same
   // cookies after an explicit logout/relink must not count as unchanged.
-  const identity = gateway + "|" + relayIdentity({gateway, token, connectionMode});
+  const identity = gateway + "|" + relayIdentity({gateway, token, connectionMode}) +
+    (provider === "chatgpt" ? "|profile:unpartitioned_credentials" : "");
   const version = await cookieSnapshotVersion(snapshot,
     linkEpoch === undefined ? identity : identity + "|consent:" + linkEpoch);
   const {relaySnapshotVersions = {}, providerLinkEpochs:latestEpochs = {}} =

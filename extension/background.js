@@ -144,6 +144,7 @@ function recordProviderDiagnostic(provider, state, errorCode = null, attempt = n
     phase: safeState === "syncing" && IMPORT_PHASES.includes(telemetry?.phase)
       ? telemetry.phase : null,
     durations_ms: redactedImportTimings(telemetry?.durations_ms),
+    capture_profile: provider === "chatgpt" ? "unpartitioned_credentials" : "all_scopes_checked",
     partition_counts: provider === "chatgpt" ? redactedPartitionCounts(telemetry?.partition_counts) : null,
     partition_details: provider === "chatgpt" ? redactedPartitionDetails(telemetry?.partition_details) : null
   };
@@ -170,6 +171,7 @@ function finalizeRelayDiagnostics(result, requestedGeneration, requestedEpochs) 
         updated_at: previous?.updated_at || null,
         phase: previous?.phase || null,
         durations_ms: redactedImportTimings(previous?.durations_ms),
+        capture_profile: provider === "chatgpt" ? "unpartitioned_credentials" : "all_scopes_checked",
         partition_counts: provider === "chatgpt" && extension.permissions?.providers?.[provider] === true
           ? redactedPartitionCounts(previous?.partition_counts) : null,
         partition_details: provider === "chatgpt" && extension.permissions?.providers?.[provider] === true

@@ -82,3 +82,20 @@ ordinary `diagnostics` command additionally reports bounded `partition_details`:
 app versus auxiliary partitioned scope counts and fixed unknown-metadata reason
 counts. It returns no cookie name, value, domain or partition URL. All otherwise
 eligible partitioned snapshots still fail before upload.
+
+### ChatGPT supported credential profile (0.3.5)
+
+ChatGPT capture now explicitly selects Chrome's unpartitioned-cookie profile by
+omitting `partitionKey` from its cookies API query, in the current execution
+context's cookie store. This is the credential profile supported by the current
+relay schema and Obscura jar, not a complete Chrome partition replay. The former
+all-partitions query overcollected unrelated site and extension contexts, causing
+an otherwise usable Chrome account to fail before upload. Other providers keep
+their existing all-scopes capture/rejection behavior. See the official
+[Chrome cookies partitioning contract](https://developer.chrome.com/docs/extensions/reference/api/cookies#partitioning).
+
+No returned partitioned cookie is dropped or flattened: if the API unexpectedly
+returns one, the complete upload still fails before persistence. Cookie metadata,
+consent, permission, owner and empty-snapshot fences remain unchanged. The gateway
+must independently validate the imported first-party session; Chrome account
+verification and upload status alone never establish successful Obscura chat.

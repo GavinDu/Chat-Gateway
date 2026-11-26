@@ -1887,6 +1887,7 @@ test("partition detail status projects numeric categories and hides stale uncons
   const details=Object.fromEntries(["app_partitioned","auxiliary_partitioned","shape","extra_fields","ancestor_type","missing_site","opaque_site","extension_site","non_web_scheme","invalid_url","noncanonical_site","chatgpt_alias","other"].map(k=>[k,0]));
   details.app_partitioned=2;details.missing_site=1;details.token="PRIVATE";
   const entry=f.sandbox.recordProviderDiagnostic("chatgpt","failed","partition_scope_unsupported",null,{partition_details:details});
+  assert.equal(entry.capture_profile,"unpartitioned_credentials");
   assert.equal(entry.partition_details.app_partitioned,2);assert.equal(Object.keys(entry.partition_details).length,13);assert.doesNotMatch(JSON.stringify(entry),/PRIVATE/);
   assert.equal(f.sandbox.finalizeRelayDiagnostics({ok:true,extension:{linked_providers:["chatgpt"]}},0,{chatgpt:"new-consent"}).extension.provider_sync.chatgpt.partition_details,null);
   assert.equal(f.sandbox.recordProviderDiagnostic("metaai","failed",null,null,{partition_details:details}).partition_details,null);
