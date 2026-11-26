@@ -1,3 +1,4 @@
+pub(crate) mod build_identity;
 pub(crate) mod health;
 pub(crate) mod models;
 pub(crate) mod ops;

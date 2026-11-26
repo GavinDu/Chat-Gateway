@@ -13,7 +13,7 @@ Fill these fields for *each* live acceptance run; do not copy secrets into
 GitHub issues, artifacts or logs:
 
 - Main commit SHA: **not captured — live acceptance not run in this session**
-- GitHub Actions run URL and all four job conclusions: **not captured for live run**
+- GitHub Actions run URL and three routine job conclusions (`test`, `embedded-native`, `docker-build`): **not captured for live run**. ARM64 manual-run evidence: **not run/not applicable unless targeting ARM64**
 - Runtime environment: **not recorded** (OS, architecture, Docker image digest,
   Obscura/browser build, gateway config revision, network category)
 - Session source and age: **not recorded** (e.g. extension-linked, embedded login;
@@ -43,9 +43,11 @@ results from a successful or failed merged-main execution.
 
 ## Live acceptance criteria (delegated separately)
 
-1. Confirm the exact merged-main SHA and all four Rust CI jobs: `test`,
-   `embedded-native`, `docker-build` and `docker-arm64-low-memory`.
-   Record the environment and browser-session source without storing secrets.
+1. Confirm the exact merged-main SHA and all three routine Rust CI jobs:
+   `test`, `embedded-native`, and `docker-build`. For ARM64-targeted releases,
+   separately run `Docker ARM64 Low Memory (Manual)` on the intended commit
+   before release, and record its evidence. Record the environment and
+   browser-session source without storing secrets.
 2. For each of the nine providers, distinguish saved cookies from a verified
    authenticated composer. Check login expiry, an unloaded page and challenge
    handling without attempting to bypass a provider challenge.

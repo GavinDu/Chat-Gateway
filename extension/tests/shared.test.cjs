@@ -7,6 +7,7 @@ const { TextEncoder } = require("node:util");
 
 function loadShared(cookieFixtures = [], hasAllPermissions = true, storageValues = {}, hooks = {}) {
   let cookieReads = 0;
+  const cookieQueries = [];
   const fetchCalls = [];
   const context = {
     URL,
@@ -14,6 +15,7 @@ function loadShared(cookieFixtures = [], hasAllPermissions = true, storageValues
     crypto: webcrypto,
     TextEncoder,
     AbortController,
+    performance: hooks.performance || {now: () => Date.now()},
     setTimeout: hooks.setTimeout || setTimeout,
     clearTimeout: hooks.clearTimeout || clearTimeout,
     fetch: async (url, options) => {
@@ -25,8 +27,9 @@ function loadShared(cookieFixtures = [], hasAllPermissions = true, storageValues
       cookies: {
         // Return the full fixture set to simulate a permissive/misbehaving
         // browser API; providerCookieSnapshot must still enforce its own scope.
-        getAll: async ({domain}) => {
+        getAll: async ({domain,partitionKey}) => {
           cookieReads += 1;
+          cookieQueries.push({domain,partitionKey});
           if (hooks.onCookieRead) await hooks.onCookieRead(storageValues, domain);
           return cookieFixtures;
         }
@@ -39,14 +42,18 @@ function loadShared(cookieFixtures = [], hasAllPermissions = true, storageValues
       },
       storage: { local: {
         get: async () => storageValues,
-        set: async update => Object.assign(storageValues, update)
+        set: async update => {
+          if (hooks.onStorageSet) return hooks.onStorageSet(update, storageValues);
+          Object.assign(storageValues, update);
+        }
       } }
     }
   };
   vm.createContext(context);
   const source = fs.readFileSync(require.resolve("../shared.js"), "utf8");
   vm.runInContext(source + "\nglobalThis.__testApi = { normalizeGateway, providerCookieSnapshot, relayFetch, syncProvider, PROVIDERS };", context);
-  return { ...context.__testApi, getCookieReads: () => cookieReads, fetchCalls };
+  return { ...context.__testApi, getCookieReads: () => cookieReads,
+    getCookieQueries: () => cookieQueries, fetchCalls };
 }
 
 test("gateway normalization accepts local HTTP and explicit HTTPS origins", () => {
@@ -111,6 +118,57 @@ test("relayFetch supports an HTTPS gateway without weakening the HTTP loopback r
   assert.equal(api.fetchCalls[0].options.redirect, "error");
 });
 
+test("relayFetch refuses authority-confused and non-API paths before credential dispatch", async () => {
+  const api = loadShared([], true, {
+    gateway:"https://gateway.example.com", token:"synthetic-install-token",
+    connectionMode:"remote"
+  });
+  const invalid = [
+    "@attacker.example/relay/v1/status",
+    "//attacker.example/relay/v1/status",
+    "https://attacker.example/relay/v1/status",
+    "/outside/relay",
+    "/relay/v1/../admin",
+    "/relay/v1/%2e%2e/admin",
+    "/relay/v1/status?token=secret",
+    "/relay/v1/status#fragment",
+    "/relay/v1/status\\unexpected",
+    "/relay/v1/status" + String.fromCharCode(0),
+    null
+  ];
+  for (const path of invalid) {
+    await assert.rejects(
+      () => api.relayFetch(path, {method:"POST", body:"synthetic-cookie-snapshot"}),
+      /Invalid relay API path/,
+      String(path)
+    );
+  }
+  assert.equal(api.fetchCalls.length, 0,
+    "invalid path must not dispatch a bearer token or cookie snapshot");
+});
+
+test("strict relay API path keeps valid status and session calls on configured origin", async () => {
+  const api = loadShared([], true, {
+    gateway:"https://gateway.example.com", token:"synthetic-install-token",
+    connectionMode:"remote"
+  });
+  await api.relayFetch("/relay/v1/diagnostics", {method:"POST",body:"{}"});
+  await api.relayFetch("/relay/v1/session/chatgpt", {
+    method:"DELETE",body:"{}"
+  });
+  assert.equal(api.fetchCalls.length, 2);
+  assert.deepEqual(api.fetchCalls.map(call => call.url), [
+    "https://gateway.example.com/relay/v1/diagnostics",
+    "https://gateway.example.com/relay/v1/session/chatgpt"
+  ]);
+  for (const call of api.fetchCalls) {
+    assert.equal(new URL(call.url).origin, "https://gateway.example.com");
+    assert.equal(call.options.headers.get("Authorization"),
+      "Bearer synthetic-install-token");
+    assert.equal(call.options.redirect, "error");
+  }
+});
+
 test("a caller cannot override the no-redirect policy on credentialed relay requests", async () => {
   const api = loadShared([], true, {
     gateway: "https://gateway.example.com",
@@ -119,6 +177,54 @@ test("a caller cannot override the no-redirect policy on credentialed relay requ
   await api.relayFetch("/relay/v1/status", {method:"POST", body:"{}", redirect:"follow"});
   assert.equal(api.fetchCalls.length, 1);
   assert.equal(api.fetchCalls[0].options.redirect, "error");
+});
+
+test("an already-cancelled owner never dispatches a relay cookie snapshot", async () => {
+  const controller = new AbortController();
+  controller.abort();
+  const api = loadShared([], true, {
+    gateway: "http://127.0.0.1:8080", connectionMode: "local"
+  });
+  await assert.rejects(
+    () => api.relayFetch("/relay/v1/session/chatgpt", {
+      method:"POST", body:"private-cookie-snapshot", signal:controller.signal
+    }),
+    error => {
+      assert.match(error.message, /Gateway request cancelled/);
+      assert.doesNotMatch(error.message, /cookie|private-cookie-snapshot|timed out/i);
+      return true;
+    }
+  );
+  assert.equal(api.fetchCalls.length, 0, "an aborted owner may not dispatch even a single fetch");
+});
+
+test("owner cancellation aborts one pending relay POST without a false timeout or secret leak", async () => {
+  const controller = new AbortController();
+  const api = loadShared([], true, {
+    gateway: "http://127.0.0.1:8080", connectionMode: "local"
+  }, {
+    onFetch(_url, options) {
+      return new Promise((_resolve, reject) => {
+        options.signal.addEventListener("abort", () =>
+          reject(new Error("raw upstream failure cookie=private-secret")), {once:true});
+      });
+    }
+  });
+  const pending = api.relayFetch("/relay/v1/session/chatgpt", {
+    method:"POST", body:"private-cookie-snapshot", signal:controller.signal
+  });
+  for (let i = 0; i < 8 && !api.fetchCalls.length; i++) {
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  assert.equal(api.fetchCalls.length, 1);
+  controller.abort();
+  await assert.rejects(pending, error => {
+    assert.match(error.message, /Gateway request cancelled/);
+    assert.doesNotMatch(error.message, /timed out|private-secret|cookie=/i);
+    return true;
+  });
+  assert.equal(api.fetchCalls.length, 1, "ambiguous POST must never auto-replay");
+  assert.equal(api.fetchCalls[0].options.signal.aborted, true);
 });
 
 test("relay fetch aborts a stalled credential import without replaying it", async () => {
@@ -361,6 +467,81 @@ test("unlinked provider sync does not read or transmit cookies", async () => {
   assert.equal(api.fetchCalls.length, 0);
 });
 
+test("same-gateway unlink/relink during cookie read rejects old link epoch", async () => {
+  const storage = {
+    gateway:"http://127.0.0.1:8080", connectionMode:"local",
+    linkedProviders:["chatgpt"], providerLinkEpochs:{chatgpt:"consent-old"}
+  };
+  const api = loadShared([
+    {name:"session",value:"synthetic",domain:".chatgpt.com",path:"/",secure:true}
+  ], true, storage, {
+    onCookieRead: () => {
+      storage.linkedProviders = [];
+      storage.providerLinkEpochs = {chatgpt:"revoked"};
+      storage.linkedProviders = ["chatgpt"];
+      storage.providerLinkEpochs = {chatgpt:"consent-new"};
+    }
+  });
+  assert.equal(await api.syncProvider("chatgpt"),"skipped");
+  assert.equal(api.fetchCalls.length,0,
+    "old snapshot cannot upload even when same gateway and consent list reappear");
+});
+
+test("same-gateway consent revocation at final relay host permission check blocks POST", async () => {
+  const storage = {
+    gateway:"http://127.0.0.1:8080",connectionMode:"local",
+    linkedProviders:["chatgpt"],providerLinkEpochs:{chatgpt:"consent-old"}
+  };
+  const api = loadShared([
+    {name:"session",value:"synthetic",domain:".chatgpt.com",path:"/",secure:true}
+  ], true, storage, {
+    onPermissionCheck: origins => {
+      if (origins.some(origin => origin.startsWith("http://127.0.0.1"))) {
+        storage.providerLinkEpochs = {chatgpt:"consent-new"};
+      }
+    }
+  });
+  await assert.rejects(() => api.syncProvider("chatgpt"),
+    /consent or gateway connection changed/);
+  assert.equal(api.fetchCalls.length,0,
+    "gateway host permission await must not let stale cookies cross the upload boundary");
+});
+
+test("same cookies after re-link require fresh upload rather than inherited digest", async () => {
+  const storage = {
+    gateway:"http://127.0.0.1:8080",connectionMode:"local",
+    linkedProviders:["chatgpt"],providerLinkEpochs:{chatgpt:"link-a"}
+  };
+  const api = loadShared([
+    {name:"session",value:"synthetic",domain:".chatgpt.com",path:"/",secure:true}
+  ], true, storage);
+  assert.equal(await api.syncProvider("chatgpt"),"uploaded");
+  const first = storage.relaySnapshotVersions.chatgpt;
+  assert.equal(await api.syncProvider("chatgpt"),"unchanged");
+  storage.providerLinkEpochs = {chatgpt:"link-b"};
+  assert.equal(await api.syncProvider("chatgpt"),"uploaded");
+  assert.notEqual(storage.relaySnapshotVersions.chatgpt,first);
+  assert.equal(api.fetchCalls.length,2);
+});
+
+test("post-POST old consent response cannot replace new provider digest", async () => {
+  const storage = {
+    gateway:"http://127.0.0.1:8080",connectionMode:"local",
+    linkedProviders:["chatgpt"],providerLinkEpochs:{chatgpt:"link-a"}
+  };
+  const api = loadShared([
+    {name:"session",value:"synthetic",domain:".chatgpt.com",path:"/",secure:true}
+  ], true, storage, {
+    onFetch: async () => {
+      storage.providerLinkEpochs = {chatgpt:"link-b"};
+      return {ok:true,status:200};
+    }
+  });
+  assert.equal(await api.syncProvider("chatgpt"),"uploaded");
+  assert.equal(storage.relaySnapshotVersions,undefined,
+    "a completed old HTTP request is not a current-link snapshot cache hit");
+});
+
 test("provider sync never uploads old cookies to a newly paired gateway", async () => {
   const storage = {
     gateway: "http://127.0.0.1:8080",
@@ -456,6 +637,56 @@ test("revoked provider permission at upload boundary blocks previously captured 
   );
   assert.equal(providerChecks, 3);
   assert.equal(api.fetchCalls.length, 0, "revoked consent must block credential uploads");
+});
+
+test("provider host permission revoked during gateway check prevents cookie POST", async () => {
+  const storage = {
+    gateway:"http://127.0.0.1:8080", connectionMode:"local",
+    linkedProviders:["chatgpt"], providerLinkEpochs:{chatgpt:"owner-consent"}
+  };
+  let providerPermission = true;
+  const api = loadShared([
+    {name:"session", value:"synthetic-only", domain:".chatgpt.com", path:"/", secure:true}
+  ], true, storage, {
+    onPermissionCheck: origins => {
+      // Capture, cookie reads, digest and the earlier pre-upload provider
+      // check all succeeded. Revocation happens in the awaited GATEWAY
+      // origin check inside relayFetch, before its final POST dispatch.
+      if (origins.some(origin => origin.startsWith("http://127.0.0.1"))) {
+        providerPermission = false;
+      }
+    },
+    hasPermissions: origins => origins.every(origin => origin.startsWith("https://"))
+      ? providerPermission : true
+  });
+  await assert.rejects(() => api.syncProvider("chatgpt"),
+    /Provider host permissions were revoked before relay upload/);
+  assert.equal(api.getCookieReads() > 0, true,
+    "consent revocation here must occur after a real snapshot was collected");
+  assert.equal(api.fetchCalls.length, 0,
+    "revoked browser host permission cannot authorize later cookie POST");
+  assert.equal(storage.relaySnapshotVersions, undefined,
+    "a rejected POST must not cache a session snapshot digest");
+});
+
+test("final provider host permission fence does not block session DELETE or status", async () => {
+  const storage = {
+    gateway:"http://127.0.0.1:8080", connectionMode:"local",
+    linkedProviders:["chatgpt"], providerLinkEpochs:{chatgpt:"owner-consent"}
+  };
+  const api = loadShared([], true, storage, {
+    hasPermissions: origins => !origins.some(origin => origin.startsWith("https://"))
+  });
+  const expected = {
+    gateway:storage.gateway, connectionMode:storage.connectionMode,
+    provider:"chatgpt", linkEpoch:"owner-consent"
+  };
+  await api.relayFetch("/relay/v1/session/chatgpt", {
+    method:"DELETE", body:"{}"
+  }, expected);
+  await api.relayFetch("/relay/v1/diagnostics", {method:"POST", body:"{}"});
+  assert.equal(api.fetchCalls.length, 2,
+    "permission revocation must not break cleanup or safe diagnostics");
 });
 
 test("token-bound logout can run after provider consent is removed", async () => {
@@ -565,6 +796,54 @@ test("invalid browser cookie attributes fail the complete relay upload before pe
   }
 });
 
+test("partitioned provider cookies fail closed before upload without erasing saved relay state", async () => {
+  for (const partitionKey of [
+    {topLevelSite:"https://private.example"},
+    {topLevelSite:"https://chatgpt.com",hasCrossSiteAncestor:true},
+    {},
+    "forged-partition-shape",
+    0
+  ]) {
+    const storage = {
+      gateway:"http://127.0.0.1:8080",
+      token:"synthetic-install-token",
+      linkedProviders:["chatgpt"],
+      relaySnapshotVersions:{chatgpt:"prior-version"}
+    };
+    const api = loadShared([
+      {name:"plain",value:"fixture",domain:".chatgpt.com",path:"/",secure:true},
+      {name:"partitioned-private-name",value:"private-credential",domain:".chatgpt.com",
+        path:"/",secure:true,partitionKey}
+    ], true, storage);
+    await assert.rejects(
+      () => api.syncProvider("chatgpt"),
+      error => error.message ===
+        "Unsupported browser cookie partition scope; existing gateway session was preserved."
+    );
+    assert.equal(api.fetchCalls.length, 0, "partial provider snapshot must never be transmitted");
+    assert.deepEqual(storage.linkedProviders, ["chatgpt"], "owner consent is unchanged");
+    assert.equal(storage.relaySnapshotVersions.chatgpt, "prior-version");
+  }
+});
+
+test("irrelevant partitioned cookies are excluded while ordinary active cookies remain usable", async () => {
+  const api = loadShared([
+    {name:"non-partitioned",value:"fixture",domain:".chatgpt.com",path:"/",secure:true},
+    {name:"null-partition",value:"fixture",domain:".chatgpt.com",path:"/",secure:true,partitionKey:null},
+    {name:"out-of-scope",value:"private",domain:".gmail.com",path:"/",secure:true,
+      partitionKey:{topLevelSite:"https://private.example"}}
+  ]);
+  const snapshot = await api.providerCookieSnapshot("chatgpt");
+  const names = JSON.parse(JSON.stringify(snapshot.cookies.map(cookie => cookie.name).sort()));
+  assert.deepEqual(names, ["non-partitioned","null-partition"]);
+  const queries = api.getCookieQueries();
+  assert.ok(queries.length > 0);
+  assert.ok(queries.every(query => query.partitionKey &&
+    Object.keys(query.partitionKey).length === 0),
+    "explicit empty partitionKey is necessary to enumerate all cookie scopes");
+  assert.ok(snapshot.cookies.every(cookie => !Object.hasOwn(cookie, "partitionKey")));
+});
+
 test("automatic sync skips unchanged snapshots but manual sync always refreshes", async () => {
   const storage = {gateway:"http://127.0.0.1:8080",token:"install-1",linkedProviders:["chatgpt"]};
   const fixtures = [{name:"session",value:"first",domain:".chatgpt.com",path:"/",secure:true,httpOnly:true}];
@@ -621,16 +900,231 @@ test("local relay mode cannot be used for a remote HTTP or HTTPS gateway", async
   }
 });
 
+test("sync stopwatch reports only fixed monotonic bounded stages and durations", async () => {
+  let clock = 0;
+  const progress = [];
+  const api = loadShared([
+    { name:"session",value:"cookie-private-value",domain:".chatgpt.com",path:"/",secure:true,httpOnly:true }
+  ], true, {
+    gateway:"http://127.0.0.1:8080",connectionMode:"local",
+    linkedProviders:["chatgpt"],providerLinkEpochs:{chatgpt:"private-epoch"}
+  }, {
+    performance:{now:()=>{clock+=5;return clock;}}
+  });
+  const result = await api.syncProvider("chatgpt", {
+    force:true,onProgress:sample=>progress.push(sample)
+  });
+  assert.equal(result,"uploaded");
+  assert.deepEqual(progress.map(e=>e.phase),
+    ["permission","cookie_read","digest","upload",null]);
+  assert.deepEqual(JSON.parse(JSON.stringify(progress.at(-1).durations_ms)), {
+    permission:5,cookie_read:5,digest:5,upload:5
+  });
+  assert.ok(!JSON.stringify(progress).includes("cookie-private-value"));
+  assert.ok(!JSON.stringify(progress).includes("private-epoch"));
+  assert.ok(!JSON.stringify(progress).includes("127.0.0.1"));
+  assert.equal(api.fetchCalls.length,1);
+});
 
-test("saved activation failures retain consent without caching success or replaying", async () => {
+test("missing permission and absent cookies do not invent later sync phases", async () => {
+  const state = {
+    gateway:"http://127.0.0.1:8080",connectionMode:"local",
+    linkedProviders:["manus"],providerLinkEpochs:{manus:"private-consent"}
+  };
+  const deniedEvents = [];
+  const denied = loadShared([], false, {...state}, {
+    performance:{now:()=>6}
+  });
+  await assert.rejects(() => denied.syncProvider("manus",{
+    onProgress:step=>deniedEvents.push(step)
+  }),/Missing provider host permissions/);
+  assert.deepEqual(deniedEvents.map(x=>x.phase),["permission",null]);
+  assert.deepEqual(JSON.parse(JSON.stringify(deniedEvents.at(-1).durations_ms)),{permission:0});
+  assert.equal(denied.getCookieReads(),0);
+  assert.equal(denied.fetchCalls.length,0);
+
+  const emptyEvents = [];
+  const empty = loadShared([], true, {...state}, {performance:{now:()=>9}});
+  assert.equal(await empty.syncProvider("manus",{
+    onProgress:step=>emptyEvents.push(step)
+  }),"no_cookies");
+  assert.deepEqual(emptyEvents.map(x=>x.phase),
+    ["permission","cookie_read","digest",null]);
+  assert.equal(empty.fetchCalls.length,0);
+});
+
+test("sync stopwatch clamps unexpected timer jumps and ignores failing reporters", async () => {
+  const state = {gateway:"http://127.0.0.1:8080",connectionMode:"local",
+    linkedProviders:["chatgpt"],providerLinkEpochs:{chatgpt:"private-consent"}};
+  let clock = -500;
+  const seen = [];
+  const api = loadShared([], true, state, {
+    performance:{now:()=>{clock+=200_000;return clock;}}
+  });
+  assert.equal(await api.syncProvider("chatgpt",{
+    onProgress:step=>{
+      seen.push(step);
+      if (step.phase === "cookie_read") throw new Error("private reporter exception");
+    }
+  }),"no_cookies");
+  assert.ok(seen.length>=3);
+  for (const sample of seen) for (const value of Object.values(sample.durations_ms)) {
+    assert.equal(value,120_000);
+  }
+});
+
+
+test("concurrent cross-provider uploads preserve both snapshot digests", async () => {
+  const storage = {
+    gateway:"http://127.0.0.1:8080", connectionMode:"local",
+    linkedProviders:["chatgpt","claude"],
+    providerLinkEpochs:{chatgpt:"epoch-a",claude:"epoch-b"}
+  };
+  let entered;
+  let release;
+  const started = new Promise(resolve => {entered = resolve;});
+  const held = new Promise(resolve => {release = resolve;});
+  let writes = 0;
+  const api = loadShared([
+    {name:"session-a",value:"redacted-a",domain:".chatgpt.com",path:"/",secure:true,httpOnly:true},
+    {name:"session-b",value:"redacted-b",domain:".claude.ai",path:"/",secure:true,httpOnly:true}
+  ], true, storage, {
+    onStorageSet: async (patch, current) => {
+      writes++;
+      if (writes === 1) {entered(); await held;}
+      Object.assign(current, patch);
+    }
+  });
+  const first = api.syncProvider("chatgpt");
+  await started;
+  const second = api.syncProvider("claude");
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(writes, 1, "a second provider cannot read/write stale digest state");
+  release();
+  assert.deepEqual(await Promise.all([first,second]), ["uploaded","uploaded"]);
+  assert.match(storage.relaySnapshotVersions.chatgpt, /^[a-f0-9]{64}$/);
+  assert.match(storage.relaySnapshotVersions.claude, /^[a-f0-9]{64}$/);
+  assert.notEqual(storage.relaySnapshotVersions.chatgpt, storage.relaySnapshotVersions.claude);
+  assert.equal(await api.syncProvider("chatgpt"), "unchanged");
+  assert.equal(await api.syncProvider("claude"), "unchanged");
+});
+
+test("failed snapshot-version write releases cross-provider mutation queue", async () => {
+  const storage = {
+    gateway:"http://127.0.0.1:8080", connectionMode:"local",
+    linkedProviders:["chatgpt","claude"],
+    providerLinkEpochs:{chatgpt:"epoch-a",claude:"epoch-b"}
+  };
+  let failFirst = true;
+  const api = loadShared([
+    {name:"session-a",value:"redacted-a",domain:".chatgpt.com",path:"/",secure:true,httpOnly:true},
+    {name:"session-b",value:"redacted-b",domain:".claude.ai",path:"/",secure:true,httpOnly:true}
+  ], true, storage, {
+    onStorageSet: async (patch, current) => {
+      if (failFirst) {failFirst = false; throw new Error("simulated storage failure");}
+      Object.assign(current, patch);
+    }
+  });
+  await assert.rejects(() => api.syncProvider("chatgpt"), /simulated storage failure/);
+  assert.equal(await api.syncProvider("claude"), "uploaded");
+  assert.match(storage.relaySnapshotVersions.claude, /^[a-f0-9]{64}$/);
+  assert.equal(storage.relaySnapshotVersions.chatgpt, undefined);
+});
+
+
+test("prototype property names cannot authorize cookie collection or sync", async () => {
+  const storage = {
+    gateway:"http://127.0.0.1:8080", connectionMode:"local",
+    linkedProviders:["constructor","toString","__proto__",["chatgpt"]]
+  };
+  const api = loadShared([
+    {name:"session", value:"private-fixture", domain:".chatgpt.com", path:"/", secure:true}
+  ], true, storage);
+  for (const invalid of ["constructor","toString","__proto__",["chatgpt"],null]) {
+    await assert.rejects(() => api.providerCookieSnapshot(invalid), /Unsupported provider/);
+    await assert.rejects(() => api.syncProvider(invalid), /Unsupported provider/);
+  }
+  assert.equal(api.getCookieReads(), 0, "prototype names must never read browser cookies");
+  assert.equal(api.fetchCalls.length, 0, "prototype names must never upload cookie material");
+  assert.equal(api.PROVIDERS.chatgpt[0], "chatgpt.com");
+});
+
+
+test("malformed linked-provider storage cannot authorize Manus cookie sync", async () => {
+  const storage = {
+    gateway:"http://127.0.0.1:8080", connectionMode:"local",
+    linkedProviders:"prefix-manus-suffix", providerLinkEpochs:{manus:"consent-a"}
+  };
+  const api = loadShared([
+    {name:"session",value:"private-fixture",domain:".manus.im",path:"/",secure:true,httpOnly:true}
+  ], true, storage);
+  for (const malformed of [
+    "prefix-manus-suffix", "manus", "chatgpt,manus", {}, null, 42, {includes:()=>true}
+  ]) {
+    storage.linkedProviders = malformed;
+    assert.equal(await api.syncProvider("manus"), "skipped");
+    assert.equal(api.getCookieReads(), 0, "malformed consent must fail before cookie collection");
+    assert.equal(api.fetchCalls.length, 0, "malformed consent must never POST cookies");
+  }
+  storage.linkedProviders = ["manus"];
+  assert.equal(await api.syncProvider("manus"), "uploaded");
+  assert.ok(api.getCookieReads() > 0, "genuine linked Manus can use existing permitted browser login");
+  assert.equal(api.fetchCalls.length, 1);
+  assert.equal(api.fetchCalls[0].url, "http://127.0.0.1:8080/relay/v1/session/manus");
+});
+
+test("relay upload rechecks exact array consent after an awaited owner transition", async () => {
+  const storage = {
+    gateway:"http://127.0.0.1:8080", connectionMode:"local",
+    linkedProviders:["manus"],providerLinkEpochs:{manus:"consent-a"}
+  };
+  const api = loadShared([
+    {name:"session",value:"private-fixture",domain:".manus.im",path:"/",secure:true,httpOnly:true}
+  ], true, storage, {
+    onCookieRead: async current => {current.linkedProviders = "prefix-manus-suffix";}
+  });
+  assert.equal(await api.syncProvider("manus"), "skipped");
+  assert.equal(api.fetchCalls.length, 0);
+  await assert.rejects(() => api.relayFetch("/relay/v1/session/manus", {
+    method:"POST", body:"{}"
+  }, {
+    gateway:storage.gateway, token:undefined, connectionMode:"local",
+    provider:"manus", linkEpoch:"consent-a"
+  }), /Provider consent or gateway connection changed/);
+  assert.equal(api.fetchCalls.length, 0, "pre-POST consent fence must reject string membership");
+});
+
+
+test("exact typed persistence-success activation failures remain pending without caching a digest", async () => {
   for (const [status, code] of [[504, "session_activation_timeout"], [500, "session_refresh_failed"]]) {
-    const storage = {gateway:"http://127.0.0.1:8080",token:"install",linkedProviders:["chatgpt"]};
-    const api = loadShared([{name:"session",value:"fixture",domain:".chatgpt.com",path:"/",secure:true}], true, storage, {
-      fetchResponse:{ok:false,status,json:async()=>({error:{code}})}
+    const storage = {gateway:"http://127.0.0.1:8080",connectionMode:"local",
+      linkedProviders:["chatgpt"],providerLinkEpochs:{chatgpt:"consent-epoch"}};
+    const api = loadShared([{name:"session",value:"private-test-cookie",
+      domain:".chatgpt.com",path:"/",secure:true}],true,storage,{
+      fetchResponse:{ok:false,status,json:async()=>({error:{code,message:"private token=secret"}})}
     });
     assert.equal(await api.syncProvider("chatgpt"), "saved_activation_pending");
     assert.deepEqual(storage.linkedProviders, ["chatgpt"]);
-    assert.equal(storage.relaySnapshotVersions, undefined);
-    assert.equal(api.fetchCalls.length, 1);
+    assert.equal(storage.relaySnapshotVersions, undefined,
+      "activation-pending must not falsely mark a cookie version as activated");
+    assert.equal(api.fetchCalls.length,1,"do not automatically replay uncertain uploads");
+  }
+});
+
+test("untyped or status-mismatched activation responses cannot claim persisted consent", async () => {
+  for (const [status, code] of [
+    [504,"unrelated_timeout"],[500,"session_activation_timeout"],
+    [504,"session_refresh_failed"],[403,"session_refresh_failed"],
+  ]) {
+    const storage = {gateway:"http://127.0.0.1:8080",connectionMode:"local",
+      linkedProviders:["chatgpt"],providerLinkEpochs:{chatgpt:"consent-epoch"}};
+    const api = loadShared([{name:"session",value:"private-test-cookie",
+      domain:".chatgpt.com",path:"/",secure:true}],true,storage,{
+      fetchResponse:{ok:false,status,json:async()=>({error:{code,message:"private token=secret"}})}
+    });
+    await assert.rejects(() => api.syncProvider("chatgpt"),
+      /Gateway rejected session update/);
+    assert.equal(storage.relaySnapshotVersions,undefined);
+    assert.equal(api.fetchCalls.length,1);
   }
 });

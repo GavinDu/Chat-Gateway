@@ -3,6 +3,11 @@
 (() => {
   const attempt = __ATTEMPT__;
   if (location.origin !== __ORIGIN__) return {state:'off_origin'};
+  // The full URL may carry a private thread/account token. Keep it in this
+  // first-party realm and use it only to fence an asynchronous page change.
+  const initialHref = location.href;
+  const samePage = () => location.origin === __ORIGIN__ &&
+                         location.href === initialHref;
   const key = '__chatGatewayChatgptSessionReadiness';
   const previous = globalThis[key];
   if (previous) {
@@ -13,7 +18,10 @@
   globalThis[key] = probe;
   const finish = state => {
     if (globalThis[key] !== probe || probe.state !== 'pending') return;
-    probe.state = state;
+    // A completed request for an older same-origin SPA route or navigated
+    // document cannot prove the currently displayed account. Also prevent an
+    // earlier 401 from demanding a new login in the later page.
+    probe.state = samePage() ? state : 'unavailable';
     clearTimeout(probe.timer);
   };
   probe.timer = setTimeout(() => {
@@ -21,19 +29,51 @@
     try { probe.controller.abort(); } catch (_) {}
   }, __TIMEOUT_MS__);
   try {
-    fetch('/api/auth/session', {credentials:'include', cache:'no-store', signal:probe.controller.signal})
+    // Pinned Obscura op_fetch_url follows redirects regardless of Request's
+    // "error" setting, while its bootstrap masks Response.redirected unless
+    // mode is "follow". Explicit follow exposes final URL + redirect metadata
+    // so this verifier can reject every redirected/foreign endpoint response
+    // instead of mistaking a redirected 200 for first-party session proof.
+    fetch('/api/auth/session', {credentials:'include', cache:'no-store',
+      redirect:'follow', signal:probe.controller.signal})
       .then(async response => {
         probe.http = response.status;
+        if (response.redirected ||
+            (__ORIGIN__ !== 'null' &&
+              response.url !== __ORIGIN__ + '/api/auth/session')) {
+          finish('unavailable'); return;
+        }
         if (response.status === 401) { finish('needs_login'); return; }
         if (!response.ok) { finish('unavailable'); return; }
         const session = await response.json();
         if (!session || typeof session !== 'object' || Array.isArray(session)) {
           finish('unavailable'); return;
         }
-        const user = !!session.user && typeof session.user === 'object' && !Array.isArray(session.user);
-        const token = typeof session.accessToken === 'string' && session.accessToken.length > 0;
+        // `{user:{}}` is not a source-backed account. Preserve unknown
+        // rather than claiming verified or forcing re-login on schema drift.
+        // HTTP 200 and the outer session expiry do not make a failed
+        // refresh or an expired access token usable. JWT claims can only
+        // reject stale evidence here; they never establish account proof.
+        if (session.error) { finish('unavailable'); return; }
+        const tokenCurrent = (() => {
+          if (typeof session.accessToken !== 'string') return false;
+          const parts = session.accessToken.split('.');
+          if (parts.length !== 3) return true; // Preserve opaque-token support.
+          try {
+            const encoded = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+            if (!encoded || encoded.length > 32768) return false;
+            const payload = JSON.parse(atob(encoded + '='.repeat((4 - encoded.length % 4) % 4)));
+            return payload && typeof payload === 'object' && !Array.isArray(payload) &&
+              (payload.exp === undefined || (typeof payload.exp === 'number' &&
+                Number.isFinite(payload.exp) && payload.exp * 1000 > Date.now()));
+          } catch (_) { return false; }
+        })();
+        const user = !!session.user && typeof session.user === 'object' &&
+                     !Array.isArray(session.user) && Object.keys(session.user).length > 0;
+        const token = typeof session.accessToken === 'string' &&
+                      session.accessToken.trim().length > 0;
         const future = typeof session.expires === 'string' && Date.parse(session.expires) > Date.now();
-        if (user && token && future) finish('verified');
+        if (user && token && tokenCurrent && future) finish('verified');
         else if (Object.keys(session).length === 0) finish('needs_login');
         else finish('unavailable');
       }).catch(() => finish('unavailable'));

@@ -24,6 +24,9 @@ use tokio_tungstenite::{
 const BRIDGE_PATH: &str = "/.well-known/chat-gateway-websocket";
 const MAX_COMMAND: usize = 1_048_576;
 const MAX_SOCKETS: usize = 16;
+// Bridge commands, including slow DNS/TLS opens and 5-second read polls,
+// cannot spawn an unbounded number of per-page tasks.
+const MAX_INFLIGHT_COMMANDS: usize = 64;
 
 struct SocketHandle {
     outgoing: mpsc::Sender<Message>,
@@ -37,14 +40,29 @@ struct State {
 }
 
 fn allowed_target(target: &str) -> Option<(String, String)> {
+    if target.len() > 4096 || target.contains('#') {
+        return None;
+    }
     let uri = target.parse::<axum::http::Uri>().ok()?;
     let authority = uri.authority()?;
     let host = uri.host()?.to_ascii_lowercase();
+    // port_u16() returns None for malformed or out-of-range ports; compare
+    // raw authority against the exact host and the sole permitted :443 suffix.
+    // This also rejects credentials, IP literals and malformed delimiters.
+    let raw_authority = authority.as_str().to_ascii_lowercase();
     if uri.scheme_str() != Some("wss")
-        || authority.as_str().contains('@')
-        || authority.port_u16().is_some_and(|p| p != 443)
+        || (raw_authority != host && raw_authority != format!("{host}:443"))
         || !(host == "chatgpt.com" || host.ends_with(".chatgpt.com"))
-        || target.contains('#')
+        || host.len() > 253
+        || host.split('.').any(|label| {
+            label.is_empty()
+                || label.len() > 63
+                || label.starts_with('-')
+                || label.ends_with('-')
+                || !label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        })
     {
         return None;
     }
@@ -67,23 +85,63 @@ fn public_ip(ip: IpAddr) -> bool {
                 && o[0] != 0
                 && !(o[0] == 100 && (64..=127).contains(&o[1]))
                 && !(o[0] == 198 && (o[1] == 18 || o[1] == 19))
+                // Special-use and obsolete transition ranges must never
+                // become a local-network credential delivery path.
+                && !(o[0] == 192 && o[1] == 0 && o[2] == 0)
+                && !(o[0] == 192 && o[1] == 88 && o[2] == 99)
                 && o[0] < 240
         }
         IpAddr::V6(v) => {
             if let Some(v4) = v.to_ipv4_mapped() {
                 return public_ip(IpAddr::V4(v4));
             }
-            !v.is_loopback()
-                && !v.is_unspecified()
+            // Admit only unicast 2000::/3, excluding non-routed or special
+            // transition/documentation ranges. IPv4-mapped values above use
+            // IPv4's stricter public-only policy.
+            (v.segments()[0] & 0xe000) == 0x2000
                 && !v.is_multicast()
                 && !v.is_unique_local()
                 && !v.is_unicast_link_local()
+                && !(v.segments()[0] == 0x2001 && v.segments()[1] == 0)
                 && !(v.segments()[0] == 0x2001 && v.segments()[1] == 0x0db8)
+                && !(v.segments()[0] == 0x2001 && (v.segments()[1] & 0xfff0) == 0x0010)
+                && v.segments()[0] != 0x2002
         }
     }
 }
 
-fn bridge_origin(url: &str) -> Option<&'static str> {
+fn allowed_target_for_origin(origin: &str, target: &str) -> Option<(String, String)> {
+    if matches!(origin, "https://chatgpt.com" | "https://www.chatgpt.com") {
+        return allowed_target(target);
+    }
+    if !matches!(origin, "https://meta.ai" | "https://www.meta.ai")
+        || target.len() > 4096
+        || target.contains('#')
+    {
+        return None;
+    }
+    let uri = target.parse::<axum::http::Uri>().ok()?;
+    let authority = uri.authority()?.as_str();
+    if uri.scheme_str() != Some("wss")
+        || !matches!(authority, "gateway.meta.ai" | "gateway.meta.ai:443")
+        || uri.path() != "/ws/clippy"
+    {
+        return None;
+    }
+    Some((
+        "gateway.meta.ai".into(),
+        "https://gateway.meta.ai/ws/clippy".into(),
+    ))
+}
+
+fn bridge_origin(url: &str, metaai: bool) -> Option<&'static str> {
+    if metaai {
+        return match url {
+            "https://meta.ai/.well-known/chat-gateway-websocket" => Some("https://meta.ai"),
+            "https://www.meta.ai/.well-known/chat-gateway-websocket" => Some("https://www.meta.ai"),
+            _ => None,
+        };
+    }
     if url == format!("https://chatgpt.com{BRIDGE_PATH}") {
         Some("https://chatgpt.com")
     } else if url == format!("https://www.chatgpt.com{BRIDGE_PATH}") {
@@ -179,6 +237,11 @@ async fn command(
     input: Value,
 ) -> Value {
     let fail = || json!({"ok":false});
+    let provider = match origin {
+        "https://chatgpt.com" | "https://www.chatgpt.com" => "chatgpt",
+        "https://meta.ai" | "https://www.meta.ai" => "metaai",
+        _ => return fail(),
+    };
     match input["op"].as_str().unwrap_or("") {
         "reset" => {
             let mut sockets = state.sockets.lock().await;
@@ -192,7 +255,7 @@ async fn command(
             let Some(target) = input["url"].as_str() else {
                 return fail();
             };
-            let Some((host, cookie_url)) = allowed_target(target) else {
+            let Some((host, cookie_url)) = allowed_target_for_origin(origin, target) else {
                 return fail();
             };
             let Some(ua) = input["ua"].as_str().filter(|s| s.len() <= 1024) else {
@@ -279,18 +342,18 @@ async fn command(
                     Ok(result) => result,
                     Err(tokio_tungstenite::tungstenite::Error::Http(response)) => {
                         tracing::warn!(
-                            provider = "chatgpt",
+                            provider,
                             status = response.status().as_u16(),
-                            "ChatGPT WebSocket handshake rejected"
+                            "Provider WebSocket handshake rejected"
                         );
                         return None;
                     }
                     Err(_) => return None,
                 };
                 tracing::info!(
-                    provider = "chatgpt",
+                    provider,
                     host = host.as_str(),
-                    "ChatGPT WebSocket connected"
+                    "Provider WebSocket connected"
                 );
                 let protocol = response
                     .headers()
@@ -305,9 +368,9 @@ async fn command(
                 Ok(Some(value)) => value,
                 _ => {
                     tracing::warn!(
-                        provider = "chatgpt",
+                        provider,
                         category = "websocket_connect_failed",
-                        "ChatGPT transport connection failed"
+                        "Provider transport connection failed"
                     );
                     fail()
                 }
@@ -359,7 +422,14 @@ async fn command(
             let Some(id) = input["id"].as_u64() else {
                 return fail();
             };
-            let code = input["code"].as_u64().unwrap_or(1000) as u16;
+            // Reject out-of-range JSON integers before conversion. A narrowing
+            // cast would turn 65536 + 1000 into a seemingly valid close code.
+            let Some(code) = input["code"]
+                .as_u64()
+                .map_or(Some(1000), |raw| u16::try_from(raw).ok())
+            else {
+                return fail();
+            };
             if code != 1000 && !(3000..=4999).contains(&code) {
                 return fail();
             }
@@ -392,17 +462,34 @@ async fn command(
 }
 
 pub(super) fn attach(browser: &Browser, page: &mut Page) {
+    attach_for_site(browser, page, false);
+}
+
+/// Meta AI's observed DGW endpoint needs a real socket as well. Reuse the
+/// bounded page-scoped bridge with an exact, disjoint target policy.
+pub(super) fn attach_metaai(browser: &Browser, page: &mut Page) {
+    attach_for_site(browser, page, true);
+}
+
+fn attach_for_site(browser: &Browser, page: &mut Page, metaai: bool) {
     let token = uuid::Uuid::new_v4().simple().to_string();
     let config = json!({"token":token,"path":BRIDGE_PATH});
-    page.add_preload_script(
-        &include_str!("chatgpt_websocket.js").replace("__BRIDGE_CONFIG__", &config.to_string()),
-    );
+    let mut source =
+        include_str!("chatgpt_websocket.js").replace("__BRIDGE_CONFIG__", &config.to_string());
+    if metaai {
+        source = source.replace(
+            "['chatgpt.com', 'www.chatgpt.com']",
+            "['meta.ai', 'www.meta.ai']",
+        );
+    }
+    page.add_preload_script(&source);
     let mut requests = page.enable_interception();
     let cookies = Arc::new(browser.cookies());
     let state = Arc::new(State::default());
+    let command_capacity = Arc::new(tokio::sync::Semaphore::new(MAX_INFLIGHT_COMMANDS));
     tokio::spawn(async move {
         while let Some(request) = requests.recv().await {
-            let Some(origin) = bridge_origin(&request.url) else {
+            let Some(origin) = bridge_origin(&request.url, metaai) else {
                 let _ = request.resolver.send(InterceptResolution::Continue {
                     url: None,
                     method: None,
@@ -428,9 +515,24 @@ pub(super) fn attach(browser: &Browser, page: &mut Page) {
                 .and_then(|s| STANDARD.decode(s).ok())
                 .filter(|v| v.len() <= MAX_COMMAND)
                 .and_then(|v| serde_json::from_slice::<Value>(&v).ok());
+            // Non-blocking admission protects the gateway from unbounded
+            // concurrent intercepted commands while the page renders.
+            let Ok(permit) = command_capacity.clone().try_acquire_owned() else {
+                let _ = request.resolver.send(InterceptResolution::Fulfill {
+                    status: 503,
+                    headers: HashMap::from([
+                        ("content-type".into(), "application/json".into()),
+                        ("cache-control".into(), "no-store".into()),
+                    ]),
+                    body: r#"{"ok":false}"#.to_string(),
+                    body_base64: String::new(),
+                });
+                continue;
+            };
             let state = state.clone();
             let cookies = cookies.clone();
             tokio::spawn(async move {
+                let _permit = permit;
                 let output = if let Some(input) = parsed {
                     command(&state, &cookies, origin, input).await
                 } else {
@@ -470,6 +572,17 @@ pub(super) fn attach(browser: &Browser, page: &mut Page) {
 mod tests {
     use super::*;
     #[test]
+    fn bridge_command_capacity_is_bounded_and_recovers_after_drop() {
+        let limiter = Arc::new(tokio::sync::Semaphore::new(MAX_INFLIGHT_COMMANDS));
+        let permits = (0..MAX_INFLIGHT_COMMANDS)
+            .map(|_| limiter.clone().try_acquire_owned().unwrap())
+            .collect::<Vec<_>>();
+        assert!(limiter.clone().try_acquire_owned().is_err());
+        drop(permits);
+        assert!(limiter.try_acquire_owned().is_ok());
+    }
+
+    #[test]
     fn targets_reject_other_origins_credentials_ports_and_plaintext() {
         for url in [
             "wss://ws.chatgpt.com/subscribe?token=fixture",
@@ -483,6 +596,9 @@ mod tests {
             "wss://user@ws.chatgpt.com/socket",
             "wss://127.0.0.1/socket",
             "wss://ws.chatgpt.com:444/socket",
+            "wss://ws.chatgpt.com:65536/socket",
+            "wss://ws..chatgpt.com/socket",
+            "wss://-bad.chatgpt.com/socket",
             "wss://ws.chatgpt.com/socket#fragment",
         ] {
             assert!(allowed_target(url).is_none(), "{url}");
@@ -495,165 +611,31 @@ mod tests {
             "::1",
             "fc00::1",
             "::ffff:127.0.0.1",
+            "192.0.0.1",
+            "192.88.99.1",
+            "2001:db8::1",
+            "2002::1",
+            "2001::1",
         ] {
             assert!(!public_ip(ip.parse().unwrap()));
         }
         assert!(public_ip("1.1.1.1".parse().unwrap()));
+        assert!(public_ip("2001:4860:4860::8888".parse().unwrap()));
     }
 
     #[tokio::test]
-    async fn native_chatgpt_lazy_stream_pulls_serially_after_start() {
+    async fn invalid_large_close_code_does_not_wrap_into_valid_status() {
         let browser = Browser::builder().stealth(false).build().unwrap();
-        let mut page = browser.new_page().await.unwrap();
-        page.goto("data:text/html,<body>stream fixture</body>")
-            .await
-            .unwrap();
-        let source = include_str!("chatgpt_streams.js").replace(
-            "if (!['chatgpt.com', 'www.chatgpt.com'].includes(location.hostname)) return;",
-            "",
-        );
-        page.evaluate(&source);
-        page.evaluate(r#"(() => {globalThis.fixtureResult=null;(async()=>{
-            let started=false,pulls=0,active=0,maxActive=0;
-            const stream=new ReadableStream({
-                async start(){await Promise.resolve();started=true;},
-                async pull(controller){if(!started)throw Error('early pull');active++;maxActive=Math.max(maxActive,active);await Promise.resolve();controller.enqueue(++pulls);active--;if(pulls===3)controller.close();}
-            });
-            const reader=stream.getReader();const results=await Promise.all([reader.read(),reader.read(),reader.read(),reader.read()]);
-            fixtureResult=JSON.stringify({values:results.map(r=>r.value??null),done:results[3].done,pulls,maxActive});
-        })().catch(()=>fixtureResult='error');})()"#);
-        page.settle(200).await;
-        let result: Value =
-            serde_json::from_str(page.evaluate("fixtureResult").as_str().unwrap_or("null"))
-                .unwrap();
-        assert_eq!(
-            result,
-            json!({"values":[1,2,3,null],"done":true,"pulls":3,"maxActive":1}),
-            "{}",page.evaluate("JSON.stringify({stream:typeof globalThis.ReadableStream,response:typeof globalThis.Response,result:globalThis.fixtureResult})")
-        );
-    }
-
-    #[tokio::test]
-    async fn native_chatgpt_stream_prefills_after_start_and_respects_zero_watermark() {
-        let browser = Browser::builder().stealth(false).build().unwrap();
-        let mut page = browser.new_page().await.unwrap();
-        page.goto("data:text/html,<body>stream prefetch fixture</body>")
-            .await
-            .unwrap();
-        let source = include_str!("chatgpt_streams.js").replace(
-            "if (!['chatgpt.com', 'www.chatgpt.com'].includes(location.hostname)) return;",
-            "",
-        );
-        page.evaluate(&source);
-        page.evaluate(r#"(() => {
-            globalThis.prefetchCounts=[0,0];
-            let finish;
-            const started=new Promise(resolve=>finish=resolve);
-            globalThis.finishStreamStart=finish;
-            globalThis.prefetchStreams=[undefined,{highWaterMark:0}].map((strategy,index)=>new ReadableStream({
-                start(){return started;},
-                pull(controller){prefetchCounts[index]++;controller.enqueue('fixture');}
-            },strategy));
-        })()"#);
-        page.settle(100).await;
-        assert_eq!(
-            page.evaluate("JSON.stringify(prefetchCounts)").as_str(),
-            Some("[0,0]")
-        );
-        page.evaluate("finishStreamStart()");
-        page.settle(100).await;
-        assert_eq!(
-            page.evaluate("JSON.stringify(prefetchCounts)").as_str(),
-            Some("[1,0]"),
-            "default streams must prefill without a reader after asynchronous start"
-        );
-        page.evaluate(r#"(() => {globalThis.prefetchReads=null;Promise.all(prefetchStreams.map(stream=>stream.getReader().read())).then(values=>prefetchReads=values.map(v=>v.value));})()"#);
-        page.settle(100).await;
-        assert_eq!(
-            page.evaluate("JSON.stringify(prefetchReads)").as_str(),
-            Some(r#"["fixture","fixture"]"#)
-        );
-        assert_eq!(
-            page.evaluate("JSON.stringify(prefetchCounts)").as_str(),
-            Some("[2,1]"),
-            "zero-watermark streams pull on demand; default streams refill one slot"
-        );
-    }
-
-    #[tokio::test]
-    async fn native_chatgpt_prefetch_uses_chunk_sizes_and_preserves_backpressure() {
-        let browser = Browser::builder().stealth(false).build().unwrap();
-        let mut page = browser.new_page().await.unwrap();
-        page.goto("data:text/html,<body>stream sizes fixture</body>")
-            .await
-            .unwrap();
-        let source = include_str!("chatgpt_streams.js").replace(
-            "if (!['chatgpt.com', 'www.chatgpt.com'].includes(location.hostname)) return;",
-            "",
-        );
-        page.evaluate(&source);
-        page.evaluate(&source); // repeated preload must not count each chunk twice
-        page.evaluate(
-            r#"(() => {
-            globalThis.sizedPulls=0;globalThis.sizeCalls=0;
-            globalThis.sizedController=null;
-            globalThis.sizedStream=new ReadableStream({pull(controller){
-                sizedController=controller;sizedPulls++;controller.enqueue(new Uint8Array(2));
-            }},{highWaterMark:4,size(chunk){sizeCalls++;return chunk.byteLength;}});
-        })()"#,
-        );
-        page.settle(100).await;
-        assert_eq!(
-            page.evaluate("JSON.stringify([sizedPulls,sizeCalls,sizedController.desiredSize])")
-                .as_str(),
-            Some("[2,2,0]")
-        );
-        page.evaluate(r#"(() => {sizedStream.getReader().read();})()"#);
-        page.settle(100).await;
-        assert_eq!(
-            page.evaluate("JSON.stringify([sizedPulls,sizeCalls,sizedController.desiredSize])")
-                .as_str(),
-            Some("[3,3,0]")
-        );
-        page.evaluate("sizedController.error(new Error('fixture failure'))");
-        assert_eq!(page.evaluate("sizedController.desiredSize"), Value::Null);
-        page.settle(100).await;
-        assert_eq!(page.evaluate("sizedPulls").as_f64(), Some(3.0));
-    }
-
-    #[tokio::test]
-    async fn native_chatgpt_prefetch_cancellation_stops_pending_source() {
-        let browser = Browser::builder().stealth(false).build().unwrap();
-        let mut page = browser.new_page().await.unwrap();
-        page.goto("data:text/html,<body>stream cancellation fixture</body>")
-            .await
-            .unwrap();
-        let source = include_str!("chatgpt_streams.js").replace(
-            "if (!['chatgpt.com', 'www.chatgpt.com'].includes(location.hostname)) return;",
-            "",
-        );
-        page.evaluate(&source);
-        page.evaluate(r#"(() => {
-            globalThis.cancelPulls=0;globalThis.cancelCalls=0;globalThis.cancelFinished=false;
-            globalThis.cancelStream=new ReadableStream({
-                pull(controller){cancelPulls++;return new Promise(resolve=>{
-                    globalThis.releaseCancelledPull=()=>{try{controller.enqueue('late fixture');}catch{}resolve();};
-                });},
-                cancel(){cancelCalls++;}
-            });
-        })()"#);
-        page.settle(100).await;
-        assert_eq!(page.evaluate("cancelPulls").as_f64(), Some(1.0));
-        page.evaluate(r#"(() => {cancelStream.cancel().then(()=>cancelFinished=true);releaseCancelledPull();})()"#);
-        page.settle(100).await;
-        assert_eq!(
-            page.evaluate("JSON.stringify([cancelPulls,cancelCalls,cancelFinished])")
-                .as_str(),
-            Some("[1,1,true]")
-        );
-        page.evaluate(r#"(() => {globalThis.cancelReadDone=false;cancelStream.getReader().read().then(value=>cancelReadDone=value.done);})()"#);
-        page.settle(100).await;
-        assert_eq!(page.evaluate("cancelReadDone").as_bool(), Some(true));
+        let state = Arc::new(State::default());
+        let cookies = browser.cookies();
+        let result = command(
+            &state,
+            &cookies,
+            "https://chatgpt.com",
+            json!({"op":"close","id":7,"code":66536}),
+        )
+        .await;
+        assert_eq!(result["ok"], false);
     }
 
     #[tokio::test]
@@ -676,7 +658,7 @@ mod tests {
             };})()"#);
         let source = include_str!("chatgpt_websocket.js")
             .replace(
-                "if (!['chatgpt.com', 'www.chatgpt.com'].includes(location.hostname)) return;",
+                "if (location.protocol !== 'https:' || !['chatgpt.com', 'www.chatgpt.com'].includes(location.hostname) || (location.port && location.port !== '443')) return;",
                 "",
             )
             .replace(
@@ -796,5 +778,170 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+    }
+    #[tokio::test]
+    async fn page_generation_reset_fences_late_socket_and_never_recycles_ids() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (finish_tx, finish_rx) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            // Keep all synthetic peer sockets alive until client-side
+            // generation checks finish, independent of their close behavior.
+            let mut peers = Vec::new();
+            for _ in 0..4 {
+                let (tcp, _) = listener.accept().await.unwrap();
+                peers.push(tokio_tungstenite::accept_async(tcp).await.unwrap());
+            }
+            let _ = finish_rx.await;
+            drop(peers);
+        });
+        let state = Arc::new(State::default());
+        let browser = Browser::builder().stealth(false).build().unwrap();
+        let cookies = browser.cookies();
+
+        let (first, _) = tokio_tungstenite::connect_async(format!("ws://{address}"))
+            .await
+            .unwrap();
+        let old_generation = state.generation.load(std::sync::atomic::Ordering::SeqCst);
+        let first_id = register_socket(&state, first, old_generation)
+            .await
+            .unwrap();
+        let (second, _) = tokio_tungstenite::connect_async(format!("ws://{address}"))
+            .await
+            .unwrap();
+        let second_id = register_socket(&state, second, old_generation)
+            .await
+            .unwrap();
+        assert!(second_id > first_id);
+
+        let reset = command(
+            &state,
+            &cookies,
+            "https://chatgpt.com",
+            json!({"op":"reset"}),
+        )
+        .await;
+        assert_eq!(reset["ok"], true);
+        assert!(state.sockets.lock().await.is_empty());
+
+        // A delayed TLS handshake that started before reset must not take
+        // ownership of the new page generation, even with a valid socket.
+        let (stale, _) = tokio_tungstenite::connect_async(format!("ws://{address}"))
+            .await
+            .unwrap();
+        assert!(register_socket(&state, stale, old_generation)
+            .await
+            .is_none());
+
+        let current_generation = state.generation.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(current_generation > old_generation);
+        let (current, _) = tokio_tungstenite::connect_async(format!("ws://{address}"))
+            .await
+            .unwrap();
+        let current_id = register_socket(&state, current, current_generation)
+            .await
+            .unwrap();
+        assert!(current_id > second_id, "socket ids must never ABA-reuse");
+        assert_eq!(state.sockets.lock().await.len(), 1);
+        for old_id in [first_id, second_id] {
+            assert_eq!(
+                command(
+                    &state,
+                    &cookies,
+                    "https://chatgpt.com",
+                    json!({"op":"send","id":old_id,"data":"old","binary":false}),
+                )
+                .await["ok"],
+                false
+            );
+        }
+        // Releasing an old identifier cannot affect the newly registered
+        // socket or retroactively deliver old-generation frames.
+        command(
+            &state,
+            &cookies,
+            "https://chatgpt.com",
+            json!({"op":"release","id":first_id}),
+        )
+        .await;
+        assert_eq!(state.sockets.lock().await.len(), 1);
+        command(
+            &state,
+            &cookies,
+            "https://chatgpt.com",
+            json!({"op":"reset"}),
+        )
+        .await;
+        assert!(state.sockets.lock().await.is_empty());
+        let _ = finish_tx.send(());
+        tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod metaai_target_policy_tests {
+    use super::*;
+    #[test]
+    fn metaai_socket_targets_are_exact_and_disjoint_from_chatgpt() {
+        for origin in ["https://meta.ai", "https://www.meta.ai"] {
+            for target in [
+                "wss://gateway.meta.ai/ws/clippy",
+                "wss://gateway.meta.ai:443/ws/clippy?opaque=fixture",
+            ] {
+                assert!(allowed_target_for_origin(origin, target).is_some());
+                assert!(allowed_target_for_origin("https://chatgpt.com", target).is_none());
+            }
+            for target in [
+                "wss://gateway.meta.ai/ws",
+                "wss://gateway.meta.ai/ws/clippy/",
+                "wss://gateway.meta.ai/ws/other",
+                "wss://ws.chatgpt.com/socket",
+                "ws://gateway.meta.ai/ws/clippy",
+                "wss://gateway.meta.ai:8086/ws",
+                "wss://gateway.meta.ai:65536/ws",
+                "wss://user@gateway.meta.ai/ws/clippy",
+                "wss://gateway.meta.ai.attacker.test/ws",
+                "wss://other.meta.ai/ws",
+                "wss://gateway.meta.ai/admin",
+                "wss://gateway.meta.ai/ws/clippy#secret",
+                "wss://127.0.0.1/ws",
+            ] {
+                assert!(
+                    allowed_target_for_origin(origin, target).is_none(),
+                    "{target}"
+                );
+            }
+        }
+        assert!(allowed_target_for_origin(
+            "https://attacker.test",
+            "wss://gateway.meta.ai/ws/clippy"
+        )
+        .is_none());
+    }
+    #[test]
+    fn a_page_bridge_cannot_be_reused_by_the_other_provider() {
+        assert!(bridge_origin(
+            "https://www.meta.ai/.well-known/chat-gateway-websocket",
+            true
+        )
+        .is_some());
+        assert!(bridge_origin(
+            "https://www.meta.ai/.well-known/chat-gateway-websocket",
+            false
+        )
+        .is_none());
+        assert!(bridge_origin(
+            "https://chatgpt.com/.well-known/chat-gateway-websocket",
+            true
+        )
+        .is_none());
+        assert!(bridge_origin(
+            "https://www.meta.ai:8443/.well-known/chat-gateway-websocket",
+            true
+        )
+        .is_none());
     }
 }

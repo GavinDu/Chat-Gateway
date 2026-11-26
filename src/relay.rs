@@ -72,6 +72,314 @@ impl ProviderImportGates {
     }
 }
 
+/// The browser worker's session activation is independent of both saved
+/// credentials and verified authentication. Only fixed state names enter
+/// extension-facing diagnostics; no account data is retained here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RelayActivationPhase {
+    NotAttempted,
+    Pending,
+    Ready,
+    Failed,
+    Cancelled,
+}
+
+impl RelayActivationPhase {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::NotAttempted => "not_attempted",
+            Self::Pending => "pending",
+            Self::Ready => "ready",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
+/// Fixed, privacy-preserving reasons for an attempted browser activation.
+/// A pending HTTP wait expiry is not a terminal failure: the detached browser
+/// refresh may still succeed, and only that eventual result determines Ready.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RelayActivationIssue {
+    WaitExpired,
+    WorkerUnavailable,
+    RefreshFailed,
+    AssetBlocked,
+    DocumentDenied,
+    ManualVerification,
+    SessionExpired,
+    NoApplicableMaterial,
+}
+
+impl RelayActivationIssue {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::WaitExpired => "wait_expired",
+            Self::WorkerUnavailable => "browser_worker_unavailable",
+            Self::RefreshFailed => "refresh_failed",
+            Self::AssetBlocked => "provider_assets_blocked",
+            Self::DocumentDenied => "provider_document_denied",
+            Self::ManualVerification => "manual_verification_required",
+            Self::SessionExpired => "provider_session_expired",
+            Self::NoApplicableMaterial => "provider_session_no_applicable_material",
+        }
+    }
+}
+
+/// Classify only typed upstream errors; never inspect or expose untrusted
+/// message strings, URLs, cookies, credentials, or error chains.
+fn relay_activation_error_kind(error: &anyhow::Error) -> RelayActivationIssue {
+    if error
+        .downcast_ref::<crate::browser::pool::BrowserWorkerUnavailableError>()
+        .is_some()
+    {
+        RelayActivationIssue::WorkerUnavailable
+    } else if error
+        .downcast_ref::<crate::providers::mistral::MistralAssetBlockedError>()
+        .is_some()
+    {
+        RelayActivationIssue::AssetBlocked
+    } else if error
+        .downcast_ref::<crate::providers::metaai::MetaAiDocumentDeniedError>()
+        .is_some()
+    {
+        RelayActivationIssue::DocumentDenied
+    } else if error
+        .downcast_ref::<crate::providers::ProviderChallengeError>()
+        .is_some()
+    {
+        RelayActivationIssue::ManualVerification
+    } else if error
+        .downcast_ref::<crate::browser::pool::ProviderSessionExpiredError>()
+        .is_some()
+    {
+        RelayActivationIssue::SessionExpired
+    } else if error
+        .downcast_ref::<crate::session::ProviderSnapshotNoApplicableMaterialError>()
+        .is_some()
+    {
+        RelayActivationIssue::NoApplicableMaterial
+    } else {
+        RelayActivationIssue::RefreshFailed
+    }
+}
+
+fn relay_pending_age_bucket(elapsed: Duration) -> &'static str {
+    if elapsed < Duration::from_secs(30) {
+        "recent"
+    } else if elapsed < Duration::from_secs(120) {
+        "delayed"
+    } else {
+        "stale"
+    }
+}
+
+#[derive(Debug)]
+struct ProviderActivationRecord {
+    generation: u64,
+    phase: RelayActivationPhase,
+    issue: Option<RelayActivationIssue>,
+    pending_since: Option<Instant>,
+}
+
+impl Default for ProviderActivationRecord {
+    fn default() -> Self {
+        Self {
+            generation: 0,
+            phase: RelayActivationPhase::NotAttempted,
+            issue: None,
+            pending_since: None,
+        }
+    }
+}
+
+/// A detached activation may finish after the initiating HTTP request times
+/// out. Fence its generation so late completion never resurrects a newer
+/// import or an explicitly unlinked provider.
+#[derive(Default)]
+struct ProviderActivationStates {
+    states: Mutex<HashMap<String, ProviderActivationRecord>>,
+}
+
+impl ProviderActivationStates {
+    fn begin(&self, provider: &str) -> Option<u64> {
+        let mut states = self.states.lock().ok()?;
+        let entry = states.entry(provider.to_owned()).or_default();
+        let next = entry.generation.checked_add(1)?;
+        entry.generation = next;
+        entry.phase = RelayActivationPhase::Pending;
+        entry.issue = None;
+        entry.pending_since = Some(Instant::now());
+        Some(next)
+    }
+
+    fn mark_wait_expired(&self, provider: &str, generation: Option<u64>) {
+        let Some(generation) = generation else {
+            return;
+        };
+        let Ok(mut states) = self.states.lock() else {
+            return;
+        };
+        if let Some(record) = states.get_mut(provider) {
+            if record.generation == generation && record.phase == RelayActivationPhase::Pending {
+                record.issue = Some(RelayActivationIssue::WaitExpired);
+            }
+        }
+    }
+
+    /// None means actual browser refresh succeeded; the typed failure reason
+    /// never derives from a draft, a stored cookie or a generic timeout.
+    fn finish(&self, provider: &str, generation: Option<u64>, issue: Option<RelayActivationIssue>) {
+        let Some(generation) = generation else {
+            return;
+        };
+        let Ok(mut states) = self.states.lock() else {
+            return;
+        };
+        let Some(record) = states.get_mut(provider) else {
+            return;
+        };
+        if record.generation == generation && record.phase == RelayActivationPhase::Pending {
+            record.phase = if issue.is_none() {
+                RelayActivationPhase::Ready
+            } else {
+                RelayActivationPhase::Failed
+            };
+            record.issue = issue;
+            record.pending_since = None;
+        }
+    }
+
+    fn revoke(&self, provider: &str) {
+        let Ok(mut states) = self.states.lock() else {
+            return;
+        };
+        let entry = states.entry(provider.to_owned()).or_default();
+        if let Some(next) = entry.generation.checked_add(1) {
+            entry.generation = next;
+            entry.phase = RelayActivationPhase::Cancelled;
+            entry.issue = None;
+            entry.pending_since = None;
+        }
+    }
+
+    /// Returns fixed labels only; does not return timestamps, session data or
+    /// error strings. Pending age is a bounded bucket, not an identifying time.
+    fn diagnostics(
+        &self,
+        provider: &str,
+    ) -> (&'static str, Option<&'static str>, Option<&'static str>) {
+        let Ok(states) = self.states.lock() else {
+            return ("unknown", Some("state_unavailable"), None);
+        };
+        let Some(record) = states.get(provider) else {
+            return (RelayActivationPhase::NotAttempted.as_str(), None, None);
+        };
+        (
+            record.phase.as_str(),
+            record.issue.map(RelayActivationIssue::as_str),
+            if record.phase == RelayActivationPhase::Pending {
+                record
+                    .pending_since
+                    .map(|since| relay_pending_age_bucket(since.elapsed()))
+            } else {
+                None
+            },
+        )
+    }
+}
+
+#[cfg(test)]
+mod relay_activation_state_tests {
+    use super::{
+        relay_activation_error_kind, relay_pending_age_bucket, ProviderActivationStates,
+        RelayActivationIssue,
+    };
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    #[test]
+    fn pending_reason_generation_fence_and_restart_are_independent_of_authentication() {
+        let states = ProviderActivationStates::default();
+        assert_eq!(states.diagnostics("manus"), ("not_attempted", None, None));
+        let first = states.begin("manus");
+        assert_eq!(states.diagnostics("manus").0, "pending");
+        states.mark_wait_expired("manus", first);
+        assert_eq!(states.diagnostics("manus").1, Some("wait_expired"));
+        states.finish("manus", first, None);
+        assert_eq!(states.diagnostics("manus"), ("ready", None, None));
+        let second = states.begin("manus");
+        states.finish("manus", first, Some(RelayActivationIssue::RefreshFailed));
+        assert_eq!(states.diagnostics("manus").0, "pending");
+        states.finish(
+            "manus",
+            second,
+            Some(RelayActivationIssue::WorkerUnavailable),
+        );
+        assert_eq!(
+            states.diagnostics("manus"),
+            ("failed", Some("browser_worker_unavailable"), None)
+        );
+        let third = states.begin("manus");
+        states.revoke("manus");
+        states.finish("manus", third, None);
+        assert_eq!(states.diagnostics("manus"), ("cancelled", None, None));
+        assert_eq!(states.diagnostics("qwen"), ("not_attempted", None, None));
+        assert_eq!(
+            ProviderActivationStates::default().diagnostics("manus"),
+            ("not_attempted", None, None),
+            "restart must not claim ready solely from persisted credentials"
+        );
+    }
+
+    #[tokio::test]
+    async fn late_browser_finish_never_revives_revoked_provider() {
+        let states = Arc::new(ProviderActivationStates::default());
+        let generation = states.begin("metaai");
+        let (continue_tx, continue_rx) = tokio::sync::oneshot::channel::<()>();
+        let delayed = Arc::clone(&states);
+        let worker = tokio::spawn(async move {
+            let _ = continue_rx.await;
+            delayed.finish("metaai", generation, None);
+        });
+        states.revoke("metaai");
+        continue_tx.send(()).unwrap();
+        worker.await.unwrap();
+        assert_eq!(states.diagnostics("metaai"), ("cancelled", None, None));
+    }
+
+    #[test]
+    fn bounded_age_and_typed_error_labels_do_not_leak_raw_provider_errors() {
+        assert_eq!(relay_pending_age_bucket(Duration::from_secs(29)), "recent");
+        assert_eq!(relay_pending_age_bucket(Duration::from_secs(30)), "delayed");
+        assert_eq!(
+            relay_pending_age_bucket(Duration::from_secs(119)),
+            "delayed"
+        );
+        assert_eq!(relay_pending_age_bucket(Duration::from_secs(120)), "stale");
+        let error = anyhow::anyhow!("cookie=private; URL=https://example.invalid/token");
+        let label = relay_activation_error_kind(&error).as_str();
+        assert_eq!(label, "refresh_failed");
+        assert!(!label.contains("private"));
+        assert!(!label.contains("token"));
+        let unavailable = anyhow::Error::new(crate::browser::pool::BrowserWorkerUnavailableError);
+        assert_eq!(
+            relay_activation_error_kind(&unavailable),
+            RelayActivationIssue::WorkerUnavailable
+        );
+        let denied = anyhow::Error::new(crate::providers::metaai::MetaAiDocumentDeniedError);
+        assert_eq!(
+            relay_activation_error_kind(&denied),
+            RelayActivationIssue::DocumentDenied
+        );
+        let absent = anyhow::Error::new(crate::session::ProviderSnapshotNoApplicableMaterialError);
+        let category = relay_activation_error_kind(&absent);
+        assert_eq!(category, RelayActivationIssue::NoApplicableMaterial);
+        assert_eq!(category.as_str(), "provider_session_no_applicable_material");
+        assert!(!category.as_str().contains("private"));
+    }
+}
+
 /// Keep the provider's serialization guard alive independently of the HTTP
 /// response future. Cancelling the caller must not unlock an already-started
 /// vault write, browser activation, or revocation running in the worker.
@@ -298,6 +606,7 @@ pub struct RelayState {
     used_nonces: Mutex<HashMap<String, Instant>>,
     request_times: Mutex<VecDeque<Instant>>,
     import_gates: ProviderImportGates,
+    activation_states: Arc<ProviderActivationStates>,
 }
 
 impl RelayState {
@@ -319,6 +628,7 @@ impl RelayState {
                 used_nonces: Mutex::new(HashMap::new()),
                 request_times: Mutex::new(VecDeque::new()),
                 import_gates: ProviderImportGates::default(),
+                activation_states: Arc::new(ProviderActivationStates::default()),
             },
             code,
         ))
@@ -1024,6 +1334,295 @@ fn authenticated_request_with_origin_mode(
     Ok(())
 }
 
+/// An explicit extension-approved account read uses *only* the current warm
+/// Obscura Page. The fixed report deliberately cannot certify any Chrome
+/// capture, encrypted persistence or applied replay generation.
+const ACCOUNT_PROBE_QUEUE_TIMEOUT: Duration = Duration::from_secs(2);
+const ACCOUNT_PROBE_WAIT_TIMEOUT: Duration = Duration::from_secs(15);
+
+fn account_probe_result(
+    verdict: crate::browser::pool::FirstPartyAccountVerdict,
+) -> (&'static str, &'static str) {
+    use crate::browser::pool::FirstPartyAccountVerdict;
+    match verdict {
+        FirstPartyAccountVerdict::Verified => ("verified", "first_party_session_confirmed"),
+        FirstPartyAccountVerdict::ExplicitUnauthenticated => {
+            ("unauthenticated", "provider_rejected_session")
+        }
+        FirstPartyAccountVerdict::Unknown => ("unknown", "first_party_check_inconclusive"),
+        FirstPartyAccountVerdict::Unsupported => {
+            ("unsupported", "account_verifier_not_established")
+        }
+    }
+}
+
+/// Distinguish configuration from unsupported first-party account evidence.
+/// Disabled providers cannot be probed, regardless of whether their account
+/// verification contract is implemented. This classification performs no IO.
+fn account_probe_preflight_result(
+    provider: &str,
+    enabled: bool,
+) -> Option<(&'static str, &'static str)> {
+    if !enabled {
+        Some(("unknown", "provider_disabled"))
+    } else if provider == "metaai" {
+        Some(("unsupported", "metaai_account_verifier_not_established"))
+    } else {
+        None
+    }
+}
+
+fn account_probe_worker_consistent(start: u64, end: u64, alive: bool) -> bool {
+    alive && start == end
+}
+
+fn account_probe_record(
+    provider: &'static str,
+    verdict: &'static str,
+    reason: &'static str,
+    worker_generation: Option<u64>,
+) -> serde_json::Value {
+    // No source account ID, cookie/body, URL, request parameters or credential
+    // fingerprint can enter this fixed response. The attempt UUID is random,
+    // not credential-derived or a claim that the Chrome snapshot was applied.
+    serde_json::json!({
+        "schema_version": 1,
+        "provider": provider,
+        "context": "obscura_warm_page",
+        "authentication": verdict,
+        "reason": reason,
+        "checked_at_utc": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        "attempt_id": uuid::Uuid::new_v4().to_string(),
+        "worker_generation": worker_generation,
+        "exported_snapshot_verified": false,
+        "applied_snapshot_verified": false
+    })
+}
+
+fn account_probe_response(
+    provider: &'static str,
+    verdict: &'static str,
+    reason: &'static str,
+    worker_generation: Option<u64>,
+) -> Response {
+    (
+        [
+            (header::CACHE_CONTROL, "no-store"),
+            (header::PRAGMA, "no-cache"),
+        ],
+        Json(account_probe_record(
+            provider,
+            verdict,
+            reason,
+            worker_generation,
+        )),
+    )
+        .into_response()
+}
+
+/// Explicit one-shot, POST-only, first-party account check for an authorized
+/// browser extension. Unlike /relay/v1/status, this has NO CLI/no-Origin
+/// exception, cannot be polled automatically and never invokes PageSession
+/// import, sends chat, navigates or mutates the owner vault.
+pub async fn verify_first_party_account(
+    State(app): State<Arc<crate::AppState>>,
+    headers: HeaderMap,
+    Path(provider): Path<String>,
+) -> Response {
+    if !headers.contains_key(header::ORIGIN) {
+        return json_error(
+            StatusCode::FORBIDDEN,
+            "extension_origin_rejected",
+            "the configured browser extension origin is required",
+        );
+    }
+    if let Err(response) = authenticated_request(&app, &headers) {
+        return *response;
+    }
+    let provider_name = match provider.as_str() {
+        "chatgpt" => "chatgpt",
+        "metaai" => "metaai",
+        _ => {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "unsupported_account_probe",
+                "first-party account probe is only supported for active recovery providers",
+            )
+        }
+    };
+    // A disabled provider is not an account-verifier attempt. For enabled
+    // Meta AI, no authoritative first-party signed-in contract exists (#1329);
+    // do not touch its page or invent a private endpoint.
+    let enabled = app.cfg.provider(provider_name).is_some_and(|c| c.enabled);
+    if let Some((verdict, reason)) = account_probe_preflight_result(provider_name, enabled) {
+        return account_probe_response(provider_name, verdict, reason, None);
+    }
+
+    // Relay imports/unlinks hold this same gate until actual browser activation
+    // finishes. Keep it held during the read-only check, so a concurrent
+    // relink/unlink cannot invalidate the observation before the response.
+    let Some(gate) = app.relay.import_gates.for_provider(provider_name) else {
+        return account_probe_response(provider_name, "unknown", "relay_unavailable", None);
+    };
+    let _guard = match tokio::time::timeout(ACCOUNT_PROBE_QUEUE_TIMEOUT, gate.lock_owned()).await {
+        Ok(guard) => guard,
+        Err(_) => {
+            return account_probe_response(provider_name, "unknown", "session_mutation_busy", None);
+        }
+    };
+
+    if !app.pool.worker_alive() {
+        return account_probe_response(provider_name, "unknown", "worker_unavailable", None);
+    }
+    let start = app.pool.worker_generation();
+    let check = tokio::time::timeout(
+        ACCOUNT_PROBE_WAIT_TIMEOUT,
+        app.pool.verify_first_party_account(provider_name),
+    )
+    .await;
+    let end = app.pool.worker_generation();
+    if !account_probe_worker_consistent(start, end, app.pool.worker_alive()) {
+        return account_probe_response(provider_name, "unknown", "worker_generation_changed", None);
+    }
+    let (verdict, reason) = match check {
+        Ok(Ok(result)) => account_probe_result(result),
+        Ok(Err(_)) => ("unknown", "worker_unavailable"),
+        Err(_) => ("unknown", "first_party_check_timeout"),
+    };
+    account_probe_response(provider_name, verdict, reason, Some(end))
+}
+
+#[cfg(test)]
+mod first_party_account_relay_tests {
+    use super::*;
+
+    #[test]
+    fn read_only_account_result_categories_never_infer_export_or_application() {
+        use crate::browser::pool::FirstPartyAccountVerdict as V;
+        assert_eq!(
+            account_probe_result(V::Verified),
+            ("verified", "first_party_session_confirmed")
+        );
+        assert_eq!(
+            account_probe_result(V::ExplicitUnauthenticated),
+            ("unauthenticated", "provider_rejected_session")
+        );
+        assert_eq!(
+            account_probe_result(V::Unknown),
+            ("unknown", "first_party_check_inconclusive")
+        );
+        assert_eq!(
+            account_probe_result(V::Unsupported),
+            ("unsupported", "account_verifier_not_established")
+        );
+    }
+
+    #[test]
+    fn disabled_account_probe_precedes_metaai_unsupported_verifier() {
+        assert_eq!(
+            account_probe_preflight_result("metaai", false),
+            Some(("unknown", "provider_disabled"))
+        );
+        assert_eq!(
+            account_probe_preflight_result("chatgpt", false),
+            Some(("unknown", "provider_disabled"))
+        );
+        assert_eq!(
+            account_probe_preflight_result("metaai", true),
+            Some(("unsupported", "metaai_account_verifier_not_established"))
+        );
+        // Enabled ChatGPT alone reaches the existing bounded, gated
+        // read-only verifier. None of these early states claim an account.
+        assert_eq!(account_probe_preflight_result("chatgpt", true), None);
+        for (provider, enabled) in [("metaai", false), ("chatgpt", false), ("metaai", true)] {
+            let (verdict, _) = account_probe_preflight_result(provider, enabled).unwrap();
+            assert_ne!(verdict, "verified");
+        }
+    }
+
+    #[test]
+    fn warm_page_response_is_redacted_and_snapshot_parity_never_assumed() {
+        let response = account_probe_response(
+            "chatgpt",
+            "verified",
+            "first_party_session_confirmed",
+            Some(2),
+        );
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CACHE_CONTROL).unwrap(),
+            "no-store"
+        );
+        let (verdict, reason) =
+            account_probe_result(crate::browser::pool::FirstPartyAccountVerdict::Verified);
+        let fixed = account_probe_record("chatgpt", verdict, reason, Some(2));
+        assert_eq!(fixed["schema_version"], 1);
+        assert_eq!(fixed["provider"], "chatgpt");
+        assert_eq!(fixed["context"], "obscura_warm_page");
+        assert_eq!(fixed["authentication"], "verified");
+        assert_eq!(fixed["reason"], "first_party_session_confirmed");
+        assert_eq!(fixed["worker_generation"], 2);
+        // A positive warm Page *still* cannot certify Chrome export/import or
+        // actual applied snapshot parity without source-owned lineage.
+        assert_eq!(fixed["exported_snapshot_verified"], false);
+        assert_eq!(fixed["applied_snapshot_verified"], false);
+        assert_eq!(fixed.as_object().unwrap().len(), 10);
+        let uuid = fixed["attempt_id"].as_str().unwrap();
+        assert!(!uuid::Uuid::parse_str(uuid).unwrap().is_nil());
+        let observed = fixed["checked_at_utc"].as_str().unwrap();
+        assert!(chrono::DateTime::parse_from_rfc3339(observed).is_ok());
+        let safe = fixed.to_string();
+        for source in [
+            "secret-cookie-value",
+            "private-access-token",
+            "https://chatgpt.com/c/private?key=secret",
+            "account_id",
+            "accessToken",
+            "cookie",
+            "session_generation",
+        ] {
+            assert!(!safe.contains(source));
+        }
+    }
+
+    #[test]
+    fn rejects_absent_extension_origin_and_stale_worker_generation() {
+        assert!(super::requested_extension_id(&HeaderMap::new()).is_none());
+        assert!(!account_probe_worker_consistent(1, 2, true));
+        assert!(!account_probe_worker_consistent(2, 2, false));
+        assert!(account_probe_worker_consistent(2, 2, true));
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("https://untrusted.example"),
+        );
+        assert!(super::requested_extension_id(&headers).is_none());
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("chrome-extension://abcdefghijklmnopabcdefghijklmnop"),
+        );
+        assert!(super::requested_extension_id(&headers).is_some());
+        // The actual handler additionally calls authenticated_request, which
+        // checks configured extension ID, pairing, timestamp, nonce and rate.
+    }
+}
+
+/// Browser DOM/login-view observations are not source-backed account proof for
+/// the two active recovery targets. Only ChatGPT's actual Obscura first-party
+/// verifier may assert an authenticated account; Meta AI has no reviewed
+/// positive account-readiness contract yet and must stay unknown.
+fn source_grounded_account_observation(
+    provider: &str,
+    legacy_observed: Option<bool>,
+    first_party_verified: bool,
+) -> Option<bool> {
+    match provider {
+        "chatgpt" => first_party_verified.then_some(true),
+        "metaai" => None,
+        _ => legacy_observed,
+    }
+}
+
 fn provider_authentication_status(
     observed: Option<bool>,
     state: crate::provider_state::ProviderSessionState,
@@ -1049,7 +1648,9 @@ fn provider_authentication_status(
 
 /// Fixed-category runtime diagnostics. Never return upstream errors, selectors,
 /// URLs, browser storage or credential material in the extension-facing API.
+#[allow(clippy::too_many_arguments)]
 fn relay_provider_issue(
+    provider: &str,
     linked: bool,
     enabled: bool,
     authentication: &str,
@@ -1067,11 +1668,15 @@ fn relay_provider_issue(
     } else if last_error.is_some_and(|error| error.contains("JavaScript assets blocked (HTTP 403)"))
     {
         Some("provider_assets_blocked")
+    } else if last_error
+        == Some("provider document denied (HTTP 403); check network and browser access")
+    {
+        Some("provider_document_denied")
     } else if state == ProviderSessionState::NeedsLogin || authentication == "needs_login" {
         Some("needs_login")
     } else if state == ProviderSessionState::Degraded {
         Some("provider_degraded")
-    } else if authentication != "verified" {
+    } else if authentication != "verified" && provider != "metaai" {
         Some("authentication_unverified")
     } else {
         None
@@ -1127,8 +1732,46 @@ mod relay_provider_issue_tests {
     use crate::provider_state::ProviderSessionState::{Degraded, NeedsLogin, Ready, Unknown};
 
     #[test]
+    fn metaai_unsupported_account_check_is_not_a_chat_failure() {
+        for state in [Ready, Unknown] {
+            assert_eq!(
+                relay_provider_issue("metaai", true, true, "unknown", state, false, None),
+                None
+            );
+            assert_eq!(
+                super::source_grounded_account_observation("metaai", Some(true), true),
+                None
+            );
+        }
+        assert_eq!(
+            relay_provider_issue("chatgpt", true, true, "unknown", Ready, false, None),
+            Some("authentication_unverified")
+        );
+        for (linked, enabled, auth, state, manual, expected) in [
+            (true, false, "unknown", Ready, false, "provider_disabled"),
+            (false, true, "unknown", Ready, false, "session_not_linked"),
+            (true, true, "needs_login", NeedsLogin, false, "needs_login"),
+            (true, true, "unknown", Degraded, false, "provider_degraded"),
+            (
+                true,
+                true,
+                "unknown",
+                Ready,
+                true,
+                "manual_verification_required",
+            ),
+        ] {
+            assert_eq!(
+                relay_provider_issue("metaai", linked, enabled, auth, state, manual, None),
+                Some(expected)
+            );
+        }
+    }
+
+    #[test]
     fn diagnostics_are_fixed_categories_not_upstream_error_text() {
         let blocked = relay_provider_issue(
+            "chatgpt",
             true,
             true,
             "unknown",
@@ -1138,7 +1781,29 @@ mod relay_provider_issue_tests {
         );
         assert_eq!(blocked, Some("provider_assets_blocked"));
 
+        let document = relay_provider_issue(
+            "chatgpt",
+            true,
+            true,
+            "unknown",
+            Degraded,
+            false,
+            Some("provider document denied (HTTP 403); check network and browser access"),
+        );
+        assert_eq!(document, Some("provider_document_denied"));
+        let untrusted = relay_provider_issue(
+            "chatgpt",
+            true,
+            true,
+            "unknown",
+            Degraded,
+            false,
+            Some("untrusted document denied (HTTP 403) token=secret"),
+        );
+        assert_eq!(untrusted, Some("provider_degraded"));
+
         let manual = relay_provider_issue(
+            "chatgpt",
             true,
             true,
             "unknown",
@@ -1148,16 +1813,25 @@ mod relay_provider_issue_tests {
         );
         assert_eq!(manual, Some("manual_verification_required"));
 
-        let needs_login = relay_provider_issue(true, true, "needs_login", NeedsLogin, false, None);
+        let needs_login = relay_provider_issue(
+            "chatgpt",
+            true,
+            true,
+            "needs_login",
+            NeedsLogin,
+            false,
+            None,
+        );
         assert_eq!(needs_login, Some("needs_login"));
 
-        let verified = relay_provider_issue(true, true, "verified", Ready, false, None);
+        let verified = relay_provider_issue("chatgpt", true, true, "verified", Ready, false, None);
         assert_eq!(verified, None);
 
-        let unverified = relay_provider_issue(true, true, "unknown", Unknown, false, None);
+        let unverified =
+            relay_provider_issue("chatgpt", true, true, "unknown", Unknown, false, None);
         assert_eq!(unverified, Some("authentication_unverified"));
 
-        let missing = relay_provider_issue(false, true, "unknown", Unknown, false, None);
+        let missing = relay_provider_issue("chatgpt", false, true, "unknown", Unknown, false, None);
         assert_eq!(missing, Some("session_not_linked"));
     }
 }
@@ -1233,10 +1907,15 @@ pub async fn status(State(app): State<Arc<crate::AppState>>, headers: HeaderMap)
             .is_some_and(|config| config.enabled);
         // Report the embedded browser's observed state only when available.
         // Saved cookies alone are never proof of a valid provider login.
-        let observed = active
+        let legacy_observed = active
             .iter()
             .find(|item| item.provider == provider)
             .and_then(|item| item.logged_in);
+        let observed = source_grounded_account_observation(
+            provider,
+            legacy_observed,
+            enabled && session_present && app.provider_sessions.credentials_verified(provider),
+        );
         let runtime = app.provider_sessions.status(provider);
         let lifecycle = runtime.state;
         let manual_verification_required =
@@ -1244,6 +1923,7 @@ pub async fn status(State(app): State<Arc<crate::AppState>>, headers: HeaderMap)
         let authentication =
             provider_authentication_status(observed, lifecycle, manual_verification_required);
         let issue = relay_provider_issue(
+            provider,
             session_present,
             enabled,
             authentication,
@@ -1254,13 +1934,22 @@ pub async fn status(State(app): State<Arc<crate::AppState>>, headers: HeaderMap)
         if let Some(code) = issue {
             issues.push(serde_json::json!({"provider":provider,"code":code}));
         }
+        let (activation, activation_issue, activation_pending_age) =
+            app.relay.activation_states.diagnostics(provider);
         providers.push(serde_json::json!({
             "provider": provider,
             "linked": session_present,
+            "activation": activation,
+            "activation_issue": activation_issue,
+            "activation_pending_age": activation_pending_age,
             "enabled": enabled,
             "authentication": authentication,
+            // Capability is independent of chat readiness or a login attempt.
+            "account_verification": (provider == "metaai").then_some("unsupported"),
             "availability": lifecycle.as_str(),
             "manual_verification_required": manual_verification_required,
+            // Owner-scoped, bounded last failed request, never upstream text.
+            "last_failed_request": app.provider_sessions.last_failed_request(provider),
             "issue": issue,
         }));
     }
@@ -1518,6 +2207,11 @@ pub async fn import_session(
         "queue",
         import_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
     );
+    // Enqueueing or persisting a candidate does not change the active
+    // browser context. Preserve its existing account proof on persistence
+    // rejection or a fail-closed replay guard. The worker starts a fresh
+    // verification epoch only AFTER non-destructive replay checks pass.
+    // Explicit unlink/reset and worker restart still invalidate old proofs.
     let tail_metrics_app = Arc::clone(&app);
     let task = run_provider_mutation_detached_with_tail(provider_import_guard, async move {
         let store_started = Instant::now();
@@ -1540,6 +2234,9 @@ pub async fn import_session(
         match imported {
             Ok(()) => {
                 let activation_started = Instant::now();
+                // Record actual activation, not just the saved credential
+                // snapshot. This says nothing about authenticated login.
+                let generation = app.relay.activation_states.begin(&provider);
                 // Keep the queued/active browser refresh alive after the
                 // bounded HTTP wait, including while the browser is executing
                 // an already-dispatched, non-cancellable session replacement.
@@ -1550,8 +2247,43 @@ pub async fn import_session(
                 });
                 let activated =
                     bounded_session_activation(RELAY_SESSION_ACTIVATION_TIMEOUT, &mut refresh).await;
+                // The bounded HTTP timeout is a pending, non-terminal result.
+                // Only the browser refresh's actual completion changes Ready
+                // or Failed; never classify saved cookies as verified login.
+                match &activated {
+                    Ok(Ok(Ok(()))) => {
+                        app.relay.activation_states.finish(&provider, generation, None);
+                    }
+                    Ok(Ok(Err(error))) => {
+                        app.relay.activation_states.finish(
+                            &provider,
+                            generation,
+                            Some(relay_activation_error_kind(error)),
+                        );
+                    }
+                    Ok(Err(_)) => {
+                        app.relay.activation_states.finish(
+                            &provider,
+                            generation,
+                            Some(RelayActivationIssue::WorkerUnavailable),
+                        );
+                    }
+                    Err(_) => app.relay.activation_states.mark_wait_expired(&provider, generation),
+                }
                 let pending_refresh = if activated.is_err() {
-                    Some(refresh)
+                    // A timeout returns to HTTP while activation continues.
+                    // Keep the provider gate owned until the real worker joins;
+                    // record its eventual result only for this generation.
+                    let late_states = Arc::clone(&app.relay.activation_states);
+                    let late_provider = provider.clone();
+                    Some(tokio::spawn(async move {
+                        let issue = match refresh.await {
+                            Ok(Ok(())) => None,
+                            Ok(Err(error)) => Some(relay_activation_error_kind(&error)),
+                            Err(_) => Some(RelayActivationIssue::WorkerUnavailable),
+                        };
+                        late_states.finish(&late_provider, generation, issue);
+                    }))
                 } else {
                     None
                 };
@@ -1697,6 +2429,7 @@ pub async fn unlink(
         match app.pool.unlink_session(&provider).await {
             Ok(removed) => {
                 app.provider_sessions.record_unlinked(&provider);
+                app.relay.activation_states.revoke(&provider);
                 tracing::info!(
                     provider,
                     "browser relay provider unlinked from embedded browser and persistent storage"
@@ -1897,6 +2630,45 @@ mod tests {
     }
 
     #[test]
+    fn active_provider_account_status_cannot_inherit_composer_heuristics() {
+        use crate::provider_state::ProviderSessionState::Ready;
+        for legacy in [None, Some(false), Some(true)] {
+            // ChatGPT needs its own currently valid first-party Obscura check.
+            let without_proof = source_grounded_account_observation("chatgpt", legacy, false);
+            assert_eq!(without_proof, None);
+            assert_eq!(
+                provider_authentication_status(without_proof, Ready, false),
+                "unknown"
+            );
+            let with_proof = source_grounded_account_observation("chatgpt", legacy, true);
+            assert_eq!(with_proof, Some(true));
+            assert_eq!(
+                provider_authentication_status(with_proof, Ready, false),
+                "verified"
+            );
+
+            // Meta AI has no authoritative positive account contract.
+            assert_eq!(
+                source_grounded_account_observation("metaai", legacy, true),
+                None
+            );
+            assert_eq!(
+                provider_authentication_status(
+                    source_grounded_account_observation("metaai", legacy, true),
+                    Ready,
+                    false,
+                ),
+                "unknown"
+            );
+            // Deferred providers keep their earlier routing semantics.
+            assert_eq!(
+                source_grounded_account_observation("grok", legacy, false),
+                legacy
+            );
+        }
+    }
+
+    #[test]
     fn provider_status_uses_runtime_login_failures_without_claiming_readiness_is_authentication() {
         use crate::provider_state::ProviderSessionState::{Degraded, NeedsLogin, Ready, Unknown};
         for (observed, state, challenge, expected) in [
@@ -1949,6 +2721,7 @@ mod tests {
             used_nonces: Mutex::new(HashMap::new()),
             request_times: Mutex::new(VecDeque::new()),
             import_gates: ProviderImportGates::default(),
+            activation_states: Arc::new(ProviderActivationStates::default()),
         }
     }
 

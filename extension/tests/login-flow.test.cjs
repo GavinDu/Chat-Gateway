@@ -36,9 +36,69 @@ function fixture({connected = false, linked = false, cookies = true, authenticat
     alarms:{create:async()=>{},clear:async()=>{}},
     runtime:{sendMessage:async message=>{
       messages.push(message);
+      if (message.type === "reserve-pending-approval") {
+        if (values.pendingApprovalRequest || values.pendingConnection) return {ok:false};
+        values.pendingApprovalRequest={gateway:message.gateway,generation:"f".repeat(32)};
+        return {ok:true,generation:"f".repeat(32)};
+      }
+      if (message.type === "install-pending-approval") {
+        if (message.generation !== values.pendingApprovalRequest?.generation) return {ok:false};
+        values.pendingConnection={gateway:message.gateway,request_id:message.request_id,
+          poll_secret:message.poll_secret,expires:Date.now()+300000,
+          approvalGeneration:message.generation};
+        values.pendingApprovalRequest=null;
+        return {ok:true,pending:{gateway:message.gateway,request_id:message.request_id,
+          expires:values.pendingConnection.expires}};
+      }
+      if (message.type === "release-pending-approval") {
+        if (values.pendingApprovalRequest?.generation===message.generation) values.pendingApprovalRequest=null;
+        return {ok:true,released:true};
+      }
+      if (message.type === "link-provider") {
+        const expected=message.connection;
+        if (expected.gateway !== values.gateway || expected.token !== values.token ||
+            expected.connectionMode !== values.connectionMode) {
+          return {ok:false,error:"Gateway connection changed before provider link."};
+        }
+        const prior=values.linkedProviders || [];
+        const alreadyLinked=prior.includes(message.provider);
+        const pending=values.providerLinkPendingAttempts || {};
+        const tentative=!alreadyLinked || Boolean(pending[message.provider]);
+        const epochs=values.providerLinkEpochs || {};
+        const epoch=tentative && pending[message.provider]!==message.attemptId
+          ? "fixture-link-"+messages.length
+          : (epochs[message.provider] || "fixture-link-"+messages.length);
+        values.linkedProviders=Array.from(new Set([...prior,message.provider]));
+        values.providerLinkEpochs={...epochs,[message.provider]:epoch};
+        if(tentative) values.providerLinkPendingAttempts={
+          ...pending,[message.provider]:message.attemptId};
+        return {ok:true,alreadyLinked:alreadyLinked&&!tentative,tentative};
+      }
+      if (message.type === "commit-provider-link" || message.type === "rollback-provider-link") {
+        const expected=message.connection;
+        const owner=values.providerLinkPendingAttempts?.[message.provider];
+        const valid=expected.gateway===values.gateway && expected.token===values.token &&
+          expected.connectionMode===values.connectionMode && owner===message.attemptId;
+        if(valid){
+          const pending={...(values.providerLinkPendingAttempts || {})};
+          delete pending[message.provider];
+          values.providerLinkPendingAttempts=pending;
+          if(message.type==="rollback-provider-link"){
+            values.linkedProviders=(values.linkedProviders || []).filter(value=>value!==message.provider);
+            values.providerLinkEpochs={...(values.providerLinkEpochs || {}),
+              [message.provider]:"fixture-rollback-"+messages.length};
+          }
+        }
+        return {ok:true,[message.type==="commit-provider-link"?"committed":"rolledBack"]:valid};
+      }
       if (message.type === "logout-provider") {
         linked = false;
         values.linkedProviders = (values.linkedProviders || []).filter(value => value !== message.provider);
+        values.providerLinkEpochs = {...(values.providerLinkEpochs || {}),
+          [message.provider]:"fixture-logout-"+messages.length};
+        const pending={...(values.providerLinkPendingAttempts || {})};
+        delete pending[message.provider];
+        values.providerLinkPendingAttempts=pending;
       }
       if (message.type === "sync-provider") {
         if (syncStatus === "uploaded") {
@@ -51,7 +111,8 @@ function fixture({connected = false, linked = false, cookies = true, authenticat
     }},
   };
   const context = {
-    chrome, Set, Promise, Date, Array,
+    chrome, Set, Promise, Date, Array, AbortController, setTimeout, clearTimeout,
+    randomHex: (() => { let counter = 0; return () => "test-epoch-" + (++counter); })(),
     document:{getElementById:node,createElement:newNode},
     window:{addEventListener(){}}, setInterval(){},
     confirm:()=>true,

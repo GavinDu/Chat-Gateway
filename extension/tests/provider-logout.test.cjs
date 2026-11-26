@@ -18,6 +18,7 @@ function loadWorker({failDelete = false} = {}) {
   const gate = new Promise(resolve => { releaseSync = resolve; });
   const sandbox = {
     Map, Promise, Set,
+    randomHex: (() => { let counter = 0; return () => "test-epoch-" + (++counter); })(),
     importScripts() {},
     hasRelayConnection: state => Boolean(state.gateway && (state.token || state.connectionMode === "local")),
     relayIdentity: state => state.connectionMode === "local" ? "local" : state.token,
@@ -75,6 +76,8 @@ test("logout waits for in-flight sync, then revokes and blocks further sync", as
   assert.equal((await loggingOut).ok,true);
   assert.deepEqual(worker.calls, ["sync metaai","DELETE /relay/v1/session/metaai"]);
   assert.deepEqual(Array.from(worker.values.linkedProviders), []);
+  assert.ok(worker.values.providerLinkEpochs.metaai,
+    "logout must persist a new consent generation even on legacy installs");
   await worker.send({type:"sync-provider",provider:"metaai"});
   assert.equal(worker.calls.length,2,"post-logout cookie refresh must not reimport session");
 });

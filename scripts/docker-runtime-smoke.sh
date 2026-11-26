@@ -27,9 +27,50 @@ command -v docker >/dev/null 2>&1
 command -v curl >/dev/null 2>&1
 command -v python3 >/dev/null 2>&1
 
+# The actual Docker startup helper uses alpine:3.22 to initialize temporary
+# private vault/config volumes. A transient Docker Hub token/manifest outage
+# must not make an otherwise valid ARM64 link untestable without an attempted
+# bounded recovery. Keep the full runtime smoke mandatory: after four failed
+# pulls, fail rather than masking the gate or substituting a different image.
+if ! docker image inspect alpine:3.22 >/dev/null 2>&1; then
+  helper_available=0
+  for attempt in 1 2 3 4; do
+    if docker pull --quiet alpine:3.22 >/dev/null 2>&1; then
+      helper_available=1
+      break
+    fi
+    if (( attempt < 4 )); then sleep "$((attempt * 3))"; fi
+  done
+  if (( helper_available != 1 )); then
+    echo "Required alpine:3.22 helper image unavailable after bounded Docker Hub retries" >&2
+    exit 1
+  fi
+fi
+
 # Exercise the actual start helper with an owner-only host config. Direct
 # docker-run fixtures missed the nonroot/host-UID config mount failure.
 cp "$ROOT/config.example.yaml" "$TMP/config.yaml"
+# The shipping example intentionally enables Manus. This smoke tests the
+# *offline, no-enabled-provider* readiness state without a linked account or
+# embedded browser. Disable only Manus in the disposable test copy, leaving
+# the source example and all other provider settings untouched. Fail if the
+# fixture has drifted instead of silently weakening the readiness assertion.
+python3 - "$TMP/config.yaml" <<'OFFLINECONFIGPY'
+from pathlib import Path
+import re
+import sys
+
+path = Path(sys.argv[1])
+source = path.read_text(encoding="utf-8")
+modified, changes = re.subn(
+    r"(?m)^(  - name: manus\n    enabled: )true$",
+    r"\1false",
+    source,
+)
+if changes != 1:
+    raise SystemExit("Manus offline smoke fixture does not match enabled example")
+path.write_text(modified, encoding="utf-8")
+OFFLINECONFIGPY
 chmod 600 "$TMP/config.yaml"
 PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')"
 export PORT CHAT_GATEWAY_IMAGE="$IMAGE" CHAT_GATEWAY_CONTAINER="$NAME"

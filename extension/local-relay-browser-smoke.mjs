@@ -75,11 +75,37 @@ try {
     args:["--disable-extensions-except="+join(temp,"extension"),
       "--load-extension="+join(temp,"extension")],
   });
-  const worker = context.serviceWorkers()[0] || await context.waitForEvent("serviceworker");
-  const id = new URL(worker.url()).host;
-  // The CI gateway listens on a random isolated port, not the popup's normal
-  // 8080 default. Seed only its URL; never provide a token or pairing secret.
-  await worker.evaluate(gatewayUrl => chrome.storage.local.set({gateway:gatewayUrl}), base);
+  // A Chrome MV3 serviceworker event can precede its extension APIs being
+  // initialized, and a suspended worker can be replaced during an evaluate.
+  // Only the actual installed extension background worker may seed the test
+  // gateway URL. Reacquire and retry a bounded number of times; never fake
+  // extension storage or skip the real popup assertions below.
+  const workerDeadline = Date.now() + 20_000;
+  let worker = null;
+  let id = null;
+  while (Date.now() < workerDeadline && !worker) {
+    for (const candidate of context.serviceWorkers()) {
+      const url = candidate.url();
+      if (!/^chrome-extension:\/\/[a-p]{32}\/background\.js$/.test(url)) continue;
+      try {
+        const hasStorage = await candidate.evaluate(() =>
+          typeof globalThis.chrome?.storage?.local?.set === "function");
+        if (!hasStorage) continue;
+        // The CI gateway listens on a random isolated port, not the popup's
+        // normal 8080 default. Seed only the URL, never a token or secret.
+        await candidate.evaluate(gatewayUrl =>
+          globalThis.chrome.storage.local.set({gateway:gatewayUrl}), base);
+        worker = candidate;
+        id = new URL(url).host;
+        break;
+      } catch {
+        // A worker may stop/restart between API readiness and the storage
+        // write. Retry with the current worker; never keep a stale handle.
+      }
+    }
+    if (!worker) await new Promise(resolve => setTimeout(resolve, 150));
+  }
+  assert.ok(worker, "Installed extension worker storage unavailable after bounded startup");
   const popup = await context.newPage();
   await popup.goto("chrome-extension://" + id + "/popup.html");
   try {
@@ -87,13 +113,15 @@ try {
   } catch (error) {
     console.log("Local popup diagnostic:", await popup.locator("#message").innerText());
     console.log("Local popup mode:", await popup.locator("#connection-help").innerText());
-    console.log("Local popup storage:", await worker.evaluate(() => chrome.storage.local.get(
+    console.log("Local popup storage:", await popup.evaluate(() => chrome.storage.local.get(
       ["gateway", "connectionMode", "localDisconnected"])));
     throw error;
   }
   await popup.locator("#status li").first().waitFor({timeout:10000});
   assert.equal(await popup.locator("#status li").count(),9);
-  const stored = await worker.evaluate(() => chrome.storage.local.get(
+  // The popup is a durable extension context; reading its storage avoids
+  // evaluating a stale MV3 worker after it has been suspended or replaced.
+  const stored = await popup.evaluate(() => chrome.storage.local.get(
     ["gateway","token","connectionMode","pendingConnection"]));
   assert.equal(stored.connectionMode,"local");
   assert.equal(stored.gateway,base);

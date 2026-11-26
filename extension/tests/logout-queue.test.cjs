@@ -17,6 +17,7 @@ test("logout waits for pending imports and prevents automatic re-link", async ()
   let completeSync;
   const sandbox = {
     Map, Set, Promise, Date, setTimeout, clearTimeout, importScripts() {},
+    randomHex: (() => { let counter = 0; return () => "test-epoch-" + (++counter); })(),
     hasRelayConnection: state => Boolean(state.gateway && (state.token || state.connectionMode === "local")),
     relayIdentity: state => state.connectionMode === "local" ? "local" : state.token,
     PROVIDERS:{metaai:["meta.ai"]},

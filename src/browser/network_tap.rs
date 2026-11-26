@@ -74,6 +74,17 @@ fn is_metaai_document_response(
         )
 }
 
+/// First-party Meta AI document HTTP 403 is a bootstrap-access denial,
+/// not proof of a login expiry. Do not classify CSS/scripts or lookalike hosts.
+fn is_metaai_document_denial(
+    provider: Provider,
+    resource_type: obscura_core::ResourceType,
+    host: &str,
+    status: u16,
+) -> bool {
+    status == 403 && is_metaai_document_response(provider, resource_type, host)
+}
+
 fn safe_hostname(host: &str) -> &str {
     if !host.is_empty()
         && host.len() <= 128
@@ -112,38 +123,46 @@ pub(super) fn attach_provider_network_tap(
     let provider_name = provider.name();
     let script_errors_seen = Arc::new(AtomicUsize::new(0));
     let metaai_documents_seen = Arc::new(AtomicUsize::new(0));
-    let mistral_403_seen = Arc::new(AtomicBool::new(false));
-    let observed_403 = Arc::clone(&mistral_403_seen);
+    let bootstrap_403_seen = Arc::new(AtomicBool::new(false));
+    let observed_403 = Arc::clone(&bootstrap_403_seen);
     let metaai_seen = Arc::clone(&metaai_documents_seen);
     page.on_response(Arc::new(move |info, response| {
         if is_metaai_document_response(
             provider,
             info.resource_type,
             response.url.host_str().unwrap_or(""),
-        ) && metaai_seen.fetch_add(1, Ordering::Relaxed)
-            < MAX_META_AI_DOCUMENT_LOGS_PER_PAGE
-        {
-            // HTTP status and bounded body length only. Do not log the
-            // address/path, cookies, headers, response body or script text.
-            let status = response.status;
-            if status >= 400 {
-                tracing::warn!(
-                    provider = "metaai",
-                    resource_type = "document",
-                    status,
-                    response_bytes_observed = provider_network_tap_reported_bytes(response.body.len()),
-                    redirect_hops = response.redirected_from.len().min(8),
-                    "Meta AI document HTTP response observed (metadata only)"
-                );
-            } else {
-                tracing::info!(
-                    provider = "metaai",
-                    resource_type = "document",
-                    status,
-                    response_bytes_observed = provider_network_tap_reported_bytes(response.body.len()),
-                    redirect_hops = response.redirected_from.len().min(8),
-                    "Meta AI document HTTP response observed (metadata only)"
-                );
+        ) {
+            // Preserve the directly observed first-party document status even
+            // after bounded log cap. Never retain URL paths, query or body.
+            if is_metaai_document_denial(
+                provider,
+                info.resource_type,
+                response.url.host_str().unwrap_or(""),
+                response.status,
+            ) {
+                observed_403.store(true, Ordering::Relaxed);
+            }
+            if metaai_seen.fetch_add(1, Ordering::Relaxed) < MAX_META_AI_DOCUMENT_LOGS_PER_PAGE {
+                let status = response.status;
+                if status >= 400 {
+                    tracing::warn!(
+                        provider = "metaai",
+                        resource_type = "document",
+                        status,
+                        response_bytes_observed = provider_network_tap_reported_bytes(response.body.len()),
+                        redirect_hops = response.redirected_from.len().min(8),
+                        "Meta AI document HTTP response observed (metadata only)"
+                    );
+                } else {
+                    tracing::info!(
+                        provider = "metaai",
+                        resource_type = "document",
+                        status,
+                        response_bytes_observed = provider_network_tap_reported_bytes(response.body.len()),
+                        redirect_hops = response.redirected_from.len().min(8),
+                        "Meta AI document HTTP response observed (metadata only)"
+                    );
+                }
             }
         }
         let javascript_asset_path = is_javascript_asset_path(info.url.path())
@@ -200,7 +219,7 @@ pub(super) fn attach_provider_network_tap(
             "provider network response observed (metadata only)"
         );
     }));
-    (provider == Provider::Mistral).then_some(mistral_403_seen)
+    matches!(provider, Provider::Mistral | Provider::MetaAI).then_some(bootstrap_403_seen)
 }
 
 #[cfg(test)]
@@ -244,6 +263,47 @@ mod tests {
             Provider::ChatGPT,
             ResourceType::Document,
             "www.meta.ai"
+        ));
+    }
+
+    #[test]
+    fn metaai_document_denial_requires_observed_first_party_http_403() {
+        use obscura_core::ResourceType;
+        for host in ["meta.ai", "www.meta.ai", "WWW.META.AI"] {
+            assert!(is_metaai_document_denial(
+                Provider::MetaAI,
+                ResourceType::Document,
+                host,
+                403,
+            ));
+        }
+        for host in ["meta.ai.attacker.invalid", "login.meta.ai", "fake-meta.ai"] {
+            assert!(!is_metaai_document_denial(
+                Provider::MetaAI,
+                ResourceType::Document,
+                host,
+                403,
+            ));
+        }
+        for status in [200, 302, 401, 404, 500] {
+            assert!(!is_metaai_document_denial(
+                Provider::MetaAI,
+                ResourceType::Document,
+                "www.meta.ai",
+                status,
+            ));
+        }
+        assert!(!is_metaai_document_denial(
+            Provider::MetaAI,
+            ResourceType::Script,
+            "www.meta.ai",
+            403,
+        ));
+        assert!(!is_metaai_document_denial(
+            Provider::ChatGPT,
+            ResourceType::Document,
+            "www.meta.ai",
+            403,
         ));
     }
 

@@ -9,11 +9,52 @@ import { fileURLToPath } from 'node:url';
 const { Server, utils } = ssh2;
 const root = dirname(fileURLToPath(import.meta.url));
 
-export async function startOwnerTunnel(gatewayPort) {
+const STARTUP_CATEGORIES = new Set([
+  'server_bind_failed',
+  'helper_spawn_failed',
+  'helper_exited_before_ready',
+  'helper_ready_timeout',
+  'cleanup_failed',
+  'startup_unclassified'
+]);
+function startupError(category) {
+  const error = new Error('Isolated SSH fixture startup unavailable.');
+  error.fixtureCategory = STARTUP_CATEGORIES.has(category) ? category : 'startup_unclassified';
+  return error;
+}
+
+// ssh2 1.17's Ed25519 public-key serializer can strip genuine leading zero
+// bytes. For test-only disposable SSH keys use P-256 and validate both public
+// and private parsers before starting the real authenticated SSH smoke.
+export function generateFixtureKeyPair() {
+  return utils.generateKeyPairSync('ecdsa', {bits:256});
+}
+
+// The optional hooks inject only fixture process/socket failures in offline
+// tests. The real browser/SSH acceptance always calls this with no hooks.
+export async function startOwnerTunnel(gatewayPort, testHooks = {}) {
   const temp = await mkdtemp('/dev/shm/cg-ssh-fixture-');
-  const host = utils.generateKeyPairSync('ed25519');
-  const owner = utils.generateKeyPairSync('ed25519');
-  const allowed = utils.parseKey(owner.public);
+  testHooks.onTemporaryDirectory?.(temp);
+  let host, owner, allowed;
+  try {
+    const generate = testHooks.generateFixtureKeyPair || generateFixtureKeyPair;
+    host = generate();
+    owner = generate();
+    const privateHost = utils.parseKey(host.private);
+    const privateOwner = utils.parseKey(owner.private);
+    allowed = utils.parseKey(owner.public);
+    if (privateHost instanceof Error || privateOwner instanceof Error ||
+        allowed instanceof Error ||
+        privateHost.type !== 'ecdsa-sha2-nistp256' ||
+        privateOwner.type !== 'ecdsa-sha2-nistp256' ||
+        allowed.type !== 'ecdsa-sha2-nistp256' ||
+        !privateOwner.getPublicSSH().equals(allowed.getPublicSSH())) {
+      throw startupError('startup_unclassified');
+    }
+  } catch {
+    await rm(temp,{recursive:true,force:true});
+    throw startupError('startup_unclassified');
+  }
   const clients = new Set(), children = new Set();
   let authenticated = 0, rejected = 0, helper;
   const source = await readFile(join(root, 'owner_tunnel.py'), 'utf8');
@@ -55,8 +96,14 @@ export async function startOwnerTunnel(gatewayPort) {
   });
   const stop = async () => {
     if (helper && helper.exitCode === null) {
-      helper.kill('SIGTERM');
-      await new Promise(resolve => helper.once('exit', resolve));
+      // A failed spawn might emit 'error' without 'exit'. Never hang cleanup.
+      await new Promise(resolve => {
+        const timer = setTimeout(resolve, 1_000);
+        const done = () => { clearTimeout(timer); resolve(); };
+        helper.once('exit', done);
+        helper.once('error', done);
+        try { helper.kill('SIGTERM'); } catch { done(); }
+      });
     }
     for (const client of clients) client.destroy();
     for (const child of children) child.kill('SIGTERM');
@@ -65,7 +112,12 @@ export async function startOwnerTunnel(gatewayPort) {
   };
   try {
     await new Promise((resolve,reject) => {
-      server.once('error',reject); server.listen(0,'127.0.0.1',resolve);
+      const bindFailed = () => reject(startupError('server_bind_failed'));
+      server.once('error', bindFailed);
+      try {
+        if (testHooks.listenServer) testHooks.listenServer(server, resolve, bindFailed);
+        else server.listen(0,'127.0.0.1',resolve);
+      } catch { bindFailed(); }
     });
     await writeFile(join(temp,'identity'),owner.private,{mode:0o600});
     await writeFile(join(temp,'known_hosts'),'cg-fixture '+host.public.trim()+'\n',{mode:0o600});
@@ -77,21 +129,40 @@ export async function startOwnerTunnel(gatewayPort) {
       '  PasswordAuthentication no', '  KbdInteractiveAuthentication no',
       '  IdentityAgent none', ''
     ].join('\n'),{mode:0o600});
-    helper = spawn('python3',['-B',join(root,'owner_tunnel.py'),
-      '--ssh-target','fixture','--ssh-port',String(server.address().port),
-      '--ssh-config',join(temp,'config'),'--gateway-port',String(gatewayPort),
-      '--local-port','0'], {env:{PATH:process.env.PATH,HOME:temp},
-      stdio:['ignore','pipe','ignore']});
+    try {
+      helper = (testHooks.spawnHelper || spawn)('python3',['-B',join(root,'owner_tunnel.py'),
+        '--ssh-target','fixture','--ssh-port',String(server.address().port),
+        '--ssh-config',join(temp,'config'),'--gateway-port',String(gatewayPort),
+        '--local-port','0'], {env:{PATH:process.env.PATH,HOME:temp},
+        stdio:['ignore','pipe','ignore']});
+    } catch { throw startupError('helper_spawn_failed'); }
     const port = await new Promise((resolve,reject) => {
-      const timer = setTimeout(()=>reject(new Error('SSH helper readiness timeout')),15000);
+      let settled = false;
+      const finish = (value, category) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        if (category) reject(startupError(category));
+        else resolve(value);
+      };
+      const timer = setTimeout(() => finish(null, 'helper_ready_timeout'),
+        testHooks.startupTimeoutMs ?? 15_000);
       let text='';
       helper.stdout.on('data',data=>{
         text += data.toString();
         const match=text.match(/Owner-only local UI: http:\/\/127\.0\.0\.1:(\d+)\/login/);
-        if(match){clearTimeout(timer);resolve(Number(match[1]));}
+        if(match) finish(Number(match[1]), null);
       });
-      helper.once('exit',()=>{clearTimeout(timer);reject(new Error('SSH helper startup failed'));});
+      helper.once('error',()=>finish(null, 'helper_spawn_failed'));
+      helper.once('exit',()=>finish(null, 'helper_exited_before_ready'));
     });
     return {port,stop,get authenticated(){return authenticated;},get rejected(){return rejected;}};
-  } catch(error) { await stop(); throw error; }
+  } catch(error) {
+    // No path, remote command, key material or raw child stderr can escape
+    // through this fixture's diagnostic surface.
+    const category = error?.fixtureCategory || 'startup_unclassified';
+    try { await stop(); }
+    catch { throw startupError('cleanup_failed'); }
+    throw startupError(category);
+  }
 }

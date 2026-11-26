@@ -26,10 +26,13 @@
       <button id="unpair" class="quiet-danger compact">Disconnect gateway</button>
       <p class="small">Disconnecting this extension retains provider vault sessions. Use each provider's Log out button to remove a saved session and stop automatic resync.</p>
     </section>
+    <button id="verify-chatgpt" class="secondary compact" type="button">Verify active ChatGPT tab (read only)</button>
+    <button id="verify-chatgpt-gateway" class="secondary compact" type="button">Compare Chrome and gateway ChatGPT account checks (read only)</button>
     <p id="message" role="status" aria-live="polite"></p>
     <p class="small">Local relay requires a gateway published only on 127.0.0.1. No pairing is required. Use encrypted vault mode with a stable key before linking sessions.</p>
   </main>
   <script src="shared.js"></script>
+  <script src="credential_probe.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

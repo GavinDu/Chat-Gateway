@@ -4,20 +4,25 @@ const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
 
-function loadBackground(linkedProviders, failingProviders = []) {
+function loadBackground(linkedProviders, failingProviders = [], connected = false) {
   const calls = [];
   const timers = new Map();
   const clearedTimers = new Set();
+  const createdAlarms = [];
   let nextTimerId = 0;
   const listeners = {
     installed: [],
     startup: [],
     cookieChanged: [],
     message: [],
+    alarm: [],
   };
   const sandbox = {
     Map,
     Set,
+    randomHex: (() => { let counter = 0; return () => "test-epoch-" + (++counter); })(),
+    isLocalGateway: gateway => typeof gateway==="string" &&
+      (/^http:\/\/127\.0\.0\.1:[0-9]+$/.test(gateway) || /^http:\/\/localhost:[0-9]+$/.test(gateway)),
     Promise,
     Object,
     setTimeout(callback, delay) {
@@ -39,6 +44,10 @@ function loadBackground(linkedProviders, failingProviders = []) {
       }
     },
     chrome: {
+      alarms: {
+        create: (name, options) => createdAlarms.push({name, ...options}),
+        onAlarm: { addListener: callback => listeners.alarm.push(callback) },
+      },
       cookies: {
         onChanged: { addListener: callback => listeners.cookieChanged.push(callback) },
       },
@@ -50,7 +59,9 @@ function loadBackground(linkedProviders, failingProviders = []) {
       storage: {
         local: {
           async get() {
-            return { linkedProviders };
+            return connected
+              ? {gateway:"http://127.0.0.1:8080",connectionMode:"local",linkedProviders}
+              : { linkedProviders };
           },
         },
       },
@@ -58,12 +69,109 @@ function loadBackground(linkedProviders, failingProviders = []) {
   };
   const source = fs.readFileSync(path.join(__dirname, "background.js"), "utf8");
   vm.runInNewContext(source, sandbox, { filename: "background.js" });
-  return { calls, listeners, timers, clearedTimers, sandbox };
+  return { calls, listeners, timers, clearedTimers, createdAlarms, sandbox };
 }
 
 function flushAsyncWork() {
   return new Promise(resolve => setImmediate(resolve));
 }
+
+test("pending connection poll returns only a fixed redacted popup error", async () => {
+  const f = loadBackground(["chatgpt"], [], true);
+  const send = () => new Promise(resolve => {
+    assert.equal(f.listeners.message[0]({type:"poll-connection"},{},resolve), true);
+  });
+  for (const sensitiveMessage of [
+    "fetch failed https://127.0.0.1:8080/relay/v1/connect/poll?poll_secret=private-session",
+    "Chrome storage error with token=private-key and account=private-user",
+    "Gateway approval failed (401), request_id=private-request"
+  ]) {
+    f.sandbox.pollConnection = async () => {throw new Error(sensitiveMessage)};
+    const failed = await send();
+    assert.equal(failed.ok, false);
+    assert.equal(failed.errorCode, "connection_poll_unavailable");
+    assert.equal(failed.error, "Connection approval check unavailable. Retry or reconnect.");
+    assert.ok(!JSON.stringify(failed).includes(sensitiveMessage));
+    assert.ok(!JSON.stringify(failed).includes("private"));
+    assert.ok(!JSON.stringify(failed).includes("poll_secret"));
+    assert.ok(!JSON.stringify(failed).includes("token="));
+  }
+
+  f.sandbox.pollConnection = async () => {};
+  const success = await send();
+  assert.equal(success.ok, true);
+  assert.equal(success.error, undefined);
+  assert.equal(success.errorCode, undefined);
+});
+
+test("periodic relay alarm refreshes status without recreating repeating alarm", async () => {
+  const f = loadBackground(["chatgpt"], [], true);
+  let probes = 0;
+  f.sandbox.relayFetch = async () => {
+    probes++;
+    return {ok:true,status:200,json:async()=>({providers:[{provider:"chatgpt",linked:true}]})};
+  };
+
+  f.listeners.startup[0]();
+  for (let i = 0; i < 8; i++) await flushAsyncWork();
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(f.createdAlarms)),
+    [{name:"relay-session-refresh",periodInMinutes:15}],
+    "startup must register one bounded repeating refresh"
+  );
+  assert.equal(probes, 1);
+
+  f.listeners.alarm[0]({name:"relay-session-refresh"});
+  for (let i = 0; i < 8; i++) await flushAsyncWork();
+  assert.equal(probes, 2, "periodic wake must still query fresh gateway health");
+  assert.equal(
+    f.createdAlarms.length, 1,
+    "a repeating alarm must not rearm/reset itself on every firing"
+  );
+
+  f.listeners.alarm[0]({name:"relay-unknown"});
+  for (let i = 0; i < 4; i++) await flushAsyncWork();
+  assert.equal(probes, 2, "unknown alarms are not provider heartbeat signals");
+  assert.equal(f.createdAlarms.length, 1);
+});
+
+test("relay diagnostics classify user cancellation apart from gateway timeout", () => {
+  const f = loadBackground([]);
+  assert.equal(
+    f.sandbox.classifyRelayFailure(new Error("Gateway request cancelled; check provider status before retrying.")),
+    "gateway_cancelled"
+  );
+  assert.equal(
+    f.sandbox.classifyRelayFailure(new Error("Gateway request timed out; the session may have changed.")),
+    "gateway_timeout"
+  );
+  assert.equal(
+    f.sandbox.classifyRelayFailure(new Error("private cookie=secret and unrecognized transport failure")),
+    "relay_unavailable",
+    "never expose raw upstream text in diagnostic issue codes"
+  );
+  assert.equal(
+    f.sandbox.classifyRelayFailure(new Error("provider callback cancelled by upstream proxy")),
+    "relay_unavailable",
+    "unverified upstream text must not impersonate explicit owner cancellation"
+  );
+});
+
+test("partitioned cookie refusal has fixed sync category with no provider secrets", () => {
+  const f = loadBackground([]);
+  const error = new Error("Unsupported browser cookie partition scope; existing gateway session was preserved.");
+  assert.equal(f.sandbox.classifyRelayFailure(error),"partition_scope_unsupported");
+  const result = f.sandbox.redactedManualSyncFailure(error);
+  assert.equal(result.ok,false);
+  assert.equal(result.errorCode,"partition_scope_unsupported");
+  assert.match(result.error,/Existing saved session was preserved/);
+  assert.doesNotMatch(JSON.stringify(result),/partitioned-secret|topLevelSite|private.example/);
+  const unrelated = f.sandbox.redactedManualSyncFailure(new Error(
+    "Unsupported browser cookie partition scope; existing gateway session was preserved. token=secret"
+  ));
+  assert.equal(unrelated.errorCode,"relay_unavailable",
+    "only the exact source-owned error may claim a known partition refusal");
+});
 
 test("explicit provider sync reports a skipped upload instead of success", async () => {
   const f = loadBackground(["chatgpt"]);
@@ -88,38 +196,814 @@ test("explicit provider sync reports a skipped upload instead of success", async
   assert.deepEqual(f.calls, ["chatgpt", "chatgpt"]);
 });
 
+test("local disconnect cannot be undone by a delayed queued provider link",async()=>{
+  const f=loadBackground([],[],true);
+  const state={gateway:"http://127.0.0.1:8080",connectionMode:"local",
+    linkedProviders:[],providerLinkEpochs:{}};
+  f.sandbox.chrome.storage.local.get=async()=>({...state});
+  let begin;
+  let release;
+  const started=new Promise(resolve=>{begin=resolve});
+  const gate=new Promise(resolve=>{release=resolve});
+  let writes=0;
+  f.sandbox.chrome.storage.local.set=async change=>{
+    writes++;
+    if(writes===1){begin();await gate;}
+    Object.assign(state,change);
+  };
+  f.sandbox.chrome.storage.local.remove=async keys=>{
+    for(const key of Array.isArray(keys)?keys:[keys])delete state[key];
+  };
+  const send=message=>new Promise(resolve=>f.listeners.message[0](message,{},resolve));
+  const expected={gateway:state.gateway,connectionMode:"local"};
+  const link=send({type:"link-provider",provider:"chatgpt",
+    connection:expected,attemptId:"attempt-to-link"});
+  await started;
+  const disconnect=send({type:"disconnect-local-relay",connection:expected});
+  for(let i=0;i<4;i++)await flushAsyncWork();
+  assert.equal(writes,1,"disconnect must queue behind pending provider consent mutation");
+  release();
+  assert.equal((await link).ok,true);
+  assert.equal((await disconnect).ok,true);
+  assert.equal(state.localDisconnected,true);
+  assert.equal(state.connectionMode,undefined);
+  assert.equal(state.linkedProviders,undefined);
+  assert.ok(!state.token);
+
+  const stale=await send({type:"link-provider",provider:"chatgpt",
+    connection:expected,attemptId:"late-attempt"});
+  assert.equal(stale.ok,false,"a stale popup cannot re-link after disconnect");
+  assert.equal(state.linkedProviders,undefined);
+});
+
+test("stale automatic local connect cannot reverse explicit opt-out; manual connect can",async()=>{
+  const f=loadBackground([],[],true);
+  const state={gateway:"http://127.0.0.1:8080",localDisconnected:true,
+    linkedProviders:[],providerLinkEpochs:{}};
+  f.sandbox.chrome.storage.local.get=async()=>({...state});
+  f.sandbox.chrome.storage.local.set=async next=>Object.assign(state,next);
+  f.sandbox.chrome.storage.local.remove=async keys=>{
+    for(const k of Array.isArray(keys)?keys:[keys])delete state[k];
+  };
+  const send=message=>new Promise(resolve=>f.listeners.message[0](message,{},resolve));
+  const stale=await send({type:"connect-local-relay",gateway:state.gateway,manual:false});
+  assert.equal(stale.ok,false);
+  assert.equal(state.localDisconnected,true);
+  assert.equal(state.connectionMode,undefined);
+  const manual=await send({type:"connect-local-relay",gateway:state.gateway,manual:true});
+  assert.equal(manual.ok,true);
+  assert.equal(state.localDisconnected,false);
+  assert.equal(state.connectionMode,"local");
+  assert.deepEqual(Array.from(state.linkedProviders),[]);
+  assert.equal(state.token,undefined);
+});
+
+test("local gateway switch resets linked-provider consent rather than carrying cookies to new install",async()=>{
+  const f=loadBackground([],[],true);
+  const state={gateway:"http://127.0.0.1:8080",connectionMode:"local",
+    linkedProviders:["chatgpt"],providerLinkEpochs:{chatgpt:"older-consent"}};
+  f.sandbox.chrome.storage.local.get=async()=>({...state});
+  f.sandbox.chrome.storage.local.set=async next=>Object.assign(state,next);
+  f.sandbox.chrome.storage.local.remove=async keys=>{
+    for(const k of Array.isArray(keys)?keys:[keys])delete state[k];
+  };
+  const result=await new Promise(resolve=>f.listeners.message[0]({
+    type:"connect-local-relay",gateway:"http://127.0.0.1:9090",manual:true
+  },{},resolve));
+  assert.equal(result.ok,true);
+  assert.equal(state.gateway,"http://127.0.0.1:9090");
+  assert.equal(state.connectionMode,"local");
+  assert.deepEqual(Array.from(state.linkedProviders),[]);
+  assert.equal(state.providerLinkEpochs.chatgpt,"older-consent",
+    "epochs may be retained as private history but old link consent must not be active");
+});
+
+test("concurrent cross-provider links serialize one shared membership and epoch map", async () => {
+  const f=loadBackground([],[],true);
+  const state={gateway:"http://127.0.0.1:8080",connectionMode:"local",
+    linkedProviders:[],providerLinkEpochs:{}};
+  let releaseFirst;
+  let began;
+  const started=new Promise(resolve=>{began=resolve});
+  const blocked=new Promise(resolve=>{releaseFirst=resolve});
+  let writes=0;
+  f.sandbox.chrome.storage.local.get=async()=>({...state});
+  f.sandbox.chrome.storage.local.set=async update=>{
+    writes++;
+    if(writes===1){began(); await blocked;}
+    Object.assign(state,update);
+  };
+  const expected={gateway:state.gateway,connectionMode:"local"};
+  const send=(type,provider,attemptId)=>new Promise(resolve=>
+    f.listeners.message[0]({type,provider,connection:expected,attemptId},{},resolve));
+  const first=send("link-provider","chatgpt","attempt-chatgpt");
+  await started;
+  const second=send("link-provider","claude","attempt-claude");
+  for(let i=0;i<4;i++)await flushAsyncWork();
+  assert.equal(writes,1,"second link must not run a storage get/set during first write");
+  releaseFirst();
+  assert.equal((await first).ok,true);
+  assert.equal((await second).ok,true);
+  assert.equal((await send("commit-provider-link","chatgpt","attempt-chatgpt")).committed,true);
+  assert.equal((await send("commit-provider-link","claude","attempt-claude")).committed,true);
+  assert.deepEqual(Array.from(state.linkedProviders).sort(),["chatgpt","claude"]);
+  assert.ok(state.providerLinkEpochs.chatgpt);
+  assert.ok(state.providerLinkEpochs.claude);
+  assert.notEqual(state.providerLinkEpochs.chatgpt,state.providerLinkEpochs.claude);
+  const before={...state.providerLinkEpochs};
+  const restarted=loadBackground([],[],true);
+  restarted.sandbox.chrome.storage.local.get=async()=>({...state});
+  restarted.sandbox.chrome.storage.local.set=async next=>Object.assign(state,next);
+  const repeated=await new Promise(resolve=>restarted.listeners.message[0]({
+    type:"link-provider",provider:"chatgpt",connection:expected,
+    attemptId:"attempt-after-restart"},{},resolve));
+  assert.equal(repeated.ok,true);
+  assert.equal(repeated.alreadyLinked,true);
+  assert.deepEqual({...state.providerLinkEpochs},before,"MV3 restart preserves epochs");
+});
+
+test("stale failed first link cannot revoke a newer same-gateway provisional or committed link",async()=>{
+  const f=loadBackground([],[],true);
+  const state={gateway:"http://127.0.0.1:8080",connectionMode:"local",
+    linkedProviders:[],providerLinkEpochs:{},providerLinkPendingAttempts:{}};
+  f.sandbox.chrome.storage.local.get=async()=>({...state});
+  f.sandbox.chrome.storage.local.set=async change=>Object.assign(state,change);
+  const expected={gateway:state.gateway,connectionMode:"local"};
+  const send=(type,attemptId)=>new Promise(resolve=>f.listeners.message[0]({
+    type,provider:"chatgpt",connection:expected,attemptId
+  },{},resolve));
+  const a=await send("link-provider","attempt-old-A");
+  assert.equal(a.ok,true);
+  assert.equal(a.tentative,true);
+  const oldEpoch=state.providerLinkEpochs.chatgpt;
+  const b=await send("link-provider","attempt-new-B");
+  assert.equal(b.ok,true);
+  assert.equal(b.tentative,true);
+  assert.notEqual(state.providerLinkEpochs.chatgpt,oldEpoch);
+  assert.equal(state.providerLinkPendingAttempts.chatgpt,"attempt-new-B");
+
+  const commit=await send("commit-provider-link","attempt-new-B");
+  assert.equal(commit.committed,true);
+  const oldRollback=await send("rollback-provider-link","attempt-old-A");
+  assert.equal(oldRollback.rolledBack,false,"old A must not revoke B");
+  assert.deepEqual(Array.from(state.linkedProviders),["chatgpt"]);
+  assert.equal(state.providerLinkPendingAttempts.chatgpt,undefined);
+  const saved=state.providerLinkEpochs.chatgpt;
+  const repeated=await send("link-provider","attempt-normal-sync");
+  assert.equal(repeated.alreadyLinked,true);
+  assert.equal(repeated.tentative,false,"ordinary subsequent sync is not a fresh provisional link");
+  assert.equal(state.providerLinkEpochs.chatgpt,saved);
+
+  const restarted=loadBackground([],[],true);
+  restarted.sandbox.chrome.storage.local.get=async()=>({...state});
+  restarted.sandbox.chrome.storage.local.set=async x=>Object.assign(state,x);
+  const oldAcrossRestart=await new Promise(resolve=>restarted.listeners.message[0]({
+    type:"rollback-provider-link",provider:"chatgpt",connection:expected,
+    attemptId:"attempt-old-A"
+  },{},resolve));
+  assert.equal(oldAcrossRestart.rolledBack,false);
+  assert.deepEqual(Array.from(state.linkedProviders),["chatgpt"]);
+});
+
+test("failed current tentative link rolls back without affecting other provider consent",async()=>{
+  const f=loadBackground([],[],true);
+  const state={gateway:"http://127.0.0.1:8080",connectionMode:"local",
+    linkedProviders:["claude"],providerLinkEpochs:{claude:"established"},
+    providerLinkPendingAttempts:{}};
+  f.sandbox.chrome.storage.local.get=async()=>({...state});
+  f.sandbox.chrome.storage.local.set=async patch=>Object.assign(state,patch);
+  const expected={gateway:state.gateway,connectionMode:"local"};
+  const send=(type,provider,attemptId)=>new Promise(resolve=>f.listeners.message[0]({
+    type,provider,connection:expected,attemptId
+  },{},resolve));
+  assert.equal((await send("link-provider","chatgpt","attempt-first-A")).tentative,true);
+  assert.equal((await send("rollback-provider-link","chatgpt","attempt-first-A")).rolledBack,true);
+  assert.deepEqual(Array.from(state.linkedProviders),["claude"]);
+  assert.equal(state.providerLinkEpochs.claude,"established");
+  assert.equal(state.providerLinkPendingAttempts.chatgpt,undefined);
+  const revokedEpoch=state.providerLinkEpochs.chatgpt;
+  assert.equal((await send("link-provider","chatgpt","attempt-second-B")).tentative,true);
+  assert.notEqual(state.providerLinkEpochs.chatgpt,revokedEpoch);
+});
+
+test("logout of provider B racing link of A does not resurrect B consent",async()=>{
+  const f=loadBackground([],[],true);
+  const state={gateway:"http://127.0.0.1:8080",connectionMode:"local",
+    linkedProviders:["claude"],providerLinkEpochs:{claude:"old-consent"}};
+  let release;
+  let entered;
+  const started=new Promise(resolve=>{entered=resolve});
+  const gate=new Promise(resolve=>{release=resolve});
+  let writes=0;
+  f.sandbox.chrome.storage.local.get=async()=>({...state});
+  f.sandbox.chrome.storage.local.set=async update=>{
+    writes++;
+    if(writes===1){entered(); await gate;}
+    Object.assign(state,update);
+  };
+  f.sandbox.relayFetch=async()=>({ok:true,status:200});
+  const send=(type,provider,connection)=>new Promise(resolve=>
+    f.listeners.message[0]({type,provider,connection,
+      attemptId:type==="link-provider" ? "attempt-link-a" : undefined},{},resolve));
+  const newLink=send("link-provider","chatgpt",{
+    gateway:state.gateway,connectionMode:"local"});
+  await started;
+  const logout=send("logout-provider","claude");
+  for(let i=0;i<4;i++)await flushAsyncWork();
+  assert.equal(writes,1);
+  release();
+  assert.equal((await newLink).ok,true);
+  assert.equal((await logout).ok,true);
+  assert.deepEqual(Array.from(state.linkedProviders),["chatgpt"]);
+  assert.ok(state.providerLinkEpochs.chatgpt);
+  assert.notEqual(state.providerLinkEpochs.claude,"old-consent");
+});
+
+test("manual logout message never forwards sensitive upstream errors to popup", async () => {
+  const f = loadBackground(["chatgpt", "claude"], [], true);
+  const state = {
+    gateway:"http://127.0.0.1:8080",connectionMode:"local",
+    linkedProviders:["chatgpt","claude"],
+    providerLinkEpochs:{chatgpt:"old-epoch",claude:"other-epoch"},
+    providerLinkPendingAttempts:{},relaySnapshotVersions:{}
+  };
+  f.sandbox.chrome.storage.local.get = async () => ({...state});
+  f.sandbox.chrome.storage.local.set = async patch => Object.assign(state,patch);
+  const send = provider => new Promise(resolve => {
+    assert.equal(f.listeners.message[0]({type:"logout-provider",provider},{},resolve),true);
+  });
+  const cases = [
+    ["Gateway connection changed before provider logout. token=private", "connection_changed"],
+    ["Gateway request cancelled; token=private", "gateway_cancelled"],
+    ["Gateway timed out cookie=private", "gateway_timeout"],
+    ["Missing host permission for token=private", "permission_or_consent"],
+    ["Gateway failed (504) cookie=private", "activation_timeout"],
+    ["Gateway logout failed (401) cookie=private", "gateway_unauthorized"],
+    ["Unexpected service: https://example.invalid/secret?cookie=private", "relay_unavailable"]
+  ];
+  for(const [raw,expected] of cases) {
+    // Each independent explicit link restores consent before another logout.
+    state.linkedProviders = ["chatgpt","claude"];
+    f.sandbox.relayFetch = async () => {throw new Error(raw)};
+    const result = await send("chatgpt");
+    assert.equal(result.ok,false);
+    assert.equal(result.errorCode,expected);
+    assert.equal(typeof result.error,"string");
+    assert.ok(!JSON.stringify(result).includes(raw));
+    assert.ok(!JSON.stringify(result).includes("private"));
+    assert.ok(!JSON.stringify(result).includes("secret"));
+    assert.ok(!JSON.stringify(result).includes("cookie="));
+    assert.deepEqual(Array.from(state.linkedProviders),["claude"],
+      "a failed remote DELETE still revokes only that provider's local consent");
+    assert.equal(state.providerLinkEpochs.claude,"other-epoch");
+  }
+  state.linkedProviders = ["chatgpt","claude"];
+  f.sandbox.relayFetch = async () => ({ok:true,status:200});
+  const success = await send("chatgpt");
+  assert.equal(success.ok,true);
+  assert.equal(success.error,undefined);
+  assert.deepEqual(Array.from(state.linkedProviders),["claude"]);
+});
+
+test("same-gateway unlink and relink epoch cannot attribute the old upload to new consent", async () => {
+  const f = loadBackground(["chatgpt"], [], true);
+  const state = {
+    gateway:"http://127.0.0.1:8080",connectionMode:"local",
+    linkedProviders:["chatgpt"],providerLinkEpochs:{chatgpt:"epoch-old"}
+  };
+  f.sandbox.chrome.storage.local.get = async () => ({...state});
+  f.sandbox.chrome.storage.local.set = async update => Object.assign(state,update);
+  const pending = [];
+  f.sandbox.syncProvider = async () => new Promise(resolve => pending.push(resolve));
+  const send = request => new Promise(resolve =>
+    f.listeners.message[0](request, {}, resolve));
+  const old = send({type:"sync-provider",provider:"chatgpt"});
+  for (let i = 0; i < 4; i++) await flushAsyncWork();
+  assert.equal(pending.length,1);
+
+  // This is the same HTTP gateway and install; only the consent generation
+  // distinguishes an old account link from the newly explicit opt-in.
+  state.linkedProviders = [];
+  state.providerLinkEpochs = {chatgpt:"epoch-revoked"};
+  state.linkedProviders = ["chatgpt"];
+  state.providerLinkEpochs = {chatgpt:"epoch-new"};
+  pending.shift()("uploaded");
+  assert.equal((await old).ok,true);
+  const first = await send({type:"relay-diagnostics"});
+  assert.equal(first.extension.provider_sync.chatgpt.state,"not_attempted",
+    "stale A completion must not become an uploaded result for new B consent");
+
+  const fresh = send({type:"sync-provider",provider:"chatgpt"});
+  for (let i = 0; i < 4; i++) await flushAsyncWork();
+  assert.equal(pending.length,1);
+  pending.shift()("uploaded");
+  assert.equal((await fresh).ok,true);
+  const latest = await send({type:"relay-diagnostics"});
+  assert.equal(latest.extension.provider_sync.chatgpt.state,"uploaded");
+  assert.ok(latest.extension.provider_sync.chatgpt.updated_at);
+  assert.equal(state.providerLinkEpochs.chatgpt,"epoch-new",
+    "a worker may observe but must not regenerate a persisted consent epoch");
+});
+
+test("simultaneous same-identity diagnostics share one POST but retain each consent snapshot", async () => {
+  const f = loadBackground(["chatgpt"], [], true);
+  const state = {
+    gateway:"http://127.0.0.1:8080",
+    connectionMode:"local", linkedProviders:["chatgpt"]
+  };
+  f.sandbox.chrome.storage.local.get = async () => ({...state});
+  let fetches = 0;
+  let release;
+  f.sandbox.relayFetch = async path => {
+    assert.equal(path, "/relay/v1/diagnostics");
+    fetches++;
+    return await new Promise(resolve => { release = resolve; });
+  };
+  const diagnostics = force => new Promise(resolve =>
+    f.listeners.message[0]({type:"relay-diagnostics",force},{},resolve));
+
+  const first = diagnostics(true);
+  await flushAsyncWork();
+  assert.equal(fetches, 1);
+  // Replacing the linked-provider list does not change the gateway token.
+  // A second popup view must retain its newer consent snapshot even though
+  // it shares the same read-only gateway health request.
+  state.linkedProviders = ["claude"];
+  const second = diagnostics(true);
+  await flushAsyncWork();
+  assert.equal(fetches, 1, "same gateway identity must not duplicate health requests");
+
+  release({ok:true,status:200,json:async()=>({marker:"same-identity",providers:[]})});
+  const [oldView, newView] = await Promise.all([first,second]);
+  assert.equal(oldView.ok, true);
+  assert.equal(newView.ok, true);
+  assert.equal(oldView.gateway.marker, "same-identity");
+  assert.equal(newView.gateway.marker, "same-identity");
+  assert.deepEqual(Array.from(oldView.extension.linked_providers), ["chatgpt"]);
+  assert.deepEqual(Array.from(newView.extension.linked_providers), ["claude"]);
+  assert.notEqual(newView.gateway_issue, "gateway_connection_changed");
+  await diagnostics(false);
+  assert.equal(fetches, 1, "the completed probe still supplies the normal short-lived cache");
+
+  f.sandbox.relayFetch = async () => {
+    fetches++;
+    return {ok:true,status:200,json:async()=>({marker:"fresh-forced",providers:[]})};
+  };
+  const refreshed = await diagnostics(true);
+  assert.equal(refreshed.ok, true);
+  assert.equal(refreshed.gateway.marker, "fresh-forced");
+  assert.equal(fetches, 2, "a later forced refresh must make a new request");
+});
+
+test("same-identity concurrent failed diagnostics release single-flight for recovery", async () => {
+  const f = loadBackground(["chatgpt"], [], true);
+  let fetches = 0;
+  let release;
+  f.sandbox.relayFetch = async () => {
+    fetches++;
+    return await new Promise(resolve => { release = resolve; });
+  };
+  const diagnostics = force => new Promise(resolve =>
+    f.listeners.message[0]({type:"relay-diagnostics",force},{},resolve));
+  const first = diagnostics(true);
+  const second = diagnostics(false);
+  await flushAsyncWork();
+  assert.equal(fetches, 1, "same identity's forced and unforced calls join");
+  release({ok:false,status:503});
+  const [a,b] = await Promise.all([first,second]);
+  assert.equal(a.ok, false);
+  assert.equal(b.ok, false);
+  assert.equal(a.gateway_issue, "gateway_request_failed");
+  assert.equal(b.gateway_issue, "gateway_request_failed");
+
+  f.sandbox.relayFetch = async () => {
+    fetches++;
+    return {ok:true,status:200,json:async()=>({marker:"recovered",providers:[]})};
+  };
+  const recovered = await diagnostics(false);
+  assert.equal(recovered.ok, true);
+  assert.equal(recovered.gateway.marker, "recovered");
+  assert.equal(fetches, 2, "failure must release the lease and allow retry");
+});
+
+test("stale gateway A diagnostics cannot overwrite B cache or poison B cookie recovery", async () => {
+  for (const oldFailure of [false, true]) {
+    const f = loadBackground(["chatgpt"]);
+    const firstGateway = "http://127.0.0.1:8080";
+    const secondGateway = "http://127.0.0.1:9090";
+    let gateway = firstGateway;
+    const releases = new Map();
+    let fetches = 0;
+    f.sandbox.chrome.storage.local.get = async () => ({
+      gateway, connectionMode:"local", linkedProviders:["chatgpt"]
+    });
+    f.sandbox.relayFetch = async (_path, _options, expected) => {
+      fetches += 1;
+      return await new Promise(resolve => releases.set(expected.gateway, resolve));
+    };
+    const diagnostics = force => new Promise(resolve =>
+      f.listeners.message[0]({type:"relay-diagnostics",force},{},resolve));
+
+    const old = diagnostics(true);
+    await flushAsyncWork();
+    assert.equal(typeof releases.get(firstGateway), "function");
+
+    gateway = secondGateway;
+    const newer = diagnostics(true);
+    await flushAsyncWork();
+    assert.equal(typeof releases.get(secondGateway), "function");
+    releases.get(secondGateway)({ok:true,status:200,json:async()=>({
+      marker:"new-current-gateway",providers:[{provider:"chatgpt",linked:true}]
+    })});
+    const latest = await newer;
+    assert.equal(latest.ok, true);
+    assert.equal(latest.gateway.marker, "new-current-gateway");
+
+    releases.get(firstGateway)(oldFailure
+      ? {ok:false,status:401}
+      : {ok:true,status:200,json:async()=>({
+          marker:"stale-previous-gateway",providers:[]
+        })});
+    const stale = await old;
+    assert.equal(stale.ok, false);
+    assert.equal(stale.gateway_issue, "gateway_connection_changed",
+      "stale authorization errors and old successes must be discarded");
+
+    const cached = await diagnostics(false);
+    assert.equal(cached.ok, true);
+    assert.equal(cached.gateway.marker, "new-current-gateway");
+    assert.equal(fetches, 2, "stale result must not invalidate the new cache");
+
+    f.listeners.cookieChanged[0]({cookie:{domain:".chatgpt.com"}});
+    [...f.timers.values()].at(-1).callback();
+    await flushAsyncWork();
+    assert.deepEqual(f.calls, ["chatgpt"],
+      "old identity failures cannot impose a new identity's automatic sync backoff");
+  }
+});
+
+test("unreachable configured gateway skips automatic imports and resumes after recovery", async () => {
+  const f = loadBackground(["chatgpt", "claude"]);
+  f.sandbox.chrome.storage.local.get = async () => ({
+    gateway:"http://127.0.0.1:8080", connectionMode:"local",
+    linkedProviders:["chatgpt", "claude"]
+  });
+  let healthy = false;
+  f.sandbox.relayFetch = async path => {
+    assert.equal(path, "/relay/v1/diagnostics");
+    if (!healthy) return {ok:false,status:503};
+    return {ok:true,status:200,json:async()=>({
+      ok:true,providers:[{provider:"chatgpt",linked:true},{provider:"claude",linked:false}]
+    })};
+  };
+  f.listeners.startup[0]();
+  for (let i = 0; i < 3; i++) await flushAsyncWork();
+  assert.deepEqual(f.calls, [],
+    "automatic refresh must not import cookies when the connected gateway is unavailable");
+
+  // A user-invoked sync remains usable independently of the retry policy.
+  const manual = await new Promise(resolve => f.listeners.message[0](
+    {type:"sync-provider",provider:"chatgpt"}, {}, resolve
+  ));
+  assert.equal(manual.ok, true);
+  assert.deepEqual(f.calls, ["chatgpt"]);
+  f.calls.length = 0;
+
+  healthy = true;
+  f.listeners.startup[0]();
+  for (let i = 0; i < 4; i++) await flushAsyncWork();
+  assert.deepEqual(f.calls, ["chatgpt", "claude"],
+    "startup repair must resume after a successful gateway status check");
+});
+
+test("old provider import result cannot overwrite new gateway dashboard or cache", async () => {
+  for (const oldFailure of [false, true]) {
+    const f = loadBackground(["chatgpt"], [], true);
+    let gateway = "http://127.0.0.1:8080";
+    const oldGateway = gateway;
+    let release;
+    const held = new Promise(resolve => {release = resolve;});
+    f.sandbox.chrome.storage.local.get = async () => ({
+      gateway, connectionMode:"local", linkedProviders:["chatgpt"]
+    });
+    f.sandbox.syncProvider = async provider => {
+      f.calls.push(provider);
+      await held;
+      if (oldFailure) throw new Error("old install sync failure");
+      return "uploaded";
+    };
+    f.sandbox.relayFetch = async () => ({
+      ok:true,status:200,json:async()=>({
+        marker:"connected-gateway-B",providers:[{provider:"chatgpt",linked:true}]
+      })
+    });
+    const send = (request) => new Promise(resolve =>
+      f.listeners.message[0](request,{},resolve));
+    const previous = send({type:"sync-provider",provider:"chatgpt"});
+    for (let i = 0; i < 3; i++) await flushAsyncWork();
+    assert.deepEqual(f.calls, ["chatgpt"], "old gateway import started");
+
+    gateway = "http://127.0.0.1:9090";
+    assert.notEqual(gateway, oldGateway);
+    const fresh = await send({type:"relay-diagnostics",force:true});
+    assert.equal(fresh.ok, true);
+    assert.equal(fresh.gateway.marker,"connected-gateway-B");
+    assert.equal(fresh.extension.provider_sync.chatgpt.state, "not_attempted");
+
+    release();
+    const completed = await previous;
+    assert.equal(completed.ok, !oldFailure);
+    const cached = await send({type:"relay-diagnostics",force:false});
+    assert.equal(cached.ok, true);
+    assert.equal(cached.gateway.marker,"connected-gateway-B");
+    assert.equal(cached.extension.provider_sync.chatgpt.state,"not_attempted",
+      "old gateway upload or error may not become new connection status");
+  }
+});
+
+test("unlink during in-flight import does not leave a synthetic linked sync result", async () => {
+  const f = loadBackground(["chatgpt"], [], true);
+  let linkedProviders = ["chatgpt"];
+  f.sandbox.chrome.storage.local.get = async () => ({
+    gateway:"http://127.0.0.1:8080",connectionMode:"local",linkedProviders
+  });
+  let release;
+  const held = new Promise(resolve => {release=resolve});
+  f.sandbox.syncProvider = async provider => {
+    f.calls.push(provider);
+    await held;
+    return "uploaded";
+  };
+  const send = request => new Promise(resolve =>
+    f.listeners.message[0](request,{},resolve));
+  const old = send({type:"sync-provider",provider:"chatgpt"});
+  for (let i = 0; i < 3; i++) await flushAsyncWork();
+  linkedProviders = [];
+  release();
+  await old;
+  linkedProviders = ["chatgpt"];
+  const after = await send({type:"relay-diagnostics"});
+  assert.equal(after.extension.provider_sync.chatgpt.state,"not_attempted",
+    "relinked provider must not inherit the old unlinked import result");
+});
+
+test("known gateway outage suppresses cookie-triggered imports until health returns or identity changes", async () => {
+  const f = loadBackground(["chatgpt", "claude"]);
+  let healthy = false;
+  let gateway = "http://127.0.0.1:8080";
+  f.sandbox.chrome.storage.local.get = async () => ({
+    gateway, connectionMode:"local", linkedProviders:["chatgpt","claude"]
+  });
+  f.sandbox.relayFetch = async () => healthy
+    ? {ok:true,status:200,json:async()=>({providers:[]})}
+    : {ok:false,status:503};
+  const diagnostics = () => new Promise(resolve =>
+    f.listeners.message[0]({type:"relay-diagnostics",force:true},{},resolve));
+  assert.equal((await diagnostics()).ok,false);
+
+  f.listeners.cookieChanged[0]({cookie:{domain:".chatgpt.com"}});
+  const firstTimer = [...f.timers.values()].at(-1);
+  firstTimer.callback();
+  await flushAsyncWork();
+  assert.deepEqual(f.calls, [], "known outage must not trigger a queued automatic import");
+
+  // Manual provider recovery is never blocked by the backoff.
+  const manually = await new Promise(resolve =>
+    f.listeners.message[0]({type:"sync-provider",provider:"chatgpt"},{},resolve));
+  assert.equal(manually.ok,true);
+  assert.deepEqual(f.calls, ["chatgpt"]);
+  f.calls.length = 0;
+
+  healthy = true;
+  assert.equal((await diagnostics()).ok,true);
+  f.listeners.cookieChanged[0]({cookie:{domain:".chatgpt.com"}});
+  [...f.timers.values()].at(-1).callback();
+  await flushAsyncWork();
+  assert.deepEqual(f.calls, ["chatgpt"], "successful health check must resume automatic resync");
+  f.calls.length = 0;
+
+  healthy = false;
+  assert.equal((await diagnostics()).ok,false);
+  gateway = "http://127.0.0.1:9090";
+  f.listeners.cookieChanged[0]({cookie:{domain:".claude.ai"}});
+  // Connection identity changes are observed by relayDiagnostics, not by
+  // cookie callbacks. A fresh identity check clears the old outage backoff.
+  healthy = true;
+  assert.equal((await diagnostics()).ok,true);
+  [...f.timers.values()].at(-1).callback();
+  await flushAsyncWork();
+  assert.deepEqual(f.calls, ["claude"]);
+});
+
+test("startup repair resnapshots provider consent after a delayed health response",async()=>{
+  for(const scenario of [
+    {initial:["chatgpt"],latest:[],expected:[]},
+    {initial:["chatgpt"],latest:["claude"],expected:["claude"]},
+  ]) {
+    const f=loadBackground(scenario.initial,[],true);
+    let linked=[...scenario.initial];
+    let release;
+    let started;
+    const waiting=new Promise(resolve=>{started=resolve});
+    const gate=new Promise(resolve=>{release=resolve});
+    f.sandbox.chrome.storage.local.get=async()=>({
+      gateway:"http://127.0.0.1:8080",connectionMode:"local",
+      linkedProviders:[...linked]
+    });
+    f.sandbox.relayFetch=async()=>{
+      started();
+      await gate;
+      return {ok:true,status:200,json:async()=>({providers:[]})};
+    };
+    f.listeners.startup[0]();
+    await waiting;
+    linked=[...scenario.latest];
+    release();
+    for(let i=0;i<8;i++)await flushAsyncWork();
+    assert.deepEqual(f.calls,scenario.expected,
+      "old linked providers cannot queue automatic imports after consent changes");
+  }
+});
+
+test("startup repair refuses to use old status after gateway identity changes",async()=>{
+  const f=loadBackground(["chatgpt"],[],true);
+  let gateway="http://127.0.0.1:8080";
+  let release;
+  let started;
+  const waiting=new Promise(resolve=>{started=resolve});
+  const gate=new Promise(resolve=>{release=resolve});
+  f.sandbox.chrome.storage.local.get=async()=>({
+    gateway,connectionMode:"local",linkedProviders:["chatgpt"]
+  });
+  f.sandbox.relayFetch=async()=>{
+    started();
+    await gate;
+    return {ok:true,status:200,json:async()=>({providers:[]})};
+  };
+  f.listeners.startup[0]();
+  await waiting;
+  gateway="http://127.0.0.1:9090";
+  release();
+  for(let i=0;i<8;i++)await flushAsyncWork();
+  assert.deepEqual(f.calls,[],
+    "health check from an old gateway must not trigger new automatic imports");
+});
+
+test("disconnected startup and install never fan out automatic provider imports", async () => {
+  const f = loadBackground(["chatgpt", "claude"]);
+  f.listeners.startup[0]();
+  f.listeners.installed[0]();
+  for (let i = 0; i < 5; i++) await flushAsyncWork();
+  assert.deepEqual(f.calls, [], "no gateway means no automatic cookie read or import");
+  const diagnostics = await new Promise(resolve =>
+    f.listeners.message[0]({type:"relay-diagnostics"},{},resolve));
+  assert.equal(diagnostics.ok, false);
+  assert.equal(diagnostics.gateway_issue, "not_connected");
+  assert.equal(diagnostics.extension.provider_sync.chatgpt.state, "not_attempted");
+  assert.equal(diagnostics.extension.provider_sync.claude.state, "not_attempted");
+});
+
+test("overlapping startup and install share one automatic status and provider refresh", async () => {
+  const f = loadBackground(["chatgpt"], [], true);
+  let releaseStatus;
+  const heldStatus = new Promise(resolve => { releaseStatus = resolve; });
+  let probes = 0;
+  f.sandbox.relayFetch = async () => {
+    probes++;
+    if (probes === 1) await heldStatus;
+    return {ok:true,status:200,json:async()=>({providers:[]})};
+  };
+
+  f.listeners.startup[0]();
+  f.listeners.installed[0]();
+  for (let i = 0; i < 6; i++) await flushAsyncWork();
+  assert.equal(probes, 1, "overlapping lifecycle events must not duplicate gateway diagnostics");
+  assert.deepEqual(f.calls, [], "provider import must await the single status probe");
+
+  // Explicit manual recovery is never blocked by an automatic heartbeat.
+  const manual = await new Promise(resolve => f.listeners.message[0](
+    {type:"sync-provider", provider:"chatgpt"}, {}, resolve));
+  assert.equal(manual.ok, true);
+  assert.deepEqual(f.calls, ["chatgpt"]);
+
+  releaseStatus();
+  for (let i = 0; i < 8; i++) await flushAsyncWork();
+  assert.equal(probes, 1);
+  assert.deepEqual(f.calls, ["chatgpt", "chatgpt"],
+    "one automatic refresh still repairs the missing provider snapshot");
+
+  // No persistent cache: a later alarm/startup can verify newly missing data.
+  f.listeners.startup[0]();
+  for (let i = 0; i < 8; i++) await flushAsyncWork();
+  assert.equal(probes, 2);
+  assert.deepEqual(f.calls, ["chatgpt", "chatgpt", "chatgpt"]);
+});
+
+test("failed automatic diagnostics releases scheduled single-flight lease", async () => {
+  const f = loadBackground(["chatgpt"], [], true);
+  let probes = 0;
+  let unavailable = true;
+  f.sandbox.relayFetch = async () => {
+    probes++;
+    if (unavailable) throw new Error("simulated gateway outage with secret");
+    return {ok:true,status:200,json:async()=>({providers:[]})};
+  };
+  f.listeners.startup[0]();
+  for (let i = 0; i < 8; i++) await flushAsyncWork();
+  assert.equal(probes, 1);
+  assert.deepEqual(f.calls, [], "failed health check must not queue cookie imports");
+
+  unavailable = false;
+  f.listeners.installed[0]();
+  for (let i = 0; i < 8; i++) await flushAsyncWork();
+  assert.equal(probes, 2, "a later alarm/install must retry after failure");
+  assert.deepEqual(f.calls, ["chatgpt"]);
+});
+
 test("service-worker install and startup restore each unique linked provider", async () => {
-  const { calls, listeners } = loadBackground([
+  const { calls, listeners, sandbox } = loadBackground([
     "chatgpt",
     "chatgpt",
     "unsupported-provider",
     "claude",
-  ]);
+  ], [], true);
+  sandbox.relayFetch = async () => ({
+    ok:true,status:200,json:async()=>({providers:[]})
+  });
 
   assert.equal(listeners.installed.length, 1);
   assert.equal(listeners.startup.length, 1);
 
   listeners.installed[0]();
-  await flushAsyncWork();
+  for (let i = 0; i < 4; i++) await flushAsyncWork();
   assert.deepEqual(calls, ["chatgpt", "claude"]);
 
   calls.length = 0;
   listeners.startup[0]();
-  await flushAsyncWork();
+  for (let i = 0; i < 4; i++) await flushAsyncWork();
   assert.deepEqual(calls, ["chatgpt", "claude"]);
 });
 
 test("one provider refresh failure does not prevent other linked providers", async () => {
-  const { calls, listeners } = loadBackground(["chatgpt", "claude"], ["chatgpt"]);
+  const { calls, listeners, sandbox } = loadBackground(["chatgpt", "claude"], ["chatgpt"], true);
+  sandbox.relayFetch = async () => ({ok:true,status:200,json:async()=>({providers:[]})});
 
   listeners.startup[0]();
-  await flushAsyncWork();
+  for (let i = 0; i < 4; i++) await flushAsyncWork();
 
   assert.deepEqual(calls, ["chatgpt", "claude"]);
 });
 
+test("unlinked or disconnected providers never queue automatic cookie imports", async () => {
+  const f = loadBackground(["chatgpt"], [], true);
+  let linkedProviders = [];
+  let connected = true;
+  f.sandbox.chrome.storage.local.get = async () => ({
+    linkedProviders,
+    ...(connected ? {gateway:"http://127.0.0.1:8080",connectionMode:"local"} : {})
+  });
+  const fire = async () => {
+    f.listeners.cookieChanged[0]({cookie:{domain:".chatgpt.com"}});
+    [...f.timers.values()].at(-1).callback();
+    await flushAsyncWork();
+  };
+  await fire();
+  assert.deepEqual(f.calls, [], "revoked provider consent blocks automatic sync");
+  linkedProviders = ["chatgpt"];
+  connected = false;
+  await fire();
+  assert.deepEqual(f.calls, [], "disconnected gateway blocks automatic sync");
+  connected = true;
+  await fire();
+  assert.deepEqual(f.calls, ["chatgpt"], "linked provider resync resumes when connected");
+});
+
+test("superseded cookie debounce cannot enqueue after a delayed consent read", async () => {
+  const f = loadBackground(["chatgpt"], [], true);
+  let release;
+  let first = true;
+  f.sandbox.chrome.storage.local.get = async () => {
+    if (first) {
+      first = false;
+      await new Promise(resolve => {release = resolve;});
+    }
+    return {gateway:"http://127.0.0.1:8080",connectionMode:"local",linkedProviders:["chatgpt"]};
+  };
+  f.listeners.cookieChanged[0]({cookie:{domain:"chatgpt.com"}});
+  const oldTimer = [...f.timers.values()].at(-1);
+  const slow = oldTimer.callback();
+  await flushAsyncWork();
+  f.listeners.cookieChanged[0]({cookie:{domain:".chatgpt.com"}});
+  const newest = [...f.timers.values()].at(-1);
+  await newest.callback();
+  release();
+  await slow;
+  await flushAsyncWork();
+  assert.deepEqual(f.calls, ["chatgpt"], "only the latest generation can sync after async storage");
+});
+
 test("cookie rotation is debounced and rejects lookalike domains", async () => {
-  const { calls, listeners, timers, clearedTimers } = loadBackground([]);
+  const { calls, listeners, timers, clearedTimers } = loadBackground(["chatgpt"], [], true);
   const onCookieChanged = listeners.cookieChanged[0];
 
   onCookieChanged({ cookie: { domain: ".evilchatgpt.com" } });
@@ -141,7 +1025,7 @@ test("cookie rotation is debounced and rejects lookalike domains", async () => {
 });
 
 test("two linked providers rotate independently without cross-provider sync", async () => {
-  const { calls, listeners, timers } = loadBackground(["chatgpt", "claude"]);
+  const { calls, listeners, timers } = loadBackground(["chatgpt", "claude"], [], true);
   const onCookieChanged = listeners.cookieChanged[0];
 
   onCookieChanged({ cookie: { domain: ".chatgpt.com" } });
@@ -158,7 +1042,7 @@ test("two linked providers rotate independently without cross-provider sync", as
 });
 
 test("rapid cookie rotations coalesce per provider while preserving the other provider", async () => {
-  const { calls, listeners, timers, clearedTimers } = loadBackground(["chatgpt", "claude"]);
+  const { calls, listeners, timers, clearedTimers } = loadBackground(["chatgpt", "claude"], [], true);
   const onCookieChanged = listeners.cookieChanged[0];
 
   onCookieChanged({ cookie: { domain: ".chatgpt.com" } });
@@ -179,7 +1063,7 @@ test("rapid cookie rotations coalesce per provider while preserving the other pr
 });
 
 test("slow provider sync coalesces a cookie burst into one latest trailing snapshot", async () => {
-  const f = loadBackground(["chatgpt", "claude"]);
+  const f = loadBackground(["chatgpt", "claude"], [], true);
   let release;
   const held = new Promise(resolve => { release = resolve; });
   const snapshots = [];
@@ -209,10 +1093,63 @@ test("slow provider sync coalesces a cookie burst into one latest trailing snaps
   assert.equal(chat[1].version, 20, "the trailing job reads latest cookie state");
 });
 
+test("manual provider sync returns only fixed redacted popup errors, not upstream exceptions", async () => {
+  const f = loadBackground(["chatgpt", "claude"], [], true);
+  f.sandbox.chrome.storage.local.get = async () => ({
+    gateway:"http://127.0.0.1:8080",connectionMode:"local",
+    linkedProviders:["chatgpt", "claude"],providerLinkEpochs:{chatgpt:"epoch-c",claude:"epoch-d"}
+  });
+  const request = provider => new Promise(resolve => {
+    assert.equal(f.listeners.message[0]({type:"sync-provider",provider},{},resolve), true);
+  });
+  const diagnostics = () => new Promise(resolve => {
+    f.listeners.message[0]({type:"relay-diagnostics"},{},resolve);
+  });
+  const cases = [
+    ["Gateway request cancelled; credential=private-session-cookie", "gateway_cancelled"],
+    ["gateway timed out on https://example.invalid/secret", "gateway_timeout"],
+    ["Missing provider host permissions token=secret", "permission_or_consent"],
+    ["Gateway activation failed (504), cookie=secret", "activation_timeout"],
+    ["Gateway rejected credential (401) token=secret", "gateway_unauthorized"],
+    ["upstream returned cookie=secret&access_token=private", "relay_unavailable"],
+  ];
+  const messages = new Map();
+  for (const [raw, code] of cases) {
+    f.sandbox.syncProvider = async () => {throw new Error(raw)};
+    const failed = await request("chatgpt");
+    assert.equal(failed.ok,false);
+    assert.equal(failed.errorCode,code);
+    assert.equal(typeof failed.error,"string");
+    assert.ok(failed.error.length > 0);
+    assert.ok(!JSON.stringify(failed).includes(raw));
+    assert.ok(!JSON.stringify(failed).includes("secret"));
+    assert.ok(!JSON.stringify(failed).includes("private"));
+    if (messages.has(code)) assert.equal(failed.error,messages.get(code));
+    messages.set(code,failed.error);
+
+    // Read-only health still has redacted issue categories and never infers
+    // that an uploaded session means an authenticated provider login.
+    const state = await diagnostics();
+    assert.equal(state.extension.provider_sync.chatgpt.state,"failed");
+    assert.equal(state.extension.provider_sync.chatgpt.issue,code);
+    assert.ok(!JSON.stringify(state).includes(raw));
+    assert.equal(state.extension.provider_sync.claude.state,"not_attempted");
+  }
+  f.sandbox.syncProvider = async () => "uploaded";
+  const success = await request("claude");
+  assert.equal(success.ok,true);
+  assert.equal(success.syncStatus,"uploaded");
+  assert.equal(success.error,undefined);
+  assert.equal(success.errorCode,undefined);
+});
+
 test("relay diagnostics message reports redacted local sync failures without raw errors", async () => {
   const f = loadBackground(["chatgpt"], ["chatgpt"]);
-  f.listeners.startup[0]();
-  await flushAsyncWork();
+  // Manual explicit sync remains independent of automatic disconnect skip.
+  const manual = await new Promise(resolve => {
+    f.listeners.message[0]({type:"sync-provider",provider:"chatgpt"},{},resolve);
+  });
+  assert.equal(manual.ok,false);
   const response = await new Promise(resolve => {
     const asyncReply = f.listeners.message[0]({type:"relay-diagnostics"}, {}, resolve);
     assert.equal(asyncReply, true);
@@ -247,8 +1184,365 @@ test("relay diagnostics reads authenticated gateway status without exposing cred
   assert.ok(!JSON.stringify(first).includes("private-install-token"));
 });
 
-test("multiple manual syncs coalesce into one forced refresh behind an automatic import", async () => {
+test("diagnostics separates connection, browser host permissions and saved gateway sessions", async () => {
+  const f = loadBackground(["chatgpt", "claude"]);
+  f.sandbox.chrome.storage.local.get = async () => ({
+    gateway:"http://127.0.0.1:8080", connectionMode:"local",
+    linkedProviders:["chatgpt", "claude", "chatgpt"]
+  });
+  f.sandbox.chrome.permissions = {
+    contains: async ({origins}) => !origins.some(origin => origin.includes("claude.ai"))
+  };
+  f.sandbox.relayFetch = async () => ({
+    ok:true, status:200, json:async () => ({
+      providers:[{provider:"chatgpt",linked:true,authentication:"unknown"},
+                 {provider:"claude",linked:false,authentication:"unknown"}]
+    })
+  });
+  const response = await new Promise(resolve => f.listeners.message[0](
+    {type:"relay-diagnostics",force:true}, {}, resolve
+  ));
+  assert.equal(response.ok, true);
+  assert.equal(response.extension.connected, true);
+  assert.equal(response.extension.connection_mode, "local");
+  assert.deepEqual(Array.from(response.extension.linked_providers), ["chatgpt", "claude"]);
+  assert.equal(response.extension.permissions.gateway, true);
+  assert.equal(response.extension.permissions.providers.chatgpt, true);
+  assert.equal(response.extension.permissions.providers.claude, false);
+  assert.equal(response.gateway.providers[1].linked, false,
+    "extension linkage must not rewrite backend saved-session state");
+  assert.match(response.extension.gateway_checked_at, /^[0-9]{4}-[0-9]{2}-[0-9]{2}T/);
+  assert.ok(!JSON.stringify(response).includes("127.0.0.1:8080"),
+    "never include the configured gateway origin in the diagnostics payload");
+});
+
+test("live provider diagnostics show a held sync and preserve it on first status read", async () => {
+  const f = loadBackground(["chatgpt", "claude"], [], true);
+  let release;
+  let started = false;
+  const held = new Promise(resolve => { release = resolve; });
+  f.sandbox.syncProvider = async provider => {
+    assert.equal(provider, "chatgpt");
+    started = true;
+    await held;
+    return "uploaded";
+  };
+  f.sandbox.relayFetch = async () => ({
+    ok:true, status:200, json:async()=>({providers:[
+      {provider:"chatgpt",linked:false,authentication:"unknown"},
+      {provider:"claude",linked:false,authentication:"unknown"}
+    ]})
+  });
+  const diagnosis = () => new Promise(resolve =>
+    f.listeners.message[0]({type:"relay-diagnostics",force:true},{},resolve));
+  // This import begins before *any* dashboard check has initialized its
+  // connection identity; that first dashboard query must not erase it.
+  const pending = new Promise(resolve =>
+    f.listeners.message[0]({type:"sync-provider",provider:"chatgpt"},{},resolve));
+  for (let i = 0; i < 16 && !started; i++) await flushAsyncWork();
+  assert.equal(started, true);
+  const during = await diagnosis();
+  assert.equal(during.ok, true);
+  assert.equal(during.extension.provider_sync.chatgpt.state, "syncing");
+  assert.equal(during.extension.provider_sync.chatgpt.issue, null);
+  assert.match(during.extension.provider_sync.chatgpt.updated_at, /^\d{4}-\d{2}-\d{2}T/);
+  assert.equal(during.extension.provider_sync.claude.state, "not_attempted");
+  assert.equal(during.gateway.providers[0].authentication, "unknown");
+  assert.ok(!JSON.stringify(during).includes("private-cookie"));
+
+  release();
+  const completed = await pending;
+  assert.equal(completed.ok, true);
+  assert.equal(completed.syncStatus, "uploaded");
+  const after = await diagnosis();
+  assert.equal(after.extension.provider_sync.chatgpt.state, "uploaded");
+  assert.equal(after.extension.provider_sync.claude.state, "not_attempted");
+  assert.equal(after.gateway.providers[0].authentication, "unknown",
+    "successful import is not proof of signed-in chat");
+});
+
+test("in-flight syncing status cannot survive a gateway replacement", async () => {
+  const f = loadBackground(["chatgpt"], [], true);
+  const state = {
+    gateway:"http://127.0.0.1:8080", connectionMode:"local",
+    linkedProviders:["chatgpt"], providerLinkEpochs:{chatgpt:"first-owner"}
+  };
+  f.sandbox.chrome.storage.local.get = async () => ({...state});
+  f.sandbox.relayFetch = async () => ({
+    ok:true,status:200,json:async()=>({providers:[{provider:"chatgpt",linked:false}]})
+  });
+  let release;
+  let started = false;
+  const held = new Promise(resolve => { release = resolve; });
+  f.sandbox.syncProvider = async () => {
+    started = true;
+    await held;
+    return "uploaded";
+  };
+  const diagnose = () => new Promise(resolve =>
+    f.listeners.message[0]({type:"relay-diagnostics",force:true},{},resolve));
+  const pending = new Promise(resolve =>
+    f.listeners.message[0]({type:"sync-provider",provider:"chatgpt"},{},resolve));
+  for (let i = 0; i < 16 && !started; i++) await flushAsyncWork();
+  assert.equal((await diagnose()).extension.provider_sync.chatgpt.state,"syncing");
+
+  state.gateway = "http://localhost:9090";
+  state.providerLinkEpochs = {chatgpt:"replacement-owner"};
+  assert.equal((await diagnose()).extension.provider_sync.chatgpt.state,"not_attempted",
+    "new gateway must not inherit old in-progress diagnostics");
+
+  release();
+  const completed = await pending;
+  assert.equal(completed.ok,true);
+  assert.equal((await diagnose()).extension.provider_sync.chatgpt.state,"not_attempted",
+    "stale import completion must not overwrite replacement gateway status");
+});
+
+test("gateway A-B-A identity transition invalidates a held old status probe", async () => {
+  const f = loadBackground(["chatgpt"], [], true);
+  const state = {
+    gateway:"http://127.0.0.1:8080", connectionMode:"local", linkedProviders:["chatgpt"]
+  };
+  f.sandbox.chrome.storage.local.get = async () => ({...state});
+  let release;
+  let dispatched = false;
+  const held = new Promise(resolve => { release = resolve; });
+  f.sandbox.relayFetch = async () => {
+    dispatched = true;
+    await held;
+    return {ok:true,status:200,json:async()=>({providers:[{provider:"chatgpt",linked:true}]})};
+  };
+  const first = new Promise(resolve =>
+    f.listeners.message[0]({type:"relay-diagnostics",force:true},{},resolve));
+  for (let i = 0; i < 16 && !dispatched; i++) await flushAsyncWork();
+  assert.equal(dispatched, true);
+
+  state.gateway = "http://localhost:9090";
+  f.sandbox.ensureGatewayDiagnosticIdentity(state);
+  state.gateway = "http://127.0.0.1:8080";
+  f.sandbox.ensureGatewayDiagnosticIdentity(state);
+  release();
+
+  const old = await first;
+  assert.equal(old.ok, false, "return to gateway A must not revive its stale probe");
+  assert.equal(old.gateway_issue, "gateway_connection_changed");
+  assert.equal(old.gateway, undefined);
+});
+
+test("provider sync timestamp is independent of login and turns stale when gateway status fails", async () => {
+  const f = loadBackground(["chatgpt", "claude"]);
+  let healthy = true;
+  let connected = true;
+  f.sandbox.chrome.storage.local.get = async () => connected
+    ? {gateway:"http://127.0.0.1:8080",connectionMode:"local",linkedProviders:["chatgpt","claude"]}
+    : {linkedProviders:["chatgpt","claude"]};
+  f.sandbox.relayFetch = async () => healthy
+    ? {ok:true,status:200,json:async()=>({providers:[
+      {provider:"chatgpt",linked:false,authentication:"unknown"}
+    ]})}
+    : {ok:false,status:503};
+  const diagnostic = () => new Promise(resolve => f.listeners.message[0](
+    {type:"relay-diagnostics",force:true},{},resolve));
+  const clean = await diagnostic();
+  assert.equal(clean.ok,true);
+  assert.equal(clean.extension.provider_sync.chatgpt.state,"not_attempted");
+  assert.equal(clean.extension.provider_sync.chatgpt.updated_at,null);
+  assert.equal(clean.extension.provider_sync.chatgpt.stale,false);
+  const synced = await new Promise(resolve => f.listeners.message[0](
+    {type:"sync-provider",provider:"chatgpt"},{},resolve));
+  assert.equal(synced.ok,true);
+  const after = await diagnostic();
+  const previous = after.extension.provider_sync.chatgpt;
+  assert.equal(previous.stale,false);
+  assert.match(previous.updated_at,/^\d{4}-\d{2}-\d{2}T/);
+  assert.equal(after.gateway.providers[0].authentication,"unknown",
+    "a successful local sync must never imply authenticated login");
+  assert.equal(after.extension.provider_sync.claude.state,"not_attempted");
+  healthy = false;
+  const failed = await diagnostic();
+  assert.equal(failed.ok,false);
+  assert.equal(failed.gateway,undefined);
+  assert.equal(failed.extension.provider_sync.chatgpt.stale,true);
+  assert.equal(failed.extension.provider_sync.chatgpt.updated_at,previous.updated_at);
+  assert.equal(failed.extension.provider_sync.claude.stale,true);
+  healthy = true;
+  assert.equal((await diagnostic()).extension.provider_sync.chatgpt.stale,false);
+  connected = false;
+  const disconnected = await diagnostic();
+  assert.equal(disconnected.ok,false);
+  assert.equal(disconnected.gateway_issue,"not_connected");
+  assert.equal(disconnected.extension.provider_sync.chatgpt.updated_at,null,
+    "disconnect must not leak an old install's provider state");
+  // MV3 worker restart conservatively resets in-memory sync evidence.
+  const restarted = loadBackground(["chatgpt"]);
+  const restartDiagnostic = await new Promise(resolve => restarted.listeners.message[0](
+    {type:"relay-diagnostics"}, {}, resolve));
+  assert.equal(restartDiagnostic.extension.provider_sync.chatgpt.state,"not_attempted");
+  assert.equal(restartDiagnostic.extension.provider_sync.chatgpt.updated_at,null);
+});
+
+test("delayed consent-A status never borrows new consent-B live sync", async () => {
+  const f = loadBackground(["chatgpt"], [], true);
+  const state = {gateway:"http://127.0.0.1:8080",connectionMode:"local",
+    linkedProviders:["chatgpt"],providerLinkEpochs:{chatgpt:"epoch-A"}};
+  f.sandbox.chrome.storage.local.get = async () => ({...state});
+  let releaseStatus;
+  f.sandbox.relayFetch = async () => new Promise(resolve => {releaseStatus = resolve;});
+  const send = request => new Promise(resolve => f.listeners.message[0](request,{},resolve));
+  const oldStatus = send({type:"relay-diagnostics",force:true});
+  for (let i=0;i<5;i++) await flushAsyncWork();
+  assert.equal(typeof releaseStatus,"function");
+
+  // Same gateway and consent target; a new explicit link changes only epoch.
+  state.providerLinkEpochs = {chatgpt:"epoch-B"};
+  let releaseSync;
+  f.sandbox.syncProvider = async (_provider,{onProgress}) => {
+    onProgress({phase:"upload",durations_ms:{permission:5,cookie_read:9,digest:3}});
+    return new Promise(resolve => {releaseSync = resolve;});
+  };
+  const syncing = send({type:"sync-provider",provider:"chatgpt"});
+  for (let i=0;i<5;i++) await flushAsyncWork();
+  assert.equal(typeof releaseSync,"function");
+
+  releaseStatus({ok:true,status:200,json:async()=>({providers:[]})});
+  const previous = await oldStatus;
+  assert.equal(previous.ok,true);
+  assert.equal(previous.extension.provider_sync.chatgpt.state,"not_attempted",
+    "old A status cannot borrow B in-flight sync");
+  assert.equal(previous.extension.provider_sync.chatgpt.phase,null,
+    "old A status cannot borrow B phase telemetry");
+  assert.deepEqual(JSON.parse(JSON.stringify(previous.extension.provider_sync.chatgpt.durations_ms)),{});
+  const fresh = await send({type:"relay-diagnostics"});
+  assert.equal(fresh.extension.provider_sync.chatgpt.state,"syncing");
+  assert.equal(fresh.extension.provider_sync.chatgpt.phase,"upload");
+  assert.equal(fresh.extension.provider_sync.chatgpt.durations_ms.cookie_read,9);
+  releaseSync("uploaded");
+  assert.equal((await syncing).ok,true);
+  // An uploaded session invalidates the health cache; the next status GET
+  // must use a fresh completed mock rather than waiting on old held status.
+  f.sandbox.relayFetch = async () => ({ok:true,status:200,json:async()=>({providers:[]})});
+  assert.equal((await send({type:"relay-diagnostics"})).extension.provider_sync.chatgpt.state,"uploaded");
+});
+
+test("diagnostics immediately hides old same-gateway in-flight status after consent rotation", async () => {
+  const f = loadBackground(["chatgpt"], [], true);
+  const state = {gateway:"http://127.0.0.1:8080",connectionMode:"local",
+    linkedProviders:["chatgpt"],providerLinkEpochs:{chatgpt:"epoch-before"}};
+  f.sandbox.chrome.storage.local.get = async () => ({...state});
+  f.sandbox.relayFetch = async () => ({ok:true,status:200,json:async()=>({providers:[]})});
+  let release;
+  f.sandbox.syncProvider = async () => new Promise(resolve => {release=resolve;});
+  const send = request => new Promise(resolve => f.listeners.message[0](request,{},resolve));
+  const old = send({type:"sync-provider",provider:"chatgpt"});
+  for(let i=0;i<5;i++) await flushAsyncWork();
+  assert.equal(typeof release,"function");
+  assert.equal((await send({type:"relay-diagnostics"})).extension.provider_sync.chatgpt.state,"syncing");
+  state.providerLinkEpochs = {chatgpt:"epoch-after"};
+  assert.equal((await send({type:"relay-diagnostics"})).extension.provider_sync.chatgpt.state,"not_attempted",
+    "a revoked consent generation cannot remain in-progress");
+  release("uploaded");
+  await old;
+  assert.equal((await send({type:"relay-diagnostics"})).extension.provider_sync.chatgpt.state,"not_attempted");
+});
+
+test("redacted phase progress follows the same provider ownership and terminal status", async () => {
+  const f = loadBackground(["chatgpt","claude"], [], true);
+  const state = {gateway:"http://127.0.0.1:8080",connectionMode:"local",
+    linkedProviders:["chatgpt","claude"], providerLinkEpochs:{chatgpt:"epoch-a",claude:"epoch-b"}};
+  f.sandbox.chrome.storage.local.get = async () => ({...state});
+  f.sandbox.relayFetch = async () => ({
+    ok:true,status:200,json:async()=>({providers:[{provider:"chatgpt",authentication:"unknown"}]})
+  });
+  let release;
+  f.sandbox.syncProvider = async (provider,{onProgress}) => {
+    if (provider !== "chatgpt") return "unchanged";
+    onProgress({phase:"cookie_read",durations_ms:{permission:4}});
+    onProgress({phase:"upload",durations_ms:{permission:4,cookie_read:18,digest:10}});
+    return new Promise(resolve=>{release = () => {
+      onProgress({phase:null,durations_ms:{permission:4,cookie_read:18,digest:10,upload:24}});
+      resolve("uploaded");
+    };});
+  };
+  const send = message=>new Promise(resolve=>f.listeners.message[0](message,{},resolve));
+  const work = send({type:"sync-provider",provider:"chatgpt"});
+  for (let i=0;i<5;i++) await flushAsyncWork();
+  const live = await send({type:"relay-diagnostics",force:true});
+  assert.equal(live.extension.provider_sync.chatgpt.state,"syncing");
+  assert.equal(live.extension.provider_sync.chatgpt.phase,"upload");
+  assert.equal(live.extension.provider_sync.chatgpt.durations_ms.cookie_read,18);
+  assert.equal(live.extension.provider_sync.claude.phase,null);
+  assert.equal(live.gateway.providers[0].authentication,"unknown");
+  assert.ok(!JSON.stringify(live).includes("epoch-a"));
+  release();
+  assert.equal((await work).syncStatus,"uploaded");
+  const after = await send({type:"relay-diagnostics"});
+  assert.equal(after.extension.provider_sync.chatgpt.state,"uploaded");
+  assert.equal(after.extension.provider_sync.chatgpt.phase,null);
+  assert.equal(after.extension.provider_sync.chatgpt.durations_ms.upload,24);
+});
+
+test("phase timing callback cannot leak raw values and obsolete progress is fenced on same gateway", async () => {
+  const f = loadBackground(["chatgpt"], [], true);
+  const state = {gateway:"http://127.0.0.1:8080",connectionMode:"local",
+    linkedProviders:["chatgpt"],providerLinkEpochs:{chatgpt:"old"}};
+  f.sandbox.chrome.storage.local.get = async () => ({...state});
+  f.sandbox.relayFetch = async () => ({ok:true,status:200,json:async()=>({providers:[]})});
+  let release;
+  f.sandbox.syncProvider = async (_provider,{onProgress}) => {
+    onProgress({phase:"secret-cookie=XYZ",durations_ms:{
+      permission:Infinity,cookie_read:-3,digest:200_000,upload:7.9,secret_token:12345
+    }});
+    return new Promise(resolve=>{release=() => {onProgress({phase:"upload",durations_ms:{upload:40}});resolve("uploaded");};});
+  };
+  const send = message=>new Promise(resolve=>f.listeners.message[0](message,{},resolve));
+  const work = send({type:"sync-provider",provider:"chatgpt"});
+  for(let i=0;i<5;i++) await flushAsyncWork();
+  const live = await send({type:"relay-diagnostics",force:true});
+  const detail = live.extension.provider_sync.chatgpt;
+  assert.equal(detail.phase,null);
+  assert.deepEqual(JSON.parse(JSON.stringify(detail.durations_ms)),{
+    cookie_read:0,digest:120_000,upload:7
+  });
+  assert.ok(!JSON.stringify(live).includes("secret-cookie"));
+  assert.ok(!JSON.stringify(live).includes("secret_token"));
+  state.providerLinkEpochs={chatgpt:"new"};
+  const invalid = await send({type:"relay-diagnostics"});
+  assert.equal(invalid.extension.provider_sync.chatgpt.state,"not_attempted");
+  release();
+  await work;
+  assert.equal((await send({type:"relay-diagnostics"})).extension.provider_sync.chatgpt.state,"not_attempted");
+});
+
+test("forced diagnostic refresh never reports stale success after a gateway failure", async () => {
   const f = loadBackground(["chatgpt"]);
+  f.sandbox.chrome.storage.local.get = async () => ({
+    gateway:"http://127.0.0.1:8080", connectionMode:"local", linkedProviders:["chatgpt"]
+  });
+  let reads = 0;
+  f.sandbox.relayFetch = async () => {
+    reads += 1;
+    if (reads === 1) return {ok:true,status:200,json:async () => ({providers:[]})};
+    throw new Error("simulated internal network failure with secret");
+  };
+  const request = force => new Promise(resolve => f.listeners.message[0](
+    {type:"relay-diagnostics",force}, {}, resolve
+  ));
+  assert.equal((await request(true)).ok, true);
+  const failed = await request(true);
+  assert.equal(failed.ok, false);
+  assert.equal(failed.gateway_issue, "relay_unavailable");
+  assert.equal(failed.gateway, undefined);
+  assert.equal(reads, 2);
+  assert.ok(!JSON.stringify(failed).includes("secret"));
+  const afterFailure = await request(false);
+  assert.equal(afterFailure.ok, false,
+    "a failed forced refresh must invalidate the former successful diagnostics cache");
+  assert.equal(afterFailure.gateway, undefined);
+  assert.equal(reads, 3);
+});
+
+test("multiple manual syncs coalesce into one forced refresh behind an automatic import", async () => {
+  const f = loadBackground(["chatgpt"], [], true);
   let release;
   const held = new Promise(resolve => { release = resolve; });
   const attempts = [];
@@ -268,4 +1562,248 @@ test("multiple manual syncs coalesce into one forced refresh behind an automatic
   await Promise.all([a,b]);
   for (let i = 0; i < 4; i++) await flushAsyncWork();
   assert.deepEqual(attempts, [false, true], "manual recovery runs once after the automatic import");
+});
+
+
+test("logout digest cleanup cannot clobber a concurrent other-provider commit", async () => {
+  const f = loadBackground(["chatgpt","claude"], [], true);
+  const state = {
+    gateway:"http://127.0.0.1:8080", connectionMode:"local",
+    linkedProviders:["chatgpt","claude"],
+    providerLinkEpochs:{chatgpt:"epoch-a",claude:"epoch-b"},
+    providerLinkPendingAttempts:{},
+    relaySnapshotVersions:{chatgpt:"digest-a-old",claude:"digest-b"}
+  };
+  let releaseRead, readEntered;
+  const reading = new Promise(resolve => {readEntered = resolve;});
+  const readGate = new Promise(resolve => {releaseRead = resolve;});
+  let heldRead = false;
+  f.sandbox.chrome.storage.local.get = async keys => {
+    const snap = {
+      ...state,
+      linkedProviders:[...state.linkedProviders],
+      providerLinkEpochs:{...state.providerLinkEpochs},
+      relaySnapshotVersions:{...state.relaySnapshotVersions}
+    };
+    if (!heldRead && Array.isArray(keys) && keys.includes("relaySnapshotVersions")) {
+      heldRead = true;
+      readEntered();
+      await readGate;
+    }
+    return snap;
+  };
+  f.sandbox.chrome.storage.local.set = async patch => Object.assign(state, patch);
+  f.sandbox.relayFetch = async () => ({ok:true,status:200});
+  const logout = new Promise(resolve => f.listeners.message[0]({
+    type:"logout-provider",provider:"claude"
+  }, {}, resolve));
+  await reading;
+  const otherUpload = f.sandbox.queueConsentMutation(async () => {
+    const now = await f.sandbox.chrome.storage.local.get(["relaySnapshotVersions"]);
+    await f.sandbox.chrome.storage.local.set({
+      relaySnapshotVersions:{...now.relaySnapshotVersions, chatgpt:"digest-a-new"}
+    });
+  });
+  await flushAsyncWork();
+  assert.equal(state.relaySnapshotVersions.chatgpt, "digest-a-old",
+    "logout must hold the consent writer throughout its snapshot cleanup");
+  releaseRead();
+  assert.equal((await logout).ok,true);
+  await otherUpload;
+  assert.equal(state.relaySnapshotVersions.chatgpt,"digest-a-new");
+  assert.equal(state.relaySnapshotVersions.claude,undefined);
+  assert.deepEqual(Array.from(state.linkedProviders),["chatgpt"]);
+});
+
+
+test("inherited provider names are not linked diagnostics or actionable worker messages", async () => {
+  const f = loadBackground(["chatgpt"], [], true);
+  const state = {
+    gateway:"http://127.0.0.1:8080", connectionMode:"local",
+    linkedProviders:["constructor","toString","__proto__",["chatgpt"],"chatgpt"]
+  };
+  f.sandbox.chrome.storage.local.get = async () => ({...state});
+  f.sandbox.chrome.permissions = {contains:async () => true};
+  f.sandbox.relayFetch = async () => ({
+    ok:true, status:200, json:async () => ({
+      providers:[{provider:"chatgpt",linked:true,authentication:"unknown"}]
+    })
+  });
+  const diag = await new Promise(resolve => f.listeners.message[0](
+    {type:"relay-diagnostics",force:true}, {}, resolve
+  ));
+  assert.equal(diag.ok,true, "poisoned legacy consent cannot break the dashboard");
+  assert.deepEqual(Array.from(diag.extension.linked_providers),["chatgpt"]);
+  assert.deepEqual(Object.keys(diag.extension.permissions.providers),["chatgpt"]);
+
+  for (const invalid of ["constructor","toString","__proto__",["chatgpt"],null]) {
+    for (const type of [
+      "sync-provider","logout-provider","link-provider",
+      "commit-provider-link","rollback-provider-link"
+    ]) {
+      let responded = false;
+      const handled = f.listeners.message[0](
+        {type,provider:invalid,connection:state,attemptId:"attempt-invalid"}, {},
+        () => {responded = true;}
+      );
+      assert.equal(handled,undefined);
+      assert.equal(responded,false);
+    }
+  }
+  assert.equal(f.calls.length,0,"invalid names must never schedule a provider sync");
+});
+
+
+test("malformed linked-provider storage never schedules cookie or startup imports", async () => {
+  const f = loadBackground(["chatgpt"], [], true);
+  const state = {
+    gateway:"http://127.0.0.1:8080",connectionMode:"local",
+    linkedProviders:"prefix-chatgpt-suffix",providerLinkEpochs:{chatgpt:"epoch-a"}
+  };
+  f.sandbox.chrome.storage.local.get = async () => ({...state});
+  f.sandbox.chrome.permissions = {contains:async()=>true};
+  f.sandbox.relayFetch = async () => ({
+    ok:true,status:200,json:async()=>({providers:[]})
+  });
+  for (const malformed of [
+    "prefix-chatgpt-suffix", "chatgpt", "chatgpt,claude", {}, null,
+    {includes:()=>true}
+  ]) {
+    state.linkedProviders = malformed;
+    const diagnostics = await new Promise(resolve => f.listeners.message[0](
+      {type:"relay-diagnostics",force:true},{},resolve
+    ));
+    assert.equal(diagnostics.ok,true);
+    assert.deepEqual(Array.from(diagnostics.extension.linked_providers),[]);
+    f.listeners.startup[0]();
+    for(let i=0;i<6;i++) await flushAsyncWork();
+    assert.deepEqual(f.calls,[], "malformed stored consent cannot cause automatic imports");
+    f.listeners.cookieChanged[0]({cookie:{domain:".chatgpt.com"}});
+    const last = [...f.timers.values()].at(-1);
+    await last.callback();
+    for(let i=0;i<5;i++) await flushAsyncWork();
+    assert.deepEqual(f.calls,[], "cookie rotation cannot treat substring as link consent");
+  }
+  state.linkedProviders=["chatgpt"];
+  f.listeners.startup[0]();
+  for(let i=0;i<8;i++) await flushAsyncWork();
+  assert.deepEqual(f.calls,["chatgpt"], "valid linked array still restores provider");
+});
+
+test("explicit provider link recovers safely from malformed stored membership", async () => {
+  const f = loadBackground([],[],true);
+  const state = {
+    gateway:"http://127.0.0.1:8080",connectionMode:"local",
+    linkedProviders:"prefix-chatgpt-suffix",
+    providerLinkEpochs:{},providerLinkPendingAttempts:{}
+  };
+  f.sandbox.chrome.storage.local.get=async()=>({...state});
+  f.sandbox.chrome.storage.local.set=async patch=>Object.assign(state,patch);
+  const send=(type)=>new Promise(resolve=>f.listeners.message[0]({
+    type,provider:"chatgpt",
+    connection:{gateway:state.gateway,connectionMode:"local"},
+    attemptId:"explicit-owner-consent"
+  },{},resolve));
+  const linked=await send("link-provider");
+  assert.equal(linked.ok,true);
+  assert.equal(linked.alreadyLinked,false,"malformed string is not an existing link");
+  assert.deepEqual(Array.from(state.linkedProviders),["chatgpt"]);
+  assert.equal((await send("commit-provider-link")).committed,true);
+});
+
+function pendingApprovalPollFixture(fetchImpl) {
+  const f = loadBackground([], [], true);
+  const pending = {
+    gateway:"http://127.0.0.1:8080", request_id:"private-request-id",
+    poll_secret:"private-poll-secret", expires:Date.now() + 300_000,
+    approvalGeneration:"installed-gen"
+  };
+  const state = {pendingConnection:pending};
+  const requests = [];
+  f.sandbox.normalizeGateway = gateway => gateway;
+  f.sandbox.AbortController = AbortController;
+  f.sandbox.chrome.permissions = {contains:async () => true};
+  f.sandbox.chrome.storage.local.get = async () => ({...state});
+  f.sandbox.chrome.storage.local.remove = async key => {delete state[key];};
+  f.sandbox.chrome.alarms.clear = async () => true;
+  f.sandbox.fetch = async (url, options) => {
+    requests.push({url, options});
+    return fetchImpl(url, options);
+  };
+  return {f, pending, state, requests};
+}
+
+async function findApprovalDeadline(f) {
+  for (let index = 0; index < 12; index++) {
+    const entry = [...f.timers.entries()].find(([, timer]) => timer.delay === 12_000);
+    if (entry) return entry;
+    await flushAsyncWork();
+  }
+  assert.fail("approval poll did not install its bounded deadline");
+}
+
+test("hung approval fetch times out and releases the singleton for retry", async () => {
+  let requestCount = 0;
+  const {f, state, pending, requests} = pendingApprovalPollFixture(() => {
+    requestCount++;
+    return requestCount === 1
+      ? new Promise(() => {})
+      : {status:202, ok:true};
+  });
+  const first = f.sandbox.pollConnection();
+  const [id, timer] = await findApprovalDeadline(f);
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].options.redirect, "error");
+  const signal = requests[0].options.signal;
+  assert.equal(signal.aborted, false);
+  timer.callback();
+  await assert.rejects(first, /Connection approval poll timed out/);
+  assert.equal(signal.aborted, true);
+  assert.equal(f.clearedTimers.has(id), true);
+  assert.equal(state.pendingConnection, pending,
+    "a network deadline must not discard unexpired approval");
+  assert.ok(!JSON.stringify({message:"Connection approval poll timed out. Retry or reconnect."})
+    .includes(pending.poll_secret));
+  await f.sandbox.pollConnection();
+  assert.equal(requestCount, 2,
+    "the failed in-flight poll must release the coalescing latch");
+  assert.equal(state.pendingConnection, pending);
+});
+
+test("approval JSON body hang obeys the same deadline as the fetch", async () => {
+  let parseCount = 0;
+  const {f, state, pending, requests} = pendingApprovalPollFixture(() => ({
+    status:200, ok:true, json:async () => {
+      parseCount++;
+      return new Promise(() => {});
+    }
+  }));
+  const check = f.sandbox.pollConnection();
+  const [id, timer] = await findApprovalDeadline(f);
+  for (let index = 0; index < 8 && !parseCount; index++) await flushAsyncWork();
+  assert.equal(parseCount, 1, "successful headers must not escape the body deadline");
+  timer.callback();
+  await assert.rejects(check, /Connection approval poll timed out/);
+  assert.equal(requests[0].options.signal.aborted, true);
+  assert.equal(f.clearedTimers.has(id), true);
+  assert.equal(state.pendingConnection, pending);
+});
+
+test("pending 202 approval returns without JSON parsing, abort or lost consent", async () => {
+  let parses = 0;
+  const {f, state, pending, requests} = pendingApprovalPollFixture(() => ({
+    status:202, ok:true, json:async () => {parses++; return {}; }
+  }));
+  await f.sandbox.pollConnection();
+  const [id] = await findApprovalDeadline(f);
+  assert.equal(parses, 0);
+  assert.equal(requests[0].options.signal.aborted, false);
+  assert.equal(f.clearedTimers.has(id), true);
+  assert.equal(state.pendingConnection, pending);
+});
+
+test("410 expired approval still clears only the matched pending request", async () => {
+  const {f, state} = pendingApprovalPollFixture(() => ({status:410, ok:false}));
+  await assert.rejects(f.sandbox.pollConnection(), /Connection approval unavailable/);
+  assert.equal(state.pendingConnection, undefined);
 });

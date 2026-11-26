@@ -9,6 +9,11 @@ in-process - no chromiumoxide, no external `obscura serve` CDP process).
 
 ## Quick start
 
+For repeatable provider acceptance, use the
+[provider verification standard](docs/PROVIDER_VERIFICATION_STANDARD.md) and
+[required run inputs](docs/PROVIDER_VERIFICATION_INPUTS.md). They cover Chrome
+capture, Obscura execution, JSON/SSE delivery and recovery for all nine providers.
+
 **Interactive provider login:** the separately supported [Replit-native browser
 runtime](browser-login/README.md) uses sandboxed Playwright Chromium, CDP frames
 and an encrypted vault. The default distroless Docker image does **not** package
@@ -17,9 +22,10 @@ relay remains a separate option. Never expose the native login listener publicly
 
 ```bash
 cp config.example.yaml config.yaml
-# Read docs/PROVIDERS_POLICY.md, then explicitly enable only providers
-# whose terms permit your intended use; all providers start disabled.
-# After enabling at least one provider, configure its session if required.
+# Read docs/PROVIDERS_POLICY.md and enable only providers whose terms
+# permit your intended use. The example enables Manus only; the other
+# eight providers start disabled. Linking a browser session is separate.
+# Existing config.yaml files are never replaced by this copy command.
 cargo run -- --config config.yaml
 ```
 
@@ -64,17 +70,45 @@ passed as an environment value.
 
 ```bash
 bash scripts/docker-run.sh init
-# Edit config.yaml: enable only the providers you are authorized to use.
+# Edit config.yaml: enable only providers you are authorized to use.
+# The example enables Manus, but init never overwrites existing config.yaml.
+# If you already initialized an older copy, set the Manus provider's
+# enabled: true explicitly before restart.
 bash scripts/docker-run.sh build
 bash scripts/docker-run.sh start
 bash scripts/docker-run.sh logs
 ```
 
+To enable Manus in an **already initialized** local `config.yaml` without
+overwriting any other provider, run `bash scripts/docker-run.sh enable-manus`
+and then explicitly `bash scripts/docker-run.sh restart`. The helper only
+accepts a single existing Manus entry in the standard YAML layout; it refuses
+missing/duplicate entries and never logs into Manus or starts the gateway on
+its own. Sign in on the official website and link the browser session through
+the extension separately, after checking your permitted usage.
+
+### Two-provider investigation focus (ChatGPT + Meta AI)
+
+For the owner-requested temporary focus, use the **existing private** `config.yaml`, not `config.example.yaml`. The following commands leave ChatGPT and Meta AI's existing `enabled` values unchanged, disable the other configured providers (including Manus), preserve the encrypted sessions and linked consent, and never restart automatically. Use only when you have reviewed the applicable provider terms and account authorization; this helper **never enables ChatGPT or Meta AI** for you.
+
+```bash
+bash scripts/docker-run.sh focus-chatgpt-metaai-preview
+bash scripts/docker-run.sh focus-chatgpt-metaai
+# Inspect config.yaml: only ChatGPT/Meta AI should be enabled if authorized.
+bash scripts/docker-run.sh restart
+bash scripts/docker-run.sh status
+```
+
+The helper requires exactly one recognized top-level `providers` list containing explicit `enabled: true/false` for every listed provider and both target providers. It rejects unexpected layouts, duplicates and symlinks instead of risking a wrong edit. It saves **only the previous enabled booleans** (not the config file, passwords or cookies) to an owner-private ignored `config.yaml.focus-flags.json`. To restore those flags later, run `bash scripts/docker-run.sh restore-provider-focus`, then explicitly `restart`. Do not remove the private focus snapshot if you want to restore the exact previous enabled settings. Disabling routing does not delete sessions, and linking cookies alone is never proof of authenticated completion.
+
 Load the repository's `extension/` directory from `chrome://extensions`. In its popup,
-enter `http://127.0.0.1:8080`, choose **Connect to gateway**, and approve the local
-confirmation tab once. The gateway remembers the approved extension ID, and the
-extension keeps its connection across restarts. An explicit
-`CHAT_GATEWAY_EXTENSION_ID` can still pin the installation to one ID.
+enter `http://127.0.0.1:8080` and choose **Connect to gateway**. In the
+current local-only Docker mode the extension connects **without a pairing code,
+approval tab, or installation token**. Chrome may request permission to access
+the loopback gateway origin; this browser host permission is not a gateway
+authentication/pairing step. The extension remembers the local connection
+across restarts. An explicit `CHAT_GATEWAY_EXTENSION_ID` can optionally pin
+access to one installed extension ID.
 
 Provider status appears in the extension and refreshes automatically. Choose
 **Connect account** for a provider and grant its required permissions. On the first
@@ -85,14 +119,19 @@ sync automatically. Provider sessions are encrypted in the gateway's vault;
 passwords and MFA values remain on the provider website. A saved session or
 browser cookies are shown separately from a verified login.
 
-A pairing code is not needed for local approval. The legacy
-`bash scripts/docker-run.sh pairing-code` command remains available for compatible
-clients and explicitly configured private remote gateways.
+A pairing code is not needed for a current local-only connection. The legacy
+`bash scripts/docker-run.sh pairing-code` command remains available for older
+compatible clients and explicitly configured private remote gateways, not
+for the current no-pairing local Docker mode. Provider-site sign-in and
+explicit provider cookie permissions still require separate user action.
 
 For example, `bash scripts/docker-run.sh login chatgpt` opens the provider's
 normal sign-in page in the host browser. Supported provider arguments are
 `chatgpt`, `claude`, `gemini`, `grok`, `qwen`, `metaai`, `mistral`,
-and `perplexity`.
+`perplexity`, and `manus`. A Manus browser session still has to be
+linked through the extension; this command only opens the official sign-in
+website. Agent task execution and authenticated chat must be verified before
+considering the provider operational.
 
 The browser extension currently transfers cookies only. Relay localStorage
 import is deliberately disabled until provider-specific storage-key
@@ -202,11 +241,18 @@ database override, the import source is `data/conversations.json`.
 
 ### JSON import and schema migrations
 
-On first startup, the gateway creates the current schema (currently version 8,
+On first startup, the gateway creates the current schema (currently version 10,
 recorded in `PRAGMA user_version`) and imports the legacy JSON snapshot in the
-**same transaction**. Existing supported schema versions 1–7 are upgraded
+**same transaction**. Existing supported schema versions 1–9 are upgraded
 transactionally at startup. A completion
 marker prevents reimport on later starts, including after conversation deletion.
+Version 9 clears legacy provider-thread synchronization markers once because
+older versions did not establish their provenance. Thread URLs, models and
+canonical transcripts are retained; the next send must use Replay rather than
+trusting the old marker. This does not verify remote thread identity.
+Version 10 adds a private durable conversation incarnation and generation
+counter. This storage foundation does not yet wire those identities into
+provider request or mapping publication fencing.
 The import clears legacy synthetic `tab-*` values while preserving real
 provider-thread URLs and message history. The source JSON is never modified,
 renamed, or deleted automatically. Keep it
@@ -289,7 +335,7 @@ for compatibility.
 
 ## Providers
 
-All 8 adapters share one interaction core (`providers/common.rs`):
+All 9 adapters share one interaction core (`providers/common.rs`):
 fallback selector lists for input/send/response/picker, picker-based
 model discovery, evaluate-based typing (focus + `insertText`), and a
 350ms response-poll loop that yields deltas and ends after ~2s without
@@ -308,7 +354,7 @@ cargo run -- --config config.yaml --test-adapter qwen
 
 Open `http://localhost:<port>/login` in a browser to log providers in
 through the gateway itself — the Rust-form successor to Go's dashboard
-login flow. The page lists all 8 providers with session status
+login flow. The page lists all 9 providers with session status
 (`sessions/<provider>.json` present?) and login state, and lets you
 Start / Cancel / Complete a login session per provider.
 
@@ -479,7 +525,21 @@ Inspect the effective policy with `GET /v1/admin/memory-egress-policy`; when API
 
 Use only destinations you have deliberately authorized. An unset or empty variable denies personal long-term memory to every provider. Invalid provider IDs cause requests to fail with a generic policy error; logs do not include memory contents. Current-turn content and the conversation transcript are separate data classes and are not blocked by this personal-memory setting.
 
-The current chat request path does not yet retrieve or inject personal long-term memory. This guard establishes the default-deny boundary for future gateway-injected memory; it does not classify or redact sensitive text that a user explicitly includes in their current prompt or conversation history.
+Personal long-term memory retrieval is wired into the chat request path, but is **disabled by default for each owner**. Both the owner's explicit opt-in and an explicit allowlist entry for the selected provider are required. The gateway retrieves at most 20 eligible, non-expired owner-scoped items when any provider is allowlisted; the final provider prompt receives only policy-authorized items. The current selection reserves an estimated 512-token personal-memory budget within the estimated 8,000-token context budget. Selection uses the same renderer as provider injection, including escaped fields and framing, so the rendered memory suffix stays within the reserved estimate. This is not an exact provider tokenizer limit or a hard provider character limit. A status of `personal_memory_retrieval_wired: true` means the code path exists, not that an owner has opted in or a provider is allowed.
+
+Owner-scoped controls (require the `admin` scope when API-key authentication is configured):
+
+| Method and route | Purpose |
+| --- | --- |
+| `GET /v1/memory/settings` | Read the owner's opt-in setting. |
+| `PUT /v1/memory/settings` | Set `{"enabled": true}` or `{"enabled": false}`. |
+| `GET /v1/memory/items` | List saved items and the opt-in setting. |
+| `PUT /v1/memory/items` | Explicitly save or replace a memory key/value; requires opt-in. Optional provenance must refer to an owned conversation. |
+| `GET /v1/memory/export` | Export the owner's saved memory as JSON. |
+| `DELETE /v1/memory/items/:item_id` | Delete one owned memory item. |
+| `DELETE /v1/memory/items` | Delete all owned memory items with `{"confirm": true}`. |
+
+There is no automatic extraction of personal memory from chat transcripts. Disabling retrieval does not delete saved items; use the deletion controls to remove them. Changes affect subsequent retrieval, not data already sent to a provider, downloaded exports, backups, or necessarily an in-flight request that has already retrieved memory. This policy does not classify or redact sensitive text explicitly included in the current prompt or conversation history.
  
 ## Metrics and request timing
 

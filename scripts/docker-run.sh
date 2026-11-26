@@ -29,6 +29,9 @@ Usage:
   scripts/docker-run.sh logs
   scripts/docker-run.sh pairing-code (legacy paired-mode only)
   scripts/docker-run.sh login <provider>
+  scripts/docker-run.sh enable-manus (edit existing config only; restart separately)
+  scripts/docker-run.sh manus-status (read-only, redacted local enabled flag)
+  scripts/docker-run.sh manus-runtime-status (read-only, loopback gateway state)
 
 Environment:
   PORT                         Published loopback port (default: 8080)
@@ -75,6 +78,20 @@ build_image() {
   if [[ -n "${CHAT_GATEWAY_BUILD_CACHE_TO:-}" ]]; then
     args+=(--cache-to "$CHAT_GATEWAY_BUILD_CACHE_TO")
   fi
+  # A clean source tree alone authorizes commit attribution. Dirty, missing,
+  # or non-Git checkouts use unknown, never the latest remote/main SHA.
+  local source_sha="unknown" working_tree_status="" candidate_sha="" build_timestamp
+  if command -v git >/dev/null 2>&1 && \
+      working_tree_status="$(git -C "$ROOT" status --porcelain --untracked-files=normal 2>/dev/null)" && \
+      [[ -z "$working_tree_status" ]]; then
+    candidate_sha="$(git -C "$ROOT" rev-parse --verify HEAD 2>/dev/null || true)"
+    if [[ "$candidate_sha" =~ ^[a-f0-9]{40}$ ]]; then
+      source_sha="$candidate_sha"
+    fi
+  fi
+  build_timestamp="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  args+=(--build-arg "CHAT_GATEWAY_SOURCE_SHA=$source_sha")
+  args+=(--build-arg "CHAT_GATEWAY_BUILD_TIMESTAMP=$build_timestamp")
   args+=("$ROOT")
   # Preserve build failure status; never fall back to a stale image or builder.
   docker "${args[@]}"
@@ -108,6 +125,122 @@ init_config() {
   cp "$ROOT/config.example.yaml" "$CONFIG"
   chmod 600 "$CONFIG" 2>/dev/null || true
   echo "Created $CONFIG. Enable only providers you are authorized to use."
+}
+
+enable_manus_config() {
+  # Existing owner config takes priority over the shipping example. Change
+  # only the uniquely identified Manus provider when explicitly requested.
+  # Never implicitly create a new provider, overwrite secrets or restart Docker.
+  if [[ ! -f "$CONFIG" || -L "$CONFIG" ]]; then
+    echo "Existing regular config.yaml required; run init or inspect CHAT_GATEWAY_CONFIG." >&2
+    return 1
+  fi
+  local temporary
+  temporary="$(mktemp "${CONFIG}.manus.XXXXXX")"
+  chmod 600 "$temporary"
+  if ! awk '
+    # Edit only the literal top-level providers: list. The same nested
+    # "- name: manus" structure under workflows or tools is not a provider.
+    /^[^[:space:]#]/ {
+      in_providers = $0 ~ /^providers:[[:space:]]*(#.*)?$/
+      if (in_providers) provider_sections++
+      provider = ""
+    }
+    in_providers && /^  - / {
+      # Any new list item ends the previous provider, even if malformed.
+      provider = $2 == "name:" && $3 == "manus" ? "manus" : ""
+      if (provider == "manus") found++
+    }
+    in_providers && provider == "manus" && /^    enabled:[[:space:]]*/ {
+      if ($2 == "false") {
+        sub(/enabled:[[:space:]]*false/, "enabled: true")
+        enabled++
+      } else if ($2 == "true") {
+        enabled++
+      } else {
+        invalid++
+      }
+    }
+    { print }
+    END {
+      # Reject missing/duplicate Manus or enabled fields. A narrower
+      # recognized subset is safer than modifying an unexpected YAML layout.
+      if (provider_sections != 1 || found != 1 || enabled != 1 || invalid != 0) exit 1
+    }
+  ' "$CONFIG" > "$temporary"; then
+    rm -f "$temporary"
+    echo "Refused to edit: expected one top-level providers block with exactly one Manus provider and enabled: true/false in the standard config layout." >&2
+    return 1
+  fi
+  mv "$temporary" "$CONFIG"
+  echo "Manus enabled in $CONFIG (other providers unchanged)."
+  echo "Restart Chat Gateway explicitly to apply. Sign in and link Manus separately; enabling does not prove account login or permission to automate."
+}
+
+manus_config_status() {
+  # Owner-local read-only state; config contains private settings, so neither
+  # the path nor ANY surrounding bytes are printed (even on parse failure).
+  # A saved config flag never proves the website session is authenticated.
+  if [[ ! -f "$CONFIG" || -L "$CONFIG" ]]; then
+    echo "Manus configuration: unavailable" >&2
+    return 1
+  fi
+  local flag
+  if ! flag="$(awk '
+    /^[^[:space:]#]/ {
+      in_providers = $0 ~ /^providers:[[:space:]]*(#.*)?$/
+      if (in_providers) sections++
+      provider = ""
+    }
+    in_providers && /^  - / {
+      provider = $2 == "name:" && $3 == "manus" ? "manus" : ""
+      if (provider == "manus") found++
+    }
+    in_providers && provider == "manus" && /^    enabled:[[:space:]]*/ {
+      if ($2 == "true" || $2 == "false") {
+        flags++
+        value = $2
+      } else {
+        invalid++
+      }
+    }
+    END {
+      if (sections == 1 && found == 1 && flags == 1 && invalid == 0) print value
+      else exit 1
+    }
+  ' "$CONFIG" 2>/dev/null)"; then
+    echo "Manus configuration: unverifiable" >&2
+    return 1
+  fi
+  case "$flag" in
+    true) echo "Manus configuration: enabled (login unverified)" ;;
+    false) echo "Manus configuration: disabled" ;;
+    *) echo "Manus configuration: unverifiable" >&2; return 1 ;;
+  esac
+}
+
+manus_runtime_status() {
+  # Read only the local gateway's existing redacted nine-provider status
+  # contract. Never inspect or transmit cookies, vault keys or full config.
+  if [[ ! "$PORT" =~ ^[0-9]{1,5}$ ]] || (( 10#$PORT < 1 || 10#$PORT > 65535 )); then
+    echo "Manus runtime status: unavailable" >&2
+    return 1
+  fi
+  if ! command -v curl >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1; then
+    echo "Manus runtime status: unavailable" >&2
+    return 1
+  fi
+  # Stream untrusted HTTP bytes directly to the size-bounded parser. Only
+  # its allowlisted lines may enter a shell variable; pipefail prevents a
+  # late curl failure from printing a falsely successful runtime status.
+  local safe_output
+  if ! safe_output="$(curl --noproxy '*' --max-time 8 --connect-timeout 3 --max-filesize 131072 \
+    --fail --silent --request POST "http://127.0.0.1:$PORT/relay/v1/status" 2>/dev/null |
+    python3 -B "$ROOT/scripts/manus_runtime_status.py" 2>/dev/null)"; then
+    echo "Manus runtime status: unavailable" >&2
+    return 1
+  fi
+  printf '%s\n' "$safe_output"
 }
 
 ensure_volumes_and_key() {
@@ -233,6 +366,15 @@ case "${1:-}" in
   init)
     init_config
     ;;
+  enable-manus)
+    enable_manus_config
+    ;;
+  manus-status)
+    manus_config_status
+    ;;
+  manus-runtime-status)
+    manus_runtime_status
+    ;;
   build)
     build_image
     ;;
@@ -253,11 +395,45 @@ case "${1:-}" in
     require_docker
     if container_exists; then
       docker ps --filter "name=^/$CONTAINER$" --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'
-      if curl --fail --silent "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
+      if curl --fail --silent --max-time 5 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
         echo "Health: healthy"
       else
         echo "Health: unhealthy (inspect with '$0 logs')" >&2
         exit 1
+      fi
+      # The running container's immutable image ID is distinct from a mutable
+      # local tag. Never use git HEAD here to claim the installed version.
+      image_id="$(docker inspect --format '{{.Image}}' "$CONTAINER" 2>/dev/null || true)"
+      image_revision="$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$CONTAINER" 2>/dev/null || true)"
+      [[ "$image_id" =~ ^sha256:[a-f0-9]{64}$ ]] || image_id="unknown"
+      [[ "$image_revision" =~ ^[a-f0-9]{40}$ ]] || image_revision="unknown"
+      binary_revision="unknown"
+      if command -v python3 >/dev/null 2>&1; then
+        # Parse only allowlisted build identity from bounded JSON, never echo
+        # arbitrary gateway output, upstream errors, prompts or credentials.
+        binary_revision="$(curl --fail --silent --max-time 5 "http://127.0.0.1:$PORT/health" | python3 -c '
+import json, re, sys
+try:
+    raw = sys.stdin.buffer.read(262145)
+    if len(raw) > 262144:
+        raise ValueError("oversize")
+    doc = json.loads(raw)
+    rev = doc.get("build", {}).get("source_sha", "unknown")
+    print(rev if isinstance(rev, str) and re.fullmatch(r"[a-f0-9]{40}", rev) else "unknown")
+except (ValueError, TypeError, AttributeError, UnicodeDecodeError):
+    print("unknown")
+' 2>/dev/null)" || binary_revision="unknown"
+      fi
+      [[ "$binary_revision" =~ ^[a-f0-9]{40}$ ]] || binary_revision="unknown"
+      echo "Running image ID: $image_id"
+      echo "Image revision: $image_revision"
+      echo "Binary revision: $binary_revision"
+      if [[ "$image_revision" == "unknown" || "$binary_revision" == "unknown" ]]; then
+        echo "Build provenance: unverifiable"
+      elif [[ "$image_revision" == "$binary_revision" ]]; then
+        echo "Build provenance: match"
+      else
+        echo "Build provenance: mismatch"
       fi
     else
       echo "Container $CONTAINER is not created."
@@ -295,7 +471,8 @@ case "${1:-}" in
       metaai) url="https://www.meta.ai/" ;;
       mistral) url="https://chat.mistral.ai/" ;;
       perplexity) url="https://www.perplexity.ai/" ;;
-      *) echo "Usage: $0 login <chatgpt|claude|gemini|grok|qwen|metaai|mistral|perplexity>" >&2; exit 2 ;;
+      manus) url="https://manus.im/app" ;;
+      *) echo "Usage: $0 login <chatgpt|claude|gemini|grok|qwen|metaai|mistral|perplexity|manus>" >&2; exit 2 ;;
     esac
     echo "Sign in in your normal external browser, complete MFA/CAPTCHA there, then use the Chat Gateway Relay extension to link $provider."
     echo "The extension transfers provider cookies to the encrypted Docker vault; passwords are never collected by the gateway."

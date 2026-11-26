@@ -191,7 +191,7 @@ fn json_import_clears_synthetic_tab_ids_but_preserves_real_thread_urls() {
         .unwrap()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 8);
+    assert_eq!(version, 10);
 }
 
 #[test]
@@ -513,7 +513,9 @@ fn schema_v5_migrates_to_v6_with_long_term_memory_disabled_by_default() {
             .lock()
             .unwrap()
             .execute_batch(
-                "ALTER TABLE conversations ADD COLUMN tab_id TEXT;
+                "DROP TRIGGER conversation_identity_on_insert;
+                 DROP TABLE conversation_identities;
+                 ALTER TABLE conversations ADD COLUMN tab_id TEXT;
                  DROP INDEX memory_items_owner_updated_idx;
                  DROP INDEX memory_items_owner_key_idx;
                  DROP TABLE memory_items;
@@ -528,7 +530,7 @@ fn schema_v5_migrates_to_v6_with_long_term_memory_disabled_by_default() {
         .unwrap()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 8);
+    assert_eq!(version, 10);
     assert!(!memory.long_term_memory_enabled("owner-a").unwrap());
     let item_count: i64 = memory
         .lock()
@@ -1241,7 +1243,7 @@ fn schema_v1_database_migrates_provider_thread_map_without_losing_conversations(
         .unwrap()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 8);
+    assert_eq!(version, 10);
     let memory_tables: i64 = memory
         .lock()
         .unwrap()
@@ -1660,7 +1662,7 @@ fn schema_v3_migration_assigns_existing_conversations_to_local_owner() {
         .unwrap()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 8);
+    assert_eq!(version, 10);
     let memory_tables: i64 = memory
         .lock()
         .unwrap()
@@ -1808,7 +1810,7 @@ fn schema_v4_migration_adds_summary_table_without_losing_tenant_data() {
         .unwrap()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 8);
+    assert_eq!(version, 10);
     let memory_tables: i64 = memory
         .lock()
         .unwrap()
@@ -2035,7 +2037,11 @@ fn schema_v6_migration_clears_synthetic_tabs_and_preserves_real_metadata_and_his
         store(&memory, "real-tab-migration", "keep real-tab history");
         let connection = memory.lock().unwrap();
         connection
-            .execute_batch("ALTER TABLE conversations ADD COLUMN tab_id TEXT;")
+            .execute_batch(
+                "DROP TRIGGER conversation_identity_on_insert;
+                 DROP TABLE conversation_identities;
+                 ALTER TABLE conversations ADD COLUMN tab_id TEXT;",
+            )
             .unwrap();
         connection
             .execute(
@@ -2079,7 +2085,7 @@ fn schema_v6_migration_clears_synthetic_tabs_and_preserves_real_metadata_and_his
         .unwrap()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 8);
+    assert_eq!(version, 10);
 }
 
 #[test]
@@ -2280,7 +2286,11 @@ fn version_seven_migration_clears_synthetic_tab_id_and_preserves_history() {
     {
         let connection = rusqlite::Connection::open(fixture.db()).unwrap();
         connection
-            .execute_batch("ALTER TABLE conversations ADD COLUMN tab_id TEXT;")
+            .execute_batch(
+                "DROP TRIGGER conversation_identity_on_insert;
+                 DROP TABLE conversation_identities;
+                 ALTER TABLE conversations ADD COLUMN tab_id TEXT;",
+            )
             .unwrap();
         connection
             .execute(
@@ -2319,7 +2329,7 @@ fn version_seven_migration_clears_synthetic_tab_id_and_preserves_history() {
         .unwrap()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 8);
+    assert_eq!(version, 10);
     let columns: Vec<String> = migrated
         .lock()
         .unwrap()
@@ -2502,6 +2512,183 @@ async fn async_conversation_store_concurrent_turns_are_transactionally_preserved
 }
 
 #[test]
+fn v9_upgrade_allocates_durable_identity_and_recreation_changes_it() {
+    let fixture = Fixture::new();
+    let identity = |memory: &UnifiedMemory| -> (String, i64) {
+        memory
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT incarnation, generation FROM conversation_identities
+                 WHERE conversation_id='identity-test'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap()
+    };
+    {
+        let memory = fixture.open();
+        store(&memory, "identity-test", "same content");
+        memory
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "DROP TRIGGER conversation_identity_on_insert;
+                 DROP TABLE conversation_identities;
+                 PRAGMA user_version=9;",
+            )
+            .unwrap();
+    }
+    let original = {
+        let memory = fixture.open();
+        assert_eq!(
+            memory
+                .conversation("identity-test")
+                .unwrap()
+                .unwrap()
+                .messages,
+            vec![
+                m("user", "same content"),
+                m("assistant", "answer same content")
+            ]
+        );
+        let original = identity(&memory);
+        assert_eq!(original.0.len(), 32);
+        assert_eq!(original.1, 0);
+        original
+    };
+    let first = fixture.open();
+    let second = fixture.open();
+    assert_eq!(identity(&first), original);
+    store(&second, "identity-test", "next content");
+    assert_eq!(identity(&first), (original.0.clone(), 1));
+    assert!(!first
+        .delete_conversation_for_owner("other-owner", "identity-test")
+        .unwrap());
+    assert_eq!(identity(&second), (original.0.clone(), 1));
+    let before_delete = first.conversation("identity-test").unwrap().unwrap();
+    assert!(first
+        .delete_conversation_for_owner("local", "identity-test")
+        .unwrap());
+    let remaining: i64 = second
+        .lock()
+        .unwrap()
+        .query_row("SELECT count(*) FROM conversation_identities", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(remaining, 0);
+    store(&second, "identity-test", "same content");
+    store(&second, "identity-test", "next content");
+    let recreated = identity(&first);
+    assert_ne!(recreated.0, original.0);
+    assert_eq!(recreated.1, 2);
+    assert_eq!(
+        first.conversation("identity-test").unwrap(),
+        Some(before_delete)
+    );
+}
+
+#[test]
+fn missing_or_exhausted_generation_rolls_back_turn() {
+    for missing in [false, true] {
+        let fixture = Fixture::new();
+        let memory = fixture.open();
+        store(&memory, "identity-test", "initial");
+        let before = memory.conversation("identity-test").unwrap();
+        {
+            let connection = memory.lock().unwrap();
+            if missing {
+                connection
+                    .execute("DELETE FROM conversation_identities", [])
+                    .unwrap();
+            } else {
+                connection
+                    .execute(
+                        "UPDATE conversation_identities SET generation=?1",
+                        [i64::MAX],
+                    )
+                    .unwrap();
+            }
+        }
+        let result = memory.store_turn_for_owner_with_tab_id(
+            "local",
+            "identity-test".to_owned(),
+            vec![m("user", "must not commit")],
+            m("assistant", "must not commit"),
+            "chatgpt".to_owned(),
+            None,
+        );
+        assert!(result.is_err());
+        assert_eq!(memory.conversation("identity-test").unwrap(), before);
+        drop(memory);
+        if missing {
+            assert!(open(&fixture.db(), None).is_err());
+        }
+    }
+}
+
+#[test]
+fn v8_upgrade_invalidates_legacy_sync_once_and_preserves_history() {
+    let fixture = Fixture::new();
+    let mut mapping = ProviderThread {
+        conversation_id: "migration-sync".into(),
+        provider: "chatgpt".into(),
+        thread_url: "https://chatgpt.com/c/migration-sync".into(),
+        synced_through_message_id: Some("legacy-unverified".into()),
+        model: Some("chatgpt/test".into()),
+        updated_at: 123,
+    };
+    let history = {
+        let memory = fixture.open();
+        store(&memory, "migration-sync", "preserve history");
+        memory.upsert_provider_thread(&mapping).unwrap();
+        memory
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "DROP TRIGGER conversation_identity_on_insert;
+                 DROP TABLE conversation_identities;
+                 PRAGMA user_version=8;",
+            )
+            .unwrap();
+        memory
+            .conversation("migration-sync")
+            .unwrap()
+            .unwrap()
+            .messages
+    };
+    {
+        let memory = fixture.open();
+        let mut expected = mapping.clone();
+        expected.synced_through_message_id = None;
+        assert_eq!(
+            memory
+                .get_provider_thread("migration-sync", "chatgpt")
+                .unwrap(),
+            Some(expected)
+        );
+        assert_eq!(
+            memory
+                .conversation("migration-sync")
+                .unwrap()
+                .unwrap()
+                .messages,
+            history
+        );
+        mapping.synced_through_message_id = Some("new-gateway-marker".into());
+        memory.upsert_provider_thread(&mapping).unwrap();
+    }
+    let restored = fixture.open();
+    assert_eq!(
+        restored
+            .get_provider_thread("migration-sync", "chatgpt")
+            .unwrap(),
+        Some(mapping)
+    );
+}
+
+#[test]
 fn failed_v8_migration_rolls_back_schema_and_history() {
     let fixture = Fixture::new();
     {
@@ -2512,7 +2699,9 @@ fn failed_v8_migration_rolls_back_schema_and_history() {
         let connection = Connection::open(fixture.db()).unwrap();
         connection
             .execute_batch(
-                "ALTER TABLE conversations ADD COLUMN tab_id TEXT;
+                "DROP TRIGGER conversation_identity_on_insert;
+                 DROP TABLE conversation_identities;
+                 ALTER TABLE conversations ADD COLUMN tab_id TEXT;
                  CREATE INDEX conversations_tab_id_idx ON conversations(tab_id);
                  UPDATE conversations SET tab_id='tab-legacy' WHERE id='rollback-migration';
                  PRAGMA user_version=7;",
@@ -2902,7 +3091,13 @@ async fn async_store_contract_covers_conversation_and_provider_thread_operations
         .await
         .expect("provider thread lookup should use the store contract")
         .expect("provider thread should be present");
-    assert_eq!(restored, thread);
+    assert_eq!(
+        restored,
+        ProviderThread {
+            synced_through_message_id: None,
+            ..thread
+        }
+    );
 
     assert!(store
         .clone()
@@ -3349,15 +3544,9 @@ async fn async_store_keeps_interleaved_conversation_thread_maps_isolated() {
         .expect("conversation B thread should exist");
 
     assert_eq!(thread_a.thread_url, "https://chatgpt.com/c/thread-a");
-    assert_eq!(
-        thread_a.synced_through_message_id.as_deref(),
-        Some("marker-a")
-    );
+    assert!(thread_a.synced_through_message_id.is_none());
     assert_eq!(thread_b.thread_url, "https://chatgpt.com/c/thread-b");
-    assert_eq!(
-        thread_b.synced_through_message_id.as_deref(),
-        Some("marker-b")
-    );
+    assert!(thread_b.synced_through_message_id.is_none());
 
     let (_, _, _, transcript_a) = store
         .clone()

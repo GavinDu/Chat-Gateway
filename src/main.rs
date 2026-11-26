@@ -29,12 +29,14 @@ mod chat_service;
 mod cli;
 mod config;
 mod context;
+mod credential_diagnosis;
 mod diagnostics;
 mod embedded_login;
 mod login;
 mod memory;
 mod memory_api;
 mod memory_egress;
+mod metaai_timing;
 mod metrics;
 mod provider_guard;
 mod provider_state;
@@ -76,8 +78,13 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    let remote_proxy_trust = validate_remote_gateway_config()?;
     let cli = Cli::parse();
+    if let Some(path) = cli.diagnose_credential_evidence.as_deref() {
+        // Offline evidence only: no gateway, browser, vault or network startup.
+        println!("{}", credential_diagnosis::diagnose_file(path)?);
+        return Ok(());
+    }
+    let remote_proxy_trust = validate_remote_gateway_config()?;
     if cli.show_memory_egress_policy {
         let policy = memory_egress::MemoryEgressPolicy::from_env()
             .map_err(|_| anyhow::anyhow!("provider memory egress policy is invalid"))?;
@@ -382,6 +389,11 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/relay/v1/mode", get(relay::relay_mode))
         .route("/relay/v1/status", get(relay::status).post(relay::status))
+        // Explicit authorized extension request only, never polled by status.
+        .route(
+            "/relay/v1/account-verification/:provider",
+            post(relay::verify_first_party_account),
+        )
         .route(
             "/relay/v1/diagnostics",
             get(relay::status).post(relay::status),
@@ -1026,6 +1038,77 @@ async fn reset_provider_for_retry(
     .into_response()
 }
 
+/// Stable request logging policy, independent of request bodies and credentials.
+/// HTTP metrics are recorded for every request regardless of the log level.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HttpRequestLogLevel {
+    Debug,
+    Warn,
+    Info,
+}
+
+fn http_request_log_level(route: &str, status: StatusCode) -> HttpRequestLogLevel {
+    if matches!(route, "/relay/v1/status" | "/relay/v1/diagnostics") && status.is_success() {
+        HttpRequestLogLevel::Debug
+    } else if status.is_client_error() || status.is_server_error() {
+        HttpRequestLogLevel::Warn
+    } else {
+        HttpRequestLogLevel::Info
+    }
+}
+
+#[cfg(test)]
+mod relay_http_log_level_tests {
+    use super::{http_request_log_level, HttpRequestLogLevel};
+    use axum::http::StatusCode;
+
+    #[test]
+    fn successful_relay_status_reads_are_quiet_without_hiding_failures() {
+        for route in ["/relay/v1/status", "/relay/v1/diagnostics"] {
+            assert_eq!(
+                http_request_log_level(route, StatusCode::OK),
+                HttpRequestLogLevel::Debug
+            );
+            assert_eq!(
+                http_request_log_level(route, StatusCode::NO_CONTENT),
+                HttpRequestLogLevel::Debug
+            );
+            assert_eq!(
+                http_request_log_level(route, StatusCode::UNAUTHORIZED),
+                HttpRequestLogLevel::Warn
+            );
+            assert_eq!(
+                http_request_log_level(route, StatusCode::INTERNAL_SERVER_ERROR),
+                HttpRequestLogLevel::Warn
+            );
+            assert_eq!(
+                http_request_log_level(route, StatusCode::TEMPORARY_REDIRECT),
+                HttpRequestLogLevel::Info
+            );
+        }
+    }
+
+    #[test]
+    fn chat_and_mutation_requests_preserve_existing_failure_visibility() {
+        assert_eq!(
+            http_request_log_level("/v1/chat/completions", StatusCode::OK),
+            HttpRequestLogLevel::Info
+        );
+        assert_eq!(
+            http_request_log_level("/relay/v1/session/:provider", StatusCode::OK),
+            HttpRequestLogLevel::Info
+        );
+        assert_eq!(
+            http_request_log_level("/relay/v1/session/:provider", StatusCode::BAD_REQUEST),
+            HttpRequestLogLevel::Warn
+        );
+        assert_eq!(
+            http_request_log_level("/relay/v1/session/:provider", StatusCode::GATEWAY_TIMEOUT),
+            HttpRequestLogLevel::Warn
+        );
+    }
+}
+
 /// Add a gateway-generated request ID to every response, including security
 /// middleware rejections, so callers can correlate failures with server logs
 /// without trusting arbitrary client-supplied IDs.
@@ -1044,37 +1127,33 @@ async fn attach_request_id(mut req: Request<Body>, next: Next) -> Response {
     if let Some(registry) = metrics_registry {
         registry.record_http_request(&route, response.status().as_u16(), duration_ms);
     }
-    // Routine successful relay dashboards are sampled by HTTP metrics, not
-    // emitted every poll. Preserve detailed logs for all failures.
-    if (route == "/relay/v1/status" || route == "/relay/v1/diagnostics")
-        && response.status().is_success()
-    {
-        tracing::debug!(
+    // Keep successful read-only dashboard polls out of INFO while preserving
+    // per-request HTTP metrics and WARN visibility for errors.
+    match http_request_log_level(&route, response.status()) {
+        HttpRequestLogLevel::Debug => tracing::debug!(
             request_id = %request_id,
             method = %method,
             route = %route,
             status = response.status().as_u16(),
             duration_ms,
             "relay status request handled"
-        );
-    } else if response.status().is_server_error() || response.status().is_client_error() {
-        tracing::warn!(
+        ),
+        HttpRequestLogLevel::Warn => tracing::warn!(
             request_id = %request_id,
             method = %method,
             route = %route,
             status = response.status().as_u16(),
             duration_ms,
             "http request failed"
-        );
-    } else {
-        tracing::info!(
+        ),
+        HttpRequestLogLevel::Info => tracing::info!(
             request_id = %request_id,
             method = %method,
             route = %route,
             status = response.status().as_u16(),
             duration_ms,
             "http request handled"
-        );
+        ),
     }
 
     // Axum's DefaultBodyLimit rejection happens before the Bytes handler is
@@ -1478,6 +1557,34 @@ async fn list_conversations(
     }
 }
 
+/// Never render provider-thread failures into logs: browser failures may contain
+/// bearer-bearing page URLs and storage failures may contain private owner paths.
+/// Only a stable source-owned category is retained at this structured boundary.
+fn provider_thread_failure_log_category(_error: &anyhow::Error) -> &'static str {
+    "provider_thread_operation_failed"
+}
+
+#[cfg(test)]
+mod provider_thread_log_redaction_tests {
+    use super::provider_thread_failure_log_category;
+
+    #[test]
+    fn provider_thread_log_category_ignores_wrapped_secret_bearing_errors() {
+        for raw in [
+            "sqlite /Users/owner/private/memory.db SQL=INSERT INTO threads",
+            "https://chatgpt.com/c/secret?token=opaque&cookie=private",
+            "provider session bearer secret in query or error chain",
+        ] {
+            let error = anyhow::anyhow!("{raw}")
+                .context("wrapped private conversation and account details");
+            assert_eq!(
+                provider_thread_failure_log_category(&error),
+                "provider_thread_operation_failed"
+            );
+        }
+    }
+}
+
 async fn get_provider_thread(
     State(state): State<Arc<AppState>>,
     Path((conversation_id, provider)): Path<(String, String)>,
@@ -1513,7 +1620,10 @@ async fn get_provider_thread(
             "no provider thread is stored for this conversation and provider",
         ),
         Err(error) => {
-            tracing::error!(%error, "provider thread lookup failed");
+            tracing::error!(
+                failure_category = provider_thread_failure_log_category(&error),
+                "provider thread lookup failed"
+            );
             api_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "server_error",
@@ -1554,6 +1664,10 @@ async fn upsert_provider_thread(
             "thread_url must be an HTTPS URL on the expected provider domain",
         );
     }
+    // An imported mapping is not proof that the remote thread contains the
+    // canonical transcript. Only gateway-owned completion may set a marker.
+    // In particular, a PUT must never re-arm a marker consumed by a Delta.
+    thread.synced_through_message_id = None;
     thread.updated_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -1567,7 +1681,10 @@ async fn upsert_provider_thread(
     {
         Ok(()) => Json(thread).into_response(),
         Err(error) => {
-            tracing::error!(%error, conversation_id, provider, "provider thread persistence failed");
+            tracing::error!(
+                failure_category = provider_thread_failure_log_category(&error),
+                "provider thread persistence failed"
+            );
             api_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "server_error",
@@ -1588,13 +1705,16 @@ async fn persist_provider_thread(
     conversation_id: &str,
     provider: &str,
     model: &str,
-    synced_marker: String,
+    receipt: memory::CommitReceipt,
 ) {
     let thread_url = match state.pool.current_url(provider).await {
         Ok(url) if is_reopenable_provider_thread_url(provider, &url) => url,
         Ok(_) => return,
         Err(error) => {
-            tracing::debug!(provider, %error, "provider thread URL unavailable after successful send");
+            tracing::debug!(
+                failure_category = provider_thread_failure_log_category(&error),
+                "provider thread URL unavailable after successful send"
+            );
             return;
         }
     };
@@ -1602,53 +1722,49 @@ async fn persist_provider_thread(
         conversation_id: conversation_id.to_owned(),
         provider: provider.to_owned(),
         thread_url,
-        synced_through_message_id: Some(synced_marker),
+        synced_through_message_id: Some(receipt.marker().to_owned()),
         model: Some(model.to_owned()),
         updated_at: chrono::Utc::now().timestamp(),
     };
-    if let Err(error) = state
+    match state
         .memory
         .clone()
-        .upsert_provider_thread_async(owner_key_id.to_owned(), thread)
+        .publish_provider_thread_if_current_async(owner_key_id.to_owned(), thread, receipt)
         .await
     {
-        tracing::warn!(provider, %error, "provider thread mapping could not be persisted");
+        Ok(true) => {}
+        Ok(false) => tracing::debug!("provider thread synchronization claim is no longer current"),
+        Err(error) => tracing::warn!(
+            failure_category = provider_thread_failure_log_category(&error),
+            "provider thread mapping could not be persisted"
+        ),
     }
 }
 
 async fn persist_completed_turn(
     state: &AppState,
-    owner_key_id: &str,
-    conversation_id: &str,
-    user_messages: Vec<ChatMessage>,
-    assistant_content: String,
-    provider: &str,
+    turn: memory::SnapshotTurn,
     model: &str,
 ) -> anyhow::Result<()> {
-    let synced_marker = state
+    let owner_key_id = turn.owner_key_id.clone();
+    let conversation_id = turn.conversation_id.clone();
+    let provider = turn.provider.clone();
+    let receipt = state
         .memory
         .clone()
-        .persist_turn(
-            owner_key_id.to_owned(),
-            conversation_id.to_owned(),
-            user_messages,
-            ChatMessage {
-                role: "assistant".to_owned(),
-                content: assistant_content,
-            },
-            provider.to_owned(),
-            None,
-        )
+        .persist_turn_from_snapshot(turn)
         .await?;
-    persist_provider_thread(
-        state,
-        owner_key_id,
-        conversation_id,
-        provider,
-        model,
-        synced_marker,
-    )
-    .await;
+    if let Some(receipt) = receipt {
+        persist_provider_thread(
+            state,
+            &owner_key_id,
+            &conversation_id,
+            &provider,
+            model,
+            receipt,
+        )
+        .await;
+    }
     Ok(())
 }
 
@@ -1976,14 +2092,14 @@ fn read_conversation_context(
 }
 
 async fn read_conversation_context_with_transcript_for_owner(
-    memory: Arc<dyn memory::ConversationStore>,
+    memory: Arc<UnifiedMemory>,
     owner_key_id: String,
     conversation_id: Option<String>,
     messages: Vec<ChatMessage>,
     token_budget: usize,
-) -> anyhow::Result<(String, Vec<ChatMessage>, bool, Vec<ChatMessage>)> {
+) -> anyhow::Result<memory::ContextSnapshot> {
     memory
-        .build_context_with_transcript(owner_key_id, conversation_id, messages, token_budget)
+        .build_context_snapshot_async(owner_key_id, conversation_id, messages, token_budget)
         .await
 }
 
@@ -1993,15 +2109,19 @@ fn budget_personal_memory_items(
 ) -> (Vec<memory_egress::PersonalMemoryItem>, usize) {
     let mut used = 0usize;
     let mut selected = Vec::new();
+    // Retrieval is capped at 20 items. Re-render the bounded candidate set
+    // so the estimator accounts for the exact envelope and escaped fields.
     for item in items {
-        let content = format!("{}: {}", item.memory_key, item.value);
-        let cost = context::estimate_message_tokens(&content).saturating_add(8);
-        if cost <= token_budget.saturating_sub(used) {
-            used = used.saturating_add(cost);
-            selected.push(memory_egress::PersonalMemoryItem {
-                id: item.id,
-                content,
-            });
+        selected.push(memory_egress::PersonalMemoryItem {
+            id: item.id,
+            content: format!("{}: {}", item.memory_key, item.value),
+        });
+        let rendered = memory_egress::render_personal_memory(&selected);
+        let cost = context::estimate_message_tokens(&rendered);
+        if cost <= token_budget {
+            used = cost;
+        } else {
+            selected.pop();
         }
     }
     (selected, used)
@@ -3358,6 +3478,62 @@ mod long_term_memory_export_tests {
 #[cfg(test)]
 mod personal_memory_budget_tests {
     use super::*;
+
+    fn item(id: &str, value: &str) -> memory::LongTermMemoryItem {
+        memory::LongTermMemoryItem {
+            id: id.into(),
+            memory_key: "key".into(),
+            value: value.into(),
+            source_conversation_id: None,
+            confidence: 1.0,
+            created_at: 1,
+            updated_at: 1,
+            expires_at: None,
+        }
+    }
+
+    #[test]
+    fn personal_memory_budget_matches_rendered_suffix_and_exact_boundaries() {
+        let items = vec![item("id<&\"", "&\"'<>世界"), item("second", "Unicode 🦀")];
+        let (all, cost) = budget_personal_memory_items(items.clone(), usize::MAX);
+        assert_eq!(all.len(), 2);
+        let suffix = memory_egress::render_personal_memory(&all);
+        assert_eq!(cost, context::estimate_message_tokens(&suffix));
+        assert!(suffix.contains("&amp;&quot;&apos;&lt;&gt;世界"));
+        assert!(suffix.contains("id&lt;&amp;&quot;"));
+        let (exact, used) = budget_personal_memory_items(items.clone(), cost);
+        assert_eq!(exact, all);
+        assert_eq!(used, cost);
+        let (smaller, used) = budget_personal_memory_items(items, cost - 1);
+        assert_eq!(smaller.len(), 1);
+        assert_eq!(
+            used,
+            context::estimate_message_tokens(&memory_egress::render_personal_memory(&smaller))
+        );
+        let policy = memory_egress::MemoryEgressPolicy::from_allowlist("chatgpt").unwrap();
+        let original = "latest user request";
+        let mut prompt = original.to_owned();
+        policy
+            .append_personal_memory_to_prompt("chatgpt", &mut prompt, &all)
+            .unwrap();
+        assert_eq!(prompt, format!("{original}{suffix}"));
+        let mut denied = original.to_owned();
+        policy
+            .append_personal_memory_to_prompt("claude", &mut denied, &all)
+            .unwrap();
+        assert_eq!(denied, original);
+    }
+
+    #[test]
+    fn escaping_expansion_and_framing_are_budgeted_before_selection() {
+        let escaped = item("id", &"&\"".repeat(200));
+        let (selected, used) = budget_personal_memory_items(vec![escaped], 512);
+        assert!(selected.is_empty());
+        assert_eq!(used, 0);
+        let (selected, used) = budget_personal_memory_items(vec![item("id", "x")], 1);
+        assert!(selected.is_empty());
+        assert_eq!(used, 0);
+    }
 
     #[test]
     fn personal_memory_selection_never_exceeds_its_reserved_token_budget() {

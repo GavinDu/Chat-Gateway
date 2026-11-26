@@ -25,6 +25,346 @@ function showPendingApproval(pending) {
   messageWithLink("Waiting for local approval.", pendingApprovalUrl(pending), "Open approval page");
 }
 
+// The result is not a gateway snapshot or an Obscura credential proof.
+// Never cache it across a tab change, connection switch, or popup closure.
+let chatgptCheckGeneration = 0;
+const CHATGPT_VERIFIER_REASONS = new Set([
+  "first_party_session_confirmed", "provider_rejected_session",
+  "provider_reports_no_session", "provider_or_network_blocked",
+  "unrecognized_session_response", "incomplete_or_expired_session_evidence",
+  "verification_timeout", "verification_unavailable", "tab_changed",
+  "unsupported_origin"
+]);
+
+function firstPartyChatgptTab(url) {
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === "https:" &&
+      (parsed.hostname === "chatgpt.com" || parsed.hostname === "www.chatgpt.com") &&
+      (parsed.port === "" || parsed.port === "443") &&
+      !parsed.username && !parsed.password;
+  } catch {
+    return false;
+  }
+}
+
+async function verifyChatgptActiveTab() {
+  const attempt = ++chatgptCheckGeneration;
+  // A Chrome tab/script/permission callback may settle after another explicit
+  // verification was started. Only the current attempt can publish a verdict.
+  const report = text => {
+    if (attempt === chatgptCheckGeneration) message(text);
+  };
+  const action = $("verify-chatgpt");
+  const pairedAction = $("verify-chatgpt-gateway");
+  action.disabled = true;
+  pairedAction.disabled = true;
+  report("Checking the active ChatGPT tab without syncing credentials.");
+  try {
+    if (typeof chrome.tabs?.query !== "function" ||
+        typeof chrome.scripting?.executeScript !== "function") {
+      report("Chrome active-tab account verification is unavailable in this extension.");
+      return;
+    }
+    const tabs = await chrome.tabs.query({active:true, currentWindow:true});
+    if (attempt !== chatgptCheckGeneration) return;
+    if (!Array.isArray(tabs) || tabs.length !== 1 ||
+        !Number.isSafeInteger(tabs[0]?.id) || !firstPartyChatgptTab(tabs[0].url)) {
+      report("Open an existing signed-in chatgpt.com tab, then retry verification.");
+      return;
+    }
+    const tabId = tabs[0].id;
+    // A first-party SPA/account route may change *after* the injected probe
+    // resolves but before the popup queries the active tab again. Keep this
+    // potentially private URL in memory only; compare it, never display it.
+    const initialTabUrl = tabs[0].url;
+    // Explicit user gesture + activeTab grants exactly this tab, not arbitrary
+    // browser pages. No credential-bearing body leaves the page function.
+    const runs = await chrome.scripting.executeScript({
+      target: {tabId, allFrames:false},
+      world: "MAIN",
+      func: probeActiveChatgptAccount
+    });
+    if (attempt !== chatgptCheckGeneration) return;
+    const current = await chrome.tabs.query({active:true, currentWindow:true});
+    if (attempt !== chatgptCheckGeneration ||
+        current?.length !== 1 || current[0]?.id !== tabId ||
+        current[0]?.url !== initialTabUrl ||
+        !firstPartyChatgptTab(current[0].url)) {
+      report("Tab changed during verification. Result discarded.");
+      return;
+    }
+    const result = Array.isArray(runs) && runs.length === 1 ? runs[0]?.result : null;
+    const reasons = CHATGPT_VERIFIER_REASONS;
+    if (!result || result.provider !== "chatgpt" ||
+        result.context !== "chrome_active_tab" ||
+        result.exported_snapshot_verified !== false ||
+        !reasons.has(result.reason) ||
+        !["verified","unauthenticated","unknown"].includes(result.authentication) ||
+        typeof result.checked_at !== "string" ||
+        !Number.isFinite(Date.parse(result.checked_at)) ||
+        Math.abs(Date.now() - Date.parse(result.checked_at)) > 30000) {
+      report("Chrome account verification returned unsupported evidence.");
+      return;
+    }
+    if (result.authentication === "verified" &&
+        result.reason === "first_party_session_confirmed") {
+      report("ChatGPT account verified in this Chrome tab. Gateway credential replay remains unverified.");
+    } else if (result.authentication === "unauthenticated" &&
+        ["provider_rejected_session", "provider_reports_no_session"].includes(result.reason)) {
+      report("ChatGPT explicitly reports no active account in this Chrome tab. Saved gateway credentials were not changed.");
+    } else {
+      report("ChatGPT account verification inconclusive. No session was changed or resynced.");
+    }
+  } catch (_) {
+    // Browser permission failures can include internal tab URLs or other data.
+    report("Chrome account verification unavailable. No session was changed.");
+  } finally {
+    if (attempt === chatgptCheckGeneration) {
+      action.disabled = false;
+      pairedAction.disabled = false;
+    }
+  }
+}
+
+const CHATGPT_COMPARISON_KEYS = [
+  "gateway", "token", "connectionMode", "relayConnectionEpoch",
+  "linkedProviders", "providerLinkEpochs", "providerLinkPendingAttempts"
+];
+const ACCOUNT_RECORD_KEYS = new Set([
+  "schema_version", "provider", "context", "authentication", "reason",
+  "checked_at_utc", "attempt_id", "worker_generation",
+  "exported_snapshot_verified", "applied_snapshot_verified"
+]);
+const WARM_ACCOUNT_REASONS = Object.freeze({
+  verified: new Set(["first_party_session_confirmed"]),
+  unauthenticated: new Set(["provider_rejected_session"]),
+  unknown: new Set([
+    "first_party_check_inconclusive", "provider_disabled", "relay_unavailable",
+    "session_mutation_busy", "worker_unavailable", "worker_generation_changed",
+    "first_party_check_timeout"
+  ]),
+  unsupported: new Set(["account_verifier_not_established"])
+});
+const CHATGPT_COMPARISON_DEADLINE_MS = 20_000;
+
+// Whitelist only the fixed account observation fields from our source-owned
+// gateway API. Never render or propagate an untrusted response body or error.
+function safeWarmChatgptAccountRecord(record) {
+  if (!record || typeof record !== "object" || Array.isArray(record) ||
+      Object.keys(record).length !== ACCOUNT_RECORD_KEYS.size ||
+      !Object.keys(record).every(key => ACCOUNT_RECORD_KEYS.has(key)) ||
+      record.schema_version !== 1 || record.provider !== "chatgpt" ||
+      record.context !== "obscura_warm_page" ||
+      record.exported_snapshot_verified !== false ||
+      record.applied_snapshot_verified !== false ||
+      typeof record.authentication !== "string" ||
+      !Object.hasOwn(WARM_ACCOUNT_REASONS, record.authentication) ||
+      !WARM_ACCOUNT_REASONS[record.authentication].has(record.reason) ||
+      (record.worker_generation !== null &&
+        (!Number.isSafeInteger(record.worker_generation) || record.worker_generation < 0)) ||
+      (["verified","unauthenticated"].includes(record.authentication) &&
+        record.worker_generation === null) ||
+      typeof record.attempt_id !== "string" ||
+      !/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(record.attempt_id) ||
+      typeof record.checked_at_utc !== "string" ||
+      !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(record.checked_at_utc)) return null;
+  const checked = Date.parse(record.checked_at_utc);
+  if (!Number.isFinite(checked) ||
+      new Date(checked).toISOString().replace(".000Z","Z") !== record.checked_at_utc ||
+      Math.abs(Date.now() - checked) > 30_000) return null;
+  return record.authentication;
+}
+
+function safeChromeComparisonResult(record) {
+  if (!record || record.provider !== "chatgpt" ||
+      record.context !== "chrome_active_tab" ||
+      record.exported_snapshot_verified !== false ||
+      !["verified","unauthenticated","unknown"].includes(record.authentication) ||
+      !CHATGPT_VERIFIER_REASONS.has(record.reason) ||
+      typeof record.checked_at !== "string" ||
+      !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(record.checked_at) ||
+      !Number.isFinite(Date.parse(record.checked_at)) ||
+      Math.abs(Date.now() - Date.parse(record.checked_at)) > 30_000) return null;
+  if (record.authentication === "verified" &&
+      (record.reason !== "first_party_session_confirmed" ||
+        record.http_status !== 200)) return null;
+  if (record.authentication === "unauthenticated" &&
+      !((record.reason === "provider_rejected_session" && record.http_status === 401) ||
+        (record.reason === "provider_reports_no_session" && record.http_status === 200))) return null;
+  if (record.authentication === "unknown" &&
+      ["first_party_session_confirmed", "provider_rejected_session",
+       "provider_reports_no_session"].includes(record.reason)) return null;
+  return record.authentication;
+}
+
+// Chrome storage and test doubles may return references to nested objects.
+// Capture primitive connection/link-epoch values before the first await so a
+// mutable shared object can never silently update the original comparison.
+function immutableChatgptConnection(state) {
+  return {
+    gateway:state.gateway,token:state.token,
+    connectionMode:state.connectionMode,
+    relayConnectionEpoch:state.relayConnectionEpoch,
+    providerLinkEpochs:{chatgpt:state.providerLinkEpochs?.chatgpt},
+    providerLinkPendingAttempts:{chatgpt:state.providerLinkPendingAttempts?.chatgpt},
+    linkedProviders:Array.isArray(state.linkedProviders)
+      ? [...state.linkedProviders] : []
+  };
+}
+
+function sameLinkedChatgptConnection(before, after) {
+  return before && after && before.gateway === after.gateway &&
+    before.token === after.token &&
+    before.connectionMode === after.connectionMode &&
+    before.relayConnectionEpoch === after.relayConnectionEpoch &&
+    typeof before.providerLinkEpochs?.chatgpt === "string" &&
+    before.providerLinkEpochs.chatgpt.length > 0 &&
+    before.providerLinkEpochs.chatgpt === after.providerLinkEpochs?.chatgpt &&
+    !before.providerLinkPendingAttempts?.chatgpt &&
+    !after.providerLinkPendingAttempts?.chatgpt &&
+    Array.isArray(after.linkedProviders) &&
+    after.linkedProviders.includes("chatgpt");
+}
+
+async function compareChatgptBrowserAndGateway() {
+  const attempt = ++chatgptCheckGeneration;
+  const action = $("verify-chatgpt-gateway");
+  const chromeOnlyAction = $("verify-chatgpt");
+  action.disabled = true;
+  chromeOnlyAction.disabled = true;
+  const report = text => {
+    if (attempt === chatgptCheckGeneration) message(text);
+  };
+  report("Checking Chrome and gateway accounts separately, without syncing sessions.");
+  try {
+    const read = await chrome.storage.local.get(CHATGPT_COMPARISON_KEYS);
+    if (attempt !== chatgptCheckGeneration) return;
+    const before = immutableChatgptConnection(read);
+    if (!hasRelayConnection(before) ||
+        !Array.isArray(before.linkedProviders) ||
+        !before.linkedProviders.includes("chatgpt") ||
+        !sameLinkedChatgptConnection(before, before)) {
+      report("Connect and link ChatGPT to the gateway before a read-only comparison.");
+      return;
+    }
+    if (typeof chrome.tabs?.query !== "function" ||
+        typeof chrome.scripting?.executeScript !== "function") {
+      report("Chrome active-tab account verification is unavailable in this extension.");
+      return;
+    }
+    const tabs = await chrome.tabs.query({active:true,currentWindow:true});
+    if (attempt !== chatgptCheckGeneration) return;
+    if (!Array.isArray(tabs) || tabs.length !== 1 ||
+        !Number.isSafeInteger(tabs[0]?.id) || !firstPartyChatgptTab(tabs[0].url)) {
+      report("Open an existing chatgpt.com tab to compare both account checks.");
+      return;
+    }
+    const initialUrl = tabs[0].url;
+    const tabId = tabs[0].id;
+    const runs = await chrome.scripting.executeScript({
+      target:{tabId,allFrames:false},world:"MAIN",func:probeActiveChatgptAccount
+    });
+    if (attempt !== chatgptCheckGeneration) return;
+    const chromeEvidence =
+      Array.isArray(runs) && runs.length === 1 ? runs[0]?.result : null;
+    const chromeAuth = safeChromeComparisonResult(chromeEvidence);
+    if (!chromeAuth) {
+      report("Chrome account verification returned unsupported evidence. No sessions changed.");
+      return;
+    }
+    const midway = await chrome.tabs.query({active:true,currentWindow:true});
+    const beforeRelay = await chrome.storage.local.get(CHATGPT_COMPARISON_KEYS);
+    if (attempt !== chatgptCheckGeneration) return;
+    if (midway?.length !== 1 || midway[0]?.id !== tabId ||
+        midway[0]?.url !== initialUrl ||
+        !firstPartyChatgptTab(midway[0].url)) {
+      report("Tab changed during verification. Result discarded.");
+      return;
+    }
+    if (!sameLinkedChatgptConnection(before,beforeRelay)) {
+      report("Gateway connection or ChatGPT link changed. Result discarded.");
+      return;
+    }
+    const expectedConnection = {
+      gateway:before.gateway,token:before.token,connectionMode:before.connectionMode,
+      provider:"chatgpt",linkEpoch:before.providerLinkEpochs.chatgpt
+    };
+    const controller = new AbortController();
+    let deadline;
+    let gatewayRecord;
+    try {
+      // Bound both the credential-free POST and JSON body parsing. A stale
+      // response cannot certify a later connected install or tab.
+      const expired = new Promise((_,reject) => {
+        deadline = setTimeout(() => {
+          controller.abort();
+          reject(new Error("read_only_probe_deadline"));
+        },CHATGPT_COMPARISON_DEADLINE_MS);
+      });
+      gatewayRecord = await Promise.race([
+        (async () => {
+          const response = await relayFetch(
+            "/relay/v1/account-verification/chatgpt",
+            {method:"POST",body:"{}",signal:controller.signal},expectedConnection
+          );
+          if (!response.ok) throw new Error("read_only_probe_failed");
+          return response.json();
+        })(),
+        expired
+      ]);
+    } finally {
+      clearTimeout(deadline);
+    }
+    if (attempt !== chatgptCheckGeneration) return;
+    const gatewayAuth = safeWarmChatgptAccountRecord(gatewayRecord);
+    if (!gatewayAuth) {
+      report("Gateway account verification returned unsupported evidence. No sessions changed.");
+      return;
+    }
+    const finalTab = await chrome.tabs.query({active:true,currentWindow:true});
+    const after = await chrome.storage.local.get(CHATGPT_COMPARISON_KEYS);
+    if (attempt !== chatgptCheckGeneration) return;
+    if (finalTab?.length !== 1 || finalTab[0]?.id !== tabId ||
+        finalTab[0]?.url !== initialUrl ||
+        !firstPartyChatgptTab(finalTab[0].url)) {
+      report("Tab changed during verification. Result discarded.");
+      return;
+    }
+    if (!sameLinkedChatgptConnection(before,after)) {
+      report("Gateway connection or ChatGPT link changed. Result discarded.");
+      return;
+    }
+    // Both proofs were checked at different await boundaries. A 20-second
+    // gateway request followed by final tab/storage reads can age the earlier
+    // Chrome check out of the 30-second window, even if its tab is unchanged.
+    // Revalidate both source-owned reports immediately before comparison, and
+    // require their observations to describe one bounded time window.
+    if (safeChromeComparisonResult(chromeEvidence) !== chromeAuth ||
+        safeWarmChatgptAccountRecord(gatewayRecord) !== gatewayAuth ||
+        Math.abs(Date.parse(chromeEvidence.checked_at) -
+          Date.parse(gatewayRecord.checked_at_utc)) > 30_000) {
+      report("Paired account observations expired or differ in time. Retry without syncing.");
+      return;
+    }
+    const label = Object.freeze({
+      verified:"verified",unauthenticated:"not signed in",
+      unknown:"unknown",unsupported:"unsupported"
+    });
+    report("Chrome tab: " + label[chromeAuth] +
+      ". Obscura warm page: " + label[gatewayAuth] +
+      ". Export, encrypted vault and applied-snapshot match NOT verified.");
+  } catch (_) {
+    // Never copy network, browser or source error text to the operator.
+    report("Paired account checks unavailable. No sessions changed or resynced.");
+  } finally {
+    if (attempt === chatgptCheckGeneration) {
+      action.disabled = false;
+      chromeOnlyAction.disabled = false;
+    }
+  }
+}
+
 async function openExtensionTab(url) {
   try {
     if (typeof chrome.tabs?.create === "function") {
@@ -43,43 +383,289 @@ async function openExtensionTab(url) {
   return false;
 }
 
+// Provider action callbacks can receive errors from stale workers, Chrome
+// permission/storage/tab APIs, or the gateway. Only exact source-authored
+// operator guidance may cross the popup display boundary.
+const SAFE_PROVIDER_ACTION_ERRORS = new Set([
+  "Unsupported provider.",
+  "This provider is not yet supported by Chat-Gateway.",
+  "Connect to gateway before linking a provider.",
+  "Provider permissions were not granted.",
+  "Gateway could not save provider consent. Reload the extension.",
+  "Provider cookies disappeared before sync. Sign in to the provider and retry linking.",
+  "Provider session was not uploaded; check the gateway connection and retry.",
+  "Provider session uploaded, but link confirmation changed. Refresh status.",
+  "Provider logout could not complete. Retry before reconnecting.",
+  "Gateway sync was cancelled. Retry when ready.",
+  "Gateway sync timed out. Check the connection and retry.",
+  "Provider permission or consent is missing. Re-link and retry.",
+  "Provider activation timed out. Retry from the extension.",
+  "Gateway connection was rejected. Reconnect and retry.",
+  "Provider sync failed. Check the gateway connection and retry.",
+  "Gateway connection changed before logout. Reconnect and retry.",
+  "Gateway logout was cancelled. Check status and retry.",
+  "Gateway logout timed out. Check status and retry.",
+  "Gateway or provider permission changed. Reconnect and retry.",
+  "Gateway did not finish logout in time. Check status and retry.",
+  "Gateway rejected logout. Reconnect and retry.",
+  "Gateway logout failed. Check the connection and retry."
+]);
+function safeProviderActionError(error, fallback) {
+  const text = typeof error?.message === "string" ? error.message : "";
+  return SAFE_PROVIDER_ACTION_ERRORS.has(text) ? text : fallback;
+}
+
+// Pair/Unpair can await Chrome permissions/storage, gateway HTTP, and old
+// extension workers. Preserve only exact source-authored operator guidance;
+// never render a thrown browser/network exception containing a code or token.
+const SAFE_GATEWAY_ACTION_ERRORS = new Set([
+  "Enter the fresh 8-digit code from your private remote gateway.",
+  "Gateway permission was not granted.",
+  "Local approval worker did not respond.",
+  "An approval is already pending. Finish it in the local approval tab or retry in five minutes.",
+  "Could not request approval. Check the gateway URL and configured extension ID.",
+  "Remote pairing failed. Check the gateway and request a fresh pairing code.",
+  "Invalid connection response.",
+  "Remote Pair worker did not respond.",
+  "Local approval worker did not save the request.",
+  "Local approval reservation unavailable.",
+  "Local approval changed or expired before it was saved.",
+  "Paired connection changed while pairing.",
+  "Local gateway connection changed or was disconnected.",
+  "Local disconnect worker did not respond.",
+  "Paired gateway connection changed; refresh before disconnecting.",
+  "Could not revoke the install token.",
+  "Paired disconnect worker did not respond.",
+  "Paired gateway connection changed before disconnect.",
+  "Local gateway connection changed before disconnect."
+]);
+function safeGatewayActionError(error, fallback) {
+  const text = typeof error?.message === "string" ? error.message : "";
+  return SAFE_GATEWAY_ACTION_ERRORS.has(text) ? text : fallback;
+}
+
 function showGatewayConnection(connected) {
   $("pairing").hidden = connected;
   $("linked").hidden = !connected;
   $("gateway").disabled = connected;
 }
 
+// Only source-authored fixed gateway-status errors may be displayed.
+// A Chrome storage/runtime exception or a fallback fetch rejection can
+// contain URLs, tokens or internal request identifiers, even in local mode.
+const SAFE_STATUS_ERRORS = new Set([
+  "Local relay access rejected. Check the gateway mode and optional extension ID restriction.",
+  "Gateway authorization check could not be applied safely. Refresh status.",
+  "Gateway connection changed during status check. Refresh status.",
+  "Gateway connection expired or was revoked. Choose Connect to gateway to approve it again.",
+  "Gateway is not connected.",
+  "Gateway status check timed out.",
+  "Gateway status request failed.",
+  "Gateway status is unavailable.",
+  "Gateway permission or consent is missing.",
+  "Gateway activation timed out.",
+  "Gateway diagnostics are unavailable."
+]);
+function safeStatusErrorMessage(error) {
+  const text = typeof error?.message === "string" ? error.message : "";
+  return SAFE_STATUS_ERRORS.has(text)
+    ? text
+    : "Gateway status unavailable. Check the connection and retry.";
+}
+
+// A stale worker or malformed gateway status JSON may provide arbitrary issue
+// text. Only the server's source-authored provider codes and the worker's
+// redacted sync failure codes are safe to show on the provider dashboard.
+// UI-only names: never substitute a server-provided label into actions or routing.
+const ACTIVE_PROVIDER_LABELS = Object.freeze({chatgpt: "ChatGPT", metaai: "Meta AI"});
+
+const GATEWAY_PROVIDER_ISSUES = new Set([
+  "provider_disabled", "session_not_linked", "manual_verification_required",
+  "provider_assets_blocked", "provider_document_denied",
+  "needs_login", "provider_degraded", "authentication_unverified"
+]);
+const EXTENSION_SYNC_ISSUES = new Set([
+  "partition_scope_unsupported",
+  "gateway_cancelled", "gateway_timeout", "permission_or_consent",
+  "activation_timeout", "gateway_unauthorized", "relay_unavailable",
+  "gateway_request_failed", "gateway_connection_changed"
+]);
+function safeProviderIssueLabel(value, allowed) {
+  if (value === null || value === undefined || value === "") return null;
+  return typeof value === "string" && allowed.has(value)
+    ? value.replaceAll("_", " ") : "unverified status";
+}
+
+// Relay activation is independent of authenticated account readiness. Only
+// source-owned fixed error codes may become human-readable text. Pending HTTP
+// timeout means the worker might still finish; it is not a failed login.
+const GATEWAY_ACTIVATION_ISSUES = new Set([
+  "wait_expired", "browser_worker_unavailable", "refresh_failed",
+  "provider_assets_blocked", "provider_document_denied",
+  "manual_verification_required", "provider_session_expired",
+  "provider_session_no_applicable_material"
+]);
+function safeActivationIssueDetail(item) {
+  if (item.enabled !== true || item.linked !== true ||
+      (item.activation !== "pending" && item.activation !== "failed")) return null;
+  const label = safeProviderIssueLabel(item.activation_issue, GATEWAY_ACTIVATION_ISSUES);
+  if (label === null) return null;
+  // A terminal issue on a still-pending attempt, or a wait timeout reported
+  // as terminal, is contradictory status evidence. Never infer account state.
+  if ((item.activation === "pending") !== (item.activation_issue === "wait_expired")) {
+    return "Activation detail: unverified status";
+  }
+  return "Activation detail: " + label;
+}
+
+// Worker diagnostics timestamps originate from new Date().toISOString().
+// Date.parse alone also accepts browser-dependent, noncanonical human strings;
+// never echo those raw values (which can be poisoned by a stale worker).
+function safeSyncAttemptTimestamp(value) {
+  if (typeof value !== "string" ||
+      !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value)) return null;
+  const millis = Date.parse(value);
+  if (!Number.isFinite(millis)) return null;
+  return new Date(millis).toISOString() === value ? value : null;
+}
+
+// Last-failure diagnostics are server-generated evidence, not account validity.
+// Reject the *whole* record if any field is missing, stale or untrusted; never
+// interpolate a raw upstream error, URL, token or malformed status into the UI.
+const SAFE_LAST_FAILURE_STAGES = new Set([
+  "candidate_admission", "backend_admission",
+  "first_stream_event", "json_completion"
+]);
+const SAFE_LAST_FAILURE_REASONS = new Set([
+  "invalid_request", "model_not_found", "provider_busy", "session_expired",
+  "challenge", "timeout", "memory", "provider_failure",
+  "asset_blocked", "document_denied", "input_rejected",
+  "backend_unavailable", "candidate_skipped", "unclassified"
+]);
+function safeLastFailedRequest(provider, record) {
+  if (provider !== "chatgpt" && provider !== "metaai") return null;
+  if (!record || typeof record !== "object" || Array.isArray(record)) return null;
+  if (typeof record.request_id !== "string" ||
+      !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(record.request_id) ||
+      !SAFE_LAST_FAILURE_STAGES.has(record.stage) ||
+      !SAFE_LAST_FAILURE_REASONS.has(record.reason) ||
+      !Number.isSafeInteger(record.duration_ms) ||
+      record.duration_ms < 0 || record.duration_ms > 120_000 ||
+      typeof record.observed_at_utc !== "string" ||
+      !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(record.observed_at_utc)) return null;
+  const observed = Date.parse(record.observed_at_utc);
+  if (!Number.isFinite(observed) ||
+      new Date(observed).toISOString().replace(".000Z", "Z") !== record.observed_at_utc ||
+      Date.now() - observed > 300_000 || observed - Date.now() > 60_000) return null;
+  return "Last gateway failure: " + record.stage.replaceAll("_", " ") +
+    " / " + record.reason.replaceAll("_", " ") +
+    " · request " + record.request_id + " · " + record.duration_ms + " ms";
+}
+
+// Meta AI has no reviewed first-party account verifier. Readiness describes
+// the current chat runtime, never an authenticated-account verdict.
+function metaAiChatReady(item) {
+  return item.provider === "metaai" && item.enabled === true && item.linked === true &&
+    item.availability === "ready" && [undefined, "unknown"].includes(item.authentication) &&
+    [undefined, false].includes(item.manual_verification_required) &&
+    [undefined, null].includes(item.activation_issue) &&
+    [undefined, null, "not_attempted", "ready"].includes(item.activation) &&
+    [undefined, null, "authentication_unverified"].includes(item.issue);
+}
+
 async function refreshStatus(force = false) {
+  // Bind any authorization failure to the exact paired installation whose
+  // health was requested, not a newer connection made during the await.
+  const checkedConnection = await chrome.storage.local.get([
+    "gateway", "token", "connectionMode", "relayConnectionEpoch"
+  ]);
   // The service-worker API exposes gateway status together with its own
   // redacted connectivity/sync failures. Fall back to direct status for older
   // worker versions or when the worker is unavailable.
   const diagnostics = await chrome.runtime.sendMessage({type:"relay-diagnostics", force}).catch(() => null);
+  // A modern worker has already checked the gateway, including the failure
+  // case. Falling through to the legacy endpoint here doubles noisy requests
+  // during an outage and obscures the worker's typed local diagnostic.
+  // Keep direct status fallback only for absent/older workers.
+  const diagnosticFailure = diagnostics?.ok === false &&
+    typeof diagnostics.gateway_issue === "string";
   const response = diagnostics?.ok && diagnostics.gateway
     ? {ok:true, status:200, json:async () => diagnostics.gateway}
-    : await relayFetch("/relay/v1/status", {method:"POST",body:"{}"});
+    : diagnosticFailure
+      ? {ok:false, status:diagnostics.gateway_issue === "gateway_unauthorized" ? 401 : 503}
+      : await relayFetch("/relay/v1/status", {method:"POST",body:"{}"}, checkedConnection);
   if (response.status === 401 || response.status === 403) {
-    const state = await chrome.storage.local.get(["gateway", "connectionMode"]);
-    if (state.connectionMode === "local" && isLocalGateway(state.gateway)) {
+    if (checkedConnection.connectionMode === "local" &&
+        isLocalGateway(checkedConnection.gateway)) {
       throw new Error("Local relay access rejected. Check the gateway mode and optional extension ID restriction.");
     }
-    await chrome.storage.local.remove("token");
+    // Gateway status 401 is not permission to remove an arbitrary current
+    // token. Only the worker's single consent writer can revoke the exact
+    // earlier paired identity; stale results fail closed without disconnecting
+    // a newer healthy installation.
+    const revoked = await chrome.runtime.sendMessage({
+      type:"invalidate-paired-relay", connection:checkedConnection
+    }).catch(() => null);
+    if (!revoked?.ok) {
+      throw new Error("Gateway authorization check could not be applied safely. Refresh status.");
+    }
+    if (!revoked.invalidated) {
+      throw new Error("Gateway connection changed during status check. Refresh status.");
+    }
     showGatewayConnection(false);
     throw new Error("Gateway connection expired or was revoked. Choose Connect to gateway to approve it again.");
   }
-  if (!response.ok) throw new Error("Status request failed (" + response.status + ").");
+  if (!response.ok) {
+    if (diagnosticFailure) {
+      // Fixed messages only. Never pass through upstream URLs or raw errors.
+      const reason = {
+        not_connected: "Gateway is not connected.",
+        gateway_timeout: "Gateway status check timed out.",
+        gateway_request_failed: "Gateway status request failed.",
+        relay_unavailable: "Gateway status is unavailable.",
+        permission_or_consent: "Gateway permission or consent is missing.",
+        activation_timeout: "Gateway activation timed out.",
+        diagnostics_unavailable: "Gateway diagnostics are unavailable.",
+      }[diagnostics.gateway_issue] || "Gateway status is unavailable.";
+      throw new Error(reason);
+    }
+    throw new Error("Status request failed (" + response.status + ").");
+  }
   const data = await response.json();
-  const items = await Promise.all(data.providers.map(async item => {
+  if (!data || !Array.isArray(data.providers)) {
+    throw new Error("Gateway status is unavailable.");
+  }
+  // Older or malformed gateway responses must not break every healthy provider,
+  // render unrecognized names, or expose actions for unregistered providers.
+  const candidates = data.providers.filter(item =>
+    item !== null && typeof item === "object" && !Array.isArray(item) &&
+    typeof item.provider === "string" && Object.hasOwn(PROVIDERS, item.provider)
+  );
+  // A duplicate provider may claim contradictory saved-session/auth state.
+  // Quarantine *every* copy rather than choose an arbitrary first/last row
+  // that could expose the wrong Connect/Logout action.
+  const counts = new Map();
+  for (const item of candidates) {
+    counts.set(item.provider, (counts.get(item.provider) || 0) + 1);
+  }
+  const safeRows = candidates.filter(item => counts.get(item.provider) === 1);
+  const items = await Promise.all(safeRows.map(async item => {
     const li = document.createElement("li");
     const heading = document.createElement("strong");
-    heading.textContent = item.provider;
+    heading.textContent = ACTIVE_PROVIDER_LABELS[item.provider] || item.provider;
     li.append(heading);
 
     const status = document.createElement("p");
     status.className = "provider-detail";
-    const enabled = item.enabled === false ? "Disabled in gateway config" : "Enabled in gateway";
-    const linked = item.linked ? "Session saved" : "Not linked";
+    const providerEnabled = item.enabled === true;
+    const hasSavedSession = item.linked === true;
+    const enabled = providerEnabled ? "Enabled in gateway"
+      : item.enabled === false ? "Disabled in gateway config"
+      : "Gateway enablement unverified";
+    const linked = hasSavedSession ? "Session saved" : "Not linked";
     let browser = "Browser permission not granted";
-    const domains = PROVIDERS[item.provider] || [];
+    const domains = typeof item.provider === "string" && Object.hasOwn(PROVIDERS, item.provider)
+      ? PROVIDERS[item.provider] : [];
     const origins = domains.flatMap(domain => ["https://" + domain + "/*", "https://*." + domain + "/*"]);
     // Chrome can revoke a provider's permission or fail a cookie read while
     // another provider is healthy. Keep the dashboard usable and fail closed
@@ -92,18 +678,52 @@ async function refreshStatus(force = false) {
     } catch {
       browser = "Browser cookie check unavailable";
     }
-    const auth = item.authentication === "verified" ? "Login verified"
+    const metaReady = metaAiChatReady(item);
+    const chat = item.provider === "metaai" && providerEnabled && hasSavedSession
+      ? metaReady ? "Chat ready" : item.availability === "degraded" ? "Chat unavailable" : "Chat not checked"
+      : null;
+    const auth = item.enabled === false ? "Account check deferred (provider disabled)"
       : item.authentication === "needs_login" ? "Login needed"
+      : item.provider === "metaai" ? "Account verification unavailable"
+      : item.authentication === "verified" ? "Login verified"
       : "Login unverified";
-    const blocker = item.manual_verification_required ? "Manual provider verification required; open website"
+    // Browser activation is not proof of login. Keep the independent
+    // authenticated-provider observation visible beside this fixed category.
+    const activation = !hasSavedSession ? null
+      : item.activation === "pending" ? "Browser activation pending"
+      : item.activation === "ready" ? "Browser activation completed"
+      : item.activation === "failed" ? "Browser activation failed"
+      : item.activation === "cancelled" ? "Browser activation cancelled"
+      : item.activation === "not_attempted" && !metaReady ? "Browser activation not attempted"
+      : null;
+    const activationDetail = safeActivationIssueDetail(item);
+    // A deliberately disabled provider is policy, not a gateway outage.
+    // Preserve session/consent display, but do not present stale runtime
+    // errors or a manual account action for a provider not being routed.
+    const blocker = item.enabled === false ? null
+      : item.manual_verification_required === true ? "Manual provider verification required; open website"
       : item.availability === "degraded" ? "Gateway check unavailable; retry" : null;
-    const runtimeIssue = item.issue && item.issue !== "authentication_unverified"
-      ? "Gateway issue: " + item.issue.replaceAll("_", " ") : null;
-    const extensionIssue = diagnostics?.extension?.provider_sync?.[item.provider]?.issue;
-    status.textContent = [enabled, linked, browser, auth,
+    const runtimeIssue = item.enabled !== false && item.issue && item.issue !== "authentication_unverified"
+      ? "Gateway issue: " + safeProviderIssueLabel(item.issue, GATEWAY_PROVIDER_ISSUES) : null;
+    const sync = diagnostics?.extension?.provider_sync?.[item.provider];
+    const extensionIssue = safeProviderIssueLabel(sync?.issue, EXTENSION_SYNC_ISSUES);
+    const safeSyncAttempt = safeSyncAttemptTimestamp(sync?.updated_at);
+    const syncAttempt = safeSyncAttempt
+      ? "Last extension sync attempt: " + safeSyncAttempt : null;
+    // An upload/check is not a verified login. The health call may fail
+    // while this extension still remembers an earlier successful import.
+    const staleSync = sync?.stale === true ? "Extension sync status stale (gateway check failed)" : null;
+    const lastFailedRequest = item.enabled === false ? null
+      : safeLastFailedRequest(item.provider, item.last_failed_request);
+    status.textContent = [enabled, linked, browser, ...(chat ? [chat] : []), auth,
+      ...(activation ? [activation] : []),
+      ...(activationDetail ? [activationDetail] : []),
       ...(blocker ? [blocker] : []),
       ...(runtimeIssue ? [runtimeIssue] : []),
-      ...(extensionIssue ? ["Extension sync: " + extensionIssue.replaceAll("_", " ")] : [])
+      ...(extensionIssue ? ["Extension sync: " + extensionIssue] : []),
+      ...(syncAttempt ? [syncAttempt] : []),
+      ...(staleSync ? [staleSync] : []),
+      ...(lastFailedRequest ? [lastFailedRequest] : [])
     ].join(" · ");
     li.append(status);
 
@@ -113,29 +733,32 @@ async function refreshStatus(force = false) {
     const linkButton = document.createElement("button");
     linkButton.type = "button";
     linkButton.className = "provider-action";
-    linkButton.textContent = !item.linked ? "Log in / Connect"
+    linkButton.textContent = !hasSavedSession ? "Log in / Connect"
       : item.authentication === "needs_login" ? "Re-login / Sync" : "Sync session";
-    linkButton.disabled = item.enabled === false;
+    linkButton.disabled = !providerEnabled;
     linkButton.addEventListener("click", () => connectProvider(
       item.provider,
-      !item.linked || item.authentication === "needs_login"
-    ).catch(error => message(error.message)));
+      !hasSavedSession || item.authentication === "needs_login"
+    ).catch(error => message(safeProviderActionError(error,
+      "Provider connection failed. Check browser permissions and gateway status, then retry."))));
     actions.append(linkButton);
 
     const openButton = document.createElement("button");
     openButton.type = "button";
     openButton.className = "secondary provider-action";
     openButton.textContent = "Open website";
-    openButton.addEventListener("click", () => openProviderLogin(item.provider).catch(error => message(error.message)));
+    openButton.addEventListener("click", () => openProviderLogin(item.provider).catch(error => message(safeProviderActionError(error,
+      "Unable to open provider website. Retry from the extension."))));
     actions.append(openButton);
 
-    if (item.linked) {
+    if (hasSavedSession) {
       const logoutButton = document.createElement("button");
       logoutButton.type = "button";
       logoutButton.className = "quiet-danger provider-action";
       logoutButton.textContent = "Log out";
       logoutButton.title = "Remove the gateway session and stop cookie resync. Does not sign out from the official website.";
-      logoutButton.addEventListener("click", () => logoutProvider(item.provider).catch(error => message(error.message)));
+      logoutButton.addEventListener("click", () => logoutProvider(item.provider).catch(error => message(safeProviderActionError(error,
+      "Provider logout unavailable. Check gateway status and retry."))));
       actions.append(logoutButton);
     }
     li.append(actions);
@@ -146,8 +769,10 @@ async function refreshStatus(force = false) {
 }
 
 async function openProviderLogin(provider) {
+  if (typeof provider !== "string" || !Object.hasOwn(PROVIDER_LOGIN_URLS, provider)) {
+    throw new Error("This provider is not yet supported by Chat-Gateway.");
+  }
   const url = PROVIDER_LOGIN_URLS[provider];
-  if (!url) throw new Error("This provider is not yet supported by Chat-Gateway.");
   if (await openExtensionTab(url)) {
     message("Use your existing provider session or sign in on the provider website. Connected accounts sync automatically; credentials and MFA stay there.");
   } else {
@@ -157,6 +782,36 @@ async function openProviderLogin(provider) {
 
 // Detect local-only relay mode before asking for a pairing code. A plain
 // read-only mode probe contains no token and never collects provider cookies.
+// Connection establishment is deliberately outside relayFetch (no install
+// token exists yet), but cannot wait forever for a gateway fetch or JSON body.
+// A popup closing or retrying does not authorize an older Pair response.
+const POPUP_CONNECT_DEADLINE_MS = 12_000;
+async function popupConnectionJson(gateway, path, options) {
+  if (!["/relay/v1/mode", "/relay/v1/pair", "/relay/v1/connect/request"].includes(path)) {
+    throw new Error("Invalid gateway connection route.");
+  }
+  const controller = new AbortController();
+  let deadline;
+  try {
+    return await Promise.race([
+      (async () => {
+        const response = await fetch(gateway + path, {
+          ...options, cache:"no-store", redirect:"error", signal:controller.signal
+        });
+        return {ok:response.ok, status:response.status,
+          data:response.ok ? await response.json() : null};
+      })(),
+      new Promise((_, reject) => {
+        deadline = setTimeout(() => {
+          reject(new Error("Gateway connection request timed out. Retry the connection."));
+          controller.abort();
+        }, POPUP_CONNECT_DEADLINE_MS);
+      })
+    ]);
+  } finally {
+    clearTimeout(deadline);
+  }
+}
 async function connectLocalGateway(gateway, requestPermission = false) {
   if (!isLocalGateway(gateway)) return false;
   const origins = [gateway + "/*"];
@@ -164,10 +819,8 @@ async function connectLocalGateway(gateway, requestPermission = false) {
     ? await chrome.permissions.request({origins})
     : await chrome.permissions.contains({origins});
   if (!allowed) return false;
-  const response = await fetch(gateway + "/relay/v1/mode", {
-    method:"GET", cache:"no-store", redirect:"error"
-  });
-  if (!response.ok || (await response.json()).no_pairing !== true) return false;
+  const mode = await popupConnectionJson(gateway, "/relay/v1/mode", {method:"GET"});
+  if (!mode.ok || mode.data?.no_pairing !== true) return false;
   const previous = await chrome.storage.local.get(["gateway", "token", "connectionMode", "linkedProviders"]);
   // Opening the popup must not invalidate the fingerprint of successfully
   // imported sessions, or the next background repair would restart browsers.
@@ -176,11 +829,14 @@ async function connectLocalGateway(gateway, requestPermission = false) {
     await refreshStatus();
     return true;
   }
-  const linkedProviders = previous.gateway === gateway ? (previous.linkedProviders || []) : [];
-  await chrome.storage.local.set({
-    gateway, connectionMode:"local", linkedProviders, localDisconnected:false
+  // Never mutate shared provider consent from the popup. The service
+  // worker serializes local connection changes with link, rollback and logout.
+  const connected = await chrome.runtime.sendMessage({
+    type:"connect-local-relay",gateway,manual:requestPermission === true
   });
-  await chrome.storage.local.remove(["token", "pendingConnection", "relaySnapshotVersions"]);
+  if (!connected?.ok) {
+    throw new Error(connected?.error || "Local connection worker did not respond.");
+  }
   await chrome.alarms?.clear?.("relay-connection");
   showGatewayConnection(true);
   await refreshStatus(true);
@@ -203,17 +859,20 @@ async function initialize() {
   if (!stored.localDisconnected && isLocalGateway($("gateway").value)) {
     try {
       if (await connectLocalGateway(normalizeGateway($("gateway").value))) return;
-    } catch (error) {
-      message("Local gateway unavailable: " + error.message);
+    } catch (_) {
+      // The mode probe and status fetch can reject with a credential-bearing
+      // URL or browser-internal text. Never reflect that exception to popup.
+      message("Local gateway connection unavailable. Check the gateway and retry.");
     }
   }
   showGatewayConnection(hasRelayConnection(stored));
   if (hasRelayConnection(stored)) {
-    try { await refreshStatus(); } catch (error) { message(error.message); }
+    try { await refreshStatus(); } catch (error) { message(safeStatusErrorMessage(error)); }
   }
 }
 
 $("pair").addEventListener("click", async () => {
+  let pendingApprovalGeneration = null;
   try {
     const gateway = normalizeGateway($("gateway").value);
     if (await connectLocalGateway(gateway, true)) return;
@@ -239,42 +898,84 @@ $("pair").addEventListener("click", async () => {
         }
       }
     }
-    const response = await fetch(gateway + (remote ? "/relay/v1/pair" : "/relay/v1/connect/request"), {
-      method:"POST", headers:{"Content-Type":"application/json"},
-      body:JSON.stringify(remote ? {code} : {}), cache:"no-store", redirect:"error"
-    });
+    // Capture the full pre-network install identity. The worker checks its
+    // persisted generation after the response returns; old Pair callbacks
+    // cannot silently reconnect after explicit Unpair or a newer Pair.
+    const beforePair = remote ? await chrome.storage.local.get(
+      ["gateway", "token", "connectionMode", "relayConnectionEpoch", "localDisconnected"]
+    ) : null;
+    if (!remote) {
+      // Reserve the attempt before the network await. Only the service worker
+      // may save or revoke pending approval; a stale popup never writes it.
+      const reservation = await chrome.runtime.sendMessage({
+        type:"reserve-pending-approval",gateway
+      });
+      if (!reservation?.ok || !/^[a-f0-9]{32}$/.test(reservation.generation || "")) {
+        throw new Error(reservation?.error || "Local approval worker did not respond.");
+      }
+      pendingApprovalGeneration = reservation.generation;
+    }
+    const response = await popupConnectionJson(gateway,
+      remote ? "/relay/v1/pair" : "/relay/v1/connect/request", {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body:JSON.stringify(remote ? {code} : {})
+      });
     if (!response.ok) throw new Error(remote ? "Remote pairing failed. Check the gateway and request a fresh pairing code." : response.status === 409
       ? "An approval is already pending. Finish it in the local approval tab or retry in five minutes."
       : "Could not request approval. Check the gateway URL and configured extension ID.");
-    const data = await response.json();
+    const data = response.data;
     if (remote) {
-      if (!/^[a-f0-9]{64}$/.test(data.token)) throw new Error("Invalid connection response.");
-      await chrome.storage.local.set({gateway,token:data.token,linkedProviders:[]});
-      await chrome.storage.local.remove("pendingConnection");
+      if (!/^[a-f0-9]{64}$/.test(data?.token)) throw new Error("Invalid connection response.");
+      const committed = await chrome.runtime.sendMessage({
+        type:"connect-paired-relay", gateway, token:data.token, expected:beforePair
+      });
+      // A missing/restarted worker must never trigger direct popup writes.
+      if (!committed?.ok) throw new Error(committed?.error || "Remote Pair worker did not respond.");
       await chrome.alarms?.clear?.("relay-connection");
       $("code").value = "";
       await updateConnection();
       return;
     }
-    if (!/^[a-f0-9]{64}$/.test(data.request_id) || !/^[a-f0-9]{64}$/.test(data.poll_secret)) throw new Error("Invalid connection response.");
-    await chrome.storage.local.set({pendingConnection:{gateway, ...data, expires:Date.now()+300000}});
-    // The popup itself polls every five seconds. Alarms are only a background
-    // convenience, not a prerequisite for local approval.
+    if (!/^[a-f0-9]{64}$/.test(data?.request_id) || !/^[a-f0-9]{64}$/.test(data?.poll_secret)) throw new Error("Invalid connection response.");
+    const saved = await chrome.runtime.sendMessage({
+      type:"install-pending-approval", gateway,
+      generation:pendingApprovalGeneration,
+      request_id:data.request_id, poll_secret:data.poll_secret
+    });
+    if (!saved?.ok || saved.pending?.gateway !== gateway ||
+        saved.pending?.request_id !== data.request_id) {
+      throw new Error(saved?.error || "Local approval worker did not save the request.");
+    }
+    pendingApprovalGeneration = null;
+    // The popup itself polls every five seconds. Alarms are a convenience.
+    // Only the worker owns pending-approval storage; no popup fallback write.
     await chrome.alarms?.create?.("relay-connection", {periodInMinutes:1});
-    const pending = {gateway, ...data};
+    const pending = saved.pending;
     if (await openExtensionTab(pendingApprovalUrl(pending))) {
       message("Approve the connection in the local tab, then return here.");
     } else {
       showPendingApproval(pending);
     }
-  } catch (error) { message(error.message); }
+  } catch (error) {
+    if (pendingApprovalGeneration) {
+      // A failed response may release only its own reservation. If another
+      // popup already replaced it, the worker's compare-clear returns false.
+      await chrome.runtime.sendMessage({
+        type:"release-pending-approval",generation:pendingApprovalGeneration
+      }).catch(() => null);
+    }
+    message(safeGatewayActionError(error,
+      "Gateway connection request failed. Check browser permissions and retry."));
+  }
 });
 
 // Linking consents to automatic updates from this provider. The browser only
 // sends cookies for domains the user has explicitly granted permission to.
 async function connectProvider(provider, openLogin = false) {
+  if (typeof provider !== "string" || !Object.hasOwn(PROVIDERS, provider)) {
+    throw new Error("Unsupported provider.");
+  }
   const domains = PROVIDERS[provider];
-  if (!domains) throw new Error("Unsupported provider.");
   // Pairing may be revoked or replaced while Chrome's permission prompt or
   // browser cookie read is pending. Consent must belong to the exact install.
   const connection = await chrome.storage.local.get(["gateway", "token", "connectionMode"]);
@@ -286,18 +987,26 @@ async function connectProvider(provider, openLogin = false) {
     throw new Error("Provider permissions were not granted.");
   }
   const snapshot = await providerCookieSnapshot(provider);
-  const stored = await chrome.storage.local.get(["gateway", "token", "connectionMode", "linkedProviders"]);
-  if (stored.gateway !== connection.gateway || stored.token !== connection.token || stored.connectionMode !== connection.connectionMode) {
-    throw new Error("Gateway connection changed while linking the provider. Reconnect and retry.");
+  // Only the worker mutates shared linked-provider membership and epochs.
+  // Popup direct storage writes can race worker logout or another popup.
+  // The attempt remains private to the popup-worker message channel. It
+  // identifies THIS provisional link; no epoch/token enters diagnostics.
+  const attemptId = randomHex(16);
+  const linked = await chrome.runtime.sendMessage({
+    type:"link-provider",provider,connection,attemptId
+  });
+  if (!linked?.ok) {
+    throw new Error(linked?.error || "Gateway could not save provider consent. Reload the extension.");
   }
-  const prior = stored.linkedProviders || [];
-  await chrome.storage.local.set({linkedProviders:Array.from(new Set([...prior,provider]))});
+  const tentative = linked.tentative === true;
   if (snapshot.cookies.length === 0) {
     await openProviderLogin(provider);
     // openProviderLogin already provides a manual clickable link when a tab
     // cannot open; do not overwrite that link with a second status message.
     return;
   }
+  let sessionUploaded = false;
+  let activationPending = false;
   try {
     // The service worker serializes imports and logout per provider. Never
     // send a manual import in parallel with a logout request.
@@ -309,25 +1018,28 @@ async function connectProvider(provider, openLogin = false) {
     if (result.syncStatus === "no_cookies") {
       throw new Error("Provider cookies disappeared before sync. Sign in to the provider and retry linking.");
     }
-    if (result.syncStatus === "saved_activation_pending") {
-      await refreshStatus();
-      message("Session saved. The provider browser is still unavailable; check gateway diagnostics before retrying.");
-      if (openLogin) await openProviderLogin(provider);
-      return;
-    }
-    if (result.syncStatus && result.syncStatus !== "uploaded") {
+    if (result.syncStatus && result.syncStatus !== "uploaded" &&
+        result.syncStatus !== "saved_activation_pending") {
       throw new Error("Provider session was not uploaded; check the gateway connection and retry.");
     }
-  } catch (error) {
-    // A failed first connection must not opt this provider into background
-    // uploads. Leave prior consent unchanged on an existing connection.
-    const latest = await chrome.storage.local.get(["gateway", "token", "connectionMode", "linkedProviders"]);
-    // A delayed old-install failure must not revoke consent granted by a
-    // newly paired gateway. Roll back only the install that initiated sync.
-    if (latest.gateway === connection.gateway && latest.token === connection.token && latest.connectionMode === connection.connectionMode) {
-      await chrome.storage.local.set({
-        linkedProviders:(latest.linkedProviders || []).filter(value => value !== provider || prior.includes(provider))
+    activationPending = result.syncStatus === "saved_activation_pending";
+    sessionUploaded = true;
+    if (tentative) {
+      const committed = await chrome.runtime.sendMessage({
+        type:"commit-provider-link",provider,connection,attemptId
       });
+      if (!committed?.ok || committed.committed !== true) {
+        throw new Error("Provider session uploaded, but link confirmation changed. Refresh status.");
+      }
+    }
+  } catch (error) {
+    // Roll back only a failed upload owned by THIS attempt. If the upload
+    // succeeded, do not revoke consent because its commit acknowledgement
+    // was delayed or lost. A newer adopted link has a different owner id.
+    if (tentative && !sessionUploaded) {
+      await chrome.runtime.sendMessage({
+        type:"rollback-provider-link",provider,connection,attemptId
+      }).catch(() => null);
     }
     throw error;
   }
@@ -337,13 +1049,17 @@ async function connectProvider(provider, openLogin = false) {
   // An explicit Sync session on an already-linked account remains tab-free.
   if (openLogin) {
     await openProviderLogin(provider);
+  } else if (activationPending) {
+    message("Session saved, but the provider browser could not activate it. Check gateway diagnostics and retry; authentication is not verified.");
   } else {
     message("Saved " + provider + " to the gateway. Verify the login status; saved cookies alone do not confirm authentication.");
   }
 }
 
 async function logoutProvider(provider) {
-  if (!PROVIDERS[provider]) throw new Error("Unsupported provider.");
+  if (typeof provider !== "string" || !Object.hasOwn(PROVIDERS, provider)) {
+    throw new Error("Unsupported provider.");
+  }
   if (!confirm("Log out " + provider + " from Chat Gateway and stop automatic sync? This does not sign you out on the provider website. You can reconnect later.")) return;
   // The service worker queues logout behind in-flight cookie syncs, then
   // revokes the persisted gateway snapshot. No website cookies are deleted.
@@ -353,8 +1069,11 @@ async function logoutProvider(provider) {
   message("Logged out " + provider + " from Chat Gateway. Your website login is unchanged. Choose Log in / Connect to reconnect.");
 }
 
+$("verify-chatgpt").addEventListener("click", verifyChatgptActiveTab);
+$("verify-chatgpt-gateway").addEventListener("click", compareChatgptBrowserAndGateway);
+
 $("refresh").addEventListener("click", async () => {
-  try { await refreshStatus(true); message("Status refreshed."); } catch (error) { message(error.message); }
+  try { await refreshStatus(true); message("Status refreshed."); } catch (error) { message(safeStatusErrorMessage(error)); }
 });
 
 
@@ -362,24 +1081,59 @@ $("unpair").addEventListener("click", async () => {
   try {
     const connection = await chrome.storage.local.get(["gateway", "connectionMode"]);
     if (connection.connectionMode === "local" && isLocalGateway(connection.gateway)) {
-      await chrome.storage.local.remove(["connectionMode", "token", "linkedProviders", "relaySnapshotVersions", "pendingConnection"]);
-      await chrome.storage.local.set({localDisconnected:true});
+      const result = await chrome.runtime.sendMessage({
+        type:"disconnect-local-relay",
+        connection:await chrome.storage.local.get(["gateway","token","connectionMode"])
+      });
+      if (!result?.ok) throw new Error(result?.error || "Local disconnect worker did not respond.");
       await chrome.alarms?.clear?.("relay-connection");
       showGatewayConnection(false);
       message("Local extension disconnected; provider sessions remain in the encrypted gateway vault.");
       return;
     }
-    const response = await relayFetch("/relay/v1/unpair",{method:"POST",body:"{}"});
+    // Capture the exact prior paired identity before awaiting network
+    // revocation. A delayed callback must never clear a re-paired gateway.
+    const state = await chrome.storage.local.get(
+      ["gateway", "token", "connectionMode", "pendingConnection"]);
+    if (state.connectionMode === "local" || !state.gateway?.startsWith("https://") || !state.token) {
+      throw new Error("Paired gateway connection changed; refresh before disconnecting.");
+    }
+    // Bind the network revoke to the same install identity that the worker
+    // will later clear; never revoke a newer token after a popup await.
+    const response = await relayFetch("/relay/v1/unpair",{method:"POST",body:"{}"},state);
     if (!response.ok) throw new Error("Could not revoke the install token.");
-    // A stale approval should not be able to silently reconnect a gateway
-    // after the user explicitly revoked this install.
-    await chrome.storage.local.remove(["token","linkedProviders","pendingConnection","relaySnapshotVersions"]);
+    const pending = state.pendingConnection;
+    const result = await chrome.runtime.sendMessage({
+      type:"disconnect-paired-relay",
+      connection:{
+        gateway:state.gateway, token:state.token, connectionMode:state.connectionMode,
+        pendingRequest:pending && {
+          request_id:pending.request_id, expires:pending.expires
+        }
+      }
+    });
+    // Do not use a popup-side storage cleanup as a fallback: the worker is
+    // the only permitted mutator of shared consent and connection state.
+    if (!result?.ok) throw new Error(result?.error || "Paired disconnect worker did not respond.");
     await chrome.alarms?.clear?.("relay-connection");
     showGatewayConnection(false);
     message("Gateway disconnected. Saved provider sessions remain in the gateway vault. Reconnect to manage them.");
-  } catch (error) { message(error.message); }
+  } catch (error) {
+    message(safeGatewayActionError(error,
+      "Gateway disconnect failed. Check the connection and retry."));
+  }
 });
 
+// Old paired-mode workers used a small, fixed set of source-authored
+// approval errors. Keep that useful operator guidance without reflecting
+// arbitrary strings from a replaced worker or browser/network exception.
+const SAFE_LEGACY_APPROVAL_ERRORS = new Set([
+  "Gateway permission is missing.",
+  "Local approval connection changed. Connect again.",
+  "Connection approval expired. Choose Connect to gateway again.",
+  "Connection approval unavailable. Connect again from the extension.",
+  "Invalid connection token."
+]);
 let checkingConnection;
 async function updateConnection() {
   if (checkingConnection) return checkingConnection;
@@ -400,20 +1154,46 @@ async function checkConnection() {
     showGatewayConnection(Boolean(token));
     if (token) await refreshStatus();
     else if (result?.ok !== true) {
-      // Do not hide a failed exchange behind an endless waiting message.
-      // A stale/missing service worker can also return no acknowledgement.
-      message(result?.error || "The connection worker did not respond. Reload Chat Gateway Browser Relay at chrome://extensions, then reconnect.");
+      // Never display an untrusted worker's raw error string. Older workers
+      // may still echo a network URL, poll secret or request identifier.
+      message(result?.errorCode === "connection_poll_unavailable"
+        ? "Connection approval check unavailable. Retry or reconnect."
+        : SAFE_LEGACY_APPROVAL_ERRORS.has(result?.error)
+          ? result.error
+          : "The connection worker did not respond. Reload Chat Gateway Browser Relay at chrome://extensions, then reconnect.");
       return false;
     } else if (pendingConnection) showPendingApproval(pendingConnection);
     return true;
-  } catch (error) { message(error.message); return false; }
+  } catch (_) {
+    // Storage/runtime exceptions can contain internal connection details.
+    message("Gateway connection check unavailable. Retry or reopen the extension.");
+    return false;
+  }
 }
 initialize().then(updateConnection);
-// Connected gateway dashboards use a bounded ten-second check for revocation without five-second polling.
-// Preserve prompt five-second approval completion only while pairing is pending.
-setInterval(updateConnection, 10_000);
-setInterval(async () => {
-  const {pendingConnection} = await chrome.storage.local.get("pendingConnection");
-  if (pendingConnection) await updateConnection();
-}, 5_000);
+// Only a connected dashboard needs a periodic gateway heartbeat. The popup
+// separately checks local approval every five seconds; combining both timers
+// previously duplicated requests and checked disconnected installations.
+const CONNECTED_STATUS_POLL_MS = 30_000;
+async function pollConnectedStatus() {
+  try {
+    const state = await chrome.storage.local.get([
+      "gateway", "token", "connectionMode", "pendingConnection"
+    ]);
+    if (!state.pendingConnection && hasRelayConnection(state)) await updateConnection();
+  } catch {
+    // Transient Chrome storage failure cannot authorize a gateway request.
+    // Manual Refresh and the next bounded tick remain available.
+  }
+}
+async function pollPendingApproval() {
+  try {
+    const {pendingConnection} = await chrome.storage.local.get("pendingConnection");
+    if (pendingConnection) await updateConnection();
+  } catch {
+    // A failed read cannot start a poll with unknown approval identity.
+  }
+}
+setInterval(pollConnectedStatus, CONNECTED_STATUS_POLL_MS);
+setInterval(pollPendingApproval, 5_000);
 window.addEventListener("focus", updateConnection);

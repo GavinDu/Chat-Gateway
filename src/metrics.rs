@@ -2,12 +2,28 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::sync::{Arc, Mutex};
 
-const BOUNDS: &[u64] = &[5, 10, 25, 50, 100, 250, 500, 1_000, 2_500, 5_000, 10_000];
+const BOUNDS: &[u64] = &[
+    5, 10, 25, 50, 100, 250, 500, 1_000, 2_000, 2_500, 5_000, 10_000, 12_000, 15_000, 17_500,
+    20_000, 25_000, 30_000, 40_000, 45_000, 50_000, 60_000, 90_000, 120_000, 180_000, 300_000,
+];
+
+/// Client-reported diagnostic purpose, never an authorization/routing input.
+/// Unknown or untrusted values collapse into one bounded series.
+pub(crate) fn chat_request_kind(value: Option<&str>) -> &'static str {
+    match value {
+        Some("primary") => "primary",
+        Some("title") => "title",
+        Some("compaction") => "compaction",
+        Some("generate") => "generate",
+        Some("canary") => "canary",
+        _ => "unspecified",
+    }
+}
 
 #[derive(Default)]
 struct Histogram {
     // Counts for the first matching finite bucket plus the +Inf bucket.
-    buckets: [u64; 12],
+    buckets: [u64; BOUNDS.len() + 1],
     count: u64,
     sum: u128,
 }
@@ -24,32 +40,82 @@ impl Histogram {
     }
 
     fn render(&self, out: &mut String, metric: &str, label: &str, key: &str) {
-        let escaped = escape_label(key);
+        self.render_labels(out, metric, &format!("{label}=\"{}\"", escape_label(key)));
+    }
+
+    fn render_labels(&self, out: &mut String, metric: &str, labels: &str) {
         let mut cumulative = 0u64;
         for (index, bound) in BOUNDS.iter().enumerate() {
             cumulative += self.buckets[index];
             let _ = writeln!(
                 out,
-                "{metric}_bucket{{{label}=\"{escaped}\",le=\"{bound}\"}} {cumulative}"
+                "{metric}_bucket{{{labels},le=\"{bound}\"}} {cumulative}"
+            );
+        }
+        cumulative += self.buckets[BOUNDS.len()];
+        let _ = writeln!(out, "{metric}_bucket{{{labels},le=\"+Inf\"}} {cumulative}");
+        let _ = writeln!(out, "{metric}_sum{{{labels}}} {}", self.sum);
+        let _ = writeln!(out, "{metric}_count{{{labels}}} {}", self.count);
+    }
+}
+
+// Microsecond storage preserves sub-millisecond stages; exposition uses seconds.
+#[derive(Default)]
+struct FineHistogram {
+    buckets: [u64; BOUNDS.len() + 1],
+    count: u64,
+    sum_us: u128,
+    max_us: u64,
+}
+impl FineHistogram {
+    fn observe(&mut self, us: u64) {
+        let index = BOUNDS
+            .iter()
+            .position(|bound| us <= bound * 1000)
+            .unwrap_or(BOUNDS.len());
+        self.buckets[index] += 1;
+        self.count += 1;
+        self.sum_us += us as u128;
+        self.max_us = self.max_us.max(us);
+    }
+    fn render(&self, out: &mut String, stage: &str) {
+        let _ = writeln!(
+            out,
+            "gateway_metaai_step_max_seconds{{stage=\"{stage}\"}} {:.6}",
+            self.max_us as f64 / 1_000_000.0
+        );
+        let metric = "gateway_metaai_step_duration_seconds";
+        let mut cumulative = 0;
+        for (index, bound) in BOUNDS.iter().enumerate() {
+            cumulative += self.buckets[index];
+            let _ = writeln!(
+                out,
+                "{metric}_bucket{{stage=\"{stage}\",le=\"{}\"}} {cumulative}",
+                *bound as f64 / 1000.0
             );
         }
         cumulative += self.buckets[BOUNDS.len()];
         let _ = writeln!(
             out,
-            "{metric}_bucket{{{label}=\"{escaped}\",le=\"+Inf\"}} {cumulative}"
+            "{metric}_bucket{{stage=\"{stage}\",le=\"+Inf\"}} {cumulative}"
         );
-        let _ = writeln!(out, "{metric}_sum{{{label}=\"{escaped}\"}} {}", self.sum);
         let _ = writeln!(
             out,
-            "{metric}_count{{{label}=\"{escaped}\"}} {}",
-            self.count
+            "{metric}_sum{{stage=\"{stage}\"}} {:.6}",
+            self.sum_us as f64 / 1_000_000.0
         );
+        let _ = writeln!(out, "{metric}_count{{stage=\"{stage}\"}} {}", self.count);
     }
 }
 
 #[derive(Default)]
 struct MetricData {
+    metaai_steps: BTreeMap<&'static str, FineHistogram>,
     requests: BTreeMap<(String, u16), u64>,
+    chat_kinds: BTreeMap<(&'static str, &'static str), u64>,
+    phase_ms: BTreeMap<(String, &'static str), Histogram>,
+    request_ttft_ms: BTreeMap<(String, &'static str, &'static str), Histogram>,
+    completion_reasons: BTreeMap<(String, &'static str), u64>,
     handler_ms: BTreeMap<String, Histogram>,
     queue_ms: BTreeMap<String, Histogram>,
     page_lock_ms: BTreeMap<String, Histogram>,
@@ -73,6 +139,15 @@ pub struct MetricsRegistry {
 }
 
 impl MetricsRegistry {
+    pub(crate) fn record_metaai_step(&self, step: crate::metaai_timing::Step, elapsed_us: u64) {
+        if let Ok(mut data) = self.data.lock() {
+            data.metaai_steps
+                .entry(step.label())
+                .or_default()
+                .observe(elapsed_us);
+        }
+    }
+
     /// Historical successful completions in this gateway process, independent
     /// of whether a page probe currently sees an input.
     pub fn has_successful_chat(&self, provider: &str) -> bool {
@@ -87,6 +162,65 @@ impl MetricsRegistry {
             .unwrap_or(0)
             > 0
     }
+    pub(crate) fn record_chat_request(&self, kind: Option<&str>, stream: bool) {
+        if let Ok(mut data) = self.data.lock() {
+            *data
+                .chat_kinds
+                .entry((chat_request_kind(kind), if stream { "sse" } else { "json" }))
+                .or_default() += 1;
+        }
+    }
+
+    pub(crate) fn record_request_first_content(
+        &self,
+        provider: &str,
+        kind: &str,
+        stream: bool,
+        elapsed_ms: u64,
+    ) {
+        if let Ok(mut data) = self.data.lock() {
+            data.request_ttft_ms
+                .entry((
+                    provider.to_owned(),
+                    chat_request_kind(Some(kind)),
+                    if stream { "sse" } else { "json" },
+                ))
+                .or_default()
+                .observe(elapsed_ms);
+        }
+    }
+
+    pub(crate) fn record_chat_phase(&self, provider: &str, phase: &'static str, elapsed_ms: u64) {
+        if !matches!(
+            phase,
+            "pacing" | "slot" | "provider_context" | "backend_admission" | "persistence"
+        ) {
+            return;
+        }
+        if let Ok(mut data) = self.data.lock() {
+            data.phase_ms
+                .entry((provider.to_owned(), phase))
+                .or_default()
+                .observe(elapsed_ms);
+        }
+    }
+
+    pub(crate) fn record_completion_reason(&self, provider: &str, explicit: bool) {
+        if let Ok(mut data) = self.data.lock() {
+            *data
+                .completion_reasons
+                .entry((
+                    provider.to_owned(),
+                    if explicit {
+                        "explicit_signal"
+                    } else {
+                        "idle_grace"
+                    },
+                ))
+                .or_default() += 1;
+        }
+    }
+
     pub fn record_http_request(&self, route: &str, status: u16, duration_ms: u64) {
         if let Ok(mut data) = self.data.lock() {
             *data.requests.entry((route.to_owned(), status)).or_default() += 1;
@@ -153,7 +287,7 @@ impl MetricsRegistry {
     /// Track only known timeout phases for registered provider attempts.
     /// No prompts, URLs, thread IDs or session data enter these labels.
     pub fn record_provider_timeout(&self, provider: &str, phase: &str) {
-        if !matches!(phase, "submission" | "generation") {
+        if !matches!(phase, "submission" | "first_content" | "generation") {
             return;
         }
         if let Ok(mut data) = self.data.lock() {
@@ -262,6 +396,11 @@ impl MetricsRegistry {
             return String::new();
         };
         let mut out = String::new();
+        let _ = writeln!(out, "# TYPE gateway_metaai_step_max_seconds gauge\n# TYPE gateway_metaai_step_duration_seconds histogram");
+        for (stage, histogram) in &data.metaai_steps {
+            histogram.render(&mut out, stage);
+        }
+
         let _ = writeln!(out, "# TYPE gateway_http_requests_total counter");
         for ((route, status), count) in &data.requests {
             let _ = writeln!(
@@ -291,6 +430,17 @@ impl MetricsRegistry {
                 histogram.render(&mut out, metric, label, key);
             }
         }
+        let _ = writeln!(out, "# TYPE gateway_request_ttft_ms histogram");
+        for ((provider, kind, transport), histogram) in &data.request_ttft_ms {
+            histogram.render_labels(
+                &mut out,
+                "gateway_request_ttft_ms",
+                &format!(
+                    "provider=\"{}\",kind=\"{kind}\",transport=\"{transport}\"",
+                    escape_label(provider)
+                ),
+            );
+        }
         let _ = writeln!(
             out,
             "# TYPE gateway_relay_session_import_phase_ms histogram"
@@ -301,6 +451,29 @@ impl MetricsRegistry {
                 "gateway_relay_session_import_phase_ms",
                 "phase",
                 phase,
+            );
+        }
+        let _ = writeln!(out, "# TYPE gateway_chat_phase_duration_ms histogram");
+        for ((provider, phase), histogram) in &data.phase_ms {
+            histogram.render_labels(
+                &mut out,
+                "gateway_chat_phase_duration_ms",
+                &format!("provider=\"{}\",phase=\"{phase}\"", escape_label(provider)),
+            );
+        }
+        let _ = writeln!(out, "# TYPE gateway_chat_input_requests_total counter");
+        for ((kind, transport), count) in &data.chat_kinds {
+            let _ = writeln!(out, "gateway_chat_input_requests_total{{kind=\"{kind}\",transport=\"{transport}\"}} {count}");
+        }
+        let _ = writeln!(
+            out,
+            "# TYPE gateway_provider_completion_decisions_total counter"
+        );
+        for ((provider, reason), count) in &data.completion_reasons {
+            let _ = writeln!(
+                out,
+                "gateway_provider_completion_decisions_total{{provider=\"{}\",reason=\"{reason}\"}} {count}",
+                escape_label(provider)
             );
         }
         let _ = writeln!(out, "# TYPE gateway_poll_tick_ms histogram");
@@ -360,6 +533,55 @@ mod tests {
     use super::{escape_label, normalize_route, Histogram, MetricsRegistry};
 
     #[test]
+    fn latency_buckets_resolve_metaai_long_tail_and_keep_inf_cumulative() {
+        let mut histogram = Histogram::default();
+        for value in [15_800, 43_100, 52_200, 350_000] {
+            histogram.observe(value);
+        }
+        let mut text = String::new();
+        histogram.render(&mut text, "latency_ms", "provider", "metaai");
+        for (bound, count) in [
+            ("20000", 1),
+            ("45000", 2),
+            ("60000", 3),
+            ("300000", 3),
+            ("+Inf", 4),
+        ] {
+            assert!(text.contains(&format!(
+                "latency_ms_bucket{{provider=\"metaai\",le=\"{bound}\"}} {count}"
+            )));
+        }
+        assert!(text.contains("latency_ms_count{provider=\"metaai\"} 4"));
+        assert!(text.contains("latency_ms_sum{provider=\"metaai\"} 461100"));
+    }
+
+    #[test]
+    fn chat_telemetry_has_bounded_purposes_phases_and_completion_reasons() {
+        let registry = MetricsRegistry::default();
+        registry.record_chat_request(Some("title"), true);
+        registry.record_chat_request(Some("secret-user-id"), false);
+        registry.record_chat_phase("metaai", "pacing", 5000);
+        registry.record_chat_phase("metaai", "secret-session-id", 123);
+        registry.record_request_first_content("metaai", "primary", true, 32000);
+        registry.record_completion_reason("metaai", false);
+        let text = registry.render_with_provider_states(&[]);
+        assert!(
+            text.contains("gateway_chat_input_requests_total{kind=\"title\",transport=\"sse\"} 1")
+        );
+        assert!(text.contains(
+            "gateway_chat_input_requests_total{kind=\"unspecified\",transport=\"json\"} 1"
+        ));
+        assert!(text.contains(
+            "gateway_chat_phase_duration_ms_sum{provider=\"metaai\",phase=\"pacing\"} 5000"
+        ));
+        assert!(text.contains("gateway_request_ttft_ms_sum{provider=\"metaai\",kind=\"primary\",transport=\"sse\"} 32000"));
+        assert!(text.contains(
+            "gateway_provider_completion_decisions_total{provider=\"metaai\",reason=\"idle_grace\"} 1"
+        ));
+        assert!(!text.contains("secret-"));
+    }
+
+    #[test]
     fn browser_worker_restart_metric_counts_successful_restarts() {
         let registry = MetricsRegistry::default();
         registry.record_browser_worker_restart();
@@ -414,18 +636,20 @@ mod tests {
     }
 
     #[test]
-    fn provider_timeout_metrics_distinguish_submission_and_generation_only() {
+    fn provider_timeout_metrics_distinguish_submission_first_content_and_generation() {
         let registry = MetricsRegistry::default();
-        registry.record_provider_timeout("chatgpt", "submission");
-        registry.record_provider_timeout("chatgpt", "generation");
-        registry.record_provider_timeout("chatgpt", "session-identifier");
+        registry.record_provider_timeout("qwen", "submission");
+        registry.record_provider_timeout("qwen", "first_content");
+        registry.record_provider_timeout("qwen", "generation");
+        registry.record_provider_timeout("qwen", "session-identifier");
         let metrics = registry.render_with_provider_states(&[]);
+        assert!(metrics
+            .contains("gateway_provider_timeout_total{provider=\"qwen\",phase=\"submission\"} 1"));
         assert!(metrics.contains(
-            "gateway_provider_timeout_total{provider=\"chatgpt\",phase=\"submission\"} 1"
+            "gateway_provider_timeout_total{provider=\"qwen\",phase=\"first_content\"} 1"
         ));
-        assert!(metrics.contains(
-            "gateway_provider_timeout_total{provider=\"chatgpt\",phase=\"generation\"} 1"
-        ));
+        assert!(metrics
+            .contains("gateway_provider_timeout_total{provider=\"qwen\",phase=\"generation\"} 1"));
         assert!(!metrics.contains("session-identifier"));
     }
 
@@ -444,6 +668,8 @@ mod tests {
         let actual =
             registry.render_with_provider_states(&[("chatgpt".to_owned(), "ready".to_owned())]);
         let expected = concat!(
+            "# TYPE gateway_metaai_step_max_seconds gauge\n",
+            "# TYPE gateway_metaai_step_duration_seconds histogram\n",
             "# TYPE gateway_http_requests_total counter\n",
             "# TYPE gateway_http_handler_duration_ms histogram\n",
             "# TYPE gateway_provider_queue_duration_ms histogram\n",
@@ -453,7 +679,11 @@ mod tests {
             "# TYPE gateway_provider_tail_ms histogram\n",
             "# TYPE gateway_chat_total_duration_ms histogram\n",
             "# TYPE gateway_overhead_ms histogram\n",
+            "# TYPE gateway_request_ttft_ms histogram\n",
             "# TYPE gateway_relay_session_import_phase_ms histogram\n",
+            "# TYPE gateway_chat_phase_duration_ms histogram\n",
+            "# TYPE gateway_chat_input_requests_total counter\n",
+            "# TYPE gateway_provider_completion_decisions_total counter\n",
             "# TYPE gateway_poll_tick_ms histogram\n",
             "# TYPE gateway_poll_evaluations_total counter\n",
             "# TYPE gateway_provider_requests_total counter\n",
@@ -554,5 +784,24 @@ mod verified_chat_tests {
         metrics.record_provider_timings("grok", "success", 0, Some(1), 10, 10);
         assert!(metrics.has_successful_chat("grok"));
         assert!(!metrics.has_successful_chat("mistral"));
+    }
+}
+
+#[cfg(test)]
+mod fine_histogram_tests {
+    use super::*;
+    #[test]
+    fn preserves_microseconds_and_seconds_bucket_boundaries() {
+        let mut histogram = FineHistogram::default();
+        for value in [123, 5000, 5001, 1_200_000, 301_000_000] {
+            histogram.observe(value);
+        }
+        let mut text = String::new();
+        histogram.render(&mut text, "baseline_probe");
+        assert!(text.contains("le=\"0.005\"} 2"));
+        assert!(text.contains("le=\"0.01\"} 3"));
+        assert!(text.contains("le=\"+Inf\"} 5"));
+        assert!(text.contains("_sum{stage=\"baseline_probe\"} 302.210124"));
+        assert!(text.contains("_count{stage=\"baseline_probe\"} 5"));
     }
 }

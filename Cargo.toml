@@ -31,6 +31,7 @@ zeroize = "1.9"
 ring = "0.17"
 serde_yaml = "0.9"
 rusqlite = { version = "0.41", features = ["bundled"] }
+libc = "0.2"
 dashmap = "6.0"
 anyhow = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
@@ -44,9 +45,10 @@ tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 regex = "1"
 uuid = { version = "1", features = ["v4"] }
 clap = { version = "4", features = ["derive"] }
-obscura-core = { version = "0.1.0", git = "https://github.com/h4ckf0r0day/obscura", rev = "09790944a405ba81a7df27bc2577c6b0db283900", package = "obscura", features = ["render", "stealth"] }
+obscura-core = { version = "0.1.0", git = "https://github.com/h4ckf0r0day/obscura", rev = "0e2ee76383b95a14e51203799c4abc6790d6c7df", package = "obscura", features = ["render", "stealth"] }
 
 [dev-dependencies]
+obscura-browser = { git = "https://github.com/h4ckf0r0day/obscura", rev = "0e2ee76383b95a14e51203799c4abc6790d6c7df", features = ["render", "stealth"] }
 tower = { version = "0.5", features = ["util"] }
 
 [features]
@@ -68,3 +70,6 @@ wreq-util = { path = "vendor/wreq-util" }
 name = "memory_sqlite"
 path = "benches/memory_sqlite.rs"
 harness = false
+
+[patch."https://github.com/h4ckf0r0day/obscura"]
+obscura-net = { path = "vendor/obscura-native/obscura-net" }

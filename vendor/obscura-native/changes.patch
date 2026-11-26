@@ -1,0 +1,76 @@
+--- a/obscura-net/Cargo.toml
++++ b/obscura-net/Cargo.toml
+@@ -1,23 +1,24 @@
+ [package]
++publish = false
+ name = "obscura-net"
+-version.workspace = true
+-edition.workspace = true
+-license.workspace = true
+-repository.workspace = true
++version = "0.1.0"
++edition = "2021"
++license = "Apache-2.0"
++repository = "https://github.com/h4ckf0r0day/obscura"
+ 
+ [features]
+ default = []
+ stealth = ["wreq", "wreq-util", "futures-util"]
+ 
+ [dependencies]
+-obscura-ssrf = { workspace = true }
+-reqwest = { workspace = true }
+-tokio = { workspace = true }
+-url = { workspace = true }
+-serde = { workspace = true }
+-serde_json = { workspace = true }
+-tracing = { workspace = true }
+-thiserror = { workspace = true }
++obscura-ssrf = { git = "https://github.com/h4ckf0r0day/obscura", rev = "0e2ee76383b95a14e51203799c4abc6790d6c7df", version = "0.1.0" }
++reqwest = { version = "0.12", features = ["gzip", "brotli", "deflate", "rustls-tls", "socks"], default-features = false }
++tokio = { version = "1", features = ["full"] }
++url = { version = "2" }
++serde = { version = "1", features = ["derive"] }
++serde_json = { version = "1" }
++tracing = { version = "0.1" }
++thiserror = { version = "2" }
+ async-trait = "0.1"
+ encoding_rs = "0.8"
+ tempfile = "3"
+--- a/obscura-net/src/cookies.rs
++++ b/obscura-net/src/cookies.rs
+@@ -269,7 +269,13 @@
+                 result.push(CookieInfo {
+                     name: entry.name.clone(),
+                     value: entry.value.clone(),
+-                    domain: entry.domain.clone(),
++                    // Preserve the authoritative jar scope across export and
++                    // replay; host-only cookies must never be widened.
++                    domain: if entry.host_only {
++                        entry.domain.clone()
++                    } else {
++                        format!(".{}", entry.domain)
++                    },
+                     path: entry.path.clone(),
+                     secure: entry.secure,
+                     http_only: entry.http_only,
+@@ -1318,7 +1324,7 @@
+     }
+ 
+     #[test]
+-    fn test_cdp_stored_domain_field_carries_no_dot() {
++    fn test_cdp_internal_domain_is_canonical_and_export_preserves_scope() {
+         // The dotted spelling comes LAST. That is why an implementation which only
+         // canonicalizes the map key and leaves `entry.domain` raw also fails here.
+         let jar = CookieJar::new();
+@@ -1327,7 +1333,9 @@
+ 
+         let all = marker(&jar);
+         assert_eq!(all.len(), 1, "both spellings collapse, got: {all:?}");
+-        assert_eq!(all[0].domain, "example.com", "entry.domain is canonical, got: {:?}", all[0].domain);
++        assert!(jar.read_jar().get("example.com").unwrap().values()
++            .all(|entry| entry.domain == "example.com"), "internal entry.domain must remain canonical");
++        assert_eq!(all[0].domain, ".example.com", "export must retain Domain scope");
+         assert_eq!(all[0].value, "two", "newer value must win");
+     }
+ 

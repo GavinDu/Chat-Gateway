@@ -1,5 +1,7 @@
 # ChatGPT composer investigation — 2026-11-13
 
+> Historical investigation from PR #944 at `66398a9`. Observations and old release gates below describe that exact candidate, not current main. Subsequent main-merged ports include #983 (session readiness), #1048 (bounded restore), #1066 (stream shim), #1307 (composer DOM), #1308 (WebSocket transport) and #1319 (prompt framing). Current main also has stronger activation-pending consent handling. Do not replace current runtime code with the historical versions. Residual diagnostics and acknowledgement behavior remain tracked in #955; live acceptance is separate in #1294/#604.
+
 ## Reproduced deployment
 
 Base commit: `042ea5d205a3b1761ceb52e1b5193d1e824821a0`.

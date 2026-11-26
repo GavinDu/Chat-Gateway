@@ -1,0 +1,13 @@
+{
+  "obscura-net/Cargo.toml": "03fed5637f389c8a87af4317189567c2da0599cb871c57f9ef74c7608d597ae6",
+  "obscura-net/src/blocklist.rs": "699e7a5fef49ff94d6e350814801dc2a708219caa325d362fa4b1cb40abce277",
+  "obscura-net/src/client.rs": "e0d428484dbe7a5983f5539fc55d969bad70af93c7cfa50b503bc31bcacb1fb8",
+  "obscura-net/src/cookies.rs": "3034a9b93276a8969523d6d52470d3ede3038a027f7a207617bf46f89675a517",
+  "obscura-net/src/encoding.rs": "8087404f68665bc79fb3cfabf08ead848f1afbfd40660b7fbc312f858be143af",
+  "obscura-net/src/interceptor.rs": "85afb86f48b7749aaf8a9a821089ae4b77eaa8b9fda2212873fa2b9b83b770bf",
+  "obscura-net/src/lib.rs": "a6a380e7ef5bb39fa8ed837388b31e6126675c798e2675da5e82603a33d5f51c",
+  "obscura-net/src/operator_hint.rs": "da8e107ad6e29430d288c6b91a4a91fd8188d808cdd64d1550d0487491b810e3",
+  "obscura-net/src/pgl_domains.txt": "04a12c559c538d2da4f89312a1c5804f40b2e682ffd66748751c79fba3846037",
+  "obscura-net/src/robots.rs": "62d9f1be83d3c41b4d14ebcfce38a4ea444f4d9fb4485c12048d84b08d3b756d",
+  "obscura-net/src/wreq_client.rs": "316b163d3e4754c41f952b215f9ca7a483db632c8b77122387de85fa1f5daa36"
+}

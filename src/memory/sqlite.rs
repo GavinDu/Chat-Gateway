@@ -3,7 +3,7 @@ use anyhow::{bail, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use std::{collections::HashMap, fs, path::Path, time::Duration};
 
-const VERSION: i64 = 8;
+const VERSION: i64 = 10;
 const APPLICATION_ID: i64 = 0x4347574d; // CGWM
 const PROVIDER_THREADS_SCHEMA: &str = "
     CREATE TABLE provider_threads (
@@ -46,6 +46,20 @@ const MEMORY_SCHEMA: &str = "
     );
     CREATE INDEX memory_items_owner_updated_idx ON memory_items(owner_key_id, updated_at DESC);
     CREATE INDEX memory_items_owner_key_idx ON memory_items(owner_key_id, memory_key);
+";
+// Private durable identity, never serialized as part of a conversation.
+const IDENTITY_SCHEMA: &str = "
+    CREATE TABLE conversation_identities (
+        conversation_id TEXT PRIMARY KEY NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+        incarnation TEXT NOT NULL UNIQUE DEFAULT (lower(hex(randomblob(16))))
+            CHECK(length(incarnation) = 32 AND incarnation NOT GLOB '*[^0-9a-f]*'),
+        generation INTEGER NOT NULL DEFAULT 0
+            CHECK(typeof(generation) = 'integer' AND generation >= 0)
+    );
+    CREATE TRIGGER conversation_identity_on_insert AFTER INSERT ON conversations
+    BEGIN
+        INSERT INTO conversation_identities(conversation_id) VALUES(NEW.id);
+    END;
 ";
 const SCHEMA: &str = "
     CREATE TABLE conversations (
@@ -172,7 +186,7 @@ fn initialize(connection: &mut Connection, legacy: Option<&Path>) -> Result<()> 
     }
     let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let version: i64 = tx.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    let needs_synthetic_tab_cleanup = version > 0 && version < VERSION;
+    let needs_synthetic_tab_cleanup = (1..=7).contains(&version);
     let app: i64 = tx.query_row("PRAGMA application_id", [], |row| row.get(0))?;
     if version == 0 {
         let tables: i64 = tx.query_row(
@@ -184,6 +198,7 @@ fn initialize(connection: &mut Connection, legacy: Option<&Path>) -> Result<()> 
             bail!("unversioned/nonempty SQLite database; refusing to overwrite");
         }
         tx.execute_batch(SCHEMA)?;
+        tx.execute_batch(IDENTITY_SCHEMA)?;
         tx.pragma_update(None, "application_id", APPLICATION_ID)?;
         tx.pragma_update(None, "user_version", VERSION)?;
     } else if version == 1 && app == APPLICATION_ID {
@@ -224,6 +239,10 @@ fn initialize(connection: &mut Connection, legacy: Option<&Path>) -> Result<()> 
         tx.pragma_update(None, "user_version", VERSION)?;
     } else if version == 7 && app == APPLICATION_ID {
         // The v8 column removal is performed after legacy synthetic values are cleaned.
+    } else if version == 8 && app == APPLICATION_ID {
+        // Version 9 invalidates legacy markers without changing table definitions.
+    } else if version == 9 && app == APPLICATION_ID {
+        // Version 10 introduces durable conversation identities.
     } else if version != VERSION || app != APPLICATION_ID {
         bail!("unsupported conversation schema version {version} (expected {VERSION}) or application id {app}");
     }
@@ -237,9 +256,9 @@ fn initialize(connection: &mut Connection, legacy: Option<&Path>) -> Result<()> 
         )?;
     }
     // Remove the obsolete affinity column only after legacy synthetic values
-    // have been cleared. Versions 1–7 all contain this column; a new v8
+    // have been cleared. Versions 1–7 all contain this column; a new
     // database is created without it by SCHEMA.
-    if version > 0 && version < VERSION {
+    if needs_synthetic_tab_cleanup {
         tx.execute_batch("ALTER TABLE conversations DROP COLUMN tab_id;")?;
         // Version 7 does not run one of the earlier migration branches that
         // already advances user_version. Commit the schema and version together.
@@ -248,7 +267,24 @@ fn initialize(connection: &mut Connection, legacy: Option<&Path>) -> Result<()> 
     tx.execute_batch(
         "CREATE INDEX IF NOT EXISTS conversations_owner_key_id_idx ON conversations(owner_key_id, id);",
     )?;
+    if (1..VERSION).contains(&version) {
+        tx.execute_batch(IDENTITY_SCHEMA)?;
+        tx.execute(
+            "INSERT INTO conversation_identities(conversation_id)
+             SELECT id FROM conversations",
+            [],
+        )?;
+    }
     validate_schema(&tx)?;
+    if (1..9).contains(&version) {
+        // Older releases accepted client-supplied sync claims. There is no
+        // reliable provenance for existing markers, so preserve the mappings
+        // but require a fresh replay before any future Delta.
+        tx.execute("UPDATE provider_threads SET synced_through_message_id = NULL WHERE synced_through_message_id IS NOT NULL", [])?;
+    }
+    if (1..VERSION).contains(&version) {
+        tx.pragma_update(None, "user_version", VERSION)?;
+    }
     let imported: Option<String> = tx
         .query_row(
             "SELECT value FROM metadata WHERE key='legacy_import_complete'",
@@ -296,6 +332,15 @@ fn initialize(connection: &mut Connection, legacy: Option<&Path>) -> Result<()> 
             [],
         )?;
     }
+    let missing_identity = tx
+        .prepare(
+            "SELECT 1 FROM conversations c LEFT JOIN conversation_identities i
+             ON i.conversation_id = c.id WHERE i.conversation_id IS NULL LIMIT 1",
+        )?
+        .exists([])?;
+    if missing_identity {
+        bail!("conversation database has missing durable identities");
+    }
     let foreign_key_failure = tx.prepare("PRAGMA foreign_key_check")?.exists([])?;
     if foreign_key_failure {
         bail!("conversation database has invalid foreign keys");
@@ -312,10 +357,11 @@ fn initialize(connection: &mut Connection, legacy: Option<&Path>) -> Result<()> 
 }
 
 fn validate_schema(connection: &Connection) -> Result<()> {
-    // Version 8 is owned by this application. Fail closed if its definitions
+    // The current schema is owned by this application. Fail closed if its definitions
     // were changed, including constraints that SELECT alone cannot validate.
     let expected = Connection::open_in_memory()?;
     expected.execute_batch(SCHEMA)?;
+    expected.execute_batch(IDENTITY_SCHEMA)?;
     for table in [
         "conversations",
         "messages",
@@ -324,6 +370,7 @@ fn validate_schema(connection: &Connection) -> Result<()> {
         "conversation_summaries",
         "memory_settings",
         "memory_items",
+        "conversation_identities",
     ] {
         let sql = |database: &Connection| -> Result<String> {
             Ok(database.query_row(
@@ -336,6 +383,18 @@ fn validate_schema(connection: &Connection) -> Result<()> {
         if normalize(sql(connection)?) != normalize(sql(&expected)?) {
             bail!("invalid schema definition for table '{table}'; expected version {VERSION}");
         }
+    }
+    let trigger_sql = |database: &Connection| -> Result<String> {
+        Ok(database.query_row(
+            "SELECT sql FROM sqlite_master WHERE type='trigger'
+             AND name='conversation_identity_on_insert'",
+            [],
+            |row| row.get(0),
+        )?)
+    };
+    let normalize = |sql: String| sql.split_whitespace().collect::<String>().to_lowercase();
+    if normalize(trigger_sql(connection)?) != normalize(trigger_sql(&expected)?) {
+        bail!("invalid conversation identity insert trigger");
     }
     Ok(())
 }
@@ -429,6 +488,14 @@ pub(super) fn append_owned(
             message.role,
             message.content
         ])?;
+    }
+    let updated = connection.execute(
+        "UPDATE conversation_identities SET generation = generation + 1
+         WHERE conversation_id = ?1",
+        [&conversation.id],
+    )?;
+    if updated != 1 {
+        bail!("conversation durable identity missing during append");
     }
     Ok(())
 }

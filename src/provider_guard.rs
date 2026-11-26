@@ -14,6 +14,31 @@ struct ProviderBudget {
     disabled_reason: Option<&'static str>,
 }
 
+/// A quota reservation is not an admitted request until its paced wait ends.
+/// Dropping a canceled async future releases only its matching UTC-day slot.
+/// The conservative next_start timestamp is retained to preserve spacing.
+struct PendingRequestReservation {
+    budgets: Arc<Mutex<HashMap<String, ProviderBudget>>>,
+    provider: String,
+    utc_day: u64,
+    committed: bool,
+}
+
+impl Drop for PendingRequestReservation {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        if let Ok(mut budgets) = self.budgets.lock() {
+            if let Some(budget) = budgets.get_mut(&self.provider) {
+                if budget.utc_day == self.utc_day {
+                    budget.daily_requests = budget.daily_requests.saturating_sub(1);
+                }
+            }
+        }
+    }
+}
+
 /// Provider-scoped runtime guard. Clones share state within one gateway
 /// instance; separate gateway instances no longer share process-global budgets.
 #[derive(Clone, Debug, Default)]
@@ -69,7 +94,44 @@ impl ProviderGuard {
                 % 251;
             (wait, jitter_ms)
         };
+        // Scope the permit across await: an abort/timeout must not silently
+        // spend a provider's daily request quota without admitting work.
+        let mut pending = PendingRequestReservation {
+            budgets: Arc::clone(&self.budgets),
+            provider: provider.to_owned(),
+            utc_day,
+            committed: false,
+        };
         tokio::time::sleep(wait + Duration::from_millis(jitter_ms.into())).await;
+        {
+            // A challenge detected while queued must still deny the request.
+            // Recheck after sleep without holding the mutex across await.
+            let mut budgets = self
+                .budgets
+                .lock()
+                .map_err(|_| anyhow::anyhow!("provider pacing state is unavailable"))?;
+            let entry = budgets
+                .get_mut(provider)
+                .ok_or_else(|| anyhow::anyhow!("provider pacing state is unavailable"))?;
+            if let Some(reason) = entry.disabled_reason {
+                anyhow::bail!("provider '{provider}' is disabled: {reason}");
+            }
+            // A long queued wait crossing UTC midnight must consume today's
+            // cap, not an expired reservation on yesterday's budget.
+            let today = current_utc_day();
+            if entry.utc_day != today {
+                entry.utc_day = today;
+                entry.daily_requests = 0;
+            }
+            if pending.utc_day != today {
+                if entry.daily_requests >= daily_cap {
+                    anyhow::bail!("provider '{provider}' reached its daily request cap");
+                }
+                entry.daily_requests += 1;
+                pending.utc_day = today;
+            }
+        }
+        pending.committed = true;
         Ok(())
     }
 
@@ -134,17 +196,65 @@ pub(crate) fn is_challenge_url(url: &str) -> bool {
     ) {
         return true;
     }
-    uri.path().split('/').any(|segment| {
-        matches!(
-            segment.to_ascii_lowercase().as_str(),
-            "captcha"
-                | "challenge"
-                | "checkpoint"
-                | "verify-human"
-                | "verify_you_are_human"
-                | "challenge-platform"
-        )
-    })
+    // Only a security *route* is challenge evidence. Conversation IDs like
+    // /c/challenge or /chat/captcha must never trip a sticky provider breaker.
+    // A CDN challenge is mounted under /cdn-cgi/challenge-platform; preserve
+    // the known Google sign-in challenge route without scanning arbitrary paths.
+    let mut segments = uri.path().trim_start_matches('/').split('/');
+    let root = segments.next().unwrap_or_default().to_ascii_lowercase();
+    let second = segments.next().unwrap_or_default().to_ascii_lowercase();
+    matches!(
+        root.as_str(),
+        "captcha"
+            | "challenge"
+            | "checkpoint"
+            | "verify-human"
+            | "verify_you_are_human"
+            | "challenge-platform"
+    ) || (root == "cdn-cgi" && second == "challenge-platform")
+        || (host == "accounts.google.com"
+            && root == "v3"
+            && second == "signin"
+            && segments
+                .next()
+                .is_some_and(|segment| segment.eq_ignore_ascii_case("challenge")))
+}
+
+/// Only well-known, strictly authenticated *external* challenge endpoints
+/// may disable an adapter while the browser is off the provider's own origin.
+/// A foreign page with a generic /captcha path is not provider evidence.
+pub(crate) fn is_known_external_challenge_url(url: &str) -> bool {
+    let Ok(uri) = url.parse::<axum::http::Uri>() else {
+        return false;
+    };
+    if uri.scheme_str() != Some("https") {
+        return false;
+    }
+    let (Some(host), Some(authority)) = (uri.host(), uri.authority()) else {
+        return false;
+    };
+    if host.is_empty() || host.ends_with("..") {
+        return false;
+    }
+    if !authority.as_str().eq_ignore_ascii_case(host)
+        && !authority
+            .as_str()
+            .eq_ignore_ascii_case(&format!("{host}:443"))
+    {
+        return false;
+    }
+    let normalized_host = host.trim_end_matches('.').to_ascii_lowercase();
+    match normalized_host.as_str() {
+        "challenges.cloudflare.com" | "challenge.cloudflare.com" => true,
+        "accounts.google.com" => {
+            let path = uri.path();
+            path.eq_ignore_ascii_case("/v3/signin/challenge")
+                || path
+                    .to_ascii_lowercase()
+                    .starts_with("/v3/signin/challenge/")
+        }
+        _ => false,
+    }
 }
 
 /// Visible security text outside known chat-turn containers. A user or
@@ -153,14 +263,18 @@ pub(crate) fn is_challenge_url(url: &str) -> bool {
 /// explicit challenge URLs are always checked independently.
 pub(crate) const NON_MESSAGE_CHALLENGE_TEXT_JS: &str = r#"(() => {
     if (!document.body) return '';
-    const messages = "[data-message-author-role], [data-testid='assistant-message'], [data-testid='user-message'], [data-testid*='conversation-turn']";
+    // A chat draft or prior assistant reply quoting CAPTCHA wording is not a
+    // security overlay. Use explicit message-role roots already recognized
+    // by the provider adapters; do not exclude generic dialogs or page text.
+    const messages = "[data-message-author-role], [data-message-role='assistant'], [data-message-role='user'], [data-role='assistant'], [data-role='user'], [data-testid='assistant-message'], [data-testid='user-message'], [data-testid*='assistant-response'], [data-testid*='conversation-turn']";
+    const editors = "[contenteditable='true'], [contenteditable='plaintext-only'], [contenteditable=''], [role='textbox'], textarea, input";
     const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
     let text = '';
     let visited = 0;
     while (walker.nextNode() && visited++ < 16000 && text.length < 12000) {
         const node = walker.currentNode;
         const parent = node.parentElement;
-        if (!parent || parent.closest(messages) ||
+        if (!parent || parent.closest(messages) || parent.closest(editors) ||
             parent.closest('[hidden], [inert], [aria-hidden="true"]') ||
             !parent.getClientRects().length ||
             window.getComputedStyle(parent).visibility === 'hidden') continue;
@@ -185,12 +299,48 @@ fn has_challenge_marker(url: &str, body: &str) -> bool {
         .any(|needle| body.contains(needle))
 }
 
+/// This signal is only meaningful for the trusted ChatGPT first-party page.
+/// A foreign document with a similar title/script must not disable ChatGPT.
+fn is_chatgpt_https_page(url: &str) -> bool {
+    let Ok(uri) = url.parse::<axum::http::Uri>() else {
+        return false;
+    };
+    if uri.scheme_str() != Some("https") {
+        return false;
+    }
+    let Some(authority) = uri.authority() else {
+        return false;
+    };
+    matches!(
+        authority.as_str(),
+        "chatgpt.com" | "www.chatgpt.com" | "chatgpt.com:443" | "www.chatgpt.com:443"
+    )
+}
+
+/// An empty-body managed challenge is otherwise invisible to the text scan.
+/// Require both a recognized title and a first-party challenge-platform script;
+/// never inspect cookies, solve a challenge or use arbitrary page text.
+const CHATGPT_MANAGED_CHALLENGE_SHELL_JS: &str = r#"(() => {
+    const title = (document.title || '').trim().toLowerCase();
+    if (!['just a moment...', 'just a moment', 'attention required! | cloudflare'].includes(title)) return false;
+    return Array.from(document.scripts).some(script => {
+        try {
+            if (!script.src) return false;
+            const source = new URL(script.src, location.href);
+            return source.origin === location.origin &&
+                source.pathname.startsWith('/cdn-cgi/challenge-platform/');
+        } catch (_) { return false; }
+    });
+})()"#;
+
 /// Detect challenge pages without attempting to solve or bypass them.
 pub fn is_challenge_page(page: &Page) -> bool {
     let url = page.url();
     let evaluation = page.evaluate(NON_MESSAGE_CHALLENGE_TEXT_JS);
     let body = evaluation.as_str().unwrap_or("");
     has_challenge_marker(&url, body)
+        || (is_chatgpt_https_page(&url)
+            && page.evaluate(CHATGPT_MANAGED_CHALLENGE_SHELL_JS).as_bool() == Some(true))
 }
 
 #[cfg(test)]
@@ -235,6 +385,124 @@ mod tests {
             .wait_for_request_slot("shared-budget", 1, 1)
             .await
             .is_ok());
+    }
+
+    #[tokio::test]
+    async fn timed_out_pacing_wait_refunds_only_the_unstarted_reservation() {
+        let guard = ProviderGuard::default();
+        guard
+            .wait_for_request_slot("cancelled-pace", 250, 2)
+            .await
+            .unwrap();
+        // The second call must queue behind the first's bounded interval.
+        let outcome = tokio::time::timeout(
+            Duration::from_millis(10),
+            guard.wait_for_request_slot("cancelled-pace", 250, 2),
+        )
+        .await;
+        assert!(outcome.is_err(), "second request should still be queued");
+        let count = guard
+            .budgets
+            .lock()
+            .unwrap()
+            .get("cancelled-pace")
+            .unwrap()
+            .daily_requests;
+        assert_eq!(count, 1, "only the admitted request consumes quota");
+        // Reusing the refunded cap cannot bypass the provider's configured
+        // limit; this third request must still pass the reserved paced start.
+        guard
+            .wait_for_request_slot("cancelled-pace", 250, 2)
+            .await
+            .unwrap();
+        assert!(guard
+            .wait_for_request_slot("cancelled-pace", 250, 2)
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn challenge_during_queued_wait_rejects_and_refunds() {
+        let guard = ProviderGuard::default();
+        guard
+            .wait_for_request_slot("late-challenge", 250, 3)
+            .await
+            .unwrap();
+        let worker = guard.clone();
+        let pending =
+            tokio::spawn(
+                async move { worker.wait_for_request_slot("late-challenge", 250, 3).await },
+            );
+        let mut reserved = false;
+        for _ in 0..100 {
+            reserved = guard
+                .budgets
+                .lock()
+                .unwrap()
+                .get("late-challenge")
+                .is_some_and(|entry| entry.daily_requests == 2);
+            if reserved {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        assert!(reserved, "pending request must reserve before challenge");
+        guard.disable_provider("late-challenge", "challenge page detected");
+        let result = tokio::time::timeout(Duration::from_secs(3), pending)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(result.is_err());
+        assert_eq!(
+            guard
+                .budgets
+                .lock()
+                .unwrap()
+                .get("late-challenge")
+                .unwrap()
+                .daily_requests,
+            1,
+            "blocked queued work cannot consume admission quota"
+        );
+    }
+
+    #[test]
+    fn cancelled_old_day_does_not_refund_new_day_usage() {
+        let guard = ProviderGuard::default();
+        let current_day = current_utc_day();
+        let old_day = current_day.saturating_sub(1);
+        guard.budgets.lock().unwrap().insert(
+            "day-boundary".to_owned(),
+            ProviderBudget {
+                next_start: Instant::now(),
+                utc_day: old_day,
+                daily_requests: 1,
+                disabled_reason: None,
+            },
+        );
+        let old = PendingRequestReservation {
+            budgets: Arc::clone(&guard.budgets),
+            provider: "day-boundary".to_owned(),
+            utc_day: old_day,
+            committed: false,
+        };
+        {
+            let mut budgets = guard.budgets.lock().unwrap();
+            let entry = budgets.get_mut("day-boundary").unwrap();
+            entry.utc_day = current_day;
+            entry.daily_requests = 2;
+        }
+        drop(old);
+        assert_eq!(
+            guard
+                .budgets
+                .lock()
+                .unwrap()
+                .get("day-boundary")
+                .unwrap()
+                .daily_requests,
+            2
+        );
     }
 
     #[test]
@@ -289,9 +557,162 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn editable_drafts_and_manus_meta_role_replies_are_not_challenge_overlays() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <div id="composer" contenteditable="true" role="textbox">
+                <span>Verify you are human to continue</span>
+            </div>
+            <div id="rich-draft" contenteditable="plaintext-only">
+                Complete the captcha
+            </div>
+            <div id="role-draft" role="textbox">Unusual traffic</div>
+            <textarea id="native-draft">Security challenge</textarea>
+            <div data-message-role="assistant" class="answer">
+                A prior reply explains checking your browser
+            </div>
+            <div data-role="assistant">A security challenge is a verification step</div>
+            <div data-role="user">Please verify you are human</div>
+            <div data-testid="assistant-response-27">
+                Confirm you are not a robot is a quotation
+            </div>
+            <div id="manual-dialog" role="dialog" hidden>
+                Verify you are human
+            </div>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+
+        assert!(
+            page.evaluate(NON_MESSAGE_CHALLENGE_TEXT_JS)
+                .as_str()
+                .is_some(),
+            "the static body scanner must evaluate successfully in pinned Obscura"
+        );
+        assert!(
+            !is_challenge_page(&page),
+            "visible user-authored draft and completed answer text are not security UI"
+        );
+        let before = crate::providers::common::response_probe(
+            &page,
+            &["[data-message-role='assistant']"],
+            true,
+        );
+        assert!(!before.challenge, "polling must agree with the entry guard");
+
+        page.evaluate(
+            "document.querySelector('#composer span').textContent = 'Checking your browser now'",
+        );
+        assert!(
+            !is_challenge_page(&page),
+            "a changing rich-text draft must not persistently disable the provider"
+        );
+        assert!(
+            !crate::providers::common::response_probe(
+                &page,
+                &["[data-message-role='assistant']"],
+                true,
+            )
+            .challenge
+        );
+
+        // Pinned Obscura does not reliably reflow a previously hidden node
+        // after a synthetic DOM attribute mutation. Use a freshly navigated,
+        // initially visible security dialog to test the actual scanner.
+        let challenge_html = html.replace(
+            "id=\"manual-dialog\" role=\"dialog\" hidden",
+            "id=\"manual-dialog\" role=\"dialog\" data-message-role=\"system\"",
+        );
+        assert_ne!(challenge_html, html, "challenge fixture must differ");
+        let challenge_encoded: String = challenge_html
+            .bytes()
+            .map(|byte| format!("%{byte:02X}"))
+            .collect();
+        page.goto(&format!("data:text/html,{challenge_encoded}"))
+            .await
+            .unwrap();
+        let security_text = page.evaluate(NON_MESSAGE_CHALLENGE_TEXT_JS);
+        assert!(
+            security_text
+                .as_str()
+                .is_some_and(|value| value.contains("Verify you are human")),
+            "visible system manual verification must remain in the scanned body text"
+        );
+        assert!(
+            is_challenge_page(&page),
+            "visible verification dialog outside the draft/message still requires manual handling"
+        );
+        assert!(
+            crate::providers::common::response_probe(
+                &page,
+                &["[data-message-role='assistant']"],
+                true,
+            )
+            .challenge
+        );
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        assert!(!is_challenge_page(&page), "hidden dialogs are excluded");
+    }
+
+    #[test]
+    fn foreign_challenge_authority_must_be_exact_https_identity() {
+        for url in [
+            "https://challenges.cloudflare.com/",
+            "https://challenge.cloudflare.com/captcha",
+            "https://challenges.cloudflare.com:443/",
+            "https://accounts.google.com/v3/signin/challenge",
+            "https://accounts.google.com/v3/signin/challenge/continue",
+        ] {
+            assert!(
+                is_known_external_challenge_url(url),
+                "known external challenge must retain sticky protection: {url}"
+            );
+        }
+        for url in [
+            "https://attacker.invalid/captcha",
+            "https://attacker.invalid/challenge",
+            "https://other-provider.invalid/verify-human",
+            "http://challenges.cloudflare.com/",
+            "https://challenges.cloudflare.com:444/",
+            "https://challenges.cloudflare.com:65536/",
+            "https://x@challenges.cloudflare.com/",
+            "https://challenges.cloudflare.com.attacker.invalid/",
+            "https://challenges.cloudflare.com../",
+            "https://accounts.google.com/v3/signin",
+            "https://accounts.google.com/captcha",
+            "https://accounts.google.com:444/v3/signin/challenge",
+            "https://accounts.google.com.attacker.invalid/v3/signin/challenge",
+            "data:text/html,<div>captcha</div>",
+        ] {
+            assert!(
+                !is_known_external_challenge_url(url),
+                "unverified challenge URL must not disable a provider: {url}"
+            );
+        }
+    }
+
     #[test]
     fn challenge_url_detection_ignores_non_route_keywords() {
         for url in [
+            "https://chatgpt.com/c/challenge",
+            "https://grok.com/chat/captcha",
+            "https://manus.im/app/checkpoint",
+            "https://gemini.google.com/app/verify-human",
+            "https://claude.ai/new/challenge",
+            "https://chat.qwen.ai/chat/verify_you_are_human",
+            "https://www.meta.ai/chat/challenge-platform",
+            "https://www.perplexity.ai/search/checkpoint",
+            "https://example.test/blog/cdn-cgi/challenge-platform",
+            "https://challenges.cloudflare.com.attacker.invalid/chat/checkpoint",
             "https://chatgpt.com/c/challenge-essay",
             "https://gemini.google.com/app?q=security%20challenge",
             "https://grok.com/chat?next=https%3A%2F%2Fexample.test%2Fcaptcha",
@@ -305,6 +726,9 @@ mod tests {
             );
         }
         for url in [
+            "https://accounts.google.com/v3/signin/challenge",
+            "https://example.test/verify_you_are_human",
+            "https://example.test/challenge-platform/start",
             "https://example.test/cdn-cgi/challenge-platform/h/g/",
             "https://example.test/verify-human",
             "https://example.test/checkpoint?next=/chat",
@@ -338,5 +762,71 @@ mod tests {
             Some("challenge page detected")
         );
         assert_eq!(second.provider_disabled_reason("provider-a"), None);
+    }
+}
+
+#[cfg(test)]
+mod chatgpt_managed_challenge_regressions {
+    use super::*;
+
+    #[test]
+    fn managed_challenge_requires_exact_first_party_https_authority() {
+        for url in [
+            "https://chatgpt.com/",
+            "https://chatgpt.com/c/synthetic",
+            "https://www.chatgpt.com/",
+            "https://chatgpt.com:443/",
+            "https://www.chatgpt.com:443/",
+        ] {
+            assert!(is_chatgpt_https_page(url), "{url}");
+        }
+        for url in [
+            "http://chatgpt.com/",
+            "https://chatgpt.com:444/",
+            "https://user@chatgpt.com/",
+            "https://chatgpt.com.attacker.test/",
+            "https://www.chatgpt.com.evil.invalid/",
+            "data:text/html,challenge",
+            "https://meta.ai/",
+            "https://example.test/",
+        ] {
+            assert!(!is_chatgpt_https_page(url), "{url}");
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_body_shell_requires_exact_title_and_same_origin_script() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        page.goto("data:text/html,%3Chtml%3E%3Chead%3E%3Ctitle%3EJust%20a%20moment...%3C/title%3E%3C/head%3E%3Cbody%3E%3C/body%3E%3C/html%3E")
+            .await
+            .unwrap();
+        // This data:-origin fixture tests the detection predicate in isolation;
+        // production still requires is_chatgpt_https_page on the real Page URL.
+        let js =
+            CHATGPT_MANAGED_CHALLENGE_SHELL_JS.replace("location.origin", "'https://chatgpt.com'");
+        assert_eq!(page.evaluate(&js).as_bool(), Some(false), "title alone");
+        page.evaluate(
+            "document.head.insertAdjacentHTML('beforeend', '<script src=\"https://chatgpt.com/cdn-cgi/challenge-platform/fixture\"></script>')",
+        );
+        assert_eq!(page.evaluate(&js).as_bool(), Some(true), "empty-body shell");
+        page.evaluate("document.title='Ordinary ChatGPT conversation'");
+        assert_eq!(page.evaluate(&js).as_bool(), Some(false), "script alone");
+        page.evaluate("document.title='Just a moment...'");
+        page.evaluate(
+            "document.querySelector('script').src='https://chatgpt.com.attacker.invalid/cdn-cgi/challenge-platform/x'",
+        );
+        assert_eq!(page.evaluate(&js).as_bool(), Some(false), "lookalike");
+        page.evaluate(
+            "document.querySelector('script').src='https://meta.ai/cdn-cgi/challenge-platform/x'",
+        );
+        assert_eq!(page.evaluate(&js).as_bool(), Some(false), "other provider");
+        assert!(
+            !is_challenge_page(&page),
+            "foreign fixture cannot trip the provider guard"
+        );
     }
 }

@@ -1,11 +1,50 @@
+use crate::metaai_timing::{Step as TimingStep, Timer as StepTimer};
 use obscura_core::Page;
 use std::time::Duration;
 
 /// The distinct browser timeout phases are preserved as typed errors.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderTimeoutPhase {
     Submission,
+    FirstContent,
     Generation,
+}
+
+impl ProviderTimeoutPhase {
+    /// Only confirmed new assistant text advances from first-content to
+    /// generation. A clicked Send, cleared composer or unchanged old answer
+    /// alone cannot prove the current model began responding.
+    pub fn after_submission(new_content_observed: bool) -> Self {
+        if new_content_observed {
+            Self::Generation
+        } else {
+            Self::FirstContent
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Submission => "submission",
+            Self::FirstContent => "first_content",
+            Self::Generation => "generation",
+        }
+    }
+}
+
+#[cfg(test)]
+mod provider_timeout_phase_tests {
+    use super::ProviderTimeoutPhase;
+
+    #[test]
+    fn typed_timeout_distinguishes_no_first_content_from_partial_generation() {
+        assert_eq!(ProviderTimeoutPhase::Submission.as_str(), "submission");
+        let no_content = ProviderTimeoutPhase::after_submission(false);
+        assert_eq!(no_content, ProviderTimeoutPhase::FirstContent);
+        assert_eq!(no_content.as_str(), "first_content");
+        let partial = ProviderTimeoutPhase::after_submission(true);
+        assert_eq!(partial, ProviderTimeoutPhase::Generation);
+        assert_eq!(partial.as_str(), "generation");
+    }
 }
 
 #[derive(Debug)]
@@ -33,6 +72,11 @@ impl std::fmt::Display for ProviderTimeoutError {
                 "provider '{}' timed out while submitting the prompt after {:?}",
                 self.provider, self.timeout
             ),
+            ProviderTimeoutPhase::FirstContent => write!(
+                f,
+                "provider '{}' did not return new assistant content within {:?}",
+                self.provider, self.timeout
+            ),
             ProviderTimeoutPhase::Generation => write!(
                 f,
                 "provider '{}' did not complete within {:?}",
@@ -57,6 +101,47 @@ impl std::fmt::Display for ProviderComposerInputRejectedError {
 }
 
 impl std::error::Error for ProviderComposerInputRejectedError {}
+
+/// A syntactically successful Send click is not proof the provider accepted
+/// this prompt. This is a distinct failure from a submission *timeout* or a
+/// no-first-content timeout after acknowledged submission. The error carries
+/// no prompt, page URL, cookies, DOM text, account identifier or model output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProviderSubmissionUnacknowledgedError;
+
+impl ProviderSubmissionUnacknowledgedError {
+    pub fn phase(self) -> ProviderTimeoutPhase {
+        ProviderTimeoutPhase::Submission
+    }
+}
+
+impl std::fmt::Display for ProviderSubmissionUnacknowledgedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("provider did not acknowledge prompt submission with a current-turn signal")
+    }
+}
+
+impl std::error::Error for ProviderSubmissionUnacknowledgedError {}
+
+#[cfg(test)]
+mod provider_submission_unacknowledged_error_tests {
+    use super::{ProviderSubmissionUnacknowledgedError, ProviderTimeoutError};
+
+    #[test]
+    fn redacted_typed_error_is_distinct_from_timeout_and_does_not_echo_prompt() {
+        let error = anyhow::Error::new(ProviderSubmissionUnacknowledgedError);
+        let typed = error
+            .downcast_ref::<ProviderSubmissionUnacknowledgedError>()
+            .expect("unacknowledged submission must remain downcastable");
+        assert_eq!(typed.phase().as_str(), "submission");
+        assert!(error.downcast_ref::<ProviderTimeoutError>().is_none());
+        assert_eq!(
+            error.to_string(),
+            "provider did not acknowledge prompt submission with a current-turn signal"
+        );
+        assert!(!error.to_string().contains("secret fixture prompt"));
+    }
+}
 
 /// Static per-provider selector/URL data. Each adapter is a SelectorSet
 /// plus the shared interaction logic in this module (ported from v1's
@@ -145,6 +230,8 @@ pub const STREAMING_SELECTOR: &str = r#"[data-is-streaming="true"]"#;
 pub struct ResponseProbe {
     pub text: Option<String>,
     pub count: usize,
+    /// Nonempty visible roots of the selector that supplied `text`, not unrelated fallback selectors.
+    pub populated_count: usize,
     pub streaming: bool,
     pub post_answer_affordance: bool,
     pub url: String,
@@ -172,6 +259,11 @@ fn decode_response_probe(value: serde_json::Value) -> ResponseProbe {
             .and_then(decode_dom_count)
             .and_then(|count| usize::try_from(count).ok())
             .unwrap_or(0),
+        populated_count: value
+            .get("populatedCount")
+            .and_then(decode_dom_count)
+            .and_then(|count| usize::try_from(count).ok())
+            .unwrap_or(0),
         streaming: value
             .get("streaming")
             .and_then(serde_json::Value::as_bool)
@@ -189,19 +281,33 @@ fn decode_response_probe(value: serde_json::Value) -> ResponseProbe {
     }
 }
 
-// ChatGPT's current response root also contains recovery controls. Read
-// only its outermost Markdown blocks, preserving multi-block answers and
-// literal control-label words in the answer. Other selectors keep their text.
-const RESPONSE_CONTENT_JS: &str = r#"
-    const responseContent = node => {
-        if (!node.matches('[class*="DilResponseRoot-"]')) return node.innerText || node.textContent || '';
-        const blocks=Array.from(node.querySelectorAll('[class*="MarkdownRoot-"]')).filter(block => {
-            const ancestor=block.parentElement?.closest('[class*="MarkdownRoot-"]');
-            return (!ancestor || !node.contains(ancestor)) && block.getClientRects().length > 0 &&
-                getComputedStyle(block).visibility !== 'hidden' &&
-                !block.closest('button, [role="button"], [hidden], [inert], [aria-hidden="true"]');
-        });
-        return blocks.map(block => block.innerText || block.textContent || '').join('\n\n');
+// The current ChatGPT response root contains multiple independently rendered
+// Markdown blocks plus action buttons. Read only outermost visible answer
+// blocks; never treat controls, hidden clones or user echoes as model text.
+// The same expression is used by synchronous extraction and response polling.
+const RESPONSE_RENDERED_TEXT_JS: &str = r#"
+    const renderedText = node => {
+        const ordinary = () => node.querySelector('*')
+            ? (node.innerText || '')
+            : (node.textContent || '');
+        if (!node.matches('[class*="DilResponseRoot-"]')) return ordinary();
+        const blocks = Array.from(node.querySelectorAll('[class*="MarkdownRoot-"]'))
+            .filter(block => {
+                const parentBlock = block.parentElement?.closest('[class*="MarkdownRoot-"]');
+                if (parentBlock && node.contains(parentBlock)) return false;
+                if (!block.getClientRects().length ||
+                    block.closest('button, [role="button"], [hidden], [inert], [aria-hidden="true"]')) return false;
+                // Transparent answer clones remain laid out and have a rect;
+                // unlike controls, they must never become response evidence.
+                for (let current = block; current && node.contains(current); current = current.parentElement) {
+                    const style = getComputedStyle(current);
+                    if (style.visibility === 'hidden' || Number(style.opacity) === 0) return false;
+                }
+                return true;
+            });
+        return blocks.map(block => block.querySelector('*')
+            ? (block.innerText || '')
+            : (block.textContent || '')).join('\n\n');
     };
 "#;
 
@@ -218,22 +324,30 @@ pub fn response_probe(
     let Ok(streaming_selector) = serde_json::to_string(STREAMING_SELECTOR) else {
         return ResponseProbe::default();
     };
+    let nontransparent = nontransparent_ancestors_expression("el");
+    let response_text_js = RESPONSE_RENDERED_TEXT_JS;
     let script = format!(
         r#"(() => {{
             const selectors = {selectors};
-            {response_content_js}
             const visible = el => {{
                 try {{
                     return el.getClientRects().length > 0 &&
                         window.getComputedStyle(el).visibility !== "hidden" &&
+                        {nontransparent} &&
                         !el.closest('[hidden], [inert], [aria-hidden="true"]') &&
                         !el.disabled && !el.matches(':disabled') &&
                         !el.closest('fieldset[disabled], [aria-disabled="true"]');
                 }} catch (_) {{ return false; }}
             }};
+            // A visible wrapper can contain only hidden descendants. Raw
+            // textContent must not become a fabricated provider response when
+            // innerText is empty. Text-only roots are safe and preserve exact
+            // newlines in the pinned embedded Obscura runtime.
+            {response_text_js}
             const nodes = new Set();
             let text = null;
             let lastResponseNode = null;
+            let populatedCount = 0;
             for (const selector of selectors) {{
                 try {{
                     let matches = [];
@@ -243,7 +357,7 @@ pub fn response_probe(
                             const tag = parts.shift();
                             const needle = parts.join("=");
                             matches = Array.from(document.querySelectorAll(tag)).filter(el =>
-                                ((el.innerText || el.textContent || "").trim()).includes(needle)
+                                (renderedText(el).trim()).includes(needle)
                             );
                         }}
                     }} else {{
@@ -258,10 +372,15 @@ pub fn response_probe(
                         // placeholder as the reply or hiding the earlier text.
                         for (let i = matches.length - 1; i >= 0; i -= 1) {{
                             const node = matches[i];
-                            const content = responseContent(node);
+                            const content = renderedText(node);
                             if (content.trim()) {{
                                 text = content;
                                 lastResponseNode = node;
+                                // Count only roots belonging to the selector
+                                // that actually supplied text. A different
+                                // fallback selector must never certify the
+                                // old text as a fresh response.
+                                populatedCount = matches.filter(item => renderedText(item).trim()).length;
                                 break;
                             }}
                         }}
@@ -276,8 +395,24 @@ pub fn response_probe(
                 streaming = Array.from(document.querySelectorAll({streaming_selector})).some(visible);
             }} catch (_) {{}}
             if (!streaming) {{
-                streaming = Array.from(document.querySelectorAll("button"))
-                    .some(button => visible(button) &&
+                // A stale SPA Stop clone can have a box and label while CSS
+                // makes the control inert. Do not treat that as active
+                // generation. Passive data-is-streaming markers above are
+                // intentionally not subject to pointer-actionability.
+                const pointerEnabled = button => {{
+                    try {{
+                        for (let ancestor = button; ancestor; ancestor = ancestor.parentElement) {{
+                            if (window.getComputedStyle(ancestor).pointerEvents === "none")
+                                return false;
+                        }}
+                        return true;
+                    }} catch (_) {{ return false; }}
+                }};
+                // Cancellation also recognizes ARIA role buttons. A real
+                // active generation must not be mistaken for terminal just
+                // because the provider rendered a non-<button> Stop control.
+                streaming = Array.from(document.querySelectorAll("button, [role='button']"))
+                    .some(button => visible(button) && pointerEnabled(button) &&
                         /^(stop|stop generating|stop generation|stop responding|stop response|stop answering)$/i.test(
                             (button.getAttribute("aria-label") || button.innerText || button.textContent || "").trim()
                         ));
@@ -289,30 +424,217 @@ pub fn response_probe(
             const challenge = ["verify you are human", "confirm you are not a robot", "unusual traffic", "complete the captcha", "security challenge", "checking your browser"].some(marker => body.includes(marker));
             let postAnswerAffordance = false;
             if (lastResponseNode) {{
-                const scopeSelector = "article, [data-message-author-role='assistant'], [data-testid='assistant-message'], [data-testid*='conversation-turn'], [data-testid*='message']";
-                let scope = lastResponseNode;
-                for (let depth = 0; depth < 6 && scope; depth += 1, scope = scope.parentElement) {{
-                    let buttons = [];
-                    try {{ buttons = Array.from(scope.querySelectorAll("button, [role='button']")); }} catch (_) {{}}
-                    if (buttons.some(button => visible(button) &&
-                        /copy|regenerate|retry|good response|bad response|thumbs up|thumbs down/.test(
-                            ((button.getAttribute("aria-label") || "") + " " +
-                            (button.getAttribute("data-testid") || "") + " " +
-                            (button.innerText || button.textContent || "")).toLowerCase()
-                        ))) {{
-                        postAnswerAffordance = true;
-                        break;
+                // Only explicit turn roots may attest completion. A generic
+                // message-list or conversation wrapper can contain an earlier
+                // Copy control alongside the current incomplete response.
+                const scopeSelector = "article, [data-message-author-role='assistant'], [data-testid='assistant-message'], [data-testid^='assistant-message-'], [data-testid='conversation-turn'], [data-testid^='conversation-turn-'], [data-testid='message']";
+                // A Copy/Retry control is terminal evidence ONLY when scoped to
+                // the same visible response turn. Climbing past an <article>
+                // can discover an old reply's Copy button in the conversation
+                // root and falsely complete the current partial answer.
+                let scope = null;
+                try {{ scope = lastResponseNode.closest(scopeSelector); }} catch (_) {{}}
+                if (scope) {{
+                    // An <article> may wrap a whole conversation instead of
+                    // one turn. If it contains another independent visible
+                    // answer root, none of its buttons are attributable to
+                    // this response. Nested selectors for this SAME reply
+                    // are not independent sibling turns.
+                    const hasOtherReply = Array.from(nodes).some(node =>
+                        node !== lastResponseNode && scope.contains(node) &&
+                        !lastResponseNode.contains(node) &&
+                        !node.contains(lastResponseNode));
+                    if (!hasOtherReply) {{
+                        let buttons = [];
+                        try {{ buttons = Array.from(scope.querySelectorAll("button, [role='button']")); }} catch (_) {{}}
+                        // The in-answer "Copy code" control is not proof that
+                        // the assistant turn finished. Never classify by an
+                        // unanchored substring across unrelated attributes.
+                        const replyActions = /^(copy|copy response|copy answer|copy message|regenerate|regenerate response|retry|retry response|good response|bad response|thumbs up|thumbs down)$/;
+                        const replyTestIds = /^(copy-(response|answer|message)(-button)?|(response|answer|message)-copy(-button)?|regenerate(-response)?-button|retry-response-button|thumbs-(up|down)(-button)?)$/;
+                        const normalize = value => String(value || "").trim().toLowerCase().replace(/\s+/g, " ");
+                        postAnswerAffordance = buttons.some(button => {{
+                            if (!visible(button)) return false;
+                            // A CSS-inert reply action is not evidence that
+                            // generation finished. Scope this to reply actions:
+                            // noninteractive response text may still be valid.
+                            let pointerEnabled = true;
+                            try {{
+                                for (let ancestor = button; ancestor && ancestor.nodeType === 1; ancestor = ancestor.parentElement) {{
+                                    if (window.getComputedStyle(ancestor).pointerEvents === 'none') {{
+                                        pointerEnabled = false;
+                                        break;
+                                    }}
+                                }}
+                            }} catch (_) {{ pointerEnabled = false; }}
+                            if (!pointerEnabled) return false;
+                            const aria = normalize(button.getAttribute("aria-label"));
+                            const label = normalize(button.innerText || button.textContent);
+                            const testId = normalize(button.getAttribute("data-testid"));
+                            // Code-block copy actions can have the same short
+                            // "Copy" label as a completed response. Semantic
+                            // code descendants and explicit code-copy test IDs
+                            // are never a reply-level done signal.
+                            if (button.closest("pre, code") ||
+                                /^(copy-code|copy-code-button|code-copy|code-copy-button)$/.test(testId)) return false;
+                            // An explicit aria-label contradicting a reply
+                            // control is authoritative even if inner text or
+                            // a broad test id happens to say "Copy".
+                            if (aria && !replyActions.test(aria)) return false;
+                            return replyActions.test(aria || label) ||
+                                replyTestIds.test(testId);
+                        }});
                     }}
-                    if (scope.matches && scope.matches(scopeSelector) && depth >= 3) break;
                 }}
+                // An unrecognized turn root cannot safely borrow controls
+                // from an ancestor. Retain the conservative idle fallback.
             }}
-            return {{ text, count: nodes.size, streaming, postAnswerAffordance, url, challenge }};
+            return {{ text, count: nodes.size, populatedCount, streaming, postAnswerAffordance, url, challenge }};
         }})()"#,
-        response_content_js = RESPONSE_CONTENT_JS,
         check_body_challenge = check_body_challenge,
         challenge_text_js = crate::provider_guard::NON_MESSAGE_CHALLENGE_TEXT_JS,
     );
     decode_response_probe(page.evaluate(&script))
+}
+
+#[cfg(test)]
+mod transparent_response_probe_tests {
+    use super::response_probe;
+
+    #[tokio::test]
+    async fn transparent_answer_and_stop_clones_do_not_replace_visible_turn() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><head><style>
+            .transparent { opacity: 0; }
+            .translucent { opacity: 0.5; }
+        </style></head><body>
+            <article id="old"><div class="answer">visible prior answer</div></article>
+            <article id="ghost" class="transparent">
+                <div class="answer">invisible ghost answer</div>
+                <button aria-label="Stop generating">Stop</button>
+            </article>
+            <article><div class="answer" style="opacity:0">self-invisible answer</div></article>
+            <button data-is-streaming="true" style="opacity:0">invisible streaming signal</button>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+
+        let prior = response_probe(&page, &[".answer"], false);
+        assert_eq!(prior.text.as_deref(), Some("visible prior answer"));
+        assert_eq!(
+            prior.count, 1,
+            "transparent reply must not raise root count"
+        );
+        assert_eq!(prior.populated_count, 1);
+        assert!(
+            !prior.streaming,
+            "transparent Stop must not extend generation"
+        );
+
+        page.evaluate("document.querySelector('#ghost').className = 'translucent'");
+        let new_turn = response_probe(&page, &[".answer"], false);
+        assert_eq!(new_turn.text.as_deref(), Some("invisible ghost answer"));
+        assert_eq!(new_turn.count, 2);
+        assert_eq!(new_turn.populated_count, 2);
+        assert!(
+            new_turn.streaming,
+            "nonzero-opacity Stop remains actionable"
+        );
+    }
+
+    #[tokio::test]
+    async fn transparent_copy_controls_cannot_certify_turn_completion() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><head><style>
+            .transparent { opacity: 0; }
+            .translucent { opacity: 0.5; }
+        </style></head><body>
+            <article>
+                <div class="answer">partial answer</div>
+                <section id="ghost-actions" class="transparent">
+                    <button aria-label="Copy">Copy</button>
+                </section>
+                <button style="opacity:0" aria-label="Regenerate">Regenerate</button>
+            </article>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+
+        let hidden = response_probe(&page, &[".answer"], false);
+        assert_eq!(hidden.text.as_deref(), Some("partial answer"));
+        assert!(
+            !hidden.post_answer_affordance,
+            "transparent Copy/Retry is not terminal evidence"
+        );
+
+        page.evaluate("document.querySelector('#ghost-actions').className = 'translucent'");
+        let visible = response_probe(&page, &[".answer"], false);
+        assert!(
+            visible.post_answer_affordance,
+            "nonzero-opacity same-turn Copy remains completion evidence"
+        );
+    }
+
+    #[tokio::test]
+    async fn pointer_inert_reply_actions_cannot_certify_completion() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <article>
+                <div class="answer">still generating</div>
+                <section id="inert-ancestor" style="pointer-events:none">
+                    <button id="inherited" style="pointer-events:auto"
+                        aria-label="Copy">Copy</button>
+                </section>
+                <button id="inert-self" style="pointer-events:none"
+                    aria-label="Retry">Retry</button>
+            </article>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        let partial = response_probe(&page, &[".answer"], false);
+        assert_eq!(partial.text.as_deref(), Some("still generating"));
+        assert!(
+            !partial.post_answer_affordance,
+            "pointer-inert ancestor and self controls must not certify completion"
+        );
+
+        page.evaluate("document.querySelector('#inert-ancestor').style.pointerEvents = 'auto'");
+        let done = response_probe(&page, &[".answer"], false);
+        assert!(
+            done.post_answer_affordance,
+            "ordinary actionable same-turn Copy still certifies completion"
+        );
+
+        page.evaluate("document.querySelector('#inert-ancestor').style.pointerEvents = 'none'");
+        page.evaluate("document.querySelector('#inert-self').style.pointerEvents = 'auto'");
+        assert!(
+            response_probe(&page, &[".answer"], false).post_answer_affordance,
+            "actionable sibling Retry remains valid independently"
+        );
+        page.evaluate("document.querySelector('#inert-self').style.pointerEvents = 'none'");
+        assert!(
+            !response_probe(&page, &[".answer"], false).post_answer_affordance,
+            "restoring both CSS blocks revokes terminal evidence"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -379,6 +701,111 @@ mod streaming_visibility_regression_tests {
         );
     }
     #[tokio::test]
+    async fn css_pointer_inert_stop_clones_do_not_extend_streaming() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <div class="answer">completed reply</div>
+            <button style="pointer-events:none" aria-label="Stop generating">stale Stop</button>
+            <section style="pointer-events:none">
+                <button style="pointer-events:auto" aria-label="Stop responding">stale child</button>
+            </section>
+            <button id="new-stop" aria-label="Stop" hidden>Stop</button>
+            <div id="stream-marker" data-is-streaming="true"
+                style="pointer-events:none" hidden>generating</div>
+            <button aria-label="Stop sharing">Stop sharing</button>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+
+        assert!(
+            !response_probe(&page, &[".answer"], false).streaming,
+            "pointer-inert Stop clones and unrelated actions cannot imply generation"
+        );
+
+        page.evaluate("document.querySelector('#new-stop').hidden = false");
+        assert!(
+            response_probe(&page, &[".answer"], false).streaming,
+            "a newly actionable exact Stop still indicates generation"
+        );
+        page.evaluate("document.querySelector('#new-stop').hidden = true");
+        assert!(!response_probe(&page, &[".answer"], false).streaming);
+
+        page.evaluate("document.querySelector('#stream-marker').hidden = false");
+        assert!(
+            response_probe(&page, &[".answer"], false).streaming,
+            "a passive explicit streaming marker remains valid with pointer-events:none"
+        );
+        page.evaluate("document.querySelector('#stream-marker').hidden = true");
+        assert!(!response_probe(&page, &[".answer"], false).streaming);
+    }
+
+    #[tokio::test]
+    async fn actionable_aria_role_stop_matches_cancellation_streaming_policy() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <div class="answer">partial assistant answer</div>
+            <div id="role-stop" role="button" aria-label="Stop generating">Stop</div>
+            <section id="inert-parent" style="pointer-events:none">
+                <span id="inert-role-stop" role="button"
+                    style="pointer-events:auto" aria-label="Stop responding">Stop</span>
+            </section>
+            <button id="native-stop" aria-label="Stop" hidden>Stop</button>
+            <span id="marker" data-is-streaming="true"
+                style="pointer-events:none" hidden>generating</span>
+            <div role="button" aria-label="Stop sharing">Stop sharing</div>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+
+        assert!(
+            response_probe(&page, &[".answer"], false).streaming,
+            "a visible actionable ARIA Stop button indicates active generation"
+        );
+        page.evaluate("document.getElementById('role-stop').hidden = true");
+        assert!(
+            !response_probe(&page, &[".answer"], false).streaming,
+            "an inert-ancestor role button and unrelated Stop sharing cannot indicate streaming"
+        );
+
+        page.evaluate("document.getElementById('inert-parent').style.pointerEvents = 'auto'");
+        assert!(
+            response_probe(&page, &[".answer"], false).streaming,
+            "an actionable role Stop nested in an enabled ancestor is recognized"
+        );
+        page.evaluate(
+            "document.getElementById('inert-role-stop').setAttribute('aria-hidden','true')",
+        );
+        assert!(!response_probe(&page, &[".answer"], false).streaming);
+
+        page.evaluate("document.getElementById('native-stop').hidden = false");
+        assert!(
+            response_probe(&page, &[".answer"], false).streaming,
+            "native actionable Stop controls retain previous behavior"
+        );
+        page.evaluate("document.getElementById('native-stop').hidden = true");
+
+        page.evaluate("document.getElementById('marker').hidden = false");
+        assert!(
+            response_probe(&page, &[".answer"], false).streaming,
+            "passive nonclickable streaming markers remain valid"
+        );
+        page.evaluate("document.getElementById('marker').hidden = true");
+        assert!(!response_probe(&page, &[".answer"], false).streaming);
+    }
+
+    #[tokio::test]
     async fn disabled_stop_and_hidden_copy_never_signal_progress_or_completion() {
         let browser = obscura_core::Browser::builder()
             .stealth(false)
@@ -412,6 +839,258 @@ mod streaming_visibility_regression_tests {
     }
 
     #[tokio::test]
+    async fn copy_from_previous_turn_cannot_complete_latest_partial_response() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <section id="conversation">
+              <article id="old"><div class="answer">completed earlier reply</div>
+                <button id="old-copy" aria-label="Copy">Copy</button></article>
+              <article id="current"><div><div class="answer">new partial reply</div></div>
+                <button id="current-copy" aria-label="Copy" hidden>Copy</button></article>
+            </section>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+
+        let before = response_probe(&page, &[".answer"], false);
+        assert_eq!(before.text.as_deref(), Some("new partial reply"));
+        assert!(
+            !before.post_answer_affordance,
+            "old article's visible Copy must not finish a new partial response"
+        );
+        page.evaluate("document.querySelector('#current-copy').hidden = false");
+        let current = response_probe(&page, &[".answer"], false);
+        assert!(
+            current.post_answer_affordance,
+            "same-article Copy is a scoped post-answer signal"
+        );
+        page.evaluate("document.querySelector('#current-copy').disabled = true");
+        let disabled = response_probe(&page, &[".answer"], false);
+        assert!(
+            !disabled.post_answer_affordance,
+            "disabled current Copy must not borrow an enabled old Copy"
+        );
+    }
+
+    #[tokio::test]
+    async fn message_list_cannot_borrow_previous_reply_copy_control() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <div data-testid="message-list">
+                <div class="answer">previous complete reply</div>
+                <button aria-label="Copy">Copy old answer</button>
+                <div class="answer">current partial reply</div>
+            </div>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        let probe = response_probe(&page, &[".answer"], false);
+        assert_eq!(probe.text.as_deref(), Some("current partial reply"));
+        assert!(
+            !probe.post_answer_affordance,
+            "message-list is a conversation wrapper, not a reply turn"
+        );
+    }
+
+    #[tokio::test]
+    async fn conversation_article_with_two_reply_roots_cannot_claim_done() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body><article>
+            <div class="answer">previous complete reply</div>
+            <button aria-label="Copy">Copy old answer</button>
+            <div class="answer">current partial reply</div>
+        </article></body></html>"#;
+        let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        let probe = response_probe(&page, &[".answer"], false);
+        assert_eq!(probe.count, 2);
+        assert!(
+            !probe.post_answer_affordance,
+            "conversation-wide article must not borrow old Copy"
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_assistant_turn_owns_its_completion_control() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body><div data-testid="message-list">
+            <div data-testid="assistant-message-previous">
+                <div class="answer">previous complete reply</div>
+                <button aria-label="Copy">Copy old answer</button>
+            </div>
+            <div data-testid="assistant-message-current">
+                <div class="answer">current partial reply</div>
+                <button id="current-copy" aria-label="Copy" hidden>Copy</button>
+            </div>
+        </div></body></html>"#;
+        let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        let partial = response_probe(&page, &[".answer"], false);
+        assert!(
+            !partial.post_answer_affordance,
+            "the previous turn's Copy cannot finish the current turn"
+        );
+        page.evaluate("document.querySelector('#current-copy').hidden = false");
+        let finished = response_probe(&page, &[".answer"], false);
+        assert!(
+            finished.post_answer_affordance,
+            "the current explicit assistant turn may own its Copy control"
+        );
+    }
+
+    #[tokio::test]
+    async fn in_answer_copy_code_and_unrelated_retry_do_not_finish_reply() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <article data-message-author-role="assistant">
+              <div class="answer">still generating a code example</div>
+              <button id="code-copy" aria-label="Copy code">Copy</button>
+              <button id="copyright">Copyright notice</button>
+              <button id="upload-retry">Retry upload</button>
+              <button id="reply-copy" aria-label="Copy" hidden>Copy</button>
+            </article>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        let partial = response_probe(&page, &[".answer"], false);
+        assert!(
+            !partial.post_answer_affordance,
+            "Copy code, copyright and upload retry are not reply completion"
+        );
+        page.evaluate("document.querySelector('#reply-copy').hidden = false");
+        let done = response_probe(&page, &[".answer"], false);
+        assert!(
+            done.post_answer_affordance,
+            "exact current-turn Copy remains supported"
+        );
+        page.evaluate("document.querySelector('#reply-copy').disabled = true");
+        let disabled = response_probe(&page, &[".answer"], false);
+        assert!(
+            !disabled.post_answer_affordance,
+            "disabled Copy cannot certify generation completion"
+        );
+    }
+
+    #[tokio::test]
+    async fn reply_level_testid_is_distinct_from_code_copy_metadata() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <article><div class="answer">partial response</div>
+              <button id="code" data-testid="copy-code-button">Copy code</button>
+              <button id="reply" data-testid="copy-response-button" hidden></button>
+            </article>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        assert!(!response_probe(&page, &[".answer"], false).post_answer_affordance);
+        page.evaluate("document.querySelector('#reply').hidden = false");
+        assert!(
+            response_probe(&page, &[".answer"], false).post_answer_affordance,
+            "a narrowly named response-level test id remains usable"
+        );
+        page.evaluate("document.querySelector('#reply').setAttribute('aria-label','Copy code')");
+        assert!(
+            !response_probe(&page, &[".answer"], false).post_answer_affordance,
+            "contradictory Copy code aria label must fail closed even with response testid"
+        );
+    }
+
+    #[tokio::test]
+    async fn copy_buttons_in_semantic_code_blocks_do_not_finish_reply() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <article data-message-author-role="assistant">
+              <div class="answer">generating code output</div>
+              <pre><button id="code-copy" aria-label="Copy">Copy</button>
+                <code><span role="button" aria-label="Copy">Copy</span></code>
+              </pre>
+              <button id="code-action" data-testid="copy-code-button" aria-label="Copy">Copy</button>
+              <button id="reply-action" aria-label="Copy" hidden>Copy</button>
+            </article>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        assert!(
+            !response_probe(&page, &[".answer"], false).post_answer_affordance,
+            "code-descendant and code-copy testid controls cannot complete reply"
+        );
+        page.evaluate("document.querySelector('#reply-action').hidden = false");
+        assert!(
+            response_probe(&page, &[".answer"], false).post_answer_affordance,
+            "exact reply-level Copy outside semantic code block still works"
+        );
+        page.evaluate("document.querySelector('#reply-action').disabled = true");
+        assert!(
+            !response_probe(&page, &[".answer"], false).post_answer_affordance,
+            "disabled reply Copy must not borrow an adjacent code Copy"
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_turn_root_fails_closed_for_post_answer_affordance() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body><section>
+            <div class="answer">incomplete response without known turn root</div>
+            <button aria-label="Copy">Copy older message</button>
+        </section></body></html>"#;
+        let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        let probe = response_probe(&page, &[".answer"], false);
+        assert!(
+            !probe.post_answer_affordance,
+            "a generic parent container cannot prove completion"
+        );
+    }
+
+    #[tokio::test]
     async fn visible_empty_trailing_response_does_not_hide_last_populated_reply() {
         let browser = obscura_core::Browser::builder()
             .stealth(false)
@@ -430,6 +1109,10 @@ mod streaming_visibility_regression_tests {
         let previous = response_probe(&page, &[".answer"], false);
         assert_eq!(previous.text.as_deref(), Some("previous reply"));
         assert_eq!(
+            previous.populated_count, 1,
+            "blank placeholder must not count as a populated response root"
+        );
+        assert_eq!(
             previous.count, 2,
             "visible placeholders still count as nodes"
         );
@@ -437,6 +1120,7 @@ mod streaming_visibility_regression_tests {
         page.evaluate("document.querySelector('#placeholder').textContent = 'new reply'");
         let new_reply = response_probe(&page, &[".answer"], false);
         assert_eq!(new_reply.text.as_deref(), Some("new reply"));
+        assert_eq!(new_reply.populated_count, 2);
 
         page.evaluate("document.querySelectorAll('.answer')[0].textContent = '  '");
         page.evaluate("document.querySelector('#placeholder').textContent = '  '");
@@ -445,6 +1129,36 @@ mod streaming_visibility_regression_tests {
             blank.text, None,
             "whitespace cannot masquerade as generated text"
         );
+    }
+
+    #[tokio::test]
+    async fn populated_fallback_selector_cannot_certify_old_primary_text() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <article><div class="answer">prior answer</div></article>
+            <article><div class="fallback">another selector answer</div></article>
+            <article><div class="answer" id="fresh" hidden>new current reply</div></article>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+
+        let probe = response_probe(&page, &[".answer", ".fallback"], false);
+        assert_eq!(probe.text.as_deref(), Some("prior answer"));
+        assert_eq!(probe.count, 2);
+        assert_eq!(
+            probe.populated_count, 1,
+            "the lower-priority fallback may not reset the old reply tracker"
+        );
+        page.evaluate("document.querySelector('#fresh').hidden = false");
+        let next = response_probe(&page, &[".answer", ".fallback"], false);
+        assert_eq!(next.text.as_deref(), Some("new current reply"));
+        assert_eq!(next.populated_count, 2);
     }
 
     #[tokio::test]
@@ -504,8 +1218,13 @@ fn click_text_selector(page: &Page, selector: &str) -> anyhow::Result<bool> {
     };
     let tag = serde_json::to_string(tag)?;
     let needle = serde_json::to_string(needle)?;
+    // Text selector clicks are used for model pickers. An old, transparent
+    // or pointer-inert clone is not an actionable picker, even if it has a
+    // layout box and matching label text.
+    let nontransparent = nontransparent_ancestors_expression("el");
+    let pointer_enabled = pointer_enabled_ancestors_expression("el");
     let clicked = page.evaluate(&format!(
-        "(() => {{ const el = Array.from(document.querySelectorAll({tag})).find(el => {{ try {{ return ((el.innerText || el.textContent || '').trim()).includes({needle}) && el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden' && !el.disabled && !el.matches(':disabled') && !el.closest('[hidden], [inert], [aria-hidden=\"true\"], [aria-disabled=\"true\"], fieldset[disabled]'); }} catch (_) {{ return false; }} }}); if (!el) return false; el.click(); return true; }})()"
+        "(() => {{ const el = Array.from(document.querySelectorAll({tag})).find(el => {{ try {{ return ((el.innerText || el.textContent || '').trim()).includes({needle}) && el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden' && {pointer_enabled} && {nontransparent} && !el.disabled && !el.matches(':disabled') && !el.readOnly && !el.closest('[hidden], [inert], [aria-hidden=\"true\"], [aria-disabled=\"true\"], [aria-readonly=\"true\"], fieldset[disabled]'); }} catch (_) {{ return false; }} }}); if (!el) return false; el.click(); return true; }})()"
     ));
     Ok(clicked.as_bool() == Some(true))
 }
@@ -532,6 +1251,29 @@ fn editable_composer_condition(element: &str) -> String {
     )
 }
 
+/// An editor may have a box and pointer events yet be invisible because an
+/// ancestor is entirely transparent. Opacity does not inherit, so inspect
+/// the whole parent chain. Translucent (nonzero) editors stay actionable.
+fn nontransparent_ancestors_expression(element: &str) -> String {
+    // Use a local name distinct from common callers' `node` argument.
+    // `let node = node` is a JavaScript temporal-dead-zone self-reference,
+    // which makes every visibility probe fail closed even for visible roots.
+    format!(
+        "(() => {{ for (let opacityAncestor = {element}; opacityAncestor; opacityAncestor = opacityAncestor.parentElement) {{ if (Number(window.getComputedStyle(opacityAncestor).opacity) === 0) return false; }} return true; }})()"
+    )
+}
+
+/// A programmatic click bypasses CSS pointer-event hit-testing. Reject a
+/// stale Send control under any CSS pointer-inert ancestor, even when the
+/// button itself overrides the inherited style to pointer-events:auto.
+/// Keep the JS loop-local distinct from callers' button/input names.
+fn pointer_enabled_ancestors_expression(element: &str) -> String {
+    let metaai_editor = include_str!("metaai_composer_pointer.js").replace("__ELEMENT__", element);
+    format!(
+        "(() => {{ for (let pointerAncestor = {element}; pointerAncestor; pointerAncestor = pointerAncestor.parentElement) {{ if (window.getComputedStyle(pointerAncestor).pointerEvents === 'none') return {metaai_editor}; }} return true; }})()"
+    )
+}
+
 /// A DOM match alone is not a usable chat composer. Login/status probes
 /// must ignore hidden, disabled and read-only inputs left in SPA shells.
 /// This reports UI readiness only, never proof of account authentication.
@@ -540,6 +1282,8 @@ pub fn visible_composer_exists(page: &Page, selectors: &[&str]) -> bool {
         return false;
     };
     let editable = editable_composer_condition("input");
+    let nontransparent = nontransparent_ancestors_expression("input");
+    let pointer_enabled = pointer_enabled_ancestors_expression("input");
     let script = format!(
         r#"(() => {{
             for (const selector of {selectors}) {{
@@ -548,6 +1292,8 @@ pub fn visible_composer_exists(page: &Page, selectors: &[&str]) -> bool {
                         if ({editable} &&
                             input.getClientRects().length > 0 &&
                             window.getComputedStyle(input).visibility !== "hidden" &&
+                            {pointer_enabled} &&
+                            {nontransparent} &&
                             !input.closest('[hidden], [inert], [aria-hidden="true"], [aria-disabled="true"], [aria-readonly="true"]') &&
                             !input.disabled && !input.matches(':disabled') &&
                             !input.closest('fieldset[disabled]') && !input.readOnly &&
@@ -567,9 +1313,151 @@ pub fn visible_composer_exists(page: &Page, selectors: &[&str]) -> bool {
 /// both a hidden sizing placeholder and the actual visible composer.
 fn visible_input_query(selector_js: &str) -> String {
     let editable = editable_composer_condition("el");
+    let nontransparent = nontransparent_ancestors_expression("el");
+    let pointer_enabled = pointer_enabled_ancestors_expression("el");
     format!(
-        "Array.from(document.querySelectorAll({selector_js})).find(el => {editable} && el.getClientRects().length > 0 && window.getComputedStyle(el).visibility !== 'hidden' && !el.closest('[hidden], [inert], [aria-hidden=\"true\"], [aria-disabled=\"true\"], [aria-readonly=\"true\"]') && !el.disabled && !el.matches(':disabled') && !el.closest('fieldset[disabled]') && !el.readOnly && el.getAttribute('aria-disabled') !== 'true' && el.getAttribute('aria-readonly') !== 'true' && el.getAttribute('contenteditable') !== 'false')"
+        "Array.from(document.querySelectorAll({selector_js})).find(el => {editable} && el.getClientRects().length > 0 && window.getComputedStyle(el).visibility !== 'hidden' && {pointer_enabled} && {nontransparent} && !el.closest('[hidden], [inert], [aria-hidden=\"true\"], [aria-disabled=\"true\"], [aria-readonly=\"true\"]') && !el.disabled && !el.matches(':disabled') && !el.closest('fieldset[disabled]') && !el.readOnly && el.getAttribute('aria-disabled') !== 'true' && el.getAttribute('aria-readonly') !== 'true' && el.getAttribute('contenteditable') !== 'false')"
     )
+}
+
+/// Fail closed when multiple search, thread, or dialog editors are actionable.
+/// A single editor matching multiple configured selectors counts only once.
+fn actionable_composer_count_expression(selectors: &[&str]) -> anyhow::Result<String> {
+    let selectors = serde_json::to_string(selectors)?;
+    let editable = editable_composer_condition("el");
+    let nontransparent = nontransparent_ancestors_expression("el");
+    let pointer_enabled = pointer_enabled_ancestors_expression("el");
+    Ok(format!(
+        r#"(() => {{
+            const matches = new Set();
+            for (const selector of {selectors}) {{
+                try {{
+                    for (const el of document.querySelectorAll(selector)) {{
+                        if ({editable} &&
+                            el.getClientRects().length > 0 &&
+                            window.getComputedStyle(el).visibility !== 'hidden' &&
+                            {pointer_enabled} &&
+                            {nontransparent} &&
+                            !el.closest('[hidden], [inert], [aria-hidden="true"], [aria-disabled="true"], [aria-readonly="true"]') &&
+                            !el.disabled && !el.matches(':disabled') &&
+                            !el.closest('fieldset[disabled]') &&
+                            !el.readOnly && el.getAttribute('aria-disabled') !== 'true' &&
+                            el.getAttribute('aria-readonly') !== 'true' &&
+                            el.getAttribute('contenteditable') !== 'false') {{
+                            matches.add(el);
+                        }}
+                    }}
+                }} catch (_) {{}}
+            }}
+            return matches.size;
+        }})()"#
+    ))
+}
+
+fn require_unique_actionable_composer(page: &Page, selectors: &[&str]) -> anyhow::Result<()> {
+    let expr = actionable_composer_count_expression(selectors)?;
+    if page.evaluate(&expr).as_f64() == Some(1.0) {
+        Ok(())
+    } else {
+        anyhow::bail!("provider actionable composer ambiguous or unavailable")
+    }
+}
+
+#[cfg(test)]
+mod pointer_inert_composer_ancestors_tests {
+    use super::{actionable_composer_count_expression, human_type, visible_composer_exists};
+
+    #[tokio::test]
+    async fn css_pointer_inert_ancestor_never_becomes_actionable_input() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <section id="stale-panel" style="pointer-events:none">
+                <textarea id="ghost" style="pointer-events:auto"></textarea>
+            </section>
+            <form><textarea id="live"></textarea></form>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+
+        assert!(
+            !visible_composer_exists(&page, &["#ghost"]),
+            "an explicitly pointer-enabled ghost still has a blocked ancestor"
+        );
+        assert!(visible_composer_exists(&page, &["#ghost", "#live"]));
+        let count = actionable_composer_count_expression(&["#ghost", "textarea", "#live"]).unwrap();
+        assert_eq!(
+            page.evaluate(&count).as_f64(),
+            Some(1.0),
+            "a valid editor matched twice must count once; ghost excluded"
+        );
+        human_type(&page, &["#ghost", "#live"], "private fixture input")
+            .await
+            .unwrap();
+        assert_eq!(
+            page.evaluate("document.querySelector('#ghost').value")
+                .as_str(),
+            Some("")
+        );
+        assert_eq!(
+            page.evaluate("document.querySelector('#live').value")
+                .as_str(),
+            Some("private fixture input")
+        );
+
+        page.evaluate("document.querySelector('#live').hidden = true");
+        assert!(!visible_composer_exists(&page, &["#ghost", "#live"]));
+        assert!(
+            human_type(&page, &["#ghost"], "other private input")
+                .await
+                .is_err(),
+            "stale ancestor cannot become eligible just because valid editor disappears"
+        );
+        assert_eq!(
+            page.evaluate("document.querySelector('#ghost').value")
+                .as_str(),
+            Some("")
+        );
+        page.evaluate("document.querySelector('#stale-panel').style.pointerEvents = 'auto'");
+        assert!(visible_composer_exists(&page, &["#ghost"]));
+        assert_eq!(
+            page.evaluate(&actionable_composer_count_expression(&["#ghost"]).unwrap())
+                .as_f64(),
+            Some(1.0)
+        );
+    }
+}
+
+/// The pinned Obscura engine may attach a synthetic `value` property to a
+/// contenteditable node without mutating the visible DOM or its framework
+/// model. Only native input/textarea controls may prove draft retention by
+/// value. All other actionable contenteditables must prove *visible* text.
+/// This expression is reused at typing, Send, and submission snapshot time.
+fn composer_draft_expression(element: &str) -> String {
+    format!(
+        "({element}.tagName === 'TEXTAREA' || {element}.tagName === 'INPUT' ? {element}.value : ({element}.innerText ?? {element}.textContent ?? ''))"
+    )
+}
+
+/// Preserve visible Meta AI text-node whitespace through paste verification.
+/// Read-only: hidden text and separate block paragraphs cannot authorize a send.
+pub(crate) fn metaai_composer_retains_prompt(
+    page: &Page,
+    selector: &str,
+    prompt: &str,
+) -> anyhow::Result<bool> {
+    let el = visible_input_query(&serde_json::to_string(selector)?);
+    let expected = serde_json::to_string(prompt)?;
+    let reader = include_str!("metaai_composer_text.js");
+    let retained = page.evaluate(&format!(
+        "(() => {{ const editor = {el}; const value = ({reader})(editor); return value !== null && value === {expected}; }})()"
+    ));
+    Ok(retained.as_bool() == Some(true))
 }
 
 /// Re-read the actionable composer after framework renders, not just after
@@ -582,9 +1470,10 @@ pub(crate) fn composer_retains_prompt(
     let selector_js = serde_json::to_string(selector)?;
     let el_js = visible_input_query(&selector_js);
     let prompt_js = serde_json::to_string(prompt)?;
+    let draft = composer_draft_expression("el");
     Ok(page
         .evaluate(&format!(
-            "(() => {{ const el = {el_js}; if (!el) return false; return (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') ? el.value === {prompt_js} : (el.innerText === {prompt_js} || el.textContent === {prompt_js}); }})()"
+            "(() => {{ const el = {el_js}; if (!el) return false; const value = {draft}; return value === {prompt_js}; }})()"
         ))
         .as_bool()
         == Some(true))
@@ -593,6 +1482,158 @@ pub(crate) fn composer_retains_prompt(
 #[cfg(test)]
 mod visible_composer_tests {
     use super::{click_send_or_enter, visible_composer_exists};
+
+    #[tokio::test]
+    async fn perplexity_ambiguous_visible_editors_fail_closed_and_overrides_deduplicate() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <textarea id="thread" class="candidate"></textarea>
+            <textarea id="search" class="candidate"></textarea>
+            <textarea id="hidden" class="candidate" hidden></textarea>
+            <textarea id="readonly" class="candidate" readonly></textarea>
+            <input type="email" class="candidate">
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        let inputs = &["textarea.candidate", "#thread", ".candidate"];
+        assert!(super::require_unique_actionable_composer(&page, inputs).is_err());
+        page.evaluate("document.querySelector('#search').setAttribute('hidden', '')");
+        assert!(super::require_unique_actionable_composer(&page, inputs).is_ok());
+        page.evaluate("document.querySelector('#thread').setAttribute('disabled', '')");
+        assert!(super::require_unique_actionable_composer(&page, inputs).is_err());
+        page.evaluate("document.querySelector('#thread').removeAttribute('disabled')");
+        page.evaluate("document.querySelector('#search').removeAttribute('hidden')");
+        assert!(super::require_unique_actionable_composer(&page, &["#thread"]).is_ok());
+        assert!(super::require_unique_actionable_composer(&page, &["#search", "#thread"]).is_err());
+    }
+
+    #[tokio::test]
+    async fn zero_opacity_composer_and_ancestor_clones_are_not_actionable() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><head><style>
+            .transparent { opacity: 0; }
+            .translucent { opacity: 0.5; }
+            </style></head><body>
+            <section id="ghost-root" class="transparent">
+                <textarea id="ghost-text"></textarea>
+                <div id="ghost-rich" contenteditable="true" role="textbox">Old ghost</div>
+            </section>
+            <textarea id="self-ghost" style="opacity:0"></textarea>
+            <section class="translucent"><textarea id="active"></textarea></section>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+
+        assert!(!visible_composer_exists(
+            &page,
+            &["#ghost-text", "#ghost-rich", "#self-ghost"]
+        ));
+        assert!(visible_composer_exists(&page, &["#active"]));
+        assert!(
+            super::require_unique_actionable_composer(
+                &page,
+                &["#ghost-text", "#ghost-rich", "#self-ghost", "#active"]
+            )
+            .is_ok(),
+            "fully transparent editors may not count as actionable"
+        );
+        let error = super::human_type(&page, &["#ghost-text"], "sensitive prompt")
+            .await
+            .expect_err("a transparent editor must not accept synthetic typing");
+        assert!(!error.to_string().contains("sensitive prompt"));
+        assert_eq!(
+            page.evaluate("document.querySelector('#ghost-text').value")
+                .as_str(),
+            Some("")
+        );
+        assert!(super::human_type(&page, &["#active"], "visible draft")
+            .await
+            .is_ok());
+        assert_eq!(
+            page.evaluate("document.querySelector('#active').value")
+                .as_str(),
+            Some("visible draft")
+        );
+
+        page.evaluate("document.querySelector('#ghost-root').className = 'translucent'");
+        assert!(visible_composer_exists(&page, &["#ghost-text"]));
+        assert!(visible_composer_exists(&page, &["#ghost-rich"]));
+        assert!(
+            super::require_unique_actionable_composer(&page, &["#ghost-text", "#active"]).is_err(),
+            "two nontransparent editors must fail closed as ambiguous"
+        );
+    }
+
+    #[tokio::test]
+    async fn pointer_events_disabled_composers_are_not_ready_or_synthetic_type_targets() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <section id="locked-root" style="pointer-events:none">
+                <textarea id="locked"></textarea>
+                <div id="rich" contenteditable="true" role="textbox">Old draft</div>
+            </section>
+            <textarea id="active"></textarea>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+
+        assert!(!visible_composer_exists(&page, &["#locked", "#rich"]));
+        assert!(visible_composer_exists(&page, &["#locked", "#active"]));
+        assert!(
+            super::require_unique_actionable_composer(&page, &["#locked", "#rich", "#active"])
+                .is_ok(),
+            "a pointer-disabled clone must not count as a second actionable editor"
+        );
+
+        let error = super::human_type(&page, &["#locked"], "private draft")
+            .await
+            .expect_err("pointer-disabled editor must not be selected for typing");
+        assert!(!error.to_string().contains("private draft"));
+        assert_eq!(
+            page.evaluate("document.querySelector('#locked').value")
+                .as_str(),
+            Some("")
+        );
+        assert!(super::human_type(&page, &["#active"], "allowed draft")
+            .await
+            .is_ok());
+        assert_eq!(
+            page.evaluate("document.querySelector('#active').value")
+                .as_str(),
+            Some("allowed draft")
+        );
+
+        page.evaluate("document.querySelector('#locked-root').style.pointerEvents = 'auto'");
+        assert!(visible_composer_exists(&page, &["#locked"]));
+        assert!(visible_composer_exists(&page, &["#rich"]));
+        assert!(
+            super::require_unique_actionable_composer(&page, &["#locked", "#active"]).is_err(),
+            "two currently clickable composers must still fail closed as ambiguous"
+        );
+        page.evaluate("document.querySelector('#locked').disabled = true");
+        assert!(
+            super::require_unique_actionable_composer(&page, &["#locked", "#active"]).is_ok(),
+            "only a genuinely actionable editor remains"
+        );
+    }
 
     #[tokio::test]
     async fn hidden_disabled_and_readonly_composers_are_not_reported_ready() {
@@ -783,6 +1824,7 @@ mod response_probe_tests {
             ResponseProbe {
                 text: Some("answer".to_string()),
                 count: 4,
+                populated_count: 0,
                 streaming: true,
                 post_answer_affordance: true,
                 url: "https://provider.example/challenge".to_owned(),
@@ -800,6 +1842,14 @@ mod response_probe_tests {
             3
         );
         assert_eq!(
+            decode_response_probe(serde_json::json!({"populatedCount": 2.0})).populated_count,
+            2
+        );
+        assert_eq!(
+            decode_response_probe(serde_json::json!({"populatedCount": -1})).populated_count,
+            0
+        );
+        assert_eq!(
             decode_response_probe(serde_json::json!({"count": 2.5})).count,
             0
         );
@@ -814,9 +1864,28 @@ mod response_probe_tests {
 /// interval. settle is a maximum budget and may return immediately when idle;
 /// counting those fast returns as elapsed ticks would truncate responses.
 pub async fn drive_page(page: &mut Page, duration: Duration) {
+    drive_page_timed(
+        page,
+        duration,
+        TimingStep::BrowserSettle,
+        TimingStep::BrowserSleep,
+    )
+    .await;
+}
+
+pub(crate) async fn drive_page_timed(
+    page: &mut Page,
+    duration: Duration,
+    settle: TimingStep,
+    sleep: TimingStep,
+) {
     let deadline = tokio::time::Instant::now() + duration;
-    page.settle(duration.as_millis().max(1).min(u64::MAX as u128) as u64)
-        .await;
+    {
+        let _timer = StepTimer::start(settle);
+        page.settle(duration.as_millis().max(1).min(u64::MAX as u128) as u64)
+            .await;
+    }
+    let _timer = StepTimer::start(sleep);
     tokio::time::sleep_until(deadline).await;
 }
 
@@ -828,28 +1897,210 @@ pub async fn wait_for_selector(
 ) -> anyhow::Result<()> {
     let start = std::time::Instant::now();
     while start.elapsed().as_millis() < timeout_ms as u128 {
-        if visible_composer_exists(page, selectors) {
+        let ready = {
+            let _timer = StepTimer::start(TimingStep::ComposerProbe);
+            visible_composer_exists(page, selectors)
+        };
+        if ready {
             return Ok(());
         }
-        drive_page(page, Duration::from_millis(150)).await;
+        drive_page_timed(
+            page,
+            Duration::from_millis(150),
+            TimingStep::ComposerSettle,
+            TimingStep::ComposerSleep,
+        )
+        .await;
     }
     anyhow::bail!("timeout waiting for actionable provider composer")
 }
 
-/// Click the first matching element (obscura Element::click is
-/// synchronous, scrolls into view first, and focuses the element).
+/// Click the first actionable configured model-picker control. Resolve,
+/// validate and click CSS selectors in one browser evaluation so a SPA
+/// transition cannot invalidate a prior Rust-side actionability check.
+/// Text selectors already use a single-evaluation click.
 pub fn click_first(page: &Page, selectors: &[&str]) -> anyhow::Result<()> {
     for sel in selectors {
         if text_selector_parts(sel).is_some() {
             if click_text_selector(page, sel)? {
                 return Ok(());
             }
-        } else if let Some(el) = page.query_selector(sel) {
-            el.click()?;
-            return Ok(());
+        } else {
+            let selector_js = serde_json::to_string(sel)?;
+            let nontransparent = nontransparent_ancestors_expression("el");
+            let pointer_enabled = pointer_enabled_ancestors_expression("el");
+            let clicked = page.evaluate(&format!(
+                r#"(() => {{
+                    try {{
+                        const el = document.querySelector({selector_js});
+                        if (!el) return false;
+                        const actionable = () =>
+                            document.querySelector({selector_js}) === el &&
+                            el.getClientRects().length > 0 &&
+                            window.getComputedStyle(el).visibility !== 'hidden' &&
+                            {pointer_enabled} &&
+                            {nontransparent} &&
+                            !el.closest('[hidden], [inert], [aria-hidden="true"], [aria-disabled="true"], [aria-readonly="true"], fieldset[disabled]') &&
+                            !el.disabled && !el.matches(':disabled') &&
+                            !el.readOnly &&
+                            el.getAttribute('aria-disabled') !== 'true' &&
+                            el.getAttribute('aria-readonly') !== 'true';
+                        if (!actionable()) return false;
+                        // Preserve native-click's scroll/focus preparation where
+                        // the embedded DOM supports it. Either may synchronously
+                        // rerender or disable the control, so recheck its identity
+                        // and entire ancestor chain after each operation.
+                        if (typeof el.scrollIntoView === 'function') {{
+                            try {{ el.scrollIntoView({{ block: 'center', inline: 'nearest' }}); }}
+                            catch (_) {{ /* optional scroll unsupported in embedded DOM */ }}
+                        }}
+                        if (!actionable()) return false;
+                        if (typeof el.focus === 'function') el.focus();
+                        if (!actionable()) return false;
+                        el.click();
+                        return true;
+                    }} catch (_) {{ return false; }}
+                }})()"#
+            ));
+            if clicked.as_bool() == Some(true) {
+                return Ok(());
+            }
         }
     }
     anyhow::bail!("none of selectors matched: {:?}", selectors)
+}
+
+#[cfg(test)]
+mod picker_pointer_inert_ancestor_tests {
+    use super::{click_first, click_text_selector};
+
+    #[tokio::test]
+    async fn css_pointer_inert_model_picker_clone_never_receives_a_click() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <section id="old-panel" style="pointer-events:none">
+                <button id="ghost" style="pointer-events:auto"
+                    onclick="window.ghostClicks=(window.ghostClicks||0)+1">Sonar</button>
+            </section>
+            <button id="real"
+                onclick="window.realClicks=(window.realClicks||0)+1">Sonar</button>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+
+        assert!(click_text_selector(&page, "text:button=Sonar").unwrap());
+        assert_eq!(page.evaluate("window.ghostClicks || 0").as_f64(), Some(0.0));
+        assert_eq!(page.evaluate("window.realClicks || 0").as_f64(), Some(1.0));
+
+        click_first(&page, &["#ghost", "#real"]).unwrap();
+        assert_eq!(page.evaluate("window.ghostClicks || 0").as_f64(), Some(0.0));
+        assert_eq!(page.evaluate("window.realClicks || 0").as_f64(), Some(2.0));
+
+        page.evaluate("document.querySelector('#real').hidden = true");
+        assert!(!click_text_selector(&page, "text:button=Sonar").unwrap());
+        assert!(click_first(&page, &["#ghost", "#real"]).is_err());
+        assert_eq!(page.evaluate("window.ghostClicks || 0").as_f64(), Some(0.0));
+
+        page.evaluate("document.querySelector('#old-panel').style.pointerEvents = 'auto'");
+        assert!(click_text_selector(&page, "text:button=Sonar").unwrap());
+        assert_eq!(page.evaluate("window.ghostClicks || 0").as_f64(), Some(1.0));
+    }
+    #[tokio::test]
+    async fn text_picker_skips_readonly_clones_and_never_clicks_blocked_only() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <button id="self-readonly" aria-readonly="true"
+                onclick="window.selfClicks=(window.selfClicks||0)+1">Model Next</button>
+            <section aria-readonly="true">
+                <button id="ancestor-readonly"
+                    onclick="window.ancestorClicks=(window.ancestorClicks||0)+1">Model Next</button>
+            </section>
+            <button id="live" onclick="window.liveClicks=(window.liveClicks||0)+1">Model Next</button>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+
+        assert!(click_text_selector(&page, "text:button=Model Next").unwrap());
+        assert_eq!(page.evaluate("window.selfClicks || 0").as_f64(), Some(0.0));
+        assert_eq!(
+            page.evaluate("window.ancestorClicks || 0").as_f64(),
+            Some(0.0)
+        );
+        assert_eq!(page.evaluate("window.liveClicks || 0").as_f64(), Some(1.0));
+
+        page.evaluate("document.querySelector('#live').setAttribute('aria-readonly', 'true')");
+        assert!(!click_text_selector(&page, "text:button=Model Next").unwrap());
+        assert_eq!(page.evaluate("window.liveClicks || 0").as_f64(), Some(1.0));
+    }
+
+    #[tokio::test]
+    async fn css_picker_rechecks_synchronous_focus_invalidation_and_rerender() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <section id="disabled-after-focus">
+                <button id="poison" onfocus="this.parentElement.style.pointerEvents='none'"
+                    onclick="window.poisonClicks=(window.poisonClicks||0)+1">Old</button>
+            </section>
+            <button id="replaced" onfocus="this.setAttribute('id','retired');var successor=document.createElement('button');successor.setAttribute('id','replaced');successor.textContent='New';this.parentElement.insertBefore(successor,this)"
+                onclick="window.replacedClicks=(window.replacedClicks||0)+1">Old</button>
+            <button id="valid" onclick="window.validClicks=(window.validClicks||0)+1">Valid</button>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+
+        // A focus handler can disable the entire ancestor after the first
+        // check but before click. No stale programmatic click is permitted.
+        click_first(&page, &["#poison", "#valid"]).unwrap();
+        assert_eq!(
+            page.evaluate("window.poisonClicks || 0").as_f64(),
+            Some(0.0)
+        );
+        assert_eq!(page.evaluate("window.validClicks || 0").as_f64(), Some(1.0));
+
+        // Replacement during focus must not click either the detached node
+        // or its newly inserted (not previously validated) same-ID successor.
+        click_first(&page, &["#replaced", "#valid"]).unwrap();
+        assert_eq!(
+            page.evaluate("window.replacedClicks || 0").as_f64(),
+            Some(0.0)
+        );
+        assert_eq!(page.evaluate("window.validClicks || 0").as_f64(), Some(2.0));
+        assert_eq!(
+            page.evaluate("document.querySelector('#retired') !== null")
+                .as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            page.evaluate("document.querySelector('#replaced').textContent === 'New'")
+                .as_bool(),
+            Some(true)
+        );
+
+        page.evaluate("document.querySelector('#valid').hidden = true");
+        assert!(click_first(&page, &["#poison", "#valid"]).is_err());
+        assert_eq!(
+            page.evaluate("window.poisonClicks || 0").as_f64(),
+            Some(0.0)
+        );
+    }
 }
 
 /// Focus the first matching input and type into it. Obscura has no
@@ -861,8 +2112,103 @@ pub fn click_first(page: &Page, selectors: &[&str]) -> anyhow::Result<()> {
 /// Go's `inputType: 'insertText'` + `data` fields (free, and
 /// framework-observable), and plain TEXTAREA or INPUT composers use the
 /// native value setter branch instead of execCommand. Everything else
-/// keeps merged's path (selectAll clear + execCommand insertText).
+/// uses editor-scoped Range selection + execCommand insertText. That dispatch
+/// does NOT establish valid visible draft retention by itself.
 pub async fn human_type(page: &Page, selectors: &[&str], text: &str) -> anyhow::Result<()> {
+    human_type_with_provider(page, selectors, text, None).await
+}
+
+pub(crate) async fn submit_metaai_focused(page: &mut Page, prompt: &str) -> anyhow::Result<()> {
+    let expected = serde_json::to_string(prompt)?;
+    let read = include_str!("metaai_user_turn.js")
+        .replace("__COMPOSER_TEXT__", include_str!("metaai_composer_text.js"))
+        .replace("__PROMPT__", &expected);
+    let dispatch_timer = StepTimer::start(TimingStep::SendDispatch);
+    let before = page.evaluate(&read)["count"].as_f64().unwrap_or(0.0);
+    let send = include_str!("metaai_keyboard_send.js")
+        .replace("__COMPOSER_TEXT__", include_str!("metaai_composer_text.js"))
+        .replace("__PROMPT__", &expected);
+    let status = page.evaluate(&send);
+    if status.as_str() != Some("dispatched") {
+        anyhow::bail!("Meta AI send unavailable, disabled, ambiguous or draft changed");
+    }
+    drop(dispatch_timer);
+    let _ack_timer = StepTimer::start(TimingStep::SubmissionAck);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        drive_page_timed(
+            page,
+            Duration::from_millis(100),
+            TimingStep::AckSettle,
+            TimingStep::AckSleep,
+        )
+        .await;
+        let _probe_timer = StepTimer::start(TimingStep::AckProbe);
+        require_page_provider_origin("metaai", page)?;
+        let after = page.evaluate(&read);
+        if after["valid"] == true
+            && after["draft_empty"] == true
+            && after["count"].as_f64().unwrap_or(0.0) > before
+        {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(anyhow::Error::new(ProviderSubmissionUnacknowledgedError));
+        }
+    }
+}
+
+pub(crate) async fn type_provider_prompt(
+    page: &mut Page,
+    selectors: &[&str],
+    text: &str,
+    provider: Option<&str>,
+) -> anyhow::Result<()> {
+    if provider == Some("metaai") {
+        let paste_timer = StepTimer::start(TimingStep::PasteDispatch);
+        let selector = selectors
+            .iter()
+            .copied()
+            .find(|selector| visible_composer_exists(page, &[*selector]))
+            .ok_or_else(|| anyhow::anyhow!("actionable provider composer unavailable"))?;
+        let script = include_str!("metaai_paste.js")
+            .replace("__SELECTOR__", &serde_json::to_string(selector)?)
+            .replace("__PROMPT__", &serde_json::to_string(text)?);
+        if page.evaluate(&script).as_bool() != Some(true) {
+            return Err(anyhow::Error::new(ProviderComposerInputRejectedError));
+        }
+        drop(paste_timer);
+        let _retention_timer = StepTimer::start(TimingStep::InputRetention);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            drive_page_timed(
+                page,
+                Duration::from_millis(50),
+                TimingStep::RetentionSettle,
+                TimingStep::RetentionSleep,
+            )
+            .await;
+            let retained = {
+                let _timer = StepTimer::start(TimingStep::RetentionProbe);
+                metaai_composer_retains_prompt(page, selector, text)?
+            };
+            if retained {
+                return Ok(());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(anyhow::Error::new(ProviderComposerInputRejectedError));
+            }
+        }
+    }
+    human_type_with_provider(page, selectors, text, provider).await
+}
+
+pub(crate) async fn human_type_with_provider(
+    page: &Page,
+    selectors: &[&str],
+    text: &str,
+    expected_provider: Option<&str>,
+) -> anyhow::Result<()> {
     let selector = selectors
         .iter()
         .copied()
@@ -870,6 +2216,10 @@ pub async fn human_type(page: &Page, selectors: &[&str], text: &str) -> anyhow::
         .ok_or_else(|| anyhow::anyhow!("actionable provider composer disappeared before typing"))?;
     let selector_js = serde_json::to_string(selector)?;
     let el_js = visible_input_query(&selector_js);
+    // An unsupported scoped contenteditable edit must fail closed. Setting
+    // synthetic .value or raw textContent may look correct while bypassing
+    // framework/ProseMirror state; do not dispatch input/change on that path.
+    // The DOM Range is confined to the selected editor, not the entire page.
     // Preserve Obscura's native click for ordinary single inputs. When the
     // first matching node is hidden, avoid clicking that stale placeholder;
     // the JS input path below focuses the visible match instead.
@@ -881,36 +2231,191 @@ pub async fn human_type(page: &Page, selectors: &[&str], text: &str) -> anyhow::
     }
     tokio::time::sleep(Duration::from_millis(80)).await;
     let text_js = serde_json::to_string(text)?;
+    let route_guard = provider_origin_guard_js(expected_provider)?;
+    let composer_guard = if matches!(expected_provider, Some("perplexity" | "manus")) {
+        let count = actionable_composer_count_expression(selectors)?;
+        format!("if ({count} !== 1) return 'ambiguous-composer';")
+    } else {
+        String::new()
+    };
+    // The previously successful first-party ChatGPT form uses a controlled
+    // ProseMirror paste handler. Its native paste acknowledgment is useful
+    // only if the exact rendered draft survives the existing verification.
+    // Never set a synthetic value or textContent for failed rich-text edits.
+    let chatgpt_paste_js = format!(
+        r#"if (el.matches('form[data-chatgpt-composer] div.ProseMirror[contenteditable="true"][role="textbox"]')) {{
+            try {{
+                const clipboard = {{
+                    types: ['text/plain'], files: [], items: [],
+                    getData(kind) {{ return kind === 'text/plain' || kind === 'Text' ? {text} : ''; }}
+                }};
+                const paste = new ClipboardEvent('paste', {{ bubbles: true, cancelable: true, composed: true }});
+                Object.defineProperty(paste, 'clipboardData', {{ value: clipboard }});
+                if (!el.dispatchEvent(paste)) return true;
+            }} catch (_) {{}}
+        }}"#,
+        text = text_js,
+    );
+    // Do not route framework-specific paste events through other adapters.
+    // Data-URL fixtures can exercise the helper without a provider origin.
+    let chatgpt_paste =
+        if expected_provider == Some("chatgpt") || (cfg!(test) && expected_provider.is_none()) {
+            chatgpt_paste_js
+        } else {
+            String::new()
+        };
     let js = format!(
-        "(function() {{ var el = {el_js}; if (!el) return false; el.focus(); if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {{ try {{ var prototype = el.tagName === 'INPUT' ? window.HTMLInputElement.prototype : window.HTMLTextAreaElement.prototype; var setter = Object.getOwnPropertyDescriptor(prototype, 'value').set; setter.call(el, {text}); }} catch (e) {{ el.value = {text}; }} el.dispatchEvent(new InputEvent('input', {{ bubbles: true, inputType: 'insertText', data: {text} }})); el.dispatchEvent(new Event('change', {{ bubbles: true }})); return true; }} try {{ document.execCommand('selectAll', false, null); }} catch (e) {{}} if (el.getAttribute('contenteditable') === 'true') {{ var paste = new ClipboardEvent('paste', {{bubbles:true, cancelable:true, composed:true}}); var clipboard = {{types:['text/plain'], files:[], items:[], getData:function(type) {{ return type === 'text/plain' || type === 'Text' ? {text} : ''; }}}}; Object.defineProperty(paste, 'clipboardData', {{value:clipboard}}); if (!el.dispatchEvent(paste)) return true; }} var ok = false; try {{ ok = document.execCommand('insertText', false, {text}); }} catch (e) {{}} if (!ok) {{ if ((el.tagName === 'INPUT' || el.tagName === 'TEXTAREA')) {{ el.value = {text}; }} else {{ el.textContent = {text}; }} }} el.dispatchEvent(new InputEvent('input', {{ bubbles: true, inputType: 'insertText', data: {text} }})); el.dispatchEvent(new Event('change', {{ bubbles: true }})); return true; }})()",
+        "(function() {{ {route_guard} {composer_guard} var el = {el_js}; if (!el) return false; el.focus(); if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {{ try {{ var prototype = el.tagName === 'INPUT' ? window.HTMLInputElement.prototype : window.HTMLTextAreaElement.prototype; var setter = Object.getOwnPropertyDescriptor(prototype, 'value').set; setter.call(el, {text}); }} catch (e) {{ el.value = {text}; }} el.dispatchEvent(new InputEvent('input', {{ bubbles: true, inputType: 'insertText', data: {text} }})); el.dispatchEvent(new Event('change', {{ bubbles: true }})); return true; }} var selection = window.getSelection(); if (!selection) return false; try {{ var range = document.createRange(); range.selectNodeContents(el); selection.removeAllRanges(); selection.addRange(range); }} catch (e) {{ return false; }} {chatgpt_paste} var ok = false; try {{ ok = document.execCommand('insertText', false, {text}); }} catch (e) {{}} if (!ok) return 'editor-unsupported'; el.dispatchEvent(new InputEvent('input', {{ bubbles: true, inputType: 'insertText', data: {text} }})); el.dispatchEvent(new Event('change', {{ bubbles: true }})); return true; }})()",
         text = text_js,
         el_js = el_js,
     );
-    if page.evaluate(&js).as_bool() != Some(true) {
+    let typed = page.evaluate(&js);
+    if typed.as_str() == Some("off-provider") {
+        anyhow::bail!("provider left its chat origin before typing");
+    }
+    if typed.as_str() == Some("ambiguous-composer") {
+        anyhow::bail!("provider actionable composer ambiguous or unavailable");
+    }
+    if typed.as_str() == Some("editor-unsupported") {
+        return Err(anyhow::Error::new(ProviderComposerInputRejectedError));
+    }
+    if typed.as_bool() != Some(true) {
         anyhow::bail!("typing into the provider input failed");
     }
     // Controlled editors may discard synthetic input on their next render.
     // A successful event dispatch alone is not evidence that the prompt stuck.
     tokio::time::sleep(Duration::from_millis(120)).await;
     if !composer_retains_prompt(page, selector, text)? {
-        let shape = page.evaluate(&format!(
-            "(() => {{ const el = {el_js}; if (!el) return null; const expected = {text_js}; const inner = el.innerText || ''; const content = el.textContent || ''; return {{ inner_matches: inner === expected, content_matches: content === expected, trailing_whitespace_only: inner.trimEnd() === expected.trimEnd() }}; }})()"
-        ));
-        tracing::warn!(
-            inner_matches = shape
-                .get("inner_matches")
-                .and_then(serde_json::Value::as_bool),
-            content_matches = shape
-                .get("content_matches")
-                .and_then(serde_json::Value::as_bool),
-            trailing_whitespace_only = shape
-                .get("trailing_whitespace_only")
-                .and_then(serde_json::Value::as_bool),
-            "provider draft representation mismatch"
-        );
         return Err(anyhow::Error::new(ProviderComposerInputRejectedError));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod scoped_contenteditable_selection_tests {
+    #[tokio::test]
+    async fn scoped_selection_never_overwrites_unrelated_editor_or_page_text() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <h1 id="outside-heading">Original heading</h1>
+            <div id="outside" contenteditable="true">Unrelated editor</div>
+            <div id="target" contenteditable="true"><p>Old draft</p></div>
+            <button id="send" type="button" onclick="window.sent=true">Send</button>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        page.evaluate("document.querySelector('#outside').focus()");
+        let error = super::human_type(&page, &["#target"], "scoped draft")
+            .await
+            .unwrap_err();
+        assert!(error
+            .downcast_ref::<super::ProviderComposerInputRejectedError>()
+            .is_some());
+        // The pinned Obscura contenteditable implementation can expose a
+        // synthetic retained value without updating visible nested markup.
+        // That provider-input correctness gap is tracked separately in #988.
+        // This atomic fixture verifies only that text selection never
+        // overwrites unrelated page content or dispatches a Send click.
+        assert_eq!(
+            page.evaluate("document.querySelector('#outside').textContent")
+                .as_str(),
+            Some("Unrelated editor")
+        );
+        assert_eq!(
+            page.evaluate("document.querySelector('#outside-heading').textContent")
+                .as_str(),
+            Some("Original heading")
+        );
+        assert_eq!(
+            page.evaluate("window.sent === true").as_bool(),
+            Some(false),
+            "typing must not submit the prompt or click a send button"
+        );
+    }
+
+    #[tokio::test]
+    async fn unsupported_rich_editor_never_mutates_raw_dom_or_synthetic_value() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <div id="target" contenteditable="true"><p>Original nested draft</p></div>
+            <button id="send" type="button" onclick="window.sent=true">Send</button>
+            <script>
+                const editor = document.querySelector('#target');
+                editor.value = 'original synthetic value';
+                window.editorInputs = 0;
+                window.editorChanges = 0;
+                editor.addEventListener('input', () => window.editorInputs++);
+                editor.addEventListener('change', () => window.editorChanges++);
+                document.execCommand = function() { return false; };
+            </script>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+
+        let error = super::human_type(&page, &["#target"], "secret multiline\n新 prompt")
+            .await
+            .unwrap_err();
+        assert!(error
+            .downcast_ref::<super::ProviderComposerInputRejectedError>()
+            .is_some());
+        assert!(!error.to_string().contains("secret"));
+        assert_eq!(
+            page.evaluate("document.querySelector('#target').innerHTML")
+                .as_str(),
+            Some("<p>Original nested draft</p>")
+        );
+        assert_eq!(
+            page.evaluate("document.querySelector('#target').value")
+                .as_str(),
+            Some("original synthetic value")
+        );
+        assert_eq!(page.evaluate("window.editorInputs").as_f64(), Some(0.0));
+        assert_eq!(page.evaluate("window.editorChanges").as_f64(), Some(0.0));
+        assert_eq!(page.evaluate("window.sent === true").as_bool(), Some(false));
+    }
+
+    #[tokio::test]
+    async fn native_textarea_still_accepts_exact_multiline_unicode() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <textarea id="native"></textarea>
+            <script>
+                window.nativeInputs = 0;
+                document.querySelector('#native').addEventListener(
+                    'input', () => window.nativeInputs++);
+            </script>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        let prompt = "你好\n\nemoji ☃️";
+        super::human_type(&page, &["#native"], prompt)
+            .await
+            .unwrap();
+        assert_eq!(
+            page.evaluate("document.querySelector('#native').value")
+                .as_str(),
+            Some(prompt)
+        );
+        assert_eq!(page.evaluate("window.nativeInputs").as_f64(), Some(1.0));
+    }
 }
 
 /// Dispatch an Enter keypress sequence on the element matching
@@ -919,12 +2424,25 @@ pub async fn human_type(page: &Page, selectors: &[&str], text: &str) -> anyhow::
 /// not trusted keystrokes. Frameworks listening only to trusted input
 /// may ignore it.
 pub fn press_enter(page: &Page, selector: &str) -> anyhow::Result<()> {
+    press_enter_with_provider(page, selector, None)
+}
+
+fn press_enter_with_provider(
+    page: &Page,
+    selector: &str,
+    expected_provider: Option<&str>,
+) -> anyhow::Result<()> {
     let sel_js = serde_json::to_string(selector)?;
     let el_js = visible_input_query(&sel_js);
+    let route_guard = provider_origin_guard_js(expected_provider)?;
     let js = format!(
-        "(function() {{ var el = {el_js}; if (!el) return false; el.focus(); ['keydown','keypress','keyup'].forEach(function(t) {{ el.dispatchEvent(new KeyboardEvent(t, {{key:'Enter', code:'Enter', keyCode:13, which:13, bubbles:true, cancelable:true}})); }}); return true; }})()"
+        "(function() {{ {route_guard} var el = {el_js}; if (!el) return false; el.focus(); ['keydown','keypress','keyup'].forEach(function(t) {{ el.dispatchEvent(new KeyboardEvent(t, {{key:'Enter', code:'Enter', keyCode:13, which:13, bubbles:true, cancelable:true}})); }}); return true; }})()"
     );
-    if page.evaluate(&js).as_bool() != Some(true) {
+    let result = page.evaluate(&js);
+    if result.as_str() == Some("off-provider") {
+        anyhow::bail!("provider left its chat origin before Enter fallback");
+    }
+    if result.as_bool() != Some(true) {
         anyhow::bail!("press Enter failed: input element not found");
     }
     Ok(())
@@ -964,7 +2482,7 @@ async fn click_send_or_enter_checked(
     .await
 }
 
-/// Controlled ChatGPT/Grok editors cannot rely on synthetic Enter to submit:
+/// Controlled ChatGPT/Grok/Qwen/Manus editors cannot rely on synthetic Enter:
 /// a missing Send control must not trigger an untrusted keystroke sequence.
 /// Keep the existing legacy fallback only for the other provider adapters.
 async fn click_send_or_enter_checked_with_policy(
@@ -976,44 +2494,73 @@ async fn click_send_or_enter_checked_with_policy(
     allow_untrusted_enter: bool,
     expected_provider: Option<&str>,
 ) -> anyhow::Result<bool> {
+    click_send_or_enter_checked_with_unique_composer(
+        page,
+        send_selectors,
+        input_selector,
+        timeout_ms,
+        expected_prompt,
+        SendClickPolicy {
+            allow_untrusted_enter,
+            expected_provider,
+            unique_input_selectors: None,
+        },
+    )
+    .await
+}
+
+struct SendClickPolicy<'a> {
+    allow_untrusted_enter: bool,
+    expected_provider: Option<&'a str>,
+    unique_input_selectors: Option<&'a [&'a str]>,
+}
+
+/// Multi-editor Send guard. The earlier composer check is not enough when
+/// a controlled SPA renders a second visible editor while Send is pending.
+/// The click check runs inside the same synchronous evaluation as the click.
+async fn click_send_or_enter_checked_with_unique_composer(
+    page: &mut Page,
+    send_selectors: &[&str],
+    input_selector: &str,
+    timeout_ms: u64,
+    expected_prompt: Option<&str>,
+    policy: SendClickPolicy<'_>,
+) -> anyhow::Result<bool> {
+    let SendClickPolicy {
+        allow_untrusted_enter,
+        expected_provider,
+        unique_input_selectors,
+    } = policy;
     let start = std::time::Instant::now();
     let input_js = serde_json::to_string(input_selector)?;
     let input_expr = visible_input_query(&input_js);
     let expected_js = serde_json::to_string(&expected_prompt)?;
-    let provider_js = serde_json::to_string(&expected_provider)?;
-    // The last Rust-side route check precedes the five-second Send-button
-    // wait. Validate the *current* browser URL within the same page evaluation
-    // that clicks Send, so an intervening foreign redirect is never clicked.
-    let route_guard = format!(
-        r#"const provider = {provider_js};
-           if (provider !== null) {{
-               let currentUrl;
-               try {{ currentUrl = new URL(location.href); }}
-               catch (_) {{ return 'off-provider'; }}
-               const rawHost = currentUrl.hostname.toLowerCase();
-               const host = rawHost.endsWith('.') ? rawHost.slice(0, -1) : rawHost;
-               const path = currentUrl.pathname;
-               const expectedHost = provider === 'chatgpt'
-                   ? (host === 'chatgpt.com' || host === 'www.chatgpt.com')
-                   : provider === 'grok' &&
-                       ((host === 'grok.com' || host === 'www.grok.com') ||
-                       ((host === 'x.com' || host === 'www.x.com') &&
-                           (path === '/i/grok' || path.startsWith('/i/grok/'))));
-               if (currentUrl.protocol !== 'https:' || currentUrl.username ||
-                   currentUrl.password || (currentUrl.port && currentUrl.port !== '443') ||
-                   !expectedHost) return 'off-provider';
-           }}"#
-    );
+    let draft = composer_draft_expression("input");
+    let route_guard = provider_origin_guard_js(expected_provider)?;
+    let nontransparent_button = nontransparent_ancestors_expression("button");
+    let pointer_enabled_button = pointer_enabled_ancestors_expression("button");
+    let composer_guard = if let Some(inputs) = unique_input_selectors {
+        let expr = actionable_composer_count_expression(inputs)?;
+        format!("if ({expr} !== 1) return 'ambiguous-composer';")
+    } else {
+        String::new()
+    };
     while start.elapsed().as_millis() < timeout_ms as u128 {
         for selector in send_selectors {
             let selector_js = serde_json::to_string(selector)?;
             let js = format!(
-                "(() => {{ {route_guard} const input = {input_expr}; if (!input) return 'missing'; const expected = {expected_js}; if (expected !== null && !((input.tagName === 'INPUT' || input.tagName === 'TEXTAREA') ? input.value === expected : (input.innerText === expected || input.textContent === expected))) return 'changed'; const inputForm = input.form || input.closest('form'); let root = input; for (let depth = 0; root && depth < 12; depth++, root = root.parentElement) {{ if (root.tagName === 'BODY' || root.tagName === 'HTML') break; for (const button of root.querySelectorAll({selector_js})) {{ const buttonForm = button.form || button.closest('form'); if (buttonForm && buttonForm !== inputForm) continue; if (button.getClientRects().length && window.getComputedStyle(button).visibility !== 'hidden' && window.getComputedStyle(button).pointerEvents !== 'none' && !button.closest('[inert], [hidden], [aria-hidden=true], [aria-disabled=true]') && !button.disabled && !button.matches(':disabled') && !button.closest('fieldset[disabled]') && button.getAttribute('aria-disabled') !== 'true') {{ button.click(); return 'clicked'; }} }} if (root.tagName === 'FORM') break; }} const form = input.form || input.closest('form'); if (form && form.id) {{ for (const button of document.querySelectorAll({selector_js})) {{ if (button.tagName !== 'BUTTON' || (button.form !== form && button.getAttribute('form') !== form.id) || form.contains(button)) continue; if (button.getClientRects().length && window.getComputedStyle(button).visibility !== 'hidden' && window.getComputedStyle(button).pointerEvents !== 'none' && !button.closest('[inert], [hidden], [aria-hidden=true], [aria-disabled=true]') && !button.disabled && !button.matches(':disabled') && !button.closest('fieldset[disabled]') && button.getAttribute('aria-disabled') !== 'true') {{ button.click(); return 'clicked'; }} }} }} return 'waiting'; }})()"
+                "(() => {{ {route_guard} {composer_guard} const input = {input_expr}; if (!input) return 'missing'; const expected = {expected_js}; if (expected !== null && {draft} !== expected) return 'changed'; const inputForm = input.form || input.closest('form'); let root = input; for (let depth = 0; root && depth < 12; depth++, root = root.parentElement) {{ if (root.tagName === 'BODY' || root.tagName === 'HTML') break; const eligible = Array.from(root.querySelectorAll({selector_js})).filter(button => {{ const buttonForm = button.form || button.closest('form'); return (!buttonForm || buttonForm === inputForm) && button.getClientRects().length && window.getComputedStyle(button).visibility !== 'hidden' && {pointer_enabled_button} && {nontransparent_button} && !button.closest('[inert], [hidden], [aria-hidden=true], [aria-disabled=true]') && !button.disabled && !button.matches(':disabled') && !button.closest('fieldset[disabled]') && button.getAttribute('aria-disabled') !== 'true'; }}); if (eligible.length > 1) return 'ambiguous-send'; if (eligible.length === 1) {{ eligible[0].click(); return 'clicked'; }} if (root.tagName === 'FORM') break; }} const form = input.form || input.closest('form'); if (form && form.id) {{ const eligible = Array.from(document.querySelectorAll({selector_js})).filter(button => button.tagName === 'BUTTON' && (button.form === form || button.getAttribute('form') === form.id) && !form.contains(button) && button.getClientRects().length && window.getComputedStyle(button).visibility !== 'hidden' && {pointer_enabled_button} && {nontransparent_button} && !button.closest('[inert], [hidden], [aria-hidden=true], [aria-disabled=true]') && !button.disabled && !button.matches(':disabled') && !button.closest('fieldset[disabled]') && button.getAttribute('aria-disabled') !== 'true'); if (eligible.length > 1) return 'ambiguous-send'; if (eligible.length === 1) {{ eligible[0].click(); return 'clicked'; }} }} return 'waiting'; }})()"
             );
             match page.evaluate(&js).as_str() {
                 Some("clicked") => return Ok(true),
                 Some("off-provider") => {
                     anyhow::bail!("provider left its chat origin before Send click")
+                }
+                Some("ambiguous-composer") => {
+                    anyhow::bail!("provider actionable composer ambiguous or unavailable")
+                }
+                Some("ambiguous-send") => {
+                    anyhow::bail!("provider actionable Send control ambiguous or unavailable")
                 }
                 Some("changed" | "missing") if expected_prompt.is_some() => {
                     anyhow::bail!("provider draft changed or disappeared while waiting for send")
@@ -1023,11 +2570,15 @@ async fn click_send_or_enter_checked_with_policy(
         }
         drive_page(page, Duration::from_millis(150)).await;
     }
+    // Recheck after the final asynchronous wait before any Enter fallback.
+    if let Some(inputs) = unique_input_selectors {
+        require_unique_actionable_composer(page, inputs)?;
+    }
     // A disabled send control is an explicit refusal by the application.
     // Synthetic Enter is not trusted and must not bypass that state.
     let send_js = serde_json::to_string(send_selectors)?;
     let disabled = page.evaluate(&format!(
-        "(() => {{ const input = {input_expr}; if (!input) return true; const selectors = {send_js}; const inputForm = input.form || input.closest('form'); let root = input; for (let depth = 0; root && depth < 12; depth++, root = root.parentElement) {{ if (root.tagName === 'BODY' || root.tagName === 'HTML') break; for (const selector of selectors) {{ for (const button of root.querySelectorAll(selector)) {{ const buttonForm = button.form || button.closest('form'); if (buttonForm && buttonForm !== inputForm) continue; if (button.getClientRects().length && window.getComputedStyle(button).visibility !== 'hidden' && window.getComputedStyle(button).pointerEvents !== 'none' && !button.closest('[inert], [aria-hidden=true]') && (button.disabled || button.matches(':disabled') || !!button.closest('fieldset[disabled]') || button.getAttribute('aria-disabled') === 'true' || !!button.closest('[aria-disabled=true]') || window.getComputedStyle(button).pointerEvents === 'none')) return true; }} }} if (root.tagName === 'FORM') break; }} const form = input.form || input.closest('form'); if (form && form.id) {{ for (const selector of selectors) {{ for (const button of document.querySelectorAll(selector)) {{ if (button.tagName !== 'BUTTON' || (button.form !== form && button.getAttribute('form') !== form.id) || form.contains(button)) continue; if (button.getClientRects().length && window.getComputedStyle(button).visibility !== 'hidden' && window.getComputedStyle(button).pointerEvents !== 'none' && !button.closest('[inert], [aria-hidden=true]') && (button.disabled || button.matches(':disabled') || !!button.closest('fieldset[disabled]') || button.getAttribute('aria-disabled') === 'true' || !!button.closest('[aria-disabled=true]') || window.getComputedStyle(button).pointerEvents === 'none')) return true; }} }} }} return false; }})()"
+        "(() => {{ const input = {input_expr}; if (!input) return true; const selectors = {send_js}; const inputForm = input.form || input.closest('form'); let root = input; for (let depth = 0; root && depth < 12; depth++, root = root.parentElement) {{ if (root.tagName === 'BODY' || root.tagName === 'HTML') break; for (const selector of selectors) {{ for (const button of root.querySelectorAll(selector)) {{ const buttonForm = button.form || button.closest('form'); if (buttonForm && buttonForm !== inputForm) continue; if (button.getClientRects().length && window.getComputedStyle(button).visibility !== 'hidden' && !button.closest('[aria-hidden=true]') && (button.disabled || !!button.closest('[inert]') || button.matches(':disabled') || !!button.closest('fieldset[disabled]') || button.getAttribute('aria-disabled') === 'true' || !!button.closest('[aria-disabled=true]') || !{pointer_enabled_button})) return true; }} }} if (root.tagName === 'FORM') break; }} const form = input.form || input.closest('form'); if (form && form.id) {{ for (const selector of selectors) {{ for (const button of document.querySelectorAll(selector)) {{ if (button.tagName !== 'BUTTON' || (button.form !== form && button.getAttribute('form') !== form.id) || form.contains(button)) continue; if (button.getClientRects().length && window.getComputedStyle(button).visibility !== 'hidden' && !button.closest('[aria-hidden=true]') && (button.disabled || !!button.closest('[inert]') || button.matches(':disabled') || !!button.closest('fieldset[disabled]') || button.getAttribute('aria-disabled') === 'true' || !!button.closest('[aria-disabled=true]') || !{pointer_enabled_button})) return true; }} }} }} return false; }})()"
     ));
     if disabled.as_bool() == Some(true) {
         anyhow::bail!("provider send control is disabled or composer is missing");
@@ -1040,20 +2591,671 @@ async fn click_send_or_enter_checked_with_policy(
         }
     }
     // Missing controls are not permission to synthesize keyboard input on
-    // ChatGPT/Grok: those editors must offer an actionable Send button.
+    // ChatGPT/Grok/Qwen/Manus: those editors must offer an actionable Send button.
     if !allow_untrusted_enter {
         anyhow::bail!(
             "provider Send control unavailable; synthetic Enter is not a supported submission path"
         );
     }
     // Enter dispatch remains a best-effort legacy fallback for other sites.
-    press_enter(page, input_selector)?;
+    press_enter_with_provider(page, input_selector, expected_provider)?;
     Ok(false)
+}
+
+#[cfg(test)]
+mod manus_unique_composer_tests {
+    use super::{send_prompt, EffectiveSelectorSet};
+
+    fn selectors() -> EffectiveSelectorSet {
+        EffectiveSelectorSet {
+            picker: vec![],
+            input: vec!["textarea".to_owned(), "#chat".to_owned()],
+            send: vec!["#send".to_owned()],
+            response: vec![],
+        }
+    }
+
+    #[tokio::test]
+    async fn two_actionable_manus_editors_reject_before_any_private_input_or_send() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html data-chat-gateway-test-fixture><body>
+            <form><textarea id="chat"></textarea>
+                <button id="send" type="button" onclick="window.sent=true">Send</button>
+            </form>
+            <textarea id="search"></textarea>
+            <textarea id="hidden" hidden></textarea>
+            <textarea id="readonly" readonly></textarea>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+
+        let error = send_prompt("manus", &mut page, &selectors(), "private prompt")
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("ambiguous"));
+        assert!(!error.to_string().contains("private prompt"));
+        assert_eq!(
+            page.evaluate("document.querySelector('#chat').value")
+                .as_str(),
+            Some("")
+        );
+        assert_eq!(
+            page.evaluate("document.querySelector('#search').value")
+                .as_str(),
+            Some("")
+        );
+        assert_eq!(page.evaluate("window.sent === true").as_bool(), Some(false));
+    }
+
+    #[tokio::test]
+    async fn framework_revealing_second_manus_editor_prevents_send() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html data-chat-gateway-test-fixture><body>
+            <form><textarea id="chat"></textarea>
+                <button id="send" type="button" onclick="window.sent=true">Send</button>
+            </form>
+            <textarea id="dialog" hidden></textarea>
+            <script>
+                document.querySelector('#chat').addEventListener('input', () => {
+                    document.querySelector('#dialog').hidden = false;
+                });
+            </script>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+
+        let error = send_prompt("manus", &mut page, &selectors(), "private prompt")
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("ambiguous"));
+        assert_eq!(
+            page.evaluate("document.querySelector('#chat').value")
+                .as_str(),
+            Some("private prompt")
+        );
+        assert_eq!(
+            page.evaluate("document.querySelector('#dialog').hidden")
+                .as_bool(),
+            Some(false)
+        );
+        assert_eq!(page.evaluate("window.sent === true").as_bool(), Some(false));
+    }
 }
 
 #[cfg(test)]
 mod draft_at_click_tests {
     use super::{click_send_or_enter_checked, click_send_or_enter_checked_with_policy};
+
+    #[tokio::test]
+    async fn form_less_panel_rejects_two_actionable_send_buttons_before_click() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <section id="panel">
+                <textarea id="prompt">private draft</textarea>
+                <button id="wrong" class="send" type="button"
+                    onclick="window.wrong++">Another task</button>
+                <button id="right" class="send" type="button"
+                    onclick="window.sent++">Send</button>
+                <button class="send" hidden type="button">Hidden</button>
+                <button class="send" disabled type="button">Disabled</button>
+            </section>
+            <script>
+                window.wrong = 0; window.sent = 0; window.enters = 0;
+                document.querySelector('#prompt').addEventListener(
+                    'keydown', () => { window.enters++; });
+            </script>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+
+        let error = click_send_or_enter_checked_with_policy(
+            &mut page,
+            &["button.send"],
+            "#prompt",
+            100,
+            Some("private draft"),
+            true,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("Send control ambiguous"));
+        assert!(!error.to_string().contains("private draft"));
+        assert_eq!(page.evaluate("window.wrong").as_f64(), Some(0.0));
+        assert_eq!(page.evaluate("window.sent").as_f64(), Some(0.0));
+        assert_eq!(page.evaluate("window.enters").as_f64(), Some(0.0));
+
+        // Only one visible enabled candidate remains; it is still legitimate
+        // even though hidden and disabled clones match the same selector.
+        page.evaluate("document.querySelector('#wrong').disabled = true");
+        assert!(click_send_or_enter_checked_with_policy(
+            &mut page,
+            &["button.send"],
+            "#prompt",
+            100,
+            Some("private draft"),
+            false,
+            None,
+        )
+        .await
+        .unwrap());
+        assert_eq!(page.evaluate("window.wrong").as_f64(), Some(0.0));
+        assert_eq!(page.evaluate("window.sent").as_f64(), Some(1.0));
+    }
+
+    #[tokio::test]
+    async fn form_associated_external_send_controls_must_be_unambiguous() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <form id="target"><textarea id="prompt">draft</textarea></form>
+            <form id="other"><textarea>unrelated</textarea></form>
+            <button form="other" class="send" type="button"
+                onclick="window.other++">Unrelated form</button>
+            <button id="wrong" form="target" class="send" type="button"
+                onclick="window.wrong++">Another task</button>
+            <button id="right" form="target" class="send" type="button"
+                onclick="window.sent++">Send</button>
+            <script>
+                window.other = 0; window.wrong = 0; window.sent = 0;
+            </script>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+
+        let error = click_send_or_enter_checked_with_policy(
+            &mut page,
+            &["button.send"],
+            "#prompt",
+            100,
+            Some("draft"),
+            false,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("Send control ambiguous"));
+        for key in ["other", "wrong", "sent"] {
+            assert_eq!(
+                page.evaluate(&format!("window.{key}")).as_f64(),
+                Some(0.0),
+                "ambiguous external Send must never click a candidate"
+            );
+        }
+
+        page.evaluate("document.querySelector('#wrong').hidden = true");
+        assert!(click_send_or_enter_checked_with_policy(
+            &mut page,
+            &["button.send"],
+            "#prompt",
+            100,
+            Some("draft"),
+            false,
+            None,
+        )
+        .await
+        .unwrap());
+        assert_eq!(page.evaluate("window.other").as_f64(), Some(0.0));
+        assert_eq!(page.evaluate("window.wrong").as_f64(), Some(0.0));
+        assert_eq!(page.evaluate("window.sent").as_f64(), Some(1.0));
+    }
+
+    #[tokio::test]
+    async fn perplexity_send_click_rejects_newly_ambiguous_editors_atomically() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <form><textarea id="thread" class="candidate">draft</textarea>
+                <button id="send" type="button" onclick="window.sent=true">Send</button>
+            </form>
+            <textarea id="search" class="candidate"></textarea>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        let result = super::click_send_or_enter_checked_with_unique_composer(
+            &mut page,
+            &["#send"],
+            "#thread",
+            100,
+            Some("draft"),
+            super::SendClickPolicy {
+                allow_untrusted_enter: true,
+                expected_provider: None,
+                unique_input_selectors: Some(&["textarea.candidate", "#thread"]),
+            },
+        )
+        .await;
+        assert!(result.unwrap_err().to_string().contains("ambiguous"));
+        assert_eq!(page.evaluate("window.sent === true").as_bool(), Some(false));
+
+        // The same editor matched by two configured selectors counts once.
+        page.evaluate("document.querySelector('#search').setAttribute('hidden', '')");
+        let clicked = super::click_send_or_enter_checked_with_unique_composer(
+            &mut page,
+            &["#send"],
+            "#thread",
+            100,
+            Some("draft"),
+            super::SendClickPolicy {
+                allow_untrusted_enter: true,
+                expected_provider: None,
+                unique_input_selectors: Some(&["textarea.candidate", "#thread"]),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(clicked);
+        assert_eq!(page.evaluate("window.sent === true").as_bool(), Some(true));
+    }
+
+    #[tokio::test]
+    async fn css_pointer_inert_send_ancestors_block_click_and_legacy_enter() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        for html in [
+            r#"<html><body><form id="target">
+                <textarea id="prompt">draft</textarea>
+                <section style="pointer-events:none">
+                    <button id="send" type="button" style="pointer-events:auto"
+                        onclick="window.sent++">Send</button>
+                </section>
+                <script>
+                    window.sent = 0; window.enters = 0;
+                    document.querySelector('#prompt').addEventListener(
+                        'keydown', () => window.enters++);
+                </script>
+            </form></body></html>"#,
+            r#"<html><body>
+                <form id="target"><textarea id="prompt">draft</textarea></form>
+                <section style="pointer-events:none">
+                    <button form="target" id="send" type="button"
+                        style="pointer-events:auto"
+                        onclick="window.sent++">Send</button>
+                </section>
+                <script>
+                    window.sent = 0; window.enters = 0;
+                    document.querySelector('#prompt').addEventListener(
+                        'keydown', () => window.enters++);
+                </script>
+            </body></html>"#,
+        ] {
+            let mut page = browser.new_page().await.unwrap();
+            let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+            page.goto(&format!("data:text/html,{encoded}"))
+                .await
+                .unwrap();
+            let error = click_send_or_enter_checked_with_policy(
+                &mut page,
+                &["#send"],
+                "#prompt",
+                80,
+                Some("draft"),
+                true,
+                None,
+            )
+            .await
+            .expect_err("CSS pointer-inert Send ancestor cannot authorize click or Enter");
+            assert!(error.to_string().contains("send control is disabled"));
+            assert!(!error.to_string().contains("draft"));
+            assert_eq!(page.evaluate("window.sent").as_f64(), Some(0.0));
+            assert_eq!(page.evaluate("window.enters").as_f64(), Some(0.0));
+        }
+    }
+
+    #[tokio::test]
+    async fn unrelated_css_inert_send_does_not_block_target_forms_actionable_send() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <form id="target"><textarea id="prompt">draft</textarea>
+                <button class="send" type="button"
+                    onclick="window.targetSent++">Send</button>
+            </form>
+            <form id="unrelated"></form>
+            <section style="pointer-events:none">
+                <button form="unrelated" class="send" type="button"
+                    style="pointer-events:auto"
+                    onclick="window.unrelatedSent++">Send</button>
+            </section>
+            <script>window.targetSent=0;window.unrelatedSent=0;</script>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        let clicked = click_send_or_enter_checked_with_policy(
+            &mut page,
+            &["button.send"],
+            "#prompt",
+            80,
+            Some("draft"),
+            true,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(clicked);
+        assert_eq!(page.evaluate("window.targetSent").as_f64(), Some(1.0));
+        assert_eq!(page.evaluate("window.unrelatedSent").as_f64(), Some(0.0));
+    }
+
+    #[tokio::test]
+    async fn inert_send_controls_never_authorize_legacy_enter() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        for html in [
+            r#"<html><body><form>
+                <textarea id="prompt">draft</textarea>
+                <section inert><button id="send" type="button"
+                    onclick="window.sent++">Send</button></section>
+                <script>
+                    window.sent = 0; window.enters = 0;
+                    document.querySelector('#prompt').addEventListener(
+                        'keydown', () => window.enters++);
+                </script>
+            </form></body></html>"#,
+            r#"<html><body>
+                <form id="target"><textarea id="prompt">draft</textarea></form>
+                <section inert><button form="target" id="send" type="button"
+                    onclick="window.sent++">Send</button></section>
+                <script>
+                    window.sent = 0; window.enters = 0;
+                    document.querySelector('#prompt').addEventListener(
+                        'keydown', () => window.enters++);
+                </script>
+            </body></html>"#,
+        ] {
+            let mut page = browser.new_page().await.unwrap();
+            let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+            page.goto(&format!("data:text/html,{encoded}"))
+                .await
+                .unwrap();
+            let error = click_send_or_enter_checked_with_policy(
+                &mut page,
+                &["#send"],
+                "#prompt",
+                80,
+                Some("draft"),
+                true,
+                None,
+            )
+            .await
+            .expect_err("inert Send must be treated as disabled");
+            assert!(error.to_string().contains("send control is disabled"));
+            assert!(!error.to_string().contains("draft"));
+            assert_eq!(page.evaluate("window.sent").as_f64(), Some(0.0));
+            assert_eq!(page.evaluate("window.enters").as_f64(), Some(0.0));
+        }
+    }
+
+    #[tokio::test]
+    async fn unrelated_or_hidden_inert_send_does_not_block_actionable_target() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <form id="target">
+                <textarea id="prompt">draft</textarea>
+                <button id="active" class="send" type="button"
+                    onclick="window.sent++">Send</button>
+                <button class="send" type="button" hidden inert>Hidden</button>
+            </form>
+            <form id="unrelated"></form>
+            <section inert><button form="unrelated" class="send" type="button">
+                Unrelated</button></section>
+            <script>window.sent = 0;</script>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        assert!(click_send_or_enter_checked_with_policy(
+            &mut page,
+            &["button.send"],
+            "#prompt",
+            80,
+            Some("draft"),
+            true,
+            None,
+        )
+        .await
+        .unwrap());
+        assert_eq!(page.evaluate("window.sent").as_f64(), Some(1.0));
+    }
+
+    #[tokio::test]
+    async fn css_blocked_send_never_authorizes_legacy_enter_fallback() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        for html in [
+            r#"<html><body><form>
+                <textarea id="prompt">draft</textarea>
+                <section style="pointer-events:none">
+                    <button id="send" type="button" onclick="window.sent++">Send</button>
+                </section>
+                <script>
+                    window.sent = 0; window.enters = 0;
+                    document.querySelector('#prompt').addEventListener(
+                        'keydown', () => window.enters++);
+                </script>
+            </form></body></html>"#,
+            r#"<html><body>
+                <form id="target"><textarea id="prompt">draft</textarea></form>
+                <form id="unrelated"></form>
+                <button form="unrelated" class="send" type="button"
+                    onclick="window.unrelated++">Other form</button>
+                <button id="send" class="send" form="target" type="button"
+                    style="pointer-events:none" onclick="window.sent++">Send</button>
+                <script>
+                    window.sent = 0; window.unrelated = 0; window.enters = 0;
+                    document.querySelector('#prompt').addEventListener(
+                        'keydown', () => window.enters++);
+                </script>
+            </body></html>"#,
+        ] {
+            let mut page = browser.new_page().await.unwrap();
+            let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+            page.goto(&format!("data:text/html,{encoded}"))
+                .await
+                .unwrap();
+            let error = click_send_or_enter_checked_with_policy(
+                &mut page,
+                &["#send"],
+                "#prompt",
+                80,
+                Some("draft"),
+                true,
+                None,
+            )
+            .await
+            .expect_err("CSS-blocked Send cannot enable legacy synthetic Enter");
+            assert!(
+                error.to_string().contains("send control is disabled"),
+                "the refusal must identify the blocked Send without leaking the draft: {error}"
+            );
+            assert!(!error.to_string().contains("draft"));
+            assert_eq!(page.evaluate("window.sent").as_f64(), Some(0.0));
+            assert_eq!(page.evaluate("window.enters").as_f64(), Some(0.0));
+            assert_eq!(page.evaluate("window.unrelated || 0").as_f64(), Some(0.0));
+        }
+    }
+
+    #[tokio::test]
+    async fn unrelated_css_blocked_send_does_not_disable_missing_target_send() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <form id="target"><textarea id="prompt">draft</textarea></form>
+            <form id="other"></form>
+            <button class="send" form="other" type="button"
+                style="pointer-events:none">Unrelated</button>
+            <script>
+                window.enters = 0;
+                document.querySelector('#prompt').addEventListener(
+                    'keydown', () => window.enters++);
+            </script>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        assert!(!click_send_or_enter_checked_with_policy(
+            &mut page,
+            &["button.send"],
+            "#prompt",
+            80,
+            Some("draft"),
+            true,
+            None,
+        )
+        .await
+        .unwrap());
+        assert!(page.evaluate("window.enters").as_f64().unwrap_or(0.0) > 0.0);
+    }
+
+    #[tokio::test]
+    async fn transparent_send_clones_must_not_be_clicked_or_make_send_ambiguous() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><head><style>
+            .transparent { opacity: 0; }
+            .translucent { opacity: 0.5; }
+        </style></head><body>
+            <form>
+                <textarea id="prompt">draft</textarea>
+                <section id="ghost-root" class="transparent">
+                    <button class="send" type="button" onclick="window.ghost++">Ghost</button>
+                </section>
+                <button class="send" type="button" style="opacity:0"
+                    onclick="window.selfGhost++">Self ghost</button>
+                <button id="active" class="send" type="button"
+                    onclick="window.sent++">Send</button>
+            </form>
+            <script>window.ghost = 0; window.selfGhost = 0; window.sent = 0;</script>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        assert!(click_send_or_enter_checked_with_policy(
+            &mut page,
+            &["button.send"],
+            "#prompt",
+            100,
+            Some("draft"),
+            false,
+            None,
+        )
+        .await
+        .unwrap());
+        assert_eq!(page.evaluate("window.sent").as_f64(), Some(1.0));
+        assert_eq!(page.evaluate("window.ghost").as_f64(), Some(0.0));
+        assert_eq!(page.evaluate("window.selfGhost").as_f64(), Some(0.0));
+
+        page.evaluate("document.querySelector('#ghost-root').className = 'translucent'");
+        let error = click_send_or_enter_checked_with_policy(
+            &mut page,
+            &["button.send"],
+            "#prompt",
+            100,
+            Some("draft"),
+            false,
+            None,
+        )
+        .await
+        .expect_err("two nontransparent Send controls must fail closed");
+        assert!(error.to_string().contains("Send control ambiguous"));
+        assert!(!error.to_string().contains("draft"));
+        assert_eq!(page.evaluate("window.sent").as_f64(), Some(1.0));
+        assert_eq!(page.evaluate("window.ghost").as_f64(), Some(0.0));
+    }
+
+    #[tokio::test]
+    async fn transparent_external_form_send_is_not_selected_over_visible_target() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><head><style>
+            .transparent { opacity: 0; }
+        </style></head><body>
+            <form id="target"><textarea id="prompt">draft</textarea></form>
+            <form id="unrelated"></form>
+            <section class="transparent">
+                <button form="target" class="send" type="button"
+                    onclick="window.ghost++">Ghost</button>
+            </section>
+            <button form="unrelated" class="send" type="button"
+                onclick="window.unrelated++">Other</button>
+            <button id="active" form="target" class="send" type="button"
+                onclick="window.sent++">Send</button>
+            <script>window.ghost = 0; window.unrelated = 0; window.sent = 0;</script>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        assert!(click_send_or_enter_checked_with_policy(
+            &mut page,
+            &["button.send"],
+            "#prompt",
+            100,
+            Some("draft"),
+            false,
+            None,
+        )
+        .await
+        .unwrap());
+        assert_eq!(page.evaluate("window.sent").as_f64(), Some(1.0));
+        assert_eq!(page.evaluate("window.ghost").as_f64(), Some(0.0));
+        assert_eq!(page.evaluate("window.unrelated").as_f64(), Some(0.0));
+    }
 
     #[tokio::test]
     async fn pointer_events_blocked_send_is_not_clicked_or_bypassed() {
@@ -1394,26 +3596,48 @@ pub fn is_login_url(url: &str) -> bool {
     let Ok(uri) = url.parse::<axum::http::Uri>() else {
         return false;
     };
-    if !matches!(uri.scheme_str(), Some("https" | "http")) {
+    // An unverified foreign HTTP page or malformed authority must never
+    // become proof that the requested provider's authenticated session expired.
+    if !safe_provider_https_authority(&uri) {
         return false;
     }
-    let host = uri.host().unwrap_or_default().to_ascii_lowercase();
-    let host = host.trim_end_matches('.');
+    let host = uri
+        .host()
+        .unwrap_or_default()
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    // Only enumerated identity destinations are trusted; arbitrary Auth0
+    // tenants cannot prove that this provider's session has expired.
+    // Source-verify any tenant-specific SSO hosts under issue #1090.
     if matches!(
-        host,
+        host.as_str(),
         "accounts.google.com" | "accounts.x.com" | "login.microsoftonline.com"
-    ) || host.starts_with("login.")
-        || host.starts_with("auth.")
-        || host.ends_with(".auth0.com")
-    {
+    ) {
         return true;
     }
-    uri.path().split('/').any(|segment| {
-        matches!(
-            segment.to_ascii_lowercase().as_str(),
-            "login" | "signin" | "sign-in" | "auth" | "oauth" | "oauth2" | "authorize" | "sso"
-        )
-    })
+    // Root /login on a foreign origin is an unexpected navigation, not
+    // provider-auth proof. The caller's strict origin gate reports that
+    // category without embedding URL, account identity or prompt material.
+    if provider_origin_for_url(url).is_none() {
+        return false;
+    }
+    // Authenticate only explicit root-level routes. A chat conversation ID
+    // such as /c/login, /chat/auth, or /app/oauth is not a login redirect.
+    // Nested provider-specific auth routes need observed first-party evidence.
+    let root_path = uri.path().strip_prefix('/').unwrap_or_default();
+    let root_segment = root_path.split('/').next().unwrap_or_default();
+    matches!(
+        root_segment.to_ascii_lowercase().as_str(),
+        "login" | "signin" | "sign-in" | "auth" | "oauth" | "oauth2" | "authorize" | "sso"
+    )
+}
+
+/// An explicit login route on a *different* recognized provider cannot
+/// prove that the requested provider's session expired. Let the strict
+/// provider-origin fence report unexpected navigation instead. The
+/// allowlisted cross-provider SSO hosts remain separately tracked by #1090.
+pub(crate) fn login_url_matches_provider(provider: &str, url: &str) -> bool {
+    is_login_url(url) && provider_origin_for_url(url).is_none_or(|actual| actual == provider)
 }
 
 pub fn is_login_page(page: &Page) -> bool {
@@ -1422,7 +3646,7 @@ pub fn is_login_page(page: &Page) -> bool {
 
 #[cfg(test)]
 mod login_url_classification_tests {
-    use super::is_login_url;
+    use super::{is_login_url, login_url_matches_provider};
 
     #[test]
     fn recognizes_explicit_provider_and_sso_redirects() {
@@ -1432,9 +3656,123 @@ mod login_url_classification_tests {
             "https://chatgpt.com/auth/login",
             "https://claude.ai/login?next=%2Fnew",
             "https://login.microsoftonline.com/tenant/oauth2/authorize",
-            "https://login.auth0.com/authorize",
+            "https://www.perplexity.ai/signin",
+            "https://manus.im/auth/login",
+            "https://grok.com/oauth2/authorize",
         ] {
             assert!(is_login_url(url), "missed authentication redirect: {url}");
+        }
+    }
+
+    #[test]
+    fn every_known_provider_root_login_is_authenticated_only_on_its_own_origin() {
+        for (provider, url) in [
+            ("qwen", "https://chat.qwen.ai/login"),
+            ("metaai", "https://www.meta.ai/login"),
+            ("claude", "https://claude.ai/signin"),
+            ("chatgpt", "https://chatgpt.com/auth/login"),
+            ("gemini", "https://gemini.google.com/login"),
+            ("grok", "https://grok.com/oauth2/authorize"),
+            ("mistral", "https://chat.mistral.ai/login"),
+            ("perplexity", "https://www.perplexity.ai/signin"),
+            ("manus", "https://manus.im/auth/login"),
+        ] {
+            assert_eq!(
+                super::provider_origin_for_url(url),
+                Some(provider),
+                "login route must remain first-party: {provider}"
+            );
+            assert!(
+                is_login_url(url),
+                "known provider login not recognized: {url}"
+            );
+        }
+    }
+
+    #[test]
+    fn recognized_cross_provider_login_cannot_expire_another_provider() {
+        let logins = [
+            ("qwen", "https://chat.qwen.ai/login"),
+            ("metaai", "https://www.meta.ai/login"),
+            ("claude", "https://claude.ai/signin"),
+            ("chatgpt", "https://chatgpt.com/auth/login"),
+            ("gemini", "https://gemini.google.com/login"),
+            ("grok", "https://grok.com/oauth2/authorize"),
+            ("mistral", "https://chat.mistral.ai/login"),
+            ("perplexity", "https://www.perplexity.ai/signin"),
+            ("manus", "https://manus.im/auth/login"),
+        ];
+        for (requested, _) in logins {
+            for (actual, url) in logins {
+                assert_eq!(
+                    login_url_matches_provider(requested, url),
+                    requested == actual,
+                    "login for {actual} must not expire {requested}"
+                );
+            }
+        }
+        // Explicitly enumerated SSO hosts retain their previous behavior;
+        // tenant-specific SSO awaits source-verified evidence (#1090).
+        for url in [
+            "https://accounts.google.com/v3/signin/challenge",
+            "https://login.microsoftonline.com/tenant/oauth2/authorize",
+        ] {
+            assert!(login_url_matches_provider("chatgpt", url));
+        }
+        for url in [
+            "https://login.attacker.invalid/home",
+            "https://manus.im.attacker.invalid/login",
+            "http://chatgpt.com/auth/login",
+        ] {
+            assert!(!login_url_matches_provider("chatgpt", url));
+        }
+    }
+
+    #[test]
+    fn unknown_login_paths_and_malformed_authorities_are_not_session_expiry() {
+        for url in [
+            "https://attacker.invalid/login",
+            "https://auth.attacker.invalid/login",
+            "https://login.attacker.invalid/",
+            "https://another.invalid/oauth2/authorize",
+            "https://accounts.google.com.attacker.invalid/login",
+            "https://unrelated.invalid/auth",
+            "http://accounts.google.com/",
+            "http://chatgpt.com/auth/login",
+            "https://chatgpt.com:444/login",
+            "https://chatgpt.com:65536/login",
+            "https://visitor@chatgpt.com/login",
+            "https://accounts.google.com:65536/",
+            "https://user@accounts.x.com/",
+            "https://login.microsoftonline.com.attacker.invalid/authorize",
+            "https://manus.im:444/auth/login",
+            "https://www.meta.ai../login",
+        ] {
+            assert!(
+                !is_login_url(url),
+                "unverified auth origin classified: {url}"
+            );
+        }
+    }
+
+    #[test]
+    fn arbitrary_auth0_tenants_cannot_expire_unrelated_provider_sessions() {
+        for url in [
+            "https://tenant.auth0.com/profile",
+            "https://login.auth0.com/authorize",
+            "https://attacker-tenant.auth0.com/oauth",
+            "https://auth0.com.attacker.invalid/login",
+        ] {
+            assert!(
+                !is_login_url(url),
+                "unverified tenant is not known SSO: {url}"
+            );
+            for provider in ["chatgpt", "grok", "manus", "claude", "gemini"] {
+                assert!(
+                    !login_url_matches_provider(provider, url),
+                    "unverified Auth0 tenant must not expire {provider}"
+                );
+            }
         }
     }
 
@@ -1444,7 +3782,24 @@ mod login_url_classification_tests {
             "https://chatgpt.com/c/authoring",
             "https://grok.com/author",
             "https://gemini.google.com/app?q=auth",
+            "https://chatgpt.com/c/login",
+            "https://grok.com/chat/auth",
+            "https://gemini.google.com/app/authorize",
+            "https://manus.im/app/oauth",
+            "https://claude.ai/new/signin",
+            "https://www.perplexity.ai/search/sso",
+            "https://chat.qwen.ai/c/oauth2",
             "https://claude.ai/new?redirect=https%3A%2F%2Fauth.openai.com%2Flogin",
+            "https://login.attacker.invalid/home",
+            "https://auth.attacker.invalid/profile",
+            "https://LOGIN.UNKNOWN.invalid/",
+            "https://login.microsoftonline.com.attacker.invalid/",
+            "https://tenant.auth0.com.attacker.invalid/home",
+            "https://tenant.auth0.com/profile",
+            "https://login.auth0.com/authorize",
+            "https://attacker-tenant.auth0.com/oauth",
+            "http://auth.unknown.invalid/",
+            "https://auth.other.invalid/chat/login",
             "https://accounts.x.com.attacker.invalid/",
             "data:text/html,<textarea></textarea>",
         ] {
@@ -1454,8 +3809,7 @@ mod login_url_classification_tests {
 }
 
 pub fn check_session(provider: &str, page: &Page) -> anyhow::Result<()> {
-    if is_login_page(page) {
-        let _ = provider;
+    if login_url_matches_provider(provider, &page.url()) {
         return Err(anyhow::Error::new(
             crate::browser::pool::ProviderSessionExpiredError,
         ));
@@ -1598,22 +3952,24 @@ pub fn probe_selector_groups(
 /// must not override the latest visible assistant response or satisfy probes.
 pub fn last_element_text(page: &Page, selector: &str) -> Option<String> {
     let sel_js = serde_json::to_string(selector).ok()?;
+    let nontransparent = nontransparent_ancestors_expression("node");
+    let response_text_js = RESPONSE_RENDERED_TEXT_JS;
     let js = format!(
         r#"(() => {{
             const nodes = Array.from(document.querySelectorAll({sel_js}));
-            {response_content_js}
+            {response_text_js}
             for (let i = nodes.length - 1; i >= 0; i--) {{
                 const node = nodes[i];
                 if (!node.getClientRects().length ||
                     window.getComputedStyle(node).visibility === 'hidden' ||
+                    !{nontransparent} ||
                     node.closest('[hidden], [inert], [aria-hidden="true"], [aria-disabled="true"], fieldset[disabled]') ||
                     node.disabled || node.matches(':disabled')) continue;
-                const value = responseContent(node);
+                const value = renderedText(node);
                 if (value.trim()) return value;
             }}
             return null;
-        }})()"#,
-        response_content_js = RESPONSE_CONTENT_JS,
+        }})()"#
     );
     page.evaluate(&js).as_str().map(str::to_owned)
 }
@@ -1629,6 +3985,74 @@ pub fn response_text(page: &Page, selectors: &[&str]) -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod hidden_child_response_text_tests {
+    use super::{last_element_text, response_probe, response_text};
+
+    #[tokio::test]
+    async fn nested_hidden_child_must_not_be_used_as_assistant_answer() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <div class="answer" id="real">legitimate earlier answer</div>
+            <div class="answer" id="nested">
+                <span hidden>secret hidden</span>
+                <span aria-hidden="true" style="display:none">secret aria</span>
+                <span style="display:none">secret css</span>
+            </div>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response_probe(&page, &[".answer"], false).text.as_deref(),
+            Some("legitimate earlier answer")
+        );
+        assert_eq!(
+            last_element_text(&page, ".answer").as_deref(),
+            Some("legitimate earlier answer")
+        );
+        assert_eq!(
+            response_text(&page, &[".answer"]).as_deref(),
+            Some("legitimate earlier answer")
+        );
+
+        page.evaluate("document.querySelector('#real').hidden = true");
+        assert!(
+            response_probe(&page, &[".answer"], false).text.is_none(),
+            "hidden nested child must not become response poll text"
+        );
+        assert!(last_element_text(&page, ".answer").is_none());
+        assert!(response_text(&page, &[".answer"]).is_none());
+
+        page.evaluate(
+            "document.querySelector('#nested').innerHTML = '<span>visible nested answer</span>'",
+        );
+        assert_eq!(
+            response_probe(&page, &[".answer"], false).text.as_deref(),
+            Some("visible nested answer")
+        );
+        assert_eq!(
+            response_text(&page, &[".answer"]).as_deref(),
+            Some("visible nested answer")
+        );
+        page.evaluate("document.querySelector('#nested').textContent = 'plain text answer'");
+        assert_eq!(
+            response_probe(&page, &[".answer"], false).text.as_deref(),
+            Some("plain text answer")
+        );
+        assert_eq!(
+            last_element_text(&page, ".answer").as_deref(),
+            Some("plain text answer")
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1679,6 +4103,61 @@ mod last_visible_response_text_tests {
             Some("answer")
         );
     }
+    #[tokio::test]
+    async fn transparent_assistant_clones_match_response_probe_visibility() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <div class="answer" id="live">visible reply</div>
+            <div class="answer" id="ghost-self" style="opacity:0">stale self</div>
+            <section style="opacity:0">
+                <div class="answer" id="ghost-child">stale ancestor</div>
+            </section>
+            <div class="answer" id="translucent" style="opacity:0.4">translucent reply</div>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+
+        for expected in ["translucent reply", "visible reply"] {
+            assert_eq!(
+                super::last_element_text(&page, ".answer").as_deref(),
+                Some(expected)
+            );
+            assert_eq!(
+                super::response_text(&page, &[".answer"]).as_deref(),
+                Some(expected)
+            );
+            assert_eq!(
+                super::response_probe(&page, &[".answer"], false)
+                    .text
+                    .as_deref(),
+                Some(expected)
+            );
+            page.evaluate("document.querySelector('#translucent').style.opacity = '0'");
+        }
+
+        page.evaluate("document.querySelector('#live').style.opacity = '0'");
+        assert!(super::last_element_text(&page, ".answer").is_none());
+        assert!(super::response_text(&page, &[".answer"]).is_none());
+        assert!(super::response_probe(&page, &[".answer"], false)
+            .text
+            .is_none());
+    }
+}
+
+/// Model discovery is read-only, but a redirected login or unrelated page
+/// must never supply model picker labels to a different provider's catalog.
+/// Reuse the exact origin policy already enforced for prompt submission.
+fn require_model_discovery_origin(page: &Page, set: &SelectorSet) -> anyhow::Result<()> {
+    let provider = provider_origin_for_url(set.url)
+        .ok_or_else(|| anyhow::anyhow!("provider model discovery configuration origin invalid"))?;
+    check_session(provider, page)?;
+    require_page_provider_origin(provider, page)
 }
 
 /// Discover models without sending a message (v1 body): navigate, open
@@ -1692,15 +4171,18 @@ pub async fn discover_models(
 ) -> anyhow::Result<Vec<String>> {
     page.goto(set.url).await?;
     drive_page(page, Duration::from_millis(1200)).await;
+    require_model_discovery_origin(page, set)?;
 
     // Try to open model picker without sending message
     let effective = set.effective(overrides);
     for sel in effective.picker_refs() {
         if click_first(page, &[sel]).is_ok() {
             drive_page(page, Duration::from_millis(600)).await;
+            require_model_discovery_origin(page, set)?;
             break;
         }
     }
+    require_model_discovery_origin(page, set)?;
 
     // Extract visible model labels (obscura evaluate takes an expression
     // and returns a Value synchronously, so call the v1 arrow function)
@@ -1732,18 +4214,89 @@ pub async fn discover_models(
     }
 }
 
-/// ChatGPT and Grok require an observable composer/response transition to
-/// acknowledge a send. Match actual provider hosts and Grok's alternate X
+#[cfg(test)]
+mod model_discovery_origin_tests {
+    use super::{require_model_discovery_origin, SelectorSet};
+
+    #[tokio::test]
+    async fn off_provider_model_picker_requires_explicit_test_only_fixture() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <button aria-label="model">Choose model</button>
+            <div role="option">misleading model option</div>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+
+        for spec in crate::providers::ADAPTERS {
+            let error = require_model_discovery_origin(&page, spec.selectors).unwrap_err();
+            assert!(
+                error.to_string().contains("chat origin unavailable"),
+                "{} must reject a foreign model picker",
+                spec.id
+            );
+            assert!(!error.to_string().contains("misleading model option"));
+        }
+
+        page.evaluate(
+            "document.documentElement.setAttribute('data-chat-gateway-test-fixture', '')",
+        );
+        for spec in crate::providers::ADAPTERS {
+            assert!(
+                require_model_discovery_origin(&page, spec.selectors).is_ok(),
+                "{} must accept a deliberately marked offline data fixture",
+                spec.id
+            );
+        }
+        let invalid = SelectorSet {
+            url: "https://wrong-provider.invalid/",
+            ..crate::providers::manus::SELECTORS
+        };
+        let error = require_model_discovery_origin(&page, &invalid).unwrap_err();
+        assert!(error.to_string().contains("configuration origin invalid"));
+        assert!(!error.to_string().contains("wrong-provider.invalid"));
+    }
+}
+
+/// ChatGPT, Grok, Qwen and Manus require an observable composer/response
+/// transition to acknowledge a send. Match actual provider hosts and Grok's alternate X
 /// route, never incidental substrings in query parameters or attacker hosts.
-fn submission_provider_for_url(url: &str) -> Option<&'static str> {
+/// A parsed HTTP authority can report no u16 port for an *invalid* literal
+/// such as :65536. Compare the complete authority so an overflowing, empty,
+/// noncanonical or malformed port can never masquerade as a missing port.
+/// This check is shared by submission and all-provider route classification.
+fn safe_provider_https_authority(uri: &axum::http::Uri) -> bool {
+    if uri.scheme_str() != Some("https") {
+        return false;
+    }
+    let Some(authority) = uri.authority() else {
+        return false;
+    };
+    let Some(host) = uri.host() else {
+        return false;
+    };
+    // Preserve a single fully-qualified DNS trailing dot (the browser's
+    // location guard does too), but never normalize two or more away.
+    if host.is_empty() || host.ends_with("..") {
+        return false;
+    }
+    authority.as_str().eq_ignore_ascii_case(host)
+        || authority
+            .as_str()
+            .eq_ignore_ascii_case(&format!("{host}:443"))
+}
+
+pub(crate) fn submission_provider_for_url(url: &str) -> Option<&'static str> {
     let Ok(uri) = url.parse::<axum::http::Uri>() else {
         return None;
     };
-    if uri.scheme_str() != Some("https")
-        || uri.authority().is_none_or(|authority| {
-            authority.as_str().contains('@') || authority.port_u16().is_some_and(|port| port != 443)
-        })
-    {
+    if !safe_provider_https_authority(&uri) {
         return None;
     }
     let host = uri
@@ -1754,6 +4307,8 @@ fn submission_provider_for_url(url: &str) -> Option<&'static str> {
     match host.as_str() {
         "chatgpt.com" | "www.chatgpt.com" => Some("chatgpt"),
         "grok.com" | "www.grok.com" => Some("grok"),
+        "chat.qwen.ai" => Some("qwen"),
+        "manus.im" | "www.manus.im" => Some("manus"),
         "x.com" | "www.x.com" if uri.path() == "/i/grok" || uri.path().starts_with("/i/grok/") => {
             Some("grok")
         }
@@ -1761,11 +4316,399 @@ fn submission_provider_for_url(url: &str) -> Option<&'static str> {
     }
 }
 
+/** Declare a closed set of browser origins for all provider adapters.
+ * A matching generic text box on an unrelated page is never authorization
+ * to type. ChatGPT/Grok/Qwen retain their separate strict submission contract.
+ */
+fn provider_origin_for_url(url: &str) -> Option<&'static str> {
+    if let Some(provider) = submission_provider_for_url(url) {
+        return Some(provider);
+    }
+    let uri = url.parse::<axum::http::Uri>().ok()?;
+    if !safe_provider_https_authority(&uri) {
+        return None;
+    }
+    match uri
+        .host()?
+        .trim_end_matches('.')
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "claude.ai" | "www.claude.ai" => Some("claude"),
+        "gemini.google.com" => Some("gemini"),
+        "chat.qwen.ai" => Some("qwen"),
+        "www.meta.ai" | "meta.ai" => Some("metaai"),
+        "chat.mistral.ai" => Some("mistral"),
+        "www.perplexity.ai" | "perplexity.ai" => Some("perplexity"),
+        "manus.im" | "www.manus.im" => Some("manus"),
+        _ => None,
+    }
+}
+
+/// Reject every unrecognized origin, regardless of matching page selectors.
+fn require_provider_origin(provider: &str, url: &str) -> anyhow::Result<()> {
+    if provider_origin_for_url(url) == Some(provider) {
+        Ok(())
+    } else {
+        anyhow::bail!("provider chat origin unavailable before prompt dispatch")
+    }
+}
+
+/// Only an explicit in-memory fixture can bypass real-origin navigation in
+/// unit tests. The check is removed from production builds entirely.
+#[cfg(test)]
+fn is_provider_test_fixture(page: &Page) -> bool {
+    page.url().starts_with("data:text/html,")
+        && page
+            .evaluate("document.documentElement.hasAttribute('data-chat-gateway-test-fixture')")
+            .as_bool()
+            == Some(true)
+}
+
+pub(crate) fn require_page_provider_origin(provider: &str, page: &Page) -> anyhow::Result<()> {
+    #[cfg(test)]
+    if is_provider_test_fixture(page) {
+        return Ok(());
+    }
+    require_provider_origin(provider, &page.url())
+}
+
+/// Both URLs must belong to the same expected HTTPS provider. The probe's
+/// `location.href` was captured atomically with its response text; a later
+/// `Page::url()` reading alone cannot attest to that earlier DOM snapshot.
+pub(crate) fn require_response_origin_pair(
+    provider: &str,
+    page_url: &str,
+    snapshot_url: &str,
+) -> anyhow::Result<()> {
+    require_provider_origin(provider, page_url)?;
+    require_provider_origin(provider, snapshot_url)
+}
+
+/// Only explicitly tagged offline data fixtures bypass the pair in test
+/// builds. In production, the DOM snapshot and current page must *both*
+/// independently satisfy the fixed nine-provider origin policy.
+pub(crate) fn require_response_probe_origins(
+    provider: &str,
+    page: &Page,
+    snapshot_url: &str,
+) -> anyhow::Result<()> {
+    #[cfg(test)]
+    if is_provider_test_fixture(page) {
+        return Ok(());
+    }
+    require_response_origin_pair(provider, &page.url(), snapshot_url)
+}
+
+/// Inline page guard reused for typing *and* the atomic Send click. A
+/// Rust-side check before an await is insufficient if navigation occurs
+/// while a framework-controlled composer is settling.
+pub(crate) fn provider_origin_guard_js(expected_provider: Option<&str>) -> anyhow::Result<String> {
+    let provider = serde_json::to_string(&expected_provider)?;
+    Ok(format!(
+        r#"const expectedProvider = {provider};
+           if (expectedProvider !== null) {{
+               // The pinned embedded browser exposes Location fields but
+               // does not implement the WHATWG URL constructor.
+               const currentUrl = location;
+               if (!currentUrl || !currentUrl.hostname) return 'off-provider';
+               const host = currentUrl.hostname.toLowerCase().replace(/\.$/, '');
+               const path = currentUrl.pathname;
+               let actualProvider = null;
+               switch (host) {{
+                   case 'chatgpt.com': case 'www.chatgpt.com': actualProvider = 'chatgpt'; break;
+                   case 'grok.com': case 'www.grok.com': actualProvider = 'grok'; break;
+                   case 'x.com': case 'www.x.com':
+                       if (path === '/i/grok' || path.startsWith('/i/grok/')) actualProvider = 'grok';
+                       break;
+                   case 'claude.ai': case 'www.claude.ai': actualProvider = 'claude'; break;
+                   case 'gemini.google.com': actualProvider = 'gemini'; break;
+                   case 'chat.qwen.ai': actualProvider = 'qwen'; break;
+                   case 'www.meta.ai': case 'meta.ai': actualProvider = 'metaai'; break;
+                   case 'chat.mistral.ai': actualProvider = 'mistral'; break;
+                   case 'www.perplexity.ai': case 'perplexity.ai': actualProvider = 'perplexity'; break;
+                   case 'manus.im': case 'www.manus.im': actualProvider = 'manus'; break;
+               }}
+               if (currentUrl.protocol !== 'https:' || currentUrl.username ||
+                   currentUrl.password || (currentUrl.port && currentUrl.port !== '443') ||
+                   actualProvider !== expectedProvider) return 'off-provider';
+           }}"#
+    ))
+}
+
+#[cfg(test)]
+mod all_provider_origin_fence_tests {
+    use super::{
+        provider_origin_for_url, provider_origin_guard_js, require_provider_origin,
+        require_response_origin_pair,
+    };
+
+    #[test]
+    fn reply_snapshot_and_current_page_must_both_be_expected_https_provider() {
+        for spec in crate::providers::ADAPTERS {
+            assert!(
+                require_response_origin_pair(spec.id, spec.url, spec.url).is_ok(),
+                "{} must allow its own configured site on both views",
+                spec.id
+            );
+            for bad_snapshot in [
+                "https://unrelated.invalid/c/old-reply",
+                "http://chatgpt.com/c/previous",
+                "https://chatgpt.com:65536/c/previous",
+                "https://attacker@chatgpt.com/c/previous",
+                "https://chatgpt.com.attacker.invalid/c/previous",
+            ] {
+                let err = require_response_origin_pair(spec.id, spec.url, bad_snapshot)
+                    .expect_err("foreign snapshot cannot borrow the permitted current page");
+                assert!(err.to_string().contains("chat origin unavailable"));
+                assert!(!err.to_string().contains(bad_snapshot));
+            }
+            let wrong_provider_url = crate::providers::ADAPTERS
+                .iter()
+                .find(|other| other.id != spec.id)
+                .expect("there are nine distinct adapters")
+                .url;
+            assert!(
+                require_response_origin_pair(spec.id, spec.url, wrong_provider_url).is_err(),
+                "another known provider is not the expected assistant snapshot"
+            );
+            assert!(
+                require_response_origin_pair(spec.id, "https://unrelated.invalid/", spec.url)
+                    .is_err(),
+                "a valid snapshot cannot bless a foreign current page"
+            );
+        }
+    }
+
+    #[test]
+    fn current_catalog_provider_urls_map_to_their_exact_adapter_identity() {
+        for spec in crate::providers::ADAPTERS {
+            assert_eq!(
+                provider_origin_for_url(spec.url),
+                Some(spec.id),
+                "catalog provider {} has an unrecognized model/chat URL",
+                spec.id
+            );
+        }
+    }
+
+    #[test]
+    fn every_provider_has_explicit_matching_https_origin() {
+        for (provider, url) in [
+            ("chatgpt", "https://chatgpt.com/c/abc"),
+            ("chatgpt", "https://www.chatgpt.com/"),
+            ("grok", "https://grok.com/chat/abc"),
+            ("grok", "https://x.com/i/grok/abc"),
+            ("claude", "https://claude.ai/new"),
+            ("gemini", "https://gemini.google.com/app"),
+            ("qwen", "https://chat.qwen.ai/"),
+            ("metaai", "https://www.meta.ai/"),
+            ("mistral", "https://chat.mistral.ai/chat"),
+            ("perplexity", "https://www.perplexity.ai/search/abc"),
+            ("manus", "https://manus.im/app"),
+        ] {
+            assert_eq!(provider_origin_for_url(url), Some(provider), "{url}");
+            require_provider_origin(provider, url).unwrap();
+        }
+    }
+
+    #[test]
+    fn rejects_cross_provider_redirects_and_spoofed_origins() {
+        for (provider, url) in [
+            ("qwen", "https://chatgpt.com/c/abc"),
+            ("claude", "https://manus.im/app"),
+            (
+                "perplexity",
+                "https://www.perplexity.ai.attacker.invalid/search",
+            ),
+            ("metaai", "https://attacker.invalid/?next=www.meta.ai"),
+            ("gemini", "https://gemini.google.com@attacker.invalid/app"),
+            ("manus", "http://manus.im/app"),
+            ("mistral", "https://chat.mistral.ai:8443/chat"),
+            ("grok", "https://x.com/home"),
+            ("chatgpt", "data:text/html,hello"),
+            ("qwen", "about:blank"),
+        ] {
+            assert_ne!(provider_origin_for_url(url), Some(provider), "{url}");
+            assert!(require_provider_origin(provider, url).is_err(), "{url}");
+        }
+    }
+
+    #[test]
+    fn noncanonical_or_overflowed_port_never_authorizes_provider_origin() {
+        use super::submission_provider_for_url;
+
+        for url in [
+            "https://chatgpt.com:65536/c/abc",
+            "https://grok.com:65536/chat",
+            "https://x.com:65536/i/grok",
+            "https://chat.qwen.ai:0443/",
+            "https://manus.im:443junk/app",
+            "https://www.manus.im:/app",
+            "https://claude.ai:65536/new",
+            "https://gemini.google.com:0443/app",
+            "https://www.meta.ai:65536/",
+            "https://chat.mistral.ai:65536/",
+            "https://www.perplexity.ai:65536/search",
+            "https://user:password@manus.im/app",
+            "https://chatgpt.com../c",
+            "https://www.meta.ai../",
+            "https://chatgpt.com.attacker.invalid/c",
+            "http://chatgpt.com/c",
+        ] {
+            assert_eq!(provider_origin_for_url(url), None, "{url}");
+            assert_eq!(submission_provider_for_url(url), None, "{url}");
+        }
+
+        for (provider, url) in [
+            ("chatgpt", "https://chatgpt.com:443/c/abc"),
+            ("grok", "https://x.com:443/i/grok/thread"),
+            ("qwen", "https://chat.qwen.ai:443/"),
+            ("manus", "https://www.manus.im:443/app"),
+            ("claude", "https://CLAUDE.AI:443/new"),
+            ("gemini", "https://gemini.google.com:443/app"),
+            ("metaai", "https://www.meta.ai:443/"),
+            ("mistral", "https://chat.mistral.ai:443/"),
+            ("perplexity", "https://www.perplexity.ai:443/search"),
+        ] {
+            assert_eq!(provider_origin_for_url(url), Some(provider), "{url}");
+        }
+    }
+
+    #[tokio::test]
+    async fn redirected_composer_cannot_receive_prompt_or_send() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        page.goto("data:text/html,<html><body><form><textarea id='prompt'></textarea><button id='send' type='button' onclick='window.sent=true'>Send</button></form></body></html>").await.unwrap();
+        let error =
+            super::human_type_with_provider(&page, &["#prompt"], "private draft", Some("qwen"))
+                .await
+                .unwrap_err();
+        assert!(error.to_string().contains("chat origin"));
+        assert!(!error.to_string().contains("private draft"));
+        assert_eq!(
+            page.evaluate("document.querySelector('#prompt').value")
+                .as_str(),
+            Some("")
+        );
+
+        page.evaluate("document.querySelector('#prompt').value = 'private draft'");
+        let rejected = super::click_send_or_enter_checked_with_policy(
+            &mut page,
+            &["#send"],
+            "#prompt",
+            100,
+            Some("private draft"),
+            true,
+            Some("qwen"),
+        )
+        .await
+        .unwrap_err();
+        assert!(rejected.to_string().contains("chat origin"));
+        assert_eq!(page.evaluate("window.sent === true").as_bool(), Some(false));
+
+        let enter = super::press_enter_with_provider(&page, "#prompt", Some("qwen")).unwrap_err();
+        assert!(enter.to_string().contains("chat origin"));
+    }
+
+    #[test]
+    fn inline_page_guard_declares_every_provider_and_embedded_safe_location() {
+        // The embedded VM does not support a synthetic WHATWG URL/Location
+        // object with ordinary browser property semantics. Verify the route
+        // cases against parsed Rust URIs above and exercise actual foreign
+        // page rejection in redirected_composer_cannot_receive_prompt_or_send.
+        let guard = provider_origin_guard_js(Some("qwen")).unwrap();
+        assert!(guard.contains("const currentUrl = location;"));
+        assert!(!guard.contains("new URL("));
+        for provider in [
+            "chatgpt",
+            "grok",
+            "claude",
+            "gemini",
+            "qwen",
+            "metaai",
+            "mistral",
+            "perplexity",
+            "manus",
+        ] {
+            let named = format!("actualProvider = '{provider}'");
+            assert!(
+                guard.contains(&named),
+                "missing inline route for {provider}"
+            );
+        }
+        assert!(guard.contains("currentUrl.protocol !== 'https:'"));
+        assert!(guard.contains("currentUrl.username"));
+        assert!(guard.contains("currentUrl.port"));
+    }
+}
+
 fn requires_submission_acknowledgement(url: &str) -> bool {
     submission_provider_for_url(url).is_some()
 }
 
-/// A composer's DOM selectors are not trusted evidence of a ChatGPT/Grok
+/// A browser page recognized as ChatGPT, Grok or Qwen must never be operated by
+/// another adapter simply because it exposes a matching generic composer.
+/// This is NOT an all-provider origin allowlist: unknown origins still need
+/// their own provider-specific browser-route checks and live evidence.
+#[cfg(test)]
+fn require_matching_known_provider_origin(adapter: &str, url: &str) -> anyhow::Result<()> {
+    if submission_provider_for_url(url).is_some_and(|observed| observed != adapter) {
+        anyhow::bail!("provider adapter does not match current chat origin");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod provider_adapter_origin_consistency_tests {
+    use super::require_matching_known_provider_origin as require;
+
+    #[test]
+    fn recognized_chat_origins_accept_only_the_matching_adapter() {
+        for (url, expected) in [
+            ("https://chatgpt.com/c/abc", "chatgpt"),
+            ("https://www.chatgpt.com/", "chatgpt"),
+            ("https://grok.com/chat/123", "grok"),
+            ("https://x.com/i/grok/thread/123", "grok"),
+            ("https://www.x.com/i/grok", "grok"),
+            ("https://chat.qwen.ai/chat/abc", "qwen"),
+        ] {
+            assert!(require(expected, url).is_ok());
+            for wrong in ["manus", "claude", "qwen", "chatgpt", "grok"] {
+                if wrong == expected {
+                    continue;
+                }
+                let error = require(wrong, url).unwrap_err();
+                assert_eq!(
+                    error.to_string(),
+                    "provider adapter does not match current chat origin"
+                );
+                assert!(!error.to_string().contains(url));
+            }
+        }
+    }
+
+    #[test]
+    fn unrelated_and_spoofed_urls_are_not_mistaken_for_known_provider_origins() {
+        // No match is NOT authorization to send: unknown providers retain
+        // separate unresolved signed-in route acceptance.
+        for url in [
+            "https://chatgpt.com.attacker.invalid/c/abc",
+            "https://x.com/home?q=/i/grok",
+            "https://grok.com.attacker.invalid/",
+            "http://chatgpt.com/",
+            "https://chatgpt.com:8443/",
+            "data:text/html,<textarea>grok.com</textarea>",
+        ] {
+            assert!(require("manus", url).is_ok(), "{url}");
+        }
+    }
+}
+
+/// A composer's DOM selectors are not trusted evidence of a ChatGPT/Grok/Qwen
 /// origin. Reject unrelated pages before input or click, and preserve the
 /// typed expired-session error for explicit authentication redirects.
 pub fn require_submission_provider_route(provider: &str, page: &Page) -> anyhow::Result<()> {
@@ -1802,6 +4745,8 @@ mod provider_submission_route_tests {
             "https://x.com/i/grok",
             "https://x.com/i/grok/",
             "https://www.x.com/i/grok/conversation/123",
+            "https://chat.qwen.ai/",
+            "https://chat.qwen.ai/chat/abc",
         ] {
             assert!(
                 requires_submission_acknowledgement(url),
@@ -1825,6 +4770,10 @@ mod provider_submission_route_tests {
             submission_provider_for_url("https://x.com/i/grok/abc"),
             Some("grok")
         );
+        assert_eq!(
+            submission_provider_for_url("https://chat.qwen.ai/chat/abc"),
+            Some("qwen")
+        );
         assert_ne!(
             submission_provider_for_url("https://chatgpt.com/"),
             submission_provider_for_url("https://x.com/i/grok")
@@ -1836,6 +4785,42 @@ mod provider_submission_route_tests {
             "https://chatgpt.com.attacker.invalid/",
         ] {
             assert!(submission_provider_for_url(url).is_none(), "{url}");
+        }
+    }
+
+    #[test]
+    fn qwen_strict_submission_scope_never_accepts_spoofed_host_or_enter_only() {
+        for url in ["https://chat.qwen.ai/", "https://chat.qwen.ai/chat/current"] {
+            assert_eq!(super::submission_provider_for_url(url), Some("qwen"));
+            assert!(requires_submission_acknowledgement(url));
+        }
+        for url in [
+            "http://chat.qwen.ai/",
+            "https://chat.qwen.ai:8443/",
+            "https://chat.qwen.ai.attacker.invalid/",
+            "https://elsewhere.invalid/?origin=chat.qwen.ai",
+        ] {
+            assert_ne!(super::submission_provider_for_url(url), Some("qwen"));
+            assert!(!requires_submission_acknowledgement(url));
+        }
+        // Strict send_prompt requires actionable Send and prompt-bound snapshot,
+        // never a best-effort synthetic Enter fallback.
+    }
+
+    #[test]
+    fn manus_strict_submission_scope_rejects_spoofed_origin() {
+        for url in ["https://manus.im/app", "https://www.manus.im/app"] {
+            assert_eq!(super::submission_provider_for_url(url), Some("manus"));
+            assert!(requires_submission_acknowledgement(url));
+        }
+        for url in [
+            "http://manus.im/app",
+            "https://manus.im:8443/app",
+            "https://manus.im.attacker.invalid/app",
+            "https://elsewhere.invalid/?next=manus.im",
+        ] {
+            assert_ne!(super::submission_provider_for_url(url), Some("manus"));
+            assert!(!requires_submission_acknowledgement(url));
         }
     }
 
@@ -1877,39 +4862,79 @@ mod provider_submission_route_tests {
 /// Wait for the input, type the prompt, click send (v1 send steps 1-3;
 /// the response stream is polled by providers::run_send).
 pub async fn send_prompt(
+    provider: &str,
     page: &mut Page,
     set: &EffectiveSelectorSet,
     prompt: &str,
 ) -> anyhow::Result<()> {
     let initial_url = page.url();
+    check_session(provider, page)?;
+    require_page_provider_origin(provider, page)?;
+    #[cfg(test)]
+    let send_guard_provider = if is_provider_test_fixture(page) {
+        None
+    } else {
+        Some(provider)
+    };
+    #[cfg(not(test))]
+    let send_guard_provider = Some(provider);
     let verify_submission = requires_submission_acknowledgement(&initial_url);
     let expected_submission_provider = submission_provider_for_url(&initial_url);
     let inputs = set.input_refs();
+    let composer_timer = StepTimer::start(TimingStep::ComposerWait);
     wait_for_selector(page, &inputs, 15_000)
         .await
         .inspect_err(|_| {
             tracing::warn!(
-                provider = expected_submission_provider.unwrap_or("other"),
+                provider = provider,
                 stage = "composer_wait",
                 outcome = "timeout_or_error",
                 "provider composer diagnostic"
             );
         })?;
+    drop(composer_timer);
+    // Waiting can redirect into a *different recognized provider* that
+    // exposes a similar editor. Never type the requested provider's prompt
+    // into another provider's composer.
+    check_session(provider, page)?;
+    require_page_provider_origin(provider, page)?;
+    // A search/dialog editor can coexist with a thread editor. Never pick
+    // whichever is first without a source-grounded thread-scoped selector.
+    if matches!(provider, "perplexity" | "manus") {
+        require_unique_actionable_composer(page, &inputs)?;
+    }
     // Waiting for the composer can navigate to a foreign site containing an
     // equally generic input. Verify the initial provider before typing.
     if let Some(provider) = expected_submission_provider {
         require_submission_provider_route(provider, page)?;
     }
-    if let Err(error) = human_type(page, &inputs, prompt).await {
+    let fill_timer = StepTimer::start(TimingStep::InputFill);
+    if let Err(error) = type_provider_prompt(page, &inputs, prompt, send_guard_provider).await {
         tracing::warn!(
-            provider = expected_submission_provider.unwrap_or("other"),
+            provider = provider,
             stage = "input_dispatch",
             outcome = "failed",
             "provider composer diagnostic"
         );
         return Err(error);
     }
-    drive_page(page, Duration::from_millis(200)).await;
+    drop(fill_timer);
+    {
+        let _timer = StepTimer::start(TimingStep::InputSettle);
+        drive_page_timed(
+            page,
+            Duration::from_millis(200),
+            TimingStep::InputSettleEngine,
+            TimingStep::InputSettleSleep,
+        )
+        .await;
+    }
+    let validation_timer = StepTimer::start(TimingStep::DraftValidation);
+    check_session(provider, page)?;
+    require_page_provider_origin(provider, page)?;
+    if matches!(provider, "perplexity" | "manus") {
+        require_unique_actionable_composer(page, &inputs)?;
+    }
     let input_sel = inputs
         .iter()
         .copied()
@@ -1917,59 +4942,109 @@ pub async fn send_prompt(
         .unwrap_or(inputs[0]);
     // The provider may re-render or clear the composer while the browser is
     // settling after typing. Never click Send with a missing or changed draft.
-    if !composer_retains_prompt(page, input_sel, prompt)? {
+    let retained = if provider == "metaai" {
+        metaai_composer_retains_prompt(page, input_sel, prompt)?
+    } else {
+        composer_retains_prompt(page, input_sel, prompt)?
+    };
+    if !retained {
         tracing::warn!(
-            provider = expected_submission_provider.unwrap_or("other"),
+            provider = provider,
             stage = "framework_render",
             outcome = "draft_not_retained",
             "provider composer diagnostic"
         );
         return Err(anyhow::Error::new(ProviderComposerInputRejectedError));
     }
+    check_session(provider, page)?;
+    require_page_provider_origin(provider, page)?;
     if let Some(provider) = expected_submission_provider {
         require_submission_provider_route(provider, page)?;
     }
+    if matches!(provider, "perplexity" | "manus") {
+        require_unique_actionable_composer(page, &inputs)?;
+    }
+    drop(validation_timer);
+    if provider == "metaai" {
+        return submit_metaai_focused(page, prompt).await;
+    }
     let sends = set.send_refs();
     // The click/Enter dispatch is not proof that a controlled SPA accepted
-    // the prompt. ChatGPT and Grok require a visible submission transition.
+    // the prompt. ChatGPT, Grok, Qwen and Manus require a visible transition.
     let baseline = if verify_submission {
         Some(submission_snapshot(page, input_sel, &set.response_refs())?)
     } else {
         None
     };
     if verify_submission {
+        let result = if provider == "manus" {
+            // The same unique-editor gate must run atomically with the click.
+            // A task dialog may become visible while the Send button settles.
+            click_send_or_enter_checked_with_unique_composer(
+                page,
+                &sends,
+                input_sel,
+                5_000,
+                Some(prompt),
+                SendClickPolicy {
+                    allow_untrusted_enter: false,
+                    expected_provider: send_guard_provider,
+                    unique_input_selectors: Some(&inputs),
+                },
+            )
+            .await
+        } else {
+            click_send_or_enter_checked_with_policy(
+                page,
+                &sends,
+                input_sel,
+                5_000,
+                Some(prompt),
+                false,
+                send_guard_provider,
+            )
+            .await
+        };
+        result.inspect_err(|_| {
+            tracing::warn!(
+                provider = provider,
+                stage = "send_control",
+                outcome = "unavailable_or_rejected",
+                "provider composer diagnostic"
+            );
+        })?;
+    } else if matches!(provider, "perplexity" | "manus") {
+        click_send_or_enter_checked_with_unique_composer(
+            page,
+            &sends,
+            input_sel,
+            5_000,
+            Some(prompt),
+            SendClickPolicy {
+                // A lone Perplexity Ask/search editor is not evidence of
+                // thread submission. Require the composer-scoped Send
+                // control; synthetic Enter could submit a different form.
+                allow_untrusted_enter: false,
+                expected_provider: send_guard_provider,
+                unique_input_selectors: Some(&inputs),
+            },
+        )
+        .await?;
+    } else {
         click_send_or_enter_checked_with_policy(
             page,
             &sends,
             input_sel,
             5_000,
             Some(prompt),
-            false,
-            expected_submission_provider,
+            true,
+            send_guard_provider,
         )
-        .await
-        .inspect_err(|_| {
-            tracing::warn!(
-                provider = expected_submission_provider.unwrap_or("other"),
-                stage = "send_control",
-                outcome = "unavailable_or_rejected",
-                "provider composer diagnostic"
-            );
-        })?;
-    } else {
-        click_send_or_enter_checked(page, &sends, input_sel, 5_000, Some(prompt)).await?;
+        .await?;
     }
     if let Some(before) = baseline {
         let start = std::time::Instant::now();
-        // ChatGPT can establish its authenticated socket after the composer
-        // becomes actionable. Keep the acknowledgement strict, but allow that
-        // handshake to finish inside the outer provider request deadline.
-        let acknowledgement_budget = if expected_submission_provider == Some("chatgpt") {
-            Duration::from_secs(60)
-        } else {
-            Duration::from_secs(5)
-        };
-        while start.elapsed() < acknowledgement_budget {
+        while start.elapsed() < Duration::from_secs(5) {
             drive_page(page, Duration::from_millis(150)).await;
             if submission_provider_for_url(&page.url()) != expected_submission_provider {
                 check_session("browser", page)?;
@@ -1978,9 +5053,9 @@ pub async fn send_prompt(
                 );
             }
             let after = submission_snapshot(page, input_sel, &set.response_refs())?;
-            if submission_observed_for_prompt(page, &before, &after, prompt)? {
+            if submission_observed_for_adapter(provider, page, &before, &after, prompt)? {
                 tracing::debug!(
-                    provider = expected_submission_provider.unwrap_or("other"),
+                    provider = provider,
                     stage = "submission",
                     outcome = "acknowledged",
                     "provider composer diagnostic"
@@ -1988,13 +5063,14 @@ pub async fn send_prompt(
                 return Ok(());
             }
         }
+        let error = ProviderSubmissionUnacknowledgedError;
         tracing::warn!(
-            provider = expected_submission_provider.unwrap_or("other"),
-            stage = "submission",
+            provider = provider,
+            stage = error.phase().as_str(),
             outcome = "not_acknowledged",
             "provider composer diagnostic"
         );
-        anyhow::bail!("provider did not acknowledge prompt submission (composer unchanged and no new response)");
+        return Err(anyhow::Error::new(error));
     }
     Ok(())
 }
@@ -2007,16 +5083,19 @@ fn submission_snapshot(
 ) -> anyhow::Result<SubmissionSnapshot> {
     let input = serde_json::to_string(input_selector)?;
     let input_expr = visible_input_query(&input);
+    let draft = composer_draft_expression("el");
     let responses = serde_json::to_string(response_selectors)?;
+    let nontransparent = nontransparent_ancestors_expression("node");
     let js = format!(
         r#"(() => {{
             const el = {input_expr};
-            const value = el ? ((el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') ? el.value : (el.innerText || el.textContent || '')) : null;
+            const value = el ? {draft} : null;
             const responses = {responses};
             const visible = node => {{
                 try {{
                     return node.getClientRects().length > 0 &&
                         window.getComputedStyle(node).visibility !== "hidden" &&
+                        {nontransparent} &&
                         !node.closest('[hidden], [inert], [aria-hidden="true"]') &&
                         !node.disabled && !node.matches(':disabled') &&
                         !node.closest('fieldset[disabled], [aria-disabled="true"]');
@@ -2033,8 +5112,7 @@ fn submission_snapshot(
             for (const selector of [
                 '[data-message-author-role="user"]',
                 '[data-testid="user-message"]',
-                '[data-testid="message-user"]',
-                'main [class~="group/user-message"]'
+                '[data-testid="message-user"]'
             ]) {{
                 try {{ document.querySelectorAll(selector).forEach(node => {{
                     if (visible(node)) userTurns.add(node);
@@ -2042,8 +5120,21 @@ fn submission_snapshot(
             }}
             // Visible response nodes and actionable generation controls
             // are additional evidence of a submission transition.
+            // A visually present but CSS pointer-inert Stop clone is not
+            // positive evidence that THIS submitted prompt began generating.
+            // Keep explicit first-party data-is-streaming state independent:
+            // those markers may be noninteractive response containers.
+            const actionableStop = button => {{
+                if (!visible(button)) return false;
+                try {{
+                    for (let ancestor = button; ancestor; ancestor = ancestor.parentElement) {{
+                        if (window.getComputedStyle(ancestor).pointerEvents === 'none') return false;
+                    }}
+                }} catch (_) {{ return false; }}
+                return true;
+            }};
             const streaming = Array.from(document.querySelectorAll('[data-is-streaming="true"]')).some(visible) ||
-                Array.from(document.querySelectorAll("button")).some(button => visible(button) &&
+                Array.from(document.querySelectorAll("button")).some(button => actionableStop(button) &&
                     /^(stop|stop generating|stop generation|stop responding|stop response|stop answering)$/i.test(
                         (button.getAttribute("aria-label") || button.innerText || button.textContent || "").trim()
                     ));
@@ -2077,6 +5168,128 @@ fn submission_snapshot(
             .and_then(|x| x.as_bool())
             .unwrap_or(false),
     })
+}
+
+#[cfg(test)]
+mod pointer_inert_submission_stop_tests {
+    use super::{submission_observed_for_adapter, submission_snapshot};
+
+    #[tokio::test]
+    async fn css_inert_stop_clones_never_prove_a_fresh_submission() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <textarea id="prompt">private test draft</textarea>
+            <section id="stop-root">
+                <button id="stop" aria-label="Stop generating" hidden>Stop</button>
+            </section>
+            <article><div class="answer">old reply</div></article>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+
+        let before = submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
+        assert!(!before.streaming);
+
+        page.evaluate(
+            "document.querySelector('#stop').hidden=false; document.querySelector('#stop').style.pointerEvents='none'; document.querySelector('#prompt').value=''",
+        );
+        let disabled = submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
+        assert!(
+            !disabled.streaming,
+            "pointer-inert Stop cannot signal fresh generation"
+        );
+
+        page.evaluate(
+            "document.body.insertAdjacentHTML('beforeend', '<article><div class=answer>hydrated reply</div></article>')",
+        );
+        let hydrated = submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
+        assert_eq!(hydrated.response_count, before.response_count + 1);
+        assert!(
+            !submission_observed_for_adapter(
+                "grok",
+                &page,
+                &before,
+                &hydrated,
+                "private test draft"
+            )
+            .unwrap(),
+            "old response hydration and pointer-inert Stop must not acknowledge Send"
+        );
+
+        page.evaluate(
+            "document.querySelector('#stop').style.pointerEvents='auto'; document.querySelector('#stop-root').style.pointerEvents='none'",
+        );
+        assert!(
+            !submission_snapshot(&page, "#prompt", &[".answer"])
+                .unwrap()
+                .streaming,
+            "inert ancestor blocks Stop despite child override"
+        );
+        // A fresh actionable Stop must be distinguishable from a stale
+        // framework clone whose CSS/layout state was changed in place.
+        page.evaluate(
+            r#"(() => {
+                const root = document.querySelector('#stop-root');
+                root.style.pointerEvents = 'auto';
+                root.innerHTML = '<button id="stop" aria-label="Stop generating">Stop</button>';
+            })()"#,
+        );
+        let enabled_diagnostic = page.evaluate(
+            r#"(() => {
+                const button = document.querySelector('#stop');
+                const root = document.querySelector('#stop-root');
+                return {
+                    rect: !!button?.getClientRects().length,
+                    hidden: !!button?.hidden,
+                    buttonPointer: getComputedStyle(button).pointerEvents,
+                    rootPointer: getComputedStyle(root).pointerEvents
+                };
+            })()"#,
+        );
+        assert!(
+            submission_snapshot(&page, "#prompt", &[".answer"])
+                .unwrap()
+                .streaming,
+            "fresh actionable Stop remains supported; fixture CSS: {enabled_diagnostic:?}"
+        );
+
+        page.evaluate(
+            "document.querySelector('#stop').hidden=true; document.querySelector('#stop-root').setAttribute('data-is-streaming','true')",
+        );
+        assert!(
+            submission_snapshot(&page, "#prompt", &[".answer"])
+                .unwrap()
+                .streaming,
+            "explicit streaming-state marker remains independent of Stop actionability"
+        );
+    }
+}
+
+/// For ChatGPT, Grok and the previously strict adapters, an assistant node count
+/// increase plus an emptied composer can reflect SPA history hydration over
+/// an unaccepted draft. Require a fresh prompt-bound user turn or a newly
+/// activated generation indicator. Do not infer a completed new turn from
+/// previously rendered assistant content alone.
+fn submission_observed_for_adapter(
+    provider: &str,
+    page: &Page,
+    before: &SubmissionSnapshot,
+    after: &SubmissionSnapshot,
+    prompt: &str,
+) -> anyhow::Result<bool> {
+    if matches!(provider, "chatgpt" | "qwen" | "grok" | "manus")
+        && after.user_turn_count <= before.user_turn_count
+        && !(after.streaming && !before.streaming)
+    {
+        return Ok(false);
+    }
+    submission_observed_for_prompt(page, before, after, prompt)
 }
 
 /// A new user-turn node may come from unrelated SPA history hydration. Only
@@ -2113,23 +5326,37 @@ fn submission_observed_for_prompt(
         return Ok(false);
     }
     let prompt_js = serde_json::to_string(prompt)?;
+    let nontransparent = nontransparent_ancestors_expression("node");
     let matched = page.evaluate(&format!(
         r#"(() => {{
             const expected = {prompt_js};
-            const normalized = text => (text || '').replace(/\s+/g, ' ').trim();
-            if (!normalized(expected)) return false;
+            // Whitespace collapse can acknowledge a DIFFERENT prompt: a
+            // multiline rich-text request is not the same as one line.
+            // Only canonicalize transport CRLF/CR, preserving all other
+            // intentional Unicode, spaces, indentation and line breaks.
+            const canonical = text => (text || '').replace(/\r\n?/g, '\n');
+            if (!expected || !expected.trim()) return false;
             const turns = Array.from(document.querySelectorAll(
-                '[data-message-author-role="user"], [data-testid="user-message"], [data-testid="message-user"], main [class~="group/user-message"]'
+                '[data-message-author-role="user"], [data-testid="user-message"], [data-testid="message-user"]'
             )).filter(node => {{
                 try {{
                     return node.getClientRects().length > 0 &&
                         window.getComputedStyle(node).visibility !== 'hidden' &&
+                        {nontransparent} &&
                         !node.closest('[hidden], [inert], [aria-hidden="true"], [aria-disabled="true"]');
                 }} catch (_) {{ return false; }}
             }});
             if (!turns.length) return false;
             const last = turns[turns.length - 1];
-            return normalized(last.innerText || last.textContent || '') === normalized(expected);
+            // For a text-only turn, rendered innerText may collapse meaningful
+            // newlines/spaces. Its actual text node preserves the submitted
+            // prompt. For nested markup, require rendered text so invisible
+            // child nodes cannot spoof a matching user turn.
+            const hasNestedElements = !!last.querySelector('*');
+            const actual = hasNestedElements
+                ? (last.innerText || '')
+                : (last.textContent || '');
+            return canonical(actual) === canonical(expected);
         }})()"#
     ));
     Ok(matched.as_bool() == Some(true))
@@ -2167,39 +5394,233 @@ fn submission_accepted(before: &SubmissionSnapshot, after: &SubmissionSnapshot) 
 }
 
 #[cfg(test)]
-mod current_chatgpt_submission_tests {
+mod strict_fresh_submission_ack_tests {
+    use super::*;
+
     #[tokio::test]
-    async fn current_user_turn_requires_matching_prompt_and_cleared_input() {
+    async fn old_answer_hydration_with_cleared_draft_is_not_submission() {
         let browser = obscura_core::Browser::builder()
             .stealth(false)
             .build()
             .unwrap();
         let mut page = browser.new_page().await.unwrap();
-        let html="<html><body><main><textarea id='prompt'>fixture prompt</textarea></main></body></html>";
+        let html = r#"<html><body>
+            <form><textarea id="prompt">first line
+  second line</textarea></form>
+            <article><div class="answer">old assistant answer</div></article>
+        </body></html>"#;
         let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
         page.goto(&format!("data:text/html,{encoded}"))
             .await
             .unwrap();
-        let before = super::submission_snapshot(&page, "#prompt", &[]).unwrap();
-        page.evaluate(r#"(() => {const turn=document.createElement('div');turn.className='group/user-message';turn.textContent='fixture prompt';document.querySelector('main').appendChild(turn);})()"#);
-        let uncleared = super::submission_snapshot(&page, "#prompt", &[]).unwrap();
-        assert!(!super::submission_observed_for_prompt(
-            &page,
-            &before,
-            &uncleared,
-            "fixture prompt"
-        )
-        .unwrap());
-        page.evaluate("document.querySelector('#prompt').value=''");
-        let after = super::submission_snapshot(&page, "#prompt", &[]).unwrap();
-        assert!(
-            super::submission_observed_for_prompt(&page, &before, &after, "fixture prompt")
-                .unwrap()
+        let prompt = "first line\n  second line";
+        let before = submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
+        assert_eq!(before.response_count, 1);
+        assert_eq!(before.user_turn_count, 0);
+        assert!(!before.input_empty);
+
+        // The app may hydrate an old assistant turn and separately clear an
+        // unaccepted controlled draft. Neither is proof Send was accepted.
+        page.evaluate(
+            r#"(() => {
+            document.querySelector('#prompt').value = '';
+            document.body.insertAdjacentHTML('beforeend',
+                '<article><div class="answer">hydrated history</div></article>');
+        })()"#,
         );
-        assert!(
-            !super::submission_observed_for_prompt(&page, &before, &after, "different prompt")
-                .unwrap()
+        let hydrated = submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
+        assert_eq!(hydrated.response_count, 2);
+        assert!(hydrated.input_empty);
+        for provider in ["grok", "chatgpt"] {
+            assert!(
+                !submission_observed_for_adapter(provider, &page, &before, &hydrated, prompt)
+                    .unwrap(),
+                "hydrated history cannot acknowledge {provider} Send"
+            );
+        }
+
+        // Only a fresh visible prompt-bound user turn proves actual uptake.
+        page.evaluate(
+            r#"(() => {
+            const turn = document.createElement('div');
+            turn.id = 'new-user-turn';
+            turn.setAttribute('data-testid', 'user-message');
+            turn.textContent = 'first line\n  second line';
+            document.body.appendChild(turn);
+        })()"#,
         );
+        let with_user = submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
+        assert_eq!(with_user.user_turn_count, 1);
+        for provider in ["grok", "chatgpt"] {
+            assert!(
+                submission_observed_for_adapter(provider, &page, &before, &with_user, prompt)
+                    .unwrap(),
+                "matching exact multiline user turn acknowledges {provider} prompt"
+            );
+        }
+
+        page.evaluate(
+            "document.querySelector('#new-user-turn').textContent = 'wrong previous turn'",
+        );
+        let wrong_user = submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
+        for provider in ["grok", "chatgpt"] {
+            assert!(
+                !submission_observed_for_adapter(provider, &page, &before, &wrong_user, prompt)
+                    .unwrap(),
+                "a different user turn cannot acknowledge {provider} prompt"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn only_fresh_not_inherited_stop_can_acknowledge_without_user_turn() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <textarea id="prompt">some draft</textarea>
+            <button id="stop" aria-label="Stop generating">Stop</button>
+            <div class="answer">older answer</div>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        let before_active = submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
+        assert!(before_active.streaming);
+        page.evaluate(
+            r#"(() => {
+            document.querySelector('#prompt').value = '';
+            document.body.insertAdjacentHTML('beforeend',
+                '<div class="answer">hydrated historic answer</div>');
+        })()"#,
+        );
+        let inherited = submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
+        assert!(inherited.streaming);
+        for provider in ["grok", "chatgpt"] {
+            assert!(
+                !submission_observed_for_adapter(
+                    provider,
+                    &page,
+                    &before_active,
+                    &inherited,
+                    "some draft"
+                )
+                .unwrap(),
+                "preexisting Stop is not fresh {provider} generation"
+            );
+        }
+
+        page.evaluate("document.querySelector('#stop').hidden = true");
+        page.evaluate("document.querySelector('#prompt').value = 'some draft'");
+        let before_inactive = submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
+        assert!(!before_inactive.streaming);
+        page.evaluate("document.querySelector('#stop').hidden = false");
+        let freshly_active = submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
+        assert!(freshly_active.streaming);
+        for provider in ["grok", "chatgpt"] {
+            assert!(
+                submission_observed_for_adapter(
+                    provider,
+                    &page,
+                    &before_inactive,
+                    &freshly_active,
+                    "some draft"
+                )
+                .unwrap(),
+                "freshly active generation may acknowledge {provider} before a user turn"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod perplexity_enter_fallback_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_lone_ask_search_editor_never_submits_via_synthetic_enter() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body><form id="search">
+            <textarea id="ask" placeholder="Ask anything"></textarea>
+            </form><script>
+            window.enterCount = 0;
+            document.querySelector('#ask').addEventListener('keydown', event => {
+                if (event.key === 'Enter') window.enterCount++;
+            });
+            </script></body></html>"#;
+        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        page.evaluate(
+            "document.documentElement.setAttribute('data-chat-gateway-test-fixture', '')",
+        );
+        let set = EffectiveSelectorSet {
+            picker: vec![],
+            input: vec!["#ask".to_owned()],
+            send: vec!["button[aria-label='Submit']".to_owned()],
+            response: vec![],
+        };
+        let error = send_prompt("perplexity", &mut page, &set, "private fixture request")
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("synthetic Enter is not a supported submission path"),
+            "an Ask/search editor with no explicit thread Send must fail closed"
+        );
+        assert_eq!(page.evaluate("window.enterCount").as_f64(), Some(0.0));
+        assert_eq!(
+            page.evaluate("document.querySelector('#ask').value")
+                .as_str(),
+            Some("private fixture request"),
+            "no rejected draft is silently entered or lost"
+        );
+    }
+
+    #[tokio::test]
+    async fn one_actionable_perplexity_send_still_clicks_without_enter() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body><form id="thread">
+            <textarea id="ask" placeholder="Ask follow-up"></textarea>
+            <button type="button" aria-label="Submit" id="send"
+              onclick="window.clickCount++">Send</button>
+            </form><script>
+            window.enterCount = 0; window.clickCount = 0;
+            document.querySelector('#ask').addEventListener('keydown', event => {
+                if (event.key === 'Enter') window.enterCount++;
+            });
+            </script></body></html>"#;
+        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        page.evaluate(
+            "document.documentElement.setAttribute('data-chat-gateway-test-fixture', '')",
+        );
+        let set = EffectiveSelectorSet {
+            picker: vec![],
+            input: vec!["#ask".to_owned()],
+            send: vec!["button[aria-label='Submit']".to_owned()],
+            response: vec![],
+        };
+        send_prompt("perplexity", &mut page, &set, "private fixture request")
+            .await
+            .expect("a unique actionable thread Send remains supported");
+        assert_eq!(page.evaluate("window.clickCount").as_f64(), Some(1.0));
+        assert_eq!(page.evaluate("window.enterCount").as_f64(), Some(0.0));
     }
 }
 
@@ -2230,7 +5651,10 @@ mod pre_send_retention_tests {
             ..Default::default()
         };
         let selectors = crate::providers::chatgpt::SELECTORS.effective(&overrides);
-        let result = super::send_prompt(&mut page, &selectors, "user draft").await;
+        page.evaluate(
+            "document.documentElement.setAttribute('data-chat-gateway-test-fixture', '')",
+        );
+        let result = super::send_prompt("chatgpt", &mut page, &selectors, "user draft").await;
         assert!(result.is_err(), "a cleared draft must not be submitted");
         assert_eq!(page.evaluate("window.sent || 0").as_f64(), Some(0.0));
     }
@@ -2239,82 +5663,6 @@ mod pre_send_retention_tests {
 #[cfg(test)]
 mod composer_rejected_input_tests {
     use super::ProviderComposerInputRejectedError;
-
-    #[tokio::test]
-    async fn controlled_editor_handles_paste_without_destructive_dom_fallback() {
-        let browser = obscura_core::Browser::builder()
-            .stealth(false)
-            .build()
-            .unwrap();
-        let mut page = browser.new_page().await.unwrap();
-        let html = r#"<html><body><div id="prompt" contenteditable="true"><p id="document-node"></p></div>
-            <script>
-            const editor = document.querySelector('#prompt');
-            editor.addEventListener('paste', event => {
-                window.pasteTrusted = event.isTrusted;
-                window.canonicalDraft = event.clipboardData.getData('text/plain');
-                document.querySelector('#document-node').textContent = window.canonicalDraft;
-                event.preventDefault();
-            });
-            editor.addEventListener('input', () => { window.extraInput = true; });
-            </script></body></html>"#;
-        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
-        page.goto(&format!("data:text/html,{encoded}"))
-            .await
-            .unwrap();
-        // Obscura exposes value even on DIV; it must never shadow editor text.
-        page.evaluate("document.querySelector('#prompt').value = 'stale field value'");
-        super::human_type(&page, &["#prompt"], "fixture draft")
-            .await
-            .unwrap();
-        assert_eq!(
-            page.evaluate("window.canonicalDraft"),
-            serde_json::json!("fixture draft")
-        );
-        assert!(
-            page.query_selector("#document-node").is_some(),
-            "editor document nodes must survive handled paste"
-        );
-        assert_eq!(
-            page.evaluate("window.pasteTrusted"),
-            serde_json::json!(false)
-        );
-        assert_ne!(page.evaluate("window.extraInput"), serde_json::json!(true));
-    }
-
-    #[tokio::test]
-    async fn exact_editor_text_survives_layout_whitespace_changes_through_send_guard() {
-        let browser = obscura_core::Browser::builder()
-            .stealth(false)
-            .build()
-            .unwrap();
-        let mut page = browser.new_page().await.unwrap();
-        let html = r#"<html><body><form><div id="prompt" contenteditable="true"></div>
-            <button id="send" type="button" onclick="window.sent=true">Send</button></form>
-            <script>Object.defineProperty(document.querySelector('#prompt'), 'innerText', {get(){return 'layout-normalized whitespace';}});</script>
-            </body></html>"#;
-        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
-        page.goto(&format!("data:text/html,{encoded}"))
-            .await
-            .unwrap();
-        super::human_type(&page, &["#prompt"], "exact  draft\nwith whitespace")
-            .await
-            .unwrap();
-        assert!(super::click_send_or_enter_checked(
-            &mut page,
-            &["#send"],
-            "#prompt",
-            100,
-            Some("exact  draft\nwith whitespace")
-        )
-        .await
-        .unwrap());
-        assert_eq!(page.evaluate("window.sent"), serde_json::json!(true));
-        assert_eq!(
-            page.evaluate("document.querySelector('#prompt').textContent"),
-            serde_json::json!("exact  draft\nwith whitespace")
-        );
-    }
 
     #[tokio::test]
     async fn framework_draft_rejection_is_typed_and_contains_no_prompt() {
@@ -2347,6 +5695,77 @@ mod composer_rejected_input_tests {
     }
 
     #[tokio::test]
+    async fn synthetic_value_spoof_on_nested_contenteditable_never_authorizes_send() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <form>
+              <div id="target" role="textbox" contenteditable="true"><p>Old draft</p></div>
+              <button id="send" type="button" onclick="window.sendCount=(window.sendCount||0)+1">Send</button>
+            </form>
+            <div id="other" contenteditable="true">Unrelated draft</div>
+            <div id="empty" contenteditable="true"></div>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        page.evaluate(r#"document.querySelector('#target').value = 'private message';"#);
+        assert_eq!(
+            page.evaluate("document.querySelector('#target').value")
+                .as_str(),
+            Some("private message")
+        );
+        assert!(!super::composer_retains_prompt(&page, "#target", "private message").unwrap());
+        page.evaluate("document.querySelector('#empty').value = 'private message'");
+        let snapshot = super::submission_snapshot(&page, "#empty", &[".assistant"]).unwrap();
+        assert!(
+            snapshot.input_empty,
+            "synthetic value on an empty contenteditable must not count as a real draft"
+        );
+        let rejected_click = super::click_send_or_enter_checked_with_policy(
+            &mut page,
+            &["#send"],
+            "#target",
+            250,
+            Some("private message"),
+            false,
+            None,
+        )
+        .await;
+        assert!(
+            rejected_click.is_err(),
+            "last-moment Send check must reject synthetic value"
+        );
+        assert_eq!(page.evaluate("window.sendCount || 0").as_f64(), Some(0.0));
+        let error = super::human_type(&page, &["#target"], "private message")
+            .await
+            .unwrap_err();
+        assert!(error
+            .downcast_ref::<ProviderComposerInputRejectedError>()
+            .is_some());
+        assert!(!error.to_string().contains("private message"));
+        assert_eq!(page.evaluate("window.sendCount || 0").as_f64(), Some(0.0));
+        assert_eq!(
+            page.evaluate("document.querySelector('#other').textContent")
+                .as_str(),
+            Some("Unrelated draft")
+        );
+    }
+
+    #[test]
+    fn read_only_draft_contract_never_uses_synthetic_value_for_contenteditable() {
+        let expression = super::composer_draft_expression("input");
+        assert!(expression.contains("input.tagName === 'TEXTAREA'"));
+        assert!(expression.contains("input.tagName === 'INPUT'"));
+        assert!(expression.contains("input.innerText ?? input.textContent"));
+        assert!(!expression.contains("'value' in"));
+    }
+
+    #[tokio::test]
     async fn controlled_contenteditable_draft_with_disabled_send_is_not_submitted() {
         let browser = obscura_core::Browser::builder()
             .stealth(false)
@@ -2373,9 +5792,13 @@ mod composer_rejected_input_tests {
         // The pinned embedded browser may retain a synthetic DOM draft even
         // when the controlled editor never enables submission. DOM retention
         // is not proof that the framework accepted the prompt.
-        super::human_type(&page, &["#prompt"], "private-message")
+        let error = super::human_type(&page, &["#prompt"], "private-message")
             .await
-            .unwrap();
+            .unwrap_err();
+        assert!(error
+            .downcast_ref::<ProviderComposerInputRejectedError>()
+            .is_some());
+        assert!(!error.to_string().contains("private-message"));
         assert_eq!(
             page.evaluate("document.querySelector('#send').disabled")
                 .as_bool(),
@@ -2456,7 +5879,9 @@ mod native_input_setter_tests {
 
 #[cfg(test)]
 mod prompt_bound_submission_tests {
-    use super::{submission_observed_for_prompt, submission_snapshot};
+    use super::{
+        submission_observed_for_adapter, submission_observed_for_prompt, submission_snapshot,
+    };
 
     #[tokio::test]
     async fn unrelated_hydrated_turn_cannot_acknowledge_a_cleared_draft() {
@@ -2501,6 +5926,174 @@ mod prompt_bound_submission_tests {
         assert!(
             !submission_observed_for_prompt(&page, &before, &after, "fixture request").unwrap()
         );
+    }
+
+    #[tokio::test]
+    async fn opacity_zero_turns_and_stop_clones_cannot_acknowledge_a_dropped_draft() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <textarea id="prompt">original draft</textarea>
+            <div data-message-author-role="user">earlier user turn</div>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+
+        let before = submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
+        assert_eq!(before.user_turn_count, 1);
+        assert_eq!(before.response_count, 0);
+        assert!(!before.streaming);
+
+        page.evaluate(
+            r#"(() => {
+                document.querySelector('#prompt').value = '';
+                // A SPA may retain opacity-zero transition shells after
+                // a draft is dropped. Their user/assistant/Stop nodes cannot
+                // certify application acceptance of the prompt.
+                const wrapper = document.createElement('section');
+                wrapper.id = 'ghost-wrapper';
+                wrapper.style.opacity = '0';
+                wrapper.innerHTML = '<div data-testid="user-message">request</div>' +
+                    '<div class="answer">ghost answer</div>' +
+                    '<button aria-label="Stop generating">Stop</button>';
+                document.body.appendChild(wrapper);
+                const selfGhost = document.createElement('div');
+                selfGhost.setAttribute('data-testid', 'user-message');
+                selfGhost.style.opacity = '0';
+                selfGhost.textContent = 'request';
+                document.body.appendChild(selfGhost);
+            })()"#,
+        );
+        let ghosts_only = submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
+        assert_eq!(ghosts_only.user_turn_count, before.user_turn_count);
+        assert_eq!(ghosts_only.response_count, before.response_count);
+        assert!(
+            !ghosts_only.streaming,
+            "invisible Stop is not new generation"
+        );
+        assert!(!super::submission_accepted(&before, &ghosts_only));
+        assert!(!submission_observed_for_prompt(&page, &before, &ghosts_only, "request").unwrap());
+
+        page.evaluate(
+            r#"(() => {
+                const visibleTurn = document.createElement('div');
+                visibleTurn.setAttribute('data-testid', 'user-message');
+                visibleTurn.style.opacity = '0.5';
+                visibleTurn.style.whiteSpace = 'pre-wrap';
+                visibleTurn.textContent = 'request';
+                document.body.appendChild(visibleTurn);
+            })()"#,
+        );
+        let accepted = submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
+        assert_eq!(accepted.user_turn_count, before.user_turn_count + 1);
+        assert!(!accepted.streaming);
+        assert!(submission_observed_for_prompt(&page, &before, &accepted, "request").unwrap());
+
+        // A newer invisible unrelated turn cannot hide the last *visible*
+        // prompt-bound turn or make it look like a different request.
+        page.evaluate(
+            r#"(() => {
+                const ghost = document.createElement('div');
+                ghost.setAttribute('data-message-author-role', 'user');
+                ghost.style.opacity = '0';
+                ghost.textContent = 'different private request';
+                document.body.appendChild(ghost);
+            })()"#,
+        );
+        let after_trailing_ghost = submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
+        assert_eq!(
+            after_trailing_ghost.user_turn_count,
+            accepted.user_turn_count
+        );
+        assert!(
+            submission_observed_for_prompt(&page, &before, &after_trailing_ghost, "request")
+                .unwrap(),
+            "the last nontransparent user turn is still the submitted request"
+        );
+
+        // Non-zero-opacity user turns remain visible and prevent accepting
+        // an older match once a newer distinct turn actually appears.
+        page.evaluate("document.body.lastElementChild.style.opacity = '0.5'");
+        let newer_real_turn = submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
+        assert_eq!(
+            newer_real_turn.user_turn_count,
+            accepted.user_turn_count + 1
+        );
+        assert!(
+            !submission_observed_for_prompt(&page, &before, &newer_real_turn, "request").unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn user_turn_evidence_preserves_multiline_unicode_and_significant_spacing() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <textarea id="prompt">original request</textarea>
+            <div data-message-author-role="user">older turn</div>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        let before = submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
+        page.evaluate(
+            r#"(() => {
+                document.querySelector('#prompt').value = '';
+                const turn = document.createElement('div');
+                turn.setAttribute('data-message-author-role', 'user');
+                // Preserve significant layout newlines as real visible text.
+                turn.style.whiteSpace = 'pre-wrap';
+                turn.textContent = 'line one line two';
+                document.body.appendChild(turn);
+            })()"#,
+        );
+        let after = submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
+        assert!(after.user_turn_count > before.user_turn_count);
+        assert!(
+            !submission_observed_for_prompt(&page, &before, &after, "line one\nline two").unwrap()
+        );
+
+        // A framework-rendered actual multiline turn can acknowledge it.
+        page.evaluate("document.body.lastElementChild.textContent = 'line one\\nline two'");
+        assert!(
+            submission_observed_for_prompt(&page, &before, &after, "line one\nline two").unwrap()
+        );
+        assert!(
+            !submission_observed_for_prompt(&page, &before, &after, "line one line two").unwrap()
+        );
+        assert!(
+            !submission_observed_for_prompt(&page, &before, &after, "line one  line two").unwrap()
+        );
+        assert!(
+            !submission_observed_for_prompt(&page, &before, &after, "line one\n line two").unwrap()
+        );
+
+        // CRLF is only a transport line ending; the actual significant
+        // newline, emoji and non-ASCII characters remain exact.
+        page.evaluate("document.body.lastElementChild.textContent = '你好\\n\\nemoji ☃️'");
+        assert!(
+            submission_observed_for_prompt(&page, &before, &after, "你好\r\n\r\nemoji ☃️").unwrap()
+        );
+        assert!(!submission_observed_for_prompt(&page, &before, &after, "你好 emoji ☃️").unwrap());
+        assert!(
+            !submission_observed_for_prompt(&page, &before, &after, "你好\n\nemoji ☃").unwrap()
+        );
+
+        // Hidden nested text must never become a user-turn acknowledgement
+        // simply because innerText is empty and textContent is populated.
+        page.evaluate(
+            "document.body.lastElementChild.innerHTML = '<span hidden>secret-hidden</span>'",
+        );
+        assert!(!submission_observed_for_prompt(&page, &before, &after, "secret-hidden").unwrap());
     }
 
     #[tokio::test]
@@ -2568,6 +6161,114 @@ mod prompt_bound_submission_tests {
         page.evaluate("document.querySelector('#prompt').value = ''");
         let consumed = submission_snapshot(&page, "#prompt", &[".answer"]).unwrap();
         assert!(submission_observed_for_prompt(&page, &before, &consumed, "draft").unwrap());
+    }
+
+    #[tokio::test]
+    async fn qwen_style_send_ack_rejects_unchanged_draft_and_history_hydration() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <textarea id="qwen-prompt">fresh request</textarea>
+            <div data-testid="user-message">old request</div>
+            <div class="answer">old answer</div>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        let before = submission_snapshot(&page, "#qwen-prompt", &[".answer"]).unwrap();
+        assert!(
+            !submission_observed_for_adapter("qwen", &page, &before, &before, "fresh request")
+                .unwrap()
+        );
+
+        // History hydration while the draft remains cannot certify that an
+        // unrelated completed answer belongs to the current request.
+        page.evaluate(r#"document.body.insertAdjacentHTML('beforeend', '<div class="answer">hydrated old answer</div>')"#);
+        let hydrated = submission_snapshot(&page, "#qwen-prompt", &[".answer"]).unwrap();
+        assert!(!submission_observed_for_adapter(
+            "qwen",
+            &page,
+            &before,
+            &hydrated,
+            "fresh request"
+        )
+        .unwrap());
+
+        // Even if the composer drops its value while historical content
+        // hydrates, Qwen has no prompt-correlated acceptance signal yet.
+        page.evaluate("document.querySelector('#qwen-prompt').value = ''");
+        let dropped = submission_snapshot(&page, "#qwen-prompt", &[".answer"]).unwrap();
+        assert!(!submission_observed_for_adapter(
+            "qwen",
+            &page,
+            &before,
+            &dropped,
+            "fresh request"
+        )
+        .unwrap());
+
+        // A dropped draft and the wrong user's turn must not count as success.
+        page.evaluate("document.querySelector('#qwen-prompt').value = ''");
+        page.evaluate(r#"document.body.insertAdjacentHTML('beforeend', '<div data-testid="user-message">unrelated request</div>')"#);
+        let unrelated = submission_snapshot(&page, "#qwen-prompt", &[".answer"]).unwrap();
+        assert!(!submission_observed_for_adapter(
+            "qwen",
+            &page,
+            &before,
+            &unrelated,
+            "fresh request"
+        )
+        .unwrap());
+        page.evaluate("document.body.lastElementChild.textContent = 'fresh request'");
+        assert!(submission_observed_for_adapter(
+            "qwen",
+            &page,
+            &before,
+            &unrelated,
+            "fresh request"
+        )
+        .unwrap());
+    }
+
+    #[tokio::test]
+    async fn manus_chat_ack_requires_current_prompt_not_history_hydration() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <textarea id="manus">fresh chat</textarea>
+            <div class="answer">old output</div>
+            <div data-testid="user-message">old turn</div>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|b| format!("%{b:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        let before = submission_snapshot(&page, "#manus", &[".answer"]).unwrap();
+        page.evaluate(r#"document.body.insertAdjacentHTML('beforeend', '<div class="answer">hydrated output</div>')"#);
+        page.evaluate("document.querySelector('#manus').value = ''");
+        let hydrated = submission_snapshot(&page, "#manus", &[".answer"]).unwrap();
+        assert!(
+            !submission_observed_for_adapter("manus", &page, &before, &hydrated, "fresh chat")
+                .unwrap()
+        );
+
+        page.evaluate(r#"document.body.insertAdjacentHTML('beforeend', '<div data-testid="user-message">unrelated</div>')"#);
+        let wrong = submission_snapshot(&page, "#manus", &[".answer"]).unwrap();
+        assert!(
+            !submission_observed_for_adapter("manus", &page, &before, &wrong, "fresh chat")
+                .unwrap()
+        );
+        page.evaluate("document.body.lastElementChild.textContent = 'fresh chat'");
+        assert!(
+            submission_observed_for_adapter("manus", &page, &before, &wrong, "fresh chat").unwrap()
+        );
     }
 
     #[tokio::test]
@@ -2895,6 +6596,104 @@ mod text_selector_tests {
         assert_eq!(page.evaluate("window.clicked").as_str(), Some("valid"));
         page.evaluate("document.querySelector('#valid').disabled = true");
         assert!(!super::click_text_selector(&page, "text:button=Send").unwrap());
+    }
+
+    #[tokio::test]
+    async fn text_picker_skips_opacity_zero_self_ancestor_and_pointer_inert_clones() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <button style="opacity:0" onclick="window.picked='ghost-self'">Choose model</button>
+            <section style="opacity:0">
+                <button onclick="window.picked='ghost-parent'">Choose model</button>
+            </section>
+            <button style="pointer-events:none" onclick="window.picked='pointer-inert'">Choose model</button>
+            <div style="pointer-events:none">
+                <button onclick="window.picked='pointer-parent'">Choose model</button>
+            </div>
+            <button id="valid" style="opacity:0.5" onclick="window.picked='visible'">Choose model</button>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+        assert!(
+            super::click_text_selector(&page, "text:button=Choose model").unwrap(),
+            "the translucent actionable picker must remain click-supported"
+        );
+        assert_eq!(page.evaluate("window.picked").as_str(), Some("visible"));
+        page.evaluate(
+            "(() => { window.picked = 'unchanged'; document.querySelector('#valid').style.pointerEvents='none'; })()",
+        );
+        assert!(
+            !super::click_text_selector(&page, "text:button=Choose model").unwrap(),
+            "only invisible and pointer-inert controls must not be clicked"
+        );
+        assert_eq!(page.evaluate("window.picked").as_str(), Some("unchanged"));
+    }
+
+    #[tokio::test]
+    async fn css_picker_native_click_rejects_hidden_inert_and_transparent_first_matches() {
+        let browser = obscura_core::Browser::builder()
+            .stealth(false)
+            .build()
+            .unwrap();
+        let mut page = browser.new_page().await.unwrap();
+        let html = r#"<html><body>
+            <button id="hidden" hidden onclick="window.clicked='hidden'">Model</button>
+            <button id="disabled" disabled onclick="window.clicked='disabled'">Model</button>
+            <section style="opacity:0">
+                <button id="ghost-parent" onclick="window.clicked='ghost-parent'">Model</button>
+            </section>
+            <button id="ghost-self" style="opacity:0" onclick="window.clicked='ghost-self'">Model</button>
+            <div style="pointer-events:none">
+                <button id="pointer-parent" onclick="window.clicked='pointer-parent'">Model</button>
+            </div>
+            <button id="pointer-self" style="pointer-events:none" onclick="window.clicked='pointer-self'">Model</button>
+            <div inert><button id="inert" onclick="window.clicked='inert'">Model</button></div>
+            <button id="valid" style="opacity:0.5" onclick="window.clicked='valid'">Model</button>
+        </body></html>"#;
+        let encoded: String = html.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        page.goto(&format!("data:text/html,{encoded}"))
+            .await
+            .unwrap();
+
+        for selector in [
+            "#hidden",
+            "#disabled",
+            "#ghost-parent",
+            "#ghost-self",
+            "#pointer-parent",
+            "#pointer-self",
+            "#inert",
+        ] {
+            assert!(
+                super::click_first(&page, &[selector]).is_err(),
+                "nonactionable first CSS selector unexpectedly clicked: {selector}"
+            );
+            assert_eq!(page.evaluate("window.clicked || ''").as_str(), Some(""));
+        }
+        assert!(super::click_first(
+            &page,
+            &["#hidden", "#pointer-parent", "#ghost-self", "#valid"]
+        )
+        .is_ok());
+        assert_eq!(page.evaluate("window.clicked").as_str(), Some("valid"));
+
+        // The first matching CSS node must be actionable. Never silently
+        // click a hidden first clone or pick an arbitrary later clone when
+        // only one selector was configured.
+        page.evaluate("window.clicked = ''");
+        assert!(
+            super::click_first(&page, &["button"]).is_err(),
+            "an invisible first match must fail closed"
+        );
+        assert_eq!(page.evaluate("window.clicked").as_str(), Some(""));
+        assert!(super::click_first(&page, &["#valid"]).is_ok());
+        assert_eq!(page.evaluate("window.clicked").as_str(), Some("valid"));
     }
 
     #[test]
