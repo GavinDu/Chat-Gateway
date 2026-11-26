@@ -883,7 +883,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 });
 
 
-async function resyncLinkedProviders() {
+async function resyncLinkedProviders(refresh = null) {
   // An owner can revoke consent or replace the gateway while an awaited
   // diagnostics request is in flight. Do not schedule imports from the
   // linked-provider list captured before that await.
@@ -911,12 +911,22 @@ async function resyncLinkedProviders() {
     return;
   }
   if (!hasRelayConnection(latest) || !sameRelayIdentity(initial, latest)) return;
-  const missing = new Set((status.gateway.providers || [])
-    .filter(item => !item.linked).map(item => item.provider));
+  const rows = Array.isArray(status.gateway?.providers) ? status.gateway.providers : [];
+  // Only a current, unambiguous enabled status can authorize a forced reload
+  // refresh. Ordinary health repair retains legacy missing-status behavior.
+  const forcedReload = refresh?.forceReload === true;
+  if (refresh) refresh.selected = true;
+  if (forcedReload) pendingReloadResync = false;
+  const eligible = provider => {
+    const matches = rows.filter(row => row?.provider === provider);
+    if (forcedReload) return matches.length === 1 && matches[0].enabled === true;
+    return !matches.some(row => row.enabled === false);
+  };
+  const missing = new Set(rows.filter(item => item && !item.linked).map(item => item.provider));
   await Promise.allSettled(
     [...new Set(Array.isArray(latest.linkedProviders) ? latest.linkedProviders : [])]
-      .filter(provider => typeof provider === "string" && Object.hasOwn(PROVIDERS, provider))
-      .map(provider => queueProviderSync(provider, missing.has(provider)))
+      .filter(provider => typeof provider === "string" && Object.hasOwn(PROVIDERS, provider) && eligible(provider))
+      .map(provider => queueProviderSync(provider, forcedReload || missing.has(provider)))
   );
 }
 
@@ -925,21 +935,39 @@ async function resyncLinkedProviders() {
 // refreshes. Explicit manual Sync and post-approval resync remain independent
 // so a changed connection cannot be hidden behind an old scheduled request.
 let scheduledProviderRefresh = null;
-function scheduleLinkedProviderResync() {
-  // Register a repeating alarm at install/startup, not on every alarm
-  // firing. Chrome already reschedules alarms with periodInMinutes.
+let scheduledRefreshIntent = null;
+let pendingReloadResync = false;
+function scheduleLinkedProviderResync(details) {
+  // Unpacked manual reload and runtime.reload both emit onInstalled(update).
+  // Regular browser startup and periodic heartbeats do not force uploads.
   chrome.alarms?.create?.("relay-session-refresh", {periodInMinutes:15});
-  refreshLinkedProviders();
+  refreshLinkedProviders(details?.reason === "update");
 }
-function refreshLinkedProviders() {
+function refreshLinkedProviders(forceReload = false) {
   pollConnection().catch(() => {});
-  if (scheduledProviderRefresh) return;
-  const run = resyncLinkedProviders();
+  if (forceReload) pendingReloadResync = true;
+  if (scheduledProviderRefresh) {
+    // Upgrade a probe in flight before it chooses providers. If a normal
+    // batch already started, leave the reload intent for one follow-up.
+    if (pendingReloadResync && !scheduledRefreshIntent.selected) {
+      scheduledRefreshIntent.forceReload = true;
+    }
+    if (scheduledRefreshIntent.selected && scheduledRefreshIntent.forceReload) {
+      pendingReloadResync = false; // same worker's overlapping update event
+    }
+    return;
+  }
+  const intent = {forceReload:pendingReloadResync, selected:false};
+  scheduledRefreshIntent = intent;
+  const run = resyncLinkedProviders(intent);
   scheduledProviderRefresh = run;
-  // Both success and failure release the lease. Attaching a rejection handler
-  // also prevents an unhandled promise if the gateway/storage is unavailable.
+  // On gateway failure, keep pending reload intent for the next heartbeat.
+  // Never spin retries; only follow an already-selected ordinary batch.
   const release = () => {
-    if (scheduledProviderRefresh === run) scheduledProviderRefresh = null;
+    if (scheduledProviderRefresh !== run) return;
+    scheduledProviderRefresh = null;
+    scheduledRefreshIntent = null;
+    if (intent.selected && !intent.forceReload && pendingReloadResync) refreshLinkedProviders();
   };
   void run.then(release, release);
 }
