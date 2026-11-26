@@ -176,6 +176,83 @@ async function relayFetch(path, options = {}, expectedConnection = null) {
   }
 }
 
+// Return categories only. Keep every source key and URL inside Chrome.
+function classifyChatgptPartitionKey(p) {
+  if (p === null || p === undefined) return "unpartitioned";
+  if (typeof p !== "object" || Array.isArray(p)) return "unknown";
+  for (const key of Object.keys(p)) {
+    if (key !== "topLevelSite" && key !== "hasCrossSiteAncestor") return "unknown";
+  }
+  if (!Object.hasOwn(p, "topLevelSite") || typeof p.topLevelSite !== "string") return "unknown";
+  const ancestorPresent = Object.hasOwn(p, "hasCrossSiteAncestor");
+  if (ancestorPresent && typeof p.hasCrossSiteAncestor !== "boolean") return "unknown";
+  let u;
+  try { u = new URL(p.topLevelSite); } catch (_) { return "unknown"; }
+  if ((u.protocol !== "http:" && u.protocol !== "https:") ||
+      u.username || u.password || u.port || u.search || u.hash || u.pathname !== "/" ||
+      u.origin !== p.topLevelSite || u.href !== u.origin + "/" ||
+      !u.hostname || u.hostname !== u.hostname.toLowerCase()) return "unknown";
+  if (u.origin === "https://chatgpt.com" && u.hostname === "chatgpt.com") {
+    if (!ancestorPresent) return "current_ancestor_unspecified";
+    return p.hasCrossSiteAncestor ? "current_cross_site_ancestor" : "current_site";
+  }
+  // A noncanonical ChatGPT scheme/subdomain is unknown, not safely foreign.
+  if (u.hostname === "chatgpt.com" || u.hostname.endsWith(".chatgpt.com")) return "unknown";
+  return "foreign_site";
+}
+
+const PARTITION_COUNT_FIELDS = ["unpartitioned", "current_site", "current_cross_site_ancestor", "current_ancestor_unspecified", "foreign_site", "unknown"];
+function chatgptPartitionDiagnostics(cookies) {
+  const counts = Object.fromEntries(PARTITION_COUNT_FIELDS.map(key => [key, 0]));
+  const seen = new Set();
+  counts.limited = false;
+  for (const cookie of cookies) {
+    const scope = JSON.stringify([cookie.domain, cookie.path, cookie.name, cookie.partitionKey ?? null]);
+    if (seen.has(scope)) continue;
+    if (seen.size >= 512) { counts.limited = true; break; }
+    seen.add(scope);
+    counts[classifyChatgptPartitionKey(cookie.partitionKey)]++;
+  }
+  return counts;
+}
+
+
+const PARTITION_DETAIL_FIELDS = ["app_partitioned", "auxiliary_partitioned", "shape", "extra_fields", "ancestor_type", "missing_site", "opaque_site", "extension_site", "non_web_scheme", "invalid_url", "noncanonical_site", "chatgpt_alias", "other"];
+function chatgptPartitionUnknownReason(p) {
+  if (!p || typeof p !== "object" || Array.isArray(p)) return "shape";
+  if (Object.keys(p).some(key => !["topLevelSite","hasCrossSiteAncestor"].includes(key))) return "extra_fields";
+  if (Object.hasOwn(p,"hasCrossSiteAncestor") && typeof p.hasCrossSiteAncestor !== "boolean") return "ancestor_type";
+  if (!Object.hasOwn(p,"topLevelSite") || typeof p.topLevelSite !== "string") return "missing_site";
+  if (!p.topLevelSite || p.topLevelSite === "null") return "opaque_site";
+  let u;
+  try { u=new URL(p.topLevelSite); } catch (_) { return "invalid_url"; }
+  if (u.protocol === "chrome-extension:") return "extension_site";
+  if (!["http:","https:"].includes(u.protocol)) return "non_web_scheme";
+  if (u.username || u.password || u.port || u.search || u.hash || u.pathname !== "/" || u.origin !== p.topLevelSite) return "noncanonical_site";
+  if (u.hostname === "chatgpt.com" || u.hostname.endsWith(".chatgpt.com")) return "chatgpt_alias";
+  return "other";
+}
+function chatgptPartitionDetails(cookies) {
+  const details=Object.fromEntries(PARTITION_DETAIL_FIELDS.map(key=>[key,0]));
+  const seen=new Set();
+  for (const cookie of cookies) {
+    const scope=JSON.stringify([cookie.domain,cookie.path,cookie.name,cookie.partitionKey ?? null]);
+    if (seen.has(scope)) continue;
+    if (seen.size >= 512) break;
+    seen.add(scope);
+    if (cookie.partitionKey == null) continue;
+    const host=cookie.domain.replace(/^\./, "").toLowerCase();
+    details[host === "chatgpt.com" || host.endsWith(".chatgpt.com") ? "app_partitioned" : "auxiliary_partitioned"]++;
+    if (classifyChatgptPartitionKey(cookie.partitionKey) === "unknown") details[chatgptPartitionUnknownReason(cookie.partitionKey)]++;
+  }
+  return details;
+}
+
+function providerCookieQuery(provider, domain) {
+ if (provider === "chatgpt") return {domain};
+ return {domain, partitionKey: {}};
+}
+
 async function providerCookieSnapshot(provider, afterPermissionCheck = null) {
   // Never authorize an inherited Object.prototype name as a provider.
   if (typeof provider !== "string" || !Object.hasOwn(PROVIDERS, provider)) {
@@ -196,26 +273,35 @@ async function providerCookieSnapshot(provider, afterPermissionCheck = null) {
   // Independent domain reads run concurrently instead of serializing each
   // browser API round-trip. Promise.all preserves configured domain order for
   // deterministic deduplication; any failed read rejects the whole snapshot.
-  // Chrome's default getAll() sees only UNPARTITIONED cookies. Since the
-  // relay has no partition-key representation, enumerate all cookie scopes
-  // (Chrome 119+) and fail closed if any eligible partition is present.
-  // Otherwise an apparently complete snapshot could omit live credentials.
+  // ChatGPT uses the declared unpartitioned credential profile supported by
+  // the relay and Obscura jar. Chrome selects this profile when partitionKey
+  // is omitted. Other providers retain their prior all-scope queries.
+  // Never filter a returned partitioned cookie: validation below still rejects
+  // the entire snapshot if the browser returns an unsupported context.
   const domainCookies = await Promise.all(domains.map(domain =>
-    chrome.cookies.getAll({domain, partitionKey:{}})
+    chrome.cookies.getAll(providerCookieQuery(provider, domain))
   ));
+  // Chrome permissions may be revoked while asynchronous cookie reads are
+  // pending. Never return collected session material after consent changes.
+  if (!await chrome.permissions.contains({origins:requiredOrigins})) {
+    throw new Error("Provider host permissions were revoked during cookie collection.");
+  }
   const loginHost = new URL(PROVIDER_LOGIN_URLS[provider]).hostname.toLowerCase();
+  // Measurement only: partitioned snapshots still fail before any upload.
+  // Raw scope keys exist only in this Chrome realm, never in diagnostics.
+  const eligibleForDiagnostics = provider === "chatgpt" ? domainCookies.flat().filter(cookie => {
+    const host = cookie.domain.replace(/^\./, "").toLowerCase();
+    const hostOnly = !cookie.domain.startsWith(".");
+    return domains.some(root => host === root || host.endsWith("." + root)) &&
+      !(hostOnly && host !== loginHost && domains.includes(host));
+  }) : null;
+  const partitionCounts = eligibleForDiagnostics ? chatgptPartitionDiagnostics(eligibleForDiagnostics) : null;
+  const partitionDetails = eligibleForDiagnostics ? chatgptPartitionDetails(eligibleForDiagnostics) : null;
   const all = [];
   for (const cookies of domainCookies) {
     for (const cookie of cookies) {
       const normalized = cookie.domain.replace(/^\./, "").toLowerCase();
       if (domains.some(root => normalized === root || normalized.endsWith("." + root))) {
-        // Partitioned cookies have an additional top-level-site scope.
-        // Neither the relay snapshot schema nor the pinned Obscura jar can
-        // restore that scope. Never flatten it into an ordinary cookie or
-        // publish a partial provider snapshot. Do not reflect partitionKey.
-        if (cookie.partitionKey != null) {
-          throw new Error("Unsupported browser cookie partition scope; existing gateway session was preserved.");
-        }
         // A host-only cookie is only sent to its exact host. A host-only copy on
         // a provider root (for example `google.com`) therefore cannot
         // authenticate the provider origin (`gemini.google.com`), and uploading
@@ -223,6 +309,18 @@ async function providerCookieSnapshot(provider, afterPermissionCheck = null) {
         // Drop the unusable host-only root copy and keep the domain scope.
         const hostOnly = !cookie.domain.startsWith(".");
         if (hostOnly && normalized !== loginHost && domains.includes(normalized)) continue;
+        // Apply the existing scope exclusion before validating attributes of
+        // cookies that will never enter this provider's snapshot.
+        // Partitioned cookies have an additional top-level-site scope.
+        // Neither the relay snapshot schema nor the pinned Obscura jar can
+        // restore that scope. Never flatten it into an ordinary cookie or
+        // publish a partial provider snapshot. Do not reflect partitionKey.
+        if (cookie.partitionKey != null) {
+          const error = new Error("Unsupported browser cookie partition scope; existing gateway session was preserved.");
+          if (partitionCounts) error.partitionCounts = partitionCounts;
+          if (partitionDetails) error.partitionDetails = partitionDetails;
+          throw error;
+        }
         // Preserve browser cookie policy rather than silently replacing
         // SameSite=None/Strict with a default and persistent cookies with
         // session-only cookies on gateway restoration.
@@ -246,11 +344,6 @@ async function providerCookieSnapshot(provider, afterPermissionCheck = null) {
         });
       }
     }
-  }
-  // Chrome permissions may be revoked while asynchronous cookie reads are
-  // pending. Never return collected session material after consent changes.
-  if (!await chrome.permissions.contains({origins:requiredOrigins})) {
-    throw new Error("Provider host permissions were revoked during cookie collection.");
   }
   const deduped = new Map(all.map(cookie => [cookie.domain + "\n" + cookie.path + "\n" + cookie.name, cookie]));
   return {cookies:Array.from(deduped.values()), local_storage:{}, ts:new Date().toISOString()};
@@ -346,7 +439,8 @@ async function syncProvider(provider, {
   }
   // Scope the stored snapshot digest to the consent generation. The same
   // cookies after an explicit logout/relink must not count as unchanged.
-  const identity = gateway + "|" + relayIdentity({gateway, token, connectionMode});
+  const identity = gateway + "|" + relayIdentity({gateway, token, connectionMode}) +
+    (provider === "chatgpt" ? "|profile:unpartitioned_credentials" : "");
   const version = await cookieSnapshotVersion(snapshot,
     linkEpoch === undefined ? identity : identity + "|consent:" + linkEpoch);
   const {relaySnapshotVersions = {}, providerLinkEpochs:latestEpochs = {}} =

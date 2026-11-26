@@ -341,3 +341,68 @@ navigation boundary is therefore partially opened: fetch remains opaque for
 DNS/TLS/transfer separation, while post-response work remains opaque for parsing,
 framework execution, frame/resource advancement and native load processing.
 These callbacks do not intercept or modify requests, and no extra fetch is sent.
+
+
+## ChatGPT browser-attempt evidence
+
+ChatGPT emits one bounded `ChatGPT browser attempt observation (content-free)`
+JSON record when each browser work future returns or is dropped. It records a
+runtime-owned sequence, command-queue duration, last stage, stage/step interval
+counts and microsecond sums/maxima, a bounded baseline projection and the last
+eight poll projections. Poll-only maxima and aggregate signal flags survive
+ring eviction; the separate baseline is not counted as a post-submit poll.
+Shared browser timers feed this ChatGPT-only observer;
+they do not add ChatGPT samples to Meta AI's metrics. Counts/bytes/durations are
+capped. Phase and step intervals may overlap: never add child steps to parent
+phases or interpret lifetime counts as successful operations.
+
+`future_returned` describes the complete worker future, including cleanup. An
+inner send can be cancelled while that future returns normally;
+`consumer_cancelled` records the observed consumer-cancellation branch.
+`submission_returned` records the adapter's acknowledged-submit return.
+`first_content_seen` is a browser observation, not HTTP delivery or durable
+commit. `content_evidence` distinguishes a fresh delta from the existing
+fresh-generation/final-probe-guarded identical-reply path. `terminal_attempted`
+means a terminal enqueue was attempted; it does not prove delivery/persistence.
+Require normal JSON/SSE terminal and durable conversation evidence separately.
+
+`observation_incomplete`, `dropped_steps` and `dropped_updates` expose bounded
+observer limits or reentrant borrow conflicts. If observation state is borrowed
+when the reporter drops, a fixed `state_borrowed` incomplete record is emitted
+instead of disappearing. A diagnostic is never authentication or successful
+chat proof. No text, URL, selector, credential, account/thread identifier or raw
+provider error is retained in these records. The sequence is allocated by the runtime-owned metrics registry, shared by
+clones but isolated between gateways, and resets with that runtime. Counter
+allocation failure is explicit incomplete evidence. It is not an HTTP request
+ID; correlate using runtime identity, timestamps and an explicitly controlled
+single-request test window until direct request-ID plumbing is implemented.
+
+For a selected disposable ChatGPT diagnostic only, the existing metadata network
+tap can additionally be enabled with `CHAT_GATEWAY_PROVIDER_NETWORK_TAP=1` and
+`RUST_LOG=info,chat_gateway_rs::providers::common=debug,chat_gateway_rs::browser::network_tap=debug`.
+It reports Fetch/XHR host/status/size metadata, never paths, headers or bodies.
+Keep raw runtime logs private and export only reviewed fixed-category records.
+This does not increase timeouts or authorize a retry, prompt, new account, load
+cohort or production change. Respect the selected provider/run inputs and budget.
+
+
+### ChatGPT fixed network roles (opt-in)
+
+The existing metadata-only `CHAT_GATEWAY_PROVIDER_NETWORK_TAP` observer adds
+closed `request_endpoint_kind`, `response_endpoint_kind`, `method_kind`, and
+`content_type_kind` fields. Endpoint roles distinguish the exact public account,
+conversation submit/prepare/resume and in-process WebSocket bridge routes, static
+assets and unknown first-party/other traffic. Unknown routes remain unknown;
+paths, query values, thread/account IDs and header values are never exported.
+Request and response roles are classified separately to retain redirect evidence.
+A submit role identifies an endpoint, not successful generation or delivery.
+
+ChatGPT additionally emits at most 256 Fetch/XHR dispatch observations per page,
+with bounded sequence/limit, fixed method and endpoint labels. The counter is
+page-owned and saturates at the cap. Dispatch means the native request callback
+ran; it does not attest provider receipt. Responses are buffered by the pinned
+engine before the response callback, so these events do not expose incremental
+SSE, DNS/TLS/TTFB or model queue timing. Page callback timestamps cannot pair
+concurrent requests or be assumed to share one chat attempt, especially after
+cancellation. Keep these gaps explicit and retain the independent client,
+attempt-phase and durable-history checks.

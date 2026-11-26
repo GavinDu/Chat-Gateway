@@ -1807,3 +1807,89 @@ test("410 expired approval still clears only the matched pending request", async
   await assert.rejects(f.sandbox.pollConnection(), /Connection approval unavailable/);
   assert.equal(state.pendingConnection, undefined);
 });
+
+test("extension reload forces every enabled linked provider, even when snapshot is saved",async()=>{
+  const f=loadBackground(["chatgpt","claude","chatgpt","gemini","grok","qwen"],[],true);
+  const synced=[];
+  f.sandbox.PROVIDERS={chatgpt:["chatgpt.com"],claude:["claude.ai"],gemini:["gemini.google.com"],grok:["grok.com"],qwen:["qwen.ai"],metaai:["meta.ai"]};
+  f.sandbox.syncProvider=async(provider,options)=>{synced.push([provider,options.force]);return "uploaded";};
+  f.sandbox.relayFetch=async()=>({ok:true,status:200,json:async()=>({providers:[
+    {provider:"chatgpt",enabled:true,linked:true},{provider:"claude",enabled:true,linked:false},
+    {provider:"gemini",enabled:false,linked:true},{provider:"grok",linked:true},
+    {provider:"metaai",enabled:true,linked:true}
+  ]})});
+  f.listeners.installed[0]({reason:"update"});
+  for(let i=0;i<10;i++)await flushAsyncWork();
+  assert.deepEqual(synced,[["chatgpt",true],["claude",true]]);
+});
+test("ordinary startup and periodic refresh keep saved snapshots digest-based",async()=>{
+  const f=loadBackground(["chatgpt","claude"],[],true);
+  const synced=[];
+  f.sandbox.syncProvider=async(provider,options)=>{synced.push([provider,options.force]);return "unchanged";};
+  f.sandbox.relayFetch=async()=>({ok:true,status:200,json:async()=>({providers:[
+    {provider:"chatgpt",enabled:true,linked:true},{provider:"claude",enabled:false,linked:true}
+  ]})});
+  f.listeners.startup[0]();
+  for(let i=0;i<10;i++)await flushAsyncWork();
+  f.listeners.alarm[0]({name:"relay-session-refresh"});
+  for(let i=0;i<10;i++)await flushAsyncWork();
+  assert.deepEqual(synced,[["chatgpt",false],["chatgpt",false]]);
+});
+test("reload intent upgrades overlapping startup probe, without duplicate imports",async()=>{
+  const f=loadBackground(["chatgpt"],[],true);
+  const synced=[];
+  f.sandbox.syncProvider=async(provider,options)=>{synced.push([provider,options.force]);return "uploaded";};
+  let release; const gate=new Promise(resolve=>{release=resolve;});
+  let probes=0;
+  f.sandbox.relayFetch=async()=>{probes++;await gate;return {ok:true,status:200,json:async()=>({providers:[{provider:"chatgpt",enabled:true,linked:true}]})};};
+  f.listeners.startup[0]();
+  await flushAsyncWork();
+  f.listeners.installed[0]({reason:"update"});
+  f.listeners.installed[0]({reason:"update"});
+  release();
+  for(let i=0;i<10;i++)await flushAsyncWork();
+  assert.equal(probes,1);
+  assert.deepEqual(synced,[["chatgpt",true]]);
+});
+test("reload resync retries after gateway outage on the next heartbeat",async()=>{
+  const f=loadBackground(["chatgpt"],[],true);
+  const synced=[];
+  let available=false;
+  f.sandbox.syncProvider=async(provider,options)=>{synced.push([provider,options.force]);return "uploaded";};
+  f.sandbox.relayFetch=async()=>{if(!available)throw new Error("gateway offline");return {ok:true,status:200,json:async()=>({providers:[{provider:"chatgpt",enabled:true,linked:true}]})};};
+  f.listeners.installed[0]({reason:"update"});
+  for(let i=0;i<10;i++)await flushAsyncWork();
+  assert.deepEqual(synced,[]);
+  available=true;
+  f.listeners.alarm[0]({name:"relay-session-refresh"});
+  for(let i=0;i<10;i++)await flushAsyncWork();
+  assert.deepEqual(synced,[["chatgpt",true]]);
+  f.listeners.alarm[0]({name:"relay-session-refresh"});
+  for(let i=0;i<10;i++)await flushAsyncWork();
+  assert.deepEqual(synced,[["chatgpt",true],["chatgpt",false]]);
+});
+
+test("partition count status is closed, bounded and isolated to ChatGPT",()=>{
+  const f=loadBackground(["chatgpt"]);
+  const counts={unpartitioned:2,current_site:1,current_cross_site_ancestor:0,current_ancestor_unspecified:0,foreign_site:0,unknown:0,limited:false,cookie:"SECRET",url:"https://private.invalid"};
+  const entry=f.sandbox.recordProviderDiagnostic("chatgpt","failed","partition_scope_unsupported",null,{partition_counts:counts});
+  assert.equal(entry.partition_counts.current_site,1);
+  const stale=f.sandbox.finalizeRelayDiagnostics({ok:true,extension:{linked_providers:["chatgpt"]}},0,{chatgpt:"new-consent"});
+  assert.equal(stale.extension.provider_sync.chatgpt.partition_counts,null);
+  assert.equal(Object.keys(entry.partition_counts).length,7);
+  assert.doesNotMatch(JSON.stringify(entry),/SECRET|private.invalid/);
+  assert.equal(f.sandbox.recordProviderDiagnostic("claude","failed",null,null,{partition_counts:counts}).partition_counts,null);
+  assert.equal(f.sandbox.recordProviderDiagnostic("chatgpt","failed",null,null,{partition_counts:{...counts,current_site:Infinity}}).partition_counts,null);
+});
+
+test("partition detail status projects numeric categories and hides stale unconsented evidence",()=>{
+  const f=loadBackground(["chatgpt"]);
+  const details=Object.fromEntries(["app_partitioned","auxiliary_partitioned","shape","extra_fields","ancestor_type","missing_site","opaque_site","extension_site","non_web_scheme","invalid_url","noncanonical_site","chatgpt_alias","other"].map(k=>[k,0]));
+  details.app_partitioned=2;details.missing_site=1;details.token="PRIVATE";
+  const entry=f.sandbox.recordProviderDiagnostic("chatgpt","failed","partition_scope_unsupported",null,{partition_details:details});
+  assert.equal(entry.capture_profile,"unpartitioned_credentials");
+  assert.equal(entry.partition_details.app_partitioned,2);assert.equal(Object.keys(entry.partition_details).length,13);assert.doesNotMatch(JSON.stringify(entry),/PRIVATE/);
+  assert.equal(f.sandbox.finalizeRelayDiagnostics({ok:true,extension:{linked_providers:["chatgpt"]}},0,{chatgpt:"new-consent"}).extension.provider_sync.chatgpt.partition_details,null);
+  assert.equal(f.sandbox.recordProviderDiagnostic("metaai","failed",null,null,{partition_details:details}).partition_details,null);
+  assert.equal(f.sandbox.recordProviderDiagnostic("chatgpt","failed",null,null,{partition_details:{...details,missing_site:3}}).partition_details,null);
+});

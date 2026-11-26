@@ -1,4 +1,4 @@
-importScripts("shared.js");
+importScripts("shared.js", "credential_probe.js", "native_account_diagnostics.js");
 
 const debounceTimers = new Map();
 // Internal API snapshots contain only fixed health categories and timestamps.
@@ -116,6 +116,24 @@ async function hasOriginPermissions(origins) {
   try { return Boolean(await chrome.permissions.contains({origins})); }
   catch { return false; }
 }
+
+function redactedPartitionCounts(value) {
+  const fields = ["unpartitioned", "current_site", "current_cross_site_ancestor", "current_ancestor_unspecified", "foreign_site", "unknown"];
+  if (!value || typeof value !== "object" || Array.isArray(value) ||
+      fields.some(key => !Number.isInteger(value[key]) || value[key] < 0 || value[key] > 512) ||
+      fields.reduce((total, key) => total + value[key], 0) > 512) return null;
+  return {...Object.fromEntries(fields.map(key => [key, value[key]])), limited: value.limited === true};
+}
+
+function redactedPartitionDetails(value) {
+  const fields = ["app_partitioned", "auxiliary_partitioned", "shape", "extra_fields", "ancestor_type", "missing_site", "opaque_site", "extension_site", "non_web_scheme", "invalid_url", "noncanonical_site", "chatgpt_alias", "other"];
+  if (!value || typeof value !== "object" || Array.isArray(value) ||
+      fields.some(key=>!Number.isInteger(value[key]) || value[key] < 0 || value[key] > 512) ||
+      value.app_partitioned + value.auxiliary_partitioned > 512 ||
+      fields.slice(2).reduce((sum,key)=>sum+value[key],0) > value.app_partitioned + value.auxiliary_partitioned) return null;
+  return Object.fromEntries(fields.map(key=>[key,value[key]]));
+}
+
 function recordProviderDiagnostic(provider, state, errorCode = null, attempt = null, telemetry = null) {
   // A provider sync attempt is NOT authenticated-login verification.
   // Store only stable local result codes, never raw upstream responses.
@@ -125,7 +143,10 @@ function recordProviderDiagnostic(provider, state, errorCode = null, attempt = n
     state: safeState, issue: errorCode, updated_at: new Date().toISOString(),
     phase: safeState === "syncing" && IMPORT_PHASES.includes(telemetry?.phase)
       ? telemetry.phase : null,
-    durations_ms: redactedImportTimings(telemetry?.durations_ms)
+    durations_ms: redactedImportTimings(telemetry?.durations_ms),
+    capture_profile: provider === "chatgpt" ? "unpartitioned_credentials" : "all_scopes_checked",
+    partition_counts: provider === "chatgpt" ? redactedPartitionCounts(telemetry?.partition_counts) : null,
+    partition_details: provider === "chatgpt" ? redactedPartitionDetails(telemetry?.partition_details) : null
   };
   providerDiagnostics.set(provider, entry);
   if (attempt) providerDiagnosticEpochs.set(provider, attempt.providerLinkEpochs?.[provider]);
@@ -150,6 +171,11 @@ function finalizeRelayDiagnostics(result, requestedGeneration, requestedEpochs) 
         updated_at: previous?.updated_at || null,
         phase: previous?.phase || null,
         durations_ms: redactedImportTimings(previous?.durations_ms),
+        capture_profile: provider === "chatgpt" ? "unpartitioned_credentials" : "all_scopes_checked",
+        partition_counts: provider === "chatgpt" && extension.permissions?.providers?.[provider] === true
+          ? redactedPartitionCounts(previous?.partition_counts) : null,
+        partition_details: provider === "chatgpt" && extension.permissions?.providers?.[provider] === true
+          ? redactedPartitionDetails(previous?.partition_details) : null,
         stale: !result.ok,
       }];
     })
@@ -276,9 +302,13 @@ function queueProviderTask(provider, work) {
 // map are serialized through this single worker-owned queue. The per-provider
 // task queue separately orders logout after a pending cookie upload.
 let lastConsentMutation = Promise.resolve();
+let pendingConsentMutations = 0;
 function queueConsentMutation(work) {
+  pendingConsentMutations += 1;
   const next = lastConsentMutation.catch(() => {}).then(work);
   lastConsentMutation = next.catch(() => {});
+  const release = () => { pendingConsentMutations -= 1; };
+  void next.then(release, release);
   return next;
 }
 function sameRelayIdentity(expected, actual) {
@@ -674,7 +704,11 @@ function queueProviderSync(provider, force = false) {
       return result;
     } catch (error) {
       if (await providerDiagnosticScopeCurrent(provider, attempt)) {
-        recordProviderDiagnostic(provider, "failed", classifyRelayFailure(error), attempt, inProgress);
+        recordProviderDiagnostic(provider, "failed", classifyRelayFailure(error), attempt, {
+          ...inProgress,
+          partition_counts: classifyRelayFailure(error) === "partition_scope_unsupported" ? error?.partitionCounts : null,
+          partition_details: classifyRelayFailure(error) === "partition_scope_unsupported" ? error?.partitionDetails : null
+        });
       } else {
         clearStaleProgress();
       }
@@ -879,7 +913,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 });
 
 
-async function resyncLinkedProviders() {
+async function resyncLinkedProviders(refresh = null) {
   // An owner can revoke consent or replace the gateway while an awaited
   // diagnostics request is in flight. Do not schedule imports from the
   // linked-provider list captured before that await.
@@ -907,12 +941,22 @@ async function resyncLinkedProviders() {
     return;
   }
   if (!hasRelayConnection(latest) || !sameRelayIdentity(initial, latest)) return;
-  const missing = new Set((status.gateway.providers || [])
-    .filter(item => !item.linked).map(item => item.provider));
+  const rows = Array.isArray(status.gateway?.providers) ? status.gateway.providers : [];
+  // Only a current, unambiguous enabled status can authorize a forced reload
+  // refresh. Ordinary health repair retains legacy missing-status behavior.
+  const forcedReload = refresh?.forceReload === true;
+  if (refresh) refresh.selected = true;
+  if (forcedReload) pendingReloadResync = false;
+  const eligible = provider => {
+    const matches = rows.filter(row => row?.provider === provider);
+    if (forcedReload) return matches.length === 1 && matches[0].enabled === true;
+    return !matches.some(row => row.enabled === false);
+  };
+  const missing = new Set(rows.filter(item => item && !item.linked).map(item => item.provider));
   await Promise.allSettled(
     [...new Set(Array.isArray(latest.linkedProviders) ? latest.linkedProviders : [])]
-      .filter(provider => typeof provider === "string" && Object.hasOwn(PROVIDERS, provider))
-      .map(provider => queueProviderSync(provider, missing.has(provider)))
+      .filter(provider => typeof provider === "string" && Object.hasOwn(PROVIDERS, provider) && eligible(provider))
+      .map(provider => queueProviderSync(provider, forcedReload || missing.has(provider)))
   );
 }
 
@@ -921,21 +965,39 @@ async function resyncLinkedProviders() {
 // refreshes. Explicit manual Sync and post-approval resync remain independent
 // so a changed connection cannot be hidden behind an old scheduled request.
 let scheduledProviderRefresh = null;
-function scheduleLinkedProviderResync() {
-  // Register a repeating alarm at install/startup, not on every alarm
-  // firing. Chrome already reschedules alarms with periodInMinutes.
+let scheduledRefreshIntent = null;
+let pendingReloadResync = false;
+function scheduleLinkedProviderResync(details) {
+  // Unpacked manual reload and runtime.reload both emit onInstalled(update).
+  // Regular browser startup and periodic heartbeats do not force uploads.
   chrome.alarms?.create?.("relay-session-refresh", {periodInMinutes:15});
-  refreshLinkedProviders();
+  refreshLinkedProviders(details?.reason === "update");
 }
-function refreshLinkedProviders() {
+function refreshLinkedProviders(forceReload = false) {
   pollConnection().catch(() => {});
-  if (scheduledProviderRefresh) return;
-  const run = resyncLinkedProviders();
+  if (forceReload) pendingReloadResync = true;
+  if (scheduledProviderRefresh) {
+    // Upgrade a probe in flight before it chooses providers. If a normal
+    // batch already started, leave the reload intent for one follow-up.
+    if (pendingReloadResync && !scheduledRefreshIntent.selected) {
+      scheduledRefreshIntent.forceReload = true;
+    }
+    if (scheduledRefreshIntent.selected && scheduledRefreshIntent.forceReload) {
+      pendingReloadResync = false; // same worker's overlapping update event
+    }
+    return;
+  }
+  const intent = {forceReload:pendingReloadResync, selected:false};
+  scheduledRefreshIntent = intent;
+  const run = resyncLinkedProviders(intent);
   scheduledProviderRefresh = run;
-  // Both success and failure release the lease. Attaching a rejection handler
-  // also prevents an unhandled promise if the gateway/storage is unavailable.
+  // On gateway failure, keep pending reload intent for the next heartbeat.
+  // Never spin retries; only follow an already-selected ordinary batch.
   const release = () => {
-    if (scheduledProviderRefresh === run) scheduledProviderRefresh = null;
+    if (scheduledProviderRefresh !== run) return;
+    scheduledProviderRefresh = null;
+    scheduledRefreshIntent = null;
+    if (intent.selected && !intent.forceReload && pendingReloadResync) refreshLinkedProviders();
   };
   void run.then(release, release);
 }
@@ -1081,3 +1143,9 @@ chrome.alarms?.onAlarm?.addListener?.(alarm => {
   if (alarm.name === "relay-connection") pollConnection().catch(() => {});
   if (alarm.name === "relay-session-refresh") refreshLinkedProviders();
 });
+
+// Native messaging is enabled by default in Chrome; the bridge checks its
+// persistent opt-out. Runtimes without the native API retain the relay path.
+if (typeof chrome.runtime.connectNative === "function" && chrome.permissions?.onAdded && chrome.permissions?.onRemoved) {
+  importScripts("native_bridge.js");
+}

@@ -148,11 +148,10 @@ fn reserve_absent_admission(
         [owner],
         |row| row.get(0),
     )?;
-    let total: i64 = connection.query_row(
-        "SELECT count(*) FROM conversation_admissions",
-        [],
-        |row| row.get(0),
-    )?;
+    let total: i64 =
+        connection.query_row("SELECT count(*) FROM conversation_admissions", [], |row| {
+            row.get(0)
+        })?;
     if count >= 128 || total >= 8192 {
         anyhow::bail!("conversation admission capacity exhausted");
     }
@@ -607,8 +606,14 @@ impl UnifiedMemory {
         new_messages: &[ChatMessage],
         token_budget: usize,
     ) -> anyhow::Result<(String, Vec<ChatMessage>, bool, Vec<ChatMessage>)> {
-        self.build_context_snapshot(owner_key_id, conversation_id, new_messages, token_budget, false)
-            .map(|snapshot| snapshot.context)
+        self.build_context_snapshot(
+            owner_key_id,
+            conversation_id,
+            new_messages,
+            token_budget,
+            false,
+        )
+        .map(|snapshot| snapshot.context)
     }
 
     fn build_context_snapshot(

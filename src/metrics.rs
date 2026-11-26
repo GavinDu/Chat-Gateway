@@ -110,6 +110,7 @@ impl FineHistogram {
 
 #[derive(Default)]
 struct MetricData {
+    chatgpt_attempt_sequence: u64,
     metaai_steps: BTreeMap<&'static str, FineHistogram>,
     requests: BTreeMap<(String, u16), u64>,
     chat_kinds: BTreeMap<(&'static str, &'static str), u64>,
@@ -528,6 +529,15 @@ impl MetricsRegistry {
     }
 }
 
+impl MetricsRegistry {
+    pub(crate) fn next_chatgpt_attempt_sequence(&self) -> Option<u64> {
+        let mut d = self.data.lock().ok()?;
+        let n = d.chatgpt_attempt_sequence.checked_add(1)?;
+        d.chatgpt_attempt_sequence = n;
+        Some(n)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{escape_label, normalize_route, Histogram, MetricsRegistry};
@@ -803,5 +813,23 @@ mod fine_histogram_tests {
         assert!(text.contains("le=\"+Inf\"} 5"));
         assert!(text.contains("_sum{stage=\"baseline_probe\"} 302.210124"));
         assert!(text.contains("_count{stage=\"baseline_probe\"} 5"));
+    }
+}
+
+#[cfg(test)]
+mod attempt_sequence_tests {
+    use super::*;
+    #[test]
+    fn chatgpt_attempt_sequence_is_runtime_owned() {
+        let a = MetricsRegistry::default();
+        let b = a.clone();
+        let c = MetricsRegistry::default();
+        assert_eq!(a.next_chatgpt_attempt_sequence(), Some(1));
+        assert_eq!(b.next_chatgpt_attempt_sequence(), Some(2));
+        assert_eq!(c.next_chatgpt_attempt_sequence(), Some(1));
+        a.data.lock().unwrap().chatgpt_attempt_sequence = u64::MAX;
+        assert_eq!(a.next_chatgpt_attempt_sequence(), None);
+        assert_eq!(a.next_chatgpt_attempt_sequence(), None);
+        assert_eq!(a.data.lock().unwrap().chatgpt_attempt_sequence, u64::MAX);
     }
 }

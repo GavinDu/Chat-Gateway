@@ -2638,10 +2638,7 @@ async fn v10_upgrade_preserves_identities_and_admissions_expire() {
     reopened
         .lock()
         .unwrap()
-        .execute(
-            "UPDATE conversation_admissions SET expires_at=0",
-            [],
-        )
+        .execute("UPDATE conversation_admissions SET expires_at=0", [])
         .unwrap();
     let next = snapshot(reopened.clone()).await;
     assert_ne!(next.identity, first.identity);
