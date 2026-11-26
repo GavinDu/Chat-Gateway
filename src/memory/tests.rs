@@ -513,8 +513,8 @@ fn schema_v5_migrates_to_v6_with_long_term_memory_disabled_by_default() {
             .lock()
             .unwrap()
             .execute_batch(
-                "DROP TRIGGER conversation_epoch_on_delete;
-                  DROP TABLE conversation_deletion_epochs;
+                "DROP TRIGGER conversation_admission_on_insert;
+                  DROP TABLE conversation_admissions;
                   DROP TRIGGER conversation_identity_on_insert;
                  DROP TABLE conversation_identities;
                  ALTER TABLE conversations ADD COLUMN tab_id TEXT;
@@ -2040,8 +2040,8 @@ fn schema_v6_migration_clears_synthetic_tabs_and_preserves_real_metadata_and_his
         let connection = memory.lock().unwrap();
         connection
             .execute_batch(
-                "DROP TRIGGER conversation_epoch_on_delete;
-                  DROP TABLE conversation_deletion_epochs;
+                "DROP TRIGGER conversation_admission_on_insert;
+                  DROP TABLE conversation_admissions;
                   DROP TRIGGER conversation_identity_on_insert;
                  DROP TABLE conversation_identities;
                  ALTER TABLE conversations ADD COLUMN tab_id TEXT;",
@@ -2291,8 +2291,8 @@ fn version_seven_migration_clears_synthetic_tab_id_and_preserves_history() {
         let connection = rusqlite::Connection::open(fixture.db()).unwrap();
         connection
             .execute_batch(
-                "DROP TRIGGER conversation_epoch_on_delete;
-                  DROP TABLE conversation_deletion_epochs;
+                "DROP TRIGGER conversation_admission_on_insert;
+                  DROP TABLE conversation_admissions;
                   DROP TRIGGER conversation_identity_on_insert;
                  DROP TABLE conversation_identities;
                  ALTER TABLE conversations ADD COLUMN tab_id TEXT;",
@@ -2539,8 +2539,8 @@ fn v9_upgrade_allocates_durable_identity_and_recreation_changes_it() {
             .lock()
             .unwrap()
             .execute_batch(
-                "DROP TRIGGER conversation_epoch_on_delete;
-                  DROP TABLE conversation_deletion_epochs;
+                "DROP TRIGGER conversation_admission_on_insert;
+                  DROP TABLE conversation_admissions;
                   DROP TRIGGER conversation_identity_on_insert;
                  DROP TABLE conversation_identities;
                  PRAGMA user_version=9;",
@@ -2597,8 +2597,8 @@ fn v9_upgrade_allocates_durable_identity_and_recreation_changes_it() {
     );
 }
 
-#[test]
-fn v10_upgrade_preserves_identities_and_allocates_bounded_epochs() {
+#[tokio::test]
+async fn v10_upgrade_preserves_identities_and_admissions_expire() {
     let fixture = Fixture::new();
     let memory = fixture.open();
     store(&memory, "migration-a", "preserve");
@@ -2608,83 +2608,57 @@ fn v10_upgrade_preserves_identities_and_allocates_bounded_epochs() {
         .lock()
         .unwrap()
         .execute_batch(
-            "DROP TRIGGER conversation_epoch_on_delete;
-             DROP TABLE conversation_deletion_epochs;
+            "DROP TRIGGER conversation_admission_on_insert;
+             DROP TABLE conversation_admissions;
              PRAGMA user_version=10;",
         )
         .unwrap();
     drop(memory);
-    let memory = fixture.open();
+    let memory = Arc::new(fixture.open());
     assert_eq!(
         read_identity(&memory.lock().unwrap(), "migration-a").unwrap(),
         identity
     );
     assert_eq!(memory.conversation("migration-a").unwrap(), history);
-    assert_eq!(
-        read_deletion_epoch(&memory.lock().unwrap(), "migration-a").unwrap(),
-        0
-    );
-    assert!(memory
-        .delete_conversation_for_owner("local", "migration-a")
-        .unwrap());
-    assert_eq!(
-        read_deletion_epoch(&memory.lock().unwrap(), "migration-a").unwrap(),
-        1
-    );
-    assert_eq!(
-        read_deletion_epoch(&memory.lock().unwrap(), "unrelated-b").unwrap(),
-        0
-    );
-    drop(memory);
-    let reopened = fixture.open();
-    assert_eq!(
-        read_deletion_epoch(&reopened.lock().unwrap(), "migration-a").unwrap(),
-        1
-    );
-    assert_eq!(
-        reopened
-            .lock()
-            .unwrap()
-            .query_row(
-                "SELECT count(*) FROM conversation_deletion_epochs",
-                [],
-                |row| { row.get::<_, i64>(0) }
+    let snapshot = |memory: Arc<UnifiedMemory>| async move {
+        memory
+            .build_context_snapshot_async(
+                "local".to_owned(),
+                Some("pending-a".to_owned()),
+                Vec::new(),
+                8000,
             )
-            .unwrap(),
-        64
-    );
-}
-
-#[test]
-fn missing_or_exhausted_deletion_epoch_rolls_back_delete() {
-    for missing in [true, false] {
-        let fixture = Fixture::new();
-        let memory = fixture.open();
-        store(&memory, "epoch-a", "must survive");
-        let history = memory.conversation("epoch-a").unwrap();
-        {
-            let connection = memory.lock().unwrap();
-            if missing {
-                connection
-                    .execute(
-                        "DELETE FROM conversation_deletion_epochs WHERE bucket=33",
-                        [],
-                    )
-                    .unwrap();
-            } else {
-                connection
-                    .execute(
-                        "UPDATE conversation_deletion_epochs SET epoch=?1 WHERE bucket=33",
-                        [i64::MAX],
-                    )
-                    .unwrap();
-            }
-        }
-        assert!(memory
-            .delete_conversation_for_owner("local", "epoch-a")
-            .is_err());
-        assert_eq!(memory.conversation("epoch-a").unwrap(), history);
-    }
+            .await
+            .unwrap()
+    };
+    let first = snapshot(memory.clone()).await;
+    drop(memory);
+    let reopened = Arc::new(fixture.open());
+    assert_eq!(snapshot(reopened.clone()).await.identity, first.identity);
+    reopened
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE conversation_admissions SET expires_at=0",
+            [],
+        )
+        .unwrap();
+    let next = snapshot(reopened.clone()).await;
+    assert_ne!(next.identity, first.identity);
+    assert!(reopened
+        .clone()
+        .persist_turn_from_snapshot(SnapshotTurn {
+            owner_key_id: "local".to_owned(),
+            conversation_id: "pending-a".to_owned(),
+            user_msgs: vec![m("user", "stale")],
+            assistant_msg: m("assistant", "stale answer"),
+            provider: "chatgpt".to_owned(),
+            expected_marker: transcript_marker(&first.context.3),
+            expected_identity: first.identity,
+        })
+        .await
+        .is_err());
+    assert!(reopened.conversation("pending-a").unwrap().is_none());
 }
 
 #[tokio::test]
@@ -2733,7 +2707,7 @@ async fn absent_admission_cannot_resurrect_after_create_delete_or_purge() {
 }
 
 #[tokio::test]
-async fn absent_admission_first_write_and_bucket_conflicts_are_conservative() {
+async fn absent_admission_first_write_and_unrelated_owner_deletion_are_isolated() {
     let fixture = Fixture::new();
     let memory = Arc::new(fixture.open());
     let other = Arc::new(fixture.open());
@@ -2778,8 +2752,8 @@ async fn absent_admission_first_write_and_bucket_conflicts_are_conservative() {
         vec![m("user", "question"), m("assistant", "winner")]
     );
 
-    let same_bucket = snapshot("pending-a").await;
-    let different_bucket = snapshot("pending-b").await;
+    let same_suffix = snapshot("pending-a").await;
+    let different_suffix = snapshot("pending-b").await;
     other
         .store_turn_for_owner_with_tab_id(
             "other-owner",
@@ -2793,29 +2767,42 @@ async fn absent_admission_first_write_and_bucket_conflicts_are_conservative() {
     assert!(!other
         .delete_conversation_for_owner("local", "foreign-a")
         .unwrap());
-    assert_eq!(snapshot("pending-a").await.identity, same_bucket.identity);
+    assert_eq!(snapshot("pending-a").await.identity, same_suffix.identity);
     assert!(other
         .delete_conversation_for_owner("other-owner", "foreign-a")
         .unwrap());
     assert!(memory
         .clone()
-        .persist_turn_from_snapshot(turn("pending-a", same_bucket, "stale"))
+        .persist_turn_from_snapshot(turn("pending-a", same_suffix, "valid"))
+        .await
+        .unwrap()
+        .is_some());
+    assert!(memory
+        .clone()
+        .persist_turn_from_snapshot(turn("pending-b", different_suffix, "valid"))
+        .await
+        .unwrap()
+        .is_some());
+    let exact = snapshot("exact-a").await;
+    other
+        .store_turn_for_owner_with_tab_id(
+            "other-owner",
+            "exact-a".to_owned(),
+            vec![m("user", "foreign")],
+            m("assistant", "foreign answer"),
+            "chatgpt".to_owned(),
+            None,
+        )
+        .unwrap();
+    assert!(other
+        .delete_conversation_for_owner("other-owner", "exact-a")
+        .unwrap());
+    assert!(memory
+        .clone()
+        .persist_turn_from_snapshot(turn("exact-a", exact, "stale"))
         .await
         .is_err());
-    assert!(memory.conversation("pending-a").unwrap().is_none());
-    assert!(memory
-        .clone()
-        .persist_turn_from_snapshot(turn("pending-b", different_bucket, "valid"))
-        .await
-        .unwrap()
-        .is_some());
-    let retry = snapshot("pending-a").await;
-    assert!(memory
-        .clone()
-        .persist_turn_from_snapshot(turn("pending-a", retry, "fresh"))
-        .await
-        .unwrap()
-        .is_some());
+    assert!(memory.conversation("exact-a").unwrap().is_none());
 }
 
 #[test]
@@ -2876,8 +2863,8 @@ fn v8_upgrade_invalidates_legacy_sync_once_and_preserves_history() {
             .lock()
             .unwrap()
             .execute_batch(
-                "DROP TRIGGER conversation_epoch_on_delete;
-                  DROP TABLE conversation_deletion_epochs;
+                "DROP TRIGGER conversation_admission_on_insert;
+                  DROP TABLE conversation_admissions;
                   DROP TRIGGER conversation_identity_on_insert;
                  DROP TABLE conversation_identities;
                  PRAGMA user_version=8;",
@@ -2930,8 +2917,8 @@ fn failed_v8_migration_rolls_back_schema_and_history() {
         let connection = Connection::open(fixture.db()).unwrap();
         connection
             .execute_batch(
-                "DROP TRIGGER conversation_epoch_on_delete;
-                  DROP TABLE conversation_deletion_epochs;
+                "DROP TRIGGER conversation_admission_on_insert;
+                  DROP TABLE conversation_admissions;
                   DROP TRIGGER conversation_identity_on_insert;
                  DROP TABLE conversation_identities;
                  ALTER TABLE conversations ADD COLUMN tab_id TEXT;

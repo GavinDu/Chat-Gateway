@@ -61,22 +61,23 @@ const IDENTITY_SCHEMA: &str = "
         INSERT INTO conversation_identities(conversation_id) VALUES(NEW.id);
     END;
 ";
-// Fixed-size deletion epochs: IDs sharing a bucket may conservatively retry,
-// but deleted IDs never accumulate permanent tombstone rows.
-const DELETION_EPOCH_SCHEMA: &str = "
-    CREATE TABLE conversation_deletion_epochs (
-        bucket INTEGER PRIMARY KEY NOT NULL CHECK(bucket >= 0 AND bucket < 64),
-        epoch INTEGER NOT NULL CHECK(typeof(epoch) = 'integer' AND epoch >= 0)
+// Bounded, expiring leases for absent explicit IDs. Creation invalidates all
+// leases for that exact ID, including a different owner's competing lease;
+// deletion does not affect leases for unrelated IDs.
+const ADMISSION_SCHEMA: &str = "
+    CREATE TABLE conversation_admissions (
+        owner_key_id TEXT NOT NULL,
+        conversation_id TEXT NOT NULL,
+        token TEXT NOT NULL UNIQUE DEFAULT (lower(hex(randomblob(16))))
+            CHECK(length(token) = 32 AND token NOT GLOB '*[^0-9a-f]*'),
+        expires_at INTEGER NOT NULL CHECK(typeof(expires_at) = 'integer'),
+        PRIMARY KEY(owner_key_id, conversation_id)
     );
-    WITH RECURSIVE buckets(n) AS (
-        SELECT 0 UNION ALL SELECT n + 1 FROM buckets WHERE n < 63
-    )
-    INSERT INTO conversation_deletion_epochs(bucket, epoch) SELECT n, 0 FROM buckets;
-    CREATE TRIGGER conversation_epoch_on_delete AFTER DELETE ON conversations
+    CREATE INDEX conversation_admissions_id_idx ON conversation_admissions(conversation_id);
+    CREATE INDEX conversation_admissions_expiry_idx ON conversation_admissions(expires_at);
+    CREATE TRIGGER conversation_admission_on_insert AFTER INSERT ON conversations
     BEGIN
-        UPDATE conversation_deletion_epochs SET epoch = epoch + 1
-        WHERE bucket = coalesce(unicode(substr(OLD.id, -1, 1)), 0) % 64;
-        SELECT CASE WHEN changes() != 1 THEN RAISE(ABORT, 'missing deletion epoch') END;
+        DELETE FROM conversation_admissions WHERE conversation_id = NEW.id;
     END;
 ";
 const SCHEMA: &str = "
@@ -217,7 +218,7 @@ fn initialize(connection: &mut Connection, legacy: Option<&Path>) -> Result<()> 
         }
         tx.execute_batch(SCHEMA)?;
         tx.execute_batch(IDENTITY_SCHEMA)?;
-        tx.execute_batch(DELETION_EPOCH_SCHEMA)?;
+        tx.execute_batch(ADMISSION_SCHEMA)?;
         tx.pragma_update(None, "application_id", APPLICATION_ID)?;
         tx.pragma_update(None, "user_version", VERSION)?;
     } else if version == 1 && app == APPLICATION_ID {
@@ -263,7 +264,7 @@ fn initialize(connection: &mut Connection, legacy: Option<&Path>) -> Result<()> 
     } else if version == 9 && app == APPLICATION_ID {
         // Version 10 introduces durable conversation identities.
     } else if version == 10 && app == APPLICATION_ID {
-        // Version 11 introduces bounded deletion epochs.
+        // Version 11 introduces bounded absent-ID admissions.
     } else if version != VERSION || app != APPLICATION_ID {
         bail!("unsupported conversation schema version {version} (expected {VERSION}) or application id {app}");
     }
@@ -297,17 +298,13 @@ fn initialize(connection: &mut Connection, legacy: Option<&Path>) -> Result<()> 
         )?;
     }
     if (1..11).contains(&version) {
-        tx.execute_batch(DELETION_EPOCH_SCHEMA)?;
+        tx.execute_batch(ADMISSION_SCHEMA)?;
     }
     validate_schema(&tx)?;
-    let epoch_count: i64 = tx.query_row(
-        "SELECT count(*) FROM conversation_deletion_epochs",
+    tx.execute(
+        "DELETE FROM conversation_admissions WHERE expires_at <= unixepoch()",
         [],
-        |row| row.get(0),
     )?;
-    if epoch_count != 64 {
-        bail!("conversation database has missing deletion epochs");
-    }
     if (1..9).contains(&version) {
         // Older releases accepted client-supplied sync claims. There is no
         // reliable provenance for existing markers, so preserve the mappings
@@ -394,7 +391,7 @@ fn validate_schema(connection: &Connection) -> Result<()> {
     let expected = Connection::open_in_memory()?;
     expected.execute_batch(SCHEMA)?;
     expected.execute_batch(IDENTITY_SCHEMA)?;
-    expected.execute_batch(DELETION_EPOCH_SCHEMA)?;
+    expected.execute_batch(ADMISSION_SCHEMA)?;
     for table in [
         "conversations",
         "messages",
@@ -404,7 +401,7 @@ fn validate_schema(connection: &Connection) -> Result<()> {
         "memory_settings",
         "memory_items",
         "conversation_identities",
-        "conversation_deletion_epochs",
+        "conversation_admissions",
     ] {
         let sql = |database: &Connection| -> Result<String> {
             Ok(database.query_row(
@@ -420,7 +417,7 @@ fn validate_schema(connection: &Connection) -> Result<()> {
     }
     for trigger in [
         "conversation_identity_on_insert",
-        "conversation_epoch_on_delete",
+        "conversation_admission_on_insert",
     ] {
         let trigger_sql = |database: &Connection| -> Result<String> {
             Ok(database.query_row(

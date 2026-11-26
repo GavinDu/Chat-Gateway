@@ -116,15 +116,55 @@ impl CommitReceipt {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum AdmissionIdentity {
     Existing(ConversationIdentity),
-    Absent(i64),
+    Absent(String),
     Generated,
+    ReadOnly,
 }
 
-fn read_deletion_epoch(connection: &Connection, id: &str) -> anyhow::Result<i64> {
+// Reuse an unexpired owner/ID lease without extending it. A committed creation
+// revokes all leases for that exact globally unique conversation ID.
+fn reserve_absent_admission(
+    connection: &Connection,
+    owner: &str,
+    id: &str,
+) -> anyhow::Result<String> {
+    connection.execute(
+        "DELETE FROM conversation_admissions WHERE expires_at <= unixepoch()",
+        [],
+    )?;
+    let existing = connection
+        .query_row(
+            "SELECT token FROM conversation_admissions
+             WHERE owner_key_id=?1 AND conversation_id=?2",
+            rusqlite::params![owner, id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    if let Some(token) = existing {
+        return Ok(token);
+    }
+    let count: i64 = connection.query_row(
+        "SELECT count(*) FROM conversation_admissions WHERE owner_key_id=?1",
+        [owner],
+        |row| row.get(0),
+    )?;
+    let total: i64 = connection.query_row(
+        "SELECT count(*) FROM conversation_admissions",
+        [],
+        |row| row.get(0),
+    )?;
+    if count >= 128 || total >= 8192 {
+        anyhow::bail!("conversation admission capacity exhausted");
+    }
+    connection.execute(
+        "INSERT INTO conversation_admissions(owner_key_id,conversation_id,expires_at)
+         VALUES(?1,?2,unixepoch()+3600)",
+        rusqlite::params![owner, id],
+    )?;
     Ok(connection.query_row(
-        "SELECT epoch FROM conversation_deletion_epochs
-         WHERE bucket = coalesce(unicode(substr(?1, -1, 1)), 0) % 64",
-        [id],
+        "SELECT token FROM conversation_admissions
+         WHERE owner_key_id=?1 AND conversation_id=?2",
+        rusqlite::params![owner, id],
         |row| row.get(0),
     )?)
 }
@@ -567,7 +607,7 @@ impl UnifiedMemory {
         new_messages: &[ChatMessage],
         token_budget: usize,
     ) -> anyhow::Result<(String, Vec<ChatMessage>, bool, Vec<ChatMessage>)> {
-        self.build_context_snapshot(owner_key_id, conversation_id, new_messages, token_budget)
+        self.build_context_snapshot(owner_key_id, conversation_id, new_messages, token_budget, false)
             .map(|snapshot| snapshot.context)
     }
 
@@ -577,6 +617,7 @@ impl UnifiedMemory {
         conversation_id: Option<&str>,
         new_messages: &[ChatMessage],
         token_budget: usize,
+        reserve: bool,
     ) -> anyhow::Result<ContextSnapshot> {
         let (history, saved_summary, identity) = match conversation_id {
             Some(id) => {
@@ -584,7 +625,11 @@ impl UnifiedMemory {
                 // Separate reads could otherwise combine history from one commit
                 // with a summary written by a concurrent request.
                 let mut connection = self.lock()?;
-                let tx = connection.transaction()?;
+                let tx = if reserve {
+                    connection.transaction_with_behavior(TransactionBehavior::Immediate)?
+                } else {
+                    connection.transaction()?
+                };
                 let owner: Option<String> = tx
                     .query_row(
                         "SELECT owner_key_id FROM conversations WHERE id = ?1",
@@ -599,8 +644,10 @@ impl UnifiedMemory {
                 };
                 let identity = if conversation.is_some() {
                     AdmissionIdentity::Existing(read_identity(&tx, id)?)
+                } else if reserve {
+                    AdmissionIdentity::Absent(reserve_absent_admission(&tx, owner_key_id, id)?)
                 } else {
-                    AdmissionIdentity::Absent(read_deletion_epoch(&tx, id)?)
+                    AdmissionIdentity::ReadOnly
                 };
                 let summary = if conversation.is_some() {
                     tx.query_row(
@@ -667,6 +714,7 @@ impl UnifiedMemory {
                 conversation_id.as_deref(),
                 &new_messages,
                 token_budget,
+                true,
             )
         })
         .await
@@ -893,13 +941,21 @@ impl UnifiedMemory {
                 }
                 expected == current
             }
-            Some(AdmissionIdentity::Absent(epoch)) => {
-                if current_identity.is_some()
-                    || read_deletion_epoch(&tx, &conversation_id)? != *epoch
-                {
+            Some(AdmissionIdentity::Absent(token)) => {
+                let valid: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM conversation_admissions
+                     WHERE owner_key_id=?1 AND conversation_id=?2 AND token=?3
+                     AND expires_at > unixepoch())",
+                    rusqlite::params![owner_key_id, conversation_id, token],
+                    |row| row.get(0),
+                )?;
+                if current_identity.is_some() || !valid {
                     anyhow::bail!("conversation absence changed during provider request");
                 }
                 true
+            }
+            Some(AdmissionIdentity::ReadOnly) => {
+                anyhow::bail!("read-only conversation snapshot cannot commit");
             }
             Some(AdmissionIdentity::Generated) => {
                 if current_identity.is_some() {

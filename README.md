@@ -252,11 +252,13 @@ canonical transcripts are retained; the next send must use Replay rather than
 trusting the old marker. This does not verify remote thread identity.
 Version 10 adds a private durable conversation incarnation and generation
 counter, used for provider request and mapping publication fencing. Version 11
-adds 64 durable deletion epochs. An explicit absent-ID request is rejected if
-its bucket changes before completion (including a successful delete or purge);
-this may conservatively reject unrelated absent IDs sharing that bucket. No
-empty conversation or per-ID tombstone is persisted. A DELETE of an ID that
-is already absent retains its existing not-found semantics.
+adds durable, owner-scoped admission leases for explicit absent IDs. A lease
+expires after one hour and is not extended by reuse. Creating a conversation
+revokes leases for that exact globally unique ID, including competing owners;
+unrelated IDs are unaffected. Expired leases are reclaimed at startup and
+admission; capacity is limited to 128 leases per owner and 8192 globally.
+No empty conversation or permanent tombstone is persisted. A DELETE of an ID
+that is already absent retains its existing not-found semantics.
 The import clears legacy synthetic `tab-*` values while preserving real
 provider-thread URLs and message history. The source JSON is never modified,
 renamed, or deleted automatically. Keep it
