@@ -1,13 +1,15 @@
-// Executed ONLY by the explicit popup action through activeTab permission.
+// Used by the explicit popup action and the consent/permission-scoped native diagnostic.
 // Chrome serializes this function into the active first-party page context.
 // Do not return any user, access token, cookie, body, URL or upstream error.
-async function probeActiveChatgptAccount() {
+async function probeActiveChatgptAccount(context = "chrome_active_tab") {
+  const nativeDiagnostic = context === "chrome_native_diagnostic";
   const started = Date.now();
   const checked_at = new Date(started).toISOString();
-  const report = (authentication, reason, http_status = null) => ({
-    provider: "chatgpt", context: "chrome_active_tab",
+  const report = (authentication, reason, http_status = null, auth_mode = "unknown") => ({
+    provider: "chatgpt", context: nativeDiagnostic ? "chrome_native_diagnostic" : "chrome_active_tab",
     authentication, reason, http_status, checked_at,
-    exported_snapshot_verified: false
+    exported_snapshot_verified: false,
+    ...(nativeDiagnostic ? {auth_mode} : {})
   });
   if (location.protocol !== "https:" ||
       !["chatgpt.com", "www.chatgpt.com"].includes(location.hostname) ||
@@ -51,7 +53,7 @@ async function probeActiveChatgptAccount() {
     // A refresh error or expired access token cannot certify this account,
     // even when the outer session expiry remains in the future. Claims stay
     // private and can only reject stale evidence, never prove authentication.
-    if (session.error) return report("unknown", "incomplete_or_expired_session_evidence", 200);
+
     const tokenCurrent = (() => {
       if (typeof session.accessToken !== 'string') return false;
       const parts = session.accessToken.split('.');
@@ -72,8 +74,33 @@ async function probeActiveChatgptAccount() {
     const tokenPresent = typeof session.accessToken === "string" &&
       session.accessToken.trim().length > 0;
     const expiry = typeof session.expires === "string" ? Date.parse(session.expires) : NaN;
+    if (session.error) {
+      // A native diagnostic may test the observed token against the provider's
+      // real account endpoint. Token claims alone never prove authentication.
+      // All account fields and the bearer remain inside this first-party page.
+      if (nativeDiagnostic && validUser && tokenPresent && tokenCurrent &&
+          Number.isFinite(expiry) && expiry > Date.now() &&
+          typeof session.user.id === "string" && session.user.id.trim()) {
+        const account = await fetch("/backend-api/me", {
+          credentials:"include", cache:"no-store", redirect:"error", signal:controller.signal,
+          headers:{Accept:"application/json", Authorization:"Bearer " + session.accessToken}
+        });
+        if (!documentUnchanged()) return report("unknown", "tab_changed");
+        if (account.status === 401) return report("unknown", "access_token_rejected", 401);
+        if (account.status !== 200) return report("unknown", "provider_or_network_blocked", account.status);
+        const user = await account.json();
+        if (!documentUnchanged()) return report("unknown", "tab_changed");
+        if (!user || typeof user !== "object" || Array.isArray(user) ||
+            typeof user.id !== "string" || !user.id.trim()) {
+          return report("unknown", "unrecognized_account_response", 200);
+        }
+        if (user.id !== session.user.id) return report("unknown", "account_principal_mismatch", 200);
+        return report("verified", "bearer_account_confirmed", 200, "bearer");
+      }
+      return report("unknown", nativeDiagnostic ? "session_reported_error" : "incomplete_or_expired_session_evidence", 200);
+    }
     if (validUser && tokenPresent && tokenCurrent && Number.isFinite(expiry) && expiry > Date.now()) {
-      return report("verified", "first_party_session_confirmed", 200);
+      return report("verified", "first_party_session_confirmed", 200, "session");
     }
     // A partial/changed 200 response can contain user:null alongside
     // upstream error fields. Only the reviewed empty or exact-null shapes

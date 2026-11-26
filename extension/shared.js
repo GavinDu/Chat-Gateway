@@ -216,6 +216,38 @@ function chatgptPartitionDiagnostics(cookies) {
   return counts;
 }
 
+
+const PARTITION_DETAIL_FIELDS = ["app_partitioned", "auxiliary_partitioned", "shape", "extra_fields", "ancestor_type", "missing_site", "opaque_site", "extension_site", "non_web_scheme", "invalid_url", "noncanonical_site", "chatgpt_alias", "other"];
+function chatgptPartitionUnknownReason(p) {
+  if (!p || typeof p !== "object" || Array.isArray(p)) return "shape";
+  if (Object.keys(p).some(key => !["topLevelSite","hasCrossSiteAncestor"].includes(key))) return "extra_fields";
+  if (Object.hasOwn(p,"hasCrossSiteAncestor") && typeof p.hasCrossSiteAncestor !== "boolean") return "ancestor_type";
+  if (!Object.hasOwn(p,"topLevelSite") || typeof p.topLevelSite !== "string") return "missing_site";
+  if (!p.topLevelSite || p.topLevelSite === "null") return "opaque_site";
+  let u;
+  try { u=new URL(p.topLevelSite); } catch (_) { return "invalid_url"; }
+  if (u.protocol === "chrome-extension:") return "extension_site";
+  if (!["http:","https:"].includes(u.protocol)) return "non_web_scheme";
+  if (u.username || u.password || u.port || u.search || u.hash || u.pathname !== "/" || u.origin !== p.topLevelSite) return "noncanonical_site";
+  if (u.hostname === "chatgpt.com" || u.hostname.endsWith(".chatgpt.com")) return "chatgpt_alias";
+  return "other";
+}
+function chatgptPartitionDetails(cookies) {
+  const details=Object.fromEntries(PARTITION_DETAIL_FIELDS.map(key=>[key,0]));
+  const seen=new Set();
+  for (const cookie of cookies) {
+    const scope=JSON.stringify([cookie.domain,cookie.path,cookie.name,cookie.partitionKey ?? null]);
+    if (seen.has(scope)) continue;
+    if (seen.size >= 512) break;
+    seen.add(scope);
+    if (cookie.partitionKey == null) continue;
+    const host=cookie.domain.replace(/^\./, "").toLowerCase();
+    details[host === "chatgpt.com" || host.endsWith(".chatgpt.com") ? "app_partitioned" : "auxiliary_partitioned"]++;
+    if (classifyChatgptPartitionKey(cookie.partitionKey) === "unknown") details[chatgptPartitionUnknownReason(cookie.partitionKey)]++;
+  }
+  return details;
+}
+
 async function providerCookieSnapshot(provider, afterPermissionCheck = null) {
   // Never authorize an inherited Object.prototype name as a provider.
   if (typeof provider !== "string" || !Object.hasOwn(PROVIDERS, provider)) {
@@ -251,14 +283,14 @@ async function providerCookieSnapshot(provider, afterPermissionCheck = null) {
   const loginHost = new URL(PROVIDER_LOGIN_URLS[provider]).hostname.toLowerCase();
   // Measurement only: partitioned snapshots still fail before any upload.
   // Raw scope keys exist only in this Chrome realm, never in diagnostics.
-  const partitionCounts = provider === "chatgpt" ? chatgptPartitionDiagnostics(
-    domainCookies.flat().filter(cookie => {
-      const host = cookie.domain.replace(/^\./, "").toLowerCase();
-      const hostOnly = !cookie.domain.startsWith(".");
-      return domains.some(root => host === root || host.endsWith("." + root)) &&
-        !(hostOnly && host !== loginHost && domains.includes(host));
-    })
-  ) : null;
+  const eligibleForDiagnostics = provider === "chatgpt" ? domainCookies.flat().filter(cookie => {
+    const host = cookie.domain.replace(/^\./, "").toLowerCase();
+    const hostOnly = !cookie.domain.startsWith(".");
+    return domains.some(root => host === root || host.endsWith("." + root)) &&
+      !(hostOnly && host !== loginHost && domains.includes(host));
+  }) : null;
+  const partitionCounts = eligibleForDiagnostics ? chatgptPartitionDiagnostics(eligibleForDiagnostics) : null;
+  const partitionDetails = eligibleForDiagnostics ? chatgptPartitionDetails(eligibleForDiagnostics) : null;
   const all = [];
   for (const cookies of domainCookies) {
     for (const cookie of cookies) {
@@ -280,6 +312,7 @@ async function providerCookieSnapshot(provider, afterPermissionCheck = null) {
         if (cookie.partitionKey != null) {
           const error = new Error("Unsupported browser cookie partition scope; existing gateway session was preserved.");
           if (partitionCounts) error.partitionCounts = partitionCounts;
+          if (partitionDetails) error.partitionDetails = partitionDetails;
           throw error;
         }
         // Preserve browser cookie policy rather than silently replacing

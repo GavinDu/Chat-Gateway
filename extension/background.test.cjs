@@ -1881,3 +1881,14 @@ test("partition count status is closed, bounded and isolated to ChatGPT",()=>{
   assert.equal(f.sandbox.recordProviderDiagnostic("claude","failed",null,null,{partition_counts:counts}).partition_counts,null);
   assert.equal(f.sandbox.recordProviderDiagnostic("chatgpt","failed",null,null,{partition_counts:{...counts,current_site:Infinity}}).partition_counts,null);
 });
+
+test("partition detail status projects numeric categories and hides stale unconsented evidence",()=>{
+  const f=loadBackground(["chatgpt"]);
+  const details=Object.fromEntries(["app_partitioned","auxiliary_partitioned","shape","extra_fields","ancestor_type","missing_site","opaque_site","extension_site","non_web_scheme","invalid_url","noncanonical_site","chatgpt_alias","other"].map(k=>[k,0]));
+  details.app_partitioned=2;details.missing_site=1;details.token="PRIVATE";
+  const entry=f.sandbox.recordProviderDiagnostic("chatgpt","failed","partition_scope_unsupported",null,{partition_details:details});
+  assert.equal(entry.partition_details.app_partitioned,2);assert.equal(Object.keys(entry.partition_details).length,13);assert.doesNotMatch(JSON.stringify(entry),/PRIVATE/);
+  assert.equal(f.sandbox.finalizeRelayDiagnostics({ok:true,extension:{linked_providers:["chatgpt"]}},0,{chatgpt:"new-consent"}).extension.provider_sync.chatgpt.partition_details,null);
+  assert.equal(f.sandbox.recordProviderDiagnostic("metaai","failed",null,null,{partition_details:details}).partition_details,null);
+  assert.equal(f.sandbox.recordProviderDiagnostic("chatgpt","failed",null,null,{partition_details:{...details,missing_site:3}}).partition_details,null);
+});

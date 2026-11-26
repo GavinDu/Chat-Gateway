@@ -22,7 +22,7 @@ ROOT = Path.home() / ".chat-gateway-native"
 SOCKET = ROOT / "bridge.sock"
 MANIFEST = Path.home() / "Library/Application Support/Google/Chrome/NativeMessagingHosts" / (HOST + ".json")
 LIMIT = 65536
-COMMANDS = {"ping", "diagnostics", "reload_extension"}
+COMMANDS = {"ping", "diagnostics", "reload_extension", "chatgpt_account"}
 ID = re.compile(r"[a-f0-9]{32}\Z")
 EXT_ID = re.compile(r"[a-p]{32}\Z")
 
@@ -147,7 +147,7 @@ def serve(extension_id, origin):
                             if not request_valid(req):
                                 continue
                             send_native(req)
-                            deadline = time.monotonic() + 15
+                            deadline = time.monotonic() + (40 if req["command"] == "chatgpt_account" else 15)
                             response = None
                             while not stopped.is_set() and time.monotonic() < deadline:
                                 try:
@@ -240,7 +240,7 @@ def main():
             MANIFEST.unlink(missing_ok=True)
             print("Registration removed. Disable the local bridge in Extension options to stop a live connection.")
             return 0
-        reply = reload_verified() if args.command == "reload_extension" else call(args.command)
+        reply = reload_verified() if args.command == "reload_extension" else call(args.command, timeout=45 if args.command == "chatgpt_account" else 20)
         print(json.dumps(reply, indent=2))
         return 0 if reply.get("ok") is True else 1
     except (OSError, EOFError, ValueError, KeyError, TypeError):

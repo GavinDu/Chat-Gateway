@@ -143,3 +143,27 @@ test("negative first-party claims also fail closed if page changes before status
   const before = await probe({status:401});
   assert.equal(before.value.authentication,"unauthenticated");
 });
+
+async function nativeProbe({session,account={id:"private-id"},status=200,changeAfter=null}={}) {
+  const calls=[];const location={protocol:"https:",hostname:"chatgpt.com",port:"",href:"https://chatgpt.com/"};
+  const context={location,Date,AbortController,setTimeout,clearTimeout,atob,
+    fetch:async(route,options)=>{calls.push({route,options});return {status:route.includes("/me")?status:200,json:async()=>{if(route.includes("/me")&&changeAfter)location.href="https://chatgpt.com/c/private";return route.includes("/me")?account:session;}};}};
+  const value=await vm.runInNewContext(source+'\nprobeActiveChatgptAccount("chrome_native_diagnostic")',context);
+  return {value,calls};
+}
+const nativeSession=()=>({user:{id:"private-id"},accessToken:"private-token",expires:new Date(Date.now()+60000).toISOString()});
+test("native account error path requires a matching real account response",async()=>{
+  const {value,calls}=await nativeProbe({session:{...nativeSession(),error:"private-refresh-error"}});
+  assert.equal(value.reason,"bearer_account_confirmed");assert.equal(value.auth_mode,"bearer");assert.equal(calls.length,2);
+  assert.equal(calls[1].route,"/backend-api/me");assert.equal(calls[1].options.headers.Authorization,"Bearer private-token");assert.equal(calls[0].options.signal,calls[1].options.signal);
+  assert.doesNotMatch(JSON.stringify(value),/private|accessToken|user/);
+});
+test("native account check does not reinterpret session errors without independent proof",async()=>{
+  for(const [params,reason] of [[{account:{id:"other-private"}},"account_principal_mismatch"],[{account:{}},"unrecognized_account_response"],[{status:401},"access_token_rejected"],[{status:403},"provider_or_network_blocked"],[{changeAfter:"json"},"tab_changed"]]){
+    const {value}=await nativeProbe({session:{...nativeSession(),error:"private"},...params});assert.equal(value.authentication,"unknown");assert.equal(value.reason,reason);assert.doesNotMatch(JSON.stringify(value),/private/);
+  }
+  for(const extra of [{expires:"2000-01-01"},{accessToken:""},{user:{}},{accessToken:"a."+btoa(JSON.stringify({exp:1}))+".c"}]){
+    const {value,calls}=await nativeProbe({session:{...nativeSession(),error:"private",...extra}});assert.equal(value.reason,"session_reported_error");assert.equal(calls.length,1);
+  }
+  const good=await nativeProbe({session:nativeSession()});assert.equal(good.value.auth_mode,"session");assert.equal(good.calls.length,1);
+});

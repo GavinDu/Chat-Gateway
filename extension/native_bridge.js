@@ -21,6 +21,14 @@
         fields.reduce((total, key) => total + value[key], 0) > 512) return null;
     return {...Object.fromEntries(fields.map(key => [key, value[key]])), limited: value.limited === true};
   }
+  function redactedPartitionDetails(value) {
+    const fields = ["app_partitioned", "auxiliary_partitioned", "shape", "extra_fields", "ancestor_type", "missing_site", "opaque_site", "extension_site", "non_web_scheme", "invalid_url", "noncanonical_site", "chatgpt_alias", "other"];
+    if (!value || typeof value !== "object" || Array.isArray(value) ||
+        fields.some(key=>!Number.isInteger(value[key]) || value[key] < 0 || value[key] > 512) ||
+        value.app_partitioned + value.auxiliary_partitioned > 512 ||
+        fields.slice(2).reduce((sum,key)=>sum+value[key],0) > value.app_partitioned + value.auxiliary_partitioned) return null;
+    return Object.fromEntries(fields.map(key=>[key,value[key]]));
+  }
   function project(snapshot) {
     const e = snapshot?.extension;
     const rows = Array.isArray(snapshot?.gateway?.providers) ? snapshot.gateway.providers : [];
@@ -46,6 +54,9 @@
             Array.isArray(e?.linked_providers) && e.linked_providers.includes(provider) &&
             e?.permissions?.providers?.[provider] === true
             ? redactedPartitionCounts(sync?.partition_counts) : null,
+          partition_details: provider === "chatgpt" && Array.isArray(e?.linked_providers) &&
+            e.linked_providers.includes(provider) && e?.permissions?.providers?.[provider] === true
+            ? redactedPartitionDetails(sync?.partition_details) : null,
           stale: sync?.stale !== false
         };
       })
@@ -109,6 +120,15 @@
           const snapshot = await relayDiagnostics(false);
           if (!await allowed() || source !== port) return;
           reply(true,project(snapshot));
+          break;
+        }
+        case "chatgpt_account": {
+          if (busy()) { reply(false,"busy"); break; }
+          const evidence = await nativeChatgptAccountDiagnostic(
+            async () => source === port && await allowed() && source === port
+          );
+          if (!await allowed() || source !== port) return;
+          reply(true,projectNativeChatgptAccount(evidence));
           break;
         }
         case "reload_extension":

@@ -21,7 +21,7 @@ The CLI uses a private directory (~/.chat-gateway-native, mode 0700), a Unix dom
 
 ## Contract
 
-Version 1 commands: ping, diagnostics, reload_extension. No arbitrary shell, eval, provider navigation, cookie exports or provider login automation. Diagnostics project only fixed provider names, booleans, category enums and bounded ChatGPT cookie-context counts. Gateway status comes from the existing read-only relay diagnostics API; counts come from the authorized Chrome capture attempt. A saved session is not verified authentication or successful chat. No raw gateway response, account identifier, cookie, token or URL is returned.
+Version 1 commands: ping, diagnostics, reload_extension, chatgpt_account. No arbitrary shell, eval, cookie exports or provider login automation. Only the fixed account command may reuse an official ChatGPT tab or open one temporary inactive `https://chatgpt.com/` tab. It closes only its own still-inactive tab; existing and user-activated tabs are preserved. Diagnostics project only fixed provider names, booleans, category enums and bounded ChatGPT cookie-context counts. Gateway status comes from the existing read-only relay diagnostics API; counts come from the authorized Chrome capture attempt. A saved session is not verified authentication or successful chat. No raw gateway response, account identifier, cookie, token or URL is returned.
 
 Reload is refused while provider sync, consent mutation or scheduled refresh is active. A successful preparation is not proof of completion. Host forwards the accepted response to the CLI before sending a matching internal reload_commit. The worker records the request receipt before calling runtime.reload. CLI waits up to 75 seconds for a different worker instance with the same receipt. This provides correlated restart evidence, not proof that a new source version was installed; compare reported version and use actual Chrome acceptance to verify source changes. No automatic retry of the reload command. Failure may be indeterminate; inspect ping before manually retrying. Pending browser debounce timers may be lost on reload; existing startup and periodic resync remain responsible for restoration.
 
@@ -61,3 +61,24 @@ excluded from ordinary snapshots because they cannot authenticate the provider
 login host. This order avoids rejecting unusable scopes; all remaining
 partitioned cookies still reject the complete upload. It does not add native
 partition replay or silently omit an otherwise eligible credential.
+
+### Scoped Chrome account diagnosis (0.3.4)
+
+Reinstall the native host from validated main, then reload the extension before
+using `python3 scripts/native_reload_bridge.py chatgpt_account`. The host waits
+up to 40 seconds and the CLI 45 seconds. This is an explicit read-only check,
+not an automatic authentication request on reload. It requires an enabled,
+linked ChatGPT provider, current host permissions and an unchanged gateway owner.
+The packaged verifier runs only in the official first-party page. It checks the
+session endpoint; a session reporting a refresh error can only produce bearer
+verification after its current token independently succeeds against the real
+account endpoint with the same account principal. Tokens and account identifiers
+stay inside that page. Navigation, permission/consent changes, timeouts, ambiguous
+responses and mismatched principals cannot establish authentication.
+
+The CLI returns only a fixed verdict, reason, HTTP status and `session`/`bearer`
+mode. This proves neither exported credentials nor Obscura replay or chat. The
+ordinary `diagnostics` command additionally reports bounded `partition_details`:
+app versus auxiliary partitioned scope counts and fixed unknown-metadata reason
+counts. It returns no cookie name, value, domain or partition URL. All otherwise
+eligible partitioned snapshots still fail before upload.

@@ -1216,3 +1216,16 @@ test("partition diagnostic counts exclude the same unusable host-only roots as c
     return true;
   });
 });
+
+test("partition details identify app/auxiliary scopes and fixed unknown reasons only",async()=>{
+  const cookies=[
+    {name:"a",value:"PRIVATE",domain:".chatgpt.com",path:"/",secure:true,partitionKey:{topLevelSite:"https://chatgpt.com",hasCrossSiteAncestor:false}},
+    {name:"b",value:"PRIVATE",domain:".openai.com",path:"/",secure:true,partitionKey:{topLevelSite:"chrome-extension://private"}},
+    {name:"c",value:"PRIVATE",domain:".chatgpt.com",path:"/",secure:true,partitionKey:{}},
+    {name:"d",value:"PRIVATE",domain:"openai.com",path:"/",secure:true,partitionKey:{}}
+  ];
+  const api=loadShared(cookies);
+  await assert.rejects(()=>api.providerCookieSnapshot("chatgpt"),error=>{
+    const d=error.partitionDetails;assert.equal(d.app_partitioned,2);assert.equal(d.auxiliary_partitioned,1);assert.equal(d.extension_site,1);assert.equal(d.missing_site,1);assert.equal(Object.keys(d).length,13);assert.doesNotMatch(JSON.stringify(d),/PRIVATE|chatgpt.com|openai.com|chrome-extension/);return true;
+  });
+});
