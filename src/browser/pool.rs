@@ -803,6 +803,7 @@ impl ObscuraPool {
     /// requested model (for UI selection on new conversations only)
     /// and `has_history` marks a returning conversation (selection
     /// skipped — the model is already fixed by the prior turns).
+    #[allow(dead_code)] // Compatibility for callers that do not consume thread evidence.
     pub async fn send_stream(
         &self,
         name: &str,

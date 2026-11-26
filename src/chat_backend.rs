@@ -465,15 +465,15 @@ impl ChatBackend for crate::browser::pool::ObscuraPool {
     ) -> std::result::Result<ObservedChatStream, GatewayError> {
         let (source, observation) =
             crate::browser::pool::ObscuraPool::send_stream_with_thread_observation(
-            self,
-            request.provider.as_str(),
-            request.prompt,
-            request.model,
-            request.has_history,
-            request.thread_url,
-        )
-        .await
-        .map_err(map_backend_error)?;
+                self,
+                request.provider.as_str(),
+                request.prompt,
+                request.model,
+                request.has_history,
+                request.thread_url,
+            )
+            .await
+            .map_err(map_backend_error)?;
         let (tx, rx) = mpsc::channel(32);
         forward_provider_stream(source, tx);
         Ok(ObservedChatStream {

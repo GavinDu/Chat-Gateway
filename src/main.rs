@@ -1766,6 +1766,74 @@ async fn persist_completed_turn(
     Ok(())
 }
 
+#[cfg(test)]
+mod attempt_thread_publication_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn canonical_turn_does_not_certify_unobserved_or_wrong_provider_thread() {
+        let (_, state) =
+            super::real_chat_router_scripted_backend_tests::fixture(&["chatgpt"], vec![], None);
+        for (id, observation, expected) in [
+            ("no-proof", None, false),
+            (
+                "wrong-provider",
+                Some(chat_backend::RemoteThreadObservation::new(
+                    "claude".to_owned(),
+                    "https://chatgpt.com/c/synthetic-thread".to_owned(),
+                )),
+                false,
+            ),
+            (
+                "observed",
+                Some(chat_backend::RemoteThreadObservation::new(
+                    "chatgpt".to_owned(),
+                    "https://chatgpt.com/c/synthetic-thread".to_owned(),
+                )),
+                true,
+            ),
+        ] {
+            persist_completed_turn(
+                &state,
+                memory::SnapshotTurn {
+                    owner_key_id: "local".to_owned(),
+                    conversation_id: id.to_owned(),
+                    user_msgs: vec![ChatMessage {
+                        role: "user".to_owned(),
+                        content: "synthetic question".to_owned(),
+                    }],
+                    assistant_msg: ChatMessage {
+                        role: "assistant".to_owned(),
+                        content: "synthetic answer".to_owned(),
+                    },
+                    provider: "chatgpt".to_owned(),
+                    expected_marker: transcript_marker(&[]),
+                    expected_identity: memory::AdmissionIdentity::Generated,
+                },
+                "fake-model",
+                observation,
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                state
+                    .memory
+                    .conversation(id)
+                    .unwrap()
+                    .unwrap()
+                    .messages
+                    .len(),
+                2
+            );
+            let mapping = state.memory.get_provider_thread(id, "chatgpt").unwrap();
+            assert_eq!(mapping.is_some(), expected);
+            if let Some(mapping) = mapping {
+                assert!(mapping.synced_through_message_id.is_some());
+            }
+        }
+    }
+}
+
 fn is_reopenable_provider_thread_url(provider: &str, value: &str) -> bool {
     let Some(provider_kind) = providers::Provider::from_name(provider) else {
         return false;

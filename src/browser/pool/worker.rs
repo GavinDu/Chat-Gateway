@@ -60,8 +60,10 @@ mod completed_thread_observation_tests {
             (None, home, "https://evil.example/c/thread-a"),
             (None, "https://evil.example/", thread),
         ] {
-            assert!(completed_thread_observation(Provider::ChatGPT, expected, initial, final_url)
-                .is_none());
+            assert!(
+                completed_thread_observation(Provider::ChatGPT, expected, initial, final_url)
+                    .is_none()
+            );
         }
         assert!(completed_thread_observation(
             Provider::MetaAI,

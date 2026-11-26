@@ -799,7 +799,7 @@ impl ChatService {
         Self { backend }
     }
 
-    #[cfg(test)]
+    #[allow(dead_code)] // Compatibility for callers that do not consume thread evidence.
     pub async fn stream(
         &self,
         request: BackendRequest,
@@ -820,7 +820,7 @@ impl ChatService {
     /// A backend may stall *before* it returns a stream receiver (for example
     /// while its command queue is saturated). Bound admission as well as event
     /// collection; dropping the pending future cancels the admission attempt.
-    #[cfg(test)]
+    #[allow(dead_code)] // Compatibility for callers that do not consume thread evidence.
     pub async fn stream_with_timeout(
         &self,
         request: BackendRequest,
