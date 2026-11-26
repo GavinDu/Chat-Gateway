@@ -16,7 +16,7 @@ async function fixture(granted = true) {
   const tasks = new Map();
   const sandbox = {
     randomHex: () => "a".repeat(32), PROVIDERS:{chatgpt:[],metaai:[]},
-    providerTasks:tasks,scheduledProviderRefresh:null,connectionPoll:null,
+    providerTasks:tasks,pendingConsentMutations:0,scheduledProviderRefresh:null,connectionPoll:null,
     relayDiagnostics:async()=>({ok:true, extension:{connected:true,connection_mode:"local",linked_providers:["chatgpt"],provider_sync:{chatgpt:{state:"uploaded",issue:"secret-token",stale:false}},permissions:{providers:{chatgpt:true}}},gateway:{providers:[{provider:"chatgpt",enabled:true,linked:true,authentication:"verified",availability:"ready",token:"SECRET",url:"https://private.invalid"}]}}),
     chrome:{
       permissions:{contains:async()=>granted,onAdded:added,onRemoved:removed},
