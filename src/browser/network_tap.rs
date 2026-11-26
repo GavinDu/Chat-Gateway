@@ -98,19 +98,25 @@ fn safe_hostname(host: &str) -> &str {
     }
 }
 
-fn chatgpt_endpoint_kind(url: &reqwest::Url) -> &'static str {
-    if url.scheme() != "https" {
+fn chatgpt_endpoint_kind(value: &str) -> &'static str {
+    // Reuse the already linked HTTP URI parser; no new client dependency.
+    let value = value.split('#').next().unwrap_or_default();
+    let Ok(url) = value.parse::<axum::http::Uri>() else {
         return "other";
-    }
-    if !url.username().is_empty() || url.password().is_some() {
+    };
+    let Some(authority) = url.authority() else {
         return "other";
-    }
-    if url.port_or_known_default() != Some(443) {
+    };
+    let Some(host) = url.host() else {
         return "other";
-    }
-    match url.host_str() {
-        Some("chatgpt.com") | Some("www.chatgpt.com") => {}
-        _ => return "other",
+    };
+    let host = host.to_ascii_lowercase();
+    let authority = authority.as_str().to_ascii_lowercase();
+    if url.scheme_str() != Some("https")
+        || !matches!(host.as_str(), "chatgpt.com" | "www.chatgpt.com")
+        || (authority != host && authority != format!("{host}:443"))
+    {
+        return "other";
     }
     let path = url.path();
     match path {
@@ -208,7 +214,7 @@ pub(super) fn attach_provider_network_tap(
                 scope = "page_request",
                 observation_sequence = previous + 1,
                 observation_limit = 256,
-                endpoint_kind = chatgpt_endpoint_kind(&info.url),
+                endpoint_kind = chatgpt_endpoint_kind(info.url.as_str()),
                 method_kind = method_kind(&info.method),
                 "ChatGPT request dispatched (fixed metadata only)"
             );
@@ -311,8 +317,8 @@ pub(super) fn attach_provider_network_tap(
             response_bytes_observed = provider_network_tap_reported_bytes(response.body.len()),
             response_bytes_truncated = response.body.len() > MAX_PROVIDER_NETWORK_TAP_REPORTED_BYTES,
             scope = "page_response",
-            request_endpoint_kind = if provider == Provider::ChatGPT { chatgpt_endpoint_kind(&info.url) } else { "not_applicable" },
-            response_endpoint_kind = if provider == Provider::ChatGPT { chatgpt_endpoint_kind(&response.url) } else { "not_applicable" },
+            request_endpoint_kind = if provider == Provider::ChatGPT { chatgpt_endpoint_kind(info.url.as_str()) } else { "not_applicable" },
+            response_endpoint_kind = if provider == Provider::ChatGPT { chatgpt_endpoint_kind(response.url.as_str()) } else { "not_applicable" },
             method_kind = method_kind(&info.method),
             content_type_kind = content_type_kind(response.content_type()),
             "provider network response observed (metadata only)"
@@ -551,9 +557,7 @@ mod chatgpt_network_metadata_tests {
             ("/backend-api/me/extra", "first_party_other"),
         ] {
             for origin in ["https://chatgpt.com", "https://www.chatgpt.com:443"] {
-                let url =
-                    reqwest::Url::parse(&format!("{origin}{path}?token=synthetic-private#private"))
-                        .unwrap();
+                let url = format!("{origin}{path}?token=synthetic-private#private");
                 assert_eq!(chatgpt_endpoint_kind(&url), expected);
                 assert!(!chatgpt_endpoint_kind(&url).contains("private"));
             }
@@ -573,8 +577,7 @@ mod chatgpt_network_metadata_tests {
             "data:text/plain,synthetic-private",
             "https://127.0.0.1/backend-api/me",
         ] {
-            let url = reqwest::Url::parse(value).unwrap();
-            assert_eq!(chatgpt_endpoint_kind(&url), "other");
+            assert_eq!(chatgpt_endpoint_kind(value), "other");
         }
     }
     #[test]
