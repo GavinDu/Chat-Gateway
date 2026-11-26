@@ -203,7 +203,7 @@ pub(super) fn attach_provider_network_tap(
                 return;
             }
             let Ok(previous) =
-                dispatched.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+                dispatched.try_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
                     (count < 256).then_some(count.saturating_add(1))
                 })
             else {
