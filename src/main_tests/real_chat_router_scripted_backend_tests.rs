@@ -290,8 +290,7 @@ async fn real_memory_api_owner_scoped_consent_crud_and_export() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["deleted"], 1);
-    let (_, body) =
-        memory_request(&app, "owner-b", "GET", export, serde_json::Value::Null).await;
+    let (_, body) = memory_request(&app, "owner-b", "GET", export, serde_json::Value::Null).await;
     assert_eq!(body["data"].as_array().unwrap().len(), 1);
     assert_eq!(body["data"][0]["id"], foreign["id"]);
 }
