@@ -1992,6 +1992,8 @@ pub async fn run_send(
     chunks: mpsc::Sender<Result<ProviderChunk>>,
 ) {
     use crate::metaai_timing::{Step, Timer};
+    use chatgpt::attempt_diagnostics::{self as observation, Stage};
+    observation::stage(Stage::EntryGuards);
     let entry_timer = Timer::start(Step::EntryGuards);
     let ProviderSendPolicy {
         completion_idle,
@@ -2029,6 +2031,7 @@ pub async fn run_send(
     // Rust v1's 350ms / stability / indicator completion.
     let done_signal = adapter.done_signal();
     drop(entry_timer);
+    observation::stage(Stage::Baseline);
     let baseline_probe = {
         let _timer = Timer::start(Step::BaselineProbe);
         adapter.response_probe(page, true)
@@ -2063,6 +2066,7 @@ pub async fn run_send(
         let _ = chunks.send(Err(error)).await;
         return;
     }
+    observation::baseline(&baseline_probe);
     let baseline_response_count = baseline_probe.count;
     let baseline_populated_count = baseline_probe.populated_count;
     let baseline = baseline_probe.text.filter(|t| !t.is_empty());
@@ -2081,6 +2085,7 @@ pub async fn run_send(
     // The consumer may disconnect after Send was clicked but before the
     // framework reports an acknowledged submission. Drop the incomplete
     // mutable-page future before using the page for guarded Stop cleanup.
+    observation::stage(Stage::Submission);
     let submission_timer = Timer::start(Step::Submission);
     let submission = tokio::select! {
         result = tokio::time::timeout(timeout, adapter.send_prompt(page, &prompt)) => Some(result),
@@ -2106,7 +2111,7 @@ pub async fn run_send(
         return;
     };
     match submission {
-        Ok(Ok(())) => {}
+        Ok(Ok(())) => observation::submission_returned(),
         Ok(Err(error)) => {
             // A provider can redirect to manual verification while the
             // composer is being typed or the Send control is settling.
@@ -2205,6 +2210,11 @@ pub async fn run_send(
         }
 
         let after_content = last_delta_at.is_some();
+        observation::stage(if after_content {
+            Stage::AfterContent
+        } else {
+            Stage::FirstContent
+        });
         common::drive_page_timed(
             page,
             poll_tick,
@@ -2233,6 +2243,7 @@ pub async fn run_send(
             });
             adapter.response_probe(page, check_body_challenge)
         };
+        observation::poll(&probe, identical_answer_fallback.as_deref());
         metrics.record_browser_poll(
             adapter.name(),
             1,
@@ -2432,6 +2443,9 @@ pub async fn run_send(
                             } else {
                                 answer.clone()
                             };
+                            if !answer.is_empty() {
+                                observation::verified_identical_reply();
+                            }
                             if chunks
                                 .send(Ok(ProviderChunk {
                                     content: answer,
@@ -2471,6 +2485,7 @@ pub async fn run_send(
                                 return;
                             }
                         }
+                        observation::terminal_attempted();
                         let _ = chunks
                             .send(Ok(ProviderChunk {
                                 content: String::new(),
@@ -2489,6 +2504,7 @@ pub async fn run_send(
                     }
                     stable_ticks = 0;
                     if !delta.is_empty() {
+                        observation::first_content();
                         last_delta_at = Some(Instant::now());
                     }
                     if !delta.is_empty()
@@ -2610,6 +2626,7 @@ pub async fn run_send(
                         return;
                     }
                 }
+                observation::terminal_attempted();
                 let _ = chunks
                     .send(Ok(ProviderChunk {
                         content: String::new(),
