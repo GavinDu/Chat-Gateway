@@ -811,6 +811,76 @@ async fn imported_thread_marker_cannot_rearm_consumed_delta() {
 }
 
 #[tokio::test]
+async fn real_router_cancelled_absent_admission_allows_explicit_retry() {
+    let (cancelled_tx, cancelled_rx) = tokio::sync::oneshot::channel();
+    let (app, state, _) = fixture_with_backend(
+        &["chatgpt"],
+        vec![
+            ScriptedSend::PartialThenHold(
+                ChatEvent {
+                    content: "discarded first answer".to_owned(),
+                    done: false,
+                },
+                cancelled_tx,
+            ),
+            response_events("fresh answer"),
+        ],
+        None,
+    );
+    let conversation = "router_absent_cancel_001";
+    let response = send_prompt(
+        app.clone(),
+        true,
+        "chatgpt/fake-model",
+        conversation,
+        "INTERRUPTED_FIRST_TURN",
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    drop(response);
+    tokio::time::timeout(std::time::Duration::from_secs(2), cancelled_rx)
+        .await
+        .expect("client drop should close backend receiver")
+        .expect("scripted backend should observe cancellation");
+    assert!(state
+        .memory
+        .conversation_messages_for_owner("local", conversation)
+        .unwrap()
+        .is_empty());
+    assert!(state
+        .memory
+        .get_provider_thread_for_owner("local", conversation, "chatgpt")
+        .unwrap()
+        .is_none());
+
+    let retry = send_prompt(
+        app,
+        false,
+        "chatgpt/fake-model",
+        conversation,
+        "EXPLICIT_RETRY_TURN",
+    )
+    .await;
+    assert_eq!(retry.status(), StatusCode::OK);
+    assert_eq!(
+        state
+            .memory
+            .conversation_messages_for_owner("local", conversation)
+            .unwrap(),
+        vec![
+            ChatMessage {
+                role: "user".to_owned(),
+                content: "EXPLICIT_RETRY_TURN".to_owned(),
+            },
+            ChatMessage {
+                role: "assistant".to_owned(),
+                content: "fresh answer".to_owned(),
+            },
+        ]
+    );
+}
+
+#[tokio::test]
 async fn real_router_absent_admission_cannot_resurrect_deleted_conversation() {
     for stream in [false, true] {
         let (release_tx, release_rx) = tokio::sync::oneshot::channel();
