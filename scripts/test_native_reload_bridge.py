@@ -15,6 +15,28 @@ from unittest.mock import patch
 import native_reload_bridge as bridge
 
 
+def wait_for_listener(sock_path, process, timeout=5.0):
+    deadline = time.monotonic() + timeout
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise AssertionError("timed out waiting for listener")
+        if process.poll() is not None:
+            raise AssertionError("process exited before listener became ready")
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+                client.settimeout(min(0.05, remaining))
+                client.connect(str(sock_path))
+                return
+        except OSError:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise AssertionError("timed out waiting for listener")
+            if process.poll() is not None:
+                raise AssertionError("process exited before listener became ready")
+            time.sleep(min(0.01, remaining))
+
+
 class NativeBridgeTests(unittest.TestCase):
     def test_frame_roundtrip(self):
         request = {"v": 1, "id": "a" * 32, "command": "diagnostics"}
@@ -110,11 +132,11 @@ class NativeBridgeTests(unittest.TestCase):
             proc = subprocess.Popen(cmd, env=env, stdin=subprocess.PIPE,
                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
             try:
-                deadline = time.monotonic() + 5
-                while not sock.exists() and proc.poll() is None and time.monotonic() < deadline:
-                    time.sleep(0.02)
+                # A path exists between bind and chmod/listen. Probe the
+                # listener before asserting its final permissions. EOF probes
+                # forward no native command and preserve all framing checks.
+                wait_for_listener(sock, proc)
                 self.assertTrue(sock.is_socket(), "native host failed to bind")
-                # bind precedes chmod; private directory already protects access.
                 self.assertEqual(root.stat().st_mode & 0o777, 0o700)
                 self.assertEqual(sock.stat().st_mode & 0o777, 0o600)
                 contender = subprocess.run(cmd, env=env, input=b"",
@@ -182,6 +204,61 @@ class NativeBridgeTests(unittest.TestCase):
                 proc.stderr.close()
             self.assertEqual(proc.returncode, 0)
             self.assertFalse(sock.exists(), "native host left a stale socket")
+
+
+
+
+class ListenerReadinessTests(unittest.TestCase):
+    def test_bound_socket_is_not_ready_until_chmod_and_listen(self):
+        from threading import Event
+        from unittest.mock import Mock
+        attempted = Event()
+        real_socket = socket.socket
+        class Probe:
+            def __init__(self, *args, **kwargs): self.client = real_socket(*args, **kwargs)
+            def __enter__(self): return self
+            def __exit__(self, *args): self.client.close()
+            def settimeout(self, value): self.client.settimeout(value)
+            def connect(self, path):
+                try: return self.client.connect(path)
+                finally: attempted.set()
+        with tempfile.TemporaryDirectory(prefix="cg-ready-", dir="/tmp") as temp:
+            path = Path(temp) / "pending.sock"
+            with real_socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
+                server.bind(str(path)); os.chmod(path, 0o700)
+                process = Mock(); process.poll.return_value = None
+                with patch.object(socket, "socket", side_effect=Probe):
+                    with ThreadPoolExecutor(max_workers=1) as pool:
+                        future = pool.submit(wait_for_listener, path, process)
+                        self.assertTrue(attempted.wait(5), "listener probe never ran")
+                        self.assertFalse(future.done(), "bound path was mistaken for listener readiness")
+                        self.assertEqual(path.stat().st_mode & 0o777, 0o700)
+                        os.chmod(path, 0o600); server.listen(1)
+                        future.result(timeout=5)
+                server.settimeout(5)
+                connection, _ = server.accept()
+                with connection: self.assertEqual(connection.recv(1), b"")
+                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+
+    def test_deadline_and_process_exit_fail_without_connecting(self):
+        from unittest.mock import Mock
+        process = Mock(); process.poll.return_value = None
+        with patch.object(socket, "socket") as factory:
+            with self.assertRaisesRegex(AssertionError, "^timed out waiting for listener$"):
+                wait_for_listener("synthetic-private", process, timeout=0)
+            factory.assert_not_called()
+        process.poll.return_value = 1
+        with patch.object(socket, "socket") as factory:
+            with self.assertRaisesRegex(AssertionError, "^process exited before listener became ready$"):
+                wait_for_listener("synthetic-private", process)
+            factory.assert_not_called()
+
+    def test_unexpected_programming_error_is_not_swallowed(self):
+        from unittest.mock import Mock
+        process = Mock(); process.poll.return_value = None
+        with patch.object(socket, "socket", side_effect=RuntimeError("synthetic fixture error")):
+            with self.assertRaisesRegex(RuntimeError, "synthetic fixture error"):
+                wait_for_listener("synthetic-private", process)
 
 
 if __name__ == "__main__":
