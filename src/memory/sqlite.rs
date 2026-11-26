@@ -3,7 +3,7 @@ use anyhow::{bail, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use std::{collections::HashMap, fs, path::Path, time::Duration};
 
-const VERSION: i64 = 10;
+const VERSION: i64 = 11;
 const APPLICATION_ID: i64 = 0x4347574d; // CGWM
 const PROVIDER_THREADS_SCHEMA: &str = "
     CREATE TABLE provider_threads (
@@ -59,6 +59,24 @@ const IDENTITY_SCHEMA: &str = "
     CREATE TRIGGER conversation_identity_on_insert AFTER INSERT ON conversations
     BEGIN
         INSERT INTO conversation_identities(conversation_id) VALUES(NEW.id);
+    END;
+";
+// Fixed-size deletion epochs: IDs sharing a bucket may conservatively retry,
+// but deleted IDs never accumulate permanent tombstone rows.
+const DELETION_EPOCH_SCHEMA: &str = "
+    CREATE TABLE conversation_deletion_epochs (
+        bucket INTEGER PRIMARY KEY NOT NULL CHECK(bucket >= 0 AND bucket < 64),
+        epoch INTEGER NOT NULL CHECK(typeof(epoch) = 'integer' AND epoch >= 0)
+    );
+    WITH RECURSIVE buckets(n) AS (
+        SELECT 0 UNION ALL SELECT n + 1 FROM buckets WHERE n < 63
+    )
+    INSERT INTO conversation_deletion_epochs(bucket, epoch) SELECT n, 0 FROM buckets;
+    CREATE TRIGGER conversation_epoch_on_delete AFTER DELETE ON conversations
+    BEGIN
+        UPDATE conversation_deletion_epochs SET epoch = epoch + 1
+        WHERE bucket = coalesce(unicode(substr(OLD.id, -1, 1)), 0) % 64;
+        SELECT CASE WHEN changes() != 1 THEN RAISE(ABORT, 'missing deletion epoch') END;
     END;
 ";
 const SCHEMA: &str = "
@@ -199,6 +217,7 @@ fn initialize(connection: &mut Connection, legacy: Option<&Path>) -> Result<()> 
         }
         tx.execute_batch(SCHEMA)?;
         tx.execute_batch(IDENTITY_SCHEMA)?;
+        tx.execute_batch(DELETION_EPOCH_SCHEMA)?;
         tx.pragma_update(None, "application_id", APPLICATION_ID)?;
         tx.pragma_update(None, "user_version", VERSION)?;
     } else if version == 1 && app == APPLICATION_ID {
@@ -243,6 +262,8 @@ fn initialize(connection: &mut Connection, legacy: Option<&Path>) -> Result<()> 
         // Version 9 invalidates legacy markers without changing table definitions.
     } else if version == 9 && app == APPLICATION_ID {
         // Version 10 introduces durable conversation identities.
+    } else if version == 10 && app == APPLICATION_ID {
+        // Version 11 introduces bounded deletion epochs.
     } else if version != VERSION || app != APPLICATION_ID {
         bail!("unsupported conversation schema version {version} (expected {VERSION}) or application id {app}");
     }
@@ -267,7 +288,7 @@ fn initialize(connection: &mut Connection, legacy: Option<&Path>) -> Result<()> 
     tx.execute_batch(
         "CREATE INDEX IF NOT EXISTS conversations_owner_key_id_idx ON conversations(owner_key_id, id);",
     )?;
-    if (1..VERSION).contains(&version) {
+    if (1..10).contains(&version) {
         tx.execute_batch(IDENTITY_SCHEMA)?;
         tx.execute(
             "INSERT INTO conversation_identities(conversation_id)
@@ -275,7 +296,18 @@ fn initialize(connection: &mut Connection, legacy: Option<&Path>) -> Result<()> 
             [],
         )?;
     }
+    if (1..11).contains(&version) {
+        tx.execute_batch(DELETION_EPOCH_SCHEMA)?;
+    }
     validate_schema(&tx)?;
+    let epoch_count: i64 = tx.query_row(
+        "SELECT count(*) FROM conversation_deletion_epochs",
+        [],
+        |row| row.get(0),
+    )?;
+    if epoch_count != 64 {
+        bail!("conversation database has missing deletion epochs");
+    }
     if (1..9).contains(&version) {
         // Older releases accepted client-supplied sync claims. There is no
         // reliable provenance for existing markers, so preserve the mappings
@@ -362,6 +394,7 @@ fn validate_schema(connection: &Connection) -> Result<()> {
     let expected = Connection::open_in_memory()?;
     expected.execute_batch(SCHEMA)?;
     expected.execute_batch(IDENTITY_SCHEMA)?;
+    expected.execute_batch(DELETION_EPOCH_SCHEMA)?;
     for table in [
         "conversations",
         "messages",
@@ -371,6 +404,7 @@ fn validate_schema(connection: &Connection) -> Result<()> {
         "memory_settings",
         "memory_items",
         "conversation_identities",
+        "conversation_deletion_epochs",
     ] {
         let sql = |database: &Connection| -> Result<String> {
             Ok(database.query_row(
@@ -384,17 +418,18 @@ fn validate_schema(connection: &Connection) -> Result<()> {
             bail!("invalid schema definition for table '{table}'; expected version {VERSION}");
         }
     }
-    let trigger_sql = |database: &Connection| -> Result<String> {
-        Ok(database.query_row(
-            "SELECT sql FROM sqlite_master WHERE type='trigger'
-             AND name='conversation_identity_on_insert'",
-            [],
-            |row| row.get(0),
-        )?)
-    };
-    let normalize = |sql: String| sql.split_whitespace().collect::<String>().to_lowercase();
-    if normalize(trigger_sql(connection)?) != normalize(trigger_sql(&expected)?) {
-        bail!("invalid conversation identity insert trigger");
+    for trigger in ["conversation_identity_on_insert", "conversation_epoch_on_delete"] {
+        let trigger_sql = |database: &Connection| -> Result<String> {
+            Ok(database.query_row(
+                "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?1",
+                [trigger],
+                |row| row.get(0),
+            )?)
+        };
+        let normalize = |sql: String| sql.split_whitespace().collect::<String>().to_lowercase();
+        if normalize(trigger_sql(connection)?) != normalize(trigger_sql(&expected)?) {
+            bail!("invalid conversation trigger '{trigger}'");
+        }
     }
     Ok(())
 }

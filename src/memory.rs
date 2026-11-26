@@ -85,7 +85,7 @@ struct TurnWrite<'a> {
     tab_id: Option<String>,
     compute_marker: bool,
     expected_marker: Option<&'a str>,
-    expected_identity: Option<&'a Option<ConversationIdentity>>,
+    expected_identity: Option<&'a AdmissionIdentity>,
 }
 
 /// Internal durable identity of one conversation incarnation at a revision.
@@ -111,9 +111,27 @@ impl CommitReceipt {
     }
 }
 
+/// Distinguish an existing incarnation, an explicitly absent client ID,
+/// and a server-generated ID that is not exposed before completion.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum AdmissionIdentity {
+    Existing(ConversationIdentity),
+    Absent(i64),
+    Generated,
+}
+
+fn read_deletion_epoch(connection: &Connection, id: &str) -> anyhow::Result<i64> {
+    Ok(connection.query_row(
+        "SELECT epoch FROM conversation_deletion_epochs
+         WHERE bucket = coalesce(unicode(substr(?1, -1, 1)), 0) % 64",
+        [id],
+        |row| row.get(0),
+    )?)
+}
+
 pub(crate) struct ContextSnapshot {
     pub(crate) context: (String, Vec<ChatMessage>, bool, Vec<ChatMessage>),
-    pub(crate) identity: Option<ConversationIdentity>,
+    pub(crate) identity: AdmissionIdentity,
 }
 
 fn read_identity(connection: &Connection, id: &str) -> anyhow::Result<ConversationIdentity> {
@@ -137,7 +155,7 @@ pub(crate) struct SnapshotTurn {
     pub(crate) assistant_msg: ChatMessage,
     pub(crate) provider: String,
     pub(crate) expected_marker: String,
-    pub(crate) expected_identity: Option<ConversationIdentity>,
+    pub(crate) expected_identity: AdmissionIdentity,
 }
 
 /// Async contract for bounded conversation history access and atomic turn persistence.
@@ -580,9 +598,9 @@ impl UnifiedMemory {
                     None => None,
                 };
                 let identity = if conversation.is_some() {
-                    Some(read_identity(&tx, id)?)
+                    AdmissionIdentity::Existing(read_identity(&tx, id)?)
                 } else {
-                    None
+                    AdmissionIdentity::Absent(read_deletion_epoch(&tx, id)?)
                 };
                 let summary = if conversation.is_some() {
                     tx.query_row(
@@ -608,7 +626,7 @@ impl UnifiedMemory {
                 })?;
                 (history, summary, identity)
             }
-            None => (Vec::new(), None, None),
+            None => (Vec::new(), None, AdmissionIdentity::Generated),
         };
         let has_history = !history.is_empty();
         let summary_message = saved_summary.map(|(summary, _covered)| ChatMessage {
@@ -865,15 +883,32 @@ impl UnifiedMemory {
         } else {
             None
         };
-        if let Some(expected) = expected_identity {
-            // An absent or replaced incarnation is not a concurrent append.
-            // Never resurrect a deleted conversation or append to its successor.
-            if expected.as_ref().map(|value| &value.incarnation)
-                != current_identity.as_ref().map(|value| &value.incarnation)
-            {
-                anyhow::bail!("conversation incarnation changed during provider request");
+        let identity_current = match expected_identity {
+            Some(AdmissionIdentity::Existing(expected)) => {
+                let Some(current) = current_identity.as_ref() else {
+                    anyhow::bail!("conversation incarnation changed during provider request");
+                };
+                if expected.incarnation != current.incarnation {
+                    anyhow::bail!("conversation incarnation changed during provider request");
+                }
+                expected == current
             }
-        }
+            Some(AdmissionIdentity::Absent(epoch)) => {
+                if current_identity.is_some()
+                    || read_deletion_epoch(&tx, &conversation_id)? != *epoch
+                {
+                    anyhow::bail!("conversation absence changed during provider request");
+                }
+                true
+            }
+            Some(AdmissionIdentity::Generated) => {
+                if current_identity.is_some() {
+                    anyhow::bail!("generated conversation ID already exists");
+                }
+                true
+            }
+            None => true,
+        };
         let mut conversation =
             sqlite::load(&tx, &conversation_id)?.unwrap_or_else(|| Conversation {
                 id: conversation_id,
@@ -889,7 +924,7 @@ impl UnifiedMemory {
         let replay = !user_msgs.is_empty()
             && (conversation.messages.starts_with(&completed)
                 || conversation.messages.ends_with(&completed));
-        let sync_eligible = expected_identity.is_none_or(|expected| expected == &current_identity)
+        let sync_eligible = identity_current
             && expected_marker.is_none_or(|expected| {
                 !replay && transcript_marker(&conversation.messages) == expected
             });
