@@ -1,4 +1,11 @@
 import io
+import os
+import select
+import socket
+import subprocess
+import sys
+import time
+from concurrent.futures import ThreadPoolExecutor
 import json
 import struct
 import tempfile
@@ -76,6 +83,103 @@ class NativeBridgeTests(unittest.TestCase):
                 self.assertEqual(data["allowed_origins"], ["chrome-extension://" + "a" * 32 + "/"])
                 self.assertEqual(Path(data["path"]).stat().st_mode & 0o777, 0o700)
                 self.assertEqual(manifest.stat().st_mode & 0o777, 0o600)
+
+
+    def test_reload_deadline_does_not_report_success(self):
+        previous = "a" * 32
+        ack = {"ok": True, "result": {"stage": "accepted", "instance": previous}}
+        with patch.object(bridge, "call", side_effect=[ack, OSError("host gone")]) as call, \
+                patch.object(bridge.time, "sleep"), \
+                patch.object(bridge.time, "monotonic", side_effect=[0, 1, 2, 76]):
+            result = bridge.reload_verified()
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "reload_unverified")
+        self.assertEqual(call.call_count, 2)
+
+    def test_real_host_subprocess_socket_and_reload_transaction(self):
+        # Simulate Chrome's native-message pipes, not an actual Chrome browser.
+        with tempfile.TemporaryDirectory(prefix="cg-native-", dir="/tmp") as temp:
+            root = Path(temp) / ".chat-gateway-native"
+            sock = root / "bridge.sock"
+            env = dict(os.environ, HOME=temp)
+            extension_id = "a" * 32
+            cmd = [sys.executable, "-u", str(Path(bridge.__file__).resolve()),
+                   "host", extension_id, "chrome-extension://" + extension_id + "/"]
+            proc = subprocess.Popen(cmd, env=env, stdin=subprocess.PIPE,
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
+            try:
+                deadline = time.monotonic() + 5
+                while not sock.exists() and proc.poll() is None and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                self.assertTrue(sock.is_socket(), "native host failed to bind")
+                # bind precedes chmod; private directory already protects access.
+                self.assertEqual(root.stat().st_mode & 0o777, 0o700)
+                self.assertEqual(sock.stat().st_mode & 0o777, 0o600)
+                contender = subprocess.run(cmd, env=env, input=b"",
+                                           capture_output=True, timeout=5)
+                self.assertNotEqual(contender.returncode, 0)
+                self.assertTrue(sock.is_socket(), "second host removed active socket")
+
+                def receive():
+                    self.assertTrue(select.select([proc.stdout], [], [], 5)[0],
+                                    "native host did not emit a frame")
+                    return bridge.read_frame(proc.stdout)
+
+                def respond(request, result):
+                    proc.stdin.write(bridge.encode({"v": 1, "id": request["id"],
+                                                     "ok": True, "result": result}))
+                    proc.stdin.flush()
+
+                def client_call(command, request_id):
+                    request = {"v": 1, "id": request_id, "command": command}
+                    with socket.socket(socket.AF_UNIX) as client:
+                        client.settimeout(8)
+                        client.connect(str(sock))
+                        client.sendall(bridge.encode(request))
+                        with client.makefile("rb") as incoming:
+                            return bridge.read_frame(incoming)
+
+                # Reject an invalid client without forwarding it to Chrome.
+                with socket.socket(socket.AF_UNIX) as client:
+                    client.settimeout(3)
+                    client.connect(str(sock))
+                    client.sendall(struct.pack("=I", bridge.LIMIT + 1))
+                    self.assertEqual(client.recv(1), b"")
+
+                ids = ["b" * 32, "c" * 32]
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    futures = [pool.submit(client_call, "ping", ident) for ident in ids]
+                    seen = set()
+                    for _ in ids:
+                        request = receive()
+                        self.assertEqual(request["command"], "ping")
+                        seen.add(request["id"])
+                        respond(request, {"echo": request["id"]})
+                    self.assertEqual(seen, set(ids))
+                    for ident, future in zip(ids, futures):
+                        self.assertEqual(future.result(timeout=8)["result"]["echo"], ident)
+
+                    reload_id = "d" * 32
+                    future = pool.submit(client_call, "reload_extension", reload_id)
+                    prepare = receive()
+                    self.assertEqual(prepare["command"], "reload_extension")
+                    self.assertEqual(prepare["id"], reload_id)
+                    # No internal commit is emitted without Chrome's ack.
+                    self.assertFalse(select.select([proc.stdout], [], [], 0.05)[0])
+                    respond(prepare, {"stage": "accepted", "instance": "e" * 32})
+                    self.assertEqual(future.result(timeout=8)["result"]["stage"], "accepted")
+                    self.assertEqual(receive(), {"v": 1, "id": reload_id, "command": "reload_commit"})
+            finally:
+                proc.stdin.close()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=5)
+                proc.stdout.close()
+                proc.stderr.close()
+            self.assertEqual(proc.returncode, 0)
+            self.assertFalse(sock.exists(), "native host left a stale socket")
 
 
 if __name__ == "__main__":
