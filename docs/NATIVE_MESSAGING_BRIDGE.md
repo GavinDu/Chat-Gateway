@@ -1,0 +1,39 @@
+# Local native messaging development bridge (macOS)
+
+Epic #1605. This is optional and does not change the loopback gateway, provider permissions, session vault or Obscura runtime. Do not enable on an untrusted user account. Local processes running as your macOS user can reach the private socket; this is not isolation from same-user malware. Only one Chrome profile can own the bridge at a time.
+
+## Install
+
+1. Load the repository's existing `extension/` directory at chrome://extensions (Developer mode).
+2. Copy its exact 32-character extension ID (letters a–p).
+3. From the repository root run `python3 scripts/native_reload_bridge.py install YOUR_EXTENSION_ID`. Requires Python 3.8+; install uses the absolute interpreter path. Do not use sudo.
+4. Open the extension's **Extension options** and select **Enable native messaging**. If Chrome cannot discover the newly registered host, quit and reopen Chrome. The worker retries on a one-minute alarm if the host disconnects.
+5. Run these commands:
+
+```bash
+python3 scripts/native_reload_bridge.py ping
+python3 scripts/native_reload_bridge.py diagnostics
+python3 scripts/native_reload_bridge.py reload_extension
+python3 scripts/native_reload_bridge.py diagnostics
+```
+
+The CLI uses a private directory (~/.chat-gateway-native, mode 0700), a Unix domain socket (0600) and length-prefixed JSON. Native registration is under ~/Library/Application Support/Google/Chrome/NativeMessagingHosts. The installer copies the reviewed host script; rerun installation after changing it, then reconnect the host. A long home path may exceed the OS socket path limit.
+
+## Contract
+
+Version 1 commands: ping, diagnostics, reload_extension. No arbitrary shell, eval, provider navigation, cookie exports or provider login automation. Diagnostics project only fixed provider names, booleans and category enums from the existing read-only relay diagnostics API. A saved session is not verified authentication or successful chat. No raw gateway response, account identifier, cookie, token or URL is returned.
+
+Reload is refused while provider sync, consent mutation or scheduled refresh is active. A successful preparation is not proof of completion. Host forwards the accepted response to the CLI before sending a matching internal reload_commit. The worker records the request receipt before calling runtime.reload. CLI waits up to 75 seconds for a different worker instance with the same receipt. This provides correlated restart evidence, not proof that a new source version was installed; compare reported version and use actual Chrome acceptance to verify source changes. No automatic retry of the reload command. Failure may be indeterminate; inspect ping before manually retrying. Pending browser debounce timers may be lost on reload; existing startup and periodic resync remain responsible for restoration.
+
+## Remove
+
+Disable native messaging from Extension options first. Then run `python3 scripts/native_reload_bridge.py uninstall`. This removes only host registration; the private host directory remains for explicit cleanup after Chrome stops the host.
+
+## Verification
+
+```bash
+node --test extension/tests/native_bridge.test.cjs
+python3 -m unittest discover -s scripts -p test_native_reload_bridge.py
+```
+
+Existing Rust CI discovers both suites. Actual Chrome acceptance on the owner Mac is tracked by #1610. Validate ping, permission revocation, missing host, restart, reload while busy, and provider diagnostics against ChatGPT and Meta AI. Provider account login and permissions remain explicit user actions.
