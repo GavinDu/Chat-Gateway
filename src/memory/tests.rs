@@ -2645,9 +2645,11 @@ fn v10_upgrade_preserves_identities_and_allocates_bounded_epochs() {
         reopened
             .lock()
             .unwrap()
-            .query_row("SELECT count(*) FROM conversation_deletion_epochs", [], |row| {
-                row.get::<_, i64>(0)
-            })
+            .query_row(
+                "SELECT count(*) FROM conversation_deletion_epochs",
+                [],
+                |row| { row.get::<_, i64>(0) }
+            )
             .unwrap(),
         64
     );

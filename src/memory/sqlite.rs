@@ -418,7 +418,10 @@ fn validate_schema(connection: &Connection) -> Result<()> {
             bail!("invalid schema definition for table '{table}'; expected version {VERSION}");
         }
     }
-    for trigger in ["conversation_identity_on_insert", "conversation_epoch_on_delete"] {
+    for trigger in [
+        "conversation_identity_on_insert",
+        "conversation_epoch_on_delete",
+    ] {
         let trigger_sql = |database: &Connection| -> Result<String> {
             Ok(database.query_row(
                 "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?1",
