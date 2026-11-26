@@ -21,6 +21,63 @@ pub(super) async fn wait(page: &mut Page) -> Result<()> {
     wait_on_origin(page, ORIGIN, TIMEOUT).await
 }
 
+fn safe_reason(value: Option<&str>) -> &'static str {
+    match value {
+        Some("pending") => "pending",
+        Some("verified") => "verified",
+        Some("explicit_unauthenticated") => "explicit_unauthenticated",
+        Some("off_origin") => "off_origin",
+        Some("page_changed") => "page_changed",
+        Some("deadline") => "deadline",
+        Some("response_redirected") => "response_redirected",
+        Some("response_url_missing") => "response_url_missing",
+        Some("response_endpoint_mismatch") => "response_endpoint_mismatch",
+        Some("http_unavailable") => "http_unavailable",
+        Some("invalid_json_or_body") => "invalid_json_or_body",
+        Some("invalid_session_schema") => "invalid_session_schema",
+        Some("session_reported_error") => "session_reported_error",
+        Some("user_missing") => "user_missing",
+        Some("access_token_missing") => "access_token_missing",
+        Some("access_token_invalid") => "access_token_invalid",
+        Some("access_token_expired") => "access_token_expired",
+        Some("session_expiry_invalid") => "session_expiry_invalid",
+        Some("session_expiry_expired") => "session_expiry_expired",
+        Some("request_failed") => "request_failed",
+        _ => "unknown",
+    }
+}
+#[test]
+fn test_safe_reason() {
+    assert_eq!(safe_reason(Some("pending")), "pending");
+    assert_eq!(safe_reason(Some("verified")), "verified");
+    assert_eq!(safe_reason(Some("request_failed")), "request_failed");
+    assert_eq!(safe_reason(None), "unknown");
+    assert_eq!(safe_reason(Some("sk-live-123")), "unknown");
+    assert_eq!(
+        safe_reason(Some("https://example.com/?token=abc")),
+        "unknown"
+    );
+    assert_eq!(safe_reason(Some("session=abc; HttpOnly")), "unknown");
+}
+
+struct ReadinessAttempt<'a> {
+    page: &'a mut Page,
+    cleanup: String,
+}
+impl<'a> ReadinessAttempt<'a> {
+    fn new(page: &'a mut Page, cleanup: String) -> Self {
+        Self { page, cleanup }
+    }
+    fn page(&mut self) -> &mut Page {
+        self.page
+    }
+}
+impl Drop for ReadinessAttempt<'_> {
+    fn drop(&mut self) {
+        let _ = self.page.evaluate(&self.cleanup);
+    }
+}
+
 async fn wait_on_origin(page: &mut Page, origin: &str, timeout: Duration) -> Result<()> {
     let attempt = uuid::Uuid::new_v4().to_string();
     let attempt_json = serde_json::to_string(&attempt)?;
@@ -35,20 +92,23 @@ async fn wait_on_origin(page: &mut Page, origin: &str, timeout: Duration) -> Res
         ));
     }
     let read = format!(
-        "(() => {{ const p=globalThis.__chatGatewayChatgptSessionReadiness; return p?.attempt === {attempt_json} ? {{state:p.state,http:p.http}} : null; }})()"
+        "(() => {{ const p=globalThis.__chatGatewayChatgptSessionReadiness; return p?.attempt === {attempt_json} ? {{state:p.state,http:p.http,reason:p.reason}} : null; }})()"
     );
     let cleanup = format!(
         "(() => {{ const p=globalThis.__chatGatewayChatgptSessionReadiness; if(p?.attempt === {attempt_json}) {{ clearTimeout(p.timer); if(p.state === 'pending') {{ try {{p.controller.abort();}} catch(_) {{}} }} delete globalThis.__chatGatewayChatgptSessionReadiness; }} }})()"
     );
     let deadline = tokio::time::Instant::now() + timeout;
+    let mut attempt = ReadinessAttempt::new(page, cleanup);
     let result = loop {
-        let value = page.evaluate(&read);
+        let value = attempt.page().evaluate(&read);
+        let reason = safe_reason(value["reason"].as_str());
         match value["state"].as_str() {
             Some("verified") => {
                 tracing::debug!(
                     provider = "chatgpt",
                     stage = "authenticated_session_readiness",
                     outcome = "verified",
+                    reason,
                     "provider readiness check completed"
                 );
                 break Ok(());
@@ -58,6 +118,7 @@ async fn wait_on_origin(page: &mut Page, origin: &str, timeout: Duration) -> Res
                     provider = "chatgpt",
                     stage = "authenticated_session_readiness",
                     outcome = "needs_login",
+                    reason,
                     "provider readiness check completed"
                 );
                 break Err(anyhow::Error::new(
@@ -69,6 +130,7 @@ async fn wait_on_origin(page: &mut Page, origin: &str, timeout: Duration) -> Res
                     provider = "chatgpt",
                     stage = "authenticated_session_readiness",
                     outcome = "unavailable",
+                    reason,
                     http = value["http"].as_u64(),
                     "provider readiness check completed"
                 );
@@ -77,16 +139,34 @@ async fn wait_on_origin(page: &mut Page, origin: &str, timeout: Duration) -> Res
                 ));
             }
             Some("timeout") => {
-                break Err(anyhow!("ChatGPT authenticated session readiness timed out"))
+                tracing::warn!(
+                    provider = "chatgpt",
+                    stage = "authenticated_session_readiness",
+                    outcome = "timeout",
+                    reason = "deadline",
+                    "provider readiness check completed"
+                );
+                break Err(anyhow!("ChatGPT authenticated session readiness timed out"));
             }
             _ => {}
         }
         let Some(remaining) = deadline.checked_duration_since(tokio::time::Instant::now()) else {
+            tracing::warn!(
+                provider = "chatgpt",
+                stage = "authenticated_session_readiness",
+                outcome = "timeout",
+                reason = "deadline",
+                "provider readiness check completed"
+            );
             break Err(anyhow!("ChatGPT authenticated session readiness timed out"));
         };
-        crate::providers::common::drive_page(page, remaining.min(Duration::from_millis(100))).await;
+        crate::providers::common::drive_page(
+            attempt.page(),
+            remaining.min(Duration::from_millis(100)),
+        )
+        .await;
     };
-    page.evaluate(&cleanup);
+    drop(attempt);
     result
 }
 
@@ -230,5 +310,65 @@ mod tests {
         assert_eq!(page.evaluate("aborted").as_bool(), Some(true));
         wait(&mut page).await.unwrap_err();
         assert_eq!(page.evaluate("fetchCalls").as_f64(), Some(1.0));
+    }
+
+    #[tokio::test]
+    async fn cancels_pending_fetch_and_clears_probe() {
+        let mut page = page_with_fetch(r#"(() => { globalThis.capturedSignal = null; globalThis.fetch = (url, options) => { globalThis.capturedSignal = options.signal; return new Promise(() => {}); }; })()"#).await;
+        let outcome = tokio::time::timeout(
+            Duration::from_millis(150),
+            wait_on_origin(&mut page, "null", Duration::from_secs(5)),
+        )
+        .await;
+        assert!(outcome.is_err(), "{outcome:?}");
+        let aborted: bool = page
+            .evaluate("globalThis.capturedSignal.aborted")
+            .as_bool()
+            .unwrap();
+        assert!(aborted);
+        let probe: String = page
+            .evaluate("typeof globalThis.__chatGatewayChatgptSessionReadiness")
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(probe, "undefined");
+    }
+
+    #[tokio::test]
+    async fn older_cleanup_preserves_newer_attempt() {
+        let newer = "newer-attempt-1600";
+        let raw = include_str!("session_readiness.js");
+        let script = raw
+            .replace("__ATTEMPT__", &serde_json::to_string(newer).unwrap())
+            .replace("__ORIGIN__", &serde_json::to_string("null").unwrap())
+            .replace("__TIMEOUT_MS__", "5000");
+        let mut source = String::from("(() => { globalThis.nextScript = ");
+        source.push_str(&serde_json::to_string(&script).unwrap());
+        source.push_str("; globalThis.fetchCalls = 0; globalThis.oldSignal = null; globalThis.newSignal = null; globalThis.fetch = (url, options) => { globalThis.fetchCalls += 1; if (globalThis.fetchCalls === 1) { globalThis.oldSignal = options.signal; setTimeout(() => eval(globalThis.nextScript), 0); } else { globalThis.newSignal = options.signal; } return new Promise(() => {}); };");
+        source.push_str("})()");
+        let mut page = page_with_fetch(&source).await;
+        let outcome = tokio::time::timeout(
+            Duration::from_millis(150),
+            wait_on_origin(&mut page, "null", Duration::from_secs(5)),
+        )
+        .await;
+        assert!(outcome.is_err(), "{outcome:?}");
+
+        let attempt: String = page
+            .evaluate("globalThis.__chatGatewayChatgptSessionReadiness.attempt")
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(attempt, newer);
+        let old_aborted: bool = page
+            .evaluate("globalThis.oldSignal.aborted")
+            .as_bool()
+            .unwrap();
+        assert!(old_aborted);
+        let new_aborted: bool = page
+            .evaluate("globalThis.newSignal.aborted")
+            .as_bool()
+            .unwrap();
+        assert!(!new_aborted);
     }
 }

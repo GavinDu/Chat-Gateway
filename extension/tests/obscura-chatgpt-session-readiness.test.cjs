@@ -19,7 +19,7 @@ const validSession = () => ({
 async function run({origin="https://chatgpt.com", status=200,
                     session=validSession(), changeAt=null,
                     navigation="same_origin", rejected=false,
-                    redirected=false, responseUrl=null} = {}) {
+                    redirected=false, responseUrl=null, jsonRejected=false} = {}) {
   const location = {
     origin, href: origin + "/c/original-private-thread"
   };
@@ -33,7 +33,7 @@ async function run({origin="https://chatgpt.com", status=200,
     }
   };
   const sandbox = {
-    location, AbortController, setTimeout, clearTimeout, Date,
+    location, AbortController, setTimeout, clearTimeout, Date, atob,
     fetch: async (route, options) => {
       calls.push({route,options});
       if (rejected) throw new Error("private upstream redirect or bearer");
@@ -43,6 +43,7 @@ async function run({origin="https://chatgpt.com", status=200,
         redirected, url: responseUrl === null ? origin + "/api/auth/session" : responseUrl,
         json: async () => {
           if (changeAt === "json") changePage();
+          if (jsonRejected) throw new Error("private malformed response body");
           return session;
         }
       };
@@ -52,7 +53,7 @@ async function run({origin="https://chatgpt.com", status=200,
   const initial = vm.runInContext(script, sandbox);
   await new Promise(resolve => setImmediate(resolve));
   const report = sandbox.__chatGatewayChatgptSessionReadiness
-    ? vm.runInContext("({state:globalThis.__chatGatewayChatgptSessionReadiness.state, http:globalThis.__chatGatewayChatgptSessionReadiness.http})", sandbox)
+    ? vm.runInContext("({state:globalThis.__chatGatewayChatgptSessionReadiness.state, http:globalThis.__chatGatewayChatgptSessionReadiness.http, reason:globalThis.__chatGatewayChatgptSessionReadiness.reason})", sandbox)
     : initial;
   return {report, calls, sandbox};
 }
@@ -69,7 +70,7 @@ test("verified first-party snapshot is source-scoped, no account data crosses re
   // the verifier must fail closed on Response.redirected and final URL.
   assert.equal(calls[0].options.redirect,"follow");
   assert(calls[0].options.signal);
-  assert.deepEqual(Object.keys(report).sort(),["http","state"]);
+  assert.deepEqual(Object.keys(report).sort(),["http","reason","state"]);
   const json=JSON.stringify(report);
   for (const secret of ["private@example.test", "bearer-private", "original-private-thread"]) {
     assert(!json.includes(secret));
@@ -130,4 +131,59 @@ test("a moved page cannot turn an earlier 401 into a false current logout", asyn
   const {report}=await run({status:401,changeAt:"fetch"});
   assert.equal(report.state,"unavailable");
   assert.equal(report.http,401);
+});
+
+test("fixed reasons distinguish HTTP 200 failures without returning session data", async () => {
+  const jwt = payload => "e30." + Buffer.from(JSON.stringify(payload)).toString("base64url") + ".synthetic-signature";
+  const cases = [
+    [{}, "verified", "verified"],
+    [{status:401}, "needs_login", "explicit_unauthenticated"],
+    [{session:{}}, "needs_login", "explicit_unauthenticated"],
+    [{status:403}, "unavailable", "http_unavailable"],
+    [{redirected:true}, "unavailable", "response_redirected"],
+    [{responseUrl:""}, "unavailable", "response_url_missing"],
+    [{responseUrl:"https://private.invalid/secret"}, "unavailable", "response_endpoint_mismatch"],
+    [{jsonRejected:true}, "unavailable", "invalid_json_or_body"],
+    [{session:[]}, "unavailable", "invalid_session_schema"],
+    [{session:{...validSession(),error:"private-refresh-error"}}, "unavailable", "session_reported_error"],
+    [{session:{...validSession(),user:{}}}, "unavailable", "user_missing"],
+    [{session:{...validSession(),accessToken:" "}}, "unavailable", "access_token_missing"],
+    [{session:{...validSession(),accessToken:"a.invalid.signature"}}, "unavailable", "access_token_invalid"],
+    [{session:{...validSession(),accessToken:jwt({exp:1})}}, "unavailable", "access_token_expired"],
+    [{session:{...validSession(),accessToken:jwt({exp:"private"})}}, "unavailable", "access_token_invalid"],
+    [{session:{...validSession(),accessToken:jwt({exp:Date.now()/1000+60})}}, "verified", "verified"],
+    [{session:{...validSession(),accessToken:jwt({})}}, "verified", "verified"],
+    [{session:{...validSession(),expires:"private-invalid-expiry"}}, "unavailable", "session_expiry_invalid"],
+    [{session:{...validSession(),expires:"2000-01-01T00:00:00Z"}}, "unavailable", "session_expiry_expired"],
+    [{rejected:true}, "unavailable", "request_failed"],
+    [{changeAt:"json"}, "unavailable", "page_changed"],
+    [{origin:"https://private.invalid"}, "off_origin", "off_origin"],
+  ];
+  for (const [options,state,reason] of cases) {
+    const {report} = await run(options);
+    assert.equal(report.state,state,reason);
+    assert.equal(report.reason,reason);
+    const serialized=JSON.stringify(report);
+    for (const secret of ["private", "synthetic-signature", "accessToken", "user", "expires"]) {
+      // Reason names are constant; the user_missing category is deliberately allowed.
+      if (secret === "user") continue;
+      assert(!serialized.includes(secret), reason + ": " + secret);
+    }
+  }
+});
+
+test("deadline reports only a fixed reason and aborts its pending request", async () => {
+  let signal;
+  const sandbox = {
+    location: {origin:"https://chatgpt.com",href:"https://chatgpt.com/c/private-thread"},
+    AbortController, setTimeout, clearTimeout, Date,
+    fetch: (_, options) => { signal=options.signal; return new Promise(() => {}); }
+  };
+  vm.createContext(sandbox);
+  vm.runInContext(script.replace("2500", "10"),sandbox);
+  await new Promise(resolve => setTimeout(resolve,30));
+  const p=sandbox.__chatGatewayChatgptSessionReadiness;
+  assert.equal(p.state,"timeout");
+  assert.equal(p.reason,"deadline");
+  assert.equal(signal.aborted,true);
 });
