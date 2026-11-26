@@ -27,11 +27,12 @@ function loadShared(cookieFixtures = [], hasAllPermissions = true, storageValues
       cookies: {
         // Return the full fixture set to simulate a permissive/misbehaving
         // browser API; providerCookieSnapshot must still enforce its own scope.
-        getAll: async ({domain,partitionKey}) => {
+        getAll: async query => {
+          const {domain,partitionKey}=query;
           cookieReads += 1;
           cookieQueries.push({domain,partitionKey});
           if (hooks.onCookieRead) await hooks.onCookieRead(storageValues, domain);
-          return cookieFixtures;
+          return hooks.cookieQueryResponse ? hooks.cookieQueryResponse(query, cookieFixtures) : cookieFixtures;
         }
       },
       permissions: {
@@ -838,9 +839,8 @@ test("irrelevant partitioned cookies are excluded while ordinary active cookies 
   assert.deepEqual(names, ["non-partitioned","null-partition"]);
   const queries = api.getCookieQueries();
   assert.ok(queries.length > 0);
-  assert.ok(queries.every(query => query.partitionKey &&
-    Object.keys(query.partitionKey).length === 0),
-    "explicit empty partitionKey is necessary to enumerate all cookie scopes");
+  assert.ok(queries.every(query => query.partitionKey === undefined),
+    "ChatGPT query must select the supported unpartitioned profile");
   assert.ok(snapshot.cookies.every(cookie => !Object.hasOwn(cookie, "partitionKey")));
 });
 
@@ -1228,4 +1228,24 @@ test("partition details identify app/auxiliary scopes and fixed unknown reasons 
   await assert.rejects(()=>api.providerCookieSnapshot("chatgpt"),error=>{
     const d=error.partitionDetails;assert.equal(d.app_partitioned,2);assert.equal(d.auxiliary_partitioned,1);assert.equal(d.extension_site,1);assert.equal(d.missing_site,1);assert.equal(Object.keys(d).length,13);assert.doesNotMatch(JSON.stringify(d),/PRIVATE|chatgpt.com|openai.com|chrome-extension/);return true;
   });
+});
+
+test("ChatGPT supported profile queries never request other partitions, and preserve cookie metadata",async()=>{
+  const fixtures=[{name:"session",value:"PRIVATE",domain:".chatgpt.com",path:"/",secure:true,httpOnly:true,sameSite:"strict",expirationDate:2000000000},
+    {name:"partition-current",value:"PRIVATE",domain:".chatgpt.com",path:"/",secure:true,partitionKey:{topLevelSite:"https://chatgpt.com",hasCrossSiteAncestor:false}},
+    {name:"partition-extension",value:"PRIVATE",domain:".chatgpt.com",path:"/",secure:true,partitionKey:{topLevelSite:"chrome-extension://private"}}];
+  const queries=[];const api=loadShared(fixtures,true,{}, {cookieQueryResponse:(query,all)=>{queries.push(query);return Object.hasOwn(query,"partitionKey")?all:all.filter(c=>c.partitionKey==null);}});
+  const snapshot=await api.providerCookieSnapshot("chatgpt");assert.equal(snapshot.cookies.length,1);assert.equal(snapshot.cookies[0].same_site,"Strict");assert.equal(snapshot.cookies[0].http_only,true);assert.equal(snapshot.cookies[0].expires,2000000000);
+  assert.ok(queries.length>0);assert.ok(queries.every(q=>!Object.hasOwn(q,"partitionKey")));assert.doesNotMatch(JSON.stringify(snapshot),/partition-current|partition-extension|partitionKey|chrome-extension/);
+});
+test("unexpected partitioned browser return still rejects ChatGPT profile before any upload",async()=>{
+  const state={gateway:"http://127.0.0.1:8080",connectionMode:"local",linkedProviders:["chatgpt"],relaySnapshotVersions:{chatgpt:"prior"}};
+  const api=loadShared([{name:"PRIVATE",value:"PRIVATE",domain:".chatgpt.com",path:"/",secure:true,partitionKey:{topLevelSite:"https://chatgpt.com",hasCrossSiteAncestor:false}}],true,state);
+  await assert.rejects(()=>api.syncProvider("chatgpt",{force:true}),/Unsupported browser cookie partition scope/);assert.equal(api.fetchCalls.length,0);assert.equal(state.relaySnapshotVersions.chatgpt,"prior");
+});
+
+test("non-ChatGPT capture continues inspecting every partition scope",async()=>{
+  const api=loadShared([{name:"PRIVATE",value:"PRIVATE",domain:".meta.ai",path:"/",secure:true,partitionKey:{topLevelSite:"https://meta.ai",hasCrossSiteAncestor:false}}]);
+  await assert.rejects(()=>api.providerCookieSnapshot("metaai"),/Unsupported browser cookie partition scope/);
+  assert.ok(api.getCookieQueries().every(q=>q.partitionKey&&Object.keys(q.partitionKey).length===0));
 });

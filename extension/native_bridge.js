@@ -50,6 +50,7 @@
           activation: pick(row?.activation, ["pending","ready","failed","cancelled","not_attempted"]),
           successful_chat_observed: flag(row?.successful_chat_observed),
           sync_state: pick(sync?.state, states), sync_issue: sync?.issue == null ? null : pick(sync.issue, issues),
+          capture_profile: pick(sync?.capture_profile, ["unpartitioned_credentials","all_scopes_checked"]),
           partition_counts: provider === "chatgpt" &&
             Array.isArray(e?.linked_providers) && e.linked_providers.includes(provider) &&
             e?.permissions?.providers?.[provider] === true
