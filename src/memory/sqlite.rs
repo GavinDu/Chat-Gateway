@@ -3,7 +3,7 @@ use anyhow::{bail, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use std::{collections::HashMap, fs, path::Path, time::Duration};
 
-const VERSION: i64 = 10;
+const VERSION: i64 = 11;
 const APPLICATION_ID: i64 = 0x4347574d; // CGWM
 const PROVIDER_THREADS_SCHEMA: &str = "
     CREATE TABLE provider_threads (
@@ -59,6 +59,25 @@ const IDENTITY_SCHEMA: &str = "
     CREATE TRIGGER conversation_identity_on_insert AFTER INSERT ON conversations
     BEGIN
         INSERT INTO conversation_identities(conversation_id) VALUES(NEW.id);
+    END;
+";
+// Bounded, expiring leases for absent explicit IDs. Creation invalidates all
+// leases for that exact ID, including a different owner's competing lease;
+// deletion does not affect leases for unrelated IDs.
+const ADMISSION_SCHEMA: &str = "
+    CREATE TABLE conversation_admissions (
+        owner_key_id TEXT NOT NULL,
+        conversation_id TEXT NOT NULL,
+        token TEXT NOT NULL UNIQUE DEFAULT (lower(hex(randomblob(16))))
+            CHECK(length(token) = 32 AND token NOT GLOB '*[^0-9a-f]*'),
+        expires_at INTEGER NOT NULL CHECK(typeof(expires_at) = 'integer'),
+        PRIMARY KEY(owner_key_id, conversation_id)
+    );
+    CREATE INDEX conversation_admissions_id_idx ON conversation_admissions(conversation_id);
+    CREATE INDEX conversation_admissions_expiry_idx ON conversation_admissions(expires_at);
+    CREATE TRIGGER conversation_admission_on_insert AFTER INSERT ON conversations
+    BEGIN
+        DELETE FROM conversation_admissions WHERE conversation_id = NEW.id;
     END;
 ";
 const SCHEMA: &str = "
@@ -199,6 +218,7 @@ fn initialize(connection: &mut Connection, legacy: Option<&Path>) -> Result<()> 
         }
         tx.execute_batch(SCHEMA)?;
         tx.execute_batch(IDENTITY_SCHEMA)?;
+        tx.execute_batch(ADMISSION_SCHEMA)?;
         tx.pragma_update(None, "application_id", APPLICATION_ID)?;
         tx.pragma_update(None, "user_version", VERSION)?;
     } else if version == 1 && app == APPLICATION_ID {
@@ -243,6 +263,8 @@ fn initialize(connection: &mut Connection, legacy: Option<&Path>) -> Result<()> 
         // Version 9 invalidates legacy markers without changing table definitions.
     } else if version == 9 && app == APPLICATION_ID {
         // Version 10 introduces durable conversation identities.
+    } else if version == 10 && app == APPLICATION_ID {
+        // Version 11 introduces bounded absent-ID admissions.
     } else if version != VERSION || app != APPLICATION_ID {
         bail!("unsupported conversation schema version {version} (expected {VERSION}) or application id {app}");
     }
@@ -267,7 +289,7 @@ fn initialize(connection: &mut Connection, legacy: Option<&Path>) -> Result<()> 
     tx.execute_batch(
         "CREATE INDEX IF NOT EXISTS conversations_owner_key_id_idx ON conversations(owner_key_id, id);",
     )?;
-    if (1..VERSION).contains(&version) {
+    if (1..10).contains(&version) {
         tx.execute_batch(IDENTITY_SCHEMA)?;
         tx.execute(
             "INSERT INTO conversation_identities(conversation_id)
@@ -275,7 +297,14 @@ fn initialize(connection: &mut Connection, legacy: Option<&Path>) -> Result<()> 
             [],
         )?;
     }
+    if (1..11).contains(&version) {
+        tx.execute_batch(ADMISSION_SCHEMA)?;
+    }
     validate_schema(&tx)?;
+    tx.execute(
+        "DELETE FROM conversation_admissions WHERE expires_at <= unixepoch()",
+        [],
+    )?;
     if (1..9).contains(&version) {
         // Older releases accepted client-supplied sync claims. There is no
         // reliable provenance for existing markers, so preserve the mappings
@@ -362,6 +391,7 @@ fn validate_schema(connection: &Connection) -> Result<()> {
     let expected = Connection::open_in_memory()?;
     expected.execute_batch(SCHEMA)?;
     expected.execute_batch(IDENTITY_SCHEMA)?;
+    expected.execute_batch(ADMISSION_SCHEMA)?;
     for table in [
         "conversations",
         "messages",
@@ -371,6 +401,7 @@ fn validate_schema(connection: &Connection) -> Result<()> {
         "memory_settings",
         "memory_items",
         "conversation_identities",
+        "conversation_admissions",
     ] {
         let sql = |database: &Connection| -> Result<String> {
             Ok(database.query_row(
@@ -384,17 +415,21 @@ fn validate_schema(connection: &Connection) -> Result<()> {
             bail!("invalid schema definition for table '{table}'; expected version {VERSION}");
         }
     }
-    let trigger_sql = |database: &Connection| -> Result<String> {
-        Ok(database.query_row(
-            "SELECT sql FROM sqlite_master WHERE type='trigger'
-             AND name='conversation_identity_on_insert'",
-            [],
-            |row| row.get(0),
-        )?)
-    };
-    let normalize = |sql: String| sql.split_whitespace().collect::<String>().to_lowercase();
-    if normalize(trigger_sql(connection)?) != normalize(trigger_sql(&expected)?) {
-        bail!("invalid conversation identity insert trigger");
+    for trigger in [
+        "conversation_identity_on_insert",
+        "conversation_admission_on_insert",
+    ] {
+        let trigger_sql = |database: &Connection| -> Result<String> {
+            Ok(database.query_row(
+                "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?1",
+                [trigger],
+                |row| row.get(0),
+            )?)
+        };
+        let normalize = |sql: String| sql.split_whitespace().collect::<String>().to_lowercase();
+        if normalize(trigger_sql(connection)?) != normalize(trigger_sql(&expected)?) {
+            bail!("invalid conversation trigger '{trigger}'");
+        }
     }
     Ok(())
 }

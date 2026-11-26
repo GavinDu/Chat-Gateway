@@ -191,7 +191,7 @@ fn json_import_clears_synthetic_tab_ids_but_preserves_real_thread_urls() {
         .unwrap()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 10);
+    assert_eq!(version, 11);
 }
 
 #[test]
@@ -513,7 +513,9 @@ fn schema_v5_migrates_to_v6_with_long_term_memory_disabled_by_default() {
             .lock()
             .unwrap()
             .execute_batch(
-                "DROP TRIGGER conversation_identity_on_insert;
+                "DROP TRIGGER conversation_admission_on_insert;
+                  DROP TABLE conversation_admissions;
+                  DROP TRIGGER conversation_identity_on_insert;
                  DROP TABLE conversation_identities;
                  ALTER TABLE conversations ADD COLUMN tab_id TEXT;
                  DROP INDEX memory_items_owner_updated_idx;
@@ -530,7 +532,7 @@ fn schema_v5_migrates_to_v6_with_long_term_memory_disabled_by_default() {
         .unwrap()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 10);
+    assert_eq!(version, 11);
     assert!(!memory.long_term_memory_enabled("owner-a").unwrap());
     let item_count: i64 = memory
         .lock()
@@ -1243,7 +1245,7 @@ fn schema_v1_database_migrates_provider_thread_map_without_losing_conversations(
         .unwrap()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 10);
+    assert_eq!(version, 11);
     let memory_tables: i64 = memory
         .lock()
         .unwrap()
@@ -1662,7 +1664,7 @@ fn schema_v3_migration_assigns_existing_conversations_to_local_owner() {
         .unwrap()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 10);
+    assert_eq!(version, 11);
     let memory_tables: i64 = memory
         .lock()
         .unwrap()
@@ -1810,7 +1812,7 @@ fn schema_v4_migration_adds_summary_table_without_losing_tenant_data() {
         .unwrap()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 10);
+    assert_eq!(version, 11);
     let memory_tables: i64 = memory
         .lock()
         .unwrap()
@@ -2038,7 +2040,9 @@ fn schema_v6_migration_clears_synthetic_tabs_and_preserves_real_metadata_and_his
         let connection = memory.lock().unwrap();
         connection
             .execute_batch(
-                "DROP TRIGGER conversation_identity_on_insert;
+                "DROP TRIGGER conversation_admission_on_insert;
+                  DROP TABLE conversation_admissions;
+                  DROP TRIGGER conversation_identity_on_insert;
                  DROP TABLE conversation_identities;
                  ALTER TABLE conversations ADD COLUMN tab_id TEXT;",
             )
@@ -2085,7 +2089,7 @@ fn schema_v6_migration_clears_synthetic_tabs_and_preserves_real_metadata_and_his
         .unwrap()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 10);
+    assert_eq!(version, 11);
 }
 
 #[test]
@@ -2287,7 +2291,9 @@ fn version_seven_migration_clears_synthetic_tab_id_and_preserves_history() {
         let connection = rusqlite::Connection::open(fixture.db()).unwrap();
         connection
             .execute_batch(
-                "DROP TRIGGER conversation_identity_on_insert;
+                "DROP TRIGGER conversation_admission_on_insert;
+                  DROP TABLE conversation_admissions;
+                  DROP TRIGGER conversation_identity_on_insert;
                  DROP TABLE conversation_identities;
                  ALTER TABLE conversations ADD COLUMN tab_id TEXT;",
             )
@@ -2329,7 +2335,7 @@ fn version_seven_migration_clears_synthetic_tab_id_and_preserves_history() {
         .unwrap()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 10);
+    assert_eq!(version, 11);
     let columns: Vec<String> = migrated
         .lock()
         .unwrap()
@@ -2533,7 +2539,9 @@ fn v9_upgrade_allocates_durable_identity_and_recreation_changes_it() {
             .lock()
             .unwrap()
             .execute_batch(
-                "DROP TRIGGER conversation_identity_on_insert;
+                "DROP TRIGGER conversation_admission_on_insert;
+                  DROP TABLE conversation_admissions;
+                  DROP TRIGGER conversation_identity_on_insert;
                  DROP TABLE conversation_identities;
                  PRAGMA user_version=9;",
             )
@@ -2587,6 +2595,245 @@ fn v9_upgrade_allocates_durable_identity_and_recreation_changes_it() {
         first.conversation("identity-test").unwrap(),
         Some(before_delete)
     );
+}
+
+#[tokio::test]
+async fn v10_upgrade_preserves_identities_and_admissions_expire() {
+    let fixture = Fixture::new();
+    let memory = fixture.open();
+    store(&memory, "migration-a", "preserve");
+    let identity = read_identity(&memory.lock().unwrap(), "migration-a").unwrap();
+    let history = memory.conversation("migration-a").unwrap();
+    memory
+        .lock()
+        .unwrap()
+        .execute_batch(
+            "DROP TRIGGER conversation_admission_on_insert;
+             DROP TABLE conversation_admissions;
+             PRAGMA user_version=10;",
+        )
+        .unwrap();
+    drop(memory);
+    let memory = Arc::new(fixture.open());
+    assert_eq!(
+        read_identity(&memory.lock().unwrap(), "migration-a").unwrap(),
+        identity
+    );
+    assert_eq!(memory.conversation("migration-a").unwrap(), history);
+    let snapshot = |memory: Arc<UnifiedMemory>| async move {
+        memory
+            .build_context_snapshot_async(
+                "local".to_owned(),
+                Some("pending-a".to_owned()),
+                Vec::new(),
+                8000,
+            )
+            .await
+            .unwrap()
+    };
+    let first = snapshot(memory.clone()).await;
+    drop(memory);
+    let reopened = Arc::new(fixture.open());
+    assert_eq!(snapshot(reopened.clone()).await.identity, first.identity);
+    reopened
+        .lock()
+        .unwrap()
+        .execute("UPDATE conversation_admissions SET expires_at=0", [])
+        .unwrap();
+    let next = snapshot(reopened.clone()).await;
+    assert_ne!(next.identity, first.identity);
+    assert!(reopened
+        .clone()
+        .persist_turn_from_snapshot(SnapshotTurn {
+            owner_key_id: "local".to_owned(),
+            conversation_id: "pending-a".to_owned(),
+            user_msgs: vec![m("user", "stale")],
+            assistant_msg: m("assistant", "stale answer"),
+            provider: "chatgpt".to_owned(),
+            expected_marker: transcript_marker(&first.context.3),
+            expected_identity: first.identity,
+        })
+        .await
+        .is_err());
+    assert!(reopened.conversation("pending-a").unwrap().is_none());
+}
+
+#[test]
+fn absent_admission_capacity_is_owner_scoped_and_read_only_context_does_not_reserve() {
+    let fixture = Fixture::new();
+    let memory = fixture.open();
+    let read_only = memory
+        .build_context_for_owner_with_transcript_budget("local", Some("read-only-id"), &[], 8000)
+        .unwrap();
+    assert!(read_only.3.is_empty());
+    let connection = memory.lock().unwrap();
+    let count = || {
+        connection
+            .query_row("SELECT count(*) FROM conversation_admissions", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap()
+    };
+    assert_eq!(count(), 0);
+    for index in 0..128 {
+        reserve_absent_admission(&connection, "local", &format!("reserved-{index}")).unwrap();
+    }
+    assert_eq!(count(), 128);
+    assert!(reserve_absent_admission(&connection, "local", "overflow-id").is_err());
+    assert!(reserve_absent_admission(&connection, "other", "overflow-id").is_ok());
+    assert_eq!(count(), 129);
+    connection
+        .execute(
+            "UPDATE conversation_admissions SET expires_at=0 WHERE owner_key_id='local'",
+            [],
+        )
+        .unwrap();
+    assert!(reserve_absent_admission(&connection, "local", "overflow-id").is_ok());
+    assert_eq!(count(), 2);
+}
+
+#[tokio::test]
+async fn absent_admission_cannot_resurrect_after_create_delete_or_purge() {
+    for purge in [false, true] {
+        let fixture = Fixture::new();
+        let first = Arc::new(fixture.open());
+        let snapshot = first
+            .clone()
+            .build_context_snapshot_async(
+                "local".to_owned(),
+                Some("absent-target-a".to_owned()),
+                Vec::new(),
+                8000,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(snapshot.identity, AdmissionIdentity::Absent(_)));
+        let second = fixture.open();
+        store(&second, "absent-target-a", "intervening");
+        if purge {
+            assert_eq!(second.purge_expired_conversations(i64::MAX).unwrap(), 1);
+        } else {
+            assert!(second
+                .delete_conversation_for_owner("local", "absent-target-a")
+                .unwrap());
+        }
+        drop(second);
+        let reopened = Arc::new(fixture.open());
+        let turn = SnapshotTurn {
+            owner_key_id: "local".to_owned(),
+            conversation_id: "absent-target-a".to_owned(),
+            user_msgs: vec![m("user", "stale")],
+            assistant_msg: m("assistant", "stale answer"),
+            provider: "chatgpt".to_owned(),
+            expected_marker: transcript_marker(&snapshot.context.3),
+            expected_identity: snapshot.identity,
+        };
+        assert!(reopened
+            .clone()
+            .persist_turn_from_snapshot(turn)
+            .await
+            .is_err());
+        assert!(reopened.conversation("absent-target-a").unwrap().is_none());
+    }
+}
+
+#[tokio::test]
+async fn absent_admission_first_write_and_unrelated_owner_deletion_are_isolated() {
+    let fixture = Fixture::new();
+    let memory = Arc::new(fixture.open());
+    let other = Arc::new(fixture.open());
+    let snapshot = |id: &'static str| {
+        let memory = memory.clone();
+        async move {
+            memory
+                .build_context_snapshot_async(
+                    "local".to_owned(),
+                    Some(id.to_owned()),
+                    Vec::new(),
+                    8000,
+                )
+                .await
+                .unwrap()
+        }
+    };
+    let turn = |id: &str, admission: ContextSnapshot, answer: &str| SnapshotTurn {
+        owner_key_id: "local".to_owned(),
+        conversation_id: id.to_owned(),
+        user_msgs: vec![m("user", "question")],
+        assistant_msg: m("assistant", answer),
+        provider: "chatgpt".to_owned(),
+        expected_marker: transcript_marker(&admission.context.3),
+        expected_identity: admission.identity,
+    };
+    let first = snapshot("first-a").await;
+    let second = snapshot("first-a").await;
+    let winner = other
+        .clone()
+        .persist_turn_from_snapshot(turn("first-a", first, "winner"))
+        .await
+        .unwrap();
+    assert!(winner.is_some());
+    assert!(memory
+        .clone()
+        .persist_turn_from_snapshot(turn("first-a", second, "loser"))
+        .await
+        .is_err());
+    assert_eq!(
+        memory.conversation("first-a").unwrap().unwrap().messages,
+        vec![m("user", "question"), m("assistant", "winner")]
+    );
+
+    let same_suffix = snapshot("pending-a").await;
+    let different_suffix = snapshot("pending-b").await;
+    other
+        .store_turn_for_owner_with_tab_id(
+            "other-owner",
+            "foreign-a".to_owned(),
+            vec![m("user", "foreign question")],
+            m("assistant", "foreign answer"),
+            "chatgpt".to_owned(),
+            None,
+        )
+        .unwrap();
+    assert!(!other
+        .delete_conversation_for_owner("local", "foreign-a")
+        .unwrap());
+    assert_eq!(snapshot("pending-a").await.identity, same_suffix.identity);
+    assert!(other
+        .delete_conversation_for_owner("other-owner", "foreign-a")
+        .unwrap());
+    assert!(memory
+        .clone()
+        .persist_turn_from_snapshot(turn("pending-a", same_suffix, "valid"))
+        .await
+        .unwrap()
+        .is_some());
+    assert!(memory
+        .clone()
+        .persist_turn_from_snapshot(turn("pending-b", different_suffix, "valid"))
+        .await
+        .unwrap()
+        .is_some());
+    let exact = snapshot("exact-a").await;
+    other
+        .store_turn_for_owner_with_tab_id(
+            "other-owner",
+            "exact-a".to_owned(),
+            vec![m("user", "foreign")],
+            m("assistant", "foreign answer"),
+            "chatgpt".to_owned(),
+            None,
+        )
+        .unwrap();
+    assert!(other
+        .delete_conversation_for_owner("other-owner", "exact-a")
+        .unwrap());
+    assert!(memory
+        .clone()
+        .persist_turn_from_snapshot(turn("exact-a", exact, "stale"))
+        .await
+        .is_err());
+    assert!(memory.conversation("exact-a").unwrap().is_none());
 }
 
 #[test]
@@ -2647,7 +2894,9 @@ fn v8_upgrade_invalidates_legacy_sync_once_and_preserves_history() {
             .lock()
             .unwrap()
             .execute_batch(
-                "DROP TRIGGER conversation_identity_on_insert;
+                "DROP TRIGGER conversation_admission_on_insert;
+                  DROP TABLE conversation_admissions;
+                  DROP TRIGGER conversation_identity_on_insert;
                  DROP TABLE conversation_identities;
                  PRAGMA user_version=8;",
             )
@@ -2699,7 +2948,9 @@ fn failed_v8_migration_rolls_back_schema_and_history() {
         let connection = Connection::open(fixture.db()).unwrap();
         connection
             .execute_batch(
-                "DROP TRIGGER conversation_identity_on_insert;
+                "DROP TRIGGER conversation_admission_on_insert;
+                  DROP TABLE conversation_admissions;
+                  DROP TRIGGER conversation_identity_on_insert;
                  DROP TABLE conversation_identities;
                  ALTER TABLE conversations ADD COLUMN tab_id TEXT;
                  CREATE INDEX conversations_tab_id_idx ON conversations(tab_id);
