@@ -20,6 +20,7 @@ pub(super) fn streamed_provider_response(attempt: StreamingAttempt) -> Response 
         prompt_tokens: prompt_tokens_c,
         permit,
         receiver: mut rx,
+        thread_observation,
         first_chunk,
     } = attempt;
     let conversation_for_headers = conv_stream.clone();
@@ -102,6 +103,7 @@ pub(super) fn streamed_provider_response(attempt: StreamingAttempt) -> Response 
                 provider_work_ms,
                 request_started: request_started_c,
                 stream_failed: stream_error.is_some(),
+                thread_observation: thread_observation.and_then(|mut rx| rx.try_recv().ok()),
             },
         )
         .await;

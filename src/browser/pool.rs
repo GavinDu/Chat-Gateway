@@ -366,6 +366,7 @@ enum Command {
         completion_idle: Duration,
         provider_guard: ProviderGuard,
         chunks: mpsc::Sender<Result<ProviderChunk>>,
+        thread_observation: oneshot::Sender<crate::chat_backend::RemoteThreadObservation>,
     },
     CurrentUrl {
         provider: Provider,
@@ -802,6 +803,7 @@ impl ObscuraPool {
     /// requested model (for UI selection on new conversations only)
     /// and `has_history` marks a returning conversation (selection
     /// skipped — the model is already fixed by the prior turns).
+    #[allow(dead_code)] // Compatibility for callers that do not consume thread evidence.
     pub async fn send_stream(
         &self,
         name: &str,
@@ -810,6 +812,22 @@ impl ObscuraPool {
         has_history: bool,
         thread_url: Option<String>,
     ) -> Result<mpsc::Receiver<Result<ProviderChunk>>> {
+        self.send_stream_with_thread_observation(name, prompt, model, has_history, thread_url)
+            .await
+            .map(|(events, _)| events)
+    }
+
+    pub(crate) async fn send_stream_with_thread_observation(
+        &self,
+        name: &str,
+        prompt: String,
+        model: String,
+        has_history: bool,
+        thread_url: Option<String>,
+    ) -> Result<(
+        mpsc::Receiver<Result<ProviderChunk>>,
+        oneshot::Receiver<crate::chat_backend::RemoteThreadObservation>,
+    )> {
         let provider =
             Provider::from_name(name).ok_or_else(|| anyhow::anyhow!("unknown provider {name}"))?;
         let timeout = Duration::from_secs(
@@ -825,6 +843,7 @@ impl ObscuraPool {
                 .unwrap_or(15_000),
         );
         let (tx, rx) = mpsc::channel(32);
+        let (observation_tx, observation_rx) = oneshot::channel();
         self.cmd_tx
             .read()
             .await
@@ -839,13 +858,15 @@ impl ObscuraPool {
                 completion_idle,
                 provider_guard: self.provider_guard.clone(),
                 chunks: tx,
+                thread_observation: observation_tx,
             })
             .await
             .map_err(|_| browser_worker_unavailable())?;
-        Ok(rx)
+        Ok((rx, observation_rx))
     }
 
-    /// Read the active provider page URL after a completed send.
+    /// Diagnostic only: never use a separate active-page read as send evidence.
+    #[allow(dead_code)]
     pub async fn current_url(&self, name: &str) -> Result<String> {
         let provider =
             Provider::from_name(name).ok_or_else(|| anyhow::anyhow!("unknown provider {name}"))?;

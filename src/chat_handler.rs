@@ -37,6 +37,8 @@ struct StreamingAttempt {
     permit: browser::pool::ObscuraPermit,
     receiver:
         tokio::sync::mpsc::Receiver<Result<chat_backend::ChatEvent, chat_backend::GatewayError>>,
+    thread_observation:
+        Option<tokio::sync::oneshot::Receiver<chat_backend::RemoteThreadObservation>>,
     first_chunk: chat_backend::ChatEvent,
 }
 
@@ -61,6 +63,8 @@ struct JsonAttempt<'a> {
     prompt_tokens: u64,
     receiver:
         tokio::sync::mpsc::Receiver<Result<chat_backend::ChatEvent, chat_backend::GatewayError>>,
+    thread_observation:
+        Option<tokio::sync::oneshot::Receiver<chat_backend::RemoteThreadObservation>>,
 }
 
 // Stable fixed labels only: never put untrusted browser/provider error text
@@ -285,7 +289,7 @@ pub(super) async fn run(
         let backend_admission_started = Instant::now();
         let backend_admission = state
             .chat_service
-            .stream_with_timeout(
+            .observed_stream_with_timeout(
                 BackendRequest {
                     provider: match ProviderId::new(provider_name.clone()) {
                         Some(provider) => provider,
@@ -313,8 +317,11 @@ pub(super) async fn run(
                 .as_millis()
                 .min(u64::MAX as u128) as u64,
         );
-        let mut rx = match backend_admission {
-            Ok(rx) => rx,
+        let chat_backend::ObservedChatStream {
+            events: mut rx,
+            thread_observation,
+        } = match backend_admission {
+            Ok(stream) => stream,
             Err(e) => {
                 chat_service::record_backend_admission_error(
                     &state.provider_sessions,
@@ -399,6 +406,7 @@ pub(super) async fn run(
                 prompt_tokens: estimate_tokens(&provider_prompt),
                 permit,
                 receiver: rx,
+                thread_observation,
                 first_chunk: first_stream_chunk.expect("streaming path prefetches its first chunk"),
             });
         }
@@ -423,6 +431,7 @@ pub(super) async fn run(
             queue_ms,
             prompt_tokens: estimate_tokens(&provider_prompt),
             receiver: rx,
+            thread_observation,
         })
         .await;
         match response {
