@@ -799,6 +799,101 @@ async fn real_router_stream_has_role_delta_done_and_durable_turn() {
 }
 
 #[tokio::test]
+async fn real_router_attempt_observation_requires_matching_proof_and_terminal_completion() {
+    use crate::chat_backend::RemoteThreadObservation;
+
+    let url = "https://chatgpt.com/c/synthetic-observed-thread";
+    for stream in [false, true] {
+        for (proof_provider, proof_url, terminal, expect_mapping) in [
+            (Some("chatgpt"), url, "done", true),
+            (None, url, "done", false),
+            (Some("claude"), url, "done", false),
+            (
+                Some("chatgpt"),
+                "https://example.invalid/c/foreign",
+                "done",
+                false,
+            ),
+            (Some("chatgpt"), url, "error", false),
+            (Some("chatgpt"), url, "closed", false),
+        ] {
+            let mut events = vec![Ok(ChatEvent {
+                content: "synthetic observed answer".to_owned(),
+                done: false,
+            })];
+            if terminal == "done" {
+                events.push(Ok(ChatEvent {
+                    content: String::new(),
+                    done: true,
+                }));
+            } else if terminal == "error" {
+                events.push(Err(GatewayError::provider_failure(
+                    "synthetic partial failure",
+                )));
+            }
+            let first = match proof_provider {
+                Some(provider) => ScriptedSend::ObservedEvents(
+                    events,
+                    RemoteThreadObservation::new(provider.to_owned(), proof_url.to_owned()),
+                ),
+                None => ScriptedSend::Events(events),
+            };
+            let (app, state, backend) = fixture_with_backend(
+                &["chatgpt"],
+                vec![first, response_events("synthetic follow-up answer")],
+                None,
+            );
+            let id = "router_observed_thread_001";
+            let response = send(app.clone(), stream, "chatgpt/fake-model", id).await;
+            let expected_status = if stream || terminal == "done" {
+                StatusCode::OK
+            } else {
+                StatusCode::BAD_GATEWAY
+            };
+            assert_eq!(response.status(), expected_status);
+            let body = to_bytes(response.into_body(), 65_536).await.unwrap();
+            let text = String::from_utf8(body.to_vec()).unwrap();
+            if stream && terminal != "done" {
+                assert!(text.contains("stream_failed"));
+            }
+            let history = state
+                .memory
+                .conversation_messages_for_owner("local", id)
+                .unwrap();
+            assert_eq!(history.len(), if terminal == "done" { 2 } else { 0 });
+            let mapping = state
+                .memory
+                .get_provider_thread_for_owner("local", id, "chatgpt")
+                .unwrap();
+            if expect_mapping {
+                let mapping = mapping.unwrap();
+                assert_eq!(mapping.thread_url, url);
+                assert_eq!(
+                    mapping.synced_through_message_id.as_deref(),
+                    Some(transcript_marker(&history).as_str())
+                );
+                let followup = send_prompt(
+                    app,
+                    stream,
+                    "chatgpt/fake-model",
+                    id,
+                    "synthetic next user turn",
+                )
+                .await;
+                assert_eq!(followup.status(), StatusCode::OK);
+                let _ = to_bytes(followup.into_body(), 65_536).await.unwrap();
+                let observed = backend.observed_requests().await;
+                assert_eq!(observed.len(), 2);
+                assert_eq!(observed[1].thread_url.as_deref(), Some(url));
+                assert!(!observed[1].prompt.contains("synthetic observed answer"));
+            } else {
+                assert!(mapping.is_none());
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn real_router_persistence_failure_is_an_error_for_json_and_sse() {
     for stream in [false, true] {
         let memory = Arc::new(UnifiedMemory::new(8_000));
