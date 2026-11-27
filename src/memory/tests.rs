@@ -2710,6 +2710,73 @@ fn existing_snapshot_reads_committed_wal_view_without_writer_reservation() {
 }
 
 #[test]
+fn admission_escalation_rechecks_competing_creator_and_owner() {
+    for creator in [Some("local"), Some("foreign"), None] {
+        let fixture = Fixture::new();
+        let reader = fixture.open();
+        let writer = fixture.open();
+        let id = "competing-creator";
+        let mut boundary_calls = 0;
+        let result = reader.build_context_snapshot_with_admission_boundary(
+            "local",
+            Some(id),
+            &[],
+            8000,
+            true,
+            || {
+                boundary_calls += 1;
+                if let Some(owner) = creator {
+                    writer
+                        .store_turn_for_owner(
+                            owner,
+                            id.to_owned(),
+                            vec![m("user", "committed competing prompt")],
+                            m("assistant", "committed competing answer"),
+                            "chatgpt".to_owned(),
+                            "tab".to_owned(),
+                        )
+                        .unwrap();
+                }
+            },
+        );
+        assert_eq!(boundary_calls, 1);
+        match creator {
+            Some("local") => {
+                let snapshot = result.unwrap();
+                let current = writer.conversation(id).unwrap().unwrap();
+                assert_eq!(snapshot.context.3, current.messages);
+                assert_eq!(
+                    snapshot.identity,
+                    AdmissionIdentity::Existing(
+                        read_identity(&writer.lock().unwrap(), id).unwrap()
+                    )
+                );
+            }
+            Some("foreign") => {
+                let error = result.err().expect("foreign creator must be denied");
+                assert!(error.to_string().contains("another API key"));
+            }
+            None => {
+                let snapshot = result.unwrap();
+                assert!(snapshot.context.3.is_empty());
+                assert!(matches!(snapshot.identity, AdmissionIdentity::Absent(_)));
+            }
+            Some(_) => unreachable!(),
+        }
+        let leases: i64 = reader
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM conversation_admissions WHERE conversation_id=?1",
+                [id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(leases, if creator.is_none() { 1 } else { 0 });
+    }
+}
+
+#[test]
 fn absent_admission_capacity_is_owner_scoped_and_read_only_context_does_not_reserve() {
     let fixture = Fixture::new();
     let memory = fixture.open();

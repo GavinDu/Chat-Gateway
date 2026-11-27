@@ -624,6 +624,28 @@ impl UnifiedMemory {
         token_budget: usize,
         reserve: bool,
     ) -> anyhow::Result<ContextSnapshot> {
+        self.build_context_snapshot_with_admission_boundary(
+            owner_key_id,
+            conversation_id,
+            new_messages,
+            token_budget,
+            reserve,
+            || {},
+        )
+    }
+
+    // The boundary callback is a no-op in production. Tests use a separate
+    // connection to commit at the exact point between the two transactions;
+    // it must never reenter this connection while its mutex is held.
+    fn build_context_snapshot_with_admission_boundary(
+        &self,
+        owner_key_id: &str,
+        conversation_id: Option<&str>,
+        new_messages: &[ChatMessage],
+        token_budget: usize,
+        reserve: bool,
+        mut after_absent_read: impl FnMut(),
+    ) -> anyhow::Result<ContextSnapshot> {
         let (history, saved_summary, identity) = match conversation_id {
             Some(id) => {
                 // Read ownership, transcript, and summary in one SQLite snapshot.
@@ -649,6 +671,7 @@ impl UnifiedMemory {
                         // writer commits. Release it and re-read under IMMEDIATE;
                         // never carry the observed absence across transactions.
                         tx.commit()?;
+                        after_absent_read();
                         write_admission = true;
                         continue;
                     }
