@@ -389,6 +389,14 @@ pub(crate) async fn prepare_candidate_attempt(
                 "provider thread synchronization could not be claimed safely",
             ))));
         }
+        Err(CandidatePromptError::UnreadablePersonalMemory) => {
+            return Err(CandidateAttemptError::Fatal(Box::new(api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                "memory_read_failed",
+                "personal memory authorization could not be revalidated safely",
+            ))));
+        }
         Err(CandidatePromptError::MemoryEgressDenied) => {
             return Err(CandidateAttemptError::Skip {
                 message: "provider memory egress policy denied request".to_owned(),
@@ -688,6 +696,7 @@ pub(crate) struct CandidatePromptRequest<'a> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CandidatePromptError {
     UnreadableThreadState,
+    UnreadablePersonalMemory,
     ThreadSyncClaimFailed,
     MemoryEgressDenied,
 }
@@ -722,14 +731,6 @@ pub(crate) async fn prepare_candidate_prompt(
         request.token_budget,
         request.replay_prompt,
     );
-    request
-        .policy
-        .append_personal_memory_to_prompt(
-            request.provider,
-            &mut prompt,
-            request.personal_memory_items,
-        )
-        .map_err(|_| CandidatePromptError::MemoryEgressDenied)?;
     // Do not trust this marker again once the remote thread may be mutated.
     // The provider permit is still held. A successful local commit restores
     // synchronization; cancellation, failure and restart leave it invalid.
@@ -746,6 +747,46 @@ pub(crate) async fn prepare_candidate_prompt(
             return Err(CandidatePromptError::ThreadSyncClaimFailed);
         }
     }
+    // Revalidate at the last candidate preparation boundary, after pacing,
+    // permit acquisition and any asynchronous thread claim. Keep only data
+    // that was originally budgeted AND is still eligible at this read.
+    // Revocation after this read cannot recall an already admitted send.
+    let current_items = if !request.personal_memory_items.is_empty()
+        && request
+            .policy
+            .authorize(
+                request.provider,
+                memory_egress::ProviderDataClass::PersonalLongTermMemory,
+            )
+            .is_ok()
+    {
+        let current = request
+            .state
+            .memory
+            .clone()
+            .retrieve_long_term_memory_items_async(request.owner_key_id.to_owned(), 20)
+            .await
+            .map_err(|_| CandidatePromptError::UnreadablePersonalMemory)?;
+        request
+            .personal_memory_items
+            .iter()
+            .filter(|cached| {
+                current.iter().any(|item| {
+                    item.id == cached.id
+                        && format!("{}: {}", item.memory_key, item.value) == cached.content
+                })
+            })
+            .cloned()
+            .collect::<Vec<_>>()
+    } else {
+        // The policy renderer will withhold all items for a denied provider.
+        // Preserve its existing denial diagnostics without a storage read.
+        request.personal_memory_items.to_vec()
+    };
+    request
+        .policy
+        .append_personal_memory_to_prompt(request.provider, &mut prompt, &current_items)
+        .map_err(|_| CandidatePromptError::MemoryEgressDenied)?;
     Ok((prompt, thread_url))
 }
 
@@ -1698,5 +1739,108 @@ mod first_event_tests {
             first_event(&mut rx, Duration::from_millis(1)).await,
             FirstEvent::Timeout
         ));
+    }
+}
+
+#[cfg(test)]
+mod dispatch_memory_revalidation_tests {
+    use super::*;
+
+    async fn candidate_prompt(
+        state: &AppState,
+        owner: &str,
+        provider: &str,
+        policy: &memory_egress::MemoryEgressPolicy,
+        cached: &[memory_egress::PersonalMemoryItem],
+    ) -> String {
+        let _permit = state.pool.acquire(provider).await.unwrap();
+        prepare_candidate_prompt(CandidatePromptRequest {
+            state,
+            owner_key_id: owner,
+            conversation_id: None,
+            provider,
+            model: "fake-model",
+            stored_messages: &[],
+            incoming_messages: &[],
+            token_budget: 7500,
+            replay_prompt: "synthetic current request",
+            policy,
+            personal_memory_items: cached,
+        })
+        .await
+        .unwrap()
+        .0
+    }
+
+    #[tokio::test]
+    async fn admitted_candidates_revalidate_cached_memory_without_adding_new_facts() {
+        let (_, state) = crate::real_chat_router_scripted_backend_tests::fixture(
+            &["chatgpt", "claude", "metaai"],
+            vec![],
+            None,
+        );
+        let owner = "memory-dispatch-owner";
+        let memory = &state.memory;
+        memory.set_long_term_memory_enabled(owner, true).unwrap();
+        memory
+            .save_long_term_memory_item(owner, "keep", "KEEP_SENTINEL", None, 1.0, None)
+            .unwrap();
+        let deleted = memory
+            .save_long_term_memory_item(owner, "delete", "DELETE_SENTINEL", None, 1.0, None)
+            .unwrap();
+        memory
+            .save_long_term_memory_item(owner, "update", "OLD_SENTINEL", None, 1.0, None)
+            .unwrap();
+        memory
+            .save_long_term_memory_item(owner, "expiry", "EXPIRY_SENTINEL", None, 1.0, None)
+            .unwrap();
+        let (cached, _) = budget_personal_memory_items(
+            memory.retrieve_long_term_memory_items(owner, 20).unwrap(),
+            512,
+        );
+        assert_eq!(cached.len(), 4);
+        let policy = memory_egress::MemoryEgressPolicy::from_allowlist("chatgpt,claude").unwrap();
+        let original = candidate_prompt(&state, owner, "chatgpt", &policy, &cached).await;
+        for sentinel in [
+            "KEEP_SENTINEL",
+            "DELETE_SENTINEL",
+            "OLD_SENTINEL",
+            "EXPIRY_SENTINEL",
+        ] {
+            assert!(original.contains(sentinel));
+        }
+
+        assert!(memory
+            .delete_long_term_memory_item(owner, &deleted.id)
+            .unwrap());
+        memory
+            .save_long_term_memory_item(owner, "update", "NEW_SENTINEL", None, 1.0, None)
+            .unwrap();
+        memory
+            .save_long_term_memory_item(owner, "expiry", "EXPIRY_SENTINEL", None, 1.0, Some(0))
+            .unwrap();
+        memory
+            .save_long_term_memory_item(owner, "new", "ADDED_SENTINEL", None, 1.0, None)
+            .unwrap();
+        let failover = candidate_prompt(&state, owner, "claude", &policy, &cached).await;
+        assert!(failover.contains("KEEP_SENTINEL"));
+        for sentinel in [
+            "DELETE_SENTINEL",
+            "OLD_SENTINEL",
+            "NEW_SENTINEL",
+            "EXPIRY_SENTINEL",
+            "ADDED_SENTINEL",
+        ] {
+            assert!(!failover.contains(sentinel));
+        }
+        let denied = candidate_prompt(&state, owner, "metaai", &policy, &cached).await;
+        assert!(!denied.contains("KEEP_SENTINEL"));
+        let foreign = candidate_prompt(&state, "foreign", "claude", &policy, &cached).await;
+        assert!(!foreign.contains("KEEP_SENTINEL"));
+        memory.set_long_term_memory_enabled(owner, false).unwrap();
+        let disabled = candidate_prompt(&state, owner, "chatgpt", &policy, &cached).await;
+        assert!(!disabled.contains("KEEP_SENTINEL"));
+        let baseline = candidate_prompt(&state, owner, "chatgpt", &policy, &[]).await;
+        assert_eq!(disabled, baseline);
     }
 }
