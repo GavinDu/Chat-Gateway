@@ -1782,7 +1782,7 @@ mod dispatch_memory_revalidation_tests {
         let owner = "memory-dispatch-owner";
         let memory = &state.memory;
         memory.set_long_term_memory_enabled(owner, true).unwrap();
-        let keep = memory
+        memory
             .save_long_term_memory_item(owner, "keep", "KEEP_SENTINEL", None, 1.0, None)
             .unwrap();
         let deleted = memory
@@ -1794,8 +1794,10 @@ mod dispatch_memory_revalidation_tests {
         memory
             .save_long_term_memory_item(owner, "expiry", "EXPIRY_SENTINEL", None, 1.0, None)
             .unwrap();
-        let (cached, _) =
-            budget_personal_memory_items(memory.retrieve_long_term_memory_items(owner, 20).unwrap(), 512);
+        let (cached, _) = budget_personal_memory_items(
+            memory.retrieve_long_term_memory_items(owner, 20).unwrap(),
+            512,
+        );
         assert_eq!(cached.len(), 4);
         let policy = memory_egress::MemoryEgressPolicy::from_allowlist("chatgpt,claude").unwrap();
         let original = candidate_prompt(&state, owner, "chatgpt", &policy, &cached).await;
@@ -1808,7 +1810,9 @@ mod dispatch_memory_revalidation_tests {
             assert!(original.contains(sentinel));
         }
 
-        assert!(memory.delete_long_term_memory_item(owner, &deleted.id).unwrap());
+        assert!(memory
+            .delete_long_term_memory_item(owner, &deleted.id)
+            .unwrap());
         memory
             .save_long_term_memory_item(owner, "update", "NEW_SENTINEL", None, 1.0, None)
             .unwrap();
@@ -1836,7 +1840,7 @@ mod dispatch_memory_revalidation_tests {
         memory.set_long_term_memory_enabled(owner, false).unwrap();
         let disabled = candidate_prompt(&state, owner, "chatgpt", &policy, &cached).await;
         assert!(!disabled.contains("KEEP_SENTINEL"));
-        assert_eq!(disabled, "synthetic current request");
-        assert!(!keep.id.is_empty());
+        let baseline = candidate_prompt(&state, owner, "chatgpt", &policy, &[]).await;
+        assert_eq!(disabled, baseline);
     }
 }
