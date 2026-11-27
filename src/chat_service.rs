@@ -272,6 +272,7 @@ pub(crate) struct CandidateAttemptRequest<'a> {
     pub(crate) provider: &'a str,
     pub(crate) owner_key_id: &'a str,
     pub(crate) conversation_id: Option<&'a str>,
+    pub(crate) admission_identity: &'a crate::memory::AdmissionIdentity,
     pub(crate) model: &'a str,
     pub(crate) stored_messages: &'a [ChatMessage],
     pub(crate) incoming_messages: &'a [ChatMessage],
@@ -302,6 +303,7 @@ pub(crate) async fn prepare_candidate_attempt(
         provider,
         owner_key_id,
         conversation_id,
+        admission_identity,
         model,
         stored_messages,
         incoming_messages,
@@ -356,6 +358,7 @@ pub(crate) async fn prepare_candidate_attempt(
         state,
         owner_key_id,
         conversation_id,
+        admission_identity,
         provider,
         model,
         stored_messages,
@@ -683,6 +686,7 @@ pub(crate) struct CandidatePromptRequest<'a> {
     pub(crate) state: &'a AppState,
     pub(crate) owner_key_id: &'a str,
     pub(crate) conversation_id: Option<&'a str>,
+    pub(crate) admission_identity: &'a crate::memory::AdmissionIdentity,
     pub(crate) provider: &'a str,
     pub(crate) model: &'a str,
     pub(crate) stored_messages: &'a [ChatMessage],
@@ -736,11 +740,19 @@ pub(crate) async fn prepare_candidate_prompt(
     // synchronization; cancellation, failure and restart leave it invalid.
     if thread_url.is_some() {
         let expected = saved_thread.ok_or(CandidatePromptError::ThreadSyncClaimFailed)?;
+        let crate::memory::AdmissionIdentity::Existing(identity) = request.admission_identity
+        else {
+            return Err(CandidatePromptError::ThreadSyncClaimFailed);
+        };
         let claimed = request
             .state
             .memory
             .clone()
-            .claim_provider_thread_sync_async(request.owner_key_id.to_owned(), expected)
+            .claim_provider_thread_sync_async(
+                request.owner_key_id.to_owned(),
+                expected,
+                identity.clone(),
+            )
             .await
             .map_err(|_| CandidatePromptError::ThreadSyncClaimFailed)?;
         if !claimed {
@@ -1743,6 +1755,133 @@ mod first_event_tests {
 }
 
 #[cfg(test)]
+mod delta_admission_identity_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn candidate_rejects_stale_incarnation_before_consuming_current_delta() {
+        let (_, state) =
+            crate::real_chat_router_scripted_backend_tests::fixture(&["chatgpt"], vec![], None);
+        let id = "delta-identity-fixture";
+        let history = vec![
+            ChatMessage {
+                role: "user".to_owned(),
+                content: "synthetic prior prompt".to_owned(),
+            },
+            ChatMessage {
+                role: "assistant".to_owned(),
+                content: "synthetic prior answer".to_owned(),
+            },
+        ];
+        let mapping = ProviderThread {
+            conversation_id: id.to_owned(),
+            provider: "chatgpt".to_owned(),
+            thread_url: "https://chatgpt.com/c/synthetic-identity".to_owned(),
+            synced_through_message_id: Some(transcript_marker(&history)),
+            model: Some("chatgpt/fake-model".to_owned()),
+            updated_at: 1,
+        };
+        let seed = || {
+            state
+                .memory
+                .store_turn_for_owner_with_tab_id(
+                    "local",
+                    id.to_owned(),
+                    vec![history[0].clone()],
+                    history[1].clone(),
+                    "chatgpt".to_owned(),
+                    None,
+                )
+                .unwrap();
+            state
+                .memory
+                .upsert_provider_thread_for_owner("local", &mapping)
+                .unwrap();
+        };
+        seed();
+        let old = state
+            .memory
+            .clone()
+            .build_context_snapshot_async("local".to_owned(), Some(id.to_owned()), vec![], 8000)
+            .await
+            .unwrap();
+        assert!(state
+            .memory
+            .delete_conversation_for_owner("local", id)
+            .unwrap());
+        seed();
+        let current = state
+            .memory
+            .clone()
+            .build_context_snapshot_async("local".to_owned(), Some(id.to_owned()), vec![], 8000)
+            .await
+            .unwrap();
+        assert_eq!(old.context.3, current.context.3);
+        assert_ne!(old.identity, current.identity);
+
+        let incoming = [ChatMessage {
+            role: "user".to_owned(),
+            content: "synthetic follow-up".to_owned(),
+        }];
+        let policy = memory_egress::MemoryEgressPolicy::from_allowlist("").unwrap();
+        let _permit = state.pool.acquire("chatgpt").await.unwrap();
+        for identity in [
+            &old.identity,
+            &crate::memory::AdmissionIdentity::ReadOnly,
+            &crate::memory::AdmissionIdentity::Generated,
+        ] {
+            let result = prepare_candidate_prompt(CandidatePromptRequest {
+                state: &state,
+                owner_key_id: "local",
+                conversation_id: Some(id),
+                admission_identity: identity,
+                provider: "chatgpt",
+                model: "chatgpt/fake-model",
+                stored_messages: &old.context.3,
+                incoming_messages: &incoming,
+                token_budget: 8000,
+                replay_prompt: "synthetic replay",
+                policy: &policy,
+                personal_memory_items: &[],
+            })
+            .await;
+            assert_eq!(result, Err(CandidatePromptError::ThreadSyncClaimFailed));
+            assert_eq!(
+                state
+                    .memory
+                    .get_provider_thread_for_owner("local", id, "chatgpt")
+                    .unwrap(),
+                Some(mapping.clone())
+            );
+        }
+        let (_, url) = prepare_candidate_prompt(CandidatePromptRequest {
+            state: &state,
+            owner_key_id: "local",
+            conversation_id: Some(id),
+            admission_identity: &current.identity,
+            provider: "chatgpt",
+            model: "chatgpt/fake-model",
+            stored_messages: &current.context.3,
+            incoming_messages: &incoming,
+            token_budget: 8000,
+            replay_prompt: "synthetic replay",
+            policy: &policy,
+            personal_memory_items: &[],
+        })
+        .await
+        .unwrap();
+        assert_eq!(url.as_deref(), Some(mapping.thread_url.as_str()));
+        assert!(state
+            .memory
+            .get_provider_thread_for_owner("local", id, "chatgpt")
+            .unwrap()
+            .unwrap()
+            .synced_through_message_id
+            .is_none());
+    }
+}
+
+#[cfg(test)]
 mod dispatch_memory_revalidation_tests {
     use super::*;
 
@@ -1758,6 +1897,7 @@ mod dispatch_memory_revalidation_tests {
             state,
             owner_key_id: owner,
             conversation_id: None,
+            admission_identity: &crate::memory::AdmissionIdentity::Generated,
             provider,
             model: "fake-model",
             stored_messages: &[],

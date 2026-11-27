@@ -1086,10 +1086,24 @@ async fn imported_thread_marker_cannot_rearm_consumed_delta() {
         .memory
         .upsert_provider_thread_for_owner("local", &thread)
         .unwrap();
+    let admission = state
+        .memory
+        .clone()
+        .build_context_snapshot_async(
+            "local".to_owned(),
+            Some(conversation.to_owned()),
+            Vec::new(),
+            8000,
+        )
+        .await
+        .unwrap();
+    let memory::AdmissionIdentity::Existing(identity) = admission.identity else {
+        panic!("seeded conversation must have an existing identity");
+    };
     assert!(state
         .memory
         .clone()
-        .claim_provider_thread_sync_async("local".to_owned(), thread.clone())
+        .claim_provider_thread_sync_async("local".to_owned(), thread.clone(), identity)
         .await
         .unwrap());
 
