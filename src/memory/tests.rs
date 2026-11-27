@@ -2659,6 +2659,57 @@ async fn v10_upgrade_preserves_identities_and_admissions_expire() {
 }
 
 #[test]
+fn existing_snapshot_reads_committed_wal_view_without_writer_reservation() {
+    let fixture = Fixture::new();
+    let reader = fixture.open();
+    let writer = fixture.open();
+    store(&reader, "existing-a", "committed");
+    let before = reader.conversation("existing-a").unwrap().unwrap();
+    let expected_identity = read_identity(&reader.lock().unwrap(), "existing-a").unwrap();
+    reader
+        .lock()
+        .unwrap()
+        .busy_timeout(std::time::Duration::ZERO)
+        .unwrap();
+
+    let mut connection = writer.lock().unwrap();
+    let tx = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .unwrap();
+    tx.execute(
+        "UPDATE messages SET content='uncommitted' WHERE conversation_id='existing-a'",
+        [],
+    )
+    .unwrap();
+
+    // The independent writer is still holding its transaction. An IMMEDIATE
+    // snapshot would fail SQLITE_BUSY with the reader's zero busy timeout.
+    let snapshot = reader
+        .build_context_snapshot("local", Some("existing-a"), &[], 8000, true)
+        .unwrap();
+    assert_eq!(snapshot.context.3, before.messages);
+    assert_eq!(
+        snapshot.identity,
+        AdmissionIdentity::Existing(expected_identity)
+    );
+    assert!(reader
+        .build_context_snapshot("foreign", Some("existing-a"), &[], 8000, true)
+        .is_err());
+    assert!(reader
+        .build_context_snapshot("local", Some("absent-a"), &[], 8000, true)
+        .is_err());
+    let read_only = reader
+        .build_context_snapshot("local", Some("absent-a"), &[], 8000, false)
+        .unwrap();
+    assert_eq!(read_only.identity, AdmissionIdentity::ReadOnly);
+    tx.rollback().unwrap();
+    let absent = reader
+        .build_context_snapshot("local", Some("absent-a"), &[], 8000, true)
+        .unwrap();
+    assert!(matches!(absent.identity, AdmissionIdentity::Absent(_)));
+}
+
+#[test]
 fn absent_admission_capacity_is_owner_scoped_and_read_only_context_does_not_reserve() {
     let fixture = Fixture::new();
     let memory = fixture.open();
