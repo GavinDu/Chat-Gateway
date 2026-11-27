@@ -826,7 +826,9 @@ fn personal_memory_read_uses_committed_wal_snapshot_without_writer_reservation()
         .unwrap()
         .busy_timeout(std::time::Duration::ZERO)
         .unwrap();
-    let before = reader.retrieve_long_term_memory_items("owner-a", 20).unwrap();
+    let before = reader
+        .retrieve_long_term_memory_items("owner-a", 20)
+        .unwrap();
     assert_eq!(before.len(), 1);
     assert_eq!(before[0].value, "owner-a");
 
@@ -846,11 +848,15 @@ fn personal_memory_read_uses_committed_wal_snapshot_without_writer_reservation()
     .unwrap();
     // A read-only authorization snapshot must not fail with SQLITE_BUSY.
     // Neither the pending disable nor the pending item update is visible.
-    let a = reader.retrieve_long_term_memory_items("owner-a", 100).unwrap();
+    let a = reader
+        .retrieve_long_term_memory_items("owner-a", 100)
+        .unwrap();
     assert_eq!(a.len(), 1);
     assert_eq!(a[0].id, before[0].id);
     assert_eq!(a[0].value, "owner-a");
-    let b = reader.retrieve_long_term_memory_items("owner-b", 20).unwrap();
+    let b = reader
+        .retrieve_long_term_memory_items("owner-b", 20)
+        .unwrap();
     assert_eq!(b.len(), 1);
     assert_eq!(b[0].value, "owner-b");
     assert!(reader
@@ -867,10 +873,15 @@ fn personal_memory_read_uses_committed_wal_snapshot_without_writer_reservation()
         .retrieve_long_term_memory_items("owner-a", 20)
         .unwrap()
         .is_empty());
-    let b = reader.retrieve_long_term_memory_items("owner-b", 20).unwrap();
+    let b = reader
+        .retrieve_long_term_memory_items("owner-b", 20)
+        .unwrap();
     assert_eq!(b.len(), 1);
     assert_eq!(b[0].value, "uncommitted");
-    assert_eq!(reader.list_long_term_memory_items("owner-a").unwrap().len(), 2);
+    assert_eq!(
+        reader.list_long_term_memory_items("owner-a").unwrap().len(),
+        2
+    );
 }
 
 #[test]
