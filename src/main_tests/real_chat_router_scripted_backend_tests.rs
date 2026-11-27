@@ -808,7 +808,12 @@ async fn real_router_attempt_observation_requires_matching_proof_and_terminal_co
             (Some("chatgpt"), url, "done", true),
             (None, url, "done", false),
             (Some("claude"), url, "done", false),
-            (Some("chatgpt"), "https://example.invalid/c/foreign", "done", false),
+            (
+                Some("chatgpt"),
+                "https://example.invalid/c/foreign",
+                "done",
+                false,
+            ),
             (Some("chatgpt"), url, "error", false),
             (Some("chatgpt"), url, "closed", false),
         ] {
@@ -822,7 +827,9 @@ async fn real_router_attempt_observation_requires_matching_proof_and_terminal_co
                     done: true,
                 }));
             } else if terminal == "error" {
-                events.push(Err(GatewayError::provider_failure("synthetic partial failure")));
+                events.push(Err(GatewayError::provider_failure(
+                    "synthetic partial failure",
+                )));
             }
             let first = match proof_provider {
                 Some(provider) => ScriptedSend::ObservedEvents(
@@ -1174,10 +1181,24 @@ async fn imported_thread_marker_cannot_rearm_consumed_delta() {
         .memory
         .upsert_provider_thread_for_owner("local", &thread)
         .unwrap();
+    let admission = state
+        .memory
+        .clone()
+        .build_context_snapshot_async(
+            "local".to_owned(),
+            Some(conversation.to_owned()),
+            Vec::new(),
+            8000,
+        )
+        .await
+        .unwrap();
+    let memory::AdmissionIdentity::Existing(identity) = admission.identity else {
+        panic!("seeded conversation must have an existing identity");
+    };
     assert!(state
         .memory
         .clone()
-        .claim_provider_thread_sync_async("local".to_owned(), thread.clone())
+        .claim_provider_thread_sync_async("local".to_owned(), thread.clone(), identity)
         .await
         .unwrap());
 

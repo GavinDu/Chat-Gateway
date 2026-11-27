@@ -252,6 +252,7 @@ pub(super) async fn run(
             provider: &provider_name,
             owner_key_id: &owner_key_id,
             conversation_id: conversation_id.as_deref(),
+            admission_identity: &snapshot_identity,
             model: &req.model,
             stored_messages: &stored_messages,
             incoming_messages: &req.messages,

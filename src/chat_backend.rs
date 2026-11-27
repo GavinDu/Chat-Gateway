@@ -552,7 +552,10 @@ pub(crate) mod test_support {
             &self,
             request: ChatRequest,
         ) -> Result<mpsc::Receiver<Result<ChatEvent, GatewayError>>, GatewayError> {
-            Ok(self.send_stream_with_thread_observation(request).await?.events)
+            Ok(self
+                .send_stream_with_thread_observation(request)
+                .await?
+                .events)
         }
 
         async fn send_stream_with_thread_observation(
