@@ -630,53 +630,64 @@ impl UnifiedMemory {
                 // Separate reads could otherwise combine history from one commit
                 // with a summary written by a concurrent request.
                 let mut connection = self.lock()?;
-                let tx = if reserve {
-                    connection.transaction_with_behavior(TransactionBehavior::Immediate)?
-                } else {
-                    connection.transaction()?
-                };
-                let owner: Option<String> = tx
-                    .query_row(
-                        "SELECT owner_key_id FROM conversations WHERE id = ?1",
-                        [id],
-                        |row| row.get(0),
-                    )
-                    .optional()?;
-                let conversation = match owner {
-                    Some(owner) if owner == owner_key_id => sqlite::load(&tx, id)?,
-                    Some(_) => anyhow::bail!("conversation belongs to another API key"),
-                    None => None,
-                };
-                let identity = if conversation.is_some() {
-                    AdmissionIdentity::Existing(read_identity(&tx, id)?)
-                } else if reserve {
-                    AdmissionIdentity::Absent(reserve_absent_admission(&tx, owner_key_id, id)?)
-                } else {
-                    AdmissionIdentity::ReadOnly
-                };
-                let summary = if conversation.is_some() {
-                    tx.query_row(
-                        "SELECT summary, covered_through_position
-                         FROM conversation_summaries WHERE conversation_id = ?1",
-                        [id],
-                        |row| {
-                            Ok((
-                                row.get::<_, String>(0)?,
-                                row.get::<_, i64>(1)?.max(0) as usize,
-                            ))
-                        },
-                    )
-                    .optional()?
-                } else {
-                    None
-                };
-                let history = conversation
-                    .map(|conversation| conversation.messages)
-                    .unwrap_or_default();
-                tx.commit().map_err(|error| {
-                    anyhow::anyhow!("completing context snapshot read: {error}")
-                })?;
-                (history, summary, identity)
+                let mut write_admission = false;
+                loop {
+                    let tx = if write_admission {
+                        connection.transaction_with_behavior(TransactionBehavior::Immediate)?
+                    } else {
+                        connection.transaction()?
+                    };
+                    let owner: Option<String> = tx
+                        .query_row(
+                            "SELECT owner_key_id FROM conversations WHERE id = ?1",
+                            [id],
+                            |row| row.get(0),
+                        )
+                        .optional()?;
+                    if reserve && owner.is_none() && !write_admission {
+                        // A DEFERRED read cannot safely upgrade after another
+                        // writer commits. Release it and re-read under IMMEDIATE;
+                        // never carry the observed absence across transactions.
+                        tx.commit()?;
+                        write_admission = true;
+                        continue;
+                    }
+                    let conversation = match owner {
+                        Some(owner) if owner == owner_key_id => sqlite::load(&tx, id)?,
+                        Some(_) => anyhow::bail!("conversation belongs to another API key"),
+                        None => None,
+                    };
+                    let identity = if conversation.is_some() {
+                        AdmissionIdentity::Existing(read_identity(&tx, id)?)
+                    } else if reserve {
+                        AdmissionIdentity::Absent(reserve_absent_admission(&tx, owner_key_id, id)?)
+                    } else {
+                        AdmissionIdentity::ReadOnly
+                    };
+                    let summary = if conversation.is_some() {
+                        tx.query_row(
+                            "SELECT summary, covered_through_position
+                             FROM conversation_summaries WHERE conversation_id = ?1",
+                            [id],
+                            |row| {
+                                Ok((
+                                    row.get::<_, String>(0)?,
+                                    row.get::<_, i64>(1)?.max(0) as usize,
+                                ))
+                            },
+                        )
+                        .optional()?
+                    } else {
+                        None
+                    };
+                    let history = conversation
+                        .map(|conversation| conversation.messages)
+                        .unwrap_or_default();
+                    tx.commit().map_err(|error| {
+                        anyhow::anyhow!("completing context snapshot read: {error}")
+                    })?;
+                    break (history, summary, identity);
+                }
             }
             None => (Vec::new(), None, AdmissionIdentity::Generated),
         };
