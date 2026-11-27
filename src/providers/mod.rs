@@ -1982,6 +1982,7 @@ mod post_send_cancel_origin_tests {
     }
 }
 
+#[cfg(test)]
 pub async fn run_send(
     adapter: Arc<dyn SiteAdapter>,
     page: &mut Page,
