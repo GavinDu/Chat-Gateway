@@ -1982,6 +1982,7 @@ mod post_send_cancel_origin_tests {
     }
 }
 
+#[cfg(test)]
 pub async fn run_send(
     adapter: Arc<dyn SiteAdapter>,
     page: &mut Page,
@@ -1991,6 +1992,34 @@ pub async fn run_send(
     policy: ProviderSendPolicy,
     chunks: mpsc::Sender<Result<ProviderChunk>>,
 ) {
+    let mut terminal_url = None;
+    run_send_with_terminal_url(
+        adapter,
+        page,
+        prompt,
+        timeout,
+        poll_tick,
+        policy,
+        chunks,
+        &mut terminal_url,
+    )
+    .await;
+}
+
+/// Record the URL from the same DOM probe that confirmed terminal response
+/// completion, not a later independent page read.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn run_send_with_terminal_url(
+    adapter: Arc<dyn SiteAdapter>,
+    page: &mut Page,
+    prompt: String,
+    timeout: Duration,
+    poll_tick: Duration,
+    policy: ProviderSendPolicy,
+    chunks: mpsc::Sender<Result<ProviderChunk>>,
+    terminal_url: &mut Option<String>,
+) {
+    *terminal_url = None;
     use crate::metaai_timing::{Step, Timer};
     use chatgpt::attempt_diagnostics::{self as observation, Stage};
     observation::stage(Stage::EntryGuards);
@@ -2485,6 +2514,7 @@ pub async fn run_send(
                                 return;
                             }
                         }
+                        *terminal_url = Some(final_probe.url.clone());
                         observation::terminal_attempted();
                         let _ = chunks
                             .send(Ok(ProviderChunk {
@@ -2626,6 +2656,7 @@ pub async fn run_send(
                         return;
                     }
                 }
+                *terminal_url = Some(final_probe.url.clone());
                 observation::terminal_attempted();
                 let _ = chunks
                     .send(Ok(ProviderChunk {

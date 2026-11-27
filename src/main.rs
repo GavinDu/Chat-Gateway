@@ -1706,17 +1706,13 @@ async fn persist_provider_thread(
     provider: &str,
     model: &str,
     receipt: memory::CommitReceipt,
+    observation: chat_backend::RemoteThreadObservation,
 ) {
-    let thread_url = match state.pool.current_url(provider).await {
-        Ok(url) if is_reopenable_provider_thread_url(provider, &url) => url,
-        Ok(_) => return,
-        Err(error) => {
-            tracing::debug!(
-                failure_category = provider_thread_failure_log_category(&error),
-                "provider thread URL unavailable after successful send"
-            );
-            return;
-        }
+    let Some(thread_url) = observation
+        .into_url_for(provider)
+        .filter(|url| is_reopenable_provider_thread_url(provider, url))
+    else {
+        return;
     };
     let thread = ProviderThread {
         conversation_id: conversation_id.to_owned(),
@@ -1745,6 +1741,7 @@ async fn persist_completed_turn(
     state: &AppState,
     turn: memory::SnapshotTurn,
     model: &str,
+    observation: Option<chat_backend::RemoteThreadObservation>,
 ) -> anyhow::Result<()> {
     let owner_key_id = turn.owner_key_id.clone();
     let conversation_id = turn.conversation_id.clone();
@@ -1754,7 +1751,7 @@ async fn persist_completed_turn(
         .clone()
         .persist_turn_from_snapshot(turn)
         .await?;
-    if let Some(receipt) = receipt {
+    if let (Some(receipt), Some(observation)) = (receipt, observation) {
         persist_provider_thread(
             state,
             &owner_key_id,
@@ -1762,10 +1759,79 @@ async fn persist_completed_turn(
             &provider,
             model,
             receipt,
+            observation,
         )
         .await;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod attempt_thread_publication_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn canonical_turn_does_not_certify_unobserved_or_wrong_provider_thread() {
+        let (_, state) =
+            super::real_chat_router_scripted_backend_tests::fixture(&["chatgpt"], vec![], None);
+        for (id, observation, expected) in [
+            ("no-proof", None, false),
+            (
+                "wrong-provider",
+                Some(chat_backend::RemoteThreadObservation::new(
+                    "claude".to_owned(),
+                    "https://chatgpt.com/c/synthetic-thread".to_owned(),
+                )),
+                false,
+            ),
+            (
+                "observed",
+                Some(chat_backend::RemoteThreadObservation::new(
+                    "chatgpt".to_owned(),
+                    "https://chatgpt.com/c/synthetic-thread".to_owned(),
+                )),
+                true,
+            ),
+        ] {
+            persist_completed_turn(
+                &state,
+                memory::SnapshotTurn {
+                    owner_key_id: "local".to_owned(),
+                    conversation_id: id.to_owned(),
+                    user_msgs: vec![ChatMessage {
+                        role: "user".to_owned(),
+                        content: "synthetic question".to_owned(),
+                    }],
+                    assistant_msg: ChatMessage {
+                        role: "assistant".to_owned(),
+                        content: "synthetic answer".to_owned(),
+                    },
+                    provider: "chatgpt".to_owned(),
+                    expected_marker: transcript_marker(&[]),
+                    expected_identity: memory::AdmissionIdentity::Generated,
+                },
+                "fake-model",
+                observation,
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                state
+                    .memory
+                    .export_conversation_for_owner("local", id)
+                    .unwrap()
+                    .unwrap()
+                    .messages
+                    .len(),
+                2
+            );
+            let mapping = state.memory.get_provider_thread(id, "chatgpt").unwrap();
+            assert_eq!(mapping.is_some(), expected);
+            if let Some(mapping) = mapping {
+                assert!(mapping.synced_through_message_id.is_some());
+            }
+        }
+    }
 }
 
 fn is_reopenable_provider_thread_url(provider: &str, value: &str) -> bool {
