@@ -740,7 +740,8 @@ pub(crate) async fn prepare_candidate_prompt(
     // synchronization; cancellation, failure and restart leave it invalid.
     if thread_url.is_some() {
         let expected = saved_thread.ok_or(CandidatePromptError::ThreadSyncClaimFailed)?;
-        let crate::memory::AdmissionIdentity::Existing(identity) = request.admission_identity else {
+        let crate::memory::AdmissionIdentity::Existing(identity) = request.admission_identity
+        else {
             return Err(CandidatePromptError::ThreadSyncClaimFailed);
         };
         let claimed = request
@@ -1759,11 +1760,8 @@ mod delta_admission_identity_tests {
 
     #[tokio::test]
     async fn candidate_rejects_stale_incarnation_before_consuming_current_delta() {
-        let (_, state) = crate::real_chat_router_scripted_backend_tests::fixture(
-            &["chatgpt"],
-            vec![],
-            None,
-        );
+        let (_, state) =
+            crate::real_chat_router_scripted_backend_tests::fixture(&["chatgpt"], vec![], None);
         let id = "delta-identity-fixture";
         let history = vec![
             ChatMessage {

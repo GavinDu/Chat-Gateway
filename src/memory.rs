@@ -2372,7 +2372,9 @@ mod provider_thread_map_isolation_tests {
             "https://chatgpt.com/c/a",
             "marker-a",
         );
-        memory.upsert_provider_thread_for_owner("owner-a", &a).unwrap();
+        memory
+            .upsert_provider_thread_for_owner("owner-a", &a)
+            .unwrap();
         let original = identity(&memory, "conversation-a");
 
         // A newer generation can retain identical mapping fields.
@@ -2389,14 +2391,20 @@ mod provider_thread_map_isolation_tests {
         assert_ne!(original.generation, newer.generation);
         assert_eq!(original.incarnation, newer.incarnation);
         assert_eq!(
-            memory.get_provider_thread_for_owner("owner-a", "conversation-a", "chatgpt").unwrap(),
+            memory
+                .get_provider_thread_for_owner("owner-a", "conversation-a", "chatgpt")
+                .unwrap(),
             Some(a.clone())
         );
 
         // Recreate identical transcript and mapping; generation may repeat.
-        assert!(memory.delete_conversation_for_owner("owner-a", "conversation-a").unwrap());
+        assert!(memory
+            .delete_conversation_for_owner("owner-a", "conversation-a")
+            .unwrap());
         persist_conversation(&memory, "conversation-a", "owner-a");
-        memory.upsert_provider_thread_for_owner("owner-a", &a).unwrap();
+        memory
+            .upsert_provider_thread_for_owner("owner-a", &a)
+            .unwrap();
         let recreated = identity(&memory, "conversation-a");
         assert_eq!(original.generation, recreated.generation);
         assert_ne!(original.incarnation, recreated.incarnation);
@@ -2406,7 +2414,9 @@ mod provider_thread_map_isolation_tests {
             .await
             .unwrap());
         assert_eq!(
-            memory.get_provider_thread_for_owner("owner-a", "conversation-a", "chatgpt").unwrap(),
+            memory
+                .get_provider_thread_for_owner("owner-a", "conversation-a", "chatgpt")
+                .unwrap(),
             Some(a.clone())
         );
         assert!(memory
@@ -2414,7 +2424,9 @@ mod provider_thread_map_isolation_tests {
             .claim_provider_thread_sync_async("owner-a".to_owned(), a.clone(), recreated.clone())
             .await
             .unwrap());
-        assert!(!memory.claim_provider_thread_sync("owner-a", &a, &recreated).unwrap());
+        assert!(!memory
+            .claim_provider_thread_sync("owner-a", &a, &recreated)
+            .unwrap());
     }
 
     #[tokio::test]
@@ -2451,13 +2463,17 @@ mod provider_thread_map_isolation_tests {
         assert!(!memory
             .claim_provider_thread_sync("owner-a", &stale, &admission)
             .unwrap());
-        assert!(!memory.claim_provider_thread_sync("owner-b", &a, &admission).unwrap());
+        assert!(!memory
+            .claim_provider_thread_sync("owner-b", &a, &admission)
+            .unwrap());
         assert!(memory
             .clone()
             .claim_provider_thread_sync_async("owner-a".to_owned(), a.clone(), admission.clone())
             .await
             .unwrap());
-        assert!(!memory.claim_provider_thread_sync("owner-a", &a, &admission).unwrap());
+        assert!(!memory
+            .claim_provider_thread_sync("owner-a", &a, &admission)
+            .unwrap());
         let invalidated = memory
             .get_provider_thread_for_owner("owner-a", "conversation-a", "chatgpt")
             .unwrap()
@@ -2867,7 +2883,9 @@ mod provider_thread_map_isolation_tests {
             .unwrap();
         assert_eq!(mapping.thread_url, a.thread_url);
         assert!(mapping.synced_through_message_id.is_none());
-        assert!(!restored.claim_provider_thread_sync("owner-a", &a, &admission).unwrap());
+        assert!(!restored
+            .claim_provider_thread_sync("owner-a", &a, &admission)
+            .unwrap());
         assert_eq!(
             restored
                 .conversation_messages_for_owner("owner-a", "conversation-a")
