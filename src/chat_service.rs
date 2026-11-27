@@ -272,6 +272,7 @@ pub(crate) struct CandidateAttemptRequest<'a> {
     pub(crate) provider: &'a str,
     pub(crate) owner_key_id: &'a str,
     pub(crate) conversation_id: Option<&'a str>,
+    pub(crate) admission_identity: &'a crate::memory::AdmissionIdentity,
     pub(crate) model: &'a str,
     pub(crate) stored_messages: &'a [ChatMessage],
     pub(crate) incoming_messages: &'a [ChatMessage],
@@ -302,6 +303,7 @@ pub(crate) async fn prepare_candidate_attempt(
         provider,
         owner_key_id,
         conversation_id,
+        admission_identity,
         model,
         stored_messages,
         incoming_messages,
@@ -356,6 +358,7 @@ pub(crate) async fn prepare_candidate_attempt(
         state,
         owner_key_id,
         conversation_id,
+        admission_identity,
         provider,
         model,
         stored_messages,
@@ -683,6 +686,7 @@ pub(crate) struct CandidatePromptRequest<'a> {
     pub(crate) state: &'a AppState,
     pub(crate) owner_key_id: &'a str,
     pub(crate) conversation_id: Option<&'a str>,
+    pub(crate) admission_identity: &'a crate::memory::AdmissionIdentity,
     pub(crate) provider: &'a str,
     pub(crate) model: &'a str,
     pub(crate) stored_messages: &'a [ChatMessage],
@@ -736,11 +740,18 @@ pub(crate) async fn prepare_candidate_prompt(
     // synchronization; cancellation, failure and restart leave it invalid.
     if thread_url.is_some() {
         let expected = saved_thread.ok_or(CandidatePromptError::ThreadSyncClaimFailed)?;
+        let crate::memory::AdmissionIdentity::Existing(identity) = request.admission_identity else {
+            return Err(CandidatePromptError::ThreadSyncClaimFailed);
+        };
         let claimed = request
             .state
             .memory
             .clone()
-            .claim_provider_thread_sync_async(request.owner_key_id.to_owned(), expected)
+            .claim_provider_thread_sync_async(
+                request.owner_key_id.to_owned(),
+                expected,
+                identity.clone(),
+            )
             .await
             .map_err(|_| CandidatePromptError::ThreadSyncClaimFailed)?;
         if !claimed {
@@ -1758,6 +1769,7 @@ mod dispatch_memory_revalidation_tests {
             state,
             owner_key_id: owner,
             conversation_id: None,
+            admission_identity: &crate::memory::AdmissionIdentity::Generated,
             provider,
             model: "fake-model",
             stored_messages: &[],

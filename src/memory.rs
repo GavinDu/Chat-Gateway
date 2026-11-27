@@ -1593,9 +1593,10 @@ impl UnifiedMemory {
         self: Arc<Self>,
         owner_key_id: String,
         expected: ProviderThread,
+        identity: ConversationIdentity,
     ) -> anyhow::Result<bool> {
         tokio::task::spawn_blocking(move || {
-            self.claim_provider_thread_sync(&owner_key_id, &expected)
+            self.claim_provider_thread_sync(&owner_key_id, &expected, &identity)
         })
         .await
         .map_err(|_| anyhow::anyhow!("provider thread claim task failed"))?
@@ -1605,6 +1606,7 @@ impl UnifiedMemory {
         &self,
         owner_key_id: &str,
         expected: &ProviderThread,
+        identity: &ConversationIdentity,
     ) -> anyhow::Result<bool> {
         let Some(marker) = expected.synced_through_message_id.as_deref() else {
             return Ok(false);
@@ -1615,8 +1617,12 @@ impl UnifiedMemory {
              WHERE conversation_id = ?1 AND provider = ?2
                AND thread_url = ?3 AND synced_through_message_id = ?4
                AND model IS ?5
-               AND EXISTS (SELECT 1 FROM conversations
-                           WHERE id = ?1 AND owner_key_id = ?6)",
+               AND EXISTS (
+                   SELECT 1 FROM conversations c
+                   JOIN conversation_identities i ON i.conversation_id = c.id
+                   WHERE c.id = ?1 AND c.owner_key_id = ?6
+                     AND i.incarnation = ?7 AND i.generation = ?8
+               )",
             rusqlite::params![
                 expected.conversation_id,
                 expected.provider,
@@ -1624,6 +1630,8 @@ impl UnifiedMemory {
                 marker,
                 expected.model,
                 owner_key_id,
+                identity.incarnation,
+                identity.generation,
             ],
         )?;
         Ok(updated == 1)
@@ -2350,6 +2358,65 @@ mod provider_thread_map_isolation_tests {
         }
     }
 
+    fn identity(memory: &UnifiedMemory, id: &str) -> super::ConversationIdentity {
+        super::read_identity(&memory.lock().unwrap(), id).unwrap()
+    }
+
+    #[tokio::test]
+    async fn stale_admission_cannot_consume_republished_identical_delta_marker() {
+        let memory = std::sync::Arc::new(UnifiedMemory::new(8000));
+        persist_conversation(&memory, "conversation-a", "owner-a");
+        let a = thread(
+            "conversation-a",
+            "chatgpt",
+            "https://chatgpt.com/c/a",
+            "marker-a",
+        );
+        memory.upsert_provider_thread_for_owner("owner-a", &a).unwrap();
+        let original = identity(&memory, "conversation-a");
+
+        // A newer generation can retain identical mapping fields.
+        memory.lock().unwrap().execute(
+            "UPDATE conversation_identities SET generation = generation + 1 WHERE conversation_id = ?1",
+            ["conversation-a"],
+        ).unwrap();
+        assert!(!memory
+            .clone()
+            .claim_provider_thread_sync_async("owner-a".to_owned(), a.clone(), original.clone())
+            .await
+            .unwrap());
+        let newer = identity(&memory, "conversation-a");
+        assert_ne!(original.generation, newer.generation);
+        assert_eq!(original.incarnation, newer.incarnation);
+        assert_eq!(
+            memory.get_provider_thread_for_owner("owner-a", "conversation-a", "chatgpt").unwrap(),
+            Some(a.clone())
+        );
+
+        // Recreate identical transcript and mapping; generation may repeat.
+        assert!(memory.delete_conversation_for_owner("owner-a", "conversation-a").unwrap());
+        persist_conversation(&memory, "conversation-a", "owner-a");
+        memory.upsert_provider_thread_for_owner("owner-a", &a).unwrap();
+        let recreated = identity(&memory, "conversation-a");
+        assert_eq!(original.generation, recreated.generation);
+        assert_ne!(original.incarnation, recreated.incarnation);
+        assert!(!memory
+            .clone()
+            .claim_provider_thread_sync_async("owner-a".to_owned(), a.clone(), original)
+            .await
+            .unwrap());
+        assert_eq!(
+            memory.get_provider_thread_for_owner("owner-a", "conversation-a", "chatgpt").unwrap(),
+            Some(a.clone())
+        );
+        assert!(memory
+            .clone()
+            .claim_provider_thread_sync_async("owner-a".to_owned(), a.clone(), recreated.clone())
+            .await
+            .unwrap());
+        assert!(!memory.claim_provider_thread_sync("owner-a", &a, &recreated).unwrap());
+    }
+
     #[tokio::test]
     async fn claiming_delta_consumes_only_exact_owned_thread_marker() {
         let memory = std::sync::Arc::new(UnifiedMemory::new(8000));
@@ -2378,18 +2445,19 @@ mod provider_thread_map_isolation_tests {
                 .upsert_provider_thread_for_owner("owner-a", entry)
                 .unwrap();
         }
+        let admission = identity(&memory, "conversation-a");
         let mut stale = a.clone();
         stale.synced_through_message_id = Some("stale".to_owned());
         assert!(!memory
-            .claim_provider_thread_sync("owner-a", &stale)
+            .claim_provider_thread_sync("owner-a", &stale, &admission)
             .unwrap());
-        assert!(!memory.claim_provider_thread_sync("owner-b", &a).unwrap());
+        assert!(!memory.claim_provider_thread_sync("owner-b", &a, &admission).unwrap());
         assert!(memory
             .clone()
-            .claim_provider_thread_sync_async("owner-a".to_owned(), a.clone())
+            .claim_provider_thread_sync_async("owner-a".to_owned(), a.clone(), admission.clone())
             .await
             .unwrap());
-        assert!(!memory.claim_provider_thread_sync("owner-a", &a).unwrap());
+        assert!(!memory.claim_provider_thread_sync("owner-a", &a, &admission).unwrap());
         let invalidated = memory
             .get_provider_thread_for_owner("owner-a", "conversation-a", "chatgpt")
             .unwrap()
@@ -2784,9 +2852,10 @@ mod provider_thread_map_isolation_tests {
         let history = memory
             .conversation_messages_for_owner("owner-a", "conversation-a")
             .unwrap();
+        let admission = identity(&memory, "conversation-a");
         assert!(memory
             .clone()
-            .claim_provider_thread_sync_async("owner-a".to_owned(), a.clone())
+            .claim_provider_thread_sync_async("owner-a".to_owned(), a.clone(), admission.clone())
             .await
             .unwrap());
         drop(memory);
@@ -2798,7 +2867,7 @@ mod provider_thread_map_isolation_tests {
             .unwrap();
         assert_eq!(mapping.thread_url, a.thread_url);
         assert!(mapping.synced_through_message_id.is_none());
-        assert!(!restored.claim_provider_thread_sync("owner-a", &a).unwrap());
+        assert!(!restored.claim_provider_thread_sync("owner-a", &a, &admission).unwrap());
         assert_eq!(
             restored
                 .conversation_messages_for_owner("owner-a", "conversation-a")
