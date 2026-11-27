@@ -3,7 +3,8 @@
 //! The service owns backend dispatch and common event-stream consumption so
 //! streaming and non-streaming handlers share the same provider event contract.
 use crate::chat_backend::{
-    BackendRequest, ChatBackend, ChatEvent, GatewayError, ObservedChatStream, RemoteThreadObservation,
+    BackendRequest, ChatBackend, ChatEvent, GatewayError, ObservedChatStream,
+    RemoteThreadObservation,
 };
 use crate::{
     api::api_error,

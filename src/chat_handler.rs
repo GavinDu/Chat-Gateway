@@ -37,7 +37,8 @@ struct StreamingAttempt {
     permit: browser::pool::ObscuraPermit,
     receiver:
         tokio::sync::mpsc::Receiver<Result<chat_backend::ChatEvent, chat_backend::GatewayError>>,
-    thread_observation: Option<tokio::sync::oneshot::Receiver<chat_backend::RemoteThreadObservation>>,
+    thread_observation:
+        Option<tokio::sync::oneshot::Receiver<chat_backend::RemoteThreadObservation>>,
     first_chunk: chat_backend::ChatEvent,
 }
 
@@ -62,7 +63,8 @@ struct JsonAttempt<'a> {
     prompt_tokens: u64,
     receiver:
         tokio::sync::mpsc::Receiver<Result<chat_backend::ChatEvent, chat_backend::GatewayError>>,
-    thread_observation: Option<tokio::sync::oneshot::Receiver<chat_backend::RemoteThreadObservation>>,
+    thread_observation:
+        Option<tokio::sync::oneshot::Receiver<chat_backend::RemoteThreadObservation>>,
 }
 
 // Stable fixed labels only: never put untrusted browser/provider error text

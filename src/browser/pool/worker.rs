@@ -55,7 +55,11 @@ mod completed_thread_observation_tests {
             (None, thread, thread),
             (Some(thread), thread, "https://chatgpt.com/c/thread-b"),
             (Some(thread), home, thread),
-            (None, home, "https://chatgpt.com/c/thread-a?conversation=foreign"),
+            (
+                None,
+                home,
+                "https://chatgpt.com/c/thread-a?conversation=foreign",
+            ),
             (None, home, "https://chatgpt.com/c/"),
             (None, home, "https://evil.example/c/thread-a"),
             (None, "https://evil.example/", thread),
