@@ -487,7 +487,10 @@ impl ChatBackend for crate::browser::pool::ObscuraPool {
 /// HTTP handler is decomposed, the production router without an Obscura page.
 #[cfg(test)]
 pub(crate) mod test_support {
-    use super::{ChatBackend, ChatEvent, ChatRequest, GatewayError, ProviderId};
+    use super::{
+        ChatBackend, ChatEvent, ChatRequest, GatewayError, ObservedChatStream, ProviderId,
+        RemoteThreadObservation,
+    };
     use std::{collections::VecDeque, time::Duration};
     use tokio::sync::{mpsc, oneshot, Mutex};
 
@@ -498,6 +501,12 @@ pub(crate) mod test_support {
         HangOnAdmission(oneshot::Sender<()>),
         /// Emit events in order, including incomplete or errored streams.
         Events(Vec<Result<ChatEvent, GatewayError>>),
+        /// Supply synthetic attempt-owned evidence with the scripted events.
+        /// Deliberately supports errors too, to test that proof alone cannot commit.
+        ObservedEvents(
+            Vec<Result<ChatEvent, GatewayError>>,
+            RemoteThreadObservation,
+        ),
         /// Simulate delayed first content without blocking the HTTP worker.
         Delay(Duration, Vec<Result<ChatEvent, GatewayError>>),
         /// Simulate a backend that holds request admission open before
@@ -543,6 +552,13 @@ pub(crate) mod test_support {
             &self,
             request: ChatRequest,
         ) -> Result<mpsc::Receiver<Result<ChatEvent, GatewayError>>, GatewayError> {
+            Ok(self.send_stream_with_thread_observation(request).await?.events)
+        }
+
+        async fn send_stream_with_thread_observation(
+            &self,
+            request: ChatRequest,
+        ) -> Result<ObservedChatStream, GatewayError> {
             self.requests.lock().await.push(request);
             let scripted = self
                 .sends
@@ -565,7 +581,24 @@ pub(crate) mod test_support {
                             .await
                             .expect("scripted receiver is still held by this function");
                     }
-                    Ok(rx)
+                    Ok(ObservedChatStream {
+                        events: rx,
+                        thread_observation: None,
+                    })
+                }
+                ScriptedSend::ObservedEvents(events, observation) => {
+                    let (proof_tx, proof_rx) = oneshot::channel();
+                    let _ = proof_tx.send(observation);
+                    let (tx, rx) = mpsc::channel(events.len().max(1));
+                    for event in events {
+                        tx.send(event)
+                            .await
+                            .expect("scripted receiver is still held by this function");
+                    }
+                    Ok(ObservedChatStream {
+                        events: rx,
+                        thread_observation: Some(proof_rx),
+                    })
                 }
                 ScriptedSend::Delay(delay, events) => {
                     let (tx, rx) = mpsc::channel(8);
@@ -581,7 +614,10 @@ pub(crate) mod test_support {
                             }
                         }
                     });
-                    Ok(rx)
+                    Ok(ObservedChatStream {
+                        events: rx,
+                        thread_observation: None,
+                    })
                 }
                 ScriptedSend::DelayAdmission(delay, events) => {
                     tokio::time::sleep(delay).await;
@@ -591,7 +627,10 @@ pub(crate) mod test_support {
                             .await
                             .expect("scripted receiver is still held by this function");
                     }
-                    Ok(rx)
+                    Ok(ObservedChatStream {
+                        events: rx,
+                        thread_observation: None,
+                    })
                 }
                 ScriptedSend::Hold(cancelled) => {
                     let (tx, rx) = mpsc::channel::<Result<ChatEvent, GatewayError>>(1);
@@ -599,7 +638,10 @@ pub(crate) mod test_support {
                         tx.closed().await;
                         let _ = cancelled.send(());
                     });
-                    Ok(rx)
+                    Ok(ObservedChatStream {
+                        events: rx,
+                        thread_observation: None,
+                    })
                 }
                 ScriptedSend::PartialThenRelease(first, release, started) => {
                     let (tx, rx) = mpsc::channel(1);
@@ -622,7 +664,10 @@ pub(crate) mod test_support {
                             }
                         }
                     });
-                    Ok(rx)
+                    Ok(ObservedChatStream {
+                        events: rx,
+                        thread_observation: None,
+                    })
                 }
                 ScriptedSend::PartialThenHold(first, cancelled) => {
                     let (tx, rx) = mpsc::channel(1);
@@ -632,7 +677,10 @@ pub(crate) mod test_support {
                         }
                         let _ = cancelled.send(());
                     });
-                    Ok(rx)
+                    Ok(ObservedChatStream {
+                        events: rx,
+                        thread_observation: None,
+                    })
                 }
             }
         }
