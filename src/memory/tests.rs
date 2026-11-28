@@ -4055,14 +4055,17 @@ async fn async_store_keeps_interleaved_conversation_thread_maps_isolated() {
     );
 }
 
-
 #[test]
 fn v12_memory_revisions_migrate_and_survive_reopen() {
     let fixture = Fixture::new();
     let original = {
         let memory = fixture.open();
-        memory.set_long_term_memory_enabled("owner-a", true).unwrap();
-        memory.set_long_term_memory_enabled("owner-b", true).unwrap();
+        memory
+            .set_long_term_memory_enabled("owner-a", true)
+            .unwrap();
+        memory
+            .set_long_term_memory_enabled("owner-b", true)
+            .unwrap();
         let item = memory
             .save_long_term_memory_item("owner-a", "key", "value", None, 1.0, None)
             .unwrap();
@@ -4104,10 +4107,16 @@ fn v12_memory_revisions_migrate_and_survive_reopen() {
         );
         assert!(!memory.long_term_memory_enabled("missing").unwrap());
         assert_eq!(counters(&memory, "owner-a"), (0, 0));
-        memory.set_long_term_memory_enabled("owner-a", true).unwrap();
+        memory
+            .set_long_term_memory_enabled("owner-a", true)
+            .unwrap();
         assert_eq!(counters(&memory, "owner-a"), (0, 0));
-        memory.set_long_term_memory_enabled("owner-a", false).unwrap();
-        memory.set_long_term_memory_enabled("owner-a", true).unwrap();
+        memory
+            .set_long_term_memory_enabled("owner-a", false)
+            .unwrap();
+        memory
+            .set_long_term_memory_enabled("owner-a", true)
+            .unwrap();
         let item = memory
             .save_long_term_memory_item("owner-a", "key", "value", None, 1.0, None)
             .unwrap();
@@ -4137,7 +4146,9 @@ fn v12_memory_revision_overflow_rolls_back_and_missing_trigger_fails_closed() {
     let fixture = Fixture::new();
     {
         let memory = fixture.open();
-        memory.set_long_term_memory_enabled("owner-a", true).unwrap();
+        memory
+            .set_long_term_memory_enabled("owner-a", true)
+            .unwrap();
         memory
             .save_long_term_memory_item("owner-a", "key", "original", None, 1.0, None)
             .unwrap();
