@@ -1,6 +1,101 @@
 //! SSE completion lifecycle with permit retention and transactional finalization.
 use super::*;
 
+/// SSE-local observation only: this is not a browser cleanup acknowledgement
+/// or a durable transcript commit. Never retain provider text in the record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ObservedTerminal {
+    Pending,
+    Done,
+    Error(chat_backend::GatewayErrorKind),
+    ChannelClosed,
+}
+
+struct SseAttemptDiagnostics {
+    request_id: String,
+    provider: String,
+    started: Instant,
+    content_events: usize,
+    content_bytes: usize,
+    first_observed_ms: Option<u64>,
+    last_observed_ms: Option<u64>,
+    terminal: ObservedTerminal,
+    reducer_finished: bool,
+}
+
+impl SseAttemptDiagnostics {
+    fn new(request_id: String, provider: String, started: Instant) -> Self {
+        Self {
+            request_id,
+            provider,
+            started,
+            content_events: 0,
+            content_bytes: 0,
+            first_observed_ms: None,
+            last_observed_ms: None,
+            terminal: ObservedTerminal::Pending,
+            reducer_finished: false,
+        }
+    }
+
+    fn elapsed_ms(&self) -> u64 {
+        self.started.elapsed().as_millis().min(u64::MAX as u128) as u64
+    }
+
+    fn observe_chunk(&mut self, chunk: &chat_backend::ChatEvent) {
+        if !chunk.content.is_empty() {
+            let elapsed = self.elapsed_ms();
+            self.first_observed_ms.get_or_insert(elapsed);
+            self.last_observed_ms = Some(elapsed);
+            self.content_events = self.content_events.saturating_add(1);
+            self.content_bytes = self.content_bytes.saturating_add(chunk.content.len());
+        }
+        if chunk.done {
+            self.terminal = ObservedTerminal::Done;
+        }
+    }
+
+    fn observe(&mut self, event: &Result<chat_backend::ChatEvent, chat_backend::GatewayError>) {
+        match event {
+            Ok(chunk) => self.observe_chunk(chunk),
+            Err(error) => self.terminal = ObservedTerminal::Error(error.kind),
+        }
+    }
+
+    fn reducer_finished(&mut self) {
+        if self.terminal == ObservedTerminal::Pending {
+            self.terminal = ObservedTerminal::ChannelClosed;
+        }
+        self.reducer_finished = true;
+        self.record("reducer_finished");
+    }
+
+    fn record(&self, boundary: &'static str) {
+        tracing::info!(
+            request_id = %self.request_id,
+            provider = %self.provider,
+            boundary,
+            observed_terminal = ?self.terminal,
+            content_events = self.content_events,
+            content_bytes = self.content_bytes,
+            first_observed_ms = ?self.first_observed_ms,
+            last_observed_ms = ?self.last_observed_ms,
+            observed_elapsed_ms = self.elapsed_ms(),
+            "SSE provider attempt observation"
+        );
+    }
+}
+
+impl Drop for SseAttemptDiagnostics {
+    fn drop(&mut self) {
+        if !self.reducer_finished {
+            // This also covers a response dropped before its first poll.
+            // Do not infer why it was dropped or that the worker has stopped.
+            self.record("body_dropped_before_reducer_finish");
+        }
+    }
+}
+
 pub(super) fn streamed_provider_response(attempt: StreamingAttempt) -> Response {
     let StreamingAttempt {
         state: state_c,
@@ -26,7 +121,15 @@ pub(super) fn streamed_provider_response(attempt: StreamingAttempt) -> Response 
     let conversation_for_headers = conv_stream.clone();
     let provider_for_headers = provider_c.clone();
     let identity = CompletionIdentity::new();
+    // Capture the already-admitted first chunk even if the body is never polled.
+    let mut diagnostics = SseAttemptDiagnostics::new(
+        request_id_c.clone(),
+        provider_c.clone(),
+        provider_started_c,
+    );
+    diagnostics.observe_chunk(&first_chunk);
     let sse_stream = async_stream::stream! {
+        let mut diagnostics = diagnostics;
         let _permit = permit;
         let mut accumulator = chat_service::ResponseAccumulator::new(provider_started_c);
         let completion_deadline =
@@ -45,7 +148,13 @@ pub(super) fn streamed_provider_response(attempt: StreamingAttempt) -> Response 
         let mut pending: Option<Result<chat_backend::ChatEvent, chat_backend::GatewayError>> = Some(Ok(first_chunk));
         while let Some(item) = match pending.take() {
             Some(item) => Some(item),
-            None => chat_service::recv_with_deadline(&mut rx, completion_deadline).await,
+            None => {
+                let item = chat_service::recv_with_deadline(&mut rx, completion_deadline).await;
+                if let Some(event) = item.as_ref() {
+                    diagnostics.observe(event);
+                }
+                item
+            },
         } {
             let update = accumulator.push(item);
             let done_after_delta =
@@ -66,12 +175,13 @@ pub(super) fn streamed_provider_response(attempt: StreamingAttempt) -> Response 
                 }
                 chat_service::StreamUpdate::Complete => break,
                 chat_service::StreamUpdate::Failed => {
-                    tracing::warn!(provider = %provider_c, "provider stream failed; partial response not committed");
+                    tracing::warn!(request_id = %request_id_c, provider = %provider_c, "provider stream failed; partial response not committed");
                     break;
                 }
             }
         }
         let collected = accumulator.finish();
+        diagnostics.reducer_finished();
         let full = collected.content;
         let ttft_ms = collected
             .first_event_elapsed
@@ -158,4 +268,67 @@ pub(super) fn streamed_provider_response(attempt: StreamingAttempt) -> Response 
         true,
     );
     (headers, Sse::new(sse_stream)).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn diagnostics() -> SseAttemptDiagnostics {
+        SseAttemptDiagnostics::new("request-test".into(), "chatgpt".into(), Instant::now())
+    }
+
+    fn chunk(content: &str, done: bool) -> chat_backend::ChatEvent {
+        chat_backend::ChatEvent {
+            content: content.into(),
+            done,
+        }
+    }
+
+    #[test]
+    fn partial_error_uses_only_typed_category_and_content_lengths() {
+        let mut observed = diagnostics();
+        observed.observe_chunk(&chunk("é", false));
+        observed.observe(&Ok(chunk("", false)));
+        observed.observe(&Ok(chunk("abc", false)));
+        observed.observe(&Err(chat_backend::GatewayError::timeout("SECRET_SENTINEL")));
+        observed.reducer_finished();
+        assert_eq!(
+            observed.terminal,
+            ObservedTerminal::Error(chat_backend::GatewayErrorKind::Timeout)
+        );
+        assert_eq!(observed.content_events, 2);
+        assert_eq!(observed.content_bytes, 5);
+        assert!(observed.first_observed_ms.is_some());
+        assert!(observed.last_observed_ms >= observed.first_observed_ms);
+        assert!(observed.reducer_finished);
+    }
+
+    #[test]
+    fn closed_channel_and_empty_terminal_are_not_conflated() {
+        let mut closed = diagnostics();
+        closed.reducer_finished();
+        assert_eq!(closed.terminal, ObservedTerminal::ChannelClosed);
+        assert_eq!(closed.first_observed_ms, None);
+
+        let mut empty = diagnostics();
+        empty.observe_chunk(&chunk("", true));
+        empty.reducer_finished();
+        assert_eq!(empty.terminal, ObservedTerminal::Done);
+        assert_eq!(empty.content_events, 0);
+        assert_eq!(empty.content_bytes, 0);
+    }
+
+    #[test]
+    fn admitted_first_chunk_is_observed_before_body_poll_and_not_a_commit() {
+        let mut observed = diagnostics();
+        observed.observe_chunk(&chunk("first", true));
+        assert_eq!(observed.terminal, ObservedTerminal::Done);
+        assert_eq!(observed.content_events, 1);
+        assert!(!observed.reducer_finished);
+        let next = diagnostics();
+        assert_eq!(next.terminal, ObservedTerminal::Pending);
+        assert_eq!(next.content_bytes, 0);
+        assert_eq!(next.first_observed_ms, None);
+    }
 }
