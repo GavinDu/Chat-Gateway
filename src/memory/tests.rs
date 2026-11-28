@@ -191,7 +191,7 @@ fn json_import_clears_synthetic_tab_ids_but_preserves_real_thread_urls() {
         .unwrap()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 11);
+    assert_eq!(version, 12);
 }
 
 #[test]
@@ -532,7 +532,7 @@ fn schema_v5_migrates_to_v6_with_long_term_memory_disabled_by_default() {
         .unwrap()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 11);
+    assert_eq!(version, 12);
     assert!(!memory.long_term_memory_enabled("owner-a").unwrap());
     let item_count: i64 = memory
         .lock()
@@ -1322,7 +1322,7 @@ fn schema_v1_database_migrates_provider_thread_map_without_losing_conversations(
         .unwrap()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 11);
+    assert_eq!(version, 12);
     let memory_tables: i64 = memory
         .lock()
         .unwrap()
@@ -1741,7 +1741,7 @@ fn schema_v3_migration_assigns_existing_conversations_to_local_owner() {
         .unwrap()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 11);
+    assert_eq!(version, 12);
     let memory_tables: i64 = memory
         .lock()
         .unwrap()
@@ -1889,7 +1889,7 @@ fn schema_v4_migration_adds_summary_table_without_losing_tenant_data() {
         .unwrap()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 11);
+    assert_eq!(version, 12);
     let memory_tables: i64 = memory
         .lock()
         .unwrap()
@@ -2117,7 +2117,12 @@ fn schema_v6_migration_clears_synthetic_tabs_and_preserves_real_metadata_and_his
         let connection = memory.lock().unwrap();
         connection
             .execute_batch(
-                "DROP TRIGGER conversation_admission_on_insert;
+                "DROP TRIGGER memory_consent_on_insert;
+                  DROP TRIGGER memory_consent_on_update;
+                  DROP TRIGGER memory_revision_on_update;
+                  ALTER TABLE memory_settings DROP COLUMN consent_epoch;
+                  ALTER TABLE memory_items DROP COLUMN revision;
+                  DROP TRIGGER conversation_admission_on_insert;
                   DROP TABLE conversation_admissions;
                   DROP TRIGGER conversation_identity_on_insert;
                  DROP TABLE conversation_identities;
@@ -2166,7 +2171,7 @@ fn schema_v6_migration_clears_synthetic_tabs_and_preserves_real_metadata_and_his
         .unwrap()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 11);
+    assert_eq!(version, 12);
 }
 
 #[test]
@@ -2368,7 +2373,12 @@ fn version_seven_migration_clears_synthetic_tab_id_and_preserves_history() {
         let connection = rusqlite::Connection::open(fixture.db()).unwrap();
         connection
             .execute_batch(
-                "DROP TRIGGER conversation_admission_on_insert;
+                "DROP TRIGGER memory_consent_on_insert;
+                  DROP TRIGGER memory_consent_on_update;
+                  DROP TRIGGER memory_revision_on_update;
+                  ALTER TABLE memory_settings DROP COLUMN consent_epoch;
+                  ALTER TABLE memory_items DROP COLUMN revision;
+                  DROP TRIGGER conversation_admission_on_insert;
                   DROP TABLE conversation_admissions;
                   DROP TRIGGER conversation_identity_on_insert;
                  DROP TABLE conversation_identities;
@@ -2412,7 +2422,7 @@ fn version_seven_migration_clears_synthetic_tab_id_and_preserves_history() {
         .unwrap()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 11);
+    assert_eq!(version, 12);
     let columns: Vec<String> = migrated
         .lock()
         .unwrap()
@@ -2616,7 +2626,12 @@ fn v9_upgrade_allocates_durable_identity_and_recreation_changes_it() {
             .lock()
             .unwrap()
             .execute_batch(
-                "DROP TRIGGER conversation_admission_on_insert;
+                "DROP TRIGGER memory_consent_on_insert;
+                  DROP TRIGGER memory_consent_on_update;
+                  DROP TRIGGER memory_revision_on_update;
+                  ALTER TABLE memory_settings DROP COLUMN consent_epoch;
+                  ALTER TABLE memory_items DROP COLUMN revision;
+                  DROP TRIGGER conversation_admission_on_insert;
                   DROP TABLE conversation_admissions;
                   DROP TRIGGER conversation_identity_on_insert;
                  DROP TABLE conversation_identities;
@@ -2685,7 +2700,12 @@ async fn v10_upgrade_preserves_identities_and_admissions_expire() {
         .lock()
         .unwrap()
         .execute_batch(
-            "DROP TRIGGER conversation_admission_on_insert;
+            "DROP TRIGGER memory_consent_on_insert;
+                  DROP TRIGGER memory_consent_on_update;
+                  DROP TRIGGER memory_revision_on_update;
+                  ALTER TABLE memory_settings DROP COLUMN consent_epoch;
+                  ALTER TABLE memory_items DROP COLUMN revision;
+                  DROP TRIGGER conversation_admission_on_insert;
              DROP TABLE conversation_admissions;
              PRAGMA user_version=10;",
         )
@@ -3089,7 +3109,12 @@ fn v8_upgrade_invalidates_legacy_sync_once_and_preserves_history() {
             .lock()
             .unwrap()
             .execute_batch(
-                "DROP TRIGGER conversation_admission_on_insert;
+                "DROP TRIGGER memory_consent_on_insert;
+                  DROP TRIGGER memory_consent_on_update;
+                  DROP TRIGGER memory_revision_on_update;
+                  ALTER TABLE memory_settings DROP COLUMN consent_epoch;
+                  ALTER TABLE memory_items DROP COLUMN revision;
+                  DROP TRIGGER conversation_admission_on_insert;
                   DROP TABLE conversation_admissions;
                   DROP TRIGGER conversation_identity_on_insert;
                  DROP TABLE conversation_identities;
@@ -3143,7 +3168,12 @@ fn failed_v8_migration_rolls_back_schema_and_history() {
         let connection = Connection::open(fixture.db()).unwrap();
         connection
             .execute_batch(
-                "DROP TRIGGER conversation_admission_on_insert;
+                "DROP TRIGGER memory_consent_on_insert;
+                  DROP TRIGGER memory_consent_on_update;
+                  DROP TRIGGER memory_revision_on_update;
+                  ALTER TABLE memory_settings DROP COLUMN consent_epoch;
+                  ALTER TABLE memory_items DROP COLUMN revision;
+                  DROP TRIGGER conversation_admission_on_insert;
                   DROP TABLE conversation_admissions;
                   DROP TRIGGER conversation_identity_on_insert;
                  DROP TABLE conversation_identities;
@@ -4023,4 +4053,168 @@ async fn async_store_keeps_interleaved_conversation_thread_maps_isolated() {
         transcript_b,
         vec![m("user", "question B"), m("assistant", "answer B")]
     );
+}
+
+#[test]
+fn v12_memory_revisions_migrate_and_survive_reopen() {
+    let fixture = Fixture::new();
+    let original = {
+        let memory = fixture.open();
+        memory
+            .set_long_term_memory_enabled("owner-a", true)
+            .unwrap();
+        memory
+            .set_long_term_memory_enabled("owner-b", true)
+            .unwrap();
+        let item = memory
+            .save_long_term_memory_item("owner-a", "key", "value", None, 1.0, None)
+            .unwrap();
+        memory
+            .save_long_term_memory_item("owner-b", "key", "other", None, 1.0, None)
+            .unwrap();
+        memory
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "DROP TRIGGER memory_consent_on_insert;
+                 DROP TRIGGER memory_consent_on_update;
+                 DROP TRIGGER memory_revision_on_update;
+                 ALTER TABLE memory_settings DROP COLUMN consent_epoch;
+                 ALTER TABLE memory_items DROP COLUMN revision;
+                 PRAGMA user_version=11;",
+            )
+            .unwrap();
+        item
+    };
+    let counters = |memory: &UnifiedMemory, owner: &str| -> (i64, i64) {
+        memory
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT s.consent_epoch, i.revision FROM memory_settings s
+                 JOIN memory_items i ON s.owner_key_id=i.owner_key_id
+                 WHERE s.owner_key_id=?1 AND i.memory_key='key'",
+                [owner],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap()
+    };
+    {
+        let memory = fixture.open();
+        assert_eq!(
+            memory.list_long_term_memory_items("owner-a").unwrap(),
+            vec![original.clone()]
+        );
+        assert!(!memory.long_term_memory_enabled("missing").unwrap());
+        assert_eq!(counters(&memory, "owner-a"), (0, 0));
+        memory
+            .set_long_term_memory_enabled("owner-a", true)
+            .unwrap();
+        assert_eq!(counters(&memory, "owner-a"), (0, 0));
+        memory
+            .set_long_term_memory_enabled("owner-a", false)
+            .unwrap();
+        memory
+            .set_long_term_memory_enabled("owner-a", true)
+            .unwrap();
+        let item = memory
+            .save_long_term_memory_item("owner-a", "key", "value", None, 1.0, None)
+            .unwrap();
+        assert_eq!(item.id, original.id);
+        memory
+            .store_turn_for_owner(
+                "owner-a",
+                "revision-source".into(),
+                vec![m("user", "source")],
+                m("assistant", "reply"),
+                "chatgpt".into(),
+                "tab".into(),
+            )
+            .unwrap();
+        memory
+            .save_long_term_memory_item(
+                "owner-a",
+                "key",
+                "value",
+                Some("revision-source"),
+                1.0,
+                None,
+            )
+            .unwrap();
+        assert_eq!(counters(&memory, "owner-a"), (2, 2));
+        assert!(memory
+            .delete_conversation_for_owner("owner-a", "revision-source")
+            .unwrap());
+        assert_eq!(counters(&memory, "owner-a"), (2, 3));
+        assert_eq!(
+            memory.list_long_term_memory_items("owner-a").unwrap()[0].source_conversation_id,
+            None
+        );
+        assert_eq!(counters(&memory, "owner-b"), (0, 0));
+        let wire = serde_json::to_value(item).unwrap();
+        assert!(wire.get("revision").is_none());
+        assert!(wire.get("consent_epoch").is_none());
+    }
+    let reopened = fixture.open();
+    assert_eq!(counters(&reopened, "owner-a"), (2, 3));
+    assert_eq!(counters(&reopened, "owner-b"), (0, 0));
+}
+
+#[test]
+fn v12_memory_revision_overflow_rolls_back_and_missing_trigger_fails_closed() {
+    let fixture = Fixture::new();
+    {
+        let memory = fixture.open();
+        memory
+            .set_long_term_memory_enabled("owner-a", true)
+            .unwrap();
+        memory
+            .save_long_term_memory_item("owner-a", "key", "original", None, 1.0, None)
+            .unwrap();
+        let connection = memory.lock().unwrap();
+        connection
+            .execute(
+                "UPDATE memory_items SET revision=?1 WHERE owner_key_id='owner-a'",
+                [i64::MAX],
+            )
+            .unwrap();
+        assert!(connection
+            .execute(
+                "UPDATE memory_items SET value='changed' WHERE owner_key_id='owner-a'",
+                [],
+            )
+            .is_err());
+        let item: (String, i64) = connection
+            .query_row(
+                "SELECT value, revision FROM memory_items WHERE owner_key_id='owner-a'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(item, ("original".into(), i64::MAX));
+        connection
+            .execute(
+                "UPDATE memory_settings SET consent_epoch=?1 WHERE owner_key_id='owner-a'",
+                [i64::MAX],
+            )
+            .unwrap();
+        assert!(connection
+            .execute(
+                "UPDATE memory_settings SET enabled=0 WHERE owner_key_id='owner-a'",
+                [],
+            )
+            .is_err());
+        let settings: (bool, i64) = connection
+            .query_row(
+                "SELECT enabled, consent_epoch FROM memory_settings WHERE owner_key_id='owner-a'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(settings, (true, i64::MAX));
+        connection
+            .execute_batch("DROP TRIGGER memory_revision_on_update;")
+            .unwrap();
+    }
+    assert!(open(&fixture.db(), None).is_err());
 }

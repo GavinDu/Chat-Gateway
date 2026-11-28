@@ -3,7 +3,7 @@ use anyhow::{bail, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use std::{collections::HashMap, fs, path::Path, time::Duration};
 
-const VERSION: i64 = 11;
+const VERSION: i64 = 12;
 const APPLICATION_ID: i64 = 0x4347574d; // CGWM
 const PROVIDER_THREADS_SCHEMA: &str = "
     CREATE TABLE provider_threads (
@@ -46,6 +46,31 @@ const MEMORY_SCHEMA: &str = "
     );
     CREATE INDEX memory_items_owner_updated_idx ON memory_items(owner_key_id, updated_at DESC);
     CREATE INDEX memory_items_owner_key_idx ON memory_items(owner_key_id, memory_key);
+";
+// Private monotonic counters. Trigger updates are part of the originating
+// statement; overflow fails the integer CHECK rather than wrapping.
+const MEMORY_REVISION_SCHEMA: &str = "
+    ALTER TABLE memory_settings ADD COLUMN consent_epoch INTEGER NOT NULL DEFAULT 0
+        CHECK(typeof(consent_epoch) = 'integer' AND consent_epoch >= 0);
+    ALTER TABLE memory_items ADD COLUMN revision INTEGER NOT NULL DEFAULT 0
+        CHECK(typeof(revision) = 'integer' AND revision >= 0);
+    CREATE TRIGGER memory_consent_on_insert AFTER INSERT ON memory_settings
+    WHEN NEW.enabled = 1
+    BEGIN
+        UPDATE memory_settings SET consent_epoch = 1 WHERE owner_key_id = NEW.owner_key_id;
+    END;
+    CREATE TRIGGER memory_consent_on_update AFTER UPDATE OF enabled ON memory_settings
+    WHEN NEW.enabled != OLD.enabled
+    BEGIN
+        UPDATE memory_settings SET consent_epoch = OLD.consent_epoch + 1
+        WHERE owner_key_id = NEW.owner_key_id;
+    END;
+    CREATE TRIGGER memory_revision_on_update AFTER UPDATE OF
+        id, owner_key_id, memory_key, value, source_conversation_id, confidence,
+        created_at, updated_at, expires_at ON memory_items
+    BEGIN
+        UPDATE memory_items SET revision = OLD.revision + 1 WHERE id = NEW.id;
+    END;
 ";
 // Private durable identity, never serialized as part of a conversation.
 const IDENTITY_SCHEMA: &str = "
@@ -265,6 +290,8 @@ fn initialize(connection: &mut Connection, legacy: Option<&Path>) -> Result<()> 
         // Version 10 introduces durable conversation identities.
     } else if version == 10 && app == APPLICATION_ID {
         // Version 11 introduces bounded absent-ID admissions.
+    } else if version == 11 && app == APPLICATION_ID {
+        // Version 12 adds private memory consent and item revision counters.
     } else if version != VERSION || app != APPLICATION_ID {
         bail!("unsupported conversation schema version {version} (expected {VERSION}) or application id {app}");
     }
@@ -299,6 +326,9 @@ fn initialize(connection: &mut Connection, legacy: Option<&Path>) -> Result<()> 
     }
     if (1..11).contains(&version) {
         tx.execute_batch(ADMISSION_SCHEMA)?;
+    }
+    if (0..12).contains(&version) {
+        tx.execute_batch(MEMORY_REVISION_SCHEMA)?;
     }
     validate_schema(&tx)?;
     tx.execute(
@@ -392,6 +422,7 @@ fn validate_schema(connection: &Connection) -> Result<()> {
     expected.execute_batch(SCHEMA)?;
     expected.execute_batch(IDENTITY_SCHEMA)?;
     expected.execute_batch(ADMISSION_SCHEMA)?;
+    expected.execute_batch(MEMORY_REVISION_SCHEMA)?;
     for table in [
         "conversations",
         "messages",
@@ -418,6 +449,9 @@ fn validate_schema(connection: &Connection) -> Result<()> {
     for trigger in [
         "conversation_identity_on_insert",
         "conversation_admission_on_insert",
+        "memory_consent_on_insert",
+        "memory_consent_on_update",
+        "memory_revision_on_update",
     ] {
         let trigger_sql = |database: &Connection| -> Result<String> {
             Ok(database.query_row(
@@ -428,7 +462,7 @@ fn validate_schema(connection: &Connection) -> Result<()> {
         };
         let normalize = |sql: String| sql.split_whitespace().collect::<String>().to_lowercase();
         if normalize(trigger_sql(connection)?) != normalize(trigger_sql(&expected)?) {
-            bail!("invalid conversation trigger '{trigger}'");
+            bail!("invalid schema trigger '{trigger}'");
         }
     }
     Ok(())

@@ -241,9 +241,9 @@ database override, the import source is `data/conversations.json`.
 
 ### JSON import and schema migrations
 
-On first startup, the gateway creates the current schema (currently version 11,
+On first startup, the gateway creates the current schema (currently version 12,
 recorded in `PRAGMA user_version`) and imports the legacy JSON snapshot in the
-**same transaction**. Existing supported schema versions 1–10 are upgraded
+**same transaction**. Existing supported schema versions 1–11 are upgraded
 transactionally at startup. A completion
 marker prevents reimport on later starts, including after conversation deletion.
 Version 9 clears legacy provider-thread synchronization markers once because
@@ -259,6 +259,10 @@ unrelated IDs are unaffected. Expired leases are reclaimed at startup and
 admission; capacity is limited to 128 leases per owner and 8192 globally.
 No empty conversation or permanent tombstone is persisted. A DELETE of an ID
 that is already absent retains its existing not-found semantics.
+Version 12 adds private durable consent epochs and item revisions. These
+advance independently of wall-clock timestamps, remain outside public memory
+API/export payloads, and provide a foundation for later dispatch revalidation.
+Older binaries cannot open v12; preserve a pre-upgrade SQLite backup.
 The import clears legacy synthetic `tab-*` values while preserving real
 provider-thread URLs and message history. The source JSON is never modified,
 renamed, or deleted automatically. Keep it
