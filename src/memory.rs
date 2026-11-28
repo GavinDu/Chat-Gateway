@@ -1838,16 +1838,13 @@ impl UnifiedMemory {
              ORDER BY i.confidence DESC, i.updated_at DESC, i.id
              LIMIT ?3",
         )?;
-        let rows = statement.query_map(
-            rusqlite::params![owner_key_id, now, limit],
-            |row| {
-                Ok(VersionedLongTermMemoryItem {
-                    item: memory_item_from_row(row)?,
-                    consent_epoch: row.get(8)?,
-                    revision: row.get(9)?,
-                })
-            },
-        )?;
+        let rows = statement.query_map(rusqlite::params![owner_key_id, now, limit], |row| {
+            Ok(VersionedLongTermMemoryItem {
+                item: memory_item_from_row(row)?,
+                consent_epoch: row.get(8)?,
+                revision: row.get(9)?,
+            })
+        })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
