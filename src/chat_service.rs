@@ -654,8 +654,28 @@ pub(crate) async fn prepare_chat_context(
         ))
     })?;
 
-    // Do not reserve memory context tokens when no provider is authorized
-    // to receive personal items. Disabled personal memory requires no read.
+    prepare_chat_context_with_policy(
+        state,
+        owner_key_id,
+        conversation_id,
+        incoming_messages,
+        memory_egress_policy,
+    )
+    .await
+}
+
+const CANONICAL_CONTEXT_BUDGET: usize = 8000;
+const PERSONAL_MEMORY_BUDGET: usize = 512;
+
+async fn prepare_chat_context_with_policy(
+    state: &AppState,
+    owner_key_id: &str,
+    conversation_id: Option<&str>,
+    incoming_messages: &[ChatMessage],
+    memory_egress_policy: memory_egress::MemoryEgressPolicy,
+) -> Result<PreparedChatContext, Box<Response>> {
+    // No memory read is needed when every provider is denied. Optional
+    // personal memory must not change the canonical context or send plan.
     let retrieved_memory = if !memory_egress_policy
         .allowed_personal_memory_providers()
         .is_empty()
@@ -676,9 +696,9 @@ pub(crate) async fn prepare_chat_context(
     } else {
         Vec::new()
     };
-    let (personal_memory_items, memory_tokens) =
-        budget_versioned_memory_items(retrieved_memory, 512);
-    let context_token_budget = 8000usize.saturating_sub(memory_tokens);
+    let (personal_memory_items, _) =
+        budget_versioned_memory_items(retrieved_memory, PERSONAL_MEMORY_BUDGET);
+    let context_token_budget = CANONICAL_CONTEXT_BUDGET;
 
     let snapshot = read_conversation_context_with_transcript_for_owner(
         state.memory.clone(),
@@ -709,6 +729,28 @@ pub(crate) async fn prepare_chat_context(
         stored_messages,
         snapshot_identity: snapshot.identity,
     })
+}
+
+/// Fit only previously selected and revalidated facts in the residual
+/// estimated space after the canonical candidate prompt is fully rendered.
+/// The baseline itself is never trimmed to accommodate optional memory.
+fn fit_personal_memory_to_candidate(
+    prompt: &str,
+    items: Vec<memory_egress::PersonalMemoryItem>,
+    token_budget: usize,
+) -> Vec<memory_egress::PersonalMemoryItem> {
+    let remaining = token_budget
+        .saturating_sub(context::estimate_message_tokens(prompt))
+        .min(PERSONAL_MEMORY_BUDGET);
+    let mut selected = Vec::new();
+    for item in items {
+        selected.push(item);
+        let rendered = memory_egress::render_personal_memory(&selected);
+        if context::estimate_message_tokens(&rendered) > remaining {
+            selected.pop();
+        }
+    }
+    selected
 }
 
 /// The canonical transcript is read once at the request boundary. Each
@@ -833,6 +875,19 @@ pub(crate) async fn prepare_candidate_prompt(
             .iter()
             .map(|cached| cached.rendered.clone())
             .collect()
+    };
+    let current_items = if request
+        .policy
+        .authorize(
+            request.provider,
+            memory_egress::ProviderDataClass::PersonalLongTermMemory,
+        )
+        .is_ok()
+    {
+        fit_personal_memory_to_candidate(&prompt, current_items, request.token_budget)
+    } else {
+        // Preserve existing policy denial diagnostics; no facts are appended.
+        current_items
     };
     request
         .policy
@@ -2101,5 +2156,109 @@ mod dispatch_memory_revalidation_tests {
         assert!(!failover.contains("SECOND_SENTINEL"));
         assert!(!failover.contains("PROVENANCE_SENTINEL"));
         assert!(failover.contains("KEEP_SENTINEL"));
+    }
+}
+
+#[cfg(test)]
+mod optional_memory_context_priority_tests {
+    use super::*;
+
+    #[test]
+    fn rendered_memory_fits_only_in_residual_candidate_space() {
+        let item = memory_egress::PersonalMemoryItem {
+            id: "synthetic".into(),
+            content: "escaped <tag> & value".into(),
+        };
+        let prompt = "canonical request";
+        let base = context::estimate_message_tokens(prompt);
+        let cost =
+            context::estimate_message_tokens(&memory_egress::render_personal_memory([&item]));
+        assert_eq!(
+            fit_personal_memory_to_candidate(prompt, vec![item.clone()], base + cost),
+            vec![item.clone()]
+        );
+        assert!(fit_personal_memory_to_candidate(prompt, vec![item.clone()], base + cost - 1)
+            .is_empty());
+        assert!(fit_personal_memory_to_candidate(prompt, vec![item], base - 1).is_empty());
+        let oversized = memory_egress::PersonalMemoryItem {
+            id: "oversized".into(),
+            content: "x".repeat(4096),
+        };
+        assert!(fit_personal_memory_to_candidate(prompt, vec![oversized], usize::MAX).is_empty());
+    }
+
+    #[tokio::test]
+    async fn optional_memory_never_shrinks_the_canonical_context_or_candidate() {
+        let (_, state) = crate::real_chat_router_scripted_backend_tests::fixture(
+            &["chatgpt"],
+            vec![],
+            None,
+        );
+        let owner = "memory-context-priority";
+        state
+            .memory
+            .set_long_term_memory_enabled(owner, true)
+            .unwrap();
+        state
+            .memory
+            .save_long_term_memory_item(owner, "fact", &"m".repeat(1500), None, 1.0, None)
+            .unwrap();
+        let incoming = vec![
+            ChatMessage {
+                role: "system".into(),
+                content: "s".repeat(400),
+            },
+            ChatMessage {
+                role: "developer".into(),
+                content: "d".repeat(400),
+            },
+            ChatMessage {
+                role: "user".into(),
+                content: "u".repeat(30700),
+            },
+        ];
+        let denied = memory_egress::MemoryEgressPolicy::from_allowlist("").unwrap();
+        let allowed = memory_egress::MemoryEgressPolicy::from_allowlist("chatgpt").unwrap();
+        let baseline =
+            prepare_chat_context_with_policy(&state, owner, None, &incoming, denied.clone())
+                .await
+                .unwrap();
+        let with_memory =
+            prepare_chat_context_with_policy(&state, owner, None, &incoming, allowed.clone())
+                .await
+                .unwrap();
+        assert_eq!(baseline.windowed, incoming);
+        assert_eq!(with_memory.windowed, baseline.windowed);
+        assert_eq!(with_memory.prompt, baseline.prompt);
+        assert_eq!(with_memory.context_token_budget, CANONICAL_CONTEXT_BUDGET);
+        assert_eq!(with_memory.personal_memory_items.len(), 1);
+
+        let _permit = state.pool.acquire("chatgpt").await.unwrap();
+        let (expected, _) = plan_provider_send(
+            "chatgpt",
+            "fake-model",
+            &[],
+            &incoming,
+            None,
+            CANONICAL_CONTEXT_BUDGET,
+            &baseline.prompt,
+        );
+        let (actual, _) = prepare_candidate_prompt(CandidatePromptRequest {
+            state: &state,
+            owner_key_id: owner,
+            conversation_id: None,
+            admission_identity: &crate::memory::AdmissionIdentity::Generated,
+            provider: "chatgpt",
+            model: "fake-model",
+            stored_messages: &[],
+            incoming_messages: &incoming,
+            token_budget: with_memory.context_token_budget,
+            replay_prompt: &with_memory.prompt,
+            policy: &allowed,
+            personal_memory_items: &with_memory.personal_memory_items,
+        })
+        .await
+        .unwrap();
+        assert_eq!(actual, expected);
     }
 }
