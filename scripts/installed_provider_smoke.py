@@ -390,7 +390,7 @@ COHORT_CONTROLS = ("ordinary_retry", "matched_delay", "client_restart",
                    "transport_reset", "direct_api")
 MAX_COHORT_ROWS = 100
 COHORT_STATES = ("client", "gateway", "helper", "transport", "workload",
-                 "history", "model")
+                 "history", "model", "config")
 COHORT_SKIP_REASONS = ("not_authorized", "not_supported", "not_reproduced",
                        "ambiguous_submission", "rate_limited", "challenge",
                        "budget_exhausted", "confounded")
@@ -454,6 +454,8 @@ def validate_opencode_cohorts(manifest: dict) -> dict:
                 or status not in ("observed", "skipped")):
             raise SmokeFailure("invalid_cohort")
         seen.add(cohort_id)
+        if control not in controls and control != COHORT_CONTROLS[len(controls)]:
+            raise SmokeFailure("invalid_cohort")
         controls.add(control)
         row = {"cohort_id": cohort_id, "control": control, "status": status}
         if status == "skipped":
@@ -493,10 +495,11 @@ def validate_opencode_cohorts(manifest: dict) -> dict:
                 or (recurrence is not None and successes == 0)):
             raise SmokeFailure("invalid_cohort")
         isolated = changed == expected
+        comparable = tuple(before[key] for key in ("workload", "history", "model", "config"))
         if isolated and control == "client_restart":
-            restart_delays.append(delay)
+            restart_delays.append((comparable, delay))
         if isolated and control == "matched_delay":
-            matched_delays.append(delay)
+            matched_delays.append((comparable, delay))
         row.update(baseline_request_id=baseline, result_request_id=result,
                    changed_dimensions=sorted(changed), isolated=isolated,
                    delay_ms=delay, successes=successes, recurrence_ms=recurrence,
@@ -506,10 +509,17 @@ def validate_opencode_cohorts(manifest: dict) -> dict:
     # Missing controls must not silently become successful evidence.
     if controls != set(COHORT_CONTROLS):
         raise SmokeFailure("invalid_cohort")
-    delay_match = bool(restart_delays and matched_delays) and all(
-        any(abs(delay - restart) <= 250 for delay in matched_delays)
-        for restart in restart_delays
-    )
+    # Match each restart with a distinct comparable delay control, not a
+    # single convenient delay from a different workload or configuration.
+    unmatched = sorted(matched_delays)
+    delay_match = bool(restart_delays)
+    for comparable, restart in sorted(restart_delays):
+        index = next((i for i, (key, delay) in enumerate(unmatched)
+                      if key == comparable and abs(delay - restart) <= 250), None)
+        if index is None:
+            delay_match = False
+        else:
+            unmatched.pop(index)
     return {"schema_version": 1, "phase": "offline_cohort_validation",
             "provider": manifest["provider"], "source_sha": manifest["source_sha"],
             "rows": rows, "matched_delay_within_250ms": delay_match,
