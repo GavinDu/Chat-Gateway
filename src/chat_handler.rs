@@ -366,6 +366,11 @@ pub(super) async fn run(
         if req.stream {
             let first_chunk_timeout = provider_timeout.saturating_sub(provider_started.elapsed());
             let first_event = first_event(&mut rx, first_chunk_timeout).await;
+            let first_failure_reason = match &first_event {
+                chat_service::FirstEvent::Timeout => "timeout",
+                chat_service::FirstEvent::Error(error) => safe_backend_reason(Some(error.kind)),
+                _ => "unclassified",
+            };
             diagnostics.observe_first_event(&first_event);
             let first = match chat_service::classify_initial_stream_event(first_event) {
                 Ok(chunk) => chunk,
@@ -384,7 +389,7 @@ pub(super) async fn run(
                         &request_id,
                         &provider_name,
                         "first_stream_event",
-                        safe_backend_reason(gateway_error.as_ref().map(|e| e.kind)),
+                        first_failure_reason,
                         provider_started,
                     );
                     last_err = Some(message);
@@ -456,14 +461,6 @@ pub(super) async fn run(
         match response {
             Ok(response) => return response,
             Err(message) => {
-                record_safe_attempt_failure(
-                    &state.provider_sessions,
-                    &request_id,
-                    &provider_name,
-                    "json_completion",
-                    "unclassified",
-                    provider_started,
-                );
                 last_err = Some(message);
                 continue;
             }
