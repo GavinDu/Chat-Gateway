@@ -22,18 +22,12 @@ pub(super) fn streamed_provider_response(attempt: StreamingAttempt) -> Response 
         receiver: mut rx,
         thread_observation,
         first_chunk,
+        diagnostics,
     } = attempt;
     let conversation_for_headers = conv_stream.clone();
     let provider_for_headers = provider_c.clone();
     let identity = CompletionIdentity::new();
-    // Capture the already-admitted first chunk even if the body is never polled.
-    let mut diagnostics = chat_service::AttemptDiagnostics::new(
-        request_id_c.clone(),
-        provider_c.clone(),
-        provider_started_c,
-        chat_service::AttemptTransport::Sse,
-    );
-    diagnostics.observe_chunk(&first_chunk);
+    // The first chunk was observed at admission, even if the body is never polled.
     let sse_stream = async_stream::stream! {
         let mut diagnostics = diagnostics;
         let _permit = permit;
