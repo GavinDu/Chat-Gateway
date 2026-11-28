@@ -32,6 +32,13 @@ pub struct LongTermMemoryItem {
     pub expires_at: Option<i64>,
 }
 
+/// Private dispatch evidence, never serialized in the public memory API.
+pub(crate) struct VersionedLongTermMemoryItem {
+    pub(crate) item: LongTermMemoryItem,
+    pub(crate) consent_epoch: i64,
+    pub(crate) revision: i64,
+}
+
 /// Stable storage validation categories for long-term memory writes.
 /// HTTP error mapping must not depend on matching arbitrary error text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1794,11 +1801,24 @@ impl UnifiedMemory {
     }
 
     /// Retrieval is empty unless explicitly enabled and always excludes expired items.
+    #[allow(dead_code)] // Compatibility retrieval without private dispatch evidence.
     pub fn retrieve_long_term_memory_items(
         &self,
         owner_key_id: &str,
         limit: usize,
     ) -> anyhow::Result<Vec<LongTermMemoryItem>> {
+        Ok(self
+            .retrieve_versioned_memory_items(owner_key_id, limit)?
+            .into_iter()
+            .map(|versioned| versioned.item)
+            .collect())
+    }
+
+    pub(crate) fn retrieve_versioned_memory_items(
+        &self,
+        owner_key_id: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<VersionedLongTermMemoryItem>> {
         // A single read statement gives settings and items the same committed
         // SQLite snapshot without reserving a writer. A concurrent disable
         // after this read cannot revoke an already authorized batch.
@@ -1810,7 +1830,7 @@ impl UnifiedMemory {
         let connection = self.lock()?;
         let mut statement = connection.prepare(
             "SELECT i.id, i.memory_key, i.value, i.source_conversation_id, i.confidence,
-                    i.created_at, i.updated_at, i.expires_at
+                    i.created_at, i.updated_at, i.expires_at, s.consent_epoch, i.revision
              FROM memory_items i
              JOIN memory_settings s ON s.owner_key_id = i.owner_key_id
              WHERE i.owner_key_id = ?1 AND s.enabled = 1
@@ -1818,11 +1838,27 @@ impl UnifiedMemory {
              ORDER BY i.confidence DESC, i.updated_at DESC, i.id
              LIMIT ?3",
         )?;
-        let rows = statement.query_map(
-            rusqlite::params![owner_key_id, now, limit],
-            memory_item_from_row,
-        )?;
+        let rows = statement.query_map(rusqlite::params![owner_key_id, now, limit], |row| {
+            Ok(VersionedLongTermMemoryItem {
+                item: memory_item_from_row(row)?,
+                consent_epoch: row.get(8)?,
+                revision: row.get(9)?,
+            })
+        })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    #[allow(dead_code)] // Standalone SQLite benchmark does not dispatch requests.
+    pub(crate) async fn retrieve_versioned_memory_items_async(
+        self: Arc<Self>,
+        owner_key_id: String,
+        limit: usize,
+    ) -> anyhow::Result<Vec<VersionedLongTermMemoryItem>> {
+        tokio::task::spawn_blocking(move || {
+            self.retrieve_versioned_memory_items(&owner_key_id, limit)
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("versioned memory retrieval task failed"))?
     }
 
     pub fn delete_long_term_memory_item(
@@ -1937,6 +1973,7 @@ pub trait LongTermMemoryStore: Send + Sync {
         owner_key_id: String,
     ) -> anyhow::Result<usize>;
 
+    #[allow(dead_code)] // Retained compatibility contract without private evidence.
     async fn retrieve_long_term_memory_items_async(
         self: Arc<Self>,
         owner_key_id: String,

@@ -4218,3 +4218,52 @@ fn v12_memory_revision_overflow_rolls_back_and_missing_trigger_fails_closed() {
     }
     assert!(open(&fixture.db(), None).is_err());
 }
+
+#[test]
+fn versioned_memory_snapshot_observes_committed_private_versions() {
+    let fixture = Fixture::new();
+    let reader = fixture.open();
+    reader
+        .set_long_term_memory_enabled("owner-a", true)
+        .unwrap();
+    let saved = reader
+        .save_long_term_memory_item("owner-a", "key", "value", None, 1.0, None)
+        .unwrap();
+    let before = reader
+        .retrieve_versioned_memory_items("owner-a", 20)
+        .unwrap();
+    assert_eq!(before.len(), 1);
+    let mut writer = Connection::open(fixture.db()).unwrap();
+    let tx = writer.transaction().unwrap();
+    tx.execute(
+        "UPDATE memory_items SET value=value, updated_at=updated_at WHERE id=?1",
+        [&saved.id],
+    )
+    .unwrap();
+    tx.execute(
+        "UPDATE memory_settings SET enabled=0 WHERE owner_key_id='owner-a'",
+        [],
+    )
+    .unwrap();
+    tx.execute(
+        "UPDATE memory_settings SET enabled=1 WHERE owner_key_id='owner-a'",
+        [],
+    )
+    .unwrap();
+    let pending = reader
+        .retrieve_versioned_memory_items("owner-a", 20)
+        .unwrap();
+    assert_eq!(pending[0].revision, before[0].revision);
+    assert_eq!(pending[0].consent_epoch, before[0].consent_epoch);
+    tx.commit().unwrap();
+    let committed = reader
+        .retrieve_versioned_memory_items("owner-a", 20)
+        .unwrap();
+    assert_eq!(committed[0].item, before[0].item);
+    assert_eq!(committed[0].revision, before[0].revision + 1);
+    assert_eq!(committed[0].consent_epoch, before[0].consent_epoch + 2);
+    assert!(reader
+        .retrieve_versioned_memory_items("owner-b", 20)
+        .unwrap()
+        .is_empty());
+}

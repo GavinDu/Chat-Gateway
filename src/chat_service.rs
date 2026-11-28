@@ -12,7 +12,7 @@ use crate::{
     budget_personal_memory_items,
     context::{self, ContextBuilder, ContextPlan, ThreadSyncState},
     conversation_context_read_error, is_reopenable_provider_thread_url,
-    memory::{ChatMessage, ConversationStore, LongTermMemoryStore, ProviderThread},
+    memory::{ChatMessage, ConversationStore, ProviderThread, VersionedLongTermMemoryItem},
     memory_egress, persist_completed_turn, providers,
     read_conversation_context_with_transcript_for_owner, transcript_marker,
 };
@@ -279,7 +279,7 @@ pub(crate) struct CandidateAttemptRequest<'a> {
     pub(crate) token_budget: usize,
     pub(crate) replay_prompt: &'a str,
     pub(crate) policy: &'a memory_egress::MemoryEgressPolicy,
-    pub(crate) personal_memory_items: &'a [memory_egress::PersonalMemoryItem],
+    pub(crate) personal_memory_items: &'a [CachedPersonalMemoryItem],
 }
 
 pub(crate) struct CandidateAttempt {
@@ -593,9 +593,41 @@ pub(crate) async fn resolve_chat_candidates(
     Ok((candidates, provider_model))
 }
 
+/// Private request evidence, separate from the provider-facing rendered item.
+pub(crate) struct CachedPersonalMemoryItem {
+    rendered: memory_egress::PersonalMemoryItem,
+    consent_epoch: i64,
+    revision: i64,
+}
+
+fn budget_versioned_memory_items(
+    items: Vec<VersionedLongTermMemoryItem>,
+    token_budget: usize,
+) -> (Vec<CachedPersonalMemoryItem>, usize) {
+    let (selected, used) = budget_personal_memory_items(
+        items
+            .iter()
+            .map(|versioned| versioned.item.clone())
+            .collect(),
+        token_budget,
+    );
+    let cached = selected
+        .into_iter()
+        .filter_map(|rendered| {
+            let versioned = items.iter().find(|item| item.item.id == rendered.id)?;
+            Some(CachedPersonalMemoryItem {
+                rendered,
+                consent_epoch: versioned.consent_epoch,
+                revision: versioned.revision,
+            })
+        })
+        .collect();
+    (cached, used)
+}
+
 pub(crate) struct PreparedChatContext {
     pub(crate) memory_egress_policy: memory_egress::MemoryEgressPolicy,
-    pub(crate) personal_memory_items: Vec<memory_egress::PersonalMemoryItem>,
+    pub(crate) personal_memory_items: Vec<CachedPersonalMemoryItem>,
     pub(crate) context_token_budget: usize,
     pub(crate) prompt: String,
     pub(crate) windowed: Vec<ChatMessage>,
@@ -631,7 +663,7 @@ pub(crate) async fn prepare_chat_context(
         state
             .memory
             .clone()
-            .retrieve_long_term_memory_items_async(owner_key_id.to_owned(), 20)
+            .retrieve_versioned_memory_items_async(owner_key_id.to_owned(), 20)
             .await
             .map_err(|_| {
                 Box::new(api_error(
@@ -645,7 +677,7 @@ pub(crate) async fn prepare_chat_context(
         Vec::new()
     };
     let (personal_memory_items, memory_tokens) =
-        budget_personal_memory_items(retrieved_memory, 512);
+        budget_versioned_memory_items(retrieved_memory, 512);
     let context_token_budget = 8000usize.saturating_sub(memory_tokens);
 
     let snapshot = read_conversation_context_with_transcript_for_owner(
@@ -694,7 +726,7 @@ pub(crate) struct CandidatePromptRequest<'a> {
     pub(crate) token_budget: usize,
     pub(crate) replay_prompt: &'a str,
     pub(crate) policy: &'a memory_egress::MemoryEgressPolicy,
-    pub(crate) personal_memory_items: &'a [memory_egress::PersonalMemoryItem],
+    pub(crate) personal_memory_items: &'a [CachedPersonalMemoryItem],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -776,7 +808,7 @@ pub(crate) async fn prepare_candidate_prompt(
             .state
             .memory
             .clone()
-            .retrieve_long_term_memory_items_async(request.owner_key_id.to_owned(), 20)
+            .retrieve_versioned_memory_items_async(request.owner_key_id.to_owned(), 20)
             .await
             .map_err(|_| CandidatePromptError::UnreadablePersonalMemory)?;
         request
@@ -784,16 +816,23 @@ pub(crate) async fn prepare_candidate_prompt(
             .iter()
             .filter(|cached| {
                 current.iter().any(|item| {
-                    item.id == cached.id
-                        && format!("{}: {}", item.memory_key, item.value) == cached.content
+                    item.item.id == cached.rendered.id
+                        && item.consent_epoch == cached.consent_epoch
+                        && item.revision == cached.revision
+                        && format!("{}: {}", item.item.memory_key, item.item.value)
+                            == cached.rendered.content
                 })
             })
-            .cloned()
+            .map(|cached| cached.rendered.clone())
             .collect::<Vec<_>>()
     } else {
         // The policy renderer will withhold all items for a denied provider.
         // Preserve its existing denial diagnostics without a storage read.
-        request.personal_memory_items.to_vec()
+        request
+            .personal_memory_items
+            .iter()
+            .map(|cached| cached.rendered.clone())
+            .collect()
     };
     request
         .policy
@@ -1890,7 +1929,7 @@ mod dispatch_memory_revalidation_tests {
         owner: &str,
         provider: &str,
         policy: &memory_egress::MemoryEgressPolicy,
-        cached: &[memory_egress::PersonalMemoryItem],
+        cached: &[CachedPersonalMemoryItem],
     ) -> String {
         let _permit = state.pool.acquire(provider).await.unwrap();
         prepare_candidate_prompt(CandidatePromptRequest {
@@ -1934,8 +1973,8 @@ mod dispatch_memory_revalidation_tests {
         memory
             .save_long_term_memory_item(owner, "expiry", "EXPIRY_SENTINEL", None, 1.0, None)
             .unwrap();
-        let (cached, _) = budget_personal_memory_items(
-            memory.retrieve_long_term_memory_items(owner, 20).unwrap(),
+        let (cached, _) = budget_versioned_memory_items(
+            memory.retrieve_versioned_memory_items(owner, 20).unwrap(),
             512,
         );
         assert_eq!(cached.len(), 4);
@@ -1982,5 +2021,85 @@ mod dispatch_memory_revalidation_tests {
         assert!(!disabled.contains("KEEP_SENTINEL"));
         let baseline = candidate_prompt(&state, owner, "chatgpt", &policy, &[]).await;
         assert_eq!(disabled, baseline);
+        memory.set_long_term_memory_enabled(owner, true).unwrap();
+        let reenabled = candidate_prompt(&state, owner, "chatgpt", &policy, &cached).await;
+        assert_eq!(reenabled, baseline);
+    }
+
+    #[tokio::test]
+    async fn identical_memory_upsert_and_recreation_revoke_cached_versions() {
+        let (_, state) = crate::real_chat_router_scripted_backend_tests::fixture(
+            &["chatgpt", "claude"],
+            vec![],
+            None,
+        );
+        let owner = "memory-version-owner";
+        let memory = &state.memory;
+        memory.set_long_term_memory_enabled(owner, true).unwrap();
+        let first = memory
+            .save_long_term_memory_item(owner, "first", "FIRST_SENTINEL", None, 1.0, None)
+            .unwrap();
+        let second = memory
+            .save_long_term_memory_item(owner, "second", "SECOND_SENTINEL", None, 1.0, None)
+            .unwrap();
+        memory
+            .save_long_term_memory_item(owner, "keep", "KEEP_SENTINEL", None, 1.0, None)
+            .unwrap();
+        memory
+            .store_turn_for_owner(
+                owner,
+                "memory-version-source".into(),
+                vec![ChatMessage {
+                    role: "user".into(),
+                    content: "source".into(),
+                }],
+                ChatMessage {
+                    role: "assistant".into(),
+                    content: "reply".into(),
+                },
+                "chatgpt".into(),
+                "tab".into(),
+            )
+            .unwrap();
+        memory
+            .save_long_term_memory_item(
+                owner,
+                "provenance",
+                "PROVENANCE_SENTINEL",
+                Some("memory-version-source"),
+                1.0,
+                None,
+            )
+            .unwrap();
+        let (cached, _) = budget_versioned_memory_items(
+            memory.retrieve_versioned_memory_items(owner, 20).unwrap(),
+            512,
+        );
+        let policy = memory_egress::MemoryEgressPolicy::from_allowlist("chatgpt,claude").unwrap();
+        let original = candidate_prompt(&state, owner, "chatgpt", &policy, &cached).await;
+        assert!(original.contains("PROVENANCE_SENTINEL"));
+        assert!(original.contains("FIRST_SENTINEL"));
+        assert!(original.contains("SECOND_SENTINEL"));
+
+        let updated = memory
+            .save_long_term_memory_item(owner, "first", "FIRST_SENTINEL", None, 1.0, None)
+            .unwrap();
+        assert_eq!(updated.id, first.id);
+        assert!(memory
+            .delete_long_term_memory_item(owner, &second.id)
+            .unwrap());
+        let recreated = memory
+            .save_long_term_memory_item(owner, "second", "SECOND_SENTINEL", None, 1.0, None)
+            .unwrap();
+        assert_ne!(recreated.id, second.id);
+        assert!(memory
+            .delete_conversation_for_owner(owner, "memory-version-source")
+            .unwrap());
+
+        let failover = candidate_prompt(&state, owner, "claude", &policy, &cached).await;
+        assert!(!failover.contains("FIRST_SENTINEL"));
+        assert!(!failover.contains("SECOND_SENTINEL"));
+        assert!(!failover.contains("PROVENANCE_SENTINEL"));
+        assert!(failover.contains("KEEP_SENTINEL"));
     }
 }
