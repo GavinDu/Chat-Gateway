@@ -613,5 +613,88 @@ class ExecutionContractTests(unittest.TestCase):
                             for row in report["providers"]))
 
 
+class OpenCodeCohortTests(unittest.TestCase):
+    def manifest(self):
+        from installed_provider_smoke import COHORT_CONTROLS, COHORT_STATES
+
+        def token():
+            return str(uuid.uuid4())
+
+        rows = []
+        for control in COHORT_CONTROLS:
+            before = {key: token() for key in COHORT_STATES}
+            after = dict(before)
+            if control in ("client_restart", "direct_api"):
+                after["client"] = token()
+            if control in ("client_restart", "direct_api", "transport_reset"):
+                after["transport"] = token()
+            rows.append({
+                "cohort_id": token(), "control": control, "status": "observed",
+                "baseline_request_id": token(), "result_request_id": token(),
+                "before": before, "after": after, "delay_ms": 1000,
+                "successes": 2, "recurrence_ms": 5000, "outcome": "recovered",
+            })
+        return {"schema_version": 1, "provider": "chatgpt",
+                "source_sha": "a" * 40, "rows": rows}
+
+    def test_controls_and_correlation_are_validated_without_network(self):
+        from installed_provider_smoke import validate_opencode_cohorts
+        manifest = self.manifest()
+        with patch("installed_provider_smoke.urllib.request.build_opener") as opener:
+            report = validate_opencode_cohorts(manifest)
+        opener.assert_not_called()
+        self.assertFalse(report["live_verified"])
+        self.assertEqual(report["provider_requests_sent"], 0)
+        self.assertTrue(report["matched_delay_within_250ms"])
+        self.assertTrue(all(row["isolated"] for row in report["rows"]))
+        self.assertNotIn(manifest["rows"][0]["before"]["history"], json.dumps(report))
+
+    def test_confounded_restart_and_missing_delay_are_explicit(self):
+        from installed_provider_smoke import validate_opencode_cohorts
+        manifest = self.manifest()
+        restart = manifest["rows"][2]
+        restart["after"]["gateway"] = str(uuid.uuid4())
+        delay = manifest["rows"][1]
+        manifest["rows"][1] = {
+            "cohort_id": delay["cohort_id"], "control": "matched_delay",
+            "status": "skipped", "skip_reason": "not_authorized",
+        }
+        report = validate_opencode_cohorts(manifest)
+        self.assertFalse(report["rows"][2]["isolated"])
+        self.assertIn("gateway", report["rows"][2]["changed_dimensions"])
+        self.assertFalse(report["matched_delay_within_250ms"])
+        self.assertEqual(report["rows"][1]["skip_reason"], "not_authorized")
+
+    def test_missing_control_duplicate_request_and_secret_fields_rejected(self):
+        from installed_provider_smoke import validate_opencode_cohorts
+        for mutation in (
+            lambda m: m["rows"].pop(),
+            lambda m: m["rows"][1].update(
+                baseline_request_id=m["rows"][0]["baseline_request_id"]),
+            lambda m: m["rows"][0].update(prompt="private-sentinel"),
+            lambda m: m["rows"][0].update(result_request_id="private-sentinel"),
+            lambda m: m["rows"][0].update(successes=True),
+        ):
+            manifest = self.manifest()
+            mutation(manifest)
+            with self.assertRaises(SmokeFailure) as error:
+                validate_opencode_cohorts(manifest)
+            self.assertEqual(error.exception.category, "invalid_cohort")
+
+    def test_cli_offline_mode_never_executes_even_with_conflicting_flag(self):
+        from tempfile import TemporaryDirectory
+        from pathlib import Path
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "cohorts.json"
+            path.write_text(json.dumps(self.manifest()))
+            for extra, expected in (([], 0), (["--execute"], 1)):
+                with patch.object(sys, "argv", [
+                    "smoke", "--validate-opencode-cohorts", str(path), *extra
+                ]), patch("installed_provider_smoke.execute") as run, redirect_stdout(io.StringIO()) as out:
+                    self.assertEqual(main(), expected)
+                run.assert_not_called()
+                self.assertEqual(json.loads(out.getvalue())["provider_requests_sent"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()
