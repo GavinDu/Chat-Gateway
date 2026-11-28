@@ -1029,6 +1029,68 @@ async fn real_router_client_drop_cancels_sse_and_releases_provider_permit() {
 }
 
 #[tokio::test]
+async fn real_router_drop_after_content_cancels_before_independent_retry() {
+    use futures_util::StreamExt;
+
+    let (cancelled_tx, cancelled_rx) = tokio::sync::oneshot::channel();
+    let (app, state) = fixture(
+        &["chatgpt"],
+        vec![
+            ScriptedSend::PartialThenHold(
+                ChatEvent {
+                    content: "discarded-first-attempt".to_owned(),
+                    done: false,
+                },
+                cancelled_tx,
+            ),
+            response_events("independent-retry-answer"),
+        ],
+        None,
+    );
+    let conversation = "router_drop_after_content_001";
+    let response = send(app.clone(), true, "chatgpt/fake-model", conversation).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut body = response.into_body().into_data_stream();
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        let mut received = Vec::new();
+        while let Some(frame) = body.next().await {
+            received.extend_from_slice(&frame.unwrap());
+            if String::from_utf8_lossy(&received).contains("discarded-first-attempt") {
+                return;
+            }
+        }
+        panic!("stream closed before first content");
+    })
+    .await
+    .expect("first content must be observable before disconnect");
+    drop(body);
+    tokio::time::timeout(std::time::Duration::from_secs(2), cancelled_rx)
+        .await
+        .expect("client drop must close the first backend receiver")
+        .expect("scripted backend must acknowledge receiver closure");
+    assert!(state
+        .memory
+        .conversation_messages_for_owner("local", conversation)
+        .unwrap()
+        .is_empty());
+
+    // The next request requires the same exclusive provider permit.
+    let retry = send(app, true, "chatgpt/fake-model", conversation).await;
+    assert_eq!(retry.status(), StatusCode::OK);
+    let bytes = to_bytes(retry.into_body(), 65_536).await.unwrap();
+    let text = String::from_utf8_lossy(&bytes);
+    assert!(text.contains("independent-retry-answer"));
+    assert!(!text.contains("discarded-first-attempt"));
+    assert!(text.contains("data: [DONE]"));
+    let messages = state
+        .memory
+        .conversation_messages_for_owner("local", conversation)
+        .unwrap();
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[1].content, "independent-retry-answer");
+}
+
+#[tokio::test]
 async fn real_router_dropped_delta_invalidates_sync_and_retries_with_replay() {
     let (cancelled_tx, cancelled_rx) = tokio::sync::oneshot::channel();
     let (app, state, backend) = fixture_with_backend(
