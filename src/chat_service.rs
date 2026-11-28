@@ -32,6 +32,14 @@ enum ObservedTerminal {
     Done,
     Error(crate::chat_backend::GatewayErrorKind),
     ChannelClosed,
+    FirstOutputTimeout,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum AttemptPhase {
+    BackendAdmission,
+    FirstStreamEvent,
+    ResponseConsumption,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -42,6 +50,7 @@ pub(crate) enum AttemptTransport {
 
 pub(crate) struct AttemptDiagnostics {
     transport: AttemptTransport,
+    phase: AttemptPhase,
     attempt_id: uuid::Uuid,
     request_id: String,
     provider: String,
@@ -52,6 +61,7 @@ pub(crate) struct AttemptDiagnostics {
     last_observed_ms: Option<u64>,
     terminal: ObservedTerminal,
     reducer_finished: bool,
+    pre_consumer_failure: bool,
 }
 
 impl AttemptDiagnostics {
@@ -63,6 +73,7 @@ impl AttemptDiagnostics {
     ) -> Self {
         Self {
             transport,
+            phase: AttemptPhase::BackendAdmission,
             attempt_id: uuid::Uuid::new_v4(),
             request_id,
             provider,
@@ -73,7 +84,38 @@ impl AttemptDiagnostics {
             last_observed_ms: None,
             terminal: ObservedTerminal::Pending,
             reducer_finished: false,
+            pre_consumer_failure: false,
         }
+    }
+
+    pub(crate) fn backend_admitted(&mut self) {
+        self.record("backend_admitted");
+        self.phase = match self.transport {
+            AttemptTransport::Json => AttemptPhase::ResponseConsumption,
+            AttemptTransport::Sse => AttemptPhase::FirstStreamEvent,
+        };
+    }
+
+    pub(crate) fn backend_admission_failed(&mut self, error: &GatewayError) {
+        self.terminal = ObservedTerminal::Error(error.kind);
+        self.pre_consumer_failure = true;
+        self.record("backend_admission_failed");
+    }
+
+    pub(crate) fn observe_first_event(&mut self, first: &FirstEvent) {
+        match first {
+            FirstEvent::Chunk(chunk) => {
+                self.observe_chunk(chunk);
+                self.phase = AttemptPhase::ResponseConsumption;
+                return;
+            }
+            FirstEvent::EmptyCompletion => self.terminal = ObservedTerminal::Done,
+            FirstEvent::Error(error) => self.terminal = ObservedTerminal::Error(error.kind),
+            FirstEvent::Closed => self.terminal = ObservedTerminal::ChannelClosed,
+            FirstEvent::Timeout => self.terminal = ObservedTerminal::FirstOutputTimeout,
+        }
+        self.pre_consumer_failure = true;
+        self.record("first_stream_event_failed");
     }
 
     fn elapsed_ms(&self) -> u64 {
@@ -113,6 +155,7 @@ impl AttemptDiagnostics {
             request_id = %self.request_id,
             attempt_id = %self.attempt_id,
             transport = ?self.transport,
+            phase = ?self.phase,
             provider = %self.provider,
             boundary,
             observed_terminal = ?self.terminal,
@@ -128,7 +171,7 @@ impl AttemptDiagnostics {
 
 impl Drop for AttemptDiagnostics {
     fn drop(&mut self) {
-        if !self.reducer_finished {
+        if !self.reducer_finished && !self.pre_consumer_failure {
             // This also covers a response dropped before its first poll.
             // Do not infer why it was dropped or that the worker has stopped.
             self.record("consumer_dropped_before_reducer_finish");
@@ -286,6 +329,36 @@ mod attempt_diagnostics_tests {
         assert_ne!(next.attempt_id, observed.attempt_id);
         assert_eq!(next.content_events, 0);
         assert_eq!(next.terminal, ObservedTerminal::Pending);
+    }
+
+    #[test]
+    fn pre_consumer_failures_retain_phase_and_distinct_terminal_evidence() {
+        let mut admission = diagnostics();
+        admission.backend_admission_failed(&GatewayError::timeout("private"));
+        assert!(admission.pre_consumer_failure);
+        assert!(!admission.reducer_finished);
+        assert_eq!(
+            admission.terminal,
+            ObservedTerminal::Error(crate::chat_backend::GatewayErrorKind::Timeout)
+        );
+
+        let mut first = diagnostics();
+        first.backend_admitted();
+        first.observe_first_event(&FirstEvent::Timeout);
+        assert_eq!(first.terminal, ObservedTerminal::FirstOutputTimeout);
+        assert!(first.pre_consumer_failure);
+        assert_eq!(first.content_bytes, 0);
+
+        let mut success = diagnostics();
+        success.backend_admitted();
+        let id = success.attempt_id;
+        success.observe_first_event(&FirstEvent::Chunk(chunk("first", false)));
+        success.observe(&Ok(chunk("last", true)));
+        success.reducer_finished();
+        assert_eq!(success.attempt_id, id);
+        assert_eq!(success.content_events, 2);
+        assert_eq!(success.content_bytes, 9);
+        assert_eq!(success.terminal, ObservedTerminal::Done);
     }
 
     #[test]
