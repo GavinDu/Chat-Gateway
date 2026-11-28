@@ -752,6 +752,47 @@ async fn real_router_fails_over_after_admission_deadline_without_commit() {
 }
 
 #[tokio::test]
+async fn real_router_json_failure_retains_typed_request_diagnostic() {
+    let (app, state) = fixture(
+        &["chatgpt"],
+        vec![ScriptedSend::Events(vec![Err(GatewayError::timeout(
+            "private upstream sentinel",
+        ))])],
+        None,
+    );
+    let request_id = "5f855e0d-5b22-4a93-b925-98db841a1ee1";
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("x-request-id", request_id)
+                .body(Body::from(
+                    serde_json::json!({
+                        "model": "chatgpt/fake-model",
+                        "stream": false,
+                        "messages": [{"role":"user","content":"synthetic prompt"}]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    let diagnostic = state
+        .provider_sessions
+        .last_failed_request("chatgpt")
+        .expect("the typed failure must retain request correlation");
+    assert_eq!(diagnostic.request_id, request_id);
+    assert_eq!(diagnostic.stage, "json_completion");
+    assert_eq!(diagnostic.reason, "timeout");
+    let body = to_bytes(response.into_body(), 65_536).await.unwrap();
+    assert!(!String::from_utf8_lossy(&body).contains("private upstream sentinel"));
+}
+
+#[tokio::test]
 async fn real_router_partial_json_error_never_commits_transcript() {
     let (app, state) = fixture(
         &["chatgpt"],
