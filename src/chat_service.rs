@@ -2042,12 +2042,39 @@ mod dispatch_memory_revalidation_tests {
         memory
             .save_long_term_memory_item(owner, "keep", "KEEP_SENTINEL", None, 1.0, None)
             .unwrap();
+        memory
+            .store_turn_for_owner(
+                owner,
+                "memory-version-source".into(),
+                vec![ChatMessage {
+                    role: "user".into(),
+                    content: "source".into(),
+                }],
+                ChatMessage {
+                    role: "assistant".into(),
+                    content: "reply".into(),
+                },
+                "chatgpt".into(),
+                "tab".into(),
+            )
+            .unwrap();
+        memory
+            .save_long_term_memory_item(
+                owner,
+                "provenance",
+                "PROVENANCE_SENTINEL",
+                Some("memory-version-source"),
+                1.0,
+                None,
+            )
+            .unwrap();
         let (cached, _) = budget_versioned_memory_items(
             memory.retrieve_versioned_memory_items(owner, 20).unwrap(),
             512,
         );
         let policy = memory_egress::MemoryEgressPolicy::from_allowlist("chatgpt,claude").unwrap();
         let original = candidate_prompt(&state, owner, "chatgpt", &policy, &cached).await;
+        assert!(original.contains("PROVENANCE_SENTINEL"));
         assert!(original.contains("FIRST_SENTINEL"));
         assert!(original.contains("SECOND_SENTINEL"));
 
@@ -2055,15 +2082,21 @@ mod dispatch_memory_revalidation_tests {
             .save_long_term_memory_item(owner, "first", "FIRST_SENTINEL", None, 1.0, None)
             .unwrap();
         assert_eq!(updated.id, first.id);
-        assert!(memory.delete_long_term_memory_item(owner, &second.id).unwrap());
+        assert!(memory
+            .delete_long_term_memory_item(owner, &second.id)
+            .unwrap());
         let recreated = memory
             .save_long_term_memory_item(owner, "second", "SECOND_SENTINEL", None, 1.0, None)
             .unwrap();
         assert_ne!(recreated.id, second.id);
+        assert!(memory
+            .delete_conversation_for_owner(owner, "memory-version-source")
+            .unwrap());
 
         let failover = candidate_prompt(&state, owner, "claude", &policy, &cached).await;
         assert!(!failover.contains("FIRST_SENTINEL"));
         assert!(!failover.contains("SECOND_SENTINEL"));
+        assert!(!failover.contains("PROVENANCE_SENTINEL"));
         assert!(failover.contains("KEEP_SENTINEL"));
     }
 }
