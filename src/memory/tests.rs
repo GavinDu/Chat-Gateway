@@ -808,6 +808,83 @@ fn long_term_memory_disable_stops_retrieval_without_erasing_inspectable_items() 
 }
 
 #[test]
+fn personal_memory_read_uses_committed_wal_snapshot_without_writer_reservation() {
+    let fixture = Fixture::new();
+    let reader = fixture.open();
+    let writer = fixture.open();
+    for owner in ["owner-a", "owner-b"] {
+        reader.set_long_term_memory_enabled(owner, true).unwrap();
+        reader
+            .save_long_term_memory_item(owner, "key", owner, None, 0.9, None)
+            .unwrap();
+        reader
+            .save_long_term_memory_item(owner, "expired", "hidden", None, 1.0, Some(0))
+            .unwrap();
+    }
+    reader
+        .lock()
+        .unwrap()
+        .busy_timeout(std::time::Duration::ZERO)
+        .unwrap();
+    let before = reader
+        .retrieve_long_term_memory_items("owner-a", 20)
+        .unwrap();
+    assert_eq!(before.len(), 1);
+    assert_eq!(before[0].value, "owner-a");
+
+    let mut connection = writer.lock().unwrap();
+    let tx = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .unwrap();
+    tx.execute(
+        "UPDATE memory_settings SET enabled=0 WHERE owner_key_id='owner-a'",
+        [],
+    )
+    .unwrap();
+    tx.execute(
+        "UPDATE memory_items SET value='uncommitted' WHERE owner_key_id='owner-b'",
+        [],
+    )
+    .unwrap();
+    // A read-only authorization snapshot must not fail with SQLITE_BUSY.
+    // Neither the pending disable nor the pending item update is visible.
+    let a = reader
+        .retrieve_long_term_memory_items("owner-a", 100)
+        .unwrap();
+    assert_eq!(a.len(), 1);
+    assert_eq!(a[0].id, before[0].id);
+    assert_eq!(a[0].value, "owner-a");
+    let b = reader
+        .retrieve_long_term_memory_items("owner-b", 20)
+        .unwrap();
+    assert_eq!(b.len(), 1);
+    assert_eq!(b[0].value, "owner-b");
+    assert!(reader
+        .retrieve_long_term_memory_items("unknown-owner", 20)
+        .unwrap()
+        .is_empty());
+    assert!(reader
+        .retrieve_long_term_memory_items("owner-a", 0)
+        .unwrap()
+        .is_empty());
+    tx.commit().unwrap();
+
+    assert!(reader
+        .retrieve_long_term_memory_items("owner-a", 20)
+        .unwrap()
+        .is_empty());
+    let b = reader
+        .retrieve_long_term_memory_items("owner-b", 20)
+        .unwrap();
+    assert_eq!(b.len(), 1);
+    assert_eq!(b[0].value, "uncommitted");
+    assert_eq!(
+        reader.list_long_term_memory_items("owner-a").unwrap().len(),
+        2
+    );
+}
+
+#[test]
 fn long_term_memory_retrieval_has_deterministic_ties_and_hard_limit() {
     let fixture = Fixture::new();
     let memory = fixture.open();
